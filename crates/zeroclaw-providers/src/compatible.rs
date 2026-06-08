@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 /// Used by: Venice, Vercel AI Gateway, Cloudflare AI Gateway, Moonshot,
 /// Synthetic, `OpenCode` Zen, `OpenCode` Go, `Z.AI`, `GLM`, `MiniMax`, Bedrock, Qianfan, Groq, Mistral, `xAI`, etc.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone)]
 pub struct OpenAiCompatibleModelProvider {
     /// `[providers.models.<alias>]` key this provider was constructed
     /// under. Used by the `Attributable` impl so log emissions carry the
@@ -29,7 +28,10 @@ pub struct OpenAiCompatibleModelProvider {
     pub alias: String,
     pub name: String,
     pub base_url: String,
-    pub credential: Option<String>,
+    /// API key / credential wrapped in a `parking_lot::RwLock` so
+    /// `ReliableModelProvider` can hot-swap it on 429 key rotation
+    /// without requiring `&mut self`.
+    pub credential: parking_lot::RwLock<Option<String>>,
     pub auth_header: AuthStyle,
     supports_vision: bool,
     user_agent: Option<String>,
@@ -164,6 +166,31 @@ fn normalize_model_ids(body: ModelsResponse) -> Vec<String> {
     ids
 }
 
+impl Clone for OpenAiCompatibleModelProvider {
+    fn clone(&self) -> Self {
+        Self {
+            alias: self.alias.clone(),
+            name: self.name.clone(),
+            base_url: self.base_url.clone(),
+            credential: parking_lot::RwLock::new(self.credential.read().clone()),
+            auth_header: self.auth_header.clone(),
+            supports_vision: self.supports_vision,
+            user_agent: self.user_agent.clone(),
+            merge_system_into_user: self.merge_system_into_user,
+            native_tool_calling: self.native_tool_calling,
+            timeout_secs: self.timeout_secs,
+            extra_headers: self.extra_headers.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            api_path: self.api_path.clone(),
+            max_tokens: self.max_tokens,
+            models_dev_key: self.models_dev_key.clone(),
+            openrouter_vendor_prefix: self.openrouter_vendor_prefix.clone(),
+            local_model_tool_sanitize: self.local_model_tool_sanitize,
+            unauthenticated_model_listing: self.unauthenticated_model_listing,
+        }
+    }
+}
+
 impl OpenAiCompatibleModelProvider {
     pub fn new(
         alias: &str,
@@ -270,7 +297,7 @@ impl OpenAiCompatibleModelProvider {
             alias: alias.to_string(),
             name: name.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
-            credential: credential.map(ToString::to_string),
+            credential: parking_lot::RwLock::new(credential.map(ToString::to_string)),
             auth_header: auth_style,
             supports_vision,
             user_agent: user_agent.map(ToString::to_string),
@@ -2114,6 +2141,12 @@ impl OpenAiCompatibleModelProvider {
 
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleModelProvider {
+    fn set_credential(&self, key: Option<String>) -> bool {
+        let mut guard = self.credential.write();
+        *guard = key;
+        true
+    }
+
     fn capabilities(&self) -> zeroclaw_api::model_provider::ProviderCapabilities {
         zeroclaw_api::model_provider::ProviderCapabilities {
             native_tool_calling: self.native_tool_calling,
@@ -2128,11 +2161,15 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         // (OpenAI-compatible: GET {base_url}/models). Local OpenAI-compatible
         // servers that explicitly allow unauthenticated listing use the same
         // path without an Authorization header.
-        let list_credential = self.credential.as_deref();
-        if list_credential.is_some() || self.unauthenticated_model_listing {
+        let list_credential = {
+            let g = self.credential.read();
+            g.clone()
+        };
+        let list_credential_ref = list_credential.as_deref();
+        if list_credential_ref.is_some() || self.unauthenticated_model_listing {
             let url = format!("{}/models", self.base_url);
             let response = self
-                .apply_auth_header(self.http_client().get(&url), list_credential)
+                .apply_auth_header(self.http_client().get(&url), list_credential_ref)
                 .send()
                 .await
                 .map_err(|e| {
@@ -2207,7 +2244,10 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         } else {
             Some(temperature.unwrap_or(self.default_temperature()))
         };
-        let credential = self.credential.as_deref();
+        let credential = {
+            let g = self.credential.read();
+            g.clone()
+        };
 
         // Normalize image markers (e.g. local file paths from channel
         // attachments) into base64 data URIs before this message reaches the
@@ -2264,7 +2304,10 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         let url = self.chat_completions_url();
 
         let response = match self
-            .apply_auth_header(self.http_client().post(&url).json(&request), credential)
+            .apply_auth_header(
+                self.http_client().post(&url).json(&request),
+                credential.as_deref(),
+            )
             .send()
             .await
         {
@@ -2324,7 +2367,10 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         } else {
             Some(temperature.unwrap_or(self.default_temperature()))
         };
-        let credential = self.credential.as_deref();
+        let credential = {
+            let g = self.credential.read();
+            g.clone()
+        };
 
         let normalized = Self::normalize_messages_for_upstream(messages).await?;
         let merge = self.effective_merge_system(model);
@@ -2354,7 +2400,10 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
 
         let url = self.chat_completions_url();
         let response = match self
-            .apply_auth_header(self.http_client().post(&url).json(&request), credential)
+            .apply_auth_header(
+                self.http_client().post(&url).json(&request),
+                credential.as_deref(),
+            )
             .send()
             .await
         {
@@ -2410,7 +2459,10 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         } else {
             Some(temperature.unwrap_or(self.default_temperature()))
         };
-        let credential = self.credential.as_deref();
+        let credential = {
+            let g = self.credential.read();
+            g.clone()
+        };
 
         let normalized = Self::normalize_messages_for_upstream(messages).await?;
         let merge = self.effective_merge_system(model);
@@ -2435,7 +2487,10 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
 
         let url = self.chat_completions_url();
         let response = match self
-            .apply_auth_header(self.http_client().post(&url).json(&request), credential)
+            .apply_auth_header(
+                self.http_client().post(&url).json(&request),
+                credential.as_deref(),
+            )
             .send()
             .await
         {
@@ -2522,7 +2577,10 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         } else {
             Some(temperature.unwrap_or(self.default_temperature()))
         };
-        let credential = self.credential.as_deref();
+        let credential = {
+            let g = self.credential.read();
+            g.clone()
+        };
 
         let normalized = Self::normalize_messages_for_upstream(request.messages).await?;
         let merge = self.effective_merge_system(model);
@@ -2548,7 +2606,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         let response = match self
             .apply_auth_header(
                 self.http_client().post(&url).json(&native_request),
-                credential,
+                credential.as_deref(),
             )
             .send()
             .await
@@ -2724,7 +2782,10 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
             let url = provider.chat_completions_url();
             let client = provider.streaming_http_client();
             let auth_header = provider.auth_header.clone();
-            let credential = provider.credential.clone();
+            let credential = {
+                let guard = provider.credential.read();
+                guard.clone()
+            };
             let targets_mistral_tool_call_contract = provider.targets_mistral_tool_call_contract();
 
             let mut req_builder = client.post(&url).json(&payload);
@@ -2863,7 +2924,10 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
             let url = provider.chat_completions_url();
             let client = provider.streaming_http_client();
             let auth_header = provider.auth_header.clone();
-            let credential = provider.credential.clone();
+            let credential = {
+                let guard = provider.credential.read();
+                guard.clone()
+            };
 
             // Build request with auth
             let mut req_builder = client.post(&url).json(&request);
@@ -2978,7 +3042,10 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
             let url = provider.chat_completions_url();
             let client = provider.streaming_http_client();
             let auth_header = provider.auth_header.clone();
-            let credential = provider.credential.clone();
+            let credential = {
+                let guard = provider.credential.read();
+                guard.clone()
+            };
 
             let mut req_builder = client.post(&url).json(&request);
             req_builder = apply_auth_to_request(req_builder, &auth_header, credential.as_deref());
@@ -3028,8 +3095,12 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         // Hit the appropriate URL with a GET to prime the connection pool.
         // The server will likely return 405 Method Not Allowed, which is fine.
         let url = self.chat_completions_url();
+        let credential = {
+            let g = self.credential.read();
+            g.clone()
+        };
         let _ = self
-            .apply_auth_header(self.http_client().get(&url), self.credential.as_deref())
+            .apply_auth_header(self.http_client().get(&url), credential.as_deref())
             .send()
             .await?;
         Ok(())
@@ -3070,13 +3141,16 @@ mod tests {
         );
         assert_eq!(p.name, "venice");
         assert_eq!(p.base_url, "https://api.venice.ai");
-        assert_eq!(p.credential.as_deref(), Some("venice-test-credential"));
+        assert_eq!(
+            p.credential.read().as_deref(),
+            Some("venice-test-credential")
+        );
     }
 
     #[test]
     fn creates_without_key() {
         let p = make_model_provider("test", "https://example.com", None);
-        assert!(p.credential.is_none());
+        assert!(p.credential.read().is_none());
     }
 
     #[test]

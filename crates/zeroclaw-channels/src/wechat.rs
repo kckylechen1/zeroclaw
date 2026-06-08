@@ -8,10 +8,10 @@ use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyInit, block_padding::Pkcs
 use anyhow::Context;
 use async_trait::async_trait;
 use base64::Engine;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
 use zeroclaw_config::schema::Config;
@@ -511,6 +511,20 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Async variant of `write_private`: uses `tokio::fs` to avoid blocking
+/// the async runtime during file writes.
+async fn write_private_async(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    tokio::fs::write(path, data).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = 0o600;
+        let perms = std::fs::Permissions::from_mode(mode);
+        tokio::fs::set_permissions(path, perms).await?;
+    }
+    Ok(())
+}
+
 /// Generate a random X-WECHAT-UIN header value.
 fn random_wechat_uin() -> String {
     let bytes: [u8; 4] = rand::random();
@@ -524,29 +538,39 @@ fn build_base_info() -> serde_json::Value {
     })
 }
 
-fn markdown_to_plain_text(text: &str) -> String {
-    // TODO: Cache these Regex values instead of compiling them on every send path.
-    let code_block_re = regex::Regex::new(r"```[^\n]*\n?([\s\S]*?)```").unwrap();
-    let image_re = regex::Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap();
-    let link_re = regex::Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap();
-    let heading_re = regex::Regex::new(r"(?m)^\s{0,3}#{1,6}\s+").unwrap();
-    let blockquote_re = regex::Regex::new(r"(?m)^>\s?").unwrap();
-    let bullet_re = regex::Regex::new(r"(?m)^\s*[-*+]\s+").unwrap();
-    let emphasis_re = regex::Regex::new(r"(\*\*|__|~~|`|\*)").unwrap();
-    let table_separator_re = regex::Regex::new(r"^\|[\s:|-]+\|$").unwrap();
-    let table_row_re = regex::Regex::new(r"^\|(.+)\|$").unwrap();
+/// Pre-compiled regexes for markdown-to-plain-text conversion.
+/// Avoids re-compiling on every message send.
+static RE_CODE_BLOCK: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"```[^\n]*\n?([\s\S]*?)```").unwrap());
+static RE_IMAGE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap());
+static RE_LINK: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
+static RE_HEADING: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?m)^\s{0,3}#{1,6}\s+").unwrap());
+static RE_BLOCKQUOTE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?m)^>\s?").unwrap());
+static RE_BULLET: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(?m)^\s*[-*+]\s+").unwrap());
+static RE_EMPHASIS: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(\*\*|__|~~|`|\*)").unwrap());
+static RE_TABLE_SEPARATOR: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^\|[\s:|-]+\|$").unwrap());
+static RE_TABLE_ROW: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^\|(.+)\|$").unwrap());
 
-    let mut result = code_block_re.replace_all(text, "$1").into_owned();
-    result = image_re.replace_all(&result, "").into_owned();
-    result = link_re.replace_all(&result, "$1").into_owned();
+fn markdown_to_plain_text(text: &str) -> String {
+    let mut result = RE_CODE_BLOCK.replace_all(text, "$1").into_owned();
+    result = RE_IMAGE.replace_all(&result, "").into_owned();
+    result = RE_LINK.replace_all(&result, "$1").into_owned();
 
     let mut lines = Vec::new();
     for line in result.lines() {
-        if table_separator_re.is_match(line) {
+        if RE_TABLE_SEPARATOR.is_match(line) {
             continue;
         }
 
-        if let Some(captures) = table_row_re.captures(line) {
+        if let Some(captures) = RE_TABLE_ROW.captures(line) {
             let inner = captures.get(1).map(|value| value.as_str()).unwrap_or("");
             lines.push(
                 inner
@@ -562,10 +586,10 @@ fn markdown_to_plain_text(text: &str) -> String {
     }
 
     result = lines.join("\n");
-    result = heading_re.replace_all(&result, "").into_owned();
-    result = blockquote_re.replace_all(&result, "").into_owned();
-    result = bullet_re.replace_all(&result, "").into_owned();
-    result = emphasis_re.replace_all(&result, "").into_owned();
+    result = RE_HEADING.replace_all(&result, "").into_owned();
+    result = RE_BLOCKQUOTE.replace_all(&result, "").into_owned();
+    result = RE_BULLET.replace_all(&result, "").into_owned();
+    result = RE_EMPHASIS.replace_all(&result, "").into_owned();
 
     while result.contains("\n\n\n") {
         result = result.replace("\n\n\n", "\n\n");
@@ -742,7 +766,7 @@ impl WeChatChannel {
             if let Some(ref token) = account.token
                 && !token.is_empty()
             {
-                *self.bot_token.write().unwrap() = Some(token.clone());
+                *self.bot_token.write() = Some(token.clone());
                 ::zeroclaw_log::record!(
                     INFO,
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
@@ -750,7 +774,7 @@ impl WeChatChannel {
                 );
             }
             if let Some(ref id) = account.account_id {
-                *self.account_id.write().unwrap() = Some(id.clone());
+                *self.account_id.write() = Some(id.clone());
             }
         }
 
@@ -777,9 +801,9 @@ impl WeChatChannel {
         }
     }
 
-    /// Save account data to disk.
-    fn save_account_data(&self, token: &str, account_id: &str, user_id: Option<&str>) {
-        if let Err(e) = std::fs::create_dir_all(&self.state_dir) {
+    /// Save account data to disk (async).
+    async fn save_account_data(&self, token: &str, account_id: &str, user_id: Option<&str>) {
+        if let Err(e) = tokio::fs::create_dir_all(&self.state_dir).await {
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -799,7 +823,7 @@ impl WeChatChannel {
         let path = self.state_dir.join("account.json");
         match serde_json::to_string_pretty(&data) {
             Ok(json) => {
-                if let Err(e) = write_private(&path, json.as_bytes()) {
+                if let Err(e) = write_private_async(&path, json.as_bytes()).await {
                     ::zeroclaw_log::record!(
                         WARN,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -819,9 +843,9 @@ impl WeChatChannel {
         }
     }
 
-    /// Save sync cursor to disk.
-    fn save_sync_data(&self) {
-        if let Err(e) = std::fs::create_dir_all(&self.state_dir) {
+    /// Save sync cursor to disk (async).
+    async fn save_sync_data(&self) {
+        if let Err(e) = tokio::fs::create_dir_all(&self.state_dir).await {
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -838,7 +862,7 @@ impl WeChatChannel {
         let path = self.state_dir.join("sync.json");
         match serde_json::to_string(&data) {
             Ok(json) => {
-                if let Err(e) = write_private(&path, json.as_bytes()) {
+                if let Err(e) = write_private_async(&path, json.as_bytes()).await {
                     ::zeroclaw_log::record!(
                         WARN,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -859,18 +883,18 @@ impl WeChatChannel {
     }
 
     fn has_token(&self) -> bool {
-        self.bot_token.read().map(|t| t.is_some()).unwrap_or(false)
+        self.bot_token.read().is_some()
     }
 
     fn get_token(&self) -> Option<String> {
-        self.bot_token.read().ok().and_then(|t| t.clone())
+        self.bot_token.read().clone()
     }
 
-    fn set_context_token(&self, user_id: &str, token: &str) {
+    async fn set_context_token(&self, user_id: &str, token: &str) {
         self.context_tokens
             .lock()
             .insert(user_id.to_string(), token.to_string());
-        self.save_sync_data();
+        self.save_sync_data().await;
     }
 
     fn get_context_token(&self, user_id: &str) -> Option<String> {
@@ -1736,12 +1760,8 @@ impl WeChatChannel {
         let (token, account_id, user_id) = self.qr_login().await?;
 
         // Save to memory
-        if let Ok(mut t) = self.bot_token.write() {
-            *t = Some(token.clone());
-        }
-        if let Ok(mut a) = self.account_id.write() {
-            *a = Some(account_id.clone());
-        }
+        *self.bot_token.write() = Some(token.clone());
+        *self.account_id.write() = Some(account_id.clone());
 
         // If a user scanned, persist them as an allowed peer
         if let Some(ref uid) = user_id
@@ -1757,7 +1777,8 @@ impl WeChatChannel {
         }
 
         // Persist to disk
-        self.save_account_data(&token, &account_id, user_id.as_deref());
+        self.save_account_data(&token, &account_id, user_id.as_deref())
+            .await;
 
         Ok(())
     }
@@ -2147,11 +2168,9 @@ impl Channel for WeChatChannel {
                         )
                     );
                     // Clear token so we re-login after pause
-                    if let Ok(mut t) = self.bot_token.write() {
-                        *t = None;
-                    }
+                    *self.bot_token.write() = None;
                     self.context_tokens.lock().clear();
-                    self.save_sync_data();
+                    self.save_sync_data().await;
                     tokio::time::sleep(SESSION_PAUSE_DURATION).await;
                     // Try to re-login
                     if let Err(e) = self.ensure_logged_in().await {
@@ -2192,7 +2211,7 @@ impl Channel for WeChatChannel {
             {
                 cursor = new_cursor.to_string();
                 *self.cursor.lock() = cursor.clone();
-                self.save_sync_data();
+                self.save_sync_data().await;
             }
 
             if let Some(next_timeout) = data
@@ -2223,7 +2242,7 @@ impl Channel for WeChatChannel {
                 if let Some(ctx_token) = msg.get("context_token").and_then(|v| v.as_str())
                     && !ctx_token.is_empty()
                 {
-                    self.set_context_token(from_user_id, ctx_token);
+                    self.set_context_token(from_user_id, ctx_token).await;
                 }
 
                 let items = msg
@@ -2681,8 +2700,8 @@ mod tests {
         assert!(data.context_tokens.is_empty());
     }
 
-    #[test]
-    fn context_tokens_survive_channel_restart() {
+    #[tokio::test]
+    async fn context_tokens_survive_channel_restart() {
         let temp = tempdir().unwrap();
         let state_dir = temp.path().to_path_buf();
 
@@ -2695,10 +2714,10 @@ mod tests {
                 Some(state_dir.clone()),
             )
             .unwrap();
-            ch.set_context_token("acct1:userA", "tok_A");
-            ch.set_context_token("acct1:userB", "tok_B");
+            ch.set_context_token("acct1:userA", "tok_A").await;
+            ch.set_context_token("acct1:userB", "tok_B").await;
             *ch.cursor.lock() = "cursor_123".to_string();
-            ch.save_sync_data();
+            ch.save_sync_data().await;
         }
 
         let ch2 = WeChatChannel::new(
@@ -2722,8 +2741,8 @@ mod tests {
         assert_eq!(*ch2.cursor.lock(), "cursor_123");
     }
 
-    #[test]
-    fn set_context_token_persists_immediately() {
+    #[tokio::test]
+    async fn set_context_token_persists_immediately() {
         let temp = tempdir().unwrap();
         let state_dir = temp.path().to_path_buf();
 
@@ -2735,7 +2754,7 @@ mod tests {
             Some(state_dir.clone()),
         )
         .unwrap();
-        ch.set_context_token("acct:user1", "immediate_tok");
+        ch.set_context_token("acct:user1", "immediate_tok").await;
 
         let ch2 = WeChatChannel::new(
             "test",
@@ -2751,8 +2770,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn save_sync_data_preserves_context_tokens() {
+    #[tokio::test]
+    async fn save_sync_data_preserves_context_tokens() {
         let temp = tempdir().unwrap();
         let state_dir = temp.path().to_path_buf();
 
@@ -2764,9 +2783,9 @@ mod tests {
             Some(state_dir.clone()),
         )
         .unwrap();
-        ch.set_context_token("acct:user1", "my_token");
+        ch.set_context_token("acct:user1", "my_token").await;
         *ch.cursor.lock() = "new_cursor_value".to_string();
-        ch.save_sync_data();
+        ch.save_sync_data().await;
 
         let ch2 = WeChatChannel::new(
             "test",
@@ -2801,8 +2820,8 @@ mod tests {
         assert_eq!(*ch.cursor.lock(), "");
     }
 
-    #[test]
-    fn context_token_overwrite_persists_latest() {
+    #[tokio::test]
+    async fn context_token_overwrite_persists_latest() {
         let temp = tempdir().unwrap();
         let state_dir = temp.path().to_path_buf();
 
@@ -2814,8 +2833,8 @@ mod tests {
             Some(state_dir.clone()),
         )
         .unwrap();
-        ch.set_context_token("acct:user1", "old_token");
-        ch.set_context_token("acct:user1", "new_token");
+        ch.set_context_token("acct:user1", "old_token").await;
+        ch.set_context_token("acct:user1", "new_token").await;
 
         let ch2 = WeChatChannel::new(
             "test",

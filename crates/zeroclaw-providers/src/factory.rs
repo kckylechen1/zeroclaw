@@ -1364,7 +1364,7 @@ mod tests {
 
         assert_eq!(provider.name, "Ollama");
         assert_eq!(provider.base_url, "http://192.168.1.100:11434/v1");
-        assert!(provider.credential.is_none());
+        assert!(provider.credential.read().is_none());
     }
 
     #[test]
@@ -1400,7 +1400,7 @@ mod tests {
             &ModelProviderRuntimeOptions::default(),
         );
 
-        assert_eq!(provider.credential.as_deref(), Some("ollama-key"));
+        assert_eq!(provider.credential.read().as_deref(), Some("ollama-key"));
     }
 
     #[test]

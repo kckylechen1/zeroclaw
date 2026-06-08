@@ -32,6 +32,7 @@ pub mod consolidation;
 pub mod decay;
 pub mod embeddings;
 pub mod hygiene;
+pub mod hypermemory;
 pub mod importance;
 pub mod knowledge_graph;
 #[cfg(feature = "memory-postgres")]
@@ -59,6 +60,7 @@ pub use backend::{
     MemoryBackendKind, MemoryBackendProfile, classify_memory_backend, default_memory_backend_key,
     memory_backend_profile, selectable_memory_backends,
 };
+pub use hypermemory::HyperMemory;
 pub use lucid::LucidMemory;
 pub use markdown::MarkdownMemory;
 pub use none::NoneMemory;
@@ -128,6 +130,7 @@ where
             let local = sqlite_builder()?;
             Ok(Box::new(LucidMemory::new("lucid", workspace_dir, local)))
         }
+        MemoryBackendKind::HyperMemory => Ok(Box::new(HyperMemory::new("hypermemory"))),
         MemoryBackendKind::Postgres => {
             // Postgres requires a typed `[storage.postgres.<alias>]` config, which this
             // builder-only entry point does not receive. All supported call paths go

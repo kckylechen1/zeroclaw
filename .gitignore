@@ -67,6 +67,7 @@ credentials.json
 
 # Claude Code skill session state (review handoffs, changelog drafts, review bodies)
 tmp/
+.agent/
 
 # Local state backups
 .local-state-backups/

@@ -5,6 +5,7 @@ pub enum MemoryBackendKind {
     Postgres,
     Qdrant,
     Markdown,
+    HyperMemory,
     None,
     Unknown,
 }
@@ -83,11 +84,21 @@ const CUSTOM_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
     optional_dependency: false,
 };
 
-const SELECTABLE_MEMORY_BACKENDS: [MemoryBackendProfile; 5] = [
+const HYPERMEMORY_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
+    key: "hypermemory",
+    label: "HyperMemory — MCP-backed remote memory via hapi-edge gateway",
+    auto_save_default: true,
+    uses_sqlite_hygiene: false,
+    sqlite_based: false,
+    optional_dependency: false,
+};
+
+const SELECTABLE_MEMORY_BACKENDS: [MemoryBackendProfile; 6] = [
     SQLITE_PROFILE,
     LUCID_PROFILE,
     POSTGRES_PROFILE,
     MARKDOWN_PROFILE,
+    HYPERMEMORY_PROFILE,
     NONE_PROFILE,
 ];
 
@@ -106,6 +117,7 @@ pub fn classify_memory_backend(backend: &str) -> MemoryBackendKind {
         "postgres" => MemoryBackendKind::Postgres,
         "qdrant" => MemoryBackendKind::Qdrant,
         "markdown" => MemoryBackendKind::Markdown,
+        "hypermemory" => MemoryBackendKind::HyperMemory,
         "none" => MemoryBackendKind::None,
         _ => MemoryBackendKind::Unknown,
     }
@@ -118,6 +130,7 @@ pub fn memory_backend_profile(backend: &str) -> MemoryBackendProfile {
         MemoryBackendKind::Postgres => POSTGRES_PROFILE,
         MemoryBackendKind::Qdrant => QDRANT_PROFILE,
         MemoryBackendKind::Markdown => MARKDOWN_PROFILE,
+        MemoryBackendKind::HyperMemory => HYPERMEMORY_PROFILE,
         MemoryBackendKind::None => NONE_PROFILE,
         MemoryBackendKind::Unknown => CUSTOM_PROFILE,
     }
@@ -150,12 +163,13 @@ mod tests {
     #[test]
     fn selectable_backends_are_ordered_for_onboarding() {
         let backends = selectable_memory_backends();
-        assert_eq!(backends.len(), 5);
+        assert_eq!(backends.len(), 6);
         assert_eq!(backends[0].key, "sqlite");
         assert_eq!(backends[1].key, "lucid");
         assert_eq!(backends[2].key, "postgres");
         assert_eq!(backends[3].key, "markdown");
-        assert_eq!(backends[4].key, "none");
+        assert_eq!(backends[4].key, "hypermemory");
+        assert_eq!(backends[5].key, "none");
     }
 
     #[test]

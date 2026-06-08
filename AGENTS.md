@@ -228,3 +228,44 @@ Dev-operational contracts — files consumed by AI coding skills and development
 - `@docs/book/src/developing/extension-examples.md` — adding providers, channels, tools, peripherals; tool shared-state contract; architecture boundary rules
 - `@docs/book/src/contributing/privacy.md` — privacy rules and neutral-placeholder palette
 - `@docs/book/src/maintainers/superseding.md` — superseded-PR attribution, PR/commit templates, handoff template
+
+---
+
+## Hyperion Integration Context
+
+This repo is being integrated as the primary agent harness for the **Hyperion** quantitative trading system (`~/Desktop/Quant_Analyzer_2026`), replacing Python Hermes-Agent.
+
+### Architecture
+
+```
+ZeroClaw (this repo)
+  └── WeChat iLink / WeCom gateway
+  └── LLM agent loop
+  └── MCP client → hapi-edge (Go)
+                      └── snapshot / batch_snapshot / history_klines / portfolio_*
+                      └── HyperMemory bridge → data/tachi/projects/hyperion/memory.db
+```
+
+### Planned Integration Tasks (priority order)
+
+| Task | File(s) | Status |
+|---|---|---|
+| **HyperMemory Backend** | `crates/zeroclaw-memory/src/hypermemory.rs` (new) | 🔲 Not started |
+| **Key Rotation fix** | `crates/zeroclaw-api/src/provider.rs`, `crates/zeroclaw-providers/src/reliable.rs`, `crates/zeroclaw-providers/src/compatible.rs` | 🔲 Not started |
+| **facts/trend consolidation enhance** | `crates/zeroclaw-memory/src/consolidation.rs` | 🔲 Not started |
+
+### HyperMemory Backend Contract
+
+- MCP endpoint: `http://127.0.0.1:6888/mcp` (or `HAPI_MEMORY_MCP_URL`)
+- Tools: `save_memory`, `search_memory`, `get_memory`, `delete_memory`, `list_memories`
+- Namespace: `hyperion` / project `hyperion` / domain `equity_trading`
+- Path prefix: `/trading/equity/...`
+- **Route through hapi-edge HyperMemory bridge only — never host tachi MCP directly**
+
+### Key Rules
+
+1. Memory → HyperMemory only, never `data/hapi.db` directly
+2. Trading tools → hapi-edge MCP only, never direct Longbridge/Tushare calls
+3. Real position writes require human OTP confirmation (Trading Harness P1)
+4. Timezone: `Asia/Shanghai`
+5. A-share lot: 100 shares (STAR: min 200 then 1-share increments)

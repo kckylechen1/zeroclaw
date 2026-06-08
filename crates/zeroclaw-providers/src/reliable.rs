@@ -619,9 +619,13 @@ impl ModelProvider for ReliableModelProvider {
                                 && !non_retryable_rate_limit
                                 && let Some(new_key) = self.rotate_key()
                             {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
+                                let rotated =
+                                    model_provider.set_credential(Some(new_key.to_string()));
+                                if rotated {
+                                    ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
+                                } else {
+                                    ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), "Rate limited; key rotation ignored (provider does not support runtime credential swap)");
+                                }
                             }
 
                             if non_retryable {
@@ -758,9 +762,13 @@ impl ModelProvider for ReliableModelProvider {
                                 && !non_retryable_rate_limit
                                 && let Some(new_key) = self.rotate_key()
                             {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
+                                let rotated =
+                                    model_provider.set_credential(Some(new_key.to_string()));
+                                if rotated {
+                                    ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
+                                } else {
+                                    ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), "Rate limited; key rotation ignored (provider does not support runtime credential swap)");
+                                }
                             }
 
                             if non_retryable {
@@ -909,9 +917,13 @@ impl ModelProvider for ReliableModelProvider {
                                 && !non_retryable_rate_limit
                                 && let Some(new_key) = self.rotate_key()
                             {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
+                                let rotated =
+                                    model_provider.set_credential(Some(new_key.to_string()));
+                                if rotated {
+                                    ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
+                                } else {
+                                    ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), "Rate limited; key rotation ignored (provider does not support runtime credential swap)");
+                                }
                             }
 
                             if non_retryable {
@@ -1047,9 +1059,13 @@ impl ModelProvider for ReliableModelProvider {
                                 && !non_retryable_rate_limit
                                 && let Some(new_key) = self.rotate_key()
                             {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
+                                let rotated =
+                                    model_provider.set_credential(Some(new_key.to_string()));
+                                if rotated {
+                                    ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
+                                } else {
+                                    ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), "Rate limited; key rotation ignored (provider does not support runtime credential swap)");
+                                }
                             }
 
                             if non_retryable {
@@ -3352,6 +3368,146 @@ mod tests {
             assert!(take_last_provider_fallback().is_none());
         })
         .await;
+    }
+
+    // ── Key Rotation Behavior Test ──────────────────────────────────────────
+
+    /// Mock that tracks which credential was active when each call was made.
+    /// Returns 429 on the first call, then succeeds on subsequent calls.
+    struct KeyRotationMock {
+        calls: Arc<AtomicUsize>,
+        credentials_seen: parking_lot::Mutex<Vec<Option<String>>>,
+        credential: parking_lot::RwLock<Option<String>>,
+    }
+
+    impl KeyRotationMock {
+        fn new(initial_key: &str) -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                credentials_seen: parking_lot::Mutex::new(Vec::new()),
+                credential: parking_lot::RwLock::new(Some(initial_key.to_string())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for KeyRotationMock {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let current_key = self.credential.read().clone();
+            self.credentials_seen.lock().push(current_key.clone());
+
+            if attempt == 1 {
+                // Simulate a 429 rate-limit error on first attempt
+                anyhow::bail!("429 Too Many Requests: rate limit exceeded");
+            }
+
+            Ok(format!("ok with key {:?}", current_key.unwrap_or_default()))
+        }
+    }
+
+    impl ::zeroclaw_api::attribution::Attributable for KeyRotationMock {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Provider(
+                ::zeroclaw_api::attribution::ProviderKind::Model(
+                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+                ),
+            )
+        }
+        fn alias(&self) -> &str {
+            "KeyRotationMock"
+        }
+    }
+
+    impl KeyRotationMock {
+        fn set_credential_impl(&self, key: Option<String>) -> bool {
+            *self.credential.write() = key;
+            true
+        }
+    }
+
+    /// Wire a wrapper to expose `set_credential` on the mock through the trait.
+    struct KeyRotationMockWrapper {
+        inner: Arc<KeyRotationMock>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for KeyRotationMockWrapper {
+        async fn chat_with_system(
+            &self,
+            system_prompt: Option<&str>,
+            message: &str,
+            model: &str,
+            temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            self.inner
+                .chat_with_system(system_prompt, message, model, temperature)
+                .await
+        }
+
+        fn set_credential(&self, key: Option<String>) -> bool {
+            self.inner.set_credential_impl(key)
+        }
+    }
+
+    impl ::zeroclaw_api::attribution::Attributable for KeyRotationMockWrapper {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Provider(
+                ::zeroclaw_api::attribution::ProviderKind::Model(
+                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+                ),
+            )
+        }
+        fn alias(&self) -> &str {
+            "KeyRotationMockWrapper"
+        }
+    }
+
+    /// Verify that on a 429 error, the ReliableModelProvider rotates the API key
+    /// and the subsequent retry uses the rotated key.
+    #[tokio::test]
+    async fn key_rotation_on_429_uses_rotated_key_on_retry() {
+        let mock = Arc::new(KeyRotationMock::new("initial-key-0000"));
+
+        let model_provider = ReliableModelProvider::new(
+            "test",
+            vec![(
+                "primary".into(),
+                Box::new(KeyRotationMockWrapper {
+                    inner: mock.clone(),
+                }) as Box<dyn ModelProvider>,
+            )],
+            2, // allow retries
+            1, // minimal backoff for test speed
+        )
+        .with_api_keys(vec![
+            "rotated-key-1111".to_string(),
+            "rotated-key-2222".to_string(),
+        ]);
+
+        let result = model_provider
+            .simple_chat("hello", "test", Some(0.0))
+            .await
+            .unwrap();
+
+        // The second call should succeed.
+        assert!(result.contains("rotated-key-1111"));
+
+        // Verify exactly 2 calls were made (1 failed + 1 succeeded).
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
+
+        // Verify the credential progression: first call used initial key,
+        // second call used the rotated key.
+        let creds = mock.credentials_seen.lock();
+        assert_eq!(creds.len(), 2);
+        assert_eq!(creds[0].as_deref(), Some("initial-key-0000"));
+        assert_eq!(creds[1].as_deref(), Some("rotated-key-1111"));
     }
 
     // Regression for #6589: ReliableModelProvider::supports_vision() must reflect the
