@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 /// Used by: Venice, Vercel AI Gateway, Cloudflare AI Gateway, Moonshot,
 /// Synthetic, `OpenCode` Zen, `OpenCode` Go, `Z.AI`, `GLM`, `MiniMax`, Bedrock, Qianfan, Groq, Mistral, `xAI`, etc.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone)]
 pub struct OpenAiCompatibleModelProvider {
     /// `[providers.models.<alias>]` key this provider was constructed
     /// under. Used by the `Attributable` impl so log emissions carry the
@@ -30,7 +29,10 @@ pub struct OpenAiCompatibleModelProvider {
     pub alias: String,
     pub name: String,
     pub base_url: String,
-    pub credential: Option<String>,
+    /// API key / credential wrapped in a `parking_lot::RwLock` so
+    /// `ReliableModelProvider` can hot-swap it on 429 key rotation
+    /// without requiring `&mut self`.
+    pub credential: parking_lot::RwLock<Option<String>>,
     auth_service: Option<AuthService>,
     auth_model_provider: Option<String>,
     auth_profile_override: Option<String>,
@@ -199,6 +201,37 @@ fn models_dev_to_model_info(ids: Vec<String>) -> Vec<zeroclaw_api::model_provide
         .collect()
 }
 
+impl Clone for OpenAiCompatibleModelProvider {
+    fn clone(&self) -> Self {
+        Self {
+            alias: self.alias.clone(),
+            name: self.name.clone(),
+            base_url: self.base_url.clone(),
+            credential: parking_lot::RwLock::new(self.credential.read().clone()),
+            auth_service: self.auth_service.clone(),
+            auth_model_provider: self.auth_model_provider.clone(),
+            auth_profile_override: self.auth_profile_override.clone(),
+            auth_header: self.auth_header.clone(),
+            supports_vision: self.supports_vision,
+            user_agent: self.user_agent.clone(),
+            merge_system_into_user: self.merge_system_into_user,
+            native_tool_calling: self.native_tool_calling,
+            timeout_secs: self.timeout_secs,
+            extra_headers: self.extra_headers.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            replay_assistant_reasoning: self.replay_assistant_reasoning,
+            api_path: self.api_path.clone(),
+            max_tokens: self.max_tokens,
+            models_dev_key: self.models_dev_key.clone(),
+            openrouter_vendor_prefix: self.openrouter_vendor_prefix.clone(),
+            local_model_tool_sanitize: self.local_model_tool_sanitize,
+            public_model_listing: self.public_model_listing,
+            tls_ca_cert_pem: self.tls_ca_cert_pem.clone(),
+            extra_body: self.extra_body.clone(),
+        }
+    }
+}
+
 impl OpenAiCompatibleModelProvider {
     pub fn new(
         alias: &str,
@@ -304,7 +337,7 @@ impl OpenAiCompatibleModelProvider {
             alias: alias.to_string(),
             name: name.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
-            credential: credential.map(ToString::to_string),
+            credential: parking_lot::RwLock::new(credential.map(ToString::to_string)),
             auth_service: None,
             auth_model_provider: None,
             auth_profile_override: None,
@@ -741,13 +774,16 @@ impl OpenAiCompatibleModelProvider {
     }
 
     async fn resolve_credential(&self) -> anyhow::Result<Option<String>> {
-        if self
-            .credential
+        // Read the (possibly hot-swapped) credential once through the RwLock so
+        // 429 key rotation applied by `ReliableModelProvider` is picked up on
+        // the next call without racing a concurrent swap mid-resolution.
+        let credential = self.credential.read().clone();
+        if credential
             .as_deref()
             .map(str::trim)
             .is_some_and(|value| !value.is_empty())
         {
-            return Ok(self.credential.clone());
+            return Ok(credential);
         }
         let (Some(auth), Some(model_provider)) = (&self.auth_service, &self.auth_model_provider)
         else {
@@ -2293,6 +2329,12 @@ impl OpenAiCompatibleModelProvider {
 
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleModelProvider {
+    fn set_credential(&self, key: Option<String>) -> bool {
+        let mut guard = self.credential.write();
+        *guard = key;
+        true
+    }
+
     fn capabilities(&self) -> zeroclaw_api::model_provider::ProviderCapabilities {
         zeroclaw_api::model_provider::ProviderCapabilities {
             native_tool_calling: self.native_tool_calling,
@@ -3355,13 +3397,16 @@ mod tests {
         );
         assert_eq!(p.name, "venice");
         assert_eq!(p.base_url, "https://api.venice.ai");
-        assert_eq!(p.credential.as_deref(), Some("venice-test-credential"));
+        assert_eq!(
+            p.credential.read().as_deref(),
+            Some("venice-test-credential")
+        );
     }
 
     #[test]
     fn creates_without_key() {
         let p = make_model_provider("test", "https://example.com", None);
-        assert!(p.credential.is_none());
+        assert!(p.credential.read().is_none());
     }
 
     // Regression: vLLM 0.19+ and spec-compliant validators reject
