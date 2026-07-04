@@ -451,7 +451,23 @@ pub struct ModelInfo {
 }
 
 #[async_trait]
-pub trait ModelProvider: Send + Sync + crate::attribution::Attributable {
+pub trait ModelProvider: Send + Sync + 'static + crate::attribution::Attributable {
+    /// Downcast to `dyn Any` for runtime type inspection (key rotation, etc.).
+    fn as_any(&self) -> &dyn std::any::Any
+    where
+        Self: Sized,
+    {
+        self
+    }
+
+    /// Hot-swap the credential at runtime. Returns `true` if the provider
+    /// actually applied the new credential; `false` (default) signals that
+    /// the provider does not support runtime key rotation so callers can
+    /// avoid logging a misleading "rotation succeeded" message.
+    fn set_credential(&self, _key: Option<String>) -> bool {
+        false
+    }
+
     /// Query model_provider capabilities.
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::default()
@@ -722,6 +738,10 @@ pub trait ModelProvider: Send + Sync + crate::attribution::Attributable {
 /// boilerplate in test and production code.
 #[async_trait]
 impl<T: ModelProvider + ?Sized> ModelProvider for Arc<T> {
+    fn set_credential(&self, key: Option<String>) -> bool {
+        self.as_ref().set_credential(key)
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         self.as_ref().capabilities()
     }
