@@ -260,7 +260,7 @@ ZeroClaw (this repo)
 The custom HyperMemory CRUD backend was protocol-mismatched with the live memory-server (wrong transport AND wrong tool API) and has been retired. Do NOT reintroduce a `hypermemory` memory backend.
 
 - Consume the memory-server as a standard `[[mcp.servers]]` entry via the native MCP client.
-- MCP endpoint: `http://127.0.0.1:6888/mcp` (or `HAPI_MEMORY_MCP_URL`). Port 8890 is dead — never depend on it.
+- MCP endpoint: `http://127.0.0.1:6888/mcp` (or `HAPI_MEMORY_MCP_URL`). ZeroClaw's memory MUST route through :6888 only — never through hapi-edge's HTTP serve on :8890. That serve path is currently disabled/crash-looping; note :8890 is still hapi-edge serve's default HTTP port (`HAPI_EDGE_PORT`) used elsewhere in Quant (Crimson UI proxy, local HTTP MCP surface), so this is a ZeroClaw-memory-dependency rule, not a claim that :8890 is globally dead.
 - Tools: `hapi_save`, `hapi_search`, `hapi_memory` (NOT `save_memory`/`list_memories` — those never existed server-side).
 - Namespace: `hyperion` / project `hyperion` / domain `equity_trading`
 - Path prefix: `/trading/equity/...`
