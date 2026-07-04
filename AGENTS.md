@@ -228,3 +228,48 @@ Dev-operational contracts — files consumed by AI coding skills and development
 - `@docs/book/src/developing/extension-examples.md` — adding providers, channels, tools, peripherals; tool shared-state contract; architecture boundary rules
 - `@docs/book/src/contributing/privacy.md` — privacy rules and neutral-placeholder palette
 - `@docs/book/src/maintainers/superseding.md` — superseded-PR attribution, PR/commit templates, handoff template
+
+---
+
+## Hyperion Integration Context
+
+This repo is being integrated as the primary agent harness for the **Hyperion** quantitative trading system (`~/Desktop/Quant_Analyzer_2026`), replacing Python Hermes-Agent.
+
+### Architecture
+
+```
+ZeroClaw (this repo)
+  └── WeChat iLink / WeCom gateway
+  └── LLM agent loop
+  └── MCP client → hapi-edge (Go)
+  │                   └── snapshot / batch_snapshot / history_klines / portfolio_*
+  └── MCP client → hapi memory-server (HTTP :6888)
+                      └── hapi_save / hapi_search / hapi_memory
+```
+
+### Integration Status
+
+| Task | File(s) | Status |
+|---|---|---|
+| **Key rotation (429 hot-swap)** | `crates/zeroclaw-api/src/model_provider.rs`, `crates/zeroclaw-providers/src/reliable.rs`, `crates/zeroclaw-providers/src/compatible.rs` | ✅ Done (this branch) |
+| **WeChat non-blocking state persistence** | `crates/zeroclaw-channels/src/wechat.rs` | ✅ Done (this branch) |
+| **HyperMemory custom backend** | ~~`crates/zeroclaw-memory/src/hypermemory.rs`~~ | ❌ Retired (#634 option C) — never re-add; see below |
+
+### Memory Contract (#634 option C)
+
+The custom HyperMemory CRUD backend was protocol-mismatched with the live memory-server (wrong transport AND wrong tool API) and has been retired. Do NOT reintroduce a `hypermemory` memory backend.
+
+- Consume the memory-server as a standard `[[mcp.servers]]` entry via the native MCP client.
+- MCP endpoint: `http://127.0.0.1:6888/mcp` (or `HAPI_MEMORY_MCP_URL`). Port 8890 is dead — never depend on it.
+- Tools: `hapi_save`, `hapi_search`, `hapi_memory` (NOT `save_memory`/`list_memories` — those never existed server-side).
+- Namespace: `hyperion` / project `hyperion` / domain `equity_trading`
+- Path prefix: `/trading/equity/...`
+- **Route through hapi-edge / hapi memory-server MCP only — never host tachi MCP directly, never write Tachi DBs directly**
+
+### Key Rules
+
+1. Memory → hapi memory-server MCP only, never `data/hapi.db` directly
+2. Trading tools → hapi-edge MCP only, never direct Longbridge/Tushare calls
+3. Real position writes require human OTP confirmation (Trading Harness P1)
+4. Timezone: `Asia/Shanghai`
+5. A-share lot: 100 shares (STAR: min 200 then 1-share increments)
