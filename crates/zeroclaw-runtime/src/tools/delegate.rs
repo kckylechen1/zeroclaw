@@ -904,11 +904,7 @@ impl DelegateTool {
 
         let profile = self.risk_profiles.get(risk_profile)?;
         Some(SecurityPolicy {
-            allowed_tools: if profile.allowed_tools.is_empty() {
-                None
-            } else {
-                Some(profile.allowed_tools.clone())
-            },
+            allowed_tools: profile.allowed_tools.clone(),
             excluded_tools: if profile.excluded_tools.is_empty() {
                 None
             } else {
@@ -3370,7 +3366,11 @@ mod tests {
         profiles.insert(
             "agentic_test".to_string(),
             RiskProfileConfig {
-                allowed_tools,
+                allowed_tools: if allowed_tools.is_empty() {
+                    None
+                } else {
+                    Some(allowed_tools)
+                },
                 excluded_tools,
                 ..Default::default()
             },
@@ -3437,7 +3437,10 @@ mod tests {
                 delegation_policy: DelegationPolicy {
                     mode: DelegationMode::Allow,
                 },
-                allowed_tools: vec!["memory_store".to_string(), "memory_recall".to_string()],
+                allowed_tools: Some(vec![
+                    "memory_store".to_string(),
+                    "memory_recall".to_string(),
+                ]),
                 ..RiskProfileConfig::default()
             },
         );
@@ -5307,7 +5310,7 @@ mod tests {
         profiles.insert(
             "agentic_test".to_string(),
             RiskProfileConfig {
-                allowed_tools: vec!["shell".to_string()],
+                allowed_tools: Some(vec!["shell".to_string()]),
                 excluded_tools: vec!["filesystem__write_file".to_string()],
                 ..Default::default()
             },
@@ -5337,7 +5340,7 @@ mod tests {
         profiles.insert(
             "agentic_test".to_string(),
             RiskProfileConfig {
-                allowed_tools: vec!["shell".to_string(), "memory_recall".to_string()],
+                allowed_tools: Some(vec!["shell".to_string(), "memory_recall".to_string()]),
                 excluded_tools: vec!["shell".to_string()],
                 ..Default::default()
             },
