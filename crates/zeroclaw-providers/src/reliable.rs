@@ -756,6 +756,12 @@ impl ReliableModelProvider {
 
     /// Cool down the key that hit 429, then advance to the next available key.
     fn rotate_key_after_rate_limit(&self) -> Option<&str> {
+        // DESIGN: cooldown records the rate-limited key's 429, independent of
+        // whether the caller's `set_credential` applies the rotation (trait
+        // default returns false — rotation is a no-op for such providers). A key
+        // that never became active still gets stamped so skip-on-retry avoids
+        // re-selecting it; providers without `set_credential` support benefit
+        // once they gain rotation, and the stamp is harmless for them today.
         self.cooldown_last_selected_key();
         self.rotate_key()
     }
