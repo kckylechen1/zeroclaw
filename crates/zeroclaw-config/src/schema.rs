@@ -11685,19 +11685,11 @@ pub struct RiskProfileConfig {
     /// (fail-closed deny under the default `on_no_approver`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_route: Option<crate::autonomy::ApprovalRoute>,
-    /// Tools the agent may call in agentic mode. Empty = inherit / no
-    /// authorization constraint. Authorization decision: which tools is
-    /// the agent permitted to invoke at all. See `excluded_tools` for
-    /// the inverse denylist scoped to non-CLI channels.
-    ///
-    /// The TOML config does not distinguish an omitted field from
-    /// `allowed_tools = []`; both deserialize to `Vec::new()` and
-    /// `SecurityPolicy::from_profiles` maps that to "no authorization
-    /// constraint" at this layer. If you need an explicit deny-all gate,
-    /// apply it on the caller-supplied per-run `allowed_tools` (cron
-    /// jobs and other narrowers pass that list in directly to
-    /// `ToolAccessPolicy`, which honors `Some(vec![])` as deny-all) or
-    /// via `excluded_tools` covering the specific tools you want blocked.
+    /// Tools the agent may call in agentic mode. `None` = inherit / no
+    /// authorization constraint; `Some(vec![])` = deny every tool;
+    /// `Some(list)` = allow only the listed names. Authorization decision:
+    /// which tools is the agent permitted to invoke at all. See
+    /// `excluded_tools` for the inverse denylist scoped to non-CLI channels.
     ///
     /// MCP exception: when the list is non-empty, runtime-discovered MCP
     /// tools (any name containing `__`, which is the `<server>__<tool>`
@@ -11712,8 +11704,9 @@ pub struct RiskProfileConfig {
     /// invocations, etc.). Per-run lists are still strict explicit-list
     /// intersections, so a job that narrows `allowed_tools = ["cron_add"]`
     /// will not see runtime-discovered MCP tools unless it names them.
-    ///
-    pub allowed_tools: Vec<String>,
+    /// See PR #7547 review for the rationale.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
     /// Tools excluded from non-CLI channels under this profile.
     ///
     /// Also subtracts from the agentic-delegate allow-list resolved at
@@ -11745,7 +11738,7 @@ impl Default for RiskProfileConfig {
             allowed_roots: Vec::new(),
             delegation_policy: DelegationPolicy::default(),
             approval_route: None,
-            allowed_tools: Vec::new(),
+            allowed_tools: None,
             excluded_tools: Vec::new(),
             sandbox_enabled: None,
             sandbox_backend: None,
@@ -24333,7 +24326,7 @@ log_tool_io = "off"
         assert!(a.require_approval_for_medium_risk);
         assert!(a.block_high_risk_commands);
         assert!(a.shell_env_passthrough.is_empty());
-        assert!(a.allowed_tools.is_empty());
+        assert!(a.allowed_tools.is_none());
     }
 
     #[test]
@@ -24773,7 +24766,7 @@ auto_save = true
                         auto_approve: vec!["file_read".into()],
                         always_ask: vec![],
                         allowed_roots: vec![],
-                        allowed_tools: vec![],
+                        allowed_tools: None,
                         excluded_tools: vec![],
                         ..RiskProfileConfig::default()
                     },
