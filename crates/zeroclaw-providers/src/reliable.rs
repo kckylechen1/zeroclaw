@@ -9,7 +9,8 @@ use futures_util::{StreamExt, stream};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Info about a model_provider fallback that occurred during a request.
@@ -626,6 +627,57 @@ impl ReliableModelProviderEntry {
     }
 }
 
+/// Cooldown applied to an API key after a 429 triggers rotation away from it.
+const KEY_ROTATION_COOLDOWN_SECS: u64 = 60;
+
+/// Sentinel: no rotation-pool key is currently active (initial credential in use).
+const NO_ROTATION_KEY: usize = usize::MAX;
+
+static MONOTONIC_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+fn monotonic_now_ms() -> u64 {
+    MONOTONIC_EPOCH
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
+fn monotonic_deadline_ms(cooldown_ms: u64) -> u64 {
+    monotonic_now_ms().saturating_add(cooldown_ms)
+}
+
+/// Select the next API key index for rotation, skipping keys in cooldown.
+/// If all keys are cooling, returns the index whose cooldown expires soonest.
+fn select_rotation_key_index(
+    len: usize,
+    start: usize,
+    cooldown_until_ms: &[AtomicU64],
+    now_ms: u64,
+) -> usize {
+    if len == 0 {
+        return 0;
+    }
+
+    for offset in 0..len {
+        let idx = (start + offset) % len;
+        if cooldown_until_ms[idx].load(Ordering::Relaxed) <= now_ms {
+            return idx;
+        }
+    }
+
+    let mut best_idx = start % len;
+    let mut best_expiry = u64::MAX;
+    for idx in 0..len {
+        let expiry = cooldown_until_ms[idx].load(Ordering::Relaxed);
+        if expiry < best_expiry {
+            best_expiry = expiry;
+            best_idx = idx;
+        }
+    }
+    best_idx
+}
+
+
 /// ModelProvider wrapper with retry + auth-key rotation. The model_provider Vec exists
 /// for tests to exercise multi-provider failover; production wiring always
 /// passes a single primary. Per-model failover chains are also test-only —
@@ -639,6 +691,10 @@ pub struct ReliableModelProvider {
     /// Extra API keys for rotation (index tracks round-robin position).
     api_keys: Vec<String>,
     key_index: AtomicUsize,
+    /// Per-key cooldown deadline (monotonic ms; 0 = not cooling).
+    key_cooldown_until_ms: Vec<AtomicU64>,
+    /// Index of the rotation-pool key last selected by [`Self::rotate_key`].
+    last_selected_key_idx: AtomicUsize,
     /// Per-model failover chains. Test-only: model_name → [alt1, alt2, ...].
     model_fallbacks: HashMap<String, Vec<String>>,
     /// Transient provider cooldowns after retryable rate limits.
@@ -677,12 +733,19 @@ impl ReliableModelProvider {
             base_backoff_ms: base_backoff_ms.max(50),
             api_keys: Vec::new(),
             key_index: AtomicUsize::new(0),
+            key_cooldown_until_ms: Vec::new(),
+            last_selected_key_idx: AtomicUsize::new(NO_ROTATION_KEY),
             model_fallbacks: HashMap::new(),
             rate_limit_cooldowns: Mutex::new(HashMap::new()),
         }
     }
     /// Set additional API keys for round-robin rotation on rate-limit errors.
     pub fn with_api_keys(mut self, keys: Vec<String>) -> Self {
+        self.key_cooldown_until_ms = keys
+            .iter()
+            .map(|_| AtomicU64::new(0))
+            .collect();
+        self.last_selected_key_idx = AtomicUsize::new(NO_ROTATION_KEY);
         self.api_keys = keys;
         self
     }
@@ -702,13 +765,54 @@ impl ReliableModelProvider {
         chain
     }
 
+    /// Mark the active rotation-pool key as cooling after a 429.
+    fn cooldown_last_selected_key(&self) {
+        let prev = self.last_selected_key_idx.load(Ordering::Relaxed);
+        if prev != NO_ROTATION_KEY && prev < self.api_keys.len() {
+            let deadline =
+                monotonic_deadline_ms(KEY_ROTATION_COOLDOWN_SECS.saturating_mul(1000));
+            self.key_cooldown_until_ms[prev].store(deadline, Ordering::Relaxed);
+        }
+    }
+
+    /// Cool down the key that hit 429, then advance to the next available key.
+    fn rotate_key_after_rate_limit(&self) -> Option<&str> {
+        // DESIGN: cooldown records the rate-limited key's 429, independent of
+        // whether the caller's `set_credential` applies the rotation (trait
+        // default returns false — rotation is a no-op for such providers). A key
+        // that never became active still gets stamped so skip-on-retry avoids
+        // re-selecting it; providers without `set_credential` support benefit
+        // once they gain rotation, and the stamp is harmless for them today.
+        self.cooldown_last_selected_key();
+        self.rotate_key()
+    }
+
     /// Advance to the next API key and return it, or None if no extra keys configured.
     fn rotate_key(&self) -> Option<&str> {
         if self.api_keys.is_empty() {
             return None;
         }
-        let idx = self.key_index.fetch_add(1, Ordering::Relaxed) % self.api_keys.len();
+        let len = self.api_keys.len();
+        let start = self.key_index.fetch_add(1, Ordering::Relaxed) % len;
+        let idx = select_rotation_key_index(
+            len,
+            start,
+            &self.key_cooldown_until_ms,
+            monotonic_now_ms(),
+        );
+        self.last_selected_key_idx
+            .store(idx, Ordering::Relaxed);
         Some(&self.api_keys[idx])
+    }
+
+    #[cfg(test)]
+    fn test_set_key_index(&self, idx: usize) {
+        self.key_index.store(idx, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn test_set_key_cooldown_ms(&self, key_idx: usize, until_ms: u64) {
+        self.key_cooldown_until_ms[key_idx].store(until_ms, Ordering::Relaxed);
     }
 
     /// Compute backoff duration, respecting Retry-After if present.
@@ -976,7 +1080,7 @@ impl ModelProvider for ReliableModelProvider {
                             // so the retry hits a different quota bucket.
                             if rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
+                                && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
                                     model_provider.set_credential(Some(new_key.to_string()));
@@ -1187,7 +1291,7 @@ impl ModelProvider for ReliableModelProvider {
 
                             if rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
+                                && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
                                     model_provider.set_credential(Some(new_key.to_string()));
@@ -1410,7 +1514,7 @@ impl ModelProvider for ReliableModelProvider {
 
                             if rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
+                                && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
                                     model_provider.set_credential(Some(new_key.to_string()));
@@ -1623,7 +1727,7 @@ impl ModelProvider for ReliableModelProvider {
 
                             if rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
+                                && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
                                     model_provider.set_credential(Some(new_key.to_string()));
@@ -2910,6 +3014,101 @@ mod tests {
     async fn auth_rotation_returns_none_when_empty() {
         let model_provider = ReliableModelProvider::new("test", vec![], 0, 1);
         assert!(model_provider.rotate_key().is_none());
+    }
+
+    // ── Golden tests: per-key cooldown on 429 rotation (issue #914 B2) ──
+
+    #[test]
+    fn g1_rotation_skips_key_in_cooldown() {
+        // Pre-fix round-robin returns B here (start=1 → idx 1). With B cooling we must land on C.
+        let cooldowns: Vec<AtomicU64> = (0..3)
+            .map(|i| AtomicU64::new(if i == 1 { 10_000 } else { 0 }))
+            .collect();
+        let idx = select_rotation_key_index(3, 1, &cooldowns, 5_000);
+        assert_eq!(idx, 2, "expected C (index 2), not B (index 1)");
+
+        let model_provider = ReliableModelProvider::new(
+            "test",
+            vec![(
+                "p".into(),
+                Box::new(MockModelProvider {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    fail_until_attempt: 0,
+                    response: "ok",
+                    error: "",
+                }),
+            )],
+            0,
+            1,
+        )
+        .with_api_keys(vec!["key-a".into(), "key-b".into(), "key-c".into()]);
+        model_provider.test_set_key_index(1);
+        model_provider.test_set_key_cooldown_ms(1, 10_000);
+        assert_eq!(model_provider.rotate_key(), Some("key-c"));
+    }
+
+    #[test]
+    fn g2_all_keys_cooling_returns_soonest_expiry() {
+        let cooldowns: Vec<AtomicU64> = vec![
+            AtomicU64::new(30_000),
+            AtomicU64::new(10_000),
+            AtomicU64::new(20_000),
+        ];
+        let idx = select_rotation_key_index(3, 0, &cooldowns, 5_000);
+        assert_eq!(idx, 1, "B expires soonest at t=10_000");
+
+        let model_provider = ReliableModelProvider::new(
+            "test",
+            vec![(
+                "p".into(),
+                Box::new(MockModelProvider {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    fail_until_attempt: 0,
+                    response: "ok",
+                    error: "",
+                }),
+            )],
+            0,
+            1,
+        )
+        .with_api_keys(vec!["key-a".into(), "key-b".into(), "key-c".into()]);
+        model_provider.test_set_key_cooldown_ms(0, 30_000);
+        model_provider.test_set_key_cooldown_ms(1, 10_000);
+        model_provider.test_set_key_cooldown_ms(2, 20_000);
+        assert_eq!(model_provider.rotate_key(), Some("key-b"));
+    }
+
+    #[test]
+    fn g3_key_reenters_rotation_after_cooldown_expires() {
+        let cooldowns: Vec<AtomicU64> = vec![
+            AtomicU64::new(0),
+            AtomicU64::new(5_000),
+            AtomicU64::new(0),
+        ];
+        let idx = select_rotation_key_index(3, 1, &cooldowns, 5_000);
+        assert_eq!(idx, 1, "B cooldown expired at t=5_000");
+
+        let model_provider = ReliableModelProvider::new(
+            "test",
+            vec![(
+                "p".into(),
+                Box::new(MockModelProvider {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    fail_until_attempt: 0,
+                    response: "ok",
+                    error: "",
+                }),
+            )],
+            0,
+            1,
+        )
+        .with_api_keys(vec!["key-a".into(), "key-b".into(), "key-c".into()]);
+        model_provider.test_set_key_index(1);
+        model_provider.test_set_key_cooldown_ms(1, 5_000);
+        MONOTONIC_EPOCH.get_or_init(Instant::now);
+        let now_ms = monotonic_now_ms();
+        model_provider.test_set_key_cooldown_ms(1, now_ms);
+        assert_eq!(model_provider.rotate_key(), Some("key-b"));
     }
 
     // ── New tests: Retry-After parsing ──
