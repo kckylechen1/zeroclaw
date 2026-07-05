@@ -2434,11 +2434,7 @@ impl SecurityPolicy {
             block_high_risk_commands: risk_profile.block_high_risk_commands,
             shell_env_passthrough: risk_profile.shell_env_passthrough.clone(),
             shell_timeout_secs: runtime.shell_timeout_secs,
-            allowed_tools: if risk_profile.allowed_tools.is_empty() {
-                None
-            } else {
-                Some(risk_profile.allowed_tools.clone())
-            },
+            allowed_tools: risk_profile.allowed_tools.clone(),
             excluded_tools: if risk_profile.excluded_tools.is_empty() {
                 None
             } else {
@@ -2817,7 +2813,7 @@ mod tests {
             always_ask: vec!["shell".into()],
             allowed_roots: vec!["/tmp/extra".into()],
             delegation_policy: crate::autonomy::DelegationPolicy::default(),
-            allowed_tools: vec!["shell".into(), "memory_recall".into()],
+            allowed_tools: Some(vec!["shell".into(), "memory_recall".into()]),
             excluded_tools: vec!["spawn_subagent".into()],
             sandbox_enabled: Some(true),
             sandbox_backend: Some("firejail".into()),
@@ -2901,7 +2897,7 @@ mod tests {
         use std::path::Path;
 
         let risk = RiskProfileConfig {
-            allowed_tools: Vec::new(),
+            allowed_tools: None,
             ..RiskProfileConfig::default()
         };
 
@@ -2916,6 +2912,101 @@ mod tests {
             policy.is_tool_allowed("filesystem__write_file"),
             "empty risk-profile allowed_tools is unrestricted, not deny-all"
         );
+    }
+
+    /// G1: explicit `allowed_tools = []` in TOML must deny all tools.
+    #[test]
+    fn risk_profile_allowed_tools_empty_toml_denies_all_tools() {
+        use crate::schema::Config;
+        use std::path::Path;
+
+        let toml = r#"
+schema_version = 2
+
+[risk_profiles.deny_all]
+allowed_tools = []
+
+[agents.default]
+risk_profile = "deny_all"
+"#;
+        let config: Config = toml::from_str(toml).expect("deny-all risk profile TOML");
+        let risk = config
+            .risk_profiles
+            .get("deny_all")
+            .expect("deny_all risk profile");
+        let policy = SecurityPolicy::from_profiles(risk, None, Path::new("/ws"));
+
+        assert_eq!(
+            policy.allowed_tools.as_ref().map(Vec::as_slice),
+            Some(&[][..]),
+            "explicit empty allowed_tools must map to Some(empty) deny-all"
+        );
+        assert!(
+            !policy.is_tool_allowed("arbitrary_tool_name"),
+            "explicit empty allowed_tools must deny an arbitrary tool"
+        );
+    }
+
+    /// G2: omitted `allowed_tools` key stays unrestricted (`None`).
+    #[test]
+    fn risk_profile_allowed_tools_absent_toml_is_unrestricted() {
+        use crate::schema::Config;
+        use std::path::Path;
+
+        let toml = r#"
+schema_version = 2
+
+[risk_profiles.unrestricted]
+
+[agents.default]
+risk_profile = "unrestricted"
+"#;
+        let config: Config = toml::from_str(toml).expect("unrestricted risk profile TOML");
+        let risk = config
+            .risk_profiles
+            .get("unrestricted")
+            .expect("unrestricted risk profile");
+        let policy = SecurityPolicy::from_profiles(risk, None, Path::new("/ws"));
+
+        assert!(
+            policy.allowed_tools.is_none(),
+            "absent allowed_tools must remain unrestricted (None)"
+        );
+        assert!(
+            policy.is_tool_allowed("shell"),
+            "absent allowed_tools must admit tools"
+        );
+    }
+
+    /// G3: non-empty `allowed_tools` list is preserved.
+    #[test]
+    fn risk_profile_allowed_tools_nonempty_toml_preserves_list() {
+        use crate::schema::Config;
+        use std::path::Path;
+
+        let toml = r#"
+schema_version = 2
+
+[risk_profiles.shell_only]
+allowed_tools = ["shell"]
+
+[agents.default]
+risk_profile = "shell_only"
+"#;
+        let config: Config = toml::from_str(toml).expect("shell_only risk profile TOML");
+        let risk = config
+            .risk_profiles
+            .get("shell_only")
+            .expect("shell_only risk profile");
+        let policy = SecurityPolicy::from_profiles(risk, None, Path::new("/ws"));
+
+        assert_eq!(
+            policy.allowed_tools.as_deref(),
+            Some(&["shell".to_string()][..]),
+            "non-empty allowed_tools must reach SecurityPolicy unchanged"
+        );
+        assert!(policy.is_tool_allowed("shell"));
+        assert!(!policy.is_tool_allowed("memory_recall"));
     }
 
     #[test]
