@@ -423,13 +423,11 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
         job.delete_after_run = delete_after_run;
     }
     if let Some(allowed_tools) = patch.allowed_tools {
-        // Empty list means "clear the allowlist" (all tools available),
-        // not "allow zero tools".
-        if allowed_tools.is_empty() {
-            job.allowed_tools = None;
-        } else {
-            job.allowed_tools = Some(allowed_tools);
-        }
+        // Explicit empty list means deny-all (empty allowlist), matching
+        // risk-profile / filter_by_allowed_tools semantics. Use `None` (omit
+        // the field) for "unset / default scheduler exclusions".
+        // Fail-closed for Hyperion: never treat [] as unrestricted.
+        job.allowed_tools = Some(allowed_tools);
     }
     if let Some(uses_memory) = patch.uses_memory {
         job.uses_memory = uses_memory;
@@ -2084,6 +2082,47 @@ mod tests {
         assert_eq!(
             get_job(&config, &job.id).unwrap().allowed_tools,
             Some(vec!["shell".into()])
+        );
+    }
+
+    #[test]
+    fn update_job_empty_allowed_tools_patch_is_deny_all() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+
+        let job = add_agent_job(
+            &config,
+            "default",
+            Some("agent".into()),
+            Schedule::Every { every_ms: 60_000 },
+            "do work",
+            SessionTarget::Isolated,
+            None,
+            None,
+            false,
+            Some(vec!["shell".into()]),
+            true,
+        )
+        .unwrap();
+
+        let updated = update_job(
+            &config,
+            &job.id,
+            CronJobPatch {
+                allowed_tools: Some(vec![]),
+                ..CronJobPatch::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            updated.allowed_tools,
+            Some(vec![]),
+            "explicit empty allowlist must persist as deny-all, not None"
+        );
+        assert_eq!(
+            get_job(&config, &job.id).unwrap().allowed_tools,
+            Some(vec![])
         );
     }
 

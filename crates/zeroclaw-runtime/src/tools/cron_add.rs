@@ -252,7 +252,7 @@ impl Tool for CronAddTool {
                 "allowed_tools": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional allowlist of tool names for agent jobs. When omitted, cron-launched agent runs keep non-scheduler tools available but exclude scheduler mutation tools such as cron_add, cron_update, cron_remove, cron_run, and schedule. Include those names explicitly to opt back in."
+                    "description": "Optional allowlist of tool names for agent jobs. When omitted, cron-launched agent runs keep non-scheduler tools available but exclude scheduler mutation tools such as cron_add, cron_update, cron_remove, cron_run, and schedule. Include those names explicitly to opt back in. An explicit empty list denies all tools."
                 },
                 "delivery": {
                     "type": "object",
@@ -469,13 +469,7 @@ impl Tool for CronAddTool {
                     .map(str::to_string);
                 let allowed_tools = match args.get("allowed_tools") {
                     Some(v) => match serde_json::from_value::<Vec<String>>(v.clone()) {
-                        Ok(v) => {
-                            if v.is_empty() {
-                                None // Treat empty list same as unset
-                            } else {
-                                Some(v)
-                            }
-                        }
+                        Ok(v) => Some(v), // [] = deny-all; omit field for unset/default
                         Err(e) => {
                             return Ok(ToolResult {
                                 success: false,
@@ -1113,7 +1107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_allowed_tools_stored_as_none() {
+    async fn empty_allowed_tools_stored_as_deny_all() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_config(&tmp).await;
         let tool = CronAddTool::new(cfg.clone(), test_security(&cfg), TEST_AGENT);
@@ -1133,8 +1127,9 @@ mod tests {
         let jobs = cron::list_jobs(&cfg).unwrap();
         assert_eq!(jobs.len(), 1);
         assert_eq!(
-            jobs[0].allowed_tools, None,
-            "empty allowed_tools should be stored as None"
+            jobs[0].allowed_tools,
+            Some(vec![]),
+            "empty allowed_tools should be stored as deny-all Some([])"
         );
     }
 
