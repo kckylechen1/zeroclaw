@@ -667,8 +667,8 @@ fn select_rotation_key_index(
 
     let mut best_idx = start % len;
     let mut best_expiry = u64::MAX;
-    for idx in 0..len {
-        let expiry = cooldown_until_ms[idx].load(Ordering::Relaxed);
+    for (idx, cooldown) in cooldown_until_ms.iter().take(len).enumerate() {
+        let expiry = cooldown.load(Ordering::Relaxed);
         if expiry < best_expiry {
             best_expiry = expiry;
             best_idx = idx;
@@ -741,10 +741,7 @@ impl ReliableModelProvider {
     }
     /// Set additional API keys for round-robin rotation on rate-limit errors.
     pub fn with_api_keys(mut self, keys: Vec<String>) -> Self {
-        self.key_cooldown_until_ms = keys
-            .iter()
-            .map(|_| AtomicU64::new(0))
-            .collect();
+        self.key_cooldown_until_ms = keys.iter().map(|_| AtomicU64::new(0)).collect();
         self.last_selected_key_idx = AtomicUsize::new(NO_ROTATION_KEY);
         self.api_keys = keys;
         self
@@ -769,8 +766,7 @@ impl ReliableModelProvider {
     fn cooldown_last_selected_key(&self) {
         let prev = self.last_selected_key_idx.load(Ordering::Relaxed);
         if prev != NO_ROTATION_KEY && prev < self.api_keys.len() {
-            let deadline =
-                monotonic_deadline_ms(KEY_ROTATION_COOLDOWN_SECS.saturating_mul(1000));
+            let deadline = monotonic_deadline_ms(KEY_ROTATION_COOLDOWN_SECS.saturating_mul(1000));
             self.key_cooldown_until_ms[prev].store(deadline, Ordering::Relaxed);
         }
     }
@@ -794,14 +790,9 @@ impl ReliableModelProvider {
         }
         let len = self.api_keys.len();
         let start = self.key_index.fetch_add(1, Ordering::Relaxed) % len;
-        let idx = select_rotation_key_index(
-            len,
-            start,
-            &self.key_cooldown_until_ms,
-            monotonic_now_ms(),
-        );
-        self.last_selected_key_idx
-            .store(idx, Ordering::Relaxed);
+        let idx =
+            select_rotation_key_index(len, start, &self.key_cooldown_until_ms, monotonic_now_ms());
+        self.last_selected_key_idx.store(idx, Ordering::Relaxed);
         Some(&self.api_keys[idx])
     }
 
@@ -3080,11 +3071,8 @@ mod tests {
 
     #[test]
     fn g3_key_reenters_rotation_after_cooldown_expires() {
-        let cooldowns: Vec<AtomicU64> = vec![
-            AtomicU64::new(0),
-            AtomicU64::new(5_000),
-            AtomicU64::new(0),
-        ];
+        let cooldowns: Vec<AtomicU64> =
+            vec![AtomicU64::new(0), AtomicU64::new(5_000), AtomicU64::new(0)];
         let idx = select_rotation_key_index(3, 1, &cooldowns, 5_000);
         assert_eq!(idx, 1, "B cooldown expired at t=5_000");
 
