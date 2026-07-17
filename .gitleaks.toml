@@ -3,15 +3,17 @@ title = "ZeroClaw gitleaks configuration"
 [extend]
 useDefault = true
 
-# Restored/expanded from the historical allowlist (8f91f956f) after the
-# microkernel split moved detector fixtures into crates/*. Path-only — do not
-# embed fixture secret literals here; GitHub push protection treats those
+# Path-only allowlists for intentional detector fixtures / docs placeholders.
+# Do not embed fixture secret literals here; GitHub push protection treats those
 # strings as real secrets even inside allowlist config.
+#
+# Tip scan evidence (gitleaks --no-git, excluding target/): the production-path
+# entries below still hit fixture strings in the current tree. Removed
+# `agent/loop_.rs` — tip scan no longer needs it.
 [[allowlists]]
 description = "Known false positives in detector fixtures, docs placeholders, and example snippets"
 paths = [
   '''(?:^|/)crates/zeroclaw-runtime/src/security/leak_detector\.rs$''',
-  '''(?:^|/)crates/zeroclaw-runtime/src/agent/loop_\.rs$''',
   '''(?:^|/)crates/zeroclaw-runtime/src/agent/turn/redact\.rs$''',
   '''(?:^|/)crates/zeroclaw-runtime/src/sop/executor\.rs$''',
   '''(?:^|/)crates/zeroclaw-runtime/src/approval/mod\.rs$''',
