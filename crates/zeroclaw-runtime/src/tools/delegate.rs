@@ -4560,21 +4560,21 @@ mod tests {
                 delegation_policy: DelegationPolicy {
                     mode: DelegationMode::Allow,
                 },
-                allowed_tools: vec![DelegateTool::NAME.to_string()],
+                allowed_tools: Some(vec![DelegateTool::NAME.to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
         config.risk_profiles.insert(
             "reviewer_readonly".to_string(),
             RiskProfileConfig {
-                allowed_tools: vec!["file_read".to_string()],
+                allowed_tools: Some(vec!["file_read".to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
         config.risk_profiles.insert(
             "sysadmin_yolo".to_string(),
             RiskProfileConfig {
-                allowed_tools: vec!["shell".to_string()],
+                allowed_tools: Some(vec!["shell".to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
@@ -4672,7 +4672,7 @@ mod tests {
                 delegation_policy: DelegationPolicy {
                     mode: DelegationMode::Allow,
                 },
-                allowed_tools: vec![DelegateTool::NAME.to_string()],
+                allowed_tools: Some(vec![DelegateTool::NAME.to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
@@ -7130,7 +7130,7 @@ mod tests {
                 allowed_commands: vec!["target-only".to_string()],
                 allowed_roots: vec![target_extra_root.display().to_string()],
                 forbidden_paths: vec![tmp.path().join("target-forbidden").display().to_string()],
-                allowed_tools: vec!["shell".to_string()],
+                allowed_tools: Some(vec!["shell".to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
@@ -7206,14 +7206,14 @@ mod tests {
                 delegation_policy: DelegationPolicy {
                     mode: DelegationMode::Allow,
                 },
-                allowed_tools: vec!["echo_tool".to_string(), DelegateTool::NAME.to_string()],
+                allowed_tools: Some(vec!["echo_tool".to_string(), DelegateTool::NAME.to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
         config.risk_profiles.insert(
             "target".to_string(),
             RiskProfileConfig {
-                allowed_tools: vec!["shell".to_string()],
+                allowed_tools: Some(vec!["shell".to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
@@ -7295,14 +7295,14 @@ mod tests {
                 delegation_policy: DelegationPolicy {
                     mode: DelegationMode::Allow,
                 },
-                allowed_tools: vec![DelegateTool::NAME.to_string()],
+                allowed_tools: Some(vec![DelegateTool::NAME.to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
         config.risk_profiles.insert(
             "target".to_string(),
             RiskProfileConfig {
-                allowed_tools: vec!["echo_tool".to_string()],
+                allowed_tools: Some(vec!["echo_tool".to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
@@ -7387,14 +7387,14 @@ mod tests {
                 delegation_policy: DelegationPolicy {
                     mode: DelegationMode::Allow,
                 },
-                allowed_tools: vec!["echo_tool".to_string()],
+                allowed_tools: Some(vec!["echo_tool".to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
         config.risk_profiles.insert(
             "target".to_string(),
             RiskProfileConfig {
-                allowed_tools: vec!["shell".to_string()],
+                allowed_tools: Some(vec!["shell".to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
@@ -7498,14 +7498,14 @@ command = "echo hi"
                 delegation_policy: DelegationPolicy {
                     mode: DelegationMode::Allow,
                 },
-                allowed_tools: vec!["echo_tool".to_string()],
+                allowed_tools: Some(vec!["echo_tool".to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
         config.risk_profiles.insert(
             "target".to_string(),
             RiskProfileConfig {
-                allowed_tools: vec!["shell".to_string()],
+                allowed_tools: Some(vec!["shell".to_string()]),
                 ..RiskProfileConfig::default()
             },
         );
