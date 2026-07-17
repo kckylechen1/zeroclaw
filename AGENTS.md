@@ -57,3 +57,69 @@ Use `./dev/ci.sh all` for full pre-PR validation when the scope warrants it. Doc
 ## Task References
 
 The architecture map routes task-specific documentation. Consult `docs/book/src/contributing/agent-guidelines.md` only for detailed agent examples, risk and stability policy, skill discovery, and protected operational documents. Do not skip a required contract because it is no longer embedded in this bootstrap file.
+
+---
+
+## Hyperion Integration Context
+
+This repo is the primary agent harness for the **Hyperion** quantitative trading
+system (`~/Projects/Quant_Analyzer_2026`), replacing Python Hermes-Agent.
+
+### Architecture
+
+```
+ZeroClaw (this repo)
+  └── WeChat iLink / WeCom gateway
+  └── LLM agent loop
+  └── MCP client → hapi-edge (Go)
+  │                   └── snapshot / batch_snapshot / history_klines / portfolio_*
+  └── MCP client → hapi memory-server (HTTP :6888)
+                      └── hapi_save / hapi_search / hapi_memory
+```
+
+### Carried patches
+
+This branch exists to carry the smallest possible set of patches that Hyperion
+needs and upstream does not have. Every row states what upstream does today, so
+each rebase can re-test whether the patch is still needed.
+
+| Patch | Upstream today | Status |
+|---|---|---|
+| `always_ask` outranks Full autonomy | `approval/mod.rs` returns `Approved` for Full **before** consulting `always_ask` — fail-open | ✅ carried |
+| risk-profile `allowed_tools`: absent ≠ empty | maps `[]` → `None` → unrestricted | ✅ carried |
+| cron `allowed_tools = []` means deny-all | ships a test asserting the opposite (`empty_allowed_tools_stored_as_none`) | ✅ carried, deliberately conflicts |
+| `ModelProvider::set_credential` + real 429 rotation | logs "cannot apply … Retrying with original key" in 4 places | ✅ re-derived on upstream tip |
+| WeChat atomic / non-blocking state persistence | `write_private` still does blocking `std::fs::write`, non-atomic truncate, chmod after write | ⬜ not ported — `save_account_data` is sync `fn`; porting changes its signature and ripples to callers |
+| Tachi memory backend | absent | ↗ moved to the `tachi-memory` branch — not a Hyperion trading dependency |
+| HyperMemory custom CRUD backend | absent | ❌ retired (#634 option C) — never re-add |
+
+### Known gaps neither side has fixed
+
+- **MCP tools bypass `allowed_tools`.** Any tool name containing `__` is
+  auto-admitted even under a non-empty allow-list (`tools/delegate.rs`,
+  `tools/tool_search.rs`, `tools/mcp_deferred.rs`, `config/helpers.rs`). The
+  first line of defence stays server-side: expose no trading write tools on the
+  hapi-edge profile the agent connects to.
+- **Approvals are memory-only.** No one-shot approval bound to a run + tool +
+  args hash, and no durable audit trail that survives a restart.
+
+### Memory Contract (#634 option C)
+
+The custom HyperMemory CRUD backend was protocol-mismatched with the live
+memory-server (wrong transport AND wrong tool API) and has been retired. Do NOT
+reintroduce a `hypermemory` memory backend.
+
+- Consume the memory-server as a standard `[[mcp.servers]]` entry via the native MCP client.
+- MCP endpoint: `http://127.0.0.1:6888/mcp` (or `HAPI_MEMORY_MCP_URL`). ZeroClaw's memory MUST route through :6888 only — never through hapi-edge's HTTP serve on :8890. That serve path is currently disabled/crash-looping; note :8890 is still hapi-edge serve's default HTTP port (`HAPI_EDGE_PORT`) used elsewhere in Quant (Crimson UI proxy, local HTTP MCP surface), so this is a ZeroClaw-memory-dependency rule, not a claim that :8890 is globally dead.
+- Tools: `hapi_save`, `hapi_search`, `hapi_memory` (NOT `save_memory`/`list_memories` — those never existed server-side).
+- Namespace: `hyperion` / project `hyperion` / domain `equity_trading`
+- Path prefix: `/trading/equity/...`
+- **Route through hapi-edge / hapi memory-server MCP only — never host tachi MCP directly, never write Tachi DBs directly**
+
+### Key Rules
+
+1. Memory → hapi memory-server MCP only, never `data/hapi.db` directly
+2. Trading tools → hapi-edge MCP only, never direct Longbridge/Tushare calls
+3. Real position writes require human OTP confirmation (Trading Harness P1)
+4. Timezone: `Asia/Shanghai`
+5. A-share lot: 100 shares (STAR: min 200 then 1-share increments)
