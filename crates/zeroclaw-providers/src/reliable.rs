@@ -1073,7 +1073,7 @@ impl ModelProvider for ReliableModelProvider {
                                 && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
-                                    model_provider.set_credential(Some(new_key.to_string()));
+                                    entry.provider.set_credential(Some(new_key.to_string()));
                                 if rotated {
                                     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
                                 } else {
@@ -1284,7 +1284,7 @@ impl ModelProvider for ReliableModelProvider {
                                 && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
-                                    model_provider.set_credential(Some(new_key.to_string()));
+                                    entry.provider.set_credential(Some(new_key.to_string()));
                                 if rotated {
                                     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
                                 } else {
@@ -1507,7 +1507,7 @@ impl ModelProvider for ReliableModelProvider {
                                 && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
-                                    model_provider.set_credential(Some(new_key.to_string()));
+                                    entry.provider.set_credential(Some(new_key.to_string()));
                                 if rotated {
                                     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
                                 } else {
@@ -1720,7 +1720,7 @@ impl ModelProvider for ReliableModelProvider {
                                 && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
-                                    model_provider.set_credential(Some(new_key.to_string()));
+                                    entry.provider.set_credential(Some(new_key.to_string()));
                                 if rotated {
                                     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
                                 } else {
