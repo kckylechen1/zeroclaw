@@ -4525,7 +4525,6 @@ mod tests {
     }
 
     // Regression for #6589: ReliableModelProvider::supports_vision() must reflect the
->>>>>>> 202f73756 (feat(providers): port 429 key-rotation hot-swap onto v0.8.2)
     // primary (first) provider, not .any() across the fallback chain. This mirrors
     // supports_native_tools() which already uses .first().
     #[test]
