@@ -566,7 +566,7 @@ mod tests {
     fn encrypt_decrypt_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let store = SecretStore::new(tmp.path(), true);
-        let secret = "sk-my-secret-api-key-12345";
+        let secret = "sk-my-secret-api-key-12345"; // gitleaks:allow
 
         let encrypted = store.encrypt(secret).unwrap();
         assert!(encrypted.starts_with("enc2:"), "Should have enc2: prefix");

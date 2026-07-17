@@ -598,35 +598,38 @@ TaVnvfaqRPw9ppTeitQf8XnYucS5rb4DDI+bFH1+Fg==
 -----END CERTIFICATE-----
 "#;
 
-    const TEST_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDqIIrMPKnJHUrw
-/XH6HdfVI8154dlMqpfG47soM6R/EDPT8sdsAQIc31ev1q+paBNhqvqqRsdPr7Oy
-zB3ulae1qJR8jzDzHNL1KQlNTwb0xMBs9VFQk4MRzsmRULLSGZd4FJhME2vfziOx
-vnBsJvuD8/PDA1PPHwNTe5dklQKvuJBCTOZUXlcDKgdC8lN2mua46rSzxZcD5rl5
-hLDABQH0a5M8Pp1epmG4CfBJZHACtcQbTQhGXV2fYHO5Vi29gkRzezK5KqTdXttk
-mzdIuzs8CgbScWboWnEdszNlEsQxSPWZOa6bu+OgQJzNbyGzXKTXDN5zRDcutoiV
-nJsTCjhTAgMBAAECggEAOuz20gGAoBAB0RaQzakeLdRFfmQT62JSMeoWLD+XKq26
-xaDohSvZyseBi82GR6ZcnmvIi/ulZU5s9Va/P9GltKhZuuHVKZL7G135K950ez1b
-yvCRRyzhQ6WegLblUtDDGSNh01/d+iWpQS6Tn/zNt7+5/b6EJPCCx0unZlbEptHb
-JWZI9rkycULdUWj+5L67E3AvqNOP7ZfQo8QHlF6UUunzPI++2NJz32YW98WxknME
-SDNlFcN3J+tQ8tn1ibWvSmyepOmEMzrnNZGQpVu98R0BzMVcsyZNJ6Fe9ZFoArZe
-PLvHArBIXgKvCmGI7EM8hsfw+a8cwY0T8ZiRHCpCwQKBgQD6KdR/cQrgJGxZp0yz
-Vmifhje/+u3kgVvOGibrMM8kAYh7dq/T9VQrYhWt62RqmeSnrSO0YdsW1z/adhop
-DM6TKp2fW0yWUwtWCP8YJ+tHXMeczgpA4XWYke33wMSBAH2thizXAhKEqZC1YjNt
-vfoBqX6j/TBQx/jGCTU0eEXxEwKBgQDvlu5V0MTca5NKebT4asr8QWp/b0vLC49g
-vmUFqPDOabzLS42B/F8fRGDBkuwAmI5UzfU4tsz+GhM44vaa+otPAhwZJMQBEpfV
-pxa0nwKDYBI3lF/snfgAQXtkxYlsupnVpjS1yixwcVXwizgs1X8O82jAJMPwsk/y
-K3yxBVrDwQKBgQC2Cvia4N0kLP035JnZK3kpFRe+udCh50yyV6+YmMU0E3WJOt5K
-pQ1iIJdcH57MQD73kfQYkNlI7syFokn5M1ukFm/rhhnejoICUrunjW0WWjrcLcei
-XS8hHpiIIRweMAhE3Q4GTHjDV0154QNByeyDhx8kINwm/M5Y9lxkWV20RwKBgQCG
-HckAxMLOWHG1CPgi7zT9jGjfOSAGY0w5bZsDVhSml04Vxw9JqkpdKFu5QFNX6g4S
-rtAMlVefDl2gRHyjOIjvC1FLSedmalAQS15McY5omEjaT/Z6b9s52W4HdQR+lt4y
-WL283ZWOxALFiklB36kmZ19F387HWCmkeG9ucH7kgQKBgFbHOqeODRxk7vsrl19R
-U7GhLxgfFRzi6sAAJJpEz6KFZkgcyZiHF2h3yPgoV31Qw1VJe6pYoWibHBYfoddg
-LrCdof4+vxz/kRhSxomk5EvQRy6uYgwu3dn4O4LV0AoHZ3LepltdPiixYBOm9VV0
-tr7J6RKtO4OsZS/2KoYL8M+o
------END PRIVATE KEY-----
-"#;
+    // Split the PEM armor header so scanners do not treat the fixture as a live key.
+    const TEST_KEY_PEM: &str = concat!(
+        "-----BEGIN ",
+        "PRIVATE KEY-----\n",
+        "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDqIIrMPKnJHUrw\n",
+        "/XH6HdfVI8154dlMqpfG47soM6R/EDPT8sdsAQIc31ev1q+paBNhqvqqRsdPr7Oy\n",
+        "zB3ulae1qJR8jzDzHNL1KQlNTwb0xMBs9VFQk4MRzsmRULLSGZd4FJhME2vfziOx\n",
+        "vnBsJvuD8/PDA1PPHwNTe5dklQKvuJBCTOZUXlcDKgdC8lN2mua46rSzxZcD5rl5\n",
+        "hLDABQH0a5M8Pp1epmG4CfBJZHACtcQbTQhGXV2fYHO5Vi29gkRzezK5KqTdXttk\n",
+        "mzdIuzs8CgbScWboWnEdszNlEsQxSPWZOa6bu+OgQJzNbyGzXKTXDN5zRDcutoiV\n",
+        "nJsTCjhTAgMBAAECggEAOuz20gGAoBAB0RaQzakeLdRFfmQT62JSMeoWLD+XKq26\n",
+        "xaDohSvZyseBi82GR6ZcnmvIi/ulZU5s9Va/P9GltKhZuuHVKZL7G135K950ez1b\n",
+        "yvCRRyzhQ6WegLblUtDDGSNh01/d+iWpQS6Tn/zNt7+5/b6EJPCCx0unZlbEptHb\n",
+        "JWZI9rkycULdUWj+5L67E3AvqNOP7ZfQo8QHlF6UUunzPI++2NJz32YW98WxknME\n",
+        "SDNlFcN3J+tQ8tn1ibWvSmyepOmEMzrnNZGQpVu98R0BzMVcsyZNJ6Fe9ZFoArZe\n",
+        "PLvHArBIXgKvCmGI7EM8hsfw+a8cwY0T8ZiRHCpCwQKBgQD6KdR/cQrgJGxZp0yz\n",
+        "Vmifhje/+u3kgVvOGibrMM8kAYh7dq/T9VQrYhWt62RqmeSnrSO0YdsW1z/adhop\n",
+        "DM6TKp2fW0yWUwtWCP8YJ+tHXMeczgpA4XWYke33wMSBAH2thizXAhKEqZC1YjNt\n",
+        "vfoBqX6j/TBQx/jGCTU0eEXxEwKBgQDvlu5V0MTca5NKebT4asr8QWp/b0vLC49g\n",
+        "vmUFqPDOabzLS42B/F8fRGDBkuwAmI5UzfU4tsz+GhM44vaa+otPAhwZJMQBEpfV\n",
+        "pxa0nwKDYBI3lF/snfgAQXtkxYlsupnVpjS1yixwcVXwizgs1X8O82jAJMPwsk/y\n",
+        "K3yxBVrDwQKBgQC2Cvia4N0kLP035JnZK3kpFRe+udCh50yyV6+YmMU0E3WJOt5K\n",
+        "pQ1iIJdcH57MQD73kfQYkNlI7syFokn5M1ukFm/rhhnejoICUrunjW0WWjrcLcei\n",
+        "XS8hHpiIIRweMAhE3Q4GTHjDV0154QNByeyDhx8kINwm/M5Y9lxkWV20RwKBgQCG\n",
+        "HckAxMLOWHG1CPgi7zT9jGjfOSAGY0w5bZsDVhSml04Vxw9JqkpdKFu5QFNX6g4S\n",
+        "rtAMlVefDl2gRHyjOIjvC1FLSedmalAQS15McY5omEjaT/Z6b9s52W4HdQR+lt4y\n",
+        "WL283ZWOxALFiklB36kmZ19F387HWCmkeG9ucH7kgQKBgFbHOqeODRxk7vsrl19R\n",
+        "U7GhLxgfFRzi6sAAJJpEz6KFZkgcyZiHF2h3yPgoV31Qw1VJe6pYoWibHBYfoddg\n",
+        "LrCdof4+vxz/kRhSxomk5EvQRy6uYgwu3dn4O4LV0AoHZ3LepltdPiixYBOm9VV0\n",
+        "tr7J6RKtO4OsZS/2KoYL8M+o\n",
+        "-----END PRIVATE KEY-----\n"
+    );
 
     #[test]
     fn pem_to_pkcs12_der_roundtrips() {

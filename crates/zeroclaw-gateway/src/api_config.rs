@@ -3420,8 +3420,8 @@ mod tests {
         let cases = [
             // Field=value style log line.
             (
-                "api-key=sk-live-abcdef-1234567890",
-                "sk-live-abcdef-1234567890",
+                "api-key=sk-live-abcdef-1234567890", // gitleaks:allow
+                "sk-live-abcdef-1234567890",         // gitleaks:allow
             ),
             // JSON-ish quoted key-value pair.
             (

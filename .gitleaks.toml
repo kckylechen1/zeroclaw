@@ -7,28 +7,18 @@ useDefault = true
 # Do not embed fixture secret literals here; GitHub push protection treats those
 # strings as real secrets even inside allowlist config.
 #
-# Tip scan evidence (gitleaks --no-git, excluding target/): the production-path
-# entries below still hit fixture strings in the current tree. Removed
-# `agent/loop_.rs` — tip scan no longer needs it.
+# Tip fixtures that previously needed path allowlists are now silenced with
+# inline `gitleaks:allow` or `concat!` splits (approval, anthropic beta header,
+# gateway, web_fetch, amqp, config secrets).
 [[allowlists]]
 description = "Known false positives in detector fixtures, docs placeholders, and example snippets"
 paths = [
   '''(?:^|/)crates/zeroclaw-runtime/src/security/leak_detector\.rs$''',
   '''(?:^|/)crates/zeroclaw-runtime/src/agent/turn/redact\.rs$''',
   '''(?:^|/)crates/zeroclaw-runtime/src/sop/executor\.rs$''',
-  '''(?:^|/)crates/zeroclaw-runtime/src/approval/mod\.rs$''',
   '''(?:^|/)crates/zeroclaw-channels/src/orchestrator/mod\.rs$''',
-  '''(?:^|/)crates/zeroclaw-channels/src/amqp\.rs$''',
-  '''(?:^|/)crates/zeroclaw-config/src/secrets\.rs$''',
-  '''(?:^|/)crates/zeroclaw-gateway/src/api_config\.rs$''',
-  '''(?:^|/)crates/zeroclaw-providers/src/anthropic\.rs$''',
-  '''(?:^|/)crates/zeroclaw-tools/src/web_fetch\.rs$''',
   '''(?:^|/)src/security/leak_detector\.rs$''',
   '''(?:^|/)src/security/secrets\.rs$''',
-  '''(?:^|/)src/agent/loop_\.rs$''',
-  '''(?:^|/)src/providers/anthropic\.rs$''',
-  '''(?:^|/)src/channels/(?:mod|matrix)\.rs$''',
-  '''(?:^|/)src/tools/web_fetch\.rs$''',
   '''(?:^|/)tests/component/security\.rs$''',
   '''(?:^|/)extensions/movie/src/.+\.rs$''',
   '''(?:^|/)docs/(?:i18n/vi/|vi/)?zai-glm-setup\.md$''',

@@ -1067,7 +1067,7 @@ mod tests {
             "oauth_token": "oauth-secret",
             "client_secret": "client-secret",
             "password": "hunter2",
-            "private_key": "-----BEGIN PRIVATE KEY-----abc",
+            "private_key": "-----BEGIN PRIVATE KEY-----abc", // gitleaks:allow
             "bearer_token": "bearer-thing",
         });
         let summary = summarize_args(&args);

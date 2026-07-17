@@ -1542,7 +1542,7 @@ mod tests {
             30,
             FirecrawlConfig {
                 enabled: true,
-                api_key_env: "FIRECRAWL_E2E_TEST_KEY".into(),
+                api_key_env: "FIRECRAWL_E2E_TEST_KEY".into(), // gitleaks:allow
                 api_url: format!("http://{firecrawl_addr}"),
                 ..FirecrawlConfig::default()
             },
