@@ -273,9 +273,7 @@ impl ApprovalManager {
 
 #[cfg(test)]
 mod approval_precedence_tests {
-    use super::{
-        ApprovalManager, ApprovalRequirement, ApprovalResponse, AutonomyLevel,
-    };
+    use super::{ApprovalManager, ApprovalRequirement, ApprovalResponse, AutonomyLevel};
     use parking_lot::Mutex;
     use serde_json::json;
     use std::collections::HashSet;
@@ -290,10 +288,7 @@ mod approval_precedence_tests {
                 .iter()
                 .map(|tool| (*tool).to_string())
                 .collect(),
-            always_ask: always_ask
-                .iter()
-                .map(|tool| (*tool).to_string())
-                .collect(),
+            always_ask: always_ask.iter().map(|tool| (*tool).to_string()).collect(),
             autonomy_level,
             non_interactive: false,
             non_interactive_shell_requires_approval: false,
