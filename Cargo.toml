@@ -185,10 +185,6 @@ cron = { version = "0.15", optional = true }
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 console = "0.16"
 
-# TUI onboarding (ratatui + crossterm)
-ratatui = { version = "0.30", default-features = true, optional = true }
-crossterm = { version = "0.29", features = ["event-stream"], optional = true }
-
 # Hardware discovery (device path globbing)
 glob = { version = "0.3", optional = true }
 
@@ -294,7 +290,6 @@ agent-runtime = [
     "dep:zeroclaw-runtime", "dep:zeroclaw-eval", "dep:zeroclaw-channels", "dep:zeroclaw-tools",
     "dep:rusqlite",
     "dep:ring", "dep:lru", "dep:chrono-tz", "dep:cron", "dep:glob", "dep:which",
-    "dep:ratatui", "dep:crossterm",
     "dep:tokio-tungstenite", "dep:tokio-socks", "dep:hostname",
     "dep:rustls", "dep:rustls-pemfile", "dep:rustls-pki-types", "dep:tokio-rustls", "dep:webpki-roots",
 ]
