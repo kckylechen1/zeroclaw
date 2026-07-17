@@ -2665,7 +2665,7 @@ risk_profile = "deny_all"
         let policy = SecurityPolicy::from_profiles(risk, None, Path::new("/ws"));
 
         assert_eq!(
-            policy.allowed_tools.as_ref().map(Vec::as_slice),
+            policy.allowed_tools.as_deref(),
             Some(&[][..]),
             "explicit empty allowed_tools must map to Some(empty) deny-all"
         );
