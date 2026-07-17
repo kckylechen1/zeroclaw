@@ -105,7 +105,7 @@ impl Tool for CronUpdateTool {
                         "allowed_tools": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Optional replacement allowlist of tool names for agent jobs"
+                            "description": "Optional replacement allowlist of tool names for agent jobs. An explicit empty list denies all tools."
                         },
                         "session_target": {
                             "type": "string",
@@ -756,7 +756,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_allowed_tools_patch_stored_as_none() {
+    async fn empty_allowed_tools_patch_stored_as_deny_all() {
         let tmp = TempDir::new().unwrap();
         let cfg = test_config(&tmp).await;
         let job = cron::add_agent_job(
@@ -789,8 +789,8 @@ mod tests {
         assert!(result.success, "{:?}", result.error);
         assert_eq!(
             cron::get_job(&cfg, &job.id).unwrap().allowed_tools,
-            None,
-            "empty allowed_tools patch should clear to None"
+            Some(vec![]),
+            "empty allowed_tools patch should persist as deny-all Some([])"
         );
     }
 
