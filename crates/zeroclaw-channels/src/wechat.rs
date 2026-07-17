@@ -8,7 +8,8 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncWriteExt;
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
 use zeroclaw_config::paths::{normalize_lexical, resolve_under};
 use zeroclaw_config::schema::Config;
@@ -465,6 +466,9 @@ pub struct WeChatChannel {
     typing_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// State directory for persisting token & cursor.
     state_dir: PathBuf,
+    /// Serializes account/sync disk persistence so overlapping saves cannot
+    /// interleave truncating writes.
+    persist_lock: tokio::sync::Mutex<()>,
     /// Workspace directory used for storing inbound attachments and resolving
     /// `/workspace/...` paths from generated replies.
     workspace_dir: Option<PathBuf>,
@@ -505,18 +509,37 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Async variant of `write_private`: uses `tokio::fs` to avoid blocking
-/// the async runtime during file writes.
+/// Async variant of `write_private`: temp file + fsync + rename (atomic replace).
+/// Uses `tokio::fs` to avoid blocking the async runtime during file writes.
 async fn write_private_async(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    tokio::fs::write(path, data).await?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = 0o600;
-        let perms = std::fs::Permissions::from_mode(mode);
-        tokio::fs::set_permissions(path, perms).await?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
+    let tmp_path = parent.join(format!(".{file_name}.{nanos}.tmp"));
+
+    let write_result = async {
+        let mut file = tokio::fs::File::create(&tmp_path).await?;
+        file.write_all(data).await?;
+        file.sync_all().await?;
+        drop(file);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            tokio::fs::set_permissions(&tmp_path, perms).await?;
+        }
+        tokio::fs::rename(&tmp_path, path).await?;
+        Ok(())
     }
-    Ok(())
+    .await;
+
+    if write_result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+    }
+    write_result
 }
 
 /// Generate a random X-WECHAT-UIN header value.
@@ -739,6 +762,7 @@ impl WeChatChannel {
             cursor: Mutex::new(String::new()),
             typing_handle: Mutex::new(None),
             state_dir,
+            persist_lock: tokio::sync::Mutex::new(()),
             workspace_dir: None,
         };
 
@@ -840,6 +864,7 @@ impl WeChatChannel {
 
     /// Save account data to disk (async).
     async fn save_account_data(&self, token: &str, account_id: &str, user_id: Option<&str>) {
+        let _persist = self.persist_lock.lock().await;
         if let Err(e) = tokio::fs::create_dir_all(&self.state_dir).await {
             ::zeroclaw_log::record!(
                 WARN,
@@ -882,6 +907,7 @@ impl WeChatChannel {
 
     /// Save sync cursor to disk (async).
     async fn save_sync_data(&self) {
+        let _persist = self.persist_lock.lock().await;
         if let Err(e) = tokio::fs::create_dir_all(&self.state_dir).await {
             ::zeroclaw_log::record!(
                 WARN,
@@ -892,9 +918,15 @@ impl WeChatChannel {
             );
             return;
         }
-        let data = SyncData {
-            get_updates_buf: self.cursor.lock().clone(),
-            context_tokens: self.context_tokens.lock().clone(),
+        // Snapshot cursor + context_tokens under both locks into one coherent
+        // SyncData generation before releasing and writing.
+        let data = {
+            let cursor = self.cursor.lock();
+            let context_tokens = self.context_tokens.lock();
+            SyncData {
+                get_updates_buf: cursor.clone(),
+                context_tokens: context_tokens.clone(),
+            }
         };
         let path = self.state_dir.join("sync.json");
         match serde_json::to_string(&data) {

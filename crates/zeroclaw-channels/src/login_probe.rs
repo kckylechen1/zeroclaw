@@ -101,6 +101,9 @@ mod tests {
     #[cfg(feature = "channel-wechat")]
     #[test]
     fn wechat_probe_tracks_account_json_in_configured_state_dir() {
+        use super::{PersistedLogin, QrPairingChannel, persisted_login};
+        use zeroclaw_config::schema::Config;
+
         let temp = tempfile::tempdir().unwrap();
         let mut config = Config::default();
         config.channels.wechat.insert(
