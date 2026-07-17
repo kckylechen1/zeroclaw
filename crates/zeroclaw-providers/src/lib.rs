@@ -1191,6 +1191,12 @@ pub fn create_resilient_model_provider_with_options(
     let primary_model_provider =
         create_model_provider_inner(None, primary_name, "default", api_key, api_url, options)?;
 
+    // SoT: `ReliabilityConfig.api_keys` in Config. Factory only receives
+    // `&ReliabilityConfig` here, so wrap a construction-time snapshot in a
+    // resolver — rotation always calls the resolver (no private owned pool
+    // field as truth). Callers with a live `Arc<RwLock<Config>>` should pass
+    // `with_api_keys_resolver` that reads config on each call; the channel
+    // orchestrator rebuilds this wrapper on config reload today.
     let reliable = ReliableModelProvider::new(
         primary_name,
         vec![(primary_name.to_string(), primary_model_provider)],
@@ -1261,6 +1267,7 @@ fn create_resilient_model_provider_for_alias_with_model_override(
         )?;
     }
 
+    // SoT: `ReliabilityConfig.api_keys` — see create_resilient_model_provider_with_options.
     let reliable = ReliableModelProvider::new_with_entries(
         alias,
         model_providers,
