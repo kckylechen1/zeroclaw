@@ -1068,12 +1068,14 @@ impl ModelProvider for ReliableModelProvider {
 
                             // Rate-limit with rotatable keys: cycle to the next API key
                             // so the retry hits a different quota bucket.
+                            let mut key_rotated = false;
                             if rate_limited
                                 && !non_retryable_rate_limit
                                 && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
                                     entry.provider.set_credential(Some(new_key.to_string()));
+                                key_rotated = rotated;
                                 if rotated {
                                     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
                                 } else {
@@ -1102,7 +1104,10 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
+                            // Successful key rotation: retry the same entry with the
+                            // new key. Only cool/skip the provider when rotation did
+                            // not apply (no pool / set_credential false).
+                            if rate_limited && self.model_providers.len() > 1 && !key_rotated {
                                 self.cool_down_rate_limited_provider(entry, current_model, &e);
                                 break;
                             }
@@ -1279,12 +1284,14 @@ impl ModelProvider for ReliableModelProvider {
                                 Some(&diagnostic),
                             );
 
+                            let mut key_rotated = false;
                             if rate_limited
                                 && !non_retryable_rate_limit
                                 && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
                                     entry.provider.set_credential(Some(new_key.to_string()));
+                                key_rotated = rotated;
                                 if rotated {
                                     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
                                 } else {
@@ -1313,7 +1320,10 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
+                            // Successful key rotation: retry the same entry with the
+                            // new key. Only cool/skip the provider when rotation did
+                            // not apply (no pool / set_credential false).
+                            if rate_limited && self.model_providers.len() > 1 && !key_rotated {
                                 self.cool_down_rate_limited_provider(entry, current_model, &e);
                                 break;
                             }
@@ -1502,12 +1512,14 @@ impl ModelProvider for ReliableModelProvider {
                                 Some(&diagnostic),
                             );
 
+                            let mut key_rotated = false;
                             if rate_limited
                                 && !non_retryable_rate_limit
                                 && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
                                     entry.provider.set_credential(Some(new_key.to_string()));
+                                key_rotated = rotated;
                                 if rotated {
                                     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
                                 } else {
@@ -1536,7 +1548,10 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
+                            // Successful key rotation: retry the same entry with the
+                            // new key. Only cool/skip the provider when rotation did
+                            // not apply (no pool / set_credential false).
+                            if rate_limited && self.model_providers.len() > 1 && !key_rotated {
                                 self.cool_down_rate_limited_provider(entry, current_model, &e);
                                 break;
                             }
@@ -1715,12 +1730,14 @@ impl ModelProvider for ReliableModelProvider {
                                 Some(&diagnostic),
                             );
 
+                            let mut key_rotated = false;
                             if rate_limited
                                 && !non_retryable_rate_limit
                                 && let Some(new_key) = self.rotate_key_after_rate_limit()
                             {
                                 let rotated =
                                     entry.provider.set_credential(Some(new_key.to_string()));
+                                key_rotated = rotated;
                                 if rotated {
                                     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Success).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation applied new key ending ...{}", &new_key[new_key.len().saturating_sub(4)..]));
                                 } else {
@@ -1749,7 +1766,10 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
+                            // Successful key rotation: retry the same entry with the
+                            // new key. Only cool/skip the provider when rotation did
+                            // not apply (no pool / set_credential false).
+                            if rate_limited && self.model_providers.len() > 1 && !key_rotated {
                                 self.cool_down_rate_limited_provider(entry, current_model, &e);
                                 break;
                             }
@@ -4705,6 +4725,71 @@ mod tests {
         // Verify the credential progression: first call used initial key,
         // second call used the rotated key.
         let creds = mock.credentials_seen.lock();
+        assert_eq!(creds.len(), 2);
+        assert_eq!(creds[0].as_deref(), Some("initial-key-0000"));
+        assert_eq!(creds[1].as_deref(), Some("rotated-key-1111"));
+    }
+
+    /// Multi-entry + api_keys pool + 429: successful set_credential must retry the
+    /// same entry with the new key and must NOT mark provider cooldown active
+    /// (which would skip this entry and sibling fallback-model entries).
+    #[tokio::test]
+    async fn key_rotation_on_429_multi_entry_retries_same_entry_without_provider_cooldown() {
+        let primary = Arc::new(KeyRotationMock::new("initial-key-0000"));
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+
+        let model_provider = ReliableModelProvider::new(
+            "test",
+            vec![
+                (
+                    "primary".into(),
+                    Box::new(KeyRotationMockWrapper {
+                        inner: primary.clone(),
+                    }) as Box<dyn ModelProvider>,
+                ),
+                (
+                    "fallback".into(),
+                    Box::new(MockModelProvider {
+                        calls: Arc::clone(&fallback_calls),
+                        fail_until_attempt: 0,
+                        response: "from fallback",
+                        error: "fallback down",
+                    }) as Box<dyn ModelProvider>,
+                ),
+            ],
+            2,
+            1,
+        )
+        .with_api_keys(vec![
+            "rotated-key-1111".to_string(),
+            "rotated-key-2222".to_string(),
+        ]);
+
+        let result = model_provider
+            .simple_chat("hello", "test", Some(0.0))
+            .await
+            .unwrap();
+
+        assert!(
+            result.contains("rotated-key-1111"),
+            "primary must succeed on the rotated key, not fall through: {result}"
+        );
+        assert_eq!(
+            primary.calls.load(Ordering::SeqCst),
+            2,
+            "same primary entry must be retried after key rotation"
+        );
+        assert_eq!(
+            fallback_calls.load(Ordering::SeqCst),
+            0,
+            "fallback must not be used when key rotation succeeded"
+        );
+        assert!(
+            !model_provider.provider_cooldown_active("primary"),
+            "successful key rotation must not cool the provider entry"
+        );
+
+        let creds = primary.credentials_seen.lock();
         assert_eq!(creds.len(), 2);
         assert_eq!(creds[0].as_deref(), Some("initial-key-0000"));
         assert_eq!(creds[1].as_deref(), Some("rotated-key-1111"));
