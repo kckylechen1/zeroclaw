@@ -24,6 +24,10 @@ impl ModelPinnedProvider {
 
 #[async_trait]
 impl ModelProvider for ModelPinnedProvider {
+    fn set_credential(&self, key: Option<String>) -> bool {
+        self.inner.set_credential(key)
+    }
+
     fn capabilities(&self) -> super::traits::ProviderCapabilities {
         self.inner.capabilities()
     }
@@ -175,5 +179,72 @@ impl zeroclaw_api::attribution::Attributable for ModelPinnedProvider {
     }
     fn alias(&self) -> &str {
         &self.alias
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    /// Inner provider that actually applies runtime credential swaps.
+    struct CredentialTrackingMock {
+        credential: Arc<RwLock<Option<String>>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for CredentialTrackingMock {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        fn set_credential(&self, key: Option<String>) -> bool {
+            *self.credential.write() = key;
+            true
+        }
+    }
+
+    impl zeroclaw_api::attribution::Attributable for CredentialTrackingMock {
+        fn role(&self) -> zeroclaw_api::attribution::Role {
+            zeroclaw_api::attribution::Role::Provider(
+                zeroclaw_api::attribution::ProviderKind::Model(
+                    zeroclaw_api::attribution::ModelProviderKind::Custom,
+                ),
+            )
+        }
+        fn alias(&self) -> &str {
+            "CredentialTrackingMock"
+        }
+    }
+
+    /// Discriminating: without forward, trait default returns false and inner
+    /// credential is unchanged; with forward, pin wrapper updates the inner.
+    #[test]
+    fn set_credential_forwards_to_inner() {
+        let credential = Arc::new(RwLock::new(Some("initial-key".into())));
+        let pinned = ModelPinnedProvider::new(
+            "pinned-alias",
+            "pinned-model",
+            Box::new(CredentialTrackingMock {
+                credential: credential.clone(),
+            }),
+        );
+
+        assert!(
+            pinned.set_credential(Some("rotated-key".into())),
+            "ModelPinnedProvider must report that the inner applied the credential"
+        );
+        assert_eq!(
+            credential.read().as_deref(),
+            Some("rotated-key"),
+            "set_credential through ModelPinnedProvider must update the inner provider"
+        );
     }
 }
