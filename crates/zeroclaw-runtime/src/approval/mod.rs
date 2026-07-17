@@ -176,9 +176,16 @@ impl ApprovalManager {
     }
 
     pub fn approval_requirement(&self, tool_name: &str) -> ApprovalRequirement {
-        // Full autonomy never prompts.
+        let always_ask = self.always_ask.contains("*") || self.always_ask.contains(tool_name);
+
+        // Full autonomy skips the default prompt, but an explicit operator
+        // always_ask rule remains authoritative.
         if self.autonomy_level == AutonomyLevel::Full {
-            return ApprovalRequirement::Approved;
+            return if always_ask {
+                ApprovalRequirement::Prompt
+            } else {
+                ApprovalRequirement::Approved
+            };
         }
 
         // ReadOnly blocks everything — handled elsewhere; no prompt needed.
@@ -186,8 +193,8 @@ impl ApprovalManager {
             return ApprovalRequirement::NotRequired;
         }
 
-        // always_ask overrides everything.
-        if self.always_ask.contains("*") || self.always_ask.contains(tool_name) {
+        // always_ask overrides every remaining approval shortcut.
+        if always_ask {
             return ApprovalRequirement::Prompt;
         }
 
@@ -261,6 +268,94 @@ impl ApprovalManager {
     /// auto-deny in the tool-call loop before reaching this point.
     pub fn prompt_cli(&self, request: &ApprovalRequest) -> ApprovalResponse {
         prompt_cli_interactive(request)
+    }
+}
+
+#[cfg(test)]
+mod approval_precedence_tests {
+    use super::{ApprovalManager, ApprovalRequirement, ApprovalResponse, AutonomyLevel};
+    use parking_lot::Mutex;
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    fn manager(
+        autonomy_level: AutonomyLevel,
+        always_ask: &[&str],
+        auto_approve: &[&str],
+    ) -> ApprovalManager {
+        ApprovalManager {
+            auto_approve: auto_approve
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect(),
+            always_ask: always_ask.iter().map(|tool| (*tool).to_string()).collect(),
+            autonomy_level,
+            non_interactive: false,
+            non_interactive_shell_requires_approval: false,
+            session_allowlist: Mutex::new(HashSet::new()),
+            audit_log: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn full_autonomy_prompts_for_exact_always_ask_tool() {
+        let manager = manager(AutonomyLevel::Full, &["shell"], &[]);
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::Prompt
+        );
+        assert!(manager.needs_approval("shell"));
+    }
+
+    #[test]
+    fn full_autonomy_prompts_for_wildcard_always_ask() {
+        let manager = manager(AutonomyLevel::Full, &["*"], &[]);
+
+        for tool_name in ["shell", "file_write", "http_request"] {
+            assert_eq!(
+                manager.approval_requirement(tool_name),
+                ApprovalRequirement::Prompt,
+                "wildcard always_ask must cover {tool_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_autonomy_approves_tool_not_covered_by_always_ask() {
+        let manager = manager(AutonomyLevel::Full, &["shell"], &[]);
+
+        assert_eq!(
+            manager.approval_requirement("file_read"),
+            ApprovalRequirement::Approved
+        );
+    }
+
+    #[test]
+    fn full_autonomy_always_ask_overrides_auto_approve_and_session_allowlist() {
+        let manager = manager(AutonomyLevel::Full, &["shell"], &["shell"]);
+        manager.record_decision(
+            "shell",
+            &json!({"command": "pwd"}),
+            &ApprovalResponse::Always,
+            "test",
+        );
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::Prompt
+        );
+    }
+
+    #[test]
+    fn read_only_behavior_is_unchanged_when_always_ask_matches() {
+        let manager = manager(AutonomyLevel::ReadOnly, &["*"], &[]);
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::NotRequired
+        );
+        assert!(!manager.needs_approval("shell"));
     }
 }
 
