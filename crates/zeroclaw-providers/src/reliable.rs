@@ -677,7 +677,6 @@ fn select_rotation_key_index(
     best_idx
 }
 
-
 /// ModelProvider wrapper with retry + auth-key rotation. The model_provider Vec exists
 /// for tests to exercise multi-provider failover; production wiring always
 /// passes a single primary. Per-model failover chains are also test-only —

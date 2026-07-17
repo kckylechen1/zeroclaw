@@ -7188,7 +7188,10 @@ mod tests {
                 delegation_policy: DelegationPolicy {
                     mode: DelegationMode::Allow,
                 },
-                allowed_tools: Some(vec!["echo_tool".to_string(), DelegateTool::NAME.to_string()]),
+                allowed_tools: Some(vec![
+                    "echo_tool".to_string(),
+                    DelegateTool::NAME.to_string(),
+                ]),
                 ..RiskProfileConfig::default()
             },
         );
