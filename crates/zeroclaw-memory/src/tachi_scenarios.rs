@@ -347,6 +347,62 @@ mod tests {
         assert!(default_hits[0].content.contains("equity trading"));
     }
 
+    /// A metadata-less row partitions as `(None, None)` — its own bucket, never
+    /// merged with an explicit `("default", "default")` row even on identical
+    /// text.
+    #[tokio::test]
+    async fn governance_near_dup_metadata_less_row_never_merges_with_default() {
+        let (_tmp, mem) = temp_tachi();
+        let base = "The operator prefers concise Rust answers for equity trading notes";
+
+        {
+            let mut store = mem.store_handle().lock();
+            seed_raw_scoped(
+                &mut store,
+                "explicit-default",
+                &TachiMemory::storage_path(
+                    Some("default"),
+                    Some("default"),
+                    &MemoryCategory::Core,
+                    "pref",
+                ),
+                base,
+                0.95,
+                "default",
+                "default",
+                "pref",
+            );
+            // Same text, no zeroclaw metadata at all (non-zeroclaw row).
+            let mut bare = store.get("explicit-default").unwrap().unwrap();
+            bare.id = "metadata-less".into();
+            bare.path = "/agents/orphan/pref".into();
+            bare.importance = 0.5;
+            bare.metadata = serde_json::json!({});
+            store.upsert(&bare).unwrap();
+        }
+
+        let report = mem.run_light_sleep_governance_report().unwrap();
+        assert_eq!(
+            report.near_dup_archived, 0,
+            "metadata-less rows must not merge into the default partition: {report:?}"
+        );
+        let store = mem.store_handle().lock();
+        assert!(
+            !store
+                .get("metadata-less")
+                .unwrap()
+                .expect("bare row")
+                .archived
+        );
+        assert!(
+            !store
+                .get("explicit-default")
+                .unwrap()
+                .expect("default row")
+                .archived
+        );
+    }
+
     /// Cross-agent near-dup must never merge (RomanBath character isolation).
     ///
     /// Discriminating vs `2ac918587`: that tip would archive one of two
