@@ -449,6 +449,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enrich_fills_missing_keywords_without_replacing_populated_fields() {
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        {
+            let mut store = mem.store_handle().lock();
+            seed_raw(
+                &mut store,
+                "raw-mixed",
+                "note has a summary and entity but needs keywords",
+                "Keep this summary",
+                &[],
+                "raw",
+                1,
+            );
+            let mut row = store.get("raw-mixed").unwrap().unwrap();
+            row.entities = vec!["Keep this entity".into()];
+            store.upsert(&row).unwrap();
+        }
+
+        let provider = FixedJsonProvider::ok(
+            r#"{"summary":"replace summary","keywords":["new-keyword"],"entities":["replace entity"]}"#,
+        );
+        let n = mem
+            .run_llm_enrichment(&provider, "test-model")
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+
+        let store = mem.store_handle().lock();
+        let row = store.get("raw-mixed").unwrap().unwrap();
+        assert_eq!(row.summary, "Keep this summary");
+        assert_eq!(row.entities, vec!["Keep this entity"]);
+        assert_eq!(row.keywords, vec!["new-keyword"]);
+    }
+
+    #[tokio::test]
     async fn enrich_bounds_keywords_and_entities_before_write() {
         let tmp = TempDir::new().unwrap();
         let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
