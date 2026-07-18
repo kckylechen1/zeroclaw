@@ -15,14 +15,15 @@
 //! ZeroClaw-native agent stores (e.g. RomanBath), not the Hyperion memory
 //! contract in `AGENTS.md`.
 //!
-//! # Known limitations (Phase 2)
+//! # Known limitations
 //!
 //! - `reindex` and `supersede` are not implemented (trait defaults).
-//! - Tier lifecycle / consolidation / GC stay in memcore; this scaffold does
-//!   not drive them.
 //! - Embedding-identity reconciliation (`auto_reindex_on_identity_change`) is
 //!   sqlite-specific and not mirrored here.
 //! - Hygiene / snapshot / auto-hydrate are not wired for this backend.
+//! - Light-sleep governance (near-dup / promote / stale archive) runs via
+//!   [`crate::run_tachi_governance`] from `DefaultMemoryStrategy::run_governance`,
+//!   not inside this struct.
 
 use super::embeddings::EmbeddingProvider;
 use super::traits::{

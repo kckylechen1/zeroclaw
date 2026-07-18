@@ -42,6 +42,8 @@ pub mod snapshot;
 pub mod sqlite;
 #[cfg(feature = "tachi")]
 pub mod tachi;
+#[cfg(feature = "tachi")]
+pub mod tachi_governance;
 pub mod threat;
 pub mod traits;
 pub mod vector;
@@ -73,7 +75,29 @@ pub use scanned::ScannedMemory;
 pub use sqlite::SqliteMemory;
 #[cfg(feature = "tachi")]
 pub use tachi::TachiMemory;
+#[cfg(feature = "tachi")]
+pub use tachi_governance::{TachiGovernanceReport, run_tachi_governance};
 pub use traits::Memory;
+
+/// Run tachi light-sleep governance when the `tachi` feature is enabled and
+/// `memory.backend` resolves to `tachi`. No-op otherwise.
+///
+/// Called from `DefaultMemoryStrategy::run_governance` so the runtime's
+/// existing governance cadence drives near-dup / promote / stale archival.
+pub fn run_tachi_governance_if_enabled(
+    config: &MemoryConfig,
+    workspace_dir: &Path,
+) -> anyhow::Result<()> {
+    #[cfg(feature = "tachi")]
+    {
+        let _report = run_tachi_governance(config, workspace_dir)?;
+    }
+    #[cfg(not(feature = "tachi"))]
+    {
+        let _ = (config, workspace_dir);
+    }
+    Ok(())
+}
 #[allow(unused_imports)]
 pub use traits::{
     ExportFilter, MemoryCategory, MemoryEntry, ProceduralMessage, is_recent_recall_query,
