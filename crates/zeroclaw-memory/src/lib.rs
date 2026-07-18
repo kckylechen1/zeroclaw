@@ -35,6 +35,8 @@ pub mod response_cache;
 pub mod retrieval;
 pub mod snapshot;
 pub mod sqlite;
+#[cfg(feature = "tachi")]
+pub mod tachi;
 pub mod traits;
 pub mod vector;
 
@@ -62,6 +64,8 @@ pub use response_cache::ResponseCache;
 #[allow(unused_imports)]
 pub use retrieval::{RetrievalConfig, RetrievalPipeline};
 pub use sqlite::SqliteMemory;
+#[cfg(feature = "tachi")]
+pub use tachi::TachiMemory;
 pub use traits::Memory;
 #[allow(unused_imports)]
 pub use traits::{
@@ -127,6 +131,13 @@ where
         }
         MemoryBackendKind::Qdrant | MemoryBackendKind::Markdown => {
             Ok(Box::new(MarkdownMemory::new("markdown", workspace_dir)))
+        }
+        #[cfg(feature = "tachi")]
+        MemoryBackendKind::Tachi => {
+            anyhow::bail!(
+                "tachi backend requires embedding config; \
+                 call create_memory_with_storage_and_routes instead of create_memory_with_builders"
+            )
         }
         MemoryBackendKind::None => Ok(Box::new(NoneMemory::new("none"))),
         MemoryBackendKind::Unknown => {
@@ -581,6 +592,33 @@ pub fn create_memory_with_storage_and_routes(
             ),
         };
         return build_postgres_memory(pg_cfg);
+    }
+
+    #[cfg(feature = "tachi")]
+    if matches!(backend_kind, MemoryBackendKind::Tachi) {
+        let embedder: Arc<dyn embeddings::EmbeddingProvider> =
+            Arc::from(embeddings::create_embedding_provider(
+                &resolved_embedding.model_provider,
+                resolved_embedding.api_key.as_deref(),
+                &resolved_embedding.model,
+                resolved_embedding.dimensions,
+            ));
+        let mem = TachiMemory::with_embedder(
+            "tachi",
+            workspace_dir,
+            embedder,
+            config.vector_weight as f32,
+            config.keyword_weight as f32,
+        )?;
+        return Ok(Box::new(mem));
+    }
+
+    #[cfg(not(feature = "tachi"))]
+    if backend_name == "tachi" {
+        anyhow::bail!(
+            "memory backend 'tachi' requested but this build was compiled without \
+             `memory-tachi`; rebuild with `--features memory-tachi`"
+        );
     }
 
     create_memory_with_builders(
