@@ -6,6 +6,8 @@ pub enum MemoryBackendKind {
     Qdrant,
     Markdown,
     None,
+    #[cfg(feature = "tachi")]
+    Tachi,
     Unknown,
 }
 
@@ -74,6 +76,16 @@ const NONE_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
     optional_dependency: false,
 };
 
+#[cfg(feature = "tachi")]
+const TACHI_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
+    key: "tachi",
+    label: "Tachi / memcore — hybrid FTS+vector recall with tier lifecycle",
+    auto_save_default: true,
+    uses_sqlite_hygiene: false,
+    sqlite_based: false,
+    optional_dependency: true,
+};
+
 const CUSTOM_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
     key: "custom",
     label: "Custom backend — extension point",
@@ -107,6 +119,8 @@ pub fn classify_memory_backend(backend: &str) -> MemoryBackendKind {
         "qdrant" => MemoryBackendKind::Qdrant,
         "markdown" => MemoryBackendKind::Markdown,
         "none" => MemoryBackendKind::None,
+        #[cfg(feature = "tachi")]
+        "tachi" => MemoryBackendKind::Tachi,
         _ => MemoryBackendKind::Unknown,
     }
 }
@@ -119,6 +133,8 @@ pub fn memory_backend_profile(backend: &str) -> MemoryBackendProfile {
         MemoryBackendKind::Qdrant => QDRANT_PROFILE,
         MemoryBackendKind::Markdown => MARKDOWN_PROFILE,
         MemoryBackendKind::None => NONE_PROFILE,
+        #[cfg(feature = "tachi")]
+        MemoryBackendKind::Tachi => TACHI_PROFILE,
         MemoryBackendKind::Unknown => CUSTOM_PROFILE,
     }
 }

@@ -40,6 +40,8 @@ pub mod retrieval;
 pub mod scanned;
 pub mod snapshot;
 pub mod sqlite;
+#[cfg(feature = "tachi")]
+pub mod tachi;
 pub mod threat;
 pub mod traits;
 pub mod vector;
@@ -69,6 +71,8 @@ pub use response_cache::ResponseCache;
 pub use retrieval::{RetrievalConfig, RetrievalPipeline};
 pub use scanned::ScannedMemory;
 pub use sqlite::SqliteMemory;
+#[cfg(feature = "tachi")]
+pub use tachi::TachiMemory;
 pub use traits::Memory;
 #[allow(unused_imports)]
 pub use traits::{
@@ -181,6 +185,13 @@ where
             workspace_dir,
             audit_enabled,
         ),
+        #[cfg(feature = "tachi")]
+        MemoryBackendKind::Tachi => {
+            anyhow::bail!(
+                "tachi backend requires embedding config; \
+                 call create_memory_with_storage_and_routes instead of create_memory_with_builders"
+            )
+        }
         MemoryBackendKind::None => wrap_scanned_and_audit(
             NoneMemory::new("none"),
             policy,
@@ -721,6 +732,33 @@ pub fn create_memory_with_storage_and_routes(
             &config.policy,
             workspace_dir,
             config.audit_enabled,
+        );
+    }
+
+    #[cfg(feature = "tachi")]
+    if matches!(backend_kind, MemoryBackendKind::Tachi) {
+        let embedder: Arc<dyn embeddings::EmbeddingProvider> =
+            Arc::from(embeddings::create_embedding_provider(
+                &resolved_embedding.model_provider,
+                resolved_embedding.api_key.as_deref(),
+                &resolved_embedding.model,
+                resolved_embedding.dimensions,
+            ));
+        let mem = TachiMemory::with_embedder(
+            "tachi",
+            workspace_dir,
+            embedder,
+            config.vector_weight as f32,
+            config.keyword_weight as f32,
+        )?;
+        return Ok(Box::new(mem));
+    }
+
+    #[cfg(not(feature = "tachi"))]
+    if backend_name == "tachi" {
+        anyhow::bail!(
+            "memory backend 'tachi' requested but this build was compiled without \
+             `memory-tachi`; rebuild with `--features memory-tachi`"
         );
     }
 
