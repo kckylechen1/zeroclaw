@@ -41,6 +41,15 @@ struct HygieneState {
     last_report: HygieneReport,
 }
 
+/// Whether the 12h hygiene cadence window has elapsed for `workspace_dir`.
+///
+/// Does **not** consult `MemoryConfig::hygiene_enabled` — callers combine that
+/// themselves when deciding whether to run sibling work (e.g. tachi light-sleep)
+/// on the same schedule as [`run_if_due`].
+pub fn is_due(workspace_dir: &Path) -> Result<bool> {
+    should_run_now(workspace_dir)
+}
+
 /// Run memory/session hygiene if the cadence window has elapsed.
 /// This function is intentionally best-effort: callers should log and continue on failure.
 pub fn run_if_due(config: &MemoryConfig, workspace_dir: &Path) -> Result<()> {

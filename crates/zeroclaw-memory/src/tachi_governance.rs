@@ -1,18 +1,30 @@
 //! Tachi / memcore light-sleep governance (feature `tachi`).
 //!
-//! Driven by [`crate::run_tachi_governance`] from
-//! `DefaultMemoryStrategy::run_governance` when `memory.backend` is `tachi`.
-//! Uses memcore public APIs only — no direct SQL into the kernel schema.
+//! Driven from the memory factory hygiene cadence
+//! ([`crate::create_memory_with_storage_and_routes`]) and from
+//! [`Memory::run_light_sleep_governance`](zeroclaw_api::memory_traits::Memory::run_light_sleep_governance)
+//! on a live [`crate::TachiMemory`] handle. Uses memcore public APIs only —
+//! no direct SQL into the kernel schema, and no second DB open on production
+//! paths.
 
-use anyhow::Context;
 use memcore::{MemoryEntry, MemoryStore, NEAR_DUP_RAW_SCAN_CAP, near_duplicate_raw_pairs};
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use zeroclaw_config::schema::MemoryConfig;
+use std::sync::Arc;
 
-use crate::backend_kind_from_dotted;
+/// Near-dup Jaccard threshold for light-sleep governance (Sigil parity: 0.9).
+///
+/// Intentionally **not** [`zeroclaw_config::schema::MemoryConfig::dedup_jaccard_threshold`]:
+/// that knob is write-time whitespace Jaccard, while governance uses memcore's
+/// tokenize Jaccard over full text. Archival is also semi-irreversible, so we
+/// keep a fixed Sigil-aligned floor rather than overloading the write-time key
+/// (no speculative new config key — AGENTS.md).
+const NEAR_DUP_GOVERNANCE_THRESHOLD: f64 = 0.9;
 
 /// Report counters from one governance pass (observability only — not persisted).
+///
+/// SSOT: this is the source of truth for per-call counters; it is not a cache of
+/// store or config state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TachiGovernanceReport {
     pub near_dup_archived: usize,
@@ -21,41 +33,13 @@ pub struct TachiGovernanceReport {
     pub stale_archived: usize,
 }
 
-/// Run tachi governance when the active memory backend is `tachi`.
+/// Run tachi light-sleep governance on the live store handle.
 ///
-/// No-op for other backends. Intended to be called from
-/// [`zeroclaw_runtime::agent::memory_strategy::DefaultMemoryStrategy::run_governance`].
-pub fn run_tachi_governance(
-    config: &MemoryConfig,
-    workspace_dir: &Path,
-) -> anyhow::Result<TachiGovernanceReport> {
-    if backend_kind_from_dotted(&config.backend) != "tachi" {
-        return Ok(TachiGovernanceReport::default());
-    }
-    run_on_workspace(config, workspace_dir)
-}
-
-fn tachi_db_path(workspace_dir: &Path) -> std::path::PathBuf {
-    workspace_dir.join("memory").join("tachi.db")
-}
-
-fn run_on_workspace(
-    config: &MemoryConfig,
-    workspace_dir: &Path,
-) -> anyhow::Result<TachiGovernanceReport> {
-    let db_path = tachi_db_path(workspace_dir);
-    if !db_path.exists() {
-        return Ok(TachiGovernanceReport::default());
-    }
-    let mut store = MemoryStore::open(
-        db_path
-            .to_str()
-            .context("tachi memory db path is not valid UTF-8")?,
-    )
-    .map_err(|e| anyhow::Error::msg(format!("tachi governance: open db failed: {e}")))?;
-
+/// Production paths must pass the same [`MemoryStore`] owned by [`crate::TachiMemory`]
+/// — never open a second connection to the same path.
+pub fn run_tachi_governance(store: &mut MemoryStore) -> anyhow::Result<TachiGovernanceReport> {
     let mut report = TachiGovernanceReport::default();
-    let near = run_near_dup_light_sleep(&mut store, config.dedup_jaccard_threshold)?;
+    let near = run_near_dup_light_sleep(store, NEAR_DUP_GOVERNANCE_THRESHOLD)?;
     report.near_dup_archived = near.0;
     report.near_dup_survivors_updated = near.1;
 
@@ -68,6 +52,14 @@ fn run_on_workspace(
         .map_err(|e| anyhow::Error::msg(format!("tachi governance: stale archive failed: {e}")))?;
 
     Ok(report)
+}
+
+/// Lock the shared store and run governance (same handle as [`crate::TachiMemory`]).
+pub fn run_tachi_governance_on_handle(
+    store: &Arc<Mutex<MemoryStore>>,
+) -> anyhow::Result<TachiGovernanceReport> {
+    let mut guard = store.lock();
+    run_tachi_governance(&mut guard)
 }
 
 /// Near-dup light-sleep: collapse connected components of raw-tier text twins
@@ -139,6 +131,10 @@ fn run_near_dup_light_sleep(
         }
         let mut merged_keywords: Vec<String> = keyword_set.into_iter().collect();
         merged_keywords.sort();
+        // Crash-safety invariant: upsert the survivor (keyword merge) *before*
+        // archiving sources. A crash between upsert and archive leaves sources
+        // unarchived and re-processable on the next governance pass; the reverse
+        // order could archive twins while losing merged keywords.
         if merged_keywords != survivor.keywords {
             survivor.keywords = merged_keywords;
             store.upsert(&survivor).map_err(|e| {
@@ -184,15 +180,17 @@ fn is_better_survivor(a: &MemoryEntry, b: &MemoryEntry) -> bool {
 #[cfg(all(test, feature = "tachi"))]
 mod tests {
     use super::*;
+    use crate::create_memory_with_storage_and_routes;
     use crate::tachi::TachiMemory;
-    use crate::traits::{Memory, MemoryCategory};
+    use crate::traits::{Memory, MemoryCategory, StoreOptions};
     use std::sync::Arc;
     use tempfile::TempDir;
+    use zeroclaw_config::schema::{ActiveStorage, MemoryConfig};
 
     fn tachi_config() -> MemoryConfig {
         MemoryConfig {
             backend: "tachi".into(),
-            dedup_jaccard_threshold: 0.9,
+            hygiene_enabled: true,
             ..MemoryConfig::default()
         }
     }
@@ -239,52 +237,60 @@ mod tests {
         store.upsert(&entry).expect("seed upsert");
     }
 
+    /// Exercises the factory hygiene-cadence wiring in
+    /// `create_memory_with_storage_and_routes` (not `run_tachi_governance` alone).
+    /// Deleting the `run_light_sleep_governance` one-liner there turns this RED.
     #[test]
     fn near_dup_merge_collapses_transitive_raw_chain_via_strategy_entry() {
         let tmp = TempDir::new().unwrap();
-        // Ensure schema exists via TachiMemory open.
-        let _mem = TachiMemory::new("tachi", tmp.path()).unwrap();
-        let db = tachi_db_path(tmp.path());
-        let mut store = MemoryStore::open(db.to_str().unwrap()).unwrap();
+        // Seed on a short-lived handle, then drop so the factory owns the live store.
+        {
+            let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+            let mut store = mem.store_handle().lock();
+            let base = "The operator prefers concise Rust answers for equity trading notes";
+            seed_raw(
+                &mut store,
+                "raw-a",
+                "/agents/default/ns/core/a",
+                base,
+                0.5,
+                &["alpha"],
+                "raw",
+            );
+            seed_raw(
+                &mut store,
+                "raw-b",
+                "/agents/default/ns/core/b",
+                &format!("{base} today"),
+                0.9,
+                &["bravo"],
+                "raw",
+            );
+            seed_raw(
+                &mut store,
+                "raw-c",
+                "/agents/default/ns/core/c",
+                &format!("{base} always"),
+                0.6,
+                &["charlie"],
+                "raw",
+            );
+        }
 
-        let base = "The operator prefers concise Rust answers for equity trading notes";
-        seed_raw(
-            &mut store,
-            "raw-a",
-            "/agents/default/ns/core/a",
-            base,
-            0.5,
-            &["alpha"],
-            "raw",
-        );
-        seed_raw(
-            &mut store,
-            "raw-b",
-            "/agents/default/ns/core/b",
-            &format!("{base} today"),
-            0.9,
-            &["bravo"],
-            "raw",
-        );
-        seed_raw(
-            &mut store,
-            "raw-c",
-            "/agents/default/ns/core/c",
-            &format!("{base} always"),
-            0.6,
-            &["charlie"],
-            "raw",
-        );
-        drop(store);
+        // Live cadence entry point — factory constructs TachiMemory and runs
+        // light-sleep when hygiene is due (no state file => due).
+        let _mem = create_memory_with_storage_and_routes(
+            &tachi_config(),
+            &[],
+            ActiveStorage::None,
+            tmp.path(),
+            None,
+            None,
+        )
+        .expect("factory tachi");
 
-        // Strategy entry point — not near_dup directly.
-        let report = run_tachi_governance(&tachi_config(), tmp.path()).unwrap();
-        assert_eq!(
-            report.near_dup_archived, 2,
-            "two sources archived: {report:?}"
-        );
-
-        let store = MemoryStore::open(db.to_str().unwrap()).unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        let store = mem.store_handle().lock();
         let survivor = store.get("raw-b").unwrap().expect("survivor");
         assert!(!survivor.archived);
         assert!(survivor.keywords.iter().any(|k| k == "alpha"));
@@ -309,47 +315,50 @@ mod tests {
     #[test]
     fn near_dup_leaves_non_raw_tiers_untouched() {
         let tmp = TempDir::new().unwrap();
-        let _mem = TachiMemory::new("tachi", tmp.path()).unwrap();
-        let db = tachi_db_path(tmp.path());
-        let mut store = MemoryStore::open(db.to_str().unwrap()).unwrap();
+        {
+            let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+            let mut store = mem.store_handle().lock();
+            let text = "Shared consolidated preference text about Rust tooling";
+            seed_raw(
+                &mut store,
+                "cons-a",
+                "/agents/default/ns/core/cons_a",
+                text,
+                0.9,
+                &[],
+                "consolidated",
+            );
+            seed_raw(
+                &mut store,
+                "cons-b",
+                "/agents/default/ns/core/cons_b",
+                &format!("{text} extra"),
+                0.5,
+                &[],
+                "consolidated",
+            );
+            seed_raw(
+                &mut store,
+                "raw-twin",
+                "/agents/default/ns/core/raw_twin",
+                text,
+                0.4,
+                &[],
+                "raw",
+            );
+        }
 
-        let text = "Shared consolidated preference text about Rust tooling";
-        seed_raw(
-            &mut store,
-            "cons-a",
-            "/agents/default/ns/core/cons_a",
-            text,
-            0.9,
-            &[],
-            "consolidated",
-        );
-        seed_raw(
-            &mut store,
-            "cons-b",
-            "/agents/default/ns/core/cons_b",
-            &format!("{text} extra"),
-            0.5,
-            &[],
-            "consolidated",
-        );
-        seed_raw(
-            &mut store,
-            "raw-twin",
-            "/agents/default/ns/core/raw_twin",
-            text,
-            0.4,
-            &[],
-            "raw",
-        );
-        drop(store);
-
-        let report = run_tachi_governance(&tachi_config(), tmp.path()).unwrap();
+        let report = {
+            let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+            mem.run_light_sleep_governance_report().unwrap()
+        };
         assert_eq!(
             report.near_dup_archived, 0,
             "consolidated twins must not archive via near-dup: {report:?}"
         );
 
-        let store = MemoryStore::open(db.to_str().unwrap()).unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        let store = mem.store_handle().lock();
         assert!(!store.get("cons-a").unwrap().expect("cons-a").archived);
         assert!(!store.get("cons-b").unwrap().expect("cons-b").archived);
         assert!(
@@ -364,68 +373,67 @@ mod tests {
     #[test]
     fn promote_and_stale_archive_smoke() {
         let tmp = TempDir::new().unwrap();
-        let _mem = TachiMemory::new("tachi", tmp.path()).unwrap();
-        let db = tachi_db_path(tmp.path());
-        let mut store = MemoryStore::open(db.to_str().unwrap()).unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        {
+            let mut store = mem.store_handle().lock();
+            let now = chrono::Local::now().to_rfc3339();
+            let promotable = MemoryEntry {
+                id: "promo".into(),
+                path: "/agents/default/ns/core/promo".into(),
+                summary: "promotable".into(),
+                text: "Diversely recalled raw note for promotion smoke".into(),
+                importance: 0.8,
+                timestamp: now.clone(),
+                valid_from: now.clone(),
+                valid_until: None,
+                category: "fact".into(),
+                topic: String::new(),
+                keywords: Vec::new(),
+                persons: Vec::new(),
+                entities: Vec::new(),
+                location: String::new(),
+                source: "zeroclaw-test".into(),
+                scope: "general".into(),
+                archived: false,
+                access_count: 0,
+                last_access: None,
+                revision: 1,
+                vector: None,
+                retention_policy: None,
+                domain: None,
+                metadata: serde_json::json!({}),
+                recall_count: 3,
+                query_diversity: 3,
+                tier: "raw".into(),
+            };
+            store.upsert(&promotable).unwrap();
 
-        let now = chrono::Local::now().to_rfc3339();
-        let promotable = MemoryEntry {
-            id: "promo".into(),
-            path: "/agents/default/ns/core/promo".into(),
-            summary: "promotable".into(),
-            text: "Diversely recalled raw note for promotion smoke".into(),
-            importance: 0.8,
-            timestamp: now.clone(),
-            valid_from: now.clone(),
-            valid_until: None,
-            category: "fact".into(),
-            topic: String::new(),
-            keywords: Vec::new(),
-            persons: Vec::new(),
-            entities: Vec::new(),
-            location: String::new(),
-            source: "zeroclaw-test".into(),
-            scope: "general".into(),
-            archived: false,
-            access_count: 0,
-            last_access: None,
-            revision: 1,
-            vector: None,
-            retention_policy: None,
-            domain: None,
-            metadata: serde_json::json!({}),
-            recall_count: 3,
-            query_diversity: 3,
-            tier: "raw".into(),
-        };
-        store.upsert(&promotable).unwrap();
+            let mut stale = promotable.clone();
+            stale.id = "stale".into();
+            stale.path = "/agents/default/ns/core/stale".into();
+            stale.text = "Old unused low-value raw note for stale archive".into();
+            stale.importance = 0.2;
+            stale.access_count = 0;
+            stale.recall_count = 0;
+            stale.query_diversity = 0;
+            store.upsert(&stale).unwrap();
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories SET created_at = '2020-01-01T00:00:00Z' WHERE id = 'stale'",
+                    [],
+                )
+                .unwrap();
+        }
 
-        let mut stale = promotable.clone();
-        stale.id = "stale".into();
-        stale.path = "/agents/default/ns/core/stale".into();
-        stale.text = "Old unused low-value raw note for stale archive".into();
-        stale.importance = 0.2;
-        stale.access_count = 0;
-        stale.recall_count = 0;
-        stale.query_diversity = 0;
-        store.upsert(&stale).unwrap();
-        store
-            .connection()
-            .execute(
-                "UPDATE memories SET created_at = '2020-01-01T00:00:00Z' WHERE id = 'stale'",
-                [],
-            )
-            .unwrap();
-        drop(store);
-
-        let report = run_tachi_governance(&tachi_config(), tmp.path()).unwrap();
+        let report = mem.run_light_sleep_governance_report().unwrap();
         assert_eq!(report.promoted, 1, "expected one promotion: {report:?}");
         assert_eq!(
             report.stale_archived, 1,
             "expected one stale archive: {report:?}"
         );
 
-        let store = MemoryStore::open(db.to_str().unwrap()).unwrap();
+        let store = mem.store_handle().lock();
         assert_eq!(store.get("promo").unwrap().unwrap().tier, "consolidated");
         assert!(
             store
@@ -437,7 +445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strategy_noop_for_non_tachi_backend() {
+    async fn pinned_row_survives_stale_archive_via_governance() {
         let tmp = TempDir::new().unwrap();
         let mem = TachiMemory::with_embedder(
             "tachi",
@@ -447,14 +455,137 @@ mod tests {
             0.3,
         )
         .unwrap();
-        mem.store("k", "content", MemoryCategory::Core, None)
-            .await
-            .unwrap();
-        let cfg = MemoryConfig {
-            backend: "sqlite".into(),
-            ..MemoryConfig::default()
-        };
-        let report = run_tachi_governance(&cfg, tmp.path()).unwrap();
-        assert_eq!(report, TachiGovernanceReport::default());
+        mem.store_with_options(
+            "pinned-old",
+            "Pinned old low-importance note that must survive stale archive",
+            MemoryCategory::Core,
+            None,
+            StoreOptions::default().pinned(true).with_importance(0.1),
+        )
+        .await
+        .unwrap();
+
+        {
+            let store = mem.store_handle().lock();
+            let row = store
+                .list_by_path("/agents", 64, false)
+                .unwrap()
+                .into_iter()
+                .find(|e| {
+                    e.metadata.get("zeroclaw_key").and_then(|v| v.as_str()) == Some("pinned-old")
+                })
+                .expect("pinned row");
+            assert_eq!(row.retention_policy.as_deref(), Some("pinned"));
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories SET created_at = '2020-01-01T00:00:00Z', importance = 0.1, access_count = 0 WHERE id = ?1",
+                    rusqlite::params![row.id],
+                )
+                .unwrap();
+        }
+
+        let report = mem.run_light_sleep_governance_report().unwrap();
+        assert_eq!(
+            report.stale_archived, 0,
+            "pinned row must be spared: {report:?}"
+        );
+        let store = mem.store_handle().lock();
+        let row = store
+            .list_by_path("/agents", 64, false)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.metadata.get("zeroclaw_key").and_then(|v| v.as_str()) == Some("pinned-old"))
+            .expect("still present");
+        assert!(!row.archived);
+    }
+
+    #[tokio::test]
+    async fn store_after_governance_preserves_merged_keywords() {
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::with_embedder(
+            "tachi",
+            tmp.path(),
+            Arc::new(crate::embeddings::NoopEmbedding),
+            0.7,
+            0.3,
+        )
+        .unwrap();
+
+        let base = "Keyword carry-over preference note for equity trading workflow";
+        let path_a = TachiMemory::storage_path(None, None, &MemoryCategory::Core, "kw-a");
+        let path_b = TachiMemory::storage_path(None, None, &MemoryCategory::Core, "kw-b");
+        {
+            let mut store = mem.store_handle().lock();
+            seed_raw(&mut store, "kw-a", &path_a, base, 0.5, &["alpha"], "raw");
+            // Attach identity metadata so a later store("kw-b") updates this row.
+            let mut entry_a = store.get("kw-a").unwrap().unwrap();
+            entry_a.metadata = serde_json::json!({
+                "zeroclaw_key": "kw-a",
+                "zeroclaw_category": "core",
+                "zeroclaw_namespace": "default",
+                "zeroclaw_agent": "default",
+            });
+            store.upsert(&entry_a).unwrap();
+
+            seed_raw(
+                &mut store,
+                "kw-b",
+                &path_b,
+                &format!("{base} today"),
+                0.95,
+                &["bravo"],
+                "raw",
+            );
+            let mut entry_b = store.get("kw-b").unwrap().unwrap();
+            entry_b.metadata = serde_json::json!({
+                "zeroclaw_key": "kw-b",
+                "zeroclaw_category": "core",
+                "zeroclaw_namespace": "default",
+                "zeroclaw_agent": "default",
+            });
+            store.upsert(&entry_b).unwrap();
+        }
+
+        let report = mem.run_light_sleep_governance_report().unwrap();
+        assert!(
+            report.near_dup_archived >= 1,
+            "expected near-dup merge: {report:?}"
+        );
+
+        {
+            let store = mem.store_handle().lock();
+            let survivor = store.get("kw-b").unwrap().expect("survivor kw-b");
+            assert!(survivor.keywords.iter().any(|k| k == "alpha"));
+            assert!(survivor.keywords.iter().any(|k| k == "bravo"));
+        }
+
+        mem.store(
+            "kw-b",
+            &format!("{base} today (edited)"),
+            MemoryCategory::Core,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let store = mem.store_handle().lock();
+        let after = store.get("kw-b").unwrap().expect("survivor after store");
+        assert!(
+            after.keywords.iter().any(|k| k == "alpha"),
+            "merged keywords must survive re-store: {:?}",
+            after.keywords
+        );
+        assert!(after.keywords.iter().any(|k| k == "bravo"));
+    }
+
+    #[test]
+    fn light_sleep_noop_default_on_non_tachi_memory_trait() {
+        // Sqlite/other backends keep the trait default (no-op).
+        assert!(
+            crate::none::NoneMemory::new("none")
+                .run_light_sleep_governance()
+                .is_ok()
+        );
     }
 }

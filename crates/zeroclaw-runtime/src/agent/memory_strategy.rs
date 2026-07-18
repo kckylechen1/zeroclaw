@@ -77,9 +77,11 @@ impl MemoryStrategy for DefaultMemoryStrategy {
         // A structured report will be wired in a follow-up when hygiene
         // exposes per-action counters.
         zeroclaw_memory::hygiene::run_if_due(&self.memory_config, &self.workspace_dir)?;
-        // Tachi / memcore light-sleep (near-dup + promote + stale archive).
-        // No-op unless `memory-tachi` is compiled in and backend is `tachi`.
-        zeroclaw_memory::run_tachi_governance_if_enabled(&self.memory_config, &self.workspace_dir)?;
+        // Tachi / memcore light-sleep on the live `Memory` handle (trait
+        // default is no-op). The factory hygiene cadence in
+        // `create_memory_with_storage_and_routes` is the primary live path;
+        // this keeps the strategy surface honest without a second DB open.
+        self.memory.run_light_sleep_governance()?;
         Ok(())
     }
 }
