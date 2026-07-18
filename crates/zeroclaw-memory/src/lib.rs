@@ -39,6 +39,8 @@ pub mod sqlite;
 pub mod tachi;
 #[cfg(feature = "tachi")]
 pub mod tachi_governance;
+#[cfg(all(test, feature = "tachi"))]
+mod tachi_scenarios;
 pub mod traits;
 pub mod vector;
 
