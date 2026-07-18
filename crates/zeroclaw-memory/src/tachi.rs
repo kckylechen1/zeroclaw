@@ -1,4 +1,28 @@
 //! Tachi / memcore memory backend (feature `tachi`).
+//!
+//! # Licensing
+//!
+//! `memcore` is licensed under **AGPL-3.0**. Any distributed binary built with
+//! the `memory-tachi` / `tachi` feature is therefore AGPL-affected. Keep that
+//! feature off for releases that must remain under ZeroClaw's own license terms
+//! alone.
+//!
+//! # Hyperion deployments
+//!
+//! Hyperion trading memory must keep using the hapi memory-server MCP on
+//! `:6888` (`hapi_save` / `hapi_search` / `hapi_memory`). Do **not** set
+//! `memory.backend = "tachi"` for trading memory — this backend is for
+//! ZeroClaw-native agent stores (e.g. RomanBath), not the Hyperion memory
+//! contract in `AGENTS.md`.
+//!
+//! # Known limitations (Phase 2)
+//!
+//! - `reindex` and `supersede` are not implemented (trait defaults).
+//! - Tier lifecycle / consolidation / GC stay in memcore; this scaffold does
+//!   not drive them.
+//! - Embedding-identity reconciliation (`auto_reindex_on_identity_change`) is
+//!   sqlite-specific and not mirrored here.
+//! - Hygiene / snapshot / auto-hydrate are not wired for this backend.
 
 use super::embeddings::EmbeddingProvider;
 use super::traits::{
@@ -10,18 +34,24 @@ use async_trait::async_trait;
 use chrono::Local;
 use memcore::{HybridWeights, MemoryStore, SearchOptions};
 use parking_lot::{Mutex, RwLock};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
 const METADATA_ZC_KEY: &str = "zeroclaw_key";
 const METADATA_ZC_CATEGORY: &str = "zeroclaw_category";
+const METADATA_ZC_NAMESPACE: &str = "zeroclaw_namespace";
+const METADATA_ZC_AGENT: &str = "zeroclaw_agent";
 const METADATA_SESSION_ID: &str = "session_id";
 const METADATA_TENANT_ID: &str = "tenant_id";
 const METADATA_PINNED: &str = "pinned";
 const METADATA_KIND: &str = "kind";
 const DEFAULT_AGENT: &str = "default";
-const LIST_LIMIT: usize = 10_000;
+const DEFAULT_NAMESPACE: &str = "default";
+/// Initial page size when growing a prefix scan to completeness.
+const DEFAULT_LIST_PAGE_SIZE: usize = 512;
+const MAX_LIST_GROW: usize = 1_048_576;
 
 #[derive(Clone)]
 pub struct TachiMemory {
@@ -31,6 +61,8 @@ pub struct TachiMemory {
     embedder: Arc<RwLock<Arc<dyn EmbeddingProvider>>>,
     vector_weight: f32,
     keyword_weight: f32,
+    /// Page size seed for complete prefix scans (overridable in tests).
+    list_page_size: usize,
 }
 
 impl TachiMemory {
@@ -51,6 +83,26 @@ impl TachiMemory {
         vector_weight: f32,
         keyword_weight: f32,
     ) -> anyhow::Result<Self> {
+        Self::with_embedder_and_page_size(
+            alias,
+            workspace_dir,
+            embedder,
+            vector_weight,
+            keyword_weight,
+            DEFAULT_LIST_PAGE_SIZE,
+        )
+    }
+
+    /// Like [`Self::with_embedder`], but with an injectable list page-size seed
+    /// for regression tests that prove get/forget survive small caps.
+    pub fn with_embedder_and_page_size(
+        alias: &str,
+        workspace_dir: &Path,
+        embedder: Arc<dyn EmbeddingProvider>,
+        vector_weight: f32,
+        keyword_weight: f32,
+        list_page_size: usize,
+    ) -> anyhow::Result<Self> {
         let db_path = workspace_dir.join("memory").join("tachi.db");
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -68,6 +120,7 @@ impl TachiMemory {
             embedder: Arc::new(RwLock::new(embedder)),
             vector_weight,
             keyword_weight,
+            list_page_size: list_page_size.max(1),
         })
     }
 
@@ -89,7 +142,7 @@ impl TachiMemory {
             MemoryCategory::Core => "core".into(),
             MemoryCategory::Daily => "daily".into(),
             MemoryCategory::Conversation => "conversation".into(),
-            MemoryCategory::Custom(name) => Self::sanitize_path_segment(name),
+            MemoryCategory::Custom(name) => Self::encode_path_segment(name),
         }
     }
 
@@ -102,7 +155,7 @@ impl TachiMemory {
         }
     }
 
-    fn segment_to_category(segment: &str, metadata: &serde_json::Value) -> MemoryCategory {
+    fn segment_to_category(_segment: &str, metadata: &serde_json::Value) -> MemoryCategory {
         if let Some(stored) = metadata.get(METADATA_ZC_CATEGORY).and_then(|v| v.as_str()) {
             return match stored {
                 "core" => MemoryCategory::Core,
@@ -111,12 +164,7 @@ impl TachiMemory {
                 other => MemoryCategory::Custom(other.to_string()),
             };
         }
-        match segment {
-            "core" => MemoryCategory::Core,
-            "daily" => MemoryCategory::Daily,
-            "conversation" => MemoryCategory::Conversation,
-            other => MemoryCategory::Custom(other.to_string()),
-        }
+        MemoryCategory::Core
     }
 
     fn sanitize_path_segment(value: &str) -> String {
@@ -132,12 +180,41 @@ impl TachiMemory {
             .collect()
     }
 
+    /// Collision-free path segment: keep the sanitized form when it equals the
+    /// original; otherwise append a short hash of the original so distinct
+    /// identities that sanitize equally never share a path.
+    fn encode_path_segment(value: &str) -> String {
+        let sanitized = Self::sanitize_path_segment(value);
+        if sanitized == value && !value.is_empty() {
+            sanitized
+        } else {
+            let hash = Self::short_hash(value);
+            if sanitized.is_empty() {
+                format!("x__{hash}")
+            } else {
+                format!("{sanitized}__{hash}")
+            }
+        }
+    }
+
+    fn short_hash(value: &str) -> String {
+        let digest = Sha256::digest(value.as_bytes());
+        format!(
+            "{:016x}",
+            u64::from_be_bytes(
+                digest[..8]
+                    .try_into()
+                    .expect("SHA-256 always produces >= 8 bytes")
+            )
+        )
+    }
+
     fn agent_segment(agent_id: Option<&str>) -> String {
-        Self::sanitize_path_segment(agent_id.unwrap_or(DEFAULT_AGENT))
+        Self::encode_path_segment(agent_id.unwrap_or(DEFAULT_AGENT))
     }
 
     fn namespace_segment(namespace: Option<&str>) -> String {
-        Self::sanitize_path_segment(namespace.unwrap_or("default"))
+        Self::encode_path_segment(namespace.unwrap_or(DEFAULT_NAMESPACE))
     }
 
     fn storage_path(
@@ -151,45 +228,16 @@ impl TachiMemory {
             Self::agent_segment(agent_id),
             Self::namespace_segment(namespace),
             Self::category_to_segment(category),
-            Self::sanitize_path_segment(key)
+            Self::encode_path_segment(key)
         )
-    }
-
-    fn path_namespace(path: &str) -> Option<String> {
-        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-        if parts.len() >= 3 && parts[0] == "agents" {
-            Some(parts[2].to_string())
-        } else {
-            None
-        }
-    }
-
-    fn path_agent_id(path: &str) -> Option<String> {
-        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-        if parts.len() >= 2 && parts[0] == "agents" {
-            Some(parts[1].to_string())
-        } else {
-            None
-        }
-    }
-
-    fn path_category_segment(path: &str) -> Option<&str> {
-        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-        if parts.len() >= 4 && parts[0] == "agents" {
-            Some(parts[3])
-        } else {
-            None
-        }
-    }
-
-    fn path_key(path: &str) -> String {
-        path.rsplit('/').next().unwrap_or(path).to_string()
     }
 
     fn build_metadata(
         key: &str,
         category: &MemoryCategory,
         session_id: Option<&str>,
+        namespace: Option<&str>,
+        agent_id: Option<&str>,
         options: &StoreOptions,
     ) -> serde_json::Value {
         let mut obj = serde_json::Map::new();
@@ -200,6 +248,14 @@ impl TachiMemory {
         obj.insert(
             METADATA_ZC_CATEGORY.to_string(),
             serde_json::Value::String(category.to_string()),
+        );
+        obj.insert(
+            METADATA_ZC_NAMESPACE.to_string(),
+            serde_json::Value::String(namespace.unwrap_or(DEFAULT_NAMESPACE).to_string()),
+        );
+        obj.insert(
+            METADATA_ZC_AGENT.to_string(),
+            serde_json::Value::String(agent_id.unwrap_or(DEFAULT_AGENT).to_string()),
         );
         if let Some(sid) = session_id {
             obj.insert(
@@ -224,6 +280,13 @@ impl TachiMemory {
         serde_json::Value::Object(obj)
     }
 
+    fn metadata_str(metadata: &serde_json::Value, key: &str) -> Option<String> {
+        metadata
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
     async fn compute_embedding(&self, text: &str) -> Option<Vec<f32>> {
         let embedder = self.embedder.read().clone();
         if embedder.dimensions() == 0 {
@@ -234,21 +297,17 @@ impl TachiMemory {
 
     fn memcore_to_zeroclaw(entry: memcore::MemoryEntry, score: Option<f64>) -> MemoryEntry {
         let metadata = entry.metadata.clone();
-        let key = metadata
-            .get(METADATA_ZC_KEY)
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| Self::path_key(&entry.path));
-        let category_segment = Self::path_category_segment(&entry.path).unwrap_or("core");
-        let category = Self::segment_to_category(category_segment, &metadata);
-        let session_id = metadata
-            .get(METADATA_SESSION_ID)
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let tenant_id = metadata
-            .get(METADATA_TENANT_ID)
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        let key = Self::metadata_str(&metadata, METADATA_ZC_KEY).unwrap_or_else(|| {
+            entry
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&entry.path)
+                .to_string()
+        });
+        let category = Self::segment_to_category("", &metadata);
+        let session_id = Self::metadata_str(&metadata, METADATA_SESSION_ID);
+        let tenant_id = Self::metadata_str(&metadata, METADATA_TENANT_ID);
         let pinned = metadata
             .get(METADATA_PINNED)
             .and_then(|v| v.as_bool())
@@ -256,7 +315,9 @@ impl TachiMemory {
         let kind = metadata
             .get(METADATA_KIND)
             .and_then(|v| serde_json::from_value(v.clone()).ok());
-        let agent_id = Self::path_agent_id(&entry.path);
+        let agent_id = Self::metadata_str(&metadata, METADATA_ZC_AGENT);
+        let namespace = Self::metadata_str(&metadata, METADATA_ZC_NAMESPACE)
+            .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
         MemoryEntry {
             id: entry.id,
             key,
@@ -265,7 +326,7 @@ impl TachiMemory {
             timestamp: entry.timestamp,
             session_id,
             score,
-            namespace: Self::path_namespace(&entry.path).unwrap_or_else(|| entry.scope.clone()),
+            namespace,
             importance: Some(entry.importance),
             superseded_by: None,
             kind,
@@ -327,6 +388,35 @@ impl TachiMemory {
             .collect()
     }
 
+    /// Grow `list_by_path` until the page is not full — never treat a fixed
+    /// cap as a complete scan.
+    fn list_prefix_complete(
+        store: &MemoryStore,
+        prefix: &str,
+        page_size: usize,
+    ) -> anyhow::Result<Vec<memcore::MemoryEntry>> {
+        let mut limit = page_size.max(1);
+        loop {
+            let rows = store
+                .list_by_path(prefix, limit, false)
+                .map_err(|e| anyhow::Error::msg(format!("tachi list failed: {e}")))?;
+            if rows.len() < limit || limit >= MAX_LIST_GROW {
+                return Ok(rows);
+            }
+            limit = limit.saturating_mul(2).min(MAX_LIST_GROW);
+        }
+    }
+
+    fn list_prefix_recent(
+        store: &MemoryStore,
+        prefix: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<memcore::MemoryEntry>> {
+        store
+            .list_by_path_recent(prefix, limit.max(1), false)
+            .map_err(|e| anyhow::Error::msg(format!("tachi list_recent failed: {e}")))
+    }
+
     async fn store_internal(
         &self,
         key: &str,
@@ -348,7 +438,8 @@ impl TachiMemory {
             Some(ns) if ns.starts_with("user:") => "user".to_string(),
             _ => "project".to_string(),
         };
-        let metadata = Self::build_metadata(key, &category, session_id, &options);
+        let metadata =
+            Self::build_metadata(key, &category, session_id, namespace, agent_id, &options);
 
         let store = self.store.clone();
         let path_c = path.clone();
@@ -356,13 +447,30 @@ impl TachiMemory {
         let category_c = Self::category_to_memcore(&category);
         let embedding_c = embedding.clone();
         let scope_c = scope;
+        let page_size = self.list_page_size;
+        let key_owned = key.to_string();
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let mut store = store.lock();
+            // Exact-path hit first; fall back to metadata key match under the
+            // same agent prefix so identity upgrades stay stable.
             let existing_id = store
                 .list_by_path(&path_c, 8, false)
                 .ok()
-                .and_then(|rows| rows.into_iter().find(|e| e.path == path_c).map(|e| e.id));
+                .and_then(|rows| rows.into_iter().find(|e| e.path == path_c).map(|e| e.id))
+                .or_else(|| {
+                    let agent_prefix = path_c.split('/').take(3).collect::<Vec<_>>().join("/");
+                    Self::list_prefix_complete(&store, &agent_prefix, page_size)
+                        .ok()
+                        .and_then(|rows| {
+                            rows.into_iter()
+                                .find(|e| {
+                                    Self::metadata_str(&e.metadata, METADATA_ZC_KEY).as_deref()
+                                        == Some(key_owned.as_str())
+                                })
+                                .map(|e| e.id)
+                        })
+                });
 
             let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
             let entry = memcore::MemoryEntry {
@@ -404,13 +512,39 @@ impl TachiMemory {
 
     async fn list_all(&self) -> anyhow::Result<Vec<MemoryEntry>> {
         let store = self.store.clone();
+        let page_size = self.list_page_size;
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
             let store = store.lock();
-            let rows = store
-                .list_by_path("/agents", LIST_LIMIT, false)
-                .map_err(|e| anyhow::Error::msg(format!("tachi list failed: {e}")))?;
+            let rows = Self::list_prefix_complete(&store, "/agents", page_size)?;
             Ok(rows
                 .into_iter()
+                .map(|row| Self::memcore_to_zeroclaw(row, None))
+                .collect())
+        })
+        .await?
+    }
+
+    async fn find_rows_by_key(
+        &self,
+        key: &str,
+        agent_id: Option<&str>,
+    ) -> anyhow::Result<Vec<MemoryEntry>> {
+        let store = self.store.clone();
+        let page_size = self.list_page_size;
+        let key = key.to_string();
+        let prefix = match agent_id {
+            Some(aid) => format!("/agents/{}/", Self::agent_segment(Some(aid))),
+            None => "/agents".to_string(),
+        };
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
+            let store = store.lock();
+            let rows = Self::list_prefix_complete(&store, &prefix, page_size)?;
+            Ok(rows
+                .into_iter()
+                .filter(|row| {
+                    Self::metadata_str(&row.metadata, METADATA_ZC_KEY).as_deref()
+                        == Some(key.as_str())
+                })
                 .map(|row| Self::memcore_to_zeroclaw(row, None))
                 .collect())
         })
@@ -428,9 +562,22 @@ impl TachiMemory {
         allowed_agents: Option<&[&str]>,
         path_prefix: Option<String>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
+        let prefix = path_prefix.unwrap_or_else(|| "/agents".to_string());
         if is_recent_recall_query(query) {
-            let mut entries = self.list_all().await?;
-            entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            let store = self.store.clone();
+            // Over-fetch so post-filters still fill `limit`.
+            let fetch = limit.saturating_mul(4).max(limit).max(16);
+            let prefix_c = prefix.clone();
+            let mut entries =
+                tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
+                    let store = store.lock();
+                    let rows = Self::list_prefix_recent(&store, &prefix_c, fetch)?;
+                    Ok(rows
+                        .into_iter()
+                        .map(|row| Self::memcore_to_zeroclaw(row, Some(1.0)))
+                        .collect())
+                })
+                .await??;
             entries = Self::filter_entries(
                 entries,
                 session_id,
@@ -440,9 +587,6 @@ impl TachiMemory {
                 allowed_agents,
                 limit,
             );
-            for entry in &mut entries {
-                entry.score = Some(1.0);
-            }
             return Ok(entries);
         }
 
@@ -450,7 +594,7 @@ impl TachiMemory {
         let store = self.store.clone();
         let query_c = query.to_string();
         let weights = self.hybrid_weights();
-        let path_prefix_c = path_prefix.clone();
+        let path_prefix_c = Some(prefix);
 
         let mut results =
             tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
@@ -490,6 +634,54 @@ impl TachiMemory {
 
     fn swap_embedder(&self, embedder: Arc<dyn EmbeddingProvider>) {
         *self.embedder.write() = embedder;
+    }
+
+    async fn delete_ids(&self, ids: Vec<String>) -> anyhow::Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            let mut store = store.lock();
+            let mut deleted = 0usize;
+            for id in ids {
+                if store
+                    .delete(&id)
+                    .map_err(|e| anyhow::Error::msg(format!("{e}")))?
+                {
+                    deleted += 1;
+                }
+            }
+            Ok(deleted)
+        })
+        .await?
+    }
+
+    async fn list_agent_entries(&self, agent_alias: &str) -> anyhow::Result<Vec<MemoryEntry>> {
+        let store = self.store.clone();
+        let page_size = self.list_page_size;
+        let prefix = format!("/agents/{}/", Self::agent_segment(Some(agent_alias)));
+        let agent_alias = agent_alias.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
+            let store = store.lock();
+            let rows = Self::list_prefix_complete(&store, &prefix, page_size)?;
+            Ok(rows
+                .into_iter()
+                .filter(|row| {
+                    Self::metadata_str(&row.metadata, METADATA_ZC_AGENT).as_deref()
+                        == Some(agent_alias.as_str())
+                        || Self::agent_segment(Some(&agent_alias))
+                            == row
+                                .path
+                                .trim_start_matches('/')
+                                .split('/')
+                                .nth(1)
+                                .unwrap_or("")
+                })
+                .map(|row| Self::memcore_to_zeroclaw(row, None))
+                .collect())
+        })
+        .await?
     }
 }
 
@@ -562,8 +754,8 @@ impl Memory for TachiMemory {
     }
 
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
-        let entries = self.list_all().await?;
-        Ok(entries.into_iter().find(|e| e.key == key))
+        let mut rows = self.find_rows_by_key(key, None).await?;
+        Ok(rows.pop())
     }
 
     async fn get_for_agent(
@@ -571,19 +763,8 @@ impl Memory for TachiMemory {
         key: &str,
         agent_id: &str,
     ) -> anyhow::Result<Option<MemoryEntry>> {
-        let prefix = format!("/agents/{}/", Self::sanitize_path_segment(agent_id));
-        let key_seg = Self::sanitize_path_segment(key);
-        let store = self.store.clone();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<Option<MemoryEntry>> {
-            let store = store.lock();
-            let hit = store
-                .list_by_path(&prefix, LIST_LIMIT, false)
-                .map_err(|e| anyhow::Error::msg(format!("{e}")))?
-                .into_iter()
-                .find(|row| Self::path_key(&row.path) == key_seg);
-            Ok(hit.map(|row| Self::memcore_to_zeroclaw(row, None)))
-        })
-        .await?
+        let mut rows = self.find_rows_by_key(key, Some(agent_id)).await?;
+        Ok(rows.pop())
     }
 
     async fn list(
@@ -602,62 +783,15 @@ impl Memory for TachiMemory {
     }
 
     async fn forget(&self, key: &str) -> anyhow::Result<bool> {
-        let entries = self.list_all().await?;
-        let ids: Vec<String> = entries
-            .into_iter()
-            .filter(|e| e.key == key)
-            .map(|e| e.id)
-            .collect();
-        if ids.is_empty() {
-            return Ok(false);
-        }
-        let store = self.store.clone();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let mut store = store.lock();
-            let mut deleted = false;
-            for id in ids {
-                if store
-                    .delete(&id)
-                    .map_err(|e| anyhow::Error::msg(format!("{e}")))?
-                {
-                    deleted = true;
-                }
-            }
-            Ok(deleted)
-        })
-        .await?
+        let rows = self.find_rows_by_key(key, None).await?;
+        let ids: Vec<String> = rows.into_iter().map(|e| e.id).collect();
+        Ok(self.delete_ids(ids).await? > 0)
     }
 
     async fn forget_for_agent(&self, key: &str, agent_id: &str) -> anyhow::Result<bool> {
-        let store = self.store.clone();
-        let agent_id = agent_id.to_string();
-        let key = key.to_string();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-            let mut store = store.lock();
-            let prefix = format!("/agents/{}/", Self::sanitize_path_segment(&agent_id));
-            let rows = store
-                .list_by_path(&prefix, LIST_LIMIT, false)
-                .map_err(|e| anyhow::Error::msg(format!("{e}")))?;
-            let ids: Vec<String> = rows
-                .into_iter()
-                .filter(|row| Self::path_key(&row.path) == Self::sanitize_path_segment(&key))
-                .map(|row| row.id)
-                .collect();
-            if ids.is_empty() {
-                return Ok(false);
-            }
-            let mut deleted = false;
-            for id in ids {
-                if store
-                    .delete(&id)
-                    .map_err(|e| anyhow::Error::msg(format!("{e}")))?
-                {
-                    deleted = true;
-                }
-            }
-            Ok(deleted)
-        })
-        .await?
+        let rows = self.find_rows_by_key(key, Some(agent_id)).await?;
+        let ids: Vec<String> = rows.into_iter().map(|e| e.id).collect();
+        Ok(self.delete_ids(ids).await? > 0)
     }
 
     async fn purge_namespace(&self, namespace: &str) -> anyhow::Result<usize> {
@@ -670,40 +804,88 @@ impl Memory for TachiMemory {
         self.delete_ids(ids).await
     }
 
+    async fn purge_session(&self, session_id: &str) -> anyhow::Result<usize> {
+        let entries = self.list_all().await?;
+        let ids: Vec<String> = entries
+            .into_iter()
+            .filter(|e| e.session_id.as_deref() == Some(session_id))
+            .map(|e| e.id)
+            .collect();
+        self.delete_ids(ids).await
+    }
+
+    async fn purge_session_for_agent(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+    ) -> anyhow::Result<usize> {
+        let entries = self.list_all().await?;
+        let ids: Vec<String> = entries
+            .into_iter()
+            .filter(|e| {
+                e.session_id.as_deref() == Some(session_id)
+                    && e.agent_id.as_deref() == Some(agent_id)
+            })
+            .map(|e| e.id)
+            .collect();
+        self.delete_ids(ids).await
+    }
+
+    async fn export_agent(&self, agent_alias: &str) -> anyhow::Result<Vec<MemoryEntry>> {
+        let mut entries = self.list_agent_entries(agent_alias).await?;
+        entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        Ok(entries)
+    }
+
     async fn purge_agent(&self, agent_alias: &str) -> anyhow::Result<usize> {
-        let prefix = format!("/agents/{}/", Self::sanitize_path_segment(agent_alias));
+        let entries = self.list_agent_entries(agent_alias).await?;
+        let ids: Vec<String> = entries.into_iter().map(|e| e.id).collect();
+        self.delete_ids(ids).await
+    }
+
+    async fn rename_agent(&self, from: &str, to: &str) -> anyhow::Result<usize> {
+        if from == to {
+            return Ok(0);
+        }
         let store = self.store.clone();
+        let page_size = self.list_page_size;
+        let from = from.to_string();
+        let to = to.to_string();
+        let from_seg = Self::agent_segment(Some(&from));
+        let to_seg = Self::agent_segment(Some(&to));
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
             let mut store = store.lock();
-            let rows = store
-                .list_by_path(&prefix, LIST_LIMIT, false)
-                .map_err(|e| anyhow::Error::msg(format!("{e}")))?;
-            let ids: Vec<String> = rows.into_iter().map(|row| row.id).collect();
-            let mut deleted = 0usize;
-            for id in ids {
-                if store
-                    .delete(&id)
-                    .map_err(|e| anyhow::Error::msg(format!("{e}")))?
-                {
-                    deleted += 1;
+            let prefix = format!("/agents/{from_seg}/");
+            let rows = Self::list_prefix_complete(&store, &prefix, page_size)?;
+            let mut rewritten = 0usize;
+            for mut row in rows {
+                let agent_meta = Self::metadata_str(&row.metadata, METADATA_ZC_AGENT);
+                if agent_meta.as_deref() != Some(from.as_str()) && !row.path.starts_with(&prefix) {
+                    continue;
                 }
+                let rest = row
+                    .path
+                    .strip_prefix(&format!("/agents/{from_seg}"))
+                    .unwrap_or("");
+                row.path = format!("/agents/{to_seg}{rest}");
+                if let Some(obj) = row.metadata.as_object_mut() {
+                    obj.insert(
+                        METADATA_ZC_AGENT.to_string(),
+                        serde_json::Value::String(to.clone()),
+                    );
+                }
+                store
+                    .upsert(&row)
+                    .map_err(|e| anyhow::Error::msg(format!("tachi rename upsert failed: {e}")))?;
+                rewritten += 1;
             }
-            Ok(deleted)
+            Ok(rewritten)
         })
         .await?
     }
 
     async fn count_agent(&self, agent_alias: &str) -> anyhow::Result<usize> {
-        let prefix = format!("/agents/{}/", Self::sanitize_path_segment(agent_alias));
-        let store = self.store.clone();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-            let store = store.lock();
-            let rows = store
-                .list_by_path(&prefix, LIST_LIMIT, false)
-                .map_err(|e| anyhow::Error::msg(format!("{e}")))?;
-            Ok(rows.len())
-        })
-        .await?
+        Ok(self.list_agent_entries(agent_alias).await?.len())
     }
 
     async fn count(&self) -> anyhow::Result<usize> {
@@ -806,7 +988,7 @@ impl Memory for TachiMemory {
         if allowed_agent_ids.len() == 1 {
             let prefix = format!(
                 "/agents/{}/",
-                Self::sanitize_path_segment(allowed_agent_ids[0])
+                Self::agent_segment(Some(allowed_agent_ids[0]))
             );
             return self
                 .recall_internal(
@@ -861,42 +1043,45 @@ impl Memory for TachiMemory {
 
     async fn stats(&self) -> anyhow::Result<MemoryStats> {
         let store = self.store.clone();
+        let page_size = self.list_page_size;
         tokio::task::spawn_blocking(move || -> anyhow::Result<MemoryStats> {
             let store = store.lock();
             let stats = store
                 .stats(false)
                 .map_err(|e| anyhow::Error::msg(format!("{e}")))?;
             let by_category: Vec<(String, u64)> = stats.by_category.into_iter().collect();
+            let rows = Self::list_prefix_complete(&store, "/agents", page_size)?;
+            let mut pinned_rows = 0u64;
+            let mut superseded_rows = 0u64;
+            let mut bytes = 0u64;
+            for row in &rows {
+                if row
+                    .metadata
+                    .get(METADATA_PINNED)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    pinned_rows += 1;
+                }
+                // memcore soft-hides superseded rows from default list; count
+                // only what we can see in metadata if present.
+                if row
+                    .metadata
+                    .get("superseded_by")
+                    .and_then(|v| v.as_str())
+                    .is_some()
+                {
+                    superseded_rows += 1;
+                }
+                bytes += row.text.len() as u64;
+            }
             Ok(MemoryStats {
                 total_rows: stats.total,
                 by_category,
-                superseded_rows: 0,
-                pinned_rows: 0,
-                bytes: 0,
+                superseded_rows,
+                pinned_rows,
+                bytes,
             })
-        })
-        .await?
-    }
-}
-
-impl TachiMemory {
-    async fn delete_ids(&self, ids: Vec<String>) -> anyhow::Result<usize> {
-        if ids.is_empty() {
-            return Ok(0);
-        }
-        let store = self.store.clone();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-            let mut store = store.lock();
-            let mut deleted = 0usize;
-            for id in ids {
-                if store
-                    .delete(&id)
-                    .map_err(|e| anyhow::Error::msg(format!("{e}")))?
-                {
-                    deleted += 1;
-                }
-            }
-            Ok(deleted)
         })
         .await?
     }
@@ -920,6 +1105,20 @@ mod tests {
     fn temp_tachi() -> (TempDir, TachiMemory) {
         let tmp = TempDir::new().unwrap();
         let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        (tmp, mem)
+    }
+
+    fn temp_tachi_small_page() -> (TempDir, TachiMemory) {
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::with_embedder_and_page_size(
+            "tachi",
+            tmp.path(),
+            Arc::new(super::super::embeddings::NoopEmbedding),
+            0.7,
+            0.3,
+            2,
+        )
+        .unwrap();
         (tmp, mem)
     }
 
@@ -1056,5 +1255,176 @@ mod tests {
 
         let listed = mem.list(Some(&MemoryCategory::Daily), None).await.unwrap();
         assert!(listed.iter().any(|e| e.key == "daily_note"));
+    }
+
+    #[tokio::test]
+    async fn user_namespace_store_recall_purge_roundtrip() {
+        let (_tmp, mem) = temp_tachi();
+        mem.store_with_agent(
+            "pref",
+            "alice user-namespace fact",
+            MemoryCategory::Core,
+            None,
+            Some("user:alice"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let hits = mem
+            .recall_namespaced("user:alice", "*", 5, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].namespace, "user:alice");
+        assert_eq!(hits[0].key, "pref");
+
+        let purged = mem.purge_namespace("user:alice").await.unwrap();
+        assert_eq!(purged, 1);
+        let after = mem
+            .recall_namespaced("user:alice", "*", 5, None, None, None)
+            .await
+            .unwrap();
+        assert!(after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn key_collision_distinct_identities() {
+        let (_tmp, mem) = temp_tachi();
+        mem.store("a/b", "slash key content", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        mem.store("a_b", "underscore key content", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+
+        let slash = mem.get("a/b").await.unwrap().expect("slash key");
+        let under = mem.get("a_b").await.unwrap().expect("underscore key");
+        assert_eq!(slash.content, "slash key content");
+        assert_eq!(under.content, "underscore key content");
+        assert_ne!(slash.id, under.id);
+        assert_eq!(mem.count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn export_agent_then_purge_returns_entries() {
+        let (_tmp, mem) = temp_tachi();
+        mem.store_with_agent(
+            "k1",
+            "agent alpha row one",
+            MemoryCategory::Core,
+            None,
+            None,
+            None,
+            Some("alpha"),
+        )
+        .await
+        .unwrap();
+        mem.store_with_agent(
+            "k2",
+            "agent alpha row two",
+            MemoryCategory::Daily,
+            None,
+            None,
+            None,
+            Some("alpha"),
+        )
+        .await
+        .unwrap();
+
+        let exported = mem.export_agent("alpha").await.unwrap();
+        assert_eq!(exported.len(), 2);
+        assert!(exported.iter().any(|e| e.key == "k1"));
+        assert!(exported.iter().any(|e| e.key == "k2"));
+
+        let purged = mem.purge_agent("alpha").await.unwrap();
+        assert_eq!(purged, 2);
+        assert!(mem.export_agent("alpha").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn purge_session_removes_only_that_session() {
+        let (_tmp, mem) = temp_tachi();
+        mem.store(
+            "s1",
+            "session one row",
+            MemoryCategory::Core,
+            Some("sess-a"),
+        )
+        .await
+        .unwrap();
+        mem.store(
+            "s2",
+            "session two row",
+            MemoryCategory::Core,
+            Some("sess-b"),
+        )
+        .await
+        .unwrap();
+
+        let purged = mem.purge_session("sess-a").await.unwrap();
+        assert_eq!(purged, 1);
+        assert!(mem.get("s1").await.unwrap().is_none());
+        assert!(mem.get("s2").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn rename_agent_moves_entries() {
+        let (_tmp, mem) = temp_tachi();
+        mem.store_with_agent(
+            "note",
+            "owned by old alias",
+            MemoryCategory::Core,
+            None,
+            None,
+            None,
+            Some("old_alias"),
+        )
+        .await
+        .unwrap();
+
+        let moved = mem.rename_agent("old_alias", "new_alias").await.unwrap();
+        assert_eq!(moved, 1);
+
+        assert!(
+            mem.recall_for_agents(&["old_alias"], "owned", 5, None, None, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let hits = mem
+            .recall_for_agents(&["new_alias"], "owned", 5, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].agent_id.as_deref(), Some("new_alias"));
+        assert_eq!(hits[0].key, "note");
+    }
+
+    #[tokio::test]
+    async fn get_and_forget_survive_small_list_page_cap() {
+        let (_tmp, mem) = temp_tachi_small_page();
+        // With page_size=2, a naive single list_by_path call would truncate.
+        // Growing scan + metadata key lookup must still find every row.
+        for i in 0..5 {
+            mem.store(
+                &format!("key_{i}"),
+                &format!("content number {i} unique"),
+                MemoryCategory::Core,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(mem.count().await.unwrap(), 5);
+
+        let hit = mem.get("key_4").await.unwrap().expect("key_4 visible");
+        assert!(hit.content.contains("number 4"));
+
+        assert!(mem.forget("key_0").await.unwrap());
+        assert!(mem.get("key_0").await.unwrap().is_none());
+        assert_eq!(mem.count().await.unwrap(), 4);
+        assert!(mem.get("key_3").await.unwrap().is_some());
     }
 }
