@@ -5,8 +5,18 @@
 //!
 //! **Importance:** the enricher JSON may include `importance`, but memcore's
 //! public `update_enrichment_fields` has no importance parameter and we do not
-//! reach into SQL — so importance is parsed only for forward-compat and then
-//! dropped.
+//! reach into SQL — so importance is deliberately not written (and not parsed).
+//!
+//! # Adjudicated non-fixes
+//!
+//! - **Global backfill via `AgentScopedMemory`:** enrichment intentionally walks
+//!   the shared install store (one DB per install). The ≤16-row / 12h window
+//!   makes cross-agent budget negligible; identity fields remain untouchable
+//!   through `update_enrichment_fields`.
+//! - **Gateway WS path:** `zeroclaw-gateway` calls `consolidation::consolidate_turn`
+//!   directly (`ws.rs`) and therefore never triggers enrichment — known
+//!   limitation. The orchestrator / `DefaultMemoryStrategy` path is the
+//!   supported cadence.
 
 use memcore::MemoryStore;
 use parking_lot::Mutex;
@@ -17,6 +27,15 @@ use zeroclaw_providers::ProviderDispatch;
 
 /// Max raw entries enriched in one pass (unattended batch bound).
 const ENRICHMENT_BATCH_LIMIT: usize = 16;
+
+/// Max keywords written per enrichment update (LLM output bound).
+const MAX_KEYWORDS: usize = 16;
+
+/// Max entities written per enrichment update (LLM output bound).
+const MAX_ENTITIES: usize = 16;
+
+/// Max UTF-8 chars kept per keyword / entity string after trim.
+const MAX_TAG_CHARS: usize = 64;
 
 const ENRICH_SYSTEM_PROMPT: &str = r#"You are a memory enrichment system for an autonomous agent.
 Given a raw memory note, extract structured fields for recall.
@@ -39,17 +58,18 @@ struct EnrichmentParse {
     keywords: Vec<String>,
     #[serde(default)]
     entities: Vec<String>,
-    /// Advisory only — not written back (no public memcore importance API on
-    /// the enrichment write path).
-    #[serde(default)]
-    #[allow(dead_code)]
-    importance: Option<f64>,
 }
 
 struct EnrichCandidate {
     id: String,
     text: String,
     revision: i64,
+    /// Row already has a non-empty summary — do not overwrite.
+    has_summary: bool,
+    /// Row already has keywords — do not overwrite.
+    has_keywords: bool,
+    /// Row already has entities — do not overwrite.
+    has_entities: bool,
 }
 
 /// Run one enrichment pass on the live store handle.
@@ -72,21 +92,41 @@ pub async fn run_enrichment_pass(
             Ok(p) => p,
             Err(_) => continue,
         };
-        if parsed.summary.trim().is_empty()
-            && parsed.keywords.is_empty()
-            && parsed.entities.is_empty()
-        {
+
+        let summary_owned = truncate_summary(parsed.summary.trim());
+        let keywords = bound_tags(parsed.keywords, MAX_KEYWORDS);
+        let entities = bound_tags(parsed.entities, MAX_ENTITIES);
+
+        // Only Some(...) for a field we are genuinely filling. Skip fields that
+        // (a) already exist on the row, or (b) came back empty from the parse.
+        let summary_arg: Option<&str> = if cand.has_summary || summary_owned.is_empty() {
+            None
+        } else {
+            Some(summary_owned.as_str())
+        };
+        let keywords_arg: Option<&[String]> = if cand.has_keywords || keywords.is_empty() {
+            None
+        } else {
+            Some(keywords.as_slice())
+        };
+        let entities_arg: Option<&[String]> = if cand.has_entities || entities.is_empty() {
+            None
+        } else {
+            Some(entities.as_slice())
+        };
+
+        if summary_arg.is_none() && keywords_arg.is_none() && entities_arg.is_none() {
             continue;
         }
-        let summary = truncate_summary(&parsed.summary);
+
         let wrote = {
             let mut guard = store.lock();
             match guard.update_enrichment_fields(
                 &cand.id,
-                Some(summary.as_str()),
+                summary_arg,
                 None, // embeddings stay on the existing embedder path
-                Some(parsed.keywords.as_slice()),
-                Some(parsed.entities.as_slice()),
+                keywords_arg,
+                entities_arg,
                 cand.revision,
             ) {
                 Ok(true) => true,
@@ -140,6 +180,11 @@ fn push_raw_candidate(
     if !seen.insert(id.clone()) {
         return Ok(());
     }
+    // memcore scanners (entries_missing_summaries / entries_missing_metadata at
+    // rev 7ae2c0a0) have no anchor/tier/LIMIT filter — post-filtering is ours.
+    if id.starts_with("anchor:") {
+        return Ok(());
+    }
     let Some(entry) = store
         .get(&id)
         .map_err(|e| anyhow::Error::msg(format!("tachi enrichment: get {id}: {e}")))?
@@ -152,10 +197,18 @@ fn push_raw_candidate(
     // Already fully enriched (scanner race / non-empty summary+keywords).
     let has_summary = !entry.summary.trim().is_empty();
     let has_keywords = !entry.keywords.is_empty();
+    let has_entities = !entry.entities.is_empty();
     if has_summary && has_keywords {
         return Ok(());
     }
-    out.push(EnrichCandidate { id, text, revision });
+    out.push(EnrichCandidate {
+        id,
+        text,
+        revision,
+        has_summary,
+        has_keywords,
+        has_entities,
+    });
     Ok(())
 }
 
@@ -199,6 +252,20 @@ fn strip_json_fences(raw: &str) -> String {
 
 fn truncate_summary(summary: &str) -> String {
     summary.chars().take(100).collect()
+}
+
+/// Trim, drop empties, cap per-string length and total count before write.
+fn bound_tags(tags: Vec<String>, max_count: usize) -> Vec<String> {
+    tags.into_iter()
+        .filter_map(|t| {
+            let trimmed = t.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            Some(trimmed.chars().take(MAX_TAG_CHARS).collect::<String>())
+        })
+        .take(max_count)
+        .collect()
 }
 
 #[cfg(all(test, feature = "tachi"))]
@@ -344,6 +411,179 @@ mod tests {
         assert!(row.entities.iter().any(|e| e == "Asia/Shanghai"));
         // memcore update_enrichment_fields is revision-checked but does not
         // bump revision; success with expected_revision=1 proves the check.
+        assert_eq!(row.revision, 1);
+    }
+
+    #[tokio::test]
+    async fn enrich_preserves_existing_summary_when_llm_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        {
+            let mut store = mem.store_handle().lock();
+            seed_raw(
+                &mut store,
+                "raw-partial",
+                "note that already has a summary but needs keywords",
+                "Keep this summary",
+                &[],
+                "raw",
+                1,
+            );
+        }
+
+        let provider = FixedJsonProvider::ok(
+            r#"{"summary":"","keywords":["timezone","trading"],"entities":[]}"#,
+        );
+        let n = mem
+            .run_llm_enrichment(&provider, "test-model")
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        let store = mem.store_handle().lock();
+        let row = store.get("raw-partial").unwrap().unwrap();
+        assert_eq!(row.summary, "Keep this summary");
+        assert!(row.keywords.iter().any(|k| k == "timezone"));
+        assert!(row.keywords.iter().any(|k| k == "trading"));
+    }
+
+    #[tokio::test]
+    async fn enrich_bounds_keywords_and_entities_before_write() {
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        {
+            let mut store = mem.store_handle().lock();
+            seed_raw(
+                &mut store,
+                "raw-bound",
+                "note that needs bounded tags",
+                "",
+                &[],
+                "raw",
+                1,
+            );
+        }
+
+        let long = "x".repeat(500);
+        let keywords: Vec<String> = (0..100).map(|i| format!("{long}-{i}")).collect();
+        let entities: Vec<String> = (0..100).map(|i| format!("ent-{long}-{i}")).collect();
+        let body = serde_json::json!({
+            "summary": "Bounded tags",
+            "keywords": keywords,
+            "entities": entities,
+        });
+        let provider = FixedJsonProvider::ok(&body.to_string());
+        let n = mem
+            .run_llm_enrichment(&provider, "test-model")
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+
+        let store = mem.store_handle().lock();
+        let row = store.get("raw-bound").unwrap().unwrap();
+        assert!(row.keywords.len() <= MAX_KEYWORDS);
+        assert!(row.entities.len() <= MAX_ENTITIES);
+        for k in &row.keywords {
+            assert!(k.chars().count() <= MAX_TAG_CHARS);
+        }
+        for e in &row.entities {
+            assert!(e.chars().count() <= MAX_TAG_CHARS);
+        }
+    }
+
+    #[tokio::test]
+    async fn enrich_skips_anchor_ids() {
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        let anchor_id = {
+            let store = mem.store_handle().lock();
+            // Anchors have empty keywords → entries_missing_metadata surfaces
+            // them; post-filter must skip by id prefix (and non-raw tier).
+            store
+                .ensure_anchor(memcore::AnchorKind::Issue, "enrich-skip")
+                .unwrap()
+        };
+        assert!(anchor_id.starts_with("anchor:"));
+
+        let provider = FixedJsonProvider::ok(
+            r#"{"summary":"should not apply","keywords":["x"],"entities":[]}"#,
+        );
+        let n = mem
+            .run_llm_enrichment(&provider, "test-model")
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+
+        let store = mem.store_handle().lock();
+        let row = store.get(&anchor_id).unwrap().unwrap();
+        assert!(row.keywords.is_empty());
+        assert_eq!(row.revision, 1);
+    }
+
+    #[tokio::test]
+    async fn enrich_parses_markdown_fenced_json() {
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        {
+            let mut store = mem.store_handle().lock();
+            seed_raw(
+                &mut store,
+                "raw-fence",
+                "fenced json response note",
+                "",
+                &[],
+                "raw",
+                1,
+            );
+        }
+
+        let provider = FixedJsonProvider::ok(
+            "```json\n{\"summary\":\"From fence\",\"keywords\":[\"fenced\"],\"entities\":[]}\n```",
+        );
+        let n = mem
+            .run_llm_enrichment(&provider, "test-model")
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+
+        let store = mem.store_handle().lock();
+        let row = store.get("raw-fence").unwrap().unwrap();
+        assert_eq!(row.summary, "From fence");
+        assert!(row.keywords.iter().any(|k| k == "fenced"));
+    }
+
+    #[tokio::test]
+    async fn enrich_skips_wrong_type_keywords_leaves_row_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        {
+            let mut store = mem.store_handle().lock();
+            seed_raw(
+                &mut store,
+                "raw-wrong-type",
+                "wrong keywords type note",
+                "",
+                &[],
+                "raw",
+                1,
+            );
+        }
+
+        let provider =
+            FixedJsonProvider::ok(r#"{"summary":"should not write","keywords":"not-an-array"}"#);
+        let n = mem
+            .run_llm_enrichment(&provider, "test-model")
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+
+        let store = mem.store_handle().lock();
+        let row = store.get("raw-wrong-type").unwrap().unwrap();
+        assert_eq!(row.summary, "");
+        assert!(row.keywords.is_empty());
         assert_eq!(row.revision, 1);
     }
 
@@ -519,5 +759,19 @@ mod tests {
             let row = store.get("raw-rev").unwrap().unwrap();
             assert_ne!(row.summary, "stale");
         }
+    }
+
+    #[test]
+    fn parse_enrichment_response_accepts_fenced_json() {
+        let raw = "```json\n{\"summary\":\"Hi\",\"keywords\":[\"a\"],\"entities\":[]}\n```";
+        let parsed = parse_enrichment_response(raw).unwrap();
+        assert_eq!(parsed.summary, "Hi");
+        assert_eq!(parsed.keywords, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn parse_enrichment_response_rejects_keywords_wrong_type() {
+        let raw = r#"{"summary":"x","keywords":"not-an-array"}"#;
+        assert!(parse_enrichment_response(raw).is_err());
     }
 }
