@@ -147,6 +147,14 @@ impl<M: Memory> Memory for AuditedMemory<M> {
         self.inner.run_light_sleep_governance()
     }
 
+    async fn run_llm_enrichment(
+        &self,
+        provider: &dyn zeroclaw_api::model_provider::ModelProvider,
+        model: &str,
+    ) -> anyhow::Result<usize> {
+        self.inner.run_llm_enrichment(provider, model).await
+    }
+
     async fn store(
         &self,
         key: &str,

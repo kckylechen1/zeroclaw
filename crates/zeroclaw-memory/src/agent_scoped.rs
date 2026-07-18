@@ -77,6 +77,14 @@ impl Memory for AgentScopedMemory {
         self.inner.run_light_sleep_governance()
     }
 
+    async fn run_llm_enrichment(
+        &self,
+        provider: &dyn zeroclaw_api::model_provider::ModelProvider,
+        model: &str,
+    ) -> Result<usize> {
+        self.inner.run_llm_enrichment(provider, model).await
+    }
+
     async fn store(
         &self,
         key: &str,

@@ -25,6 +25,9 @@
 //!   live store handle via [`Memory::run_light_sleep_governance`], invoked from
 //!   the factory hygiene cadence in [`crate::create_memory_with_storage_and_routes`]
 //!   (and from `DefaultMemoryStrategy::run_governance`).
+//! - Optional LLM enrichment (summary/keywords/entities) runs via
+//!   [`Memory::run_llm_enrichment`] with a per-call provider from
+//!   `DefaultMemoryStrategy::consolidate_turn` (12h state-file cadence).
 
 use super::embeddings::EmbeddingProvider;
 use super::traits::{
@@ -786,6 +789,14 @@ impl Memory for TachiMemory {
     fn run_light_sleep_governance(&self) -> anyhow::Result<()> {
         let _report = self.run_light_sleep_governance_report()?;
         Ok(())
+    }
+
+    async fn run_llm_enrichment(
+        &self,
+        provider: &dyn zeroclaw_api::model_provider::ModelProvider,
+        model: &str,
+    ) -> anyhow::Result<usize> {
+        crate::tachi_enrichment::run_enrichment_pass(self.store_handle(), provider, model).await
     }
 
     async fn store(
