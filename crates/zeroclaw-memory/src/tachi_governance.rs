@@ -241,7 +241,7 @@ mod tests {
     /// `create_memory_with_storage_and_routes` (not `run_tachi_governance` alone).
     /// Deleting the `run_light_sleep_governance` one-liner there turns this RED.
     #[test]
-    fn near_dup_merge_collapses_transitive_raw_chain_via_strategy_entry() {
+    fn near_dup_merge_collapses_transitive_raw_chain_via_factory_hygiene() {
         let tmp = TempDir::new().unwrap();
         // Seed on a short-lived handle, then drop so the factory owns the live store.
         {
@@ -577,6 +577,65 @@ mod tests {
             after.keywords
         );
         assert!(after.keywords.iter().any(|k| k == "bravo"));
+        assert!(
+            after.text.contains("(edited)"),
+            "carry-over must not block legitimate content updates: {:?}",
+            after.text
+        );
+    }
+
+    #[tokio::test]
+    async fn unpin_clears_retention_policy() {
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::with_embedder(
+            "tachi",
+            tmp.path(),
+            Arc::new(crate::embeddings::NoopEmbedding),
+            0.7,
+            0.3,
+        )
+        .unwrap();
+        mem.store_with_options(
+            "pin-toggle",
+            "Row that gets pinned then unpinned",
+            MemoryCategory::Core,
+            None,
+            StoreOptions::default().pinned(true),
+        )
+        .await
+        .unwrap();
+
+        let find_row = |store: &memcore::MemoryStore| {
+            store
+                .list_by_path("/agents", 64, false)
+                .unwrap()
+                .into_iter()
+                .find(|e| {
+                    e.metadata.get("zeroclaw_key").and_then(|v| v.as_str()) == Some("pin-toggle")
+                })
+                .expect("pin-toggle row")
+        };
+        assert_eq!(
+            find_row(&mem.store_handle().lock())
+                .retention_policy
+                .as_deref(),
+            Some("pinned")
+        );
+
+        mem.store_with_options(
+            "pin-toggle",
+            "Row that gets pinned then unpinned",
+            MemoryCategory::Core,
+            None,
+            StoreOptions::default().pinned(false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            find_row(&mem.store_handle().lock()).retention_policy,
+            None,
+            "unpin must clear memcore retention_policy"
+        );
     }
 
     #[test]

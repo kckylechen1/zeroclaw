@@ -143,6 +143,10 @@ impl<M: Memory> Memory for AuditedMemory<M> {
             .refresh_embedder(model_provider, api_key, model, dimensions);
     }
 
+    fn run_light_sleep_governance(&self) -> anyhow::Result<()> {
+        self.inner.run_light_sleep_governance()
+    }
+
     async fn store(
         &self,
         key: &str,
