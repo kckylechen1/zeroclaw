@@ -63,6 +63,8 @@ pub struct TachiMemory {
     keyword_weight: f32,
     /// Page size seed for complete prefix scans (overridable in tests).
     list_page_size: usize,
+    /// Upper bound for growing prefix scans (overridable in tests).
+    max_list_grow: usize,
 }
 
 impl TachiMemory {
@@ -90,11 +92,12 @@ impl TachiMemory {
             vector_weight,
             keyword_weight,
             DEFAULT_LIST_PAGE_SIZE,
+            MAX_LIST_GROW,
         )
     }
 
-    /// Like [`Self::with_embedder`], but with an injectable list page-size seed
-    /// for regression tests that prove get/forget survive small caps.
+    /// Like [`Self::with_embedder`], but with injectable list page-size / grow
+    /// caps for regression tests.
     pub fn with_embedder_and_page_size(
         alias: &str,
         workspace_dir: &Path,
@@ -102,6 +105,7 @@ impl TachiMemory {
         vector_weight: f32,
         keyword_weight: f32,
         list_page_size: usize,
+        max_list_grow: usize,
     ) -> anyhow::Result<Self> {
         let db_path = workspace_dir.join("memory").join("tachi.db");
         if let Some(parent) = db_path.parent() {
@@ -113,6 +117,7 @@ impl TachiMemory {
                 .context("tachi memory db path is not valid UTF-8")?,
         )
         .map_err(|e| anyhow::Error::msg(format!("failed to open tachi memory db: {e}")))?;
+        let list_page_size = list_page_size.max(1);
         Ok(Self {
             alias: alias.to_string(),
             db_path,
@@ -120,7 +125,8 @@ impl TachiMemory {
             embedder: Arc::new(RwLock::new(embedder)),
             vector_weight,
             keyword_weight,
-            list_page_size: list_page_size.max(1),
+            list_page_size,
+            max_list_grow: max_list_grow.max(list_page_size),
         })
     }
 
@@ -180,20 +186,16 @@ impl TachiMemory {
             .collect()
     }
 
-    /// Collision-free path segment: keep the sanitized form when it equals the
-    /// original; otherwise append a short hash of the original so distinct
-    /// identities that sanitize equally never share a path.
+    /// Injective path segment: always `{sanitized}__{sha256[:8]}` of the
+    /// original so a literal key that looks like an encoded form cannot collide
+    /// with the encoding of a different key. Logical identity lives in metadata.
     fn encode_path_segment(value: &str) -> String {
         let sanitized = Self::sanitize_path_segment(value);
-        if sanitized == value && !value.is_empty() {
-            sanitized
+        let hash = Self::short_hash(value);
+        if sanitized.is_empty() {
+            format!("x__{hash}")
         } else {
-            let hash = Self::short_hash(value);
-            if sanitized.is_empty() {
-                format!("x__{hash}")
-            } else {
-                format!("{sanitized}__{hash}")
-            }
+            format!("{sanitized}__{hash}")
         }
     }
 
@@ -388,22 +390,30 @@ impl TachiMemory {
             .collect()
     }
 
-    /// Grow `list_by_path` until the page is not full — never treat a fixed
-    /// cap as a complete scan.
+    /// Grow `list_by_path` until the page is not full. If the page is still
+    /// full at `max_grow`, fail loud — silent truncation would leave rows
+    /// surviving purge/delete.
     fn list_prefix_complete(
         store: &MemoryStore,
         prefix: &str,
         page_size: usize,
+        max_grow: usize,
     ) -> anyhow::Result<Vec<memcore::MemoryEntry>> {
         let mut limit = page_size.max(1);
+        let max_grow = max_grow.max(limit);
         loop {
             let rows = store
                 .list_by_path(prefix, limit, false)
                 .map_err(|e| anyhow::Error::msg(format!("tachi list failed: {e}")))?;
-            if rows.len() < limit || limit >= MAX_LIST_GROW {
+            if rows.len() < limit {
                 return Ok(rows);
             }
-            limit = limit.saturating_mul(2).min(MAX_LIST_GROW);
+            if limit >= max_grow {
+                return Err(anyhow::Error::msg(format!(
+                    "tachi list truncated: prefix={prefix} returned {limit} rows at max_list_grow={max_grow}"
+                )));
+            }
+            limit = limit.saturating_mul(2).min(max_grow);
         }
     }
 
@@ -448,25 +458,34 @@ impl TachiMemory {
         let embedding_c = embedding.clone();
         let scope_c = scope;
         let page_size = self.list_page_size;
+        let max_grow = self.max_list_grow;
         let key_owned = key.to_string();
+        // Sqlite upsert identity is `(agent_id, key)` — see
+        // `sqlite.rs` `ON CONFLICT(agent_id, key)`. Namespace/category update
+        // in place; they are not part of the identity tuple.
+        let agent_owned = agent_id.unwrap_or(DEFAULT_AGENT).to_string();
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let mut store = store.lock();
-            // Exact-path hit first; fall back to metadata key match under the
-            // same agent prefix so identity upgrades stay stable.
+            // Exact-path hit first; fall back to sqlite identity (agent, key)
+            // so category/namespace changes update the same row.
             let existing_id = store
                 .list_by_path(&path_c, 8, false)
                 .ok()
                 .and_then(|rows| rows.into_iter().find(|e| e.path == path_c).map(|e| e.id))
                 .or_else(|| {
-                    let agent_prefix = path_c.split('/').take(3).collect::<Vec<_>>().join("/");
-                    Self::list_prefix_complete(&store, &agent_prefix, page_size)
+                    let agent_prefix =
+                        format!("/agents/{}/", Self::agent_segment(Some(&agent_owned)));
+                    Self::list_prefix_complete(&store, &agent_prefix, page_size, max_grow)
                         .ok()
                         .and_then(|rows| {
                             rows.into_iter()
                                 .find(|e| {
                                     Self::metadata_str(&e.metadata, METADATA_ZC_KEY).as_deref()
                                         == Some(key_owned.as_str())
+                                        && Self::metadata_str(&e.metadata, METADATA_ZC_AGENT)
+                                            .as_deref()
+                                            == Some(agent_owned.as_str())
                                 })
                                 .map(|e| e.id)
                         })
@@ -513,9 +532,10 @@ impl TachiMemory {
     async fn list_all(&self) -> anyhow::Result<Vec<MemoryEntry>> {
         let store = self.store.clone();
         let page_size = self.list_page_size;
+        let max_grow = self.max_list_grow;
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
             let store = store.lock();
-            let rows = Self::list_prefix_complete(&store, "/agents", page_size)?;
+            let rows = Self::list_prefix_complete(&store, "/agents", page_size, max_grow)?;
             Ok(rows
                 .into_iter()
                 .map(|row| Self::memcore_to_zeroclaw(row, None))
@@ -531,6 +551,7 @@ impl TachiMemory {
     ) -> anyhow::Result<Vec<MemoryEntry>> {
         let store = self.store.clone();
         let page_size = self.list_page_size;
+        let max_grow = self.max_list_grow;
         let key = key.to_string();
         let prefix = match agent_id {
             Some(aid) => format!("/agents/{}/", Self::agent_segment(Some(aid))),
@@ -538,7 +559,7 @@ impl TachiMemory {
         };
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
             let store = store.lock();
-            let rows = Self::list_prefix_complete(&store, &prefix, page_size)?;
+            let rows = Self::list_prefix_complete(&store, &prefix, page_size, max_grow)?;
             Ok(rows
                 .into_iter()
                 .filter(|row| {
@@ -660,11 +681,12 @@ impl TachiMemory {
     async fn list_agent_entries(&self, agent_alias: &str) -> anyhow::Result<Vec<MemoryEntry>> {
         let store = self.store.clone();
         let page_size = self.list_page_size;
+        let max_grow = self.max_list_grow;
         let prefix = format!("/agents/{}/", Self::agent_segment(Some(agent_alias)));
         let agent_alias = agent_alias.to_string();
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
             let store = store.lock();
-            let rows = Self::list_prefix_complete(&store, &prefix, page_size)?;
+            let rows = Self::list_prefix_complete(&store, &prefix, page_size, max_grow)?;
             Ok(rows
                 .into_iter()
                 .filter(|row| {
@@ -849,6 +871,7 @@ impl Memory for TachiMemory {
         }
         let store = self.store.clone();
         let page_size = self.list_page_size;
+        let max_grow = self.max_list_grow;
         let from = from.to_string();
         let to = to.to_string();
         let from_seg = Self::agent_segment(Some(&from));
@@ -856,7 +879,7 @@ impl Memory for TachiMemory {
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
             let mut store = store.lock();
             let prefix = format!("/agents/{from_seg}/");
-            let rows = Self::list_prefix_complete(&store, &prefix, page_size)?;
+            let rows = Self::list_prefix_complete(&store, &prefix, page_size, max_grow)?;
             let mut rewritten = 0usize;
             for mut row in rows {
                 let agent_meta = Self::metadata_str(&row.metadata, METADATA_ZC_AGENT);
@@ -1044,13 +1067,14 @@ impl Memory for TachiMemory {
     async fn stats(&self) -> anyhow::Result<MemoryStats> {
         let store = self.store.clone();
         let page_size = self.list_page_size;
+        let max_grow = self.max_list_grow;
         tokio::task::spawn_blocking(move || -> anyhow::Result<MemoryStats> {
             let store = store.lock();
             let stats = store
                 .stats(false)
                 .map_err(|e| anyhow::Error::msg(format!("{e}")))?;
             let by_category: Vec<(String, u64)> = stats.by_category.into_iter().collect();
-            let rows = Self::list_prefix_complete(&store, "/agents", page_size)?;
+            let rows = Self::list_prefix_complete(&store, "/agents", page_size, max_grow)?;
             let mut pinned_rows = 0u64;
             let mut superseded_rows = 0u64;
             let mut bytes = 0u64;
@@ -1117,9 +1141,30 @@ mod tests {
             0.7,
             0.3,
             2,
+            MAX_LIST_GROW,
         )
         .unwrap();
         (tmp, mem)
+    }
+
+    fn temp_tachi_tiny_grow_cap() -> (TempDir, TachiMemory) {
+        let tmp = TempDir::new().unwrap();
+        // page_size == max_grow == 2: three rows force a full page at the cap.
+        let mem = TachiMemory::with_embedder_and_page_size(
+            "tachi",
+            tmp.path(),
+            Arc::new(super::super::embeddings::NoopEmbedding),
+            0.7,
+            0.3,
+            2,
+            2,
+        )
+        .unwrap();
+        (tmp, mem)
+    }
+
+    fn encoded_segment_for(value: &str) -> String {
+        TachiMemory::encode_path_segment(value)
     }
 
     #[tokio::test]
@@ -1426,5 +1471,144 @@ mod tests {
         assert!(mem.get("key_0").await.unwrap().is_none());
         assert_eq!(mem.count().await.unwrap(), 4);
         assert!(mem.get("key_3").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn sanitize_collision_slash_vs_colon_remain_distinct() {
+        let (_tmp, mem) = temp_tachi();
+        // Both sanitize to `a_b` under the old non-injective scheme.
+        mem.store("a/b", "slash identity", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        mem.store("a:b", "colon identity", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+
+        let slash = mem.get("a/b").await.unwrap().expect("a/b");
+        let colon = mem.get("a:b").await.unwrap().expect("a:b");
+        assert_eq!(slash.content, "slash identity");
+        assert_eq!(colon.content, "colon identity");
+        assert_ne!(slash.id, colon.id);
+        assert_ne!(
+            encoded_segment_for("a/b"),
+            encoded_segment_for("a:b"),
+            "injective encoding must distinguish sanitize-colliding keys"
+        );
+        assert_eq!(mem.count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn encoded_form_literal_collision_remains_distinct() {
+        let (_tmp, mem) = temp_tachi();
+        mem.store("a/b", "original slash key", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        // Literal key equal to the encoded segment of `a/b` — must not collide.
+        let encoded_of_slash = encoded_segment_for("a/b");
+        mem.store(
+            &encoded_of_slash,
+            "literal encoded-looking key",
+            MemoryCategory::Core,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let original = mem.get("a/b").await.unwrap().expect("a/b");
+        let literal = mem
+            .get(&encoded_of_slash)
+            .await
+            .unwrap()
+            .expect("encoded-form literal");
+        assert_eq!(original.content, "original slash key");
+        assert_eq!(literal.content, "literal encoded-looking key");
+        assert_ne!(original.id, literal.id);
+        assert_eq!(mem.count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn upsert_identity_mirrors_sqlite_agent_and_key() {
+        // Sqlite: ON CONFLICT(agent_id, key) — namespace/category update in place
+        // (`sqlite.rs` store_row_with_metadata). Same agent+key collapses;
+        // different agents stay distinct. The pre-fix fallback matched key
+        // alone under the agent prefix without verifying agent metadata and
+        // could grab the wrong row when paths diverged; matching (agent, key)
+        // keeps identity aligned with sqlite.
+        let (_tmp, mem) = temp_tachi();
+
+        mem.store_with_agent(
+            "shared",
+            "ns-alpha core",
+            MemoryCategory::Core,
+            None,
+            Some("ns-alpha"),
+            None,
+            Some("agent1"),
+        )
+        .await
+        .unwrap();
+        // Same agent+key, different namespace+category → one row (last wins).
+        mem.store_with_agent(
+            "shared",
+            "ns-beta daily",
+            MemoryCategory::Daily,
+            None,
+            Some("ns-beta"),
+            None,
+            Some("agent1"),
+        )
+        .await
+        .unwrap();
+
+        let agent1_rows = mem.export_agent("agent1").await.unwrap();
+        assert_eq!(
+            agent1_rows.len(),
+            1,
+            "sqlite identity (agent_id, key) collapses namespace/category updates"
+        );
+        assert_eq!(agent1_rows[0].content, "ns-beta daily");
+        assert_eq!(agent1_rows[0].namespace, "ns-beta");
+        assert_eq!(agent1_rows[0].category, MemoryCategory::Daily);
+
+        // Different agent, same key → second row.
+        mem.store_with_agent(
+            "shared",
+            "agent2 copy",
+            MemoryCategory::Core,
+            None,
+            Some("ns-alpha"),
+            None,
+            Some("agent2"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mem.export_agent("agent1").await.unwrap().len(), 1);
+        assert_eq!(mem.export_agent("agent2").await.unwrap().len(), 1);
+        assert_eq!(mem.count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_prefix_complete_errors_when_max_grow_full() {
+        let (_tmp, mem) = temp_tachi_tiny_grow_cap();
+        for i in 0..3 {
+            mem.store(
+                &format!("row_{i}"),
+                &format!("payload {i}"),
+                MemoryCategory::Core,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        // count() uses memcore stats (not the growing scan); list must fail loud.
+        assert_eq!(mem.count().await.unwrap(), 3);
+        let err = mem
+            .list(None, None)
+            .await
+            .expect_err("full page at max_list_grow must error");
+        assert!(
+            err.to_string().contains("truncated"),
+            "expected truncation error, got: {err}"
+        );
     }
 }
