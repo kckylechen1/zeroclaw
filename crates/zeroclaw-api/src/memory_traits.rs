@@ -404,6 +404,20 @@ pub trait Memory: Send + Sync + crate::attribution::Attributable {
         Ok(())
     }
 
+    /// Optional LLM enrichment of raw memories (summary / keywords / entities).
+    ///
+    /// Default is a no-op returning `0`. The provider is supplied per call
+    /// (mirrors [`MemoryStrategy::consolidate_turn`]) — backends must not store
+    /// a `ModelProvider` handle. Cadence is owned by the caller (typically
+    /// `DefaultMemoryStrategy::consolidate_turn` via a 12h state-file gate).
+    async fn run_llm_enrichment(
+        &self,
+        _provider: &dyn crate::model_provider::ModelProvider,
+        _model: &str,
+    ) -> anyhow::Result<usize> {
+        Ok(0)
+    }
+
     /// Mark entries as superseded by a newer row.
     ///
     /// Default: no-op. SQL backends can override this with reversible

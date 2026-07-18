@@ -11,6 +11,11 @@ use zeroclaw_config::schema::MemoryConfig;
 
 const HYGIENE_INTERVAL_HOURS: i64 = 12;
 const STATE_FILE: &str = "memory_hygiene_state.json";
+/// Cadence marker for optional LLM enrichment (same 12h window as hygiene).
+///
+/// SSOT: this file is the source of truth for enrichment due-ness — no
+/// in-memory flag is cached across calls.
+const ENRICHMENT_STATE_FILE: &str = "memory_enrichment_state.json";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HygieneReport {
@@ -48,6 +53,52 @@ struct HygieneState {
 /// on the same schedule as [`run_if_due`].
 pub fn is_due(workspace_dir: &Path) -> Result<bool> {
     should_run_now(workspace_dir)
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct EnrichmentCadenceState {
+    last_run_at: Option<String>,
+}
+
+/// Whether the 12h LLM-enrichment cadence window has elapsed.
+///
+/// Independent of hygiene's state file so light-sleep/file pruning and LLM
+/// enrichment can advance on their own clocks. Same interval as hygiene.
+pub fn enrichment_is_due(workspace_dir: &Path) -> Result<bool> {
+    let path = enrichment_state_path(workspace_dir);
+    if !path.exists() {
+        return Ok(true);
+    }
+    let raw = fs::read_to_string(&path)?;
+    let state: EnrichmentCadenceState = match serde_json::from_str(&raw) {
+        Ok(s) => s,
+        Err(_) => return Ok(true),
+    };
+    let Some(last_run_at) = state.last_run_at else {
+        return Ok(true);
+    };
+    let last = match DateTime::parse_from_rfc3339(&last_run_at) {
+        Ok(ts) => ts.with_timezone(&Utc),
+        Err(_) => return Ok(true),
+    };
+    Ok(Utc::now().signed_duration_since(last) >= Duration::hours(HYGIENE_INTERVAL_HOURS))
+}
+
+/// Record that an enrichment pass was attempted (advances the 12h cadence).
+pub fn enrichment_mark_ran(workspace_dir: &Path) -> Result<()> {
+    let path = enrichment_state_path(workspace_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let state = EnrichmentCadenceState {
+        last_run_at: Some(Utc::now().to_rfc3339()),
+    };
+    fs::write(path, serde_json::to_vec_pretty(&state)?)?;
+    Ok(())
+}
+
+fn enrichment_state_path(workspace_dir: &Path) -> PathBuf {
+    workspace_dir.join("state").join(ENRICHMENT_STATE_FILE)
 }
 
 /// Run memory/session hygiene if the cadence window has elapsed.
@@ -544,6 +595,18 @@ mod tests {
                 .max(SystemTime::UNIX_EPOCH),
         );
         set_file_mtime(path, old).unwrap();
+    }
+
+    #[test]
+    fn enrichment_cadence_state_file_is_independent_ssot() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path();
+        assert!(enrichment_is_due(workspace).unwrap());
+        enrichment_mark_ran(workspace).unwrap();
+        assert!(!enrichment_is_due(workspace).unwrap());
+        // Hygiene state is a separate file — marking enrichment must not
+        // satisfy hygiene due-ness.
+        assert!(is_due(workspace).unwrap());
     }
 
     #[test]

@@ -43,6 +43,8 @@ pub mod sqlite;
 #[cfg(feature = "tachi")]
 pub mod tachi;
 #[cfg(feature = "tachi")]
+mod tachi_enrichment;
+#[cfg(feature = "tachi")]
 pub mod tachi_governance;
 #[cfg(all(test, feature = "tachi"))]
 mod tachi_scenarios;
@@ -80,6 +82,26 @@ pub use tachi::TachiMemory;
 #[cfg(feature = "tachi")]
 pub use tachi_governance::{TachiGovernanceReport, run_tachi_governance};
 pub use traits::Memory;
+
+/// Run [`Memory::run_llm_enrichment`] when the 12h enrichment cadence is due.
+///
+/// Advances the enrichment state-file marker after the attempt. If consolidation
+/// (the strategy call site) is never invoked, enrichment never runs — acceptable
+/// without a speculative config key. Non-tachi backends return 0 via the trait
+/// default.
+pub async fn run_llm_enrichment_if_due(
+    memory: &dyn Memory,
+    workspace_dir: &Path,
+    provider: &dyn zeroclaw_api::model_provider::ModelProvider,
+    model: &str,
+) -> anyhow::Result<usize> {
+    if !hygiene::enrichment_is_due(workspace_dir)? {
+        return Ok(0);
+    }
+    let n = memory.run_llm_enrichment(provider, model).await?;
+    hygiene::enrichment_mark_ran(workspace_dir)?;
+    Ok(n)
+}
 #[allow(unused_imports)]
 pub use traits::{
     ExportFilter, MemoryCategory, MemoryEntry, ProceduralMessage, is_recent_recall_query,
