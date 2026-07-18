@@ -62,10 +62,11 @@ pub fn run_tachi_governance_on_handle(
     run_tachi_governance(&mut guard)
 }
 
-/// Metadata keys used to partition unattended near-dup (must match
-/// [`crate::tachi::TachiMemory`] write path).
-const META_ZC_AGENT: &str = "zeroclaw_agent";
-const META_ZC_NAMESPACE: &str = "zeroclaw_namespace";
+// Partition on the same metadata keys the TachiMemory write path uses —
+// shared consts so a rename cannot drift between store and governance.
+use crate::tachi::{
+    METADATA_ZC_AGENT as META_ZC_AGENT, METADATA_ZC_NAMESPACE as META_ZC_NAMESPACE,
+};
 
 /// Scope key for near-dup partitions: `(zeroclaw_agent, zeroclaw_namespace)`.
 ///
@@ -95,6 +96,11 @@ fn near_dup_scope_key(entry: &MemoryEntry) -> (Option<String>, Option<String>) {
 /// partition. Crossing namespaces would drop a `user:kyle` row from
 /// `recall_namespaced("user:kyle")` after fold-into-`default`; crossing agents
 /// would fold one RomanBath character's memory into another's.
+///
+/// **Scan window:** the intake list is a single global
+/// [`NEAR_DUP_RAW_SCAN_CAP`] scan over `/agents` (path-ASC, so path-early
+/// agents win the window); only the O(n²) pair scan runs per partition.
+/// Per-partition intake is a possible follow-up if starvation shows up.
 fn run_near_dup_light_sleep(
     store: &mut MemoryStore,
     threshold: f64,

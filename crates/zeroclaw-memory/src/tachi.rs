@@ -43,8 +43,11 @@ use uuid::Uuid;
 
 const METADATA_ZC_KEY: &str = "zeroclaw_key";
 const METADATA_ZC_CATEGORY: &str = "zeroclaw_category";
-const METADATA_ZC_NAMESPACE: &str = "zeroclaw_namespace";
-const METADATA_ZC_AGENT: &str = "zeroclaw_agent";
+// pub(crate): tachi_governance partitions near-dup on these same keys; a
+// rename drifting between the two files would silently re-enable
+// cross-agent/namespace merges.
+pub(crate) const METADATA_ZC_NAMESPACE: &str = "zeroclaw_namespace";
+pub(crate) const METADATA_ZC_AGENT: &str = "zeroclaw_agent";
 const METADATA_SESSION_ID: &str = "session_id";
 const METADATA_TENANT_ID: &str = "tenant_id";
 const METADATA_PINNED: &str = "pinned";
