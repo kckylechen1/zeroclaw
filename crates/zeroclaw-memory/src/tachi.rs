@@ -186,9 +186,10 @@ impl TachiMemory {
             .collect()
     }
 
-    /// Injective path segment: always `{sanitized}__{sha256[:8]}` of the
-    /// original so a literal key that looks like an encoded form cannot collide
-    /// with the encoding of a different key. Logical identity lives in metadata.
+    /// Injective path segment: always `{sanitized}__{hash}` where `hash` is the
+    /// first 8 **bytes** (16 hex chars, 64 bits) of SHA-256 of the original, so
+    /// a literal key that looks like an encoded form cannot collide with the
+    /// encoding of a different key. Logical identity lives in metadata.
     fn encode_path_segment(value: &str) -> String {
         let sanitized = Self::sanitize_path_segment(value);
         let hash = Self::short_hash(value);
@@ -469,27 +470,29 @@ impl TachiMemory {
             let mut store = store.lock();
             // Exact-path hit first; fall back to sqlite identity (agent, key)
             // so category/namespace changes update the same row.
-            let existing_id = store
+            let exact_hit = store
                 .list_by_path(&path_c, 8, false)
                 .ok()
-                .and_then(|rows| rows.into_iter().find(|e| e.path == path_c).map(|e| e.id))
-                .or_else(|| {
+                .and_then(|rows| rows.into_iter().find(|e| e.path == path_c).map(|e| e.id));
+            let existing_id = match exact_hit {
+                Some(id) => Some(id),
+                None => {
                     let agent_prefix =
                         format!("/agents/{}/", Self::agent_segment(Some(&agent_owned)));
-                    Self::list_prefix_complete(&store, &agent_prefix, page_size, max_grow)
-                        .ok()
-                        .and_then(|rows| {
-                            rows.into_iter()
-                                .find(|e| {
-                                    Self::metadata_str(&e.metadata, METADATA_ZC_KEY).as_deref()
-                                        == Some(key_owned.as_str())
-                                        && Self::metadata_str(&e.metadata, METADATA_ZC_AGENT)
-                                            .as_deref()
-                                            == Some(agent_owned.as_str())
-                                })
-                                .map(|e| e.id)
+                    // Propagate truncation errors: `.ok()` here would treat an
+                    // incomplete scan as "no existing row" and fork identity
+                    // with a fresh UUID.
+                    Self::list_prefix_complete(&store, &agent_prefix, page_size, max_grow)?
+                        .into_iter()
+                        .find(|e| {
+                            Self::metadata_str(&e.metadata, METADATA_ZC_KEY).as_deref()
+                                == Some(key_owned.as_str())
+                                && Self::metadata_str(&e.metadata, METADATA_ZC_AGENT).as_deref()
+                                    == Some(agent_owned.as_str())
                         })
-                });
+                        .map(|e| e.id)
+                }
+            };
 
             let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
             let entry = memcore::MemoryEntry {
@@ -1147,22 +1150,6 @@ mod tests {
         (tmp, mem)
     }
 
-    fn temp_tachi_tiny_grow_cap() -> (TempDir, TachiMemory) {
-        let tmp = TempDir::new().unwrap();
-        // page_size == max_grow == 2: three rows force a full page at the cap.
-        let mem = TachiMemory::with_embedder_and_page_size(
-            "tachi",
-            tmp.path(),
-            Arc::new(super::super::embeddings::NoopEmbedding),
-            0.7,
-            0.3,
-            2,
-            2,
-        )
-        .unwrap();
-        (tmp, mem)
-    }
-
     fn encoded_segment_for(value: &str) -> String {
         TachiMemory::encode_path_segment(value)
     }
@@ -1589,17 +1576,33 @@ mod tests {
 
     #[tokio::test]
     async fn list_prefix_complete_errors_when_max_grow_full() {
-        let (_tmp, mem) = temp_tachi_tiny_grow_cap();
-        for i in 0..3 {
-            mem.store(
-                &format!("row_{i}"),
-                &format!("payload {i}"),
-                MemoryCategory::Core,
-                None,
-            )
-            .await
-            .unwrap();
+        // Seed with default caps, then reopen with page == grow == 2 so three
+        // rows force a full page at the cap.
+        let tmp = TempDir::new().unwrap();
+        {
+            let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+            for i in 0..3 {
+                mem.store(
+                    &format!("row_{i}"),
+                    &format!("payload {i}"),
+                    MemoryCategory::Core,
+                    None,
+                )
+                .await
+                .unwrap();
+            }
         }
+        let mem = TachiMemory::with_embedder_and_page_size(
+            "tachi",
+            tmp.path(),
+            Arc::new(super::super::embeddings::NoopEmbedding),
+            0.7,
+            0.3,
+            2,
+            2,
+        )
+        .unwrap();
+
         // count() uses memcore stats (not the growing scan); list must fail loud.
         assert_eq!(mem.count().await.unwrap(), 3);
         let err = mem
@@ -1610,5 +1613,23 @@ mod tests {
             err.to_string().contains("truncated"),
             "expected truncation error, got: {err}"
         );
+
+        // Storing a NEW key must also fail loud: the (agent, key) fallback scan
+        // is incomplete, and treating that as "no existing row" would fork
+        // identity with a fresh UUID.
+        let err = mem
+            .store("row_new", "payload new", MemoryCategory::Core, None)
+            .await
+            .expect_err("upsert fallback over a truncated scan must error");
+        assert!(
+            err.to_string().contains("truncated"),
+            "expected truncation error, got: {err}"
+        );
+
+        // Updating an EXISTING key still works at the cap: the exact-path hit
+        // short-circuits before the growing scan.
+        mem.store("row_0", "payload updated", MemoryCategory::Core, None)
+            .await
+            .expect("exact-path update must not require the fallback scan");
     }
 }
