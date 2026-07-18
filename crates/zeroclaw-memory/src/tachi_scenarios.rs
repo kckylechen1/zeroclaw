@@ -270,18 +270,19 @@ mod tests {
         );
     }
 
-    /// Governance near-dup currently compares raw text across the whole
-    /// `/agents` scan — it does **not** partition by namespace. Document and
-    /// assert that behavior; changing it needs adjudication.
+    /// Cross-namespace near-dup must never merge under unattended governance.
+    ///
+    /// Discriminating vs `2ac918587`: that tip asserted `near_dup_archived == 1`
+    /// (cross-namespace fold). This test asserts `0` + both namespaces still
+    /// recallable — RED against that tip, GREEN with partition-scoped merges.
     #[tokio::test]
-    async fn hyperion_governance_near_dup_cross_namespace_current_behavior() {
+    async fn hyperion_governance_near_dup_cross_namespace_never_merges() {
         let (_tmp, mem) = temp_tachi();
         let base = "The operator prefers concise Rust answers for equity trading notes";
 
-        // Seed near-identical raw rows in two namespaces via the live handle.
         {
             let mut store = mem.store_handle().lock();
-            seed_raw_namespaced(
+            seed_raw_scoped(
                 &mut store,
                 "ns-user",
                 &TachiMemory::storage_path(
@@ -292,9 +293,11 @@ mod tests {
                 ),
                 base,
                 0.5,
+                "default",
                 "user:kyle",
+                "pref",
             );
-            seed_raw_namespaced(
+            seed_raw_scoped(
                 &mut store,
                 "ns-default",
                 &TachiMemory::storage_path(
@@ -306,44 +309,107 @@ mod tests {
                 &format!("{base} today"),
                 0.95,
                 "default",
+                "default",
+                "pref",
             );
         }
 
         let report = mem.run_light_sleep_governance_report().unwrap();
-
-        // Current semantics (memcore::near_duplicate_raw_pairs is text-only):
-        // cross-namespace twins DO merge — one archived. Flag for adjudication
-        // if product wants namespace-scoped light-sleep.
         assert_eq!(
-            report.near_dup_archived, 1,
-            "CURRENT BEHAVIOR: near-dup merges across namespaces (text Jaccard only). \
-             Adjudication question: should light-sleep respect namespace boundaries? \
-             report={report:?}"
+            report.near_dup_archived, 0,
+            "near-dup must not archive across namespaces: {report:?}"
+        );
+
+        {
+            let store = mem.store_handle().lock();
+            assert!(!store.get("ns-user").unwrap().expect("user row").archived);
+            assert!(
+                !store
+                    .get("ns-default")
+                    .unwrap()
+                    .expect("default row")
+                    .archived
+            );
+        }
+
+        let user_hits = mem
+            .recall_namespaced("user:kyle", "*", 8, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(user_hits.len(), 1);
+        assert!(user_hits[0].content.contains("equity trading"));
+
+        let default_hits = mem
+            .recall_namespaced("default", "*", 8, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(default_hits.len(), 1);
+        assert!(default_hits[0].content.contains("equity trading"));
+    }
+
+    /// Cross-agent near-dup must never merge (RomanBath character isolation).
+    ///
+    /// Discriminating vs `2ac918587`: that tip would archive one of two
+    /// near-identical character rows; this asserts zero archives.
+    #[tokio::test]
+    async fn romanbath_governance_near_dup_never_crosses_agents() {
+        let (_tmp, mem) = temp_tachi();
+        let base = "Shared character greeting about tea ceremonies and quiet evenings";
+
+        {
+            let mut store = mem.store_handle().lock();
+            seed_raw_scoped(
+                &mut store,
+                "char-alice",
+                &TachiMemory::storage_path(
+                    Some("char_alice"),
+                    Some("default"),
+                    &MemoryCategory::Core,
+                    "greeting",
+                ),
+                base,
+                0.5,
+                "char_alice",
+                "default",
+                "greeting",
+            );
+            seed_raw_scoped(
+                &mut store,
+                "char-bob",
+                &TachiMemory::storage_path(
+                    Some("char_bob"),
+                    Some("default"),
+                    &MemoryCategory::Core,
+                    "greeting",
+                ),
+                &format!("{base} tonight"),
+                0.95,
+                "char_bob",
+                "default",
+                "greeting",
+            );
+        }
+
+        let report = mem.run_light_sleep_governance_report().unwrap();
+        assert_eq!(
+            report.near_dup_archived, 0,
+            "near-dup must not archive across agents/characters: {report:?}"
         );
 
         let store = mem.store_handle().lock();
-        let survivor = store
-            .get("ns-default")
-            .unwrap()
-            .expect("higher-importance survivor");
-        assert!(!survivor.archived);
-        let source = store
-            .get_with_options("ns-user", true)
-            .unwrap()
-            .expect("source still readable when include_archived");
-        assert!(
-            source.archived,
-            "cross-namespace near-dup archived the lower-importance twin"
-        );
+        assert!(!store.get("char-alice").unwrap().expect("alice").archived);
+        assert!(!store.get("char-bob").unwrap().expect("bob").archived);
     }
 
-    fn seed_raw_namespaced(
+    fn seed_raw_scoped(
         store: &mut MemoryStore,
         id: &str,
         path: &str,
         text: &str,
         importance: f64,
+        agent: &str,
         namespace: &str,
+        key: &str,
     ) {
         let now = chrono::Local::now().to_rfc3339();
         let entry = MemoryEntry {
@@ -371,10 +437,10 @@ mod tests {
             retention_policy: None,
             domain: None,
             metadata: serde_json::json!({
-                "zeroclaw_key": "pref",
+                "zeroclaw_key": key,
                 "zeroclaw_category": "core",
                 "zeroclaw_namespace": namespace,
-                "zeroclaw_agent": "default",
+                "zeroclaw_agent": agent,
             }),
             recall_count: 0,
             query_diversity: 0,

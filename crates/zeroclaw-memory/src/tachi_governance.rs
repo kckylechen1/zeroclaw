@@ -62,9 +62,39 @@ pub fn run_tachi_governance_on_handle(
     run_tachi_governance(&mut guard)
 }
 
+/// Metadata keys used to partition unattended near-dup (must match
+/// [`crate::tachi::TachiMemory`] write path).
+const META_ZC_AGENT: &str = "zeroclaw_agent";
+const META_ZC_NAMESPACE: &str = "zeroclaw_namespace";
+
+/// Scope key for near-dup partitions: `(zeroclaw_agent, zeroclaw_namespace)`.
+///
+/// Missing metadata fields are `None` and form their own bucket — a metadata-less
+/// row must not merge with a `default` / named-agent row.
+fn near_dup_scope_key(entry: &MemoryEntry) -> (Option<String>, Option<String>) {
+    let agent = entry
+        .metadata
+        .get(META_ZC_AGENT)
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let namespace = entry
+        .metadata
+        .get(META_ZC_NAMESPACE)
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    (agent, namespace)
+}
+
 /// Near-dup light-sleep: collapse connected components of raw-tier text twins
 /// into one survivor (higher importance, then newer), merge keywords, archive
 /// sources. Mirrors Sigil consolidate star-collapse ordering.
+///
+/// **Scope rule (unattended vs Sigil):** Sigil's `near_dup_merge` is a
+/// human-reviewed proposal flow. ZeroClaw governance auto-applies archival, so
+/// merges must stay inside a single `(zeroclaw_agent, zeroclaw_namespace)`
+/// partition. Crossing namespaces would drop a `user:kyle` row from
+/// `recall_namespaced("user:kyle")` after fold-into-`default`; crossing agents
+/// would fold one RomanBath character's memory into another's.
 fn run_near_dup_light_sleep(
     store: &mut MemoryStore,
     threshold: f64,
@@ -77,7 +107,35 @@ fn run_near_dup_light_sleep(
         return Ok((0, 0));
     }
 
-    let pairs = near_duplicate_raw_pairs(&entries, threshold);
+    let mut partitions: HashMap<(Option<String>, Option<String>), Vec<MemoryEntry>> =
+        HashMap::new();
+    for entry in entries {
+        partitions
+            .entry(near_dup_scope_key(&entry))
+            .or_default()
+            .push(entry);
+    }
+
+    let mut archived = 0usize;
+    let mut survivors_updated = 0usize;
+    for partition in partitions.into_values() {
+        if partition.len() < 2 {
+            continue;
+        }
+        let (a, s) = collapse_near_dups_in_partition(store, &partition, threshold)?;
+        archived += a;
+        survivors_updated += s;
+    }
+    Ok((archived, survivors_updated))
+}
+
+/// Run memcore near-dup + star-collapse within one agent/namespace partition.
+fn collapse_near_dups_in_partition(
+    store: &mut MemoryStore,
+    entries: &[MemoryEntry],
+    threshold: f64,
+) -> anyhow::Result<(usize, usize)> {
+    let pairs = near_duplicate_raw_pairs(entries, threshold);
     if pairs.is_empty() {
         return Ok((0, 0));
     }
@@ -116,7 +174,7 @@ fn run_near_dup_light_sleep(
         if members.len() < 2 {
             continue;
         }
-        let survivor_idx = pick_survivor_index(&entries, &members);
+        let survivor_idx = pick_survivor_index(entries, &members);
         let mut survivor = entries[survivor_idx].clone();
         let mut keyword_set: HashSet<String> = survivor.keywords.iter().cloned().collect();
         let mut source_ids = Vec::new();
