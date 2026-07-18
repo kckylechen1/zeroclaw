@@ -78,26 +78,6 @@ pub use tachi::TachiMemory;
 #[cfg(feature = "tachi")]
 pub use tachi_governance::{TachiGovernanceReport, run_tachi_governance};
 pub use traits::Memory;
-
-/// Run tachi light-sleep governance when the `tachi` feature is enabled and
-/// `memory.backend` resolves to `tachi`. No-op otherwise.
-///
-/// Called from `DefaultMemoryStrategy::run_governance` so the runtime's
-/// existing governance cadence drives near-dup / promote / stale archival.
-pub fn run_tachi_governance_if_enabled(
-    config: &MemoryConfig,
-    workspace_dir: &Path,
-) -> anyhow::Result<()> {
-    #[cfg(feature = "tachi")]
-    {
-        let _report = run_tachi_governance(config, workspace_dir)?;
-    }
-    #[cfg(not(feature = "tachi"))]
-    {
-        let _ = (config, workspace_dir);
-    }
-    Ok(())
-}
 #[allow(unused_imports)]
 pub use traits::{
     ExportFilter, MemoryCategory, MemoryEntry, ProceduralMessage, is_recent_recall_query,
@@ -569,6 +549,11 @@ pub fn create_memory_with_storage_and_routes(
     let backend_kind = classify_memory_backend(&backend_name);
     let resolved_embedding = resolve_embedding_config(config, embedding_routes, api_key, providers);
 
+    // Same 12h cadence as hygiene — capture before `run_if_due` writes state so
+    // tachi light-sleep can share the window without a second due-check race.
+    #[cfg(feature = "tachi")]
+    let light_sleep_due = config.hygiene_enabled && hygiene::is_due(workspace_dir).unwrap_or(true);
+
     // Best-effort memory hygiene/retention pass (throttled by state file).
     if let Err(e) = hygiene::run_if_due(config, workspace_dir) {
         ::zeroclaw_log::record!(
@@ -775,6 +760,17 @@ pub fn create_memory_with_storage_and_routes(
             config.vector_weight as f32,
             config.keyword_weight as f32,
         )?;
+        // Live cadence: light-sleep on the factory-owned store handle (no
+        // second open). Deleting this call makes near-dup cadence tests RED.
+        if light_sleep_due && let Err(e) = mem.run_light_sleep_governance() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                "tachi light-sleep governance skipped"
+            );
+        }
         return Ok(Box::new(mem));
     }
 

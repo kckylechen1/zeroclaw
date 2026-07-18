@@ -393,6 +393,17 @@ pub trait Memory: Send + Sync + crate::attribution::Attributable {
     /// Health check
     async fn health_check(&self) -> bool;
 
+    /// Backend-specific light-sleep governance (near-dup merge, promotion,
+    /// stale archival). Default is a no-op.
+    ///
+    /// Invoked from the memory factory's hygiene cadence (when due) and from
+    /// [`MemoryStrategy::run_governance`]. Backends that own a live store
+    /// handle (e.g. tachi/memcore) override this; they must not open a second
+    /// database connection.
+    fn run_light_sleep_governance(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Mark entries as superseded by a newer row.
     ///
     /// Default: no-op. SQL backends can override this with reversible

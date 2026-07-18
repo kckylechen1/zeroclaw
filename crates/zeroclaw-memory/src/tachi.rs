@@ -20,10 +20,11 @@
 //! - `reindex` and `supersede` are not implemented (trait defaults).
 //! - Embedding-identity reconciliation (`auto_reindex_on_identity_change`) is
 //!   sqlite-specific and not mirrored here.
-//! - Hygiene / snapshot / auto-hydrate are not wired for this backend.
-//! - Light-sleep governance (near-dup / promote / stale archive) runs via
-//!   [`crate::run_tachi_governance`] from `DefaultMemoryStrategy::run_governance`,
-//!   not inside this struct.
+//! - Snapshot / auto-hydrate are not wired for this backend.
+//! - Light-sleep governance (near-dup / promote / stale archive) runs on the
+//!   live store handle via [`Memory::run_light_sleep_governance`], invoked from
+//!   the factory hygiene cadence in [`crate::create_memory_with_storage_and_routes`]
+//!   (and from `DefaultMemoryStrategy::run_governance`).
 
 use super::embeddings::EmbeddingProvider;
 use super::traits::{
@@ -131,6 +132,18 @@ impl TachiMemory {
         })
     }
 
+    /// Shared memcore handle — governance and tests must reuse this, not reopen.
+    pub(crate) fn store_handle(&self) -> &Arc<Mutex<MemoryStore>> {
+        &self.store
+    }
+
+    /// Run light-sleep governance and return counters (tests / observability).
+    pub(crate) fn run_light_sleep_governance_report(
+        &self,
+    ) -> anyhow::Result<crate::tachi_governance::TachiGovernanceReport> {
+        crate::tachi_governance::run_tachi_governance_on_handle(self.store_handle())
+    }
+
     fn hybrid_weights(&self) -> HybridWeights {
         let semantic = f64::from(self.vector_weight);
         let fts = f64::from(self.keyword_weight);
@@ -221,7 +234,7 @@ impl TachiMemory {
         Self::encode_path_segment(namespace.unwrap_or(DEFAULT_NAMESPACE))
     }
 
-    fn storage_path(
+    pub(crate) fn storage_path(
         agent_id: Option<&str>,
         namespace: Option<&str>,
         category: &MemoryCategory,
@@ -452,6 +465,7 @@ impl TachiMemory {
         };
         let metadata =
             Self::build_metadata(key, &category, session_id, namespace, agent_id, &options);
+        let pinned = options.pinned;
 
         let store = self.store.clone();
         let path_c = path.clone();
@@ -474,9 +488,9 @@ impl TachiMemory {
             let exact_hit = store
                 .list_by_path(&path_c, 8, false)
                 .ok()
-                .and_then(|rows| rows.into_iter().find(|e| e.path == path_c).map(|e| e.id));
-            let existing_id = match exact_hit {
-                Some(id) => Some(id),
+                .and_then(|rows| rows.into_iter().find(|e| e.path == path_c));
+            let existing = match exact_hit {
+                Some(entry) => Some(entry),
                 None => {
                     let agent_prefix =
                         format!("/agents/{}/", Self::agent_segment(Some(&agent_owned)));
@@ -491,11 +505,43 @@ impl TachiMemory {
                                 && Self::metadata_str(&e.metadata, METADATA_ZC_AGENT).as_deref()
                                     == Some(agent_owned.as_str())
                         })
-                        .map(|e| e.id)
                 }
             };
 
-            let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+            // Preserve governance-owned fields on update so light-sleep keyword
+            // merges and access/recall history are not clobbered by a re-store.
+            let id = existing
+                .as_ref()
+                .map(|e| e.id.clone())
+                .unwrap_or_else(|| Uuid::new_v4().to_string());
+            let keywords = existing
+                .as_ref()
+                .map(|e| e.keywords.clone())
+                .unwrap_or_default();
+            let access_count = existing.as_ref().map(|e| e.access_count).unwrap_or(0);
+            let last_access = existing.as_ref().and_then(|e| e.last_access.clone());
+            let recall_count = existing.as_ref().map(|e| e.recall_count).unwrap_or(0);
+            let query_diversity = existing.as_ref().map(|e| e.query_diversity).unwrap_or(0);
+            let tier = existing
+                .as_ref()
+                .map(|e| e.tier.clone())
+                .unwrap_or_else(memcore::types::default_tier);
+            let revision = existing.as_ref().map(|e| e.revision).unwrap_or(1);
+            // Map zeroclaw pin ↔ memcore retention_policy so stale archival
+            // spares pinned rows (`archive_stale_low_value_memories` exempts
+            // retention_policy IN ('permanent','pinned','durable')).
+            let retention_policy = if pinned {
+                Some("pinned".into())
+            } else {
+                match existing
+                    .as_ref()
+                    .and_then(|e| e.retention_policy.as_deref())
+                {
+                    Some("pinned") => None, // cleared on unpin
+                    _ => existing.as_ref().and_then(|e| e.retention_policy.clone()),
+                }
+            };
+
             let entry = memcore::MemoryEntry {
                 id,
                 path: path_c,
@@ -507,23 +553,23 @@ impl TachiMemory {
                 valid_until: None,
                 category: category_c,
                 topic: String::new(),
-                keywords: Vec::new(),
+                keywords,
                 persons: Vec::new(),
                 entities: Vec::new(),
                 location: String::new(),
                 source: "zeroclaw".into(),
                 scope: scope_c,
                 archived: false,
-                access_count: 0,
-                last_access: None,
-                revision: 1,
+                access_count,
+                last_access,
+                revision,
                 vector: embedding_c,
-                retention_policy: None,
+                retention_policy,
                 domain: None,
                 metadata,
-                recall_count: 0,
-                query_diversity: 0,
-                tier: memcore::types::default_tier(),
+                recall_count,
+                query_diversity,
+                tier,
             };
             store
                 .upsert(&entry)
@@ -732,6 +778,11 @@ impl Memory for TachiMemory {
                 dimensions,
             ));
         self.swap_embedder(embedder);
+    }
+
+    fn run_light_sleep_governance(&self) -> anyhow::Result<()> {
+        let _report = self.run_light_sleep_governance_report()?;
+        Ok(())
     }
 
     async fn store(
