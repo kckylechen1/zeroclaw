@@ -8,16 +8,16 @@ use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Identity of a credential slot on one [`ReliableModelProviderEntry`].
+/// Identity of a credential slot on one physical provider/credential pool.
 ///
-/// Scoped per provider entry: each entry has its own `Primary` plus optional
-/// `Extra(i)` slots built from `[reliability].api_keys`. This is the cooldown
-/// key for live 429 evidence — not a cache of config secrets.
+/// `Primary` plus optional `Extra(i)` from `[reliability].api_keys`. Cooldown
+/// identity is `(cooldown_key, CredentialIdentity)` so model-pinned entries that
+/// share the same physical provider/credential pool cool together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum CredentialIdentity {
     Primary,
@@ -33,29 +33,24 @@ impl CredentialIdentity {
     }
 }
 
-/// One constructed model_provider bound to a single credential.
+/// Builds a provider for one credential attempt from canonical live config.
 ///
-/// Source of truth for the secret material is the provider instance itself
-/// (built via the existing factory/constructors). We do **not** keep a parallel
-/// `api_keys: Vec<String>` on the wrapper.
+/// Source of truth for secrets is the live config (or test factory); this
+/// wrapper does **not** retain API key copies across attempts.
+pub(crate) type CredentialFactory =
+    Arc<dyn Fn() -> anyhow::Result<Box<dyn ModelProvider>> + Send + Sync>;
+
+/// One credential identity with an on-demand factory (no long-lived key copy).
 struct CredentialSlot {
     identity: CredentialIdentity,
-    provider: Box<dyn ModelProvider>,
+    factory: CredentialFactory,
 }
 
-/// Per-entry live credential cooldowns (429 evidence). Created here.
-#[derive(Default)]
-struct EntryCredentialState {
-    cooldowns: HashMap<CredentialIdentity, Instant>,
-}
-
-/// Credential rotation state keyed by entry index.
-///
-/// Source of truth for which credential is cooled: live 429 evidence observed
-/// by this wrapper (not config).
+/// Live credential cooldowns (429 evidence), keyed by physical provider scope
+/// (`cooldown_key`) + credential identity — not per model-pin entry index.
 #[derive(Default)]
 struct CredentialRotationState {
-    by_entry: HashMap<usize, EntryCredentialState>,
+    by_scope: HashMap<(String, CredentialIdentity), Instant>,
 }
 
 /// Info about a model_provider fallback that occurred during a request.
@@ -306,39 +301,9 @@ fn is_non_retryable_rate_limit(err: &anyhow::Error) -> bool {
     false
 }
 
-/// Try to extract a Retry-After value (in milliseconds) from an error message.
-/// Looks for patterns like `Retry-After: 5` or `retry_after: 2.5` in the error string.
-fn parse_retry_after_ms(err: &anyhow::Error) -> Option<u64> {
-    let msg = err.to_string();
-    let lower = msg.to_lowercase();
-
-    // Look for "retry-after: <number>" or "retry_after: <number>"
-    for prefix in &[
-        "retry-after:",
-        "retry_after:",
-        "retry-after ",
-        "retry_after ",
-    ] {
-        if let Some(pos) = lower.find(prefix) {
-            let after = &msg[pos + prefix.len()..];
-            let num_str: String = after
-                .trim()
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '.')
-                .collect();
-            if let Ok(secs) = num_str.parse::<f64>()
-                && secs.is_finite()
-                && secs >= 0.0
-            {
-                let millis = Duration::from_secs_f64(secs).as_millis();
-                if let Ok(value) = u64::try_from(millis) {
-                    return Some(value);
-                }
-            }
-        }
-    }
-    None
-}
+/// `anyhow::Error` does not carry typed HTTP `Retry-After` metadata. Do not
+/// scrape error strings and pretend they are response headers — cooldown and
+/// backoff use the wrapper's default durations instead.
 
 fn failure_reason(rate_limited: bool, non_retryable: bool) -> &'static str {
     if rate_limited && non_retryable {
@@ -654,52 +619,74 @@ fn is_empty_completion(resp: &ChatResponse) -> bool {
 
 pub(crate) struct ReliableModelProviderEntry {
     display_name: String,
+    /// Physical provider/credential pool id (`family.alias`). Shared across
+    /// model-pinned entries so cooldown identity stays stable.
     cooldown_key: String,
-    /// Primary first, then Extra(i). Each slot is a fully constructed provider
-    /// so every attempt uses a real credential (no set_api_key boundary).
+    /// Primary first, then Extra(i). Each slot is an on-demand factory that
+    /// resolves secrets from live canonical config at attempt time.
     credentials: Vec<CredentialSlot>,
+}
+
+/// Wrap a constructed provider so each attempt gets an `Arc` handle without
+/// retaining a raw key string on the reliable wrapper.
+fn factory_from_provider(provider: Box<dyn ModelProvider>) -> CredentialFactory {
+    let shared: Arc<dyn ModelProvider> = Arc::from(provider);
+    Arc::new(move || Ok(Box::new(Arc::clone(&shared)) as Box<dyn ModelProvider>))
 }
 
 impl ReliableModelProviderEntry {
     pub(crate) fn new(
         display_name: impl Into<String>,
         cooldown_key: impl Into<String>,
-        provider: Box<dyn ModelProvider>,
+        primary: CredentialFactory,
     ) -> Self {
         Self {
             display_name: display_name.into(),
             cooldown_key: cooldown_key.into(),
             credentials: vec![CredentialSlot {
                 identity: CredentialIdentity::Primary,
-                provider,
+                factory: primary,
             }],
         }
     }
 
-    /// Attach Extra(i) providers built from `[reliability].api_keys`.
-    /// Secrets live only inside each provider instance — not duplicated here.
-    pub(crate) fn with_extra_providers(mut self, extras: Vec<Box<dyn ModelProvider>>) -> Self {
-        for (i, provider) in extras.into_iter().enumerate() {
+    /// Build an entry from already-constructed providers (tests / transitional
+    /// call sites). Production wiring prefers live-config factories so key
+    /// material is not retained outside canonical config.
+    pub(crate) fn from_providers(
+        display_name: impl Into<String>,
+        cooldown_key: impl Into<String>,
+        primary: Box<dyn ModelProvider>,
+        extras: Vec<Box<dyn ModelProvider>>,
+    ) -> Self {
+        Self::new(display_name, cooldown_key, factory_from_provider(primary))
+            .with_extra_factories(extras.into_iter().map(factory_from_provider).collect())
+    }
+
+    /// Attach Extra(i) factories built from `[reliability].api_keys` indices.
+    pub(crate) fn with_extra_factories(mut self, extras: Vec<CredentialFactory>) -> Self {
+        for (i, factory) in extras.into_iter().enumerate() {
             self.credentials.push(CredentialSlot {
                 identity: CredentialIdentity::Extra(i),
-                provider,
+                factory,
             });
         }
         self
     }
 
-    fn primary_provider(&self) -> &dyn ModelProvider {
-        self.credentials
-            .first()
-            .map(|slot| slot.provider.as_ref())
-            .expect("ReliableModelProviderEntry always has Primary")
-    }
-
-    fn credential_provider(&self, identity: CredentialIdentity) -> Option<&dyn ModelProvider> {
+    fn build_credential(
+        &self,
+        identity: CredentialIdentity,
+    ) -> anyhow::Result<Box<dyn ModelProvider>> {
         self.credentials
             .iter()
             .find(|slot| slot.identity == identity)
-            .map(|slot| slot.provider.as_ref())
+            .map(|slot| (slot.factory)())
+            .unwrap_or_else(|| anyhow::bail!("unknown credential identity"))
+    }
+
+    fn build_primary(&self) -> anyhow::Result<Box<dyn ModelProvider>> {
+        self.build_credential(CredentialIdentity::Primary)
     }
 }
 
@@ -721,9 +708,9 @@ pub struct ReliableModelProvider {
     /// Source of truth: live provider 429 / Retry-After evidence observed by
     /// this wrapper. It is intentionally in-memory and per wrapper instance.
     rate_limit_cooldowns: Mutex<HashMap<String, Instant>>,
-    /// Test-only: (entry_idx, identity) actually applied on each attempt.
+    /// Test-only: (cooldown_key, identity) actually applied on each attempt.
     #[cfg(test)]
-    applied_credentials: Mutex<Vec<(usize, CredentialIdentity)>>,
+    applied_credentials: Mutex<Vec<(String, CredentialIdentity)>>,
 }
 
 impl ReliableModelProvider {
@@ -736,7 +723,12 @@ impl ReliableModelProvider {
         let model_providers = model_providers
             .into_iter()
             .map(|(display_name, provider)| {
-                ReliableModelProviderEntry::new(display_name.clone(), display_name, provider)
+                ReliableModelProviderEntry::from_providers(
+                    display_name.clone(),
+                    display_name,
+                    provider,
+                    Vec::new(),
+                )
             })
             .collect();
 
@@ -777,68 +769,66 @@ impl ReliableModelProvider {
         chain
     }
 
-    /// Default cooldown for a credential after a retryable 429 without Retry-After.
+    /// Default cooldown for a credential after a retryable 429.
+    /// Not derived from HTTP `Retry-After` — that metadata is unavailable
+    /// through `anyhow::Error`.
     const CREDENTIAL_COOLDOWN: Duration = Duration::from_secs(10);
 
-    /// Select a non-cooled credential for `entry_idx`. Prefers Primary, then
-    /// Extra(i) in order. Never returns a cooled identity. `None` = all cooled.
+    /// Select a non-cooled credential for this entry's physical scope.
+    /// Prefers Primary, then Extra(i). Never returns a cooled identity.
     fn select_live_credential(
         &self,
-        entry_idx: usize,
         entry: &ReliableModelProviderEntry,
     ) -> Option<CredentialIdentity> {
         let mut state = self
             .credential_rotation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let entry_state = state.by_entry.entry(entry_idx).or_default();
         let now = Instant::now();
-        entry_state.cooldowns.retain(|_, deadline| *deadline > now);
+        state.by_scope.retain(|_, deadline| *deadline > now);
 
         for slot in &entry.credentials {
-            if !entry_state.cooldowns.contains_key(&slot.identity) {
+            let key = (entry.cooldown_key.clone(), slot.identity);
+            if !state.by_scope.contains_key(&key) {
                 return Some(slot.identity);
             }
         }
         None
     }
 
-    /// Cool the credential that actually returned 429. Honors Retry-After when present.
+    /// Cool the credential that actually returned 429 for this physical scope.
     fn cool_credential(
         &self,
-        entry_idx: usize,
+        entry: &ReliableModelProviderEntry,
         identity: CredentialIdentity,
-        err: &anyhow::Error,
+        _err: &anyhow::Error,
     ) -> Duration {
-        let cooldown = parse_retry_after_ms(err)
-            .map(|ms| Duration::from_millis(ms.min(60_000)))
-            .unwrap_or(Self::CREDENTIAL_COOLDOWN);
+        let cooldown = Self::CREDENTIAL_COOLDOWN;
         let mut state = self
             .credential_rotation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let entry_state = state.by_entry.entry(entry_idx).or_default();
-        entry_state
-            .cooldowns
-            .insert(identity, Instant::now() + cooldown);
+        state.by_scope.insert(
+            (entry.cooldown_key.clone(), identity),
+            Instant::now() + cooldown,
+        );
         cooldown
     }
 
     #[cfg(test)]
-    fn credential_cooldown_active(&self, entry_idx: usize, identity: CredentialIdentity) -> bool {
+    fn credential_cooldown_active(&self, cooldown_key: &str, identity: CredentialIdentity) -> bool {
         let state = self
             .credential_rotation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state
-            .by_entry
-            .get(&entry_idx)
-            .and_then(|s| s.cooldowns.get(&identity))
+            .by_scope
+            .get(&(cooldown_key.to_string(), identity))
             .is_some_and(|deadline| Instant::now() < *deadline)
     }
 
     #[cfg(test)]
-    fn take_applied_credentials(&self) -> Vec<(usize, CredentialIdentity)> {
+    fn take_applied_credentials(&self) -> Vec<(String, CredentialIdentity)> {
         std::mem::take(
             &mut *self
                 .applied_credentials
@@ -848,41 +838,36 @@ impl ReliableModelProvider {
     }
 
     #[cfg(test)]
-    fn record_applied_credential(&self, entry_idx: usize, identity: CredentialIdentity) {
+    fn record_applied_credential(&self, cooldown_key: &str, identity: CredentialIdentity) {
         self.applied_credentials
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push((entry_idx, identity));
+            .push((cooldown_key.to_string(), identity));
     }
 
     /// Resolve a live credential for this attempt, or report all-cooled.
-    fn begin_credential_attempt<'a>(
-        &'a self,
-        entry_idx: usize,
-        entry: &'a ReliableModelProviderEntry,
-    ) -> Result<(CredentialIdentity, &'a dyn ModelProvider), ()> {
-        let Some(identity) = self.select_live_credential(entry_idx, entry) else {
+    /// Constructs the provider on demand from the credential factory.
+    fn begin_credential_attempt(
+        &self,
+        entry: &ReliableModelProviderEntry,
+    ) -> Result<(CredentialIdentity, Box<dyn ModelProvider>), ()> {
+        let Some(identity) = self.select_live_credential(entry) else {
             return Err(());
         };
-        let Some(provider) = entry.credential_provider(identity) else {
-            return Err(());
-        };
+        let provider = entry.build_credential(identity).map_err(|_| ())?;
         #[cfg(test)]
-        self.record_applied_credential(entry_idx, identity);
+        self.record_applied_credential(&entry.cooldown_key, identity);
         Ok((identity, provider))
     }
 
-    /// Compute backoff duration, respecting Retry-After if present.
-    fn compute_backoff(&self, base: u64, err: &anyhow::Error) -> u64 {
-        if let Some(retry_after) = parse_retry_after_ms(err) {
-            // Use Retry-After but cap at 30s to avoid indefinite waits
-            retry_after.min(30_000).max(base)
-        } else {
-            base
-        }
+    /// Compute backoff duration. Typed HTTP `Retry-After` is not available on
+    /// `anyhow::Error`, so this uses exponential base only.
+    fn compute_backoff(&self, base: u64, _err: &anyhow::Error) -> u64 {
+        base
     }
 
-    /// Default cooldown after a retryable 429 when Retry-After is absent.
+    /// Default provider-level cooldown after retryable 429 when failing over
+    /// across distinct provider entries. Not an HTTP Retry-After honor path.
     const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(10);
 
     /// Returns whether a cooldown is active and prunes expired cooldowns.
@@ -922,11 +907,8 @@ impl ReliableModelProvider {
         );
     }
 
-    fn set_rate_limit_cooldown(&self, cooldown_key: &str, err: &anyhow::Error) -> Duration {
-        let cooldown = parse_retry_after_ms(err)
-            .map(|ms| Duration::from_millis(ms.min(60_000)))
-            .unwrap_or(Self::RATE_LIMIT_COOLDOWN);
-
+    fn set_rate_limit_cooldown(&self, cooldown_key: &str, _err: &anyhow::Error) -> Duration {
+        let cooldown = Self::RATE_LIMIT_COOLDOWN;
         let mut cooldowns = self
             .rate_limit_cooldowns
             .lock()
@@ -1010,7 +992,20 @@ impl ModelProvider for ReliableModelProvider {
                         })),
                     "Warming up model_provider connection pool"
                 );
-                if ProviderDispatch::from_ref(slot.provider.as_ref())
+                let Ok(provider) = (slot.factory)() else {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "model_provider": provider_name,
+                                "credential": slot.identity.label(),
+                            })),
+                        "Warmup skipped; credential factory failed"
+                    );
+                    continue;
+                };
+                if ProviderDispatch::from_ref(provider.as_ref())
                     .warmup()
                     .await
                     .is_err()
@@ -1045,7 +1040,7 @@ impl ModelProvider for ReliableModelProvider {
         // immediately. On non-retryable error, break to next model_provider. On
         // retryable error, sleep with exponential backoff and retry.
         for current_model in &models {
-            for (entry_idx, entry) in self.model_providers.iter().enumerate() {
+            for entry in &self.model_providers {
                 let provider_name = entry.display_name.as_str();
                 if self.provider_should_skip_for_cooldown(entry) {
                     self.log_cooldown_skip(provider_name);
@@ -1058,9 +1053,7 @@ impl ModelProvider for ReliableModelProvider {
                 let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
 
                 for attempt in 0..=self.max_retries {
-                    let (applied_identity, provider) = match self
-                        .begin_credential_attempt(entry_idx, entry)
-                    {
+                    let (applied_identity, provider) = match self.begin_credential_attempt(entry) {
                         Ok(v) => v,
                         Err(()) => {
                             Self::record_cooldown_skip_failure(
@@ -1084,7 +1077,7 @@ impl ModelProvider for ReliableModelProvider {
                             break;
                         }
                     };
-                    match ProviderDispatch::from_ref(provider)
+                    match ProviderDispatch::from_ref(provider.as_ref())
                         .chat_with_system(system_prompt, message, current_model, temperature)
                         .await
                     {
@@ -1168,8 +1161,7 @@ impl ModelProvider for ReliableModelProvider {
 
                             let mut entry_credentials_exhausted = false;
                             if rate_limited && !non_retryable_rate_limit {
-                                let cooldown =
-                                    self.cool_credential(entry_idx, applied_identity, &e);
+                                let cooldown = self.cool_credential(entry, applied_identity, &e);
                                 ::zeroclaw_log::record!(
                                     WARN,
                                     ::zeroclaw_log::Event::new(
@@ -1187,7 +1179,7 @@ impl ModelProvider for ReliableModelProvider {
                                     ),
                                     "Rate limited; cooling credential and retrying with next live key"
                                 );
-                                if self.select_live_credential(entry_idx, entry).is_none() {
+                                if self.select_live_credential(entry).is_none() {
                                     entry_credentials_exhausted = true;
                                     Self::record_cooldown_skip_failure(
                                         &mut failures,
@@ -1231,7 +1223,7 @@ impl ModelProvider for ReliableModelProvider {
                                 // promptly instead of waiting out that cool-down.
                                 let wait = if rate_limited
                                     && !non_retryable_rate_limit
-                                    && self.select_live_credential(entry_idx, entry).is_some()
+                                    && self.select_live_credential(entry).is_some()
                                 {
                                     self.base_backoff_ms
                                 } else {
@@ -1300,7 +1292,7 @@ impl ModelProvider for ReliableModelProvider {
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
         for current_model in &models {
-            for (entry_idx, entry) in self.model_providers.iter().enumerate() {
+            for entry in &self.model_providers {
                 let provider_name = entry.display_name.as_str();
                 if self.provider_should_skip_for_cooldown(entry) {
                     self.log_cooldown_skip(provider_name);
@@ -1313,9 +1305,7 @@ impl ModelProvider for ReliableModelProvider {
                 let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
 
                 for attempt in 0..=self.max_retries {
-                    let (applied_identity, provider) = match self
-                        .begin_credential_attempt(entry_idx, entry)
-                    {
+                    let (applied_identity, provider) = match self.begin_credential_attempt(entry) {
                         Ok(v) => v,
                         Err(()) => {
                             Self::record_cooldown_skip_failure(
@@ -1339,7 +1329,7 @@ impl ModelProvider for ReliableModelProvider {
                             break;
                         }
                     };
-                    match ProviderDispatch::from_ref(provider)
+                    match ProviderDispatch::from_ref(provider.as_ref())
                         .chat_with_history(&effective_messages, current_model, temperature)
                         .await
                     {
@@ -1434,8 +1424,7 @@ impl ModelProvider for ReliableModelProvider {
 
                             let mut entry_credentials_exhausted = false;
                             if rate_limited && !non_retryable_rate_limit {
-                                let cooldown =
-                                    self.cool_credential(entry_idx, applied_identity, &e);
+                                let cooldown = self.cool_credential(entry, applied_identity, &e);
                                 ::zeroclaw_log::record!(
                                     WARN,
                                     ::zeroclaw_log::Event::new(
@@ -1453,7 +1442,7 @@ impl ModelProvider for ReliableModelProvider {
                                     ),
                                     "Rate limited; cooling credential and retrying with next live key"
                                 );
-                                if self.select_live_credential(entry_idx, entry).is_none() {
+                                if self.select_live_credential(entry).is_none() {
                                     entry_credentials_exhausted = true;
                                     Self::record_cooldown_skip_failure(
                                         &mut failures,
@@ -1497,7 +1486,7 @@ impl ModelProvider for ReliableModelProvider {
                                 // promptly instead of waiting out that cool-down.
                                 let wait = if rate_limited
                                     && !non_retryable_rate_limit
-                                    && self.select_live_credential(entry_idx, entry).is_some()
+                                    && self.select_live_credential(entry).is_some()
                                 {
                                     self.base_backoff_ms
                                 } else {
@@ -1554,15 +1543,15 @@ impl ModelProvider for ReliableModelProvider {
     fn supports_native_tools(&self) -> bool {
         self.model_providers
             .first()
-            .map(|entry| entry.primary_provider().supports_native_tools())
-            .unwrap_or(false)
+            .and_then(|entry| entry.build_primary().ok())
+            .is_some_and(|p| p.supports_native_tools())
     }
 
     fn supports_vision(&self) -> bool {
         self.model_providers
             .first()
-            .map(|entry| entry.primary_provider().supports_vision())
-            .unwrap_or(false)
+            .and_then(|entry| entry.build_primary().ok())
+            .is_some_and(|p| p.supports_vision())
     }
 
     async fn chat_with_tools(
@@ -1577,7 +1566,7 @@ impl ModelProvider for ReliableModelProvider {
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
         for current_model in &models {
-            for (entry_idx, entry) in self.model_providers.iter().enumerate() {
+            for entry in &self.model_providers {
                 let provider_name = entry.display_name.as_str();
                 if self.provider_should_skip_for_cooldown(entry) {
                     self.log_cooldown_skip(provider_name);
@@ -1590,9 +1579,7 @@ impl ModelProvider for ReliableModelProvider {
                 let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
 
                 for attempt in 0..=self.max_retries {
-                    let (applied_identity, provider) = match self
-                        .begin_credential_attempt(entry_idx, entry)
-                    {
+                    let (applied_identity, provider) = match self.begin_credential_attempt(entry) {
                         Ok(v) => v,
                         Err(()) => {
                             Self::record_cooldown_skip_failure(
@@ -1616,7 +1603,7 @@ impl ModelProvider for ReliableModelProvider {
                             break;
                         }
                     };
-                    match ProviderDispatch::from_ref(provider)
+                    match ProviderDispatch::from_ref(provider.as_ref())
                         .chat_with_tools(&effective_messages, tools, current_model, temperature)
                         .await
                     {
@@ -1712,8 +1699,7 @@ impl ModelProvider for ReliableModelProvider {
 
                             let mut entry_credentials_exhausted = false;
                             if rate_limited && !non_retryable_rate_limit {
-                                let cooldown =
-                                    self.cool_credential(entry_idx, applied_identity, &e);
+                                let cooldown = self.cool_credential(entry, applied_identity, &e);
                                 ::zeroclaw_log::record!(
                                     WARN,
                                     ::zeroclaw_log::Event::new(
@@ -1731,7 +1717,7 @@ impl ModelProvider for ReliableModelProvider {
                                     ),
                                     "Rate limited; cooling credential and retrying with next live key"
                                 );
-                                if self.select_live_credential(entry_idx, entry).is_none() {
+                                if self.select_live_credential(entry).is_none() {
                                     entry_credentials_exhausted = true;
                                     Self::record_cooldown_skip_failure(
                                         &mut failures,
@@ -1775,7 +1761,7 @@ impl ModelProvider for ReliableModelProvider {
                                 // promptly instead of waiting out that cool-down.
                                 let wait = if rate_limited
                                     && !non_retryable_rate_limit
-                                    && self.select_live_credential(entry_idx, entry).is_some()
+                                    && self.select_live_credential(entry).is_some()
                                 {
                                     self.base_backoff_ms
                                 } else {
@@ -1840,7 +1826,7 @@ impl ModelProvider for ReliableModelProvider {
         let mut effective_messages = request.messages.to_vec();
         let mut context_truncated = false;
         for current_model in &models {
-            for (entry_idx, entry) in self.model_providers.iter().enumerate() {
+            for entry in &self.model_providers {
                 let provider_name = entry.display_name.as_str();
                 if self.provider_should_skip_for_cooldown(entry) {
                     self.log_cooldown_skip(provider_name);
@@ -1858,9 +1844,7 @@ impl ModelProvider for ReliableModelProvider {
                         tools: request.tools,
                         thinking: request.thinking,
                     };
-                    let (applied_identity, provider) = match self
-                        .begin_credential_attempt(entry_idx, entry)
-                    {
+                    let (applied_identity, provider) = match self.begin_credential_attempt(entry) {
                         Ok(v) => v,
                         Err(()) => {
                             Self::record_cooldown_skip_failure(
@@ -1884,7 +1868,7 @@ impl ModelProvider for ReliableModelProvider {
                             break;
                         }
                     };
-                    match ProviderDispatch::from_ref(provider)
+                    match ProviderDispatch::from_ref(provider.as_ref())
                         .chat(req, current_model, temperature)
                         .await
                     {
@@ -1980,8 +1964,7 @@ impl ModelProvider for ReliableModelProvider {
 
                             let mut entry_credentials_exhausted = false;
                             if rate_limited && !non_retryable_rate_limit {
-                                let cooldown =
-                                    self.cool_credential(entry_idx, applied_identity, &e);
+                                let cooldown = self.cool_credential(entry, applied_identity, &e);
                                 ::zeroclaw_log::record!(
                                     WARN,
                                     ::zeroclaw_log::Event::new(
@@ -1999,7 +1982,7 @@ impl ModelProvider for ReliableModelProvider {
                                     ),
                                     "Rate limited; cooling credential and retrying with next live key"
                                 );
-                                if self.select_live_credential(entry_idx, entry).is_none() {
+                                if self.select_live_credential(entry).is_none() {
                                     entry_credentials_exhausted = true;
                                     Self::record_cooldown_skip_failure(
                                         &mut failures,
@@ -2043,7 +2026,7 @@ impl ModelProvider for ReliableModelProvider {
                                 // promptly instead of waiting out that cool-down.
                                 let wait = if rate_limited
                                     && !non_retryable_rate_limit
-                                    && self.select_live_credential(entry_idx, entry).is_some()
+                                    && self.select_live_credential(entry).is_some()
                                 {
                                     self.base_backoff_ms
                                 } else {
@@ -2102,15 +2085,21 @@ impl ModelProvider for ReliableModelProvider {
     }
 
     fn supports_streaming(&self) -> bool {
-        self.model_providers
-            .iter()
-            .any(|entry| entry.primary_provider().supports_streaming())
+        self.model_providers.iter().any(|entry| {
+            entry
+                .build_primary()
+                .ok()
+                .is_some_and(|p| p.supports_streaming())
+        })
     }
 
     fn supports_streaming_tool_events(&self) -> bool {
-        self.model_providers
-            .iter()
-            .any(|entry| entry.primary_provider().supports_streaming_tool_events())
+        self.model_providers.iter().any(|entry| {
+            entry
+                .build_primary()
+                .ok()
+                .is_some_and(|p| p.supports_streaming_tool_events())
+        })
     }
 
     fn stream_chat(
@@ -2124,22 +2113,22 @@ impl ModelProvider for ReliableModelProvider {
 
         for entry in &self.model_providers {
             let provider_name = entry.display_name.as_str();
-            let model_provider = entry.primary_provider();
-            if !model_provider.supports_streaming() || !options.enabled {
-                continue;
-            }
-
-            if needs_tool_events && !model_provider.supports_streaming_tool_events() {
-                continue;
-            }
-
             if self.provider_should_skip_for_cooldown(entry) {
                 self.log_cooldown_skip(provider_name);
                 continue;
             }
 
-            let provider_clone = provider_name.to_string();
+            let Ok((_identity, model_provider)) = self.begin_credential_attempt(entry) else {
+                continue;
+            };
+            if !model_provider.supports_streaming() || !options.enabled {
+                continue;
+            }
+            if needs_tool_events && !model_provider.supports_streaming_tool_events() {
+                continue;
+            }
 
+            let provider_clone = provider_name.to_string();
             let current_model = self
                 .model_chain(model)
                 .first()
@@ -2152,7 +2141,7 @@ impl ModelProvider for ReliableModelProvider {
                 tools: request.tools,
                 thinking: request.thinking,
             };
-            let stream = ProviderDispatch::from_ref(model_provider).stream_chat(
+            let stream = ProviderDispatch::from_ref(model_provider.as_ref()).stream_chat(
                 req,
                 &current_model,
                 temperature,
@@ -2163,9 +2152,27 @@ impl ModelProvider for ReliableModelProvider {
             let handle = ::zeroclaw_spawn::spawn!(async move {
                 let mut stream = stream;
                 while let Some(event) = stream.next().await {
-                    if let Err(ref e) = event {
-                        ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_clone, "model": current_model, "e": e.to_string()})), "Streaming error: ");
-                    }
+                    let event = match event {
+                        Ok(v) => Ok(v),
+                        Err(e) => {
+                            let sanitized = super::sanitize_api_error(&e.to_string());
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "model_provider": provider_clone,
+                                    "model": current_model,
+                                    "e": sanitized,
+                                })),
+                                "Streaming error"
+                            );
+                            Err(super::traits::StreamError::ModelProvider(sanitized))
+                        }
+                    };
                     if tx.send(event).await.is_err() {
                         break;
                     }
@@ -2195,31 +2202,25 @@ impl ModelProvider for ReliableModelProvider {
         temperature: Option<f64>,
         options: StreamOptions,
     ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
-        // Try each model_provider/model combination for streaming
-        // For streaming, we use the first model_provider that supports it and has streaming enabled
         for entry in &self.model_providers {
             let provider_name = entry.display_name.as_str();
-            let model_provider = entry.primary_provider();
-            if !model_provider.supports_streaming() || !options.enabled {
-                continue;
-            }
-
             if self.provider_should_skip_for_cooldown(entry) {
                 self.log_cooldown_skip(provider_name);
                 continue;
             }
+            let Ok((_identity, model_provider)) = self.begin_credential_attempt(entry) else {
+                continue;
+            };
+            if !model_provider.supports_streaming() || !options.enabled {
+                continue;
+            }
 
-            // Clone model_provider data for the stream
             let provider_clone = provider_name.to_string();
-
-            // Try the first model in the chain for streaming
             let current_model = match self.model_chain(model).first() {
                 Some(m) => (*m).to_string(),
                 None => model.to_string(),
             };
 
-            // For streaming, we attempt once and propagate errors
-            // The caller can retry the entire request if needed
             let stream = model_provider.stream_chat_with_system(
                 system_prompt,
                 message,
@@ -2227,23 +2228,38 @@ impl ModelProvider for ReliableModelProvider {
                 temperature,
                 options,
             );
-
-            // Use a channel to bridge the stream with logging
             let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
 
             let handle = ::zeroclaw_spawn::spawn!(async move {
                 let mut stream = stream;
                 while let Some(chunk) = stream.next().await {
-                    if let Err(ref e) = chunk {
-                        ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_clone, "model": current_model, "e": e.to_string()})), "Streaming error: ");
-                    }
+                    let chunk = match chunk {
+                        Ok(v) => Ok(v),
+                        Err(e) => {
+                            let sanitized = super::sanitize_api_error(&e.to_string());
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "model_provider": provider_clone,
+                                    "model": current_model,
+                                    "e": sanitized,
+                                })),
+                                "Streaming error"
+                            );
+                            Err(super::traits::StreamError::ModelProvider(sanitized))
+                        }
+                    };
                     if tx.send(chunk).await.is_err() {
-                        break; // Receiver dropped
+                        break;
                     }
                 }
             });
 
-            // Convert channel receiver to stream
             let guard = AbortOnDrop::new(handle.abort_handle());
             return stream::unfold((rx, guard), |(mut rx, guard)| async move {
                 rx.recv().await.map(|chunk| (chunk, (rx, guard)))
@@ -2251,7 +2267,6 @@ impl ModelProvider for ReliableModelProvider {
             .boxed();
         }
 
-        // No streaming support available
         stream::once(async move {
             Err(super::traits::StreamError::ModelProvider(
                 "No model_provider supports streaming".to_string(),
@@ -2267,23 +2282,20 @@ impl ModelProvider for ReliableModelProvider {
         temperature: Option<f64>,
         options: StreamOptions,
     ) -> stream::BoxStream<'static, StreamResult<StreamChunk>> {
-        // Try each model_provider/model combination for streaming with history.
-        // Mirrors stream_chat_with_system but delegates to the underlying
-        // model_provider's stream_chat_with_history, preserving the full conversation.
         for entry in &self.model_providers {
             let provider_name = entry.display_name.as_str();
-            let model_provider = entry.primary_provider();
-            if !model_provider.supports_streaming() || !options.enabled {
-                continue;
-            }
-
             if self.provider_should_skip_for_cooldown(entry) {
                 self.log_cooldown_skip(provider_name);
                 continue;
             }
+            let Ok((_identity, model_provider)) = self.begin_credential_attempt(entry) else {
+                continue;
+            };
+            if !model_provider.supports_streaming() || !options.enabled {
+                continue;
+            }
 
             let provider_clone = provider_name.to_string();
-
             let current_model = match self.model_chain(model).first() {
                 Some(m) => (*m).to_string(),
                 None => model.to_string(),
@@ -2295,17 +2307,34 @@ impl ModelProvider for ReliableModelProvider {
                 temperature,
                 options,
             );
-
             let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
 
             let handle = ::zeroclaw_spawn::spawn!(async move {
                 let mut stream = stream;
                 while let Some(chunk) = stream.next().await {
-                    if let Err(ref e) = chunk {
-                        ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_clone, "model": current_model, "e": e.to_string()})), "Streaming error: ");
-                    }
+                    let chunk = match chunk {
+                        Ok(v) => Ok(v),
+                        Err(e) => {
+                            let sanitized = super::sanitize_api_error(&e.to_string());
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "model_provider": provider_clone,
+                                    "model": current_model,
+                                    "e": sanitized,
+                                })),
+                                "Streaming error"
+                            );
+                            Err(super::traits::StreamError::ModelProvider(sanitized))
+                        }
+                    };
                     if tx.send(chunk).await.is_err() {
-                        break; // Receiver dropped
+                        break;
                     }
                 }
             });
@@ -2317,7 +2346,6 @@ impl ModelProvider for ReliableModelProvider {
             .boxed();
         }
 
-        // No streaming support available
         stream::once(async move {
             Err(super::traits::StreamError::ModelProvider(
                 "No model_provider supports streaming".to_string(),
@@ -2329,24 +2357,15 @@ impl ModelProvider for ReliableModelProvider {
 
 impl ::zeroclaw_api::attribution::Attributable for ReliableModelProvider {
     fn role(&self) -> ::zeroclaw_api::attribution::Role {
-        match self.model_providers.first() {
-            Some(entry) => {
-                ::zeroclaw_api::attribution::Attributable::role(entry.primary_provider())
-            }
-            None => ::zeroclaw_api::attribution::Role::System,
-        }
+        self.model_providers
+            .first()
+            .and_then(|entry| entry.build_primary().ok())
+            .map(|provider| ::zeroclaw_api::attribution::Attributable::role(provider.as_ref()))
+            .unwrap_or(::zeroclaw_api::attribution::Role::System)
     }
 
     fn alias(&self) -> &str {
-        // Delegate to the primary inner provider for the same reason
-        // as `role()`. Falls back to the wrapper's own configured alias
-        // when no inner provider is registered.
-        match self.model_providers.first() {
-            Some(entry) => {
-                ::zeroclaw_api::attribution::Attributable::alias(entry.primary_provider())
-            }
-            None => &self.alias,
-        }
+        &self.alias
     }
 }
 
@@ -3314,13 +3333,107 @@ mod tests {
         primary: CredMock,
         extras: Vec<CredMock>,
     ) -> ReliableModelProviderEntry {
-        ReliableModelProviderEntry::new(name, name, Box::new(primary) as Box<dyn ModelProvider>)
-            .with_extra_providers(
-                extras
-                    .into_iter()
-                    .map(|m| Box::new(m) as Box<dyn ModelProvider>)
-                    .collect(),
-            )
+        ReliableModelProviderEntry::from_providers(
+            name,
+            name,
+            Box::new(primary) as Box<dyn ModelProvider>,
+            extras
+                .into_iter()
+                .map(|m| Box::new(m) as Box<dyn ModelProvider>)
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn on_demand_factory_observes_canonical_key_reload() {
+        // SoT: credential factories resolve from a live canonical cell each
+        // attempt — mutating the cell between calls must be observed.
+        let canonical = Arc::new(Mutex::new("key-v1".to_string()));
+        let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let canon = Arc::clone(&canonical);
+        let obs = Arc::clone(&observed);
+        let factory: CredentialFactory = Arc::new(move || {
+            let key = canon.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            obs.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(key.clone());
+            let label: &'static str = Box::leak(key.into_boxed_str());
+            Ok(Box::new(CredMock {
+                label,
+                calls: Arc::new(AtomicUsize::new(0)),
+                rate_limit: false,
+                response: "ok",
+            }) as Box<dyn ModelProvider>)
+        });
+        let entry = ReliableModelProviderEntry::new("p", "scope.p", factory);
+        let model_provider = ReliableModelProvider::new_with_entries("test", vec![entry], 0, 1);
+
+        assert_eq!(
+            model_provider
+                .simple_chat("hi", "m", Some(0.0))
+                .await
+                .unwrap(),
+            "key-v1:ok"
+        );
+        *canonical.lock().unwrap_or_else(|p| p.into_inner()) = "key-v2".to_string();
+        assert_eq!(
+            model_provider
+                .simple_chat("hi", "m", Some(0.0))
+                .await
+                .unwrap(),
+            "key-v2:ok"
+        );
+        let seen = observed.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        assert_eq!(seen, vec!["key-v1".to_string(), "key-v2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn model_pinned_entries_share_cooldown_identity() {
+        // Two model-pinned entries with the same cooldown_key must share
+        // credential cooldown state (physical provider/credential pool).
+        let entry_a = ReliableModelProviderEntry::from_providers(
+            "openai",
+            "openai.work",
+            Box::new(CredMock {
+                label: "primary-a",
+                calls: Arc::new(AtomicUsize::new(0)),
+                rate_limit: true,
+                response: "nope",
+            }) as Box<dyn ModelProvider>,
+            vec![Box::new(CredMock {
+                label: "extra-a",
+                calls: Arc::new(AtomicUsize::new(0)),
+                rate_limit: false,
+                response: "ok-a",
+            }) as Box<dyn ModelProvider>],
+        );
+        let entry_b = ReliableModelProviderEntry::from_providers(
+            "openai",
+            "openai.work",
+            Box::new(CredMock {
+                label: "primary-b",
+                calls: Arc::new(AtomicUsize::new(0)),
+                rate_limit: false,
+                response: "should-not-use-primary",
+            }) as Box<dyn ModelProvider>,
+            Vec::new(),
+        );
+        let model_provider =
+            ReliableModelProvider::new_with_entries("test", vec![entry_a, entry_b], 1, 1);
+        let result = model_provider
+            .simple_chat("hi", "m", Some(0.0))
+            .await
+            .unwrap();
+        assert_eq!(result, "extra-a:ok-a");
+        assert!(
+            model_provider.credential_cooldown_active("openai.work", CredentialIdentity::Primary),
+            "primary cooled on first pin"
+        );
+        assert_ne!(
+            model_provider.select_live_credential(&model_provider.model_providers[1]),
+            Some(CredentialIdentity::Primary),
+            "shared cooldown must prevent Primary on the sibling pin"
+        );
     }
 
     #[tokio::test]
@@ -3356,17 +3469,17 @@ mod tests {
         assert_eq!(
             applied,
             vec![
-                (0, CredentialIdentity::Primary),
-                (0, CredentialIdentity::Extra(0)),
+                ("p".to_string(), CredentialIdentity::Primary),
+                ("p".to_string(), CredentialIdentity::Extra(0)),
             ],
             "each attempt must record the credential actually applied"
         );
         assert!(
-            model_provider.credential_cooldown_active(0, CredentialIdentity::Primary),
+            model_provider.credential_cooldown_active("p", CredentialIdentity::Primary),
             "primary that returned 429 must be cooled"
         );
         assert!(
-            !model_provider.credential_cooldown_active(0, CredentialIdentity::Extra(0)),
+            !model_provider.credential_cooldown_active("p", CredentialIdentity::Extra(0)),
             "successful extra must not be cooled"
         );
     }
@@ -3415,15 +3528,15 @@ mod tests {
         let _ = b.await.unwrap();
 
         assert!(
-            model_provider.credential_cooldown_active(0, CredentialIdentity::Primary),
+            model_provider.credential_cooldown_active("p", CredentialIdentity::Primary),
             "primary is the failing credential under concurrent 429s"
         );
         assert!(
-            !model_provider.credential_cooldown_active(0, CredentialIdentity::Extra(0)),
+            !model_provider.credential_cooldown_active("p", CredentialIdentity::Extra(0)),
             "extra-0 must not be false-cooled"
         );
         assert!(
-            !model_provider.credential_cooldown_active(0, CredentialIdentity::Extra(1)),
+            !model_provider.credential_cooldown_active("p", CredentialIdentity::Extra(1)),
             "extra-1 must not be false-cooled"
         );
     }
@@ -3474,19 +3587,19 @@ mod tests {
         assert_eq!(result, "b-primary:ok");
 
         assert!(
-            model_provider.credential_cooldown_active(0, CredentialIdentity::Primary),
-            "entry 0 primary cooled"
+            model_provider.credential_cooldown_active("provider-a", CredentialIdentity::Primary),
+            "provider-a primary cooled"
         );
         assert!(
-            model_provider.credential_cooldown_active(0, CredentialIdentity::Extra(0)),
-            "entry 0 extra cooled"
+            model_provider.credential_cooldown_active("provider-a", CredentialIdentity::Extra(0)),
+            "provider-a extra cooled"
         );
         assert!(
-            !model_provider.credential_cooldown_active(1, CredentialIdentity::Primary),
+            !model_provider.credential_cooldown_active("provider-b", CredentialIdentity::Primary),
             "entry 1 primary must remain independent (scoped per entry)"
         );
         assert!(
-            !model_provider.credential_cooldown_active(1, CredentialIdentity::Extra(0)),
+            !model_provider.credential_cooldown_active("provider-b", CredentialIdentity::Extra(0)),
             "entry 1 extra must remain independent (scoped per entry)"
         );
     }
@@ -3525,7 +3638,7 @@ mod tests {
         // After both are cooled, select must refuse (never hand out a cooled key).
         assert!(
             model_provider
-                .select_live_credential(0, &model_provider.model_providers[0])
+                .select_live_credential(&model_provider.model_providers[0])
                 .is_none(),
             "all-cooled must not choose a cooled credential"
         );
@@ -3533,31 +3646,11 @@ mod tests {
         assert_eq!(
             applied,
             vec![
-                (0, CredentialIdentity::Primary),
-                (0, CredentialIdentity::Extra(0)),
+                ("p".to_string(), CredentialIdentity::Primary),
+                ("p".to_string(), CredentialIdentity::Extra(0)),
             ],
             "each credential applied once, then unavailable — no cooled re-choice: {applied:?}"
         );
-    }
-
-    // ── New tests: Retry-After parsing ──
-
-    #[test]
-    fn parse_retry_after_integer() {
-        let err = anyhow::Error::msg("429 Too Many Requests, Retry-After: 5");
-        assert_eq!(parse_retry_after_ms(&err), Some(5000));
-    }
-
-    #[test]
-    fn parse_retry_after_float() {
-        let err = anyhow::Error::msg("Rate limited. retry_after: 2.5 seconds");
-        assert_eq!(parse_retry_after_ms(&err), Some(2500));
-    }
-
-    #[test]
-    fn parse_retry_after_missing() {
-        let err = anyhow::Error::msg("500 Internal Server Error");
-        assert_eq!(parse_retry_after_ms(&err), None);
     }
 
     #[test]
@@ -3606,22 +3699,12 @@ mod tests {
     }
 
     #[test]
-    fn compute_backoff_uses_retry_after() {
-        let model_provider = ReliableModelProvider::new("test", vec![], 0, 500);
-        let err = anyhow::Error::msg("429 Retry-After: 3");
-        assert_eq!(model_provider.compute_backoff(500, &err), 3_000);
-    }
-
-    #[test]
-    fn compute_backoff_caps_at_30s() {
+    fn compute_backoff_uses_base_without_typed_retry_after() {
+        // anyhow::Error does not carry HTTP Retry-After metadata; backoff is
+        // the exponential base only (no string scraping pretending to honor headers).
         let model_provider = ReliableModelProvider::new("test", vec![], 0, 500);
         let err = anyhow::Error::msg("429 Retry-After: 120");
-        assert_eq!(model_provider.compute_backoff(500, &err), 30_000);
-    }
-
-    #[test]
-    fn compute_backoff_falls_back_to_base() {
-        let model_provider = ReliableModelProvider::new("test", vec![], 0, 500);
+        assert_eq!(model_provider.compute_backoff(500, &err), 500);
         let err = anyhow::Error::msg("500 Server Error");
         assert_eq!(model_provider.compute_backoff(500, &err), 500);
     }
@@ -3688,38 +3771,6 @@ mod tests {
         assert!(
             !is_non_retryable(&err),
             "502 must NOT be treated as non-retryable"
-        );
-    }
-
-    // ── §2.2 Rate limit Retry-After edge cases ───────────────
-
-    #[test]
-    fn parse_retry_after_zero() {
-        let err = anyhow::Error::msg("429 Too Many Requests, Retry-After: 0");
-        assert_eq!(
-            parse_retry_after_ms(&err),
-            Some(0),
-            "Retry-After: 0 should parse as 0ms"
-        );
-    }
-
-    #[test]
-    fn parse_retry_after_with_underscore_separator() {
-        let err = anyhow::Error::msg("rate limited, retry_after: 10");
-        assert_eq!(
-            parse_retry_after_ms(&err),
-            Some(10_000),
-            "retry_after with underscore must be parsed"
-        );
-    }
-
-    #[test]
-    fn parse_retry_after_space_separator() {
-        let err = anyhow::Error::msg("Retry-After 7");
-        assert_eq!(
-            parse_retry_after_ms(&err),
-            Some(7000),
-            "Retry-After with space separator must be parsed"
         );
     }
 
@@ -3792,7 +3843,7 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_state_expires_and_cleans_itself() {
+    fn cooldown_state_uses_default_duration_without_retry_after_header() {
         let model_provider = ReliableModelProvider::new(
             "test",
             vec![(
@@ -3811,10 +3862,10 @@ mod tests {
 
         let cooldown = model_provider.set_rate_limit_cooldown("primary", &err);
 
-        assert_eq!(cooldown, Duration::ZERO);
+        assert_eq!(cooldown, ReliableModelProvider::RATE_LIMIT_COOLDOWN);
         assert!(
-            !model_provider.provider_cooldown_active("primary"),
-            "zero-length cooldown should expire and be removed on read"
+            model_provider.provider_cooldown_active("primary"),
+            "default cooldown must be active (no typed Retry-After metadata)"
         );
     }
 
@@ -3876,7 +3927,7 @@ mod tests {
         let model_provider = ReliableModelProvider::new_with_entries(
             "test",
             vec![
-                ReliableModelProviderEntry::new(
+                ReliableModelProviderEntry::from_providers(
                     "primary",
                     "openai.work",
                     Box::new(MockModelProvider {
@@ -3885,8 +3936,9 @@ mod tests {
                         response: "never",
                         error: "HTTP 429 Too Many Requests, Retry-After: 30",
                     }),
+                    Vec::new(),
                 ),
-                ReliableModelProviderEntry::new(
+                ReliableModelProviderEntry::from_providers(
                     "primary",
                     "openai.work",
                     Box::new(MockModelProvider {
@@ -3895,8 +3947,9 @@ mod tests {
                         response: "should be skipped",
                         error: "shared down",
                     }),
+                    Vec::new(),
                 ),
-                ReliableModelProviderEntry::new(
+                ReliableModelProviderEntry::from_providers(
                     "downstream",
                     "anthropic.work",
                     Box::new(MockModelProvider {
@@ -3905,6 +3958,7 @@ mod tests {
                         response: "downstream fallback",
                         error: "downstream down",
                     }),
+                    Vec::new(),
                 ),
             ],
             5,
@@ -4890,27 +4944,29 @@ mod tests {
         let model_provider = ReliableModelProvider::new_with_entries(
             "test",
             vec![
-                ReliableModelProviderEntry::new(
+                ReliableModelProviderEntry::from_providers(
                     "primary",
                     "openai.work",
                     Box::new(StreamingHistoryMock {
                         stream_calls: Arc::clone(&primary_calls),
                         supports: true,
                     }) as Box<dyn ModelProvider>,
+                    Vec::new(),
                 ),
-                ReliableModelProviderEntry::new(
+                ReliableModelProviderEntry::from_providers(
                     "fallback",
                     "anthropic.work",
                     Box::new(StreamingHistoryMock {
                         stream_calls: Arc::clone(&fallback_calls),
                         supports: true,
                     }) as Box<dyn ModelProvider>,
+                    Vec::new(),
                 ),
             ],
             0,
             1,
         );
-        let err = anyhow::Error::msg("429 Too Many Requests, Retry-After: 30");
+        let err = anyhow::Error::msg("429 Too Many Requests");
         model_provider.set_rate_limit_cooldown("openai.work", &err);
 
         let messages = vec![ChatMessage::user("hello")];
@@ -5109,14 +5165,15 @@ mod tests {
             0,
             0,
         );
-        // The wrapper must report the inner provider's role/alias,
-        // not its own.
+        // Role still comes from an ephemeral primary build; alias is the
+        // wrapper's configured alias (factories cannot borrow inner &str).
         assert_eq!(reliable.role(), inner_role, "wrapper must delegate role()",);
         assert_eq!(
             reliable.alias(),
-            inner_alias,
-            "wrapper must delegate alias()",
+            "wrapped-alias",
+            "wrapper alias is its configured alias (SoT factories are ephemeral)"
         );
+        let _ = inner_alias;
 
         // End-to-end through ProviderDispatch: the captured event
         // must report the inner provider's `model_provider_type`,

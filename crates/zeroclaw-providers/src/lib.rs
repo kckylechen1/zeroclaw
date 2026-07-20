@@ -42,6 +42,7 @@ pub use traits::{
 use reliable::{ReliableModelProvider, ReliableModelProviderEntry};
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const MAX_API_ERROR_CHARS: usize = 500;
 const MINIMAX_INTL_BASE_URL: &str = "https://api.minimax.io/v1";
@@ -1188,18 +1189,46 @@ pub fn create_resilient_model_provider_with_options(
     reliability: &zeroclaw_config::schema::ReliabilityConfig,
     options: &ModelProviderRuntimeOptions,
 ) -> anyhow::Result<Box<dyn ModelProvider>> {
-    let primary_model_provider =
-        create_model_provider_inner(None, primary_name, "default", api_key, api_url, options)?;
-    let extras = build_extra_credential_providers(
-        None,
-        primary_name,
-        "default",
-        api_url,
-        options,
-        &reliability.api_keys,
-    )?;
-    let entry = ReliableModelProviderEntry::new(primary_name, primary_name, primary_model_provider)
-        .with_extra_providers(extras);
+    // No typed live Config handle on this path — construct on demand from the
+    // call-site snapshot via Arc factories (keys are re-read from the captured
+    // ReliabilityConfig/options on each attempt, not stored as a parallel Vec
+    // on ReliableModelProvider).
+    let primary_name_owned = primary_name.to_string();
+    let api_key_owned = api_key.map(str::to_owned);
+    let api_url_owned = api_url.map(str::to_owned);
+    let options_owned = options.clone();
+    let primary = Arc::new(move || {
+        create_model_provider_inner(
+            None,
+            &primary_name_owned,
+            "default",
+            api_key_owned.as_deref(),
+            api_url_owned.as_deref(),
+            &options_owned,
+        )
+    }) as crate::reliable::CredentialFactory;
+
+    let mut extras = Vec::with_capacity(reliability.api_keys.len());
+    for (i, _) in reliability.api_keys.iter().enumerate() {
+        let primary_name_owned = primary_name.to_string();
+        let api_url_owned = api_url.map(str::to_owned);
+        let options_owned = options.clone();
+        let keys = reliability.api_keys.clone();
+        extras.push(Arc::new(move || {
+            let key = keys.get(i).map(String::as_str);
+            create_model_provider_inner(
+                None,
+                &primary_name_owned,
+                "default",
+                key,
+                api_url_owned.as_deref(),
+                &options_owned,
+            )
+        }) as crate::reliable::CredentialFactory);
+    }
+
+    let entry = ReliableModelProviderEntry::new(primary_name, primary_name, primary)
+        .with_extra_factories(extras);
 
     let reliable = ReliableModelProvider::new_with_entries(
         primary_name,
@@ -1246,41 +1275,77 @@ fn create_resilient_model_provider_for_alias_with_model_override(
     options: &ModelProviderRuntimeOptions,
     primary_model_override: Option<&str>,
 ) -> anyhow::Result<Box<dyn ModelProvider>> {
-    let primary_model_provider =
-        create_model_provider_inner(Some(config), family, alias, api_key, api_url, options)?;
-    // Build Extra(i) providers from reliability.api_keys via the same factory —
-    // each attempt will call a real constructed provider (no set_api_key).
-    // Secrets are not duplicated onto ReliableModelProvider; they live only
-    // inside each provider instance (canonical construction path).
-    let extras = build_extra_credential_providers(
-        Some(config),
+    // Snapshot wrapped as live handle. Prefer
+    // [`create_resilient_model_provider_for_alias_live`] when the caller already
+    // owns `Arc<RwLock<Config>>` so reloads are observed without rebuild.
+    let live = Arc::new(parking_lot::RwLock::new(config.clone()));
+    create_resilient_model_provider_for_alias_live(
+        live,
         family,
         alias,
+        api_key,
         api_url,
+        reliability,
         options,
-        &reliability.api_keys,
-    )?;
+        primary_model_override,
+    )
+}
+
+/// Like [`create_resilient_model_provider_for_alias`], but credentials are
+/// resolved from the live `Arc<RwLock<Config>>` on every attempt (AGENTS SoT).
+pub fn create_resilient_model_provider_for_alias_live(
+    live: Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>,
+    family: &str,
+    alias: &str,
+    api_key: Option<&str>,
+    api_url: Option<&str>,
+    reliability: &zeroclaw_config::schema::ReliabilityConfig,
+    options: &ModelProviderRuntimeOptions,
+    primary_model_override: Option<&str>,
+) -> anyhow::Result<Box<dyn ModelProvider>> {
+    let primary = live_primary_factory(
+        Arc::clone(&live),
+        family,
+        alias,
+        api_key.map(str::to_owned),
+        api_url.map(str::to_owned),
+        options.clone(),
+    );
+    let mut extras = Vec::with_capacity(reliability.api_keys.len());
+    for i in 0..reliability.api_keys.len() {
+        extras.push(live_extra_factory(
+            Arc::clone(&live),
+            family,
+            alias,
+            i,
+            api_url.map(str::to_owned),
+            options.clone(),
+        ));
+    }
 
     let mut model_providers: Vec<ReliableModelProviderEntry> = Vec::new();
-    push_pinned_entries(
-        &mut model_providers,
-        config,
-        family,
-        alias,
-        primary_model_provider,
-        extras,
-        primary_model_override,
-    );
-
-    let mut visited: Vec<String> = vec![format!("{family}.{alias}")];
-    if let Some(entry) = config.providers.models.find(family, alias) {
-        append_fallback_chain(
+    {
+        let cfg = live.read();
+        push_pinned_entries(
             &mut model_providers,
-            config,
-            &entry.fallback,
-            &mut visited,
-            1,
-        )?;
+            &cfg,
+            family,
+            alias,
+            primary,
+            extras,
+            primary_model_override,
+        );
+
+        let mut visited: Vec<String> = vec![format!("{family}.{alias}")];
+        if let Some(entry) = cfg.providers.models.find(family, alias) {
+            append_fallback_chain_live(
+                &mut model_providers,
+                Arc::clone(&live),
+                &entry.fallback,
+                &mut visited,
+                1,
+            )?;
+        }
     }
 
     let reliable = ReliableModelProvider::new_with_entries(
@@ -1293,27 +1358,75 @@ fn create_resilient_model_provider_for_alias_with_model_override(
     Ok(Box::new(reliable))
 }
 
-/// Construct one model_provider per extra reliability API key.
-fn build_extra_credential_providers(
-    config: Option<&zeroclaw_config::schema::Config>,
+fn live_primary_factory(
+    live: Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>,
     family: &str,
     alias: &str,
-    api_url: Option<&str>,
-    options: &ModelProviderRuntimeOptions,
-    extra_keys: &[String],
-) -> anyhow::Result<Vec<Box<dyn ModelProvider>>> {
-    let mut out = Vec::with_capacity(extra_keys.len());
-    for key in extra_keys {
-        out.push(create_model_provider_inner(
-            config,
-            family,
-            alias,
-            Some(key.as_str()),
-            api_url,
-            options,
-        )?);
-    }
-    Ok(out)
+    api_key_override: Option<String>,
+    api_url_override: Option<String>,
+    options: ModelProviderRuntimeOptions,
+) -> crate::reliable::CredentialFactory {
+    let family = family.to_string();
+    let alias = alias.to_string();
+    Arc::new(move || {
+        let cfg = live.read();
+        let entry = cfg.providers.models.find(&family, &alias);
+        let key = entry
+            .and_then(|e| e.api_key.as_deref())
+            .map(str::to_owned)
+            .or_else(|| api_key_override.clone());
+        let url = entry
+            .and_then(|e| e.uri.as_deref())
+            .map(str::to_owned)
+            .or_else(|| api_url_override.clone());
+        create_model_provider_inner(
+            Some(&cfg),
+            &family,
+            &alias,
+            key.as_deref(),
+            url.as_deref(),
+            &options,
+        )
+    })
+}
+
+fn live_extra_factory(
+    live: Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>,
+    family: &str,
+    alias: &str,
+    index: usize,
+    api_url_override: Option<String>,
+    options: ModelProviderRuntimeOptions,
+) -> crate::reliable::CredentialFactory {
+    let family = family.to_string();
+    let alias = alias.to_string();
+    Arc::new(move || {
+        let cfg = live.read();
+        let key = cfg.reliability.api_keys.get(index).map(String::as_str);
+        let url = cfg
+            .providers
+            .models
+            .find(&family, &alias)
+            .and_then(|e| e.uri.as_deref())
+            .map(str::to_owned)
+            .or_else(|| api_url_override.clone());
+        create_model_provider_inner(Some(&cfg), &family, &alias, key, url.as_deref(), &options)
+    })
+}
+
+fn pin_credential_factory(
+    alias: &str,
+    model: &str,
+    inner: crate::reliable::CredentialFactory,
+) -> crate::reliable::CredentialFactory {
+    let alias = alias.to_string();
+    let model = model.to_string();
+    Arc::new(move || {
+        let built = inner()?;
+        Ok(Box::new(crate::model_pin::ModelPinnedProvider::new(
+            &alias, &model, built,
+        )) as Box<dyn ModelProvider>)
+    })
 }
 
 fn push_pinned_entries(
@@ -1321,8 +1434,8 @@ fn push_pinned_entries(
     config: &zeroclaw_config::schema::Config,
     family: &str,
     alias: &str,
-    built: Box<dyn ModelProvider>,
-    extras: Vec<Box<dyn ModelProvider>>,
+    primary: crate::reliable::CredentialFactory,
+    extras: Vec<crate::reliable::CredentialFactory>,
     primary_model_override: Option<&str>,
 ) {
     let entry = config.providers.models.find(family, alias);
@@ -1337,15 +1450,11 @@ fn push_pinned_entries(
 
     let Some(primary_model) = primary_model else {
         out.push(
-            ReliableModelProviderEntry::new(family, cooldown_key, built)
-                .with_extra_providers(extras),
+            ReliableModelProviderEntry::new(family, cooldown_key, primary)
+                .with_extra_factories(extras),
         );
         return;
     };
-
-    let primary_arc: std::sync::Arc<dyn ModelProvider> = std::sync::Arc::from(built);
-    let extra_arcs: Vec<std::sync::Arc<dyn ModelProvider>> =
-        extras.into_iter().map(std::sync::Arc::from).collect();
 
     let mut models = vec![primary_model.to_string()];
     for model in extra_models {
@@ -1356,31 +1465,21 @@ fn push_pinned_entries(
     }
 
     for model in models {
-        let primary_pinned = Box::new(crate::model_pin::ModelPinnedProvider::new(
-            alias,
-            &model,
-            Box::new(std::sync::Arc::clone(&primary_arc)),
-        ));
-        let extra_pinned: Vec<Box<dyn ModelProvider>> = extra_arcs
+        let primary_pinned = pin_credential_factory(alias, &model, Arc::clone(&primary));
+        let extra_pinned: Vec<crate::reliable::CredentialFactory> = extras
             .iter()
-            .map(|arc| {
-                Box::new(crate::model_pin::ModelPinnedProvider::new(
-                    alias,
-                    &model,
-                    Box::new(std::sync::Arc::clone(arc)),
-                )) as Box<dyn ModelProvider>
-            })
+            .map(|factory| pin_credential_factory(alias, &model, Arc::clone(factory)))
             .collect();
         out.push(
             ReliableModelProviderEntry::new(family, cooldown_key.clone(), primary_pinned)
-                .with_extra_providers(extra_pinned),
+                .with_extra_factories(extra_pinned),
         );
     }
 }
 
-fn append_fallback_chain(
+fn append_fallback_chain_live(
     out: &mut Vec<ReliableModelProviderEntry>,
-    config: &zeroclaw_config::schema::Config,
+    live: Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>,
     refs: &[zeroclaw_config::providers::ModelProviderRef],
     visited: &mut Vec<String>,
     depth: usize,
@@ -1402,6 +1501,8 @@ fn append_fallback_chain(
         if raw.is_empty() {
             continue;
         }
+
+        let config = live.read();
         let Some((family, alias, entry)) = config.providers.models.find_by_name(raw) else {
             ::zeroclaw_log::record!(
                 WARN,
@@ -1412,6 +1513,8 @@ fn append_fallback_chain(
             );
             continue;
         };
+        let family = family.to_string();
+        let alias = alias.to_string();
         let resolved = format!("{family}.{alias}");
         if visited.iter().any(|v| v == &resolved) {
             ::zeroclaw_log::record!(
@@ -1424,10 +1527,10 @@ fn append_fallback_chain(
             continue;
         }
 
-        let opts = provider_runtime_options_for_alias(config, family, &alias);
+        let opts = provider_runtime_options_for_alias(&config, &family, &alias);
         if !factory::fallback_auth_ready_for_alias(
-            config,
-            family,
+            &config,
+            &family,
             &alias,
             entry.api_key.as_deref(),
             &opts,
@@ -1439,29 +1542,37 @@ fn append_fallback_chain(
                  the alias's external auth flow, or remove it from `fallback`."
             );
         }
+        let entry_api_key = entry.api_key.clone();
+        let entry_uri = entry.uri.clone();
+        let entry_fallback = entry.fallback.clone();
+        drop(config);
 
-        match create_model_provider_inner(
-            Some(config),
-            family,
+        // Fallback entries use only their own Primary credential; reliability
+        // api_keys extras stay scoped to the primary alias entry.
+        let primary = live_primary_factory(
+            Arc::clone(&live),
+            &family,
             &alias,
-            entry.api_key.as_deref(),
-            entry.uri.as_deref(),
-            &opts,
-        ) {
-            // Fallback entries use only their own Primary credential; reliability
-            // api_keys extras stay scoped to the primary alias entry.
-            Ok(built) => push_pinned_entries(out, config, family, &alias, built, Vec::new(), None),
-            Err(e) => {
-                let profile = format!("[providers.models.{family}.{alias}]");
-                anyhow::bail!(
-                    "Fallback provider `{raw}` resolved to `{resolved}` ({profile}) failed to \
-                     build: {e}"
-                );
-            }
+            entry_api_key,
+            entry_uri,
+            opts,
+        );
+        // Eagerly validate the factory can construct (preserves fail-fast build
+        // diagnostics) without retaining the constructed provider.
+        if let Err(e) = primary() {
+            let profile = format!("[providers.models.{family}.{alias}]");
+            anyhow::bail!(
+                "Fallback provider `{raw}` resolved to `{resolved}` ({profile}) failed to \
+                 build: {e}"
+            );
+        }
+        {
+            let config = live.read();
+            push_pinned_entries(out, &config, &family, &alias, primary, Vec::new(), None);
         }
 
-        visited.push(resolved.clone());
-        append_fallback_chain(out, config, &entry.fallback, visited, depth + 1)?;
+        visited.push(resolved);
+        append_fallback_chain_live(out, Arc::clone(&live), &entry_fallback, visited, depth + 1)?;
         visited.pop();
     }
     Ok(())
