@@ -3496,15 +3496,57 @@ mod tests {
 
         let budget = Arc::new(AtomicUsize::new(3));
 
-        // Simulate 3 iterations decrementing
+        // Simulate 3 iterations decrementing via CAS (matches turn/mod.rs).
         for i in 0..3 {
-            let remaining = budget.load(Ordering::Relaxed);
-            assert!(remaining > 0, "Budget should be >0 at iteration {i}");
-            budget.fetch_sub(1, Ordering::Relaxed);
+            let acquired = budget
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current.checked_sub(1)
+                })
+                .is_ok();
+            assert!(acquired, "Budget should be acquired at iteration {i}");
         }
 
-        // Budget should now be 0
-        assert_eq!(budget.load(Ordering::Relaxed), 0);
+        // Budget should now be 0; further subtract must refuse (no wrap).
+        assert_eq!(budget.load(Ordering::Acquire), 0);
+        assert!(
+            budget
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current.checked_sub(1)
+                })
+                .is_err(),
+            "CAS must refuse subtract at 0"
+        );
+        assert_eq!(budget.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn shared_budget_cas_refuses_concurrent_wrap_at_zero() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::thread;
+
+        let budget = Arc::new(AtomicUsize::new(1));
+        let b1 = Arc::clone(&budget);
+        let b2 = Arc::clone(&budget);
+
+        let t1 = thread::spawn(move || {
+            b1.fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| c.checked_sub(1))
+                .is_ok()
+        });
+        let t2 = thread::spawn(move || {
+            b2.fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| c.checked_sub(1))
+                .is_ok()
+        });
+
+        let a = t1.join().expect("thread 1");
+        let b = t2.join().expect("thread 2");
+        assert_ne!(a, b, "exactly one of two concurrent CAS at budget=1 succeeds");
+        assert!(a || b);
+        assert_eq!(
+            budget.load(Ordering::Acquire),
+            0,
+            "budget must stay at 0, never wrap to usize::MAX"
+        );
     }
 
     #[test]

@@ -2204,7 +2204,25 @@ impl SopEngine {
         status: SopRunStatus,
         reason: Option<String>,
     ) -> SopRunAction {
-        let mut run = self.active_runs.remove(run_id).unwrap();
+        let Some(mut run) = self.active_runs.remove(run_id) else {
+            // Missing/already-finished run: never panic under the engine lock
+            // (unwrap would poison the mutex for the whole process) (#9192).
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "run_id": run_id,
+                        "status": format!("{status:?}"),
+                    })),
+                "finish_run called for unknown or already-finished run; no-op"
+            );
+            return SopRunAction::Failed {
+                run_id: run_id.to_string(),
+                sop_name: String::new(),
+                reason: format!("run not found: {run_id}"),
+            };
+        };
         run.status = status;
         run.completed_at = Some(now_iso8601());
         let sop_name = run.sop_name.clone();
@@ -4079,6 +4097,24 @@ mod tests {
 
         // Cooldown not elapsed — should block
         assert!(!engine.can_start("s1"));
+    }
+
+    #[test]
+    fn finish_run_missing_run_is_safe_noop() {
+        let mut engine = engine_with_sops(vec![test_sop(
+            "s1",
+            SopExecutionMode::Auto,
+            SopPriority::Normal,
+        )]);
+        let action = engine.finish_run("missing-run-id", SopRunStatus::Completed, None);
+        assert!(
+            matches!(
+                action,
+                SopRunAction::Failed { ref reason, .. } if reason.contains("run not found")
+            ),
+            "missing run must return Failed without panicking: {action:?}"
+        );
+        assert!(engine.active_runs().is_empty());
     }
 
     #[test]
