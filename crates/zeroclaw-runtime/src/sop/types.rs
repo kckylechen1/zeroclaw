@@ -828,6 +828,28 @@ pub enum SopRunAction {
     },
 }
 
+/// Typed error from [`crate::sop::engine::SopEngine::finish_run`] when the run
+/// is missing or already terminal. Callers must not treat this as a fresh
+/// failure event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishRunError {
+    NotFound { run_id: String },
+    AlreadyFinished { run_id: String, sop_name: String },
+}
+
+impl std::fmt::Display for FinishRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound { run_id } => write!(f, "SOP run not found: {run_id}"),
+            Self::AlreadyFinished { run_id, sop_name } => {
+                write!(f, "SOP run already finished: {run_id} ({sop_name})")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FinishRunError {}
+
 /// Exhaustive sample builder: one representative `SopTrigger` per source.
 /// The match has no wildcard, so adding a source fails to compile here until a
 /// sample is supplied, keeping every drift walk that consumes it exhaustive.

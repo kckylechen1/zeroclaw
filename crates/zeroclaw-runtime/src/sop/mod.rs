@@ -52,10 +52,10 @@ pub use trigger_registry::{
     build_registry, registry_from_config,
 };
 pub use types::{
-    DeterministicRunState, DeterministicSavings, FilesystemEventKind, PlannedToolCall, Sop,
-    SopEvent, SopExecutionMode, SopPriority, SopRun, SopRunAction, SopRunStatus, SopRunSummary,
-    SopStep, SopStepKind, SopStepResult, SopStepStatus, SopTrigger, SopTriggerSource, StepSchema,
-    StepToolCall,
+    DeterministicRunState, DeterministicSavings, FilesystemEventKind, FinishRunError,
+    PlannedToolCall, Sop, SopEvent, SopExecutionMode, SopPriority, SopRun, SopRunAction,
+    SopRunStatus, SopRunSummary, SopStep, SopStepKind, SopStepResult, SopStepStatus, SopTrigger,
+    SopTriggerSource, StepSchema, StepToolCall,
 };
 pub use wire::{WireEdit, WireError, WireOp, apply_wire};
 

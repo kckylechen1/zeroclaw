@@ -16,9 +16,9 @@ use super::store::{
     SopEventRecord, SopRunStore, StoreError,
 };
 use super::types::{
-    DeterministicRunState, DeterministicSavings, FilesystemEventKind, Sop, SopEvent,
-    SopExecutionMode, SopPriority, SopRun, SopRunAction, SopRunStatus, SopRunSummary, SopStep,
-    SopStepKind, SopStepResult, SopStepStatus, SopTrigger, SopTriggerSource,
+    DeterministicRunState, DeterministicSavings, FilesystemEventKind, FinishRunError, Sop,
+    SopEvent, SopExecutionMode, SopPriority, SopRun, SopRunAction, SopRunStatus, SopRunSummary,
+    SopStep, SopStepKind, SopStepResult, SopStepStatus, SopTrigger, SopTriggerSource,
 };
 use crate::calendar::{CALENDAR_NO_SHOW_TOPIC, CalendarNoShowEvent};
 use crate::security::{ContentSafety, new_marker_id};
@@ -754,12 +754,15 @@ impl SopEngine {
         run_id: &str,
         step: &SopStep,
         input: &Value,
-    ) -> Option<SopRunAction> {
+    ) -> Result<Option<SopRunAction>> {
         match self.validate_step_input(step, input) {
-            Ok(()) => None,
-            Err(reason) => {
-                Some(self.fail_step_schema_validation(run_id, step.number, "input", reason))
-            }
+            Ok(()) => Ok(None),
+            Err(reason) => Ok(Some(self.fail_step_schema_validation(
+                run_id,
+                step.number,
+                "input",
+                reason,
+            )?)),
         }
     }
 
@@ -797,7 +800,7 @@ impl SopEngine {
         step_number: u32,
         phase: &str,
         reason: String,
-    ) -> SopRunAction {
+    ) -> Result<SopRunAction> {
         let reason = format!("Step {step_number} {phase} schema validation failed: {reason}");
         self.record_transition_event(
             run_id,
@@ -821,6 +824,7 @@ impl SopEngine {
             "SOP step schema validation failed"
         );
         self.finish_run(run_id, SopRunStatus::Failed, Some(reason))
+            .map_err(|e| anyhow::Error::msg(e.to_string()))
     }
 
     fn record_step_result(&mut self, run_id: &str, result: SopStepResult) -> Result<()> {
@@ -974,7 +978,7 @@ impl SopEngine {
             }
             NextStep::Complete => {
                 if deterministic {
-                    Ok(self.finish_deterministic_run(run_id))
+                    self.finish_deterministic_run(run_id)
                 } else {
                     ::zeroclaw_log::record!(
                         INFO,
@@ -982,12 +986,13 @@ impl SopEngine {
                             .with_attrs(::serde_json::json!({"run_id": run_id})),
                         "SOP run completed successfully"
                     );
-                    Ok(self.finish_run(run_id, SopRunStatus::Completed, None))
+                    self.finish_run(run_id, SopRunStatus::Completed, None)
+                        .map_err(|e| anyhow::Error::msg(e.to_string()))
                 }
             }
-            NextStep::Fail(reason) => {
-                Ok(self.finish_run(run_id, SopRunStatus::Failed, Some(reason)))
-            }
+            NextStep::Fail(reason) => self
+                .finish_run(run_id, SopRunStatus::Failed, Some(reason))
+                .map_err(|e| anyhow::Error::msg(e.to_string())),
             NextStep::Wait(step_number) => Ok(self.mark_step_pending(
                 run_id,
                 sop,
@@ -1010,11 +1015,14 @@ impl SopEngine {
             return Ok(None);
         }
 
-        Ok(Some(self.finish_run(
-            run_id,
-            SopRunStatus::Failed,
-            Some(format!("step {step_number} visit limit reached")),
-        )))
+        let action = self
+            .finish_run(
+                run_id,
+                SopRunStatus::Failed,
+                Some(format!("step {step_number} visit limit reached")),
+            )
+            .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+        Ok(Some(action))
     }
 
     fn dispatch_llm_step(
@@ -1061,7 +1069,7 @@ impl SopEngine {
                 step_input_value(run, step.number)
             }
         };
-        if let Some(action) = self.schema_input_failure_action(run_id, &step, &input) {
+        if let Some(action) = self.schema_input_failure_action(run_id, &step, &input)? {
             return Ok(action);
         }
 
@@ -1183,7 +1191,7 @@ impl SopEngine {
         }
     }
 
-    fn finish_deterministic_run(&mut self, run_id: &str) -> SopRunAction {
+    fn finish_deterministic_run(&mut self, run_id: &str) -> Result<SopRunAction> {
         let saved = self
             .active_runs
             .get(run_id)
@@ -1197,6 +1205,7 @@ impl SopEngine {
         self.deterministic_savings.total_llm_calls_saved += saved;
         self.deterministic_savings.total_runs += 1;
         self.finish_run(run_id, SopRunStatus::Completed, None)
+            .map_err(|e| anyhow::Error::msg(e.to_string()))
     }
 
     /// Cancel an active run.
@@ -1204,7 +1213,8 @@ impl SopEngine {
         if !self.active_runs.contains_key(run_id) {
             bail!("Active run not found: {run_id}");
         }
-        self.finish_run(run_id, SopRunStatus::Cancelled, None);
+        self.finish_run(run_id, SopRunStatus::Cancelled, None)
+            .map_err(|e| anyhow::Error::msg(e.to_string()))?;
         ::zeroclaw_log::record!(
             INFO,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -1404,7 +1414,7 @@ impl SopEngine {
                 .ok_or_else(|| anyhow::Error::msg(format!("Active run not found: {run_id}")))?;
             step_input_value(run, step.number)
         };
-        if let Some(action) = self.schema_input_failure_action(run_id, &step, &input) {
+        if let Some(action) = self.schema_input_failure_action(run_id, &step, &input)? {
             return Ok(action);
         }
 
@@ -1607,7 +1617,7 @@ impl SopEngine {
                         .get(run_id)
                         .map(|run| run.sop_name.clone())
                         .unwrap_or_default();
-                    return Ok(self.fail_headless_driverless_step(run_id, &sop_name, step));
+                    return self.fail_headless_driverless_step(run_id, &sop_name, step);
                 }
                 terminal => return Ok(terminal),
             }
@@ -1803,7 +1813,7 @@ impl SopEngine {
         run_id: &str,
         sop_name: &str,
         step: &SopStep,
-    ) -> SopRunAction {
+    ) -> Result<SopRunAction> {
         let reason = format!(
             "Headless deterministic SOP step {} '{}' requires an external driver; it was not executed",
             step.number, step.title
@@ -1830,6 +1840,7 @@ impl SopEngine {
             }),
         );
         self.finish_run(run_id, SopRunStatus::Failed, Some(reason))
+            .map_err(|e| anyhow::Error::msg(e.to_string()))
     }
 
     /// Resume a deterministic run from persisted state.
@@ -1945,7 +1956,7 @@ impl SopEngine {
             ));
         }
 
-        if let Some(action) = self.schema_input_failure_action(run_id, step, &input) {
+        if let Some(action) = self.schema_input_failure_action(run_id, step, &input)? {
             return Ok(action);
         }
 
@@ -2203,25 +2214,38 @@ impl SopEngine {
         run_id: &str,
         status: SopRunStatus,
         reason: Option<String>,
-    ) -> SopRunAction {
+    ) -> Result<SopRunAction, FinishRunError> {
         let Some(mut run) = self.active_runs.remove(run_id) else {
-            // Missing/already-finished run: never panic under the engine lock
-            // (unwrap would poison the mutex for the whole process) (#9192).
+            // Missing/already-finished: typed no-op — never panic and never emit
+            // a fake Failed action with an empty sop name (#9192 rework).
+            if let Some(finished) = self.finished_runs.iter().rev().find(|r| r.run_id == run_id) {
+                ::zeroclaw_log::record!(
+                    DEBUG,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_attrs(::serde_json::json!({
+                            "run_id": run_id,
+                            "sop_name": finished.sop_name,
+                            "status": format!("{status:?}"),
+                        })),
+                    "finish_run called for already-finished run; no-op"
+                );
+                return Err(FinishRunError::AlreadyFinished {
+                    run_id: run_id.to_string(),
+                    sop_name: finished.sop_name.clone(),
+                });
+            }
             ::zeroclaw_log::record!(
-                WARN,
+                DEBUG,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                     .with_attrs(::serde_json::json!({
                         "run_id": run_id,
                         "status": format!("{status:?}"),
                     })),
-                "finish_run called for unknown or already-finished run; no-op"
+                "finish_run called for unknown run; no-op"
             );
-            return SopRunAction::Failed {
+            return Err(FinishRunError::NotFound {
                 run_id: run_id.to_string(),
-                sop_name: String::new(),
-                reason: format!("run not found: {run_id}"),
-            };
+            });
         };
         run.status = status;
         run.completed_at = Some(now_iso8601());
@@ -2238,7 +2262,7 @@ impl SopEngine {
             self.finished_runs.drain(..excess);
         }
 
-        match status {
+        Ok(match status {
             SopRunStatus::Failed => SopRunAction::Failed {
                 run_id: run_id_owned,
                 sop_name,
@@ -2248,7 +2272,7 @@ impl SopEngine {
                 run_id: run_id_owned,
                 sop_name,
             },
-        }
+        })
     }
 
     // ── EPIC C: out-of-band approval plane ──────────────────────────
@@ -4100,21 +4124,50 @@ mod tests {
     }
 
     #[test]
-    fn finish_run_missing_run_is_safe_noop() {
+    fn finish_run_missing_run_is_typed_not_found() {
         let mut engine = engine_with_sops(vec![test_sop(
             "s1",
             SopExecutionMode::Auto,
             SopPriority::Normal,
         )]);
-        let action = engine.finish_run("missing-run-id", SopRunStatus::Completed, None);
+        let err = engine
+            .finish_run("missing-run-id", SopRunStatus::Completed, None)
+            .expect_err("missing run must be typed NotFound");
         assert!(
             matches!(
-                action,
-                SopRunAction::Failed { ref reason, .. } if reason.contains("run not found")
+                err,
+                FinishRunError::NotFound { ref run_id } if run_id == "missing-run-id"
             ),
-            "missing run must return Failed without panicking: {action:?}"
+            "missing run must return FinishRunError::NotFound, not a fake Failed: {err:?}"
         );
         assert!(engine.active_runs().is_empty());
+    }
+
+    #[test]
+    fn finish_run_already_finished_is_typed_noop() {
+        let mut engine = engine_with_sops(vec![test_sop(
+            "s1",
+            SopExecutionMode::Auto,
+            SopPriority::Normal,
+        )]);
+        let action = engine.start_run("s1", manual_event()).unwrap();
+        let run_id = extract_run_id(&action).to_string();
+        engine
+            .finish_run(&run_id, SopRunStatus::Completed, None)
+            .unwrap();
+        let err = engine
+            .finish_run(&run_id, SopRunStatus::Failed, Some("again".into()))
+            .expect_err("second finish must be typed AlreadyFinished");
+        match err {
+            FinishRunError::AlreadyFinished {
+                run_id: id,
+                sop_name,
+            } => {
+                assert_eq!(id, run_id);
+                assert_eq!(sop_name, "s1");
+            }
+            other => panic!("already-finished must not emit fake Failed: {other:?}"),
+        }
     }
 
     #[test]
@@ -4129,7 +4182,9 @@ mod tests {
         // Engine A starts and finishes a run (writes a terminal row to the store).
         let action = engine_a.start_run("s1", manual_event()).unwrap();
         let run_id = extract_run_id(&action).to_string();
-        engine_a.finish_run(&run_id, SopRunStatus::Completed, None);
+        engine_a
+            .finish_run(&run_id, SopRunStatus::Completed, None)
+            .unwrap();
 
         // Engine B never ran this SOP, so it has no local finished entry. It must
         // still see the cooldown via the shared store.

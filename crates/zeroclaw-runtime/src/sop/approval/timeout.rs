@@ -38,11 +38,14 @@ pub fn apply_timeout_action(
                 log_audit_skip(run_id, "cancel", &e);
                 return None;
             }
-            Some(engine.finish_run(
-                run_id,
-                SopRunStatus::Cancelled,
-                Some("approval timeout (fail-closed cancel)".to_string()),
-            ))
+            // Already finished / missing: typed no-op — do not emit a fake failure.
+            engine
+                .finish_run(
+                    run_id,
+                    SopRunStatus::Cancelled,
+                    Some("approval timeout (fail-closed cancel)".to_string()),
+                )
+                .ok()
         }
         // LEGACY, opt-in only: the single path that self-approves on timeout,
         // attributed to the system principal and routed through the chokepoint.

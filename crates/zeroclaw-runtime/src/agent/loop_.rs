@@ -3525,28 +3525,45 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::thread;
 
+        // Many threads contend at budget=1, then again at 0 — none may wrap.
         let budget = Arc::new(AtomicUsize::new(1));
-        let b1 = Arc::clone(&budget);
-        let b2 = Arc::clone(&budget);
-
-        let t1 = thread::spawn(move || {
-            b1.fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| c.checked_sub(1))
-                .is_ok()
-        });
-        let t2 = thread::spawn(move || {
-            b2.fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| c.checked_sub(1))
-                .is_ok()
-        });
-
-        let a = t1.join().expect("thread 1");
-        let b = t2.join().expect("thread 2");
-        assert_ne!(a, b, "exactly one of two concurrent CAS at budget=1 succeeds");
-        assert!(a || b);
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let b = Arc::clone(&budget);
+            handles.push(thread::spawn(move || {
+                b.fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| c.checked_sub(1))
+                    .is_ok()
+            }));
+        }
+        let wins: usize = handles
+            .into_iter()
+            .map(|h| usize::from(h.join().expect("worker")))
+            .sum();
+        assert_eq!(
+            wins, 1,
+            "exactly one concurrent CAS at budget=1 must succeed"
+        );
         assert_eq!(
             budget.load(Ordering::Acquire),
             0,
             "budget must stay at 0, never wrap to usize::MAX"
         );
+
+        let mut zero_handles = Vec::new();
+        for _ in 0..16 {
+            let b = Arc::clone(&budget);
+            zero_handles.push(thread::spawn(move || {
+                b.fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| c.checked_sub(1))
+                    .is_ok()
+            }));
+        }
+        assert!(
+            zero_handles
+                .into_iter()
+                .all(|h| !h.join().expect("zero-worker")),
+            "every CAS at budget=0 must refuse"
+        );
+        assert_eq!(budget.load(Ordering::Acquire), 0);
     }
 
     #[test]
