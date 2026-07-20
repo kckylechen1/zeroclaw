@@ -789,11 +789,12 @@ const MESSAGE_CREATE_QUEUE_CAPACITY: usize = 8;
 const MESSAGE_CREATE_PENDING_CAP: usize = 64;
 
 /// Resume-safe sequence persistence: never advance the persisted resume
-/// sequence past an unadmitted MESSAGE_CREATE job.
+/// sequence past an unfinished MESSAGE_CREATE (pending admission, in-flight
+/// in the worker, or not yet enqueued to the orchestrator).
 fn note_event_sequence(
     local_sequence: &mut i64,
     event_seq: Option<i64>,
-    pending_message_creates: usize,
+    unfinished_message_creates: usize,
     held_resume_seq: &mut Option<i64>,
     persist: impl FnOnce(i64),
     is_pending_message_create: bool,
@@ -803,10 +804,10 @@ fn note_event_sequence(
     };
     *local_sequence = s;
     if is_pending_message_create {
-        // Persist only after bounded-queue admission.
+        // Persist only after successful orchestrator enqueue (#9189).
         return;
     }
-    if pending_message_creates == 0 {
+    if unfinished_message_creates == 0 {
         persist(s);
         *held_resume_seq = None;
     } else {
@@ -814,25 +815,29 @@ fn note_event_sequence(
     }
 }
 
-fn persist_after_message_create_admit(
-    admitted_seq: i64,
-    pending_remaining: usize,
+/// Flush held resume progress once every MESSAGE_CREATE has been successfully
+/// enqueued (or intentionally handled without enqueue). Crash before this
+/// point must redeliver via Discord resume — so we must not persist on
+/// worker-queue admission alone.
+fn flush_resume_after_message_create_enqueued(
+    enqueued_seq: i64,
+    unfinished_remaining: usize,
     held_resume_seq: &mut Option<i64>,
     persist: impl FnOnce(i64),
 ) {
-    if pending_remaining == 0 {
+    if unfinished_remaining == 0 {
         let s = held_resume_seq
             .take()
-            .unwrap_or(admitted_seq)
-            .max(admitted_seq);
+            .unwrap_or(enqueued_seq)
+            .max(enqueued_seq);
         persist(s);
-    } else {
-        persist(admitted_seq);
     }
 }
 
 /// Owned MESSAGE_CREATE work item processed by the listener's ordered worker.
 struct MessageCreateJob {
+    /// Gateway event sequence for resume persistence after orchestrator enqueue.
+    gateway_seq: i64,
     atts: Vec<serde_json::Value>,
     clean_content: String,
     author_id: String,
@@ -867,32 +872,48 @@ where
 /// Drop aborts the worker; [`MessageCreatePipeline::shutdown`] closes the
 /// queue and joins (with timeout) before reconnect so no stale enqueue lands
 /// on a new session.
+///
+/// Successful orchestrator enqueues are reported on `enqueued_rx` so the
+/// listener can advance the Discord resume sequence only after delivery
+/// admission — not merely after worker-queue admission.
 struct MessageCreatePipeline {
     tx: Option<mpsc::Sender<MessageCreateJob>>,
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl MessageCreatePipeline {
-    fn start(orch_tx: mpsc::Sender<ChannelMessage>, orch_closed_tx: mpsc::Sender<()>) -> Self {
+    fn start(
+        orch_tx: mpsc::Sender<ChannelMessage>,
+        orch_closed_tx: mpsc::Sender<()>,
+    ) -> (Self, mpsc::UnboundedReceiver<i64>) {
         let (tx, rx) = mpsc::channel(MESSAGE_CREATE_QUEUE_CAPACITY);
+        let (enqueued_tx, enqueued_rx) = mpsc::unbounded_channel();
         let handle = zeroclaw_spawn::spawn!(async move {
-            run_ordered_worker(rx, |job| {
+            run_ordered_worker(rx, |job: MessageCreateJob| {
                 let orch_tx = orch_tx.clone();
                 let orch_closed_tx = orch_closed_tx.clone();
+                let enqueued_tx = enqueued_tx.clone();
                 async move {
-                    if deliver_message_create_job(job, &orch_tx).await
-                        == DeliverOutcome::OrchestratorClosed
-                    {
-                        let _ = orch_closed_tx.try_send(());
+                    let seq = job.gateway_seq;
+                    match deliver_message_create_job(job, &orch_tx).await {
+                        DeliverOutcome::Done => {
+                            let _ = enqueued_tx.send(seq);
+                        }
+                        DeliverOutcome::OrchestratorClosed => {
+                            let _ = orch_closed_tx.try_send(());
+                        }
                     }
                 }
             })
             .await;
         });
-        Self {
-            tx: Some(tx),
-            handle: Some(handle),
-        }
+        (
+            Self {
+                tx: Some(tx),
+                handle: Some(handle),
+            },
+            enqueued_rx,
+        )
     }
 
     fn sender(&self) -> mpsc::Sender<MessageCreateJob> {
@@ -2007,11 +2028,14 @@ impl Channel for DiscordChannel {
         // stale-enqueue into a new gateway session (#9189).
         // Ordering domain: MESSAGE_CREATE only; INTERACTION_CREATE is separate.
         let (orch_closed_tx, mut orch_closed_rx) = mpsc::channel::<()>(1);
-        let mut message_pipeline = MessageCreatePipeline::start(tx.clone(), orch_closed_tx);
+        let (mut message_pipeline, mut enqueued_rx) =
+            MessageCreatePipeline::start(tx.clone(), orch_closed_tx);
         let job_tx = message_pipeline.sender();
-        let mut pending_jobs: VecDeque<(MessageCreateJob, i64)> = VecDeque::new();
-        // Mutex so the per-event ResumePersist Drop guard and the admission
-        // arm can both update the held resume sequence across await points.
+        let mut pending_jobs: VecDeque<MessageCreateJob> = VecDeque::new();
+        // Admitted to the worker but not yet successfully enqueued to orch.
+        let mut inflight_message_creates: usize = 0;
+        // Mutex so the per-event ResumePersist Drop guard and the enqueue
+        // completion arm can both update the held resume sequence.
         let held_resume_seq = Mutex::new(None::<i64>);
 
         let listen_result: anyhow::Result<()> = async {
@@ -2026,6 +2050,23 @@ impl Channel for DiscordChannel {
                     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), "orchestrator channel closed; stopping discord listener");
                     break;
                 }
+                enqueued = enqueued_rx.recv() => {
+                    let Some(enqueued_seq) = enqueued else {
+                        ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown), "MESSAGE_CREATE enqueue notify closed; stopping listener");
+                        break;
+                    };
+                    inflight_message_creates = inflight_message_creates.saturating_sub(1);
+                    let unfinished = pending_jobs.len() + inflight_message_creates;
+                    let mut held = held_resume_seq.lock();
+                    flush_resume_after_message_create_enqueued(
+                        enqueued_seq,
+                        unfinished,
+                        &mut held,
+                        |s| {
+                            self.gateway_session.lock().sequence = Some(s);
+                        },
+                    );
+                }
                 _ = hb_rx.recv() => {
                     let d = if sequence >= 0 { json!(sequence) } else { json!(null) };
                     let hb = json!({"op": 1, "d": d});
@@ -2036,17 +2077,10 @@ impl Channel for DiscordChannel {
                 permit = job_tx.reserve(), if !pending_jobs.is_empty() => {
                     match permit {
                         Ok(p) => {
-                            let (job, seq) = pending_jobs.pop_front().expect("pending non-empty");
+                            let job = pending_jobs.pop_front().expect("pending non-empty");
                             p.send(job);
-                            let mut held = held_resume_seq.lock();
-                            persist_after_message_create_admit(
-                                seq,
-                                pending_jobs.len(),
-                                &mut held,
-                                |s| {
-                                    self.gateway_session.lock().sequence = Some(s);
-                                },
-                            );
+                            // Durable resume ack is the enqueued_rx arm, not admission.
+                            inflight_message_creates += 1;
                         }
                         Err(_) => {
                             ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown), "MESSAGE_CREATE worker closed; stopping listener");
@@ -2113,17 +2147,18 @@ impl Channel for DiscordChannel {
 
                     // Local sequence always tracks the latest event for heartbeats.
                     // Resume-safe persistence is deferred for MESSAGE_CREATE until
-                    // bounded-queue admission (see pending_jobs / permit arm).
+                    // successful orchestrator enqueue (enqueued_rx arm).
                     let event_seq = event.get("s").and_then(serde_json::Value::as_i64);
                     if let Some(s) = event_seq {
                         sequence = s;
                     }
                     // RAII: persist resume seq on all exit paths from this event
-                    // unless a MESSAGE_CREATE was parked for admission.
+                    // unless a MESSAGE_CREATE was parked, or other unfinished MC work
+                    // still needs durable enqueue before we advance resume.
                     struct ResumePersist<'a> {
                         defer: bool,
                         event_seq: Option<i64>,
-                        pending_len: usize,
+                        unfinished_len: usize,
                         held: &'a Mutex<Option<i64>>,
                         session: &'a Mutex<DiscordGatewaySession>,
                     }
@@ -2135,7 +2170,7 @@ impl Channel for DiscordChannel {
                             let Some(s) = self.event_seq else {
                                 return;
                             };
-                            if self.pending_len == 0 {
+                            if self.unfinished_len == 0 {
                                 self.session.lock().sequence = Some(s);
                                 *self.held.lock() = None;
                             } else {
@@ -2146,7 +2181,7 @@ impl Channel for DiscordChannel {
                     let mut resume_persist = ResumePersist {
                         defer: false,
                         event_seq,
-                        pending_len: pending_jobs.len(),
+                        unfinished_len: pending_jobs.len() + inflight_message_creates,
                         held: &held_resume_seq,
                         session: &self.gateway_session,
                     };
@@ -2736,6 +2771,7 @@ impl Channel for DiscordChannel {
                     // Park on the pending backlog; the outer select admits into
                     // the bounded worker queue while still handling Ping/hb.
                     let job = MessageCreateJob {
+                        gateway_seq: event_seq.unwrap_or(sequence),
                         atts,
                         clean_content,
                         author_id: author_id.to_string(),
@@ -2761,8 +2797,7 @@ impl Channel for DiscordChannel {
                         mention_only: self.mention_only,
                         thread_channels: Arc::clone(&self.thread_channels),
                     };
-                    let seq_for_job = event_seq.unwrap_or(sequence);
-                    // Resume sequence persists on admission (permit arm), not here.
+                    // Resume sequence persists after orchestrator enqueue, not here.
                     if pending_jobs.len() >= MESSAGE_CREATE_PENDING_CAP {
                         // Backlog full: wait for an admission slot while still
                         // servicing heartbeats / Ping / stall (control path).
@@ -2776,6 +2811,23 @@ impl Channel for DiscordChannel {
                                 _ = orch_closed_rx.recv() => {
                                     return Ok(());
                                 }
+                                enqueued = enqueued_rx.recv() => {
+                                    let Some(enqueued_seq) = enqueued else {
+                                        return Ok(());
+                                    };
+                                    inflight_message_creates =
+                                        inflight_message_creates.saturating_sub(1);
+                                    let unfinished =
+                                        pending_jobs.len() + inflight_message_creates
+                                            + usize::from(parked.is_some());
+                                    let mut held = held_resume_seq.lock();
+                                    flush_resume_after_message_create_enqueued(
+                                        enqueued_seq,
+                                        unfinished,
+                                        &mut held,
+                                        |s| { self.gateway_session.lock().sequence = Some(s); },
+                                    );
+                                }
                                 _ = hb_rx.recv() => {
                                     let d = if sequence >= 0 { json!(sequence) } else { json!(null) };
                                     let hb = json!({"op": 1, "d": d});
@@ -2786,15 +2838,9 @@ impl Channel for DiscordChannel {
                                 permit = job_tx.reserve(), if !pending_jobs.is_empty() => {
                                     match permit {
                                         Ok(p) => {
-                                            let (j, seq) = pending_jobs.pop_front().expect("pending");
+                                            let j = pending_jobs.pop_front().expect("pending");
                                             p.send(j);
-                                            let mut held = held_resume_seq.lock();
-                                            persist_after_message_create_admit(
-                                                seq,
-                                                pending_jobs.len(),
-                                                &mut held,
-                                                |s| { self.gateway_session.lock().sequence = Some(s); },
-                                            );
+                                            inflight_message_creates += 1;
                                         }
                                         Err(_) => return Ok(()),
                                     }
@@ -2818,17 +2864,18 @@ impl Channel for DiscordChannel {
                                     }
                                     if pending_jobs.len() < MESSAGE_CREATE_PENDING_CAP {
                                         if let Some(j) = parked.take() {
-                                            pending_jobs.push_back((j, seq_for_job));
+                                            pending_jobs.push_back(j);
                                         }
                                     }
                                 }
                             }
                         }
                     } else {
-                        pending_jobs.push_back((job, seq_for_job));
+                        pending_jobs.push_back(job);
                     }
                     resume_persist.defer = true;
-                    resume_persist.pending_len = pending_jobs.len();
+                    resume_persist.unfinished_len =
+                        pending_jobs.len() + inflight_message_creates;
                 }
             }
         }
@@ -5389,11 +5436,11 @@ mod tests {
     }
 
     #[test]
-    fn resume_sequence_defers_past_unadmitted_message_create() {
+    fn resume_sequence_defers_past_unenqueued_message_create() {
         let mut local = 0_i64;
         let mut held = None;
         let mut persisted = None;
-        // Non-MC event with empty pending — persist immediately.
+        // Non-MC event with empty unfinished — persist immediately.
         note_event_sequence(
             &mut local,
             Some(10),
@@ -5414,7 +5461,7 @@ mod tests {
         );
         assert_eq!(persisted, Some(10));
         assert_eq!(local, 11);
-        // Later non-MC while pending — hold, don't persist past MC.
+        // Later non-MC while unfinished — hold, don't persist past MC.
         note_event_sequence(
             &mut local,
             Some(12),
@@ -5425,8 +5472,12 @@ mod tests {
         );
         assert_eq!(held, Some(12));
         assert_eq!(persisted, Some(10));
-        // Admit MC seq 11 with pending empty — flush held.
-        persist_after_message_create_admit(11, 0, &mut held, |s| persisted = Some(s));
+        // Worker-queue admission alone must not advance resume (still unfinished).
+        flush_resume_after_message_create_enqueued(11, 1, &mut held, |s| persisted = Some(s));
+        assert_eq!(persisted, Some(10));
+        assert_eq!(held, Some(12));
+        // Orchestrator enqueue with no unfinished work — flush held.
+        flush_resume_after_message_create_enqueued(11, 0, &mut held, |s| persisted = Some(s));
         assert_eq!(persisted, Some(12));
         assert!(held.is_none());
     }
@@ -5435,6 +5486,7 @@ mod tests {
     async fn deliver_message_create_acks_only_after_successful_enqueue() {
         let (tx, mut rx) = mpsc::channel::<ChannelMessage>(1);
         let job = MessageCreateJob {
+            gateway_seq: 1,
             atts: vec![],
             clean_content: "hi".into(),
             author_id: "u1".into(),
@@ -5459,6 +5511,7 @@ mod tests {
 
         drop(rx);
         let job2 = MessageCreateJob {
+            gateway_seq: 2,
             atts: vec![],
             clean_content: "nope".into(),
             author_id: "u1".into(),
@@ -5486,10 +5539,11 @@ mod tests {
     async fn message_create_pipeline_shutdown_awaits_worker() {
         let (orch_tx, mut orch_rx) = mpsc::channel::<ChannelMessage>(8);
         let (closed_tx, _closed_rx) = mpsc::channel::<()>(1);
-        let mut pipeline = MessageCreatePipeline::start(orch_tx, closed_tx);
+        let (mut pipeline, mut enqueued_rx) = MessageCreatePipeline::start(orch_tx, closed_tx);
         let job_tx = pipeline.sender();
         job_tx
             .try_send(MessageCreateJob {
+                gateway_seq: 42,
                 atts: vec![],
                 clean_content: "a".into(),
                 author_id: "u".into(),
@@ -5508,6 +5562,8 @@ mod tests {
                 thread_channels: Arc::new(AsyncMutex::new(HashMap::new())),
             })
             .unwrap();
+        // Enqueue notify arrives before/with drain; shutdown still joins worker.
+        assert_eq!(enqueued_rx.recv().await, Some(42));
         pipeline.shutdown().await;
         // Worker drained the admitted job before shutdown completed.
         assert_eq!(orch_rx.try_recv().unwrap().content, "a");
