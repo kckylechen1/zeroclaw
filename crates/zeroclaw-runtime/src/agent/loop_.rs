@@ -896,8 +896,9 @@ pub(crate) use super::turn::{
 pub use super::turn::{
     DraftEvent, LoopKnobs, MaxIterationBehavior, ModelSwitchCallback, ModelSwitchRequested,
     PROGRESS_MIN_INTERVAL_MS, ResolvedAgentExecution, ResolvedIo, ResolvedModelAccess,
-    ResolvedRuntimeKnobs, StreamDelta, ToolLoop, ToolLoopCancelled, drain_steering_messages,
-    is_model_switch_requested, is_tool_loop_cancelled, run_tool_call_loop, scrub_credentials,
+    ResolvedRuntimeKnobs, StreamDelta, TOOL_LOOP_SHARED_BUDGET, ToolLoop, ToolLoopCancelled,
+    drain_steering_messages, is_model_switch_requested, is_tool_loop_cancelled, run_tool_call_loop,
+    scrub_credentials,
 };
 
 /// Build the tool instruction block for the system prompt so the LLM knows
@@ -1724,6 +1725,10 @@ pub async fn run(
 
             #[allow(unused_assignments)]
             let mut response = String::new();
+            // Shared parent/subagent iteration budget for this turn (SoT created here).
+            let shared_budget = Some(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+                agent.resolved.max_tool_iterations.max(1),
+            )));
             loop {
                 if let Some(sys_msg) = history.first_mut()
                     && sys_msg.role == "system"
@@ -1793,7 +1798,7 @@ pub async fn run(
                                 channel_reply_target: None,
                                 cancellation_token: None,
                                 on_delta: None,
-                                shared_budget: None,
+                                shared_budget: shared_budget.clone(),
                                 channel: None,
                                 collected_receipts: None,
                                 event_tx: None,
@@ -2261,6 +2266,9 @@ pub async fn run(
                     }
                 });
 
+                let shared_budget = Some(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+                    agent.resolved.max_tool_iterations.max(1),
+                )));
                 let response = loop {
                     if let Some(sys_msg) = history.first_mut()
                         && sys_msg.role == "system"
@@ -2336,7 +2344,7 @@ pub async fn run(
                                     channel_reply_target: None,
                                     cancellation_token: Some(cancel_token.clone()),
                                     on_delta: Some(delta_tx.clone()),
-                                    shared_budget: None,
+                                    shared_budget: shared_budget.clone(),
                                     channel: None,
                                     collected_receipts: None,
                                     event_tx: None,
@@ -3571,6 +3579,44 @@ mod tests {
         // When shared_budget is None, the check is simply skipped
         let budget: Option<Arc<std::sync::atomic::AtomicUsize>> = None;
         assert!(budget.is_none());
+    }
+
+    #[tokio::test]
+    async fn shared_budget_propagates_to_nested_tool_loop_via_task_local() {
+        use super::TOOL_LOOP_SHARED_BUDGET;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let budget = Arc::new(AtomicUsize::new(3));
+        let nested_saw = Arc::new(AtomicUsize::new(usize::MAX));
+        let nested_saw_clone = Arc::clone(&nested_saw);
+        let budget_clone = Arc::clone(&budget);
+
+        TOOL_LOOP_SHARED_BUDGET
+            .scope(Some(Arc::clone(&budget)), async move {
+                // Parent turn scopes the budget (as run_tool_call_loop does).
+                assert_eq!(
+                    TOOL_LOOP_SHARED_BUDGET
+                        .try_with(Clone::clone)
+                        .ok()
+                        .flatten()
+                        .expect("scoped")
+                        .load(Ordering::Acquire),
+                    3
+                );
+                // Nested delegate path resolves the same Arc.
+                let nested = TOOL_LOOP_SHARED_BUDGET
+                    .try_with(Clone::clone)
+                    .ok()
+                    .flatten()
+                    .expect("nested must see parent budget");
+                assert!(Arc::ptr_eq(&nested, &budget_clone));
+                nested.fetch_sub(1, Ordering::AcqRel);
+                nested_saw_clone.store(nested.load(Ordering::Acquire), Ordering::Release);
+            })
+            .await;
+
+        assert_eq!(budget.load(Ordering::Acquire), 2);
+        assert_eq!(nested_saw.load(Ordering::Acquire), 2);
     }
 
     // ── existing tests ────────────────────────────────────────────

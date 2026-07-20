@@ -116,6 +116,13 @@ pub struct ToolLoop<'a> {
     pub turn_id: &'a str,
 }
 
+// Parent turn scopes the shared iteration budget so nested delegate
+// subagent loops can resolve the same Arc without caching a copy on the
+// tool handle (AGENTS SoT: created here per turn, resolved on demand).
+tokio::task_local! {
+    pub static TOOL_LOOP_SHARED_BUDGET: Option<Arc<std::sync::atomic::AtomicUsize>>;
+}
+
 async fn enforce_reported_budget(
     history: &mut Vec<ChatMessage>,
     reported_input_tokens: usize,
@@ -161,6 +168,13 @@ async fn enforce_reported_budget(
 }
 
 pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
+    let budget = p.shared_budget.clone();
+    TOOL_LOOP_SHARED_BUDGET
+        .scope(budget, run_tool_call_loop_inner(p))
+        .await
+}
+
+async fn run_tool_call_loop_inner(p: ToolLoop<'_>) -> Result<String> {
     let ToolLoop {
         exec,
         history,

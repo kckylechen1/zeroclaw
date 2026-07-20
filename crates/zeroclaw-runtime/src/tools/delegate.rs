@@ -3,6 +3,7 @@ use crate::agent::loop_::{
     TOOL_LOOP_SESSION_KEY, ToolLoop, apply_text_tool_prompt_policy, run_tool_call_loop,
 };
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
+use crate::agent::turn::TOOL_LOOP_SHARED_BUDGET;
 use crate::observability::traits::{Observer, ObserverEvent, ObserverMetric};
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -12,6 +13,7 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
@@ -30,6 +32,13 @@ use zeroclaw_tools::memory_store::MemoryStoreTool;
 
 fn current_tool_loop_session_key() -> Option<String> {
     TOOL_LOOP_SESSION_KEY.try_with(Clone::clone).ok().flatten()
+}
+
+fn current_tool_loop_shared_budget() -> Option<Arc<AtomicUsize>> {
+    TOOL_LOOP_SHARED_BUDGET
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
 }
 
 async fn scope_delegate_session_key<F>(session_key: Option<String>, future: F) -> F::Output
@@ -146,6 +155,11 @@ pub struct DelegateTool {
     /// advertised roster so an agent is never offered itself as a
     /// delegation target. Empty when unset (legacy unit-test constructors).
     caller_alias: String,
+    /// Optional shared iteration budget inherited from the parent turn.
+    /// Prefer resolving [`crate::agent::turn::TOOL_LOOP_SHARED_BUDGET`] at
+    /// execute time; this field is for spawned background delegates that
+    /// leave the parent task-local scope.
+    shared_budget: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,6 +272,7 @@ impl DelegateTool {
             skill_bundles: Arc::new(HashMap::new()),
             root_config: None,
             caller_alias: String::new(),
+            shared_budget: None,
         }
     }
 
@@ -305,6 +320,7 @@ impl DelegateTool {
             skill_bundles: Arc::new(HashMap::new()),
             root_config: None,
             caller_alias: String::new(),
+            shared_budget: None,
         }
     }
 
@@ -1530,6 +1546,10 @@ impl DelegateTool {
         let caller_alias = self.caller_alias.clone();
         let memory = self.memory.clone();
         let parent_session_key = current_tool_loop_session_key();
+        let shared_budget_for_child = self
+            .shared_budget
+            .clone()
+            .or_else(current_tool_loop_shared_budget);
         let __zc_delegate_alias = agent_name_owned.clone();
 
         zeroclaw_spawn::spawn!(
@@ -1553,6 +1573,7 @@ impl DelegateTool {
                     skill_bundles,
                     root_config,
                     caller_alias,
+                    shared_budget: shared_budget_for_child,
                 };
 
                 let args_inner = json!({
@@ -1778,6 +1799,10 @@ impl DelegateTool {
             let caller_alias = self.caller_alias.clone();
             let session_key = parent_session_key.clone();
             let memory = self.memory.clone();
+            let shared_budget_for_child = self
+                .shared_budget
+                .clone()
+                .or_else(current_tool_loop_shared_budget);
             let __zc_delegate_alias = agent_name.clone();
 
             handles.push(zeroclaw_spawn::spawn!(
@@ -1801,6 +1826,7 @@ impl DelegateTool {
                         skill_bundles,
                         root_config,
                         caller_alias,
+                        shared_budget: shared_budget_for_child,
                     };
                     let agent_name_for_return = agent_name.clone();
                     let result = scope_delegate_session_key(session_key, async move {
@@ -2655,8 +2681,10 @@ impl DelegateTool {
                 channel_reply_target: None,
                 cancellation_token: Some(self.cancellation_token.child_token()),
                 on_delta: None,
-                shared_budget: None,
-                // TODO thread from parent in future
+                shared_budget: self
+                    .shared_budget
+                    .clone()
+                    .or_else(current_tool_loop_shared_budget),
                 channel: None,
                 collected_receipts,
                 event_tx: None,
