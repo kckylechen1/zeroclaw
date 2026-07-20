@@ -228,3 +228,51 @@ Dev-operational contracts — files consumed by AI coding skills and development
 - `@docs/book/src/developing/extension-examples.md` — adding providers, channels, tools, peripherals; tool shared-state contract; architecture boundary rules
 - `@docs/book/src/contributing/privacy.md` — privacy rules and neutral-placeholder palette
 - `@docs/book/src/maintainers/superseding.md` — superseded-PR attribution, PR/commit templates, handoff template
+
+## Cursor Cloud specific instructions
+
+Durable, non-obvious notes for cloud agents. The startup update script already
+installs the Rust toolchain and fetches crates; the standard build/lint/test
+commands live in the `## Commands` section above.
+
+### Toolchain
+
+- This workspace is edition 2024 with `rust-version = 1.87`; CI builds on
+  `1.92.0`. Use the `1.92.0` toolchain (the update script installs it and sets
+  it as the default). An older system Rust (e.g. 1.83) cannot compile this repo.
+
+### C/C++ compiler gotcha (required for the full workspace build)
+
+- `apps/zerocode` depends on `inkjet`, which compiles tree-sitter C/C++ grammars
+  via `cc-rs`. The base image's `cc`/`c++` alternatives may point at `clang`,
+  which fails to find libstdc++ headers (`fatal error: 'vector' file not found`).
+  The GCC toolchain (`gcc`/`g++` + `libstdc++-*-dev`) is present and works.
+  If a full-workspace build/test fails on `inkjet`/`gdk-sys` C++ compilation,
+  point the alternatives at GCC:
+  `sudo update-alternatives --set cc /usr/bin/gcc && sudo update-alternatives --set c++ /usr/bin/g++`.
+
+### What to build/test (scope)
+
+- `zeroclaw` (root crate, `default-run`) is the product: one binary that also
+  embeds the gateway. Build it with `cargo build --bin zeroclaw`.
+- The Tauri desktop app (`apps/tauri`, crate `zeroclaw-desktop`) needs GTK/WebKit
+  system libs that are not installed and is intentionally excluded from CI.
+  Mirror CI for workspace commands: `cargo test --workspace --exclude zeroclaw-desktop`
+  (CI uses `--features ci-all`, which additionally needs `libudev-dev` for the
+  `hardware` feature).
+
+### Running the agent without a real LLM key
+
+- `zeroclaw quickstart` is interactive and requires a TTY; it fails headlessly.
+  For headless config, use `zeroclaw agents create <alias>` then
+  `zeroclaw config set --no-interactive <path> <value>`. Note `config set`
+  cannot create a `risk_profiles.<alias>` map key — add that section by editing
+  `config.toml` directly (e.g. `[risk_profiles.default]\nlevel = "supervised"`).
+- To exercise the agent loop with no external secret, configure an `openai`
+  provider whose `uri` points at a local OpenAI-compatible endpoint (mock or
+  Ollama) and run single-shot: `zeroclaw --config-dir <dir> agent -a <alias> -m "hi"`.
+
+### Misc
+
+- `crates/zeroclaw-runtime/src/firmware` is a symlink to `../../firmware`; some
+  recursive file tools error on it — scope searches to specific subdirectories.
