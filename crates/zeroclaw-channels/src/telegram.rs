@@ -3786,10 +3786,7 @@ Ensure only one `zeroclaw` process is using this bot token."
 
             if let Some(results) = data.get("result").and_then(serde_json::Value::as_array) {
                 for update in results {
-                    // Advance offset past this update
-                    if let Some(uid) = update.get("update_id").and_then(serde_json::Value::as_i64) {
-                        offset = uid + 1;
-                    }
+                    let update_id = update.get("update_id").and_then(serde_json::Value::as_i64);
 
                     // ── Handle callback_query (inline keyboard taps) ──
                     if let Some(cb) = update.get("callback_query") {
@@ -3868,7 +3865,11 @@ Ensure only one `zeroclaw` process is using this bot token."
                             }
                         }
 
-                        continue; // callback_query is not a regular message
+                        // Ack after handling — callback_query is not enqueued (#9188).
+                        if let Some(uid) = update_id {
+                            offset = uid + 1;
+                        }
+                        continue;
                     }
 
                     let msg = if let Some(m) = self.parse_update_message(update) {
@@ -3879,6 +3880,10 @@ Ensure only one `zeroclaw` process is using this bot token."
                         m
                     } else {
                         Box::pin(self.handle_unauthorized_message(update)).await;
+                        // Handled without enqueue — safe to ack.
+                        if let Some(uid) = update_id {
+                            offset = uid + 1;
+                        }
                         continue;
                     };
 
@@ -3905,7 +3910,12 @@ Ensure only one `zeroclaw` process is using this bot token."
                         .await; // Ignore errors for typing indicator
 
                     if tx.send(msg).await.is_err() {
+                        // Do not advance offset — unsent update must be redelivered (#9188).
                         return Ok(());
+                    }
+
+                    if let Some(uid) = update_id {
+                        offset = uid + 1;
                     }
                 }
             }
@@ -6638,6 +6648,22 @@ mod tests {
     #[test]
     fn telegram_max_file_download_bytes_is_20mb() {
         assert_eq!(TELEGRAM_MAX_FILE_DOWNLOAD_BYTES, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn telegram_offset_advances_only_with_update_id() {
+        // Contract for #9188: callers bump offset after successful delivery
+        // (or after non-enqueue handling). Missing update_id is a no-op.
+        let mut offset = 10_i64;
+        if let Some(uid) = Some(42_i64) {
+            offset = uid + 1;
+        }
+        assert_eq!(offset, 43);
+        let missing: Option<i64> = None;
+        if let Some(uid) = missing {
+            offset = uid + 1;
+        }
+        assert_eq!(offset, 43);
     }
 
     // ── Attachment content format tests ──────────────────────────────

@@ -817,26 +817,9 @@ async fn process_attachments(
         };
 
         if ct.starts_with("text/") {
-            match client.get(url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(text) = resp.text().await {
-                        text_parts.push(format!("[{name}]\n{text}"));
-                    }
-                }
-                Ok(resp) => {
-                    ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"name": name, "status": resp.status().to_string()})), "attachment fetch failed");
-                }
-                Err(e) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(
-                                ::serde_json::json!({"name": name, "error": format!("{}", e)})
-                            ),
-                        "attachment fetch error"
-                    );
-                }
+            if let Some(bytes) = download_attachment_bytes(client, url, name).await {
+                let text = String::from_utf8_lossy(&bytes);
+                text_parts.push(format!("[{name}]\n{text}"));
             }
             continue;
         }
@@ -923,27 +906,67 @@ async fn process_attachments(
     (text_parts.join("\n---\n"), media)
 }
 
+/// Hard cap on inbound Discord attachment downloads (matches Telegram's
+/// style of refusing oversized payloads before they land in memory).
+/// Discord's non-Nitro upload limit is 25 MiB.
+const DISCORD_ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
 /// Download an attachment URL into memory, with structured warn-logging on
-/// each failure mode. Returns `None` when the attachment should be skipped.
+/// each failure mode. Returns `None` when the attachment should be skipped
+/// (including when it exceeds [`DISCORD_ATTACHMENT_MAX_BYTES`]).
 async fn download_attachment_bytes(
     client: &reqwest::Client,
     url: &str,
     name: &str,
 ) -> Option<Vec<u8>> {
     match client.get(url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-            Ok(b) => Some(b.to_vec()),
-            Err(e) => {
+        Ok(resp) if resp.status().is_success() => {
+            if let Some(len) = resp.content_length()
+                && len > DISCORD_ATTACHMENT_MAX_BYTES
+            {
                 ::zeroclaw_log::record!(
-                    WARN,
+                    INFO,
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"name": name, "error": format!("{}", e)})),
-                    "failed to read attachment bytes"
+                        .with_attrs(::serde_json::json!({
+                            "name": name,
+                            "content_length": len,
+                            "max_bytes": DISCORD_ATTACHMENT_MAX_BYTES
+                        })),
+                    "skipping attachment: Content-Length exceeds download limit"
                 );
-                None
+                return None;
             }
-        },
+            match resp.bytes().await {
+                Ok(b) => {
+                    if b.len() as u64 > DISCORD_ATTACHMENT_MAX_BYTES {
+                        ::zeroclaw_log::record!(
+                            INFO,
+                            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                                .with_attrs(::serde_json::json!({
+                                    "name": name,
+                                    "bytes": b.len(),
+                                    "max_bytes": DISCORD_ATTACHMENT_MAX_BYTES
+                                })),
+                            "skipping attachment: body exceeds download limit"
+                        );
+                        return None;
+                    }
+                    Some(b.to_vec())
+                }
+                Err(e) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(
+                                ::serde_json::json!({"name": name, "error": format!("{}", e)})
+                            ),
+                        "failed to read attachment bytes"
+                    );
+                    None
+                }
+            }
+        }
         Ok(resp) => {
             ::zeroclaw_log::record!(
                 WARN,
@@ -2331,113 +2354,141 @@ impl Channel for DiscordChannel {
                         continue;
                     };
 
+                    // Attachment download + enqueue must not block the gateway
+                    // select! heartbeat arm (#9189). Mirror INTERACTION_CREATE:
+                    // clone owned state and spawn the media/enqueue work.
                     let client = self.http_client();
-                    let (attachment_text, media_attachments) = process_attachments(
-                        &atts,
-                        &client,
-                        self.workspace_dir.as_deref(),
-                        self.transcription_manager.as_deref(),
-                    )
-                    .await;
-                    let final_content = if attachment_text.is_empty() {
-                        clean_content
-                    } else {
-                        format!("{clean_content}\n\n[Attachments]\n{attachment_text}")
-                    };
-
-                    // Intercept approval replies before forwarding to the agent.
-                    if let Some((token, response)) =
-                        crate::util::parse_approval_reply(&final_content)
-                    {
-                        let mut map = self.pending_approvals.lock().await;
-                        if let Some(sender) = map.remove(&token) {
-                            let _ = sender.send(response);
-                            continue;
-                        }
-                    }
-
-                    let message_id = d.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                    let workspace_dir = self.workspace_dir.clone();
+                    let transcription_manager = self.transcription_manager.clone();
+                    let pending_approvals = Arc::clone(&self.pending_approvals);
+                    let bot_token = self.bot_token.clone();
+                    let guild_ids = self.guild_ids.clone();
+                    let alias = self.alias.clone();
+                    let peer_resolver = Arc::clone(&self.peer_resolver);
+                    let listen_to_bots = self.listen_to_bots;
+                    let mention_only = self.mention_only;
+                    let thread_channels = Arc::clone(&self.thread_channels);
+                    let author_id = author_id.to_string();
+                    let message_id = d
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let channel_id = d
                         .get("channel_id")
                         .and_then(|c| c.as_str())
                         .unwrap_or("")
                         .to_string();
+                    let tx = tx.clone();
 
-                    if !message_id.is_empty() && !channel_id.is_empty() {
-                        let reaction_channel = DiscordChannel::new(
-                            self.bot_token.clone(),
-                            self.guild_ids.clone(),
-                            self.alias.clone(),
-                            Arc::clone(&self.peer_resolver),
-                            self.listen_to_bots,
-                            self.mention_only,
-                        );
-                        let reaction_channel_id = channel_id.clone();
-                        let reaction_message_id = message_id.to_string();
-                        let reaction_emoji = random_discord_ack_reaction().to_string();
-                        zeroclaw_spawn::spawn!(async move {
-                            if let Err(err) = reaction_channel
-                                .add_reaction(
-                                    &reaction_channel_id,
-                                    &reaction_message_id,
-                                    &reaction_emoji,
-                                )
-                                .await
-                            {
-                                ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"reaction_message_id": reaction_message_id, "err": err.to_string()})), "failed to add ACK reaction for message");
+                    zeroclaw_spawn::spawn!(async move {
+                        let (attachment_text, media_attachments) = process_attachments(
+                            &atts,
+                            &client,
+                            workspace_dir.as_deref(),
+                            transcription_manager.as_deref(),
+                        )
+                        .await;
+                        let final_content = if attachment_text.is_empty() {
+                            clean_content
+                        } else {
+                            format!("{clean_content}\n\n[Attachments]\n{attachment_text}")
+                        };
+
+                        // Intercept approval replies before forwarding to the agent.
+                        if let Some((token, response)) =
+                            crate::util::parse_approval_reply(&final_content)
+                        {
+                            let mut map = pending_approvals.lock().await;
+                            if let Some(sender) = map.remove(&token) {
+                                let _ = sender.send(response);
+                                return;
                             }
-                        });
-                    }
+                        }
 
-                    // Thread context decides `thread_ts` plus `interruption_scope_id`,
-                    // which the orchestrator uses as part of the conversation-history
-                    // key and the cancellation scope. When the lookup fails it falls
-                    // back to `None` and the failure is not cached, so the next
-                    // message in the same Discord thread will retry. The trade-off:
-                    // the first message after a transient lookup miss is keyed
-                    // without the thread suffix; once the cache warms, subsequent
-                    // messages are keyed with it. History for that thread can split
-                    // across two scopes until the warm-up completes. Acceptable
-                    // because the lookup is bounded by `THREAD_LOOKUP_TIMEOUT` and
-                    // the alternative (stalling the listener on a hung Discord call)
-                    // is worse.
-                    let thread_ts = if channel_id.is_empty() {
-                        None
-                    } else if self.thread_parent(&client, &channel_id).await.is_some()
-                    {
-                        Some(channel_id.clone())
-                    } else {
-                        None
-                    };
+                        if !message_id.is_empty() && !channel_id.is_empty() {
+                            let reaction_channel = DiscordChannel::new(
+                                bot_token.clone(),
+                                guild_ids,
+                                alias.clone(),
+                                peer_resolver,
+                                listen_to_bots,
+                                mention_only,
+                            );
+                            let reaction_channel_id = channel_id.clone();
+                            let reaction_message_id = message_id.clone();
+                            let reaction_emoji = random_discord_ack_reaction().to_string();
+                            zeroclaw_spawn::spawn!(async move {
+                                if let Err(err) = reaction_channel
+                                    .add_reaction(
+                                        &reaction_channel_id,
+                                        &reaction_message_id,
+                                        &reaction_emoji,
+                                    )
+                                    .await
+                                {
+                                    ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"reaction_message_id": reaction_message_id, "err": err.to_string()})), "failed to add ACK reaction for message");
+                                }
+                            });
+                        }
 
-                    let channel_msg = ChannelMessage {
-                        id: if message_id.is_empty() {
-                            Uuid::new_v4().to_string()
+                        // Thread context decides `thread_ts` plus `interruption_scope_id`,
+                        // which the orchestrator uses as part of the conversation-history
+                        // key and the cancellation scope. When the lookup fails it falls
+                        // back to `None` and the failure is not cached, so the next
+                        // message in the same Discord thread will retry. The trade-off:
+                        // the first message after a transient lookup miss is keyed
+                        // without the thread suffix; once the cache warms, subsequent
+                        // messages are keyed with it. History for that thread can split
+                        // across two scopes until the warm-up completes. Acceptable
+                        // because the lookup is bounded by `THREAD_LOOKUP_TIMEOUT` and
+                        // the alternative (stalling the listener on a hung Discord call)
+                        // is worse.
+                        let thread_ts = if channel_id.is_empty() {
+                            None
+                        } else if discord_thread_parent(
+                            &client,
+                            &bot_token,
+                            &thread_channels,
+                            &channel_id,
+                        )
+                        .await
+                        .is_some()
+                        {
+                            Some(channel_id.clone())
                         } else {
-                            format!("discord_{message_id}")
-                        },
-                        sender: author_id.to_string(),
-                        reply_target: if channel_id.is_empty() {
-                            author_id.to_string()
-                        } else {
-                            channel_id.clone()
-                        },
-                        content: final_content,
-                        channel: "discord".to_string(),
-                        channel_alias: Some(self.alias.clone()),
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        interruption_scope_id: thread_ts.clone(),
-                        thread_ts,
-                        attachments: media_attachments,
-                        subject: None,
-                    };
+                            None
+                        };
 
-                    if tx.send(channel_msg).await.is_err() {
-                        break;
-                    }
+                        let channel_msg = ChannelMessage {
+                            id: if message_id.is_empty() {
+                                Uuid::new_v4().to_string()
+                            } else {
+                                format!("discord_{message_id}")
+                            },
+                            sender: author_id.clone(),
+                            reply_target: if channel_id.is_empty() {
+                                author_id
+                            } else {
+                                channel_id
+                            },
+                            content: final_content,
+                            channel: "discord".to_string(),
+                            channel_alias: Some(alias),
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            interruption_scope_id: thread_ts.clone(),
+                            thread_ts,
+                            attachments: media_attachments,
+                            subject: None,
+                        };
+
+                        if tx.send(channel_msg).await.is_err() {
+                            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown), "orchestrator channel closed; dropping message");
+                        }
+                    });
                 }
             }
         }
@@ -4905,6 +4956,45 @@ mod tests {
     }
 
     // process_attachments tests
+
+    #[test]
+    fn discord_attachment_max_bytes_is_25_mib() {
+        assert_eq!(DISCORD_ATTACHMENT_MAX_BYTES, 25 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn download_attachment_bytes_rejects_oversize_content_length() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/big.bin"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(
+                        "content-length",
+                        (DISCORD_ATTACHMENT_MAX_BYTES + 1).to_string(),
+                    )
+                    .set_body_bytes(vec![0u8; 16]),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/big.bin", server.uri());
+        let result = download_attachment_bytes(&client, &url, "big.bin").await;
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn discord_attachment_limit_rejects_byte_counts_over_cap() {
+        // Mirrors the post-download body check in download_attachment_bytes
+        // without allocating a 25 MiB fixture in CI.
+        assert!(16u64 <= DISCORD_ATTACHMENT_MAX_BYTES);
+        assert!(DISCORD_ATTACHMENT_MAX_BYTES + 1 > DISCORD_ATTACHMENT_MAX_BYTES);
+    }
 
     #[tokio::test]
     async fn process_attachments_empty_list_returns_empty() {

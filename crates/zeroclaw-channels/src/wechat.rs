@@ -922,7 +922,7 @@ impl WeChatChannel {
                 .peer_groups
                 .entry(group_name)
                 .or_insert_with(|| PeerGroupConfig {
-                    channel: channel_ref.to_string(),
+                    channel: channel_ref,
                     ..PeerGroupConfig::default()
                 });
             if group
@@ -2192,16 +2192,13 @@ impl Channel for WeChatChannel {
 
             consecutive_failures = 0;
 
-            // Update cursor
-            if let Some(new_cursor) = data
+            // Hold the new cursor until every message in this batch is handled.
+            // Persisting before enqueue drops undelivered messages on restart (#9187).
+            let pending_cursor = data
                 .get("get_updates_buf")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-            {
-                cursor = new_cursor.to_string();
-                *self.cursor.lock() = cursor.clone();
-                self.save_sync_data();
-            }
+                .map(str::to_string);
 
             if let Some(next_timeout) = data
                 .get("longpolling_timeout_ms")
@@ -2289,8 +2286,16 @@ impl Channel for WeChatChannel {
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
                         "channel receiver dropped, stopping"
                     );
+                    // Do not commit pending_cursor — unsent messages must be redelivered.
                     return Ok(());
                 }
+            }
+
+            // Commit cursor only after the full batch was enqueued or skipped.
+            if let Some(new_cursor) = pending_cursor {
+                cursor = new_cursor;
+                *self.cursor.lock() = cursor.clone();
+                self.save_sync_data();
             }
         }
     }
@@ -2807,6 +2812,46 @@ mod tests {
 
         assert_eq!(ch.get_context_token("anything"), None);
         assert_eq!(*ch.cursor.lock(), "");
+    }
+
+    #[test]
+    fn context_token_write_does_not_persist_uncommitted_cursor() {
+        // Regression for #9187: while a getUpdates cursor is held pending
+        // successful enqueue, set_context_token → save_sync_data must keep
+        // writing the last committed cursor, not a speculative bump.
+        let temp = tempdir().unwrap();
+        let state_dir = temp.path().to_path_buf();
+
+        let ch = WeChatChannel::new(
+            "test",
+            Arc::new(|| vec!["*".to_string()]),
+            None,
+            None,
+            Some(state_dir.clone()),
+        )
+        .unwrap();
+        *ch.cursor.lock() = "committed_cursor".to_string();
+        ch.save_sync_data();
+
+        // Listen holds pending_cursor separately; in-memory cursor stays put
+        // until the batch is fully enqueued. Context-token persistence must
+        // not sneak the pending value onto disk.
+        let _pending_cursor = "uncommitted_cursor";
+        ch.set_context_token("acct:user1", "tok");
+
+        let ch2 = WeChatChannel::new(
+            "test",
+            Arc::new(|| vec!["*".to_string()]),
+            None,
+            None,
+            Some(state_dir),
+        )
+        .unwrap();
+        assert_eq!(*ch2.cursor.lock(), "committed_cursor");
+        assert_eq!(
+            ch2.get_context_token("acct:user1"),
+            Some("tok".to_string())
+        );
     }
 
     #[test]
