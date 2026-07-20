@@ -9,8 +9,38 @@ use futures_util::{StreamExt, stream};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+/// In-memory API-key rotation cursor + per-index cooldowns.
+///
+/// Source of truth for which pool index is cooled: live 429 evidence observed
+/// by this wrapper (not config). Created here — not a cache of config state.
+struct KeyRotationState {
+    next_idx: usize,
+    /// Last index handed out by select/rotate. Informational only: cooldown
+    /// MUST use the caller-supplied failed index, never this field after
+    /// concurrent rotators may have advanced it (#9190).
+    last_selected_key_idx: Option<usize>,
+    /// Cooldown deadlines keyed by the concrete key index that returned 429.
+    cooldowns: HashMap<usize, Instant>,
+}
+
+impl KeyRotationState {
+    fn new() -> Self {
+        Self {
+            next_idx: 0,
+            last_selected_key_idx: None,
+            cooldowns: HashMap::new(),
+        }
+    }
+}
+
+/// Stamp a cooldown on the concrete key index that failed.
+fn cooldown_key_locked(state: &mut KeyRotationState, failed_key_idx: usize, until: Instant) {
+    state.cooldowns.insert(failed_key_idx, until);
+}
 
 /// Info about a model_provider fallback that occurred during a request.
 #[derive(Debug, Clone)]
@@ -638,7 +668,8 @@ pub struct ReliableModelProvider {
     base_backoff_ms: u64,
     /// Extra API keys for rotation (index tracks round-robin position).
     api_keys: Vec<String>,
-    key_index: AtomicUsize,
+    /// Round-robin cursor + per-index cooldowns for `api_keys`.
+    key_rotation: Mutex<KeyRotationState>,
     /// Per-model failover chains. Test-only: model_name → [alt1, alt2, ...].
     model_fallbacks: HashMap<String, Vec<String>>,
     /// Transient provider cooldowns after retryable rate limits.
@@ -676,7 +707,7 @@ impl ReliableModelProvider {
             max_retries,
             base_backoff_ms: base_backoff_ms.max(50),
             api_keys: Vec::new(),
-            key_index: AtomicUsize::new(0),
+            key_rotation: Mutex::new(KeyRotationState::new()),
             model_fallbacks: HashMap::new(),
             rate_limit_cooldowns: Mutex::new(HashMap::new()),
         }
@@ -702,13 +733,108 @@ impl ReliableModelProvider {
         chain
     }
 
-    /// Advance to the next API key and return it, or None if no extra keys configured.
-    fn rotate_key(&self) -> Option<&str> {
+    /// Default cooldown for a pool key after a retryable 429.
+    const API_KEY_COOLDOWN: Duration = Duration::from_secs(10);
+
+    /// Advance to the next API key (round-robin, no cooldown). Returns
+    /// `(index, key)` or `None` if no extra keys are configured.
+    fn select_next_api_key(&self) -> Option<(usize, &str)> {
         if self.api_keys.is_empty() {
             return None;
         }
-        let idx = self.key_index.fetch_add(1, Ordering::Relaxed) % self.api_keys.len();
-        Some(&self.api_keys[idx])
+        let idx = {
+            let mut state = self
+                .key_rotation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let idx = state.next_idx % self.api_keys.len();
+            state.next_idx = state.next_idx.wrapping_add(1);
+            state.last_selected_key_idx = Some(idx);
+            idx
+        };
+        Some((idx, &self.api_keys[idx]))
+    }
+
+    /// Cool the concrete key index that returned 429, then select the next
+    /// non-cooled key. Callers must pass the index that actually failed —
+    /// never cool whatever is currently in `last_selected_key_idx` after
+    /// other concurrent rotators may have advanced it (#9190).
+    fn rotate_after_rate_limit(&self, failed_key_idx: usize) -> Option<(usize, &str)> {
+        if self.api_keys.is_empty() {
+            return None;
+        }
+        let key_count = self.api_keys.len();
+        let idx = {
+            let mut state = self
+                .key_rotation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let now = Instant::now();
+            cooldown_key_locked(&mut state, failed_key_idx, now + Self::API_KEY_COOLDOWN);
+            state.cooldowns.retain(|_, deadline| *deadline > now);
+
+            let mut chosen = None;
+            for _ in 0..key_count {
+                let candidate = state.next_idx % key_count;
+                state.next_idx = state.next_idx.wrapping_add(1);
+                if !state.cooldowns.contains_key(&candidate) {
+                    chosen = Some(candidate);
+                    break;
+                }
+            }
+            // All keys cooled: still hand out the next index so callers can log.
+            let idx = chosen.unwrap_or_else(|| {
+                let fallback = state.next_idx % key_count;
+                state.next_idx = state.next_idx.wrapping_add(1);
+                fallback
+            });
+            state.last_selected_key_idx = Some(idx);
+            idx
+        };
+        Some((idx, &self.api_keys[idx]))
+    }
+
+    /// On a retryable 429: cool the pool key this attempt was using (if any),
+    /// then select the next key. `selected_key_idx` is the caller's local
+    /// snapshot of the index it was using — not the shared last_selected.
+    fn rotate_key_on_rate_limit(&self, selected_key_idx: &mut Option<usize>) -> Option<&str> {
+        let rotated = match *selected_key_idx {
+            Some(failed) => self.rotate_after_rate_limit(failed),
+            None => self.select_next_api_key(),
+        };
+        match rotated {
+            Some((idx, key)) => {
+                *selected_key_idx = Some(idx);
+                Some(key)
+            }
+            None => None,
+        }
+    }
+
+    /// Advance to the next API key and return it, or None if no extra keys configured.
+    #[cfg(test)]
+    fn rotate_key(&self) -> Option<&str> {
+        self.select_next_api_key().map(|(_, key)| key)
+    }
+
+    #[cfg(test)]
+    fn api_key_cooldown_active(&self, key_idx: usize) -> bool {
+        let state = self
+            .key_rotation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .cooldowns
+            .get(&key_idx)
+            .is_some_and(|deadline| Instant::now() < *deadline)
+    }
+
+    #[cfg(test)]
+    fn last_selected_key_idx(&self) -> Option<usize> {
+        self.key_rotation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last_selected_key_idx
     }
 
     /// Compute backoff duration, respecting Retry-After if present.
@@ -871,6 +997,10 @@ impl ModelProvider for ReliableModelProvider {
     ) -> anyhow::Result<String> {
         let models = self.model_chain(model);
         let mut failures = Vec::new();
+        // Local snapshot of the pool key index this call is using. Passed into
+        // rotate_key_on_rate_limit so cooldowns stamp the failed index, not a
+        // shared last_selected that concurrent rotators may have advanced.
+        let mut selected_key_idx: Option<usize> = None;
 
         // Outer: model fallback chain. Middle: model_provider priority. Inner: retries.
         // Each iteration: attempt one (model_provider, model) call. On success, return
@@ -976,7 +1106,8 @@ impl ModelProvider for ReliableModelProvider {
                             // so the retry hits a different quota bucket.
                             if rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
+                                && let Some(new_key) =
+                                    self.rotate_key_on_rate_limit(&mut selected_key_idx)
                             {
                                 ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
                                      but cannot apply (ModelProvider trait has no set_api_key). \
@@ -1073,6 +1204,7 @@ impl ModelProvider for ReliableModelProvider {
         let mut failures = Vec::new();
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
+        let mut selected_key_idx: Option<usize> = None;
 
         for current_model in &models {
             for entry in &self.model_providers {
@@ -1183,7 +1315,8 @@ impl ModelProvider for ReliableModelProvider {
 
                             if rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
+                                && let Some(new_key) =
+                                    self.rotate_key_on_rate_limit(&mut selected_key_idx)
                             {
                                 ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
                                      but cannot apply (ModelProvider trait has no set_api_key). \
@@ -1291,6 +1424,7 @@ impl ModelProvider for ReliableModelProvider {
         let mut failures = Vec::new();
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
+        let mut selected_key_idx: Option<usize> = None;
 
         for current_model in &models {
             for entry in &self.model_providers {
@@ -1402,7 +1536,8 @@ impl ModelProvider for ReliableModelProvider {
 
                             if rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
+                                && let Some(new_key) =
+                                    self.rotate_key_on_rate_limit(&mut selected_key_idx)
                             {
                                 ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
                                      but cannot apply (ModelProvider trait has no set_api_key). \
@@ -1495,6 +1630,7 @@ impl ModelProvider for ReliableModelProvider {
         let mut failures = Vec::new();
         let mut effective_messages = request.messages.to_vec();
         let mut context_truncated = false;
+        let mut selected_key_idx: Option<usize> = None;
 
         for current_model in &models {
             for entry in &self.model_providers {
@@ -1611,7 +1747,8 @@ impl ModelProvider for ReliableModelProvider {
 
                             if rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
+                                && let Some(new_key) =
+                                    self.rotate_key_on_rate_limit(&mut selected_key_idx)
                             {
                                 ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
                                      but cannot apply (ModelProvider trait has no set_api_key). \
@@ -2894,6 +3031,37 @@ mod tests {
     async fn auth_rotation_returns_none_when_empty() {
         let model_provider = ReliableModelProvider::new("test", vec![], 0, 1);
         assert!(model_provider.rotate_key().is_none());
+    }
+
+    /// #9190: cool the concrete failed index, not whatever last_selected
+    /// advanced to under concurrent/sequential rotators.
+    #[test]
+    fn rotate_after_rate_limit_cools_failed_index_not_last_selected() {
+        let model_provider = ReliableModelProvider::new("test", vec![], 0, 1).with_api_keys(vec![
+            "key-a".into(),
+            "key-b".into(),
+            "key-c".into(),
+        ]);
+
+        // Caller A was using key 0. Before A cools, caller B selects key 1
+        // into last_selected (simulating a concurrent rotate).
+        let (failed_idx, _) = model_provider.select_next_api_key().unwrap();
+        assert_eq!(failed_idx, 0);
+        let (other_idx, _) = model_provider.select_next_api_key().unwrap();
+        assert_eq!(other_idx, 1);
+        assert_eq!(model_provider.last_selected_key_idx(), Some(1));
+
+        // A cools the index that actually failed (0), not last_selected (1).
+        let (next_idx, _) = model_provider.rotate_after_rate_limit(failed_idx).unwrap();
+        assert!(
+            model_provider.api_key_cooldown_active(0),
+            "failed key index 0 must be cooled"
+        );
+        assert!(
+            !model_provider.api_key_cooldown_active(1),
+            "healthy key 1 must not be false-cooled via last_selected race"
+        );
+        assert_ne!(next_idx, 0, "selection after cool must skip the failed key");
     }
 
     // ── New tests: Retry-After parsing ──
