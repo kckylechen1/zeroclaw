@@ -353,10 +353,18 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
             return Err(ToolLoopCancelled.into());
         }
 
-        // Shared iteration budget: parent + subagents share a global counter
+        // Shared iteration budget: parent + subagents share a global counter.
+        // CAS/fetch_update refuses subtract at 0 so concurrent iterations cannot
+        // both pass a load/check then wrap AtomicUsize via fetch_sub (#9192).
         if let Some(ref budget) = shared_budget {
-            let remaining = budget.load(std::sync::atomic::Ordering::Relaxed);
-            if remaining == 0 {
+            let acquired = budget
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |current| current.checked_sub(1),
+                )
+                .is_ok();
+            if !acquired {
                 ::zeroclaw_log::record!(
                     WARN,
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
@@ -367,7 +375,6 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
                 );
                 break;
             }
-            budget.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         preflight_history_maintenance(history);
