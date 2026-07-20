@@ -1190,14 +1190,23 @@ pub fn create_resilient_model_provider_with_options(
 ) -> anyhow::Result<Box<dyn ModelProvider>> {
     let primary_model_provider =
         create_model_provider_inner(None, primary_name, "default", api_key, api_url, options)?;
-
-    let reliable = ReliableModelProvider::new(
+    let extras = build_extra_credential_providers(
+        None,
         primary_name,
-        vec![(primary_name.to_string(), primary_model_provider)],
+        "default",
+        api_url,
+        options,
+        &reliability.api_keys,
+    )?;
+    let entry = ReliableModelProviderEntry::new(primary_name, primary_name, primary_model_provider)
+        .with_extra_providers(extras);
+
+    let reliable = ReliableModelProvider::new_with_entries(
+        primary_name,
+        vec![entry],
         reliability.provider_retries,
         reliability.provider_backoff_ms,
-    )
-    .with_api_keys(reliability.api_keys.clone());
+    );
 
     Ok(Box::new(reliable))
 }
@@ -1239,6 +1248,18 @@ fn create_resilient_model_provider_for_alias_with_model_override(
 ) -> anyhow::Result<Box<dyn ModelProvider>> {
     let primary_model_provider =
         create_model_provider_inner(Some(config), family, alias, api_key, api_url, options)?;
+    // Build Extra(i) providers from reliability.api_keys via the same factory —
+    // each attempt will call a real constructed provider (no set_api_key).
+    // Secrets are not duplicated onto ReliableModelProvider; they live only
+    // inside each provider instance (canonical construction path).
+    let extras = build_extra_credential_providers(
+        Some(config),
+        family,
+        alias,
+        api_url,
+        options,
+        &reliability.api_keys,
+    )?;
 
     let mut model_providers: Vec<ReliableModelProviderEntry> = Vec::new();
     push_pinned_entries(
@@ -1247,6 +1268,7 @@ fn create_resilient_model_provider_for_alias_with_model_override(
         family,
         alias,
         primary_model_provider,
+        extras,
         primary_model_override,
     );
 
@@ -1266,10 +1288,32 @@ fn create_resilient_model_provider_for_alias_with_model_override(
         model_providers,
         reliability.provider_retries,
         reliability.provider_backoff_ms,
-    )
-    .with_api_keys(reliability.api_keys.clone());
+    );
 
     Ok(Box::new(reliable))
+}
+
+/// Construct one model_provider per extra reliability API key.
+fn build_extra_credential_providers(
+    config: Option<&zeroclaw_config::schema::Config>,
+    family: &str,
+    alias: &str,
+    api_url: Option<&str>,
+    options: &ModelProviderRuntimeOptions,
+    extra_keys: &[String],
+) -> anyhow::Result<Vec<Box<dyn ModelProvider>>> {
+    let mut out = Vec::with_capacity(extra_keys.len());
+    for key in extra_keys {
+        out.push(create_model_provider_inner(
+            config,
+            family,
+            alias,
+            Some(key.as_str()),
+            api_url,
+            options,
+        )?);
+    }
+    Ok(out)
 }
 
 fn push_pinned_entries(
@@ -1278,6 +1322,7 @@ fn push_pinned_entries(
     family: &str,
     alias: &str,
     built: Box<dyn ModelProvider>,
+    extras: Vec<Box<dyn ModelProvider>>,
     primary_model_override: Option<&str>,
 ) {
     let entry = config.providers.models.find(family, alias);
@@ -1291,33 +1336,45 @@ fn push_pinned_entries(
     let cooldown_key = format!("{family}.{alias}");
 
     let Some(primary_model) = primary_model else {
-        out.push(ReliableModelProviderEntry::new(family, cooldown_key, built));
+        out.push(
+            ReliableModelProviderEntry::new(family, cooldown_key, built)
+                .with_extra_providers(extras),
+        );
         return;
     };
 
-    let built: std::sync::Arc<dyn ModelProvider> = std::sync::Arc::from(built);
-    out.push(ReliableModelProviderEntry::new(
-        family,
-        cooldown_key.clone(),
-        Box::new(crate::model_pin::ModelPinnedProvider::new(
-            alias,
-            primary_model,
-            Box::new(std::sync::Arc::clone(&built)),
-        )),
-    ));
+    let primary_arc: std::sync::Arc<dyn ModelProvider> = std::sync::Arc::from(built);
+    let extra_arcs: Vec<std::sync::Arc<dyn ModelProvider>> =
+        extras.into_iter().map(std::sync::Arc::from).collect();
+
+    let mut models = vec![primary_model.to_string()];
     for model in extra_models {
         if model.trim().is_empty() || model == primary_model {
             continue;
         }
-        out.push(ReliableModelProviderEntry::new(
-            family,
-            cooldown_key.clone(),
-            Box::new(crate::model_pin::ModelPinnedProvider::new(
-                alias,
-                model,
-                Box::new(std::sync::Arc::clone(&built)),
-            )),
+        models.push(model.clone());
+    }
+
+    for model in models {
+        let primary_pinned = Box::new(crate::model_pin::ModelPinnedProvider::new(
+            alias,
+            &model,
+            Box::new(std::sync::Arc::clone(&primary_arc)),
         ));
+        let extra_pinned: Vec<Box<dyn ModelProvider>> = extra_arcs
+            .iter()
+            .map(|arc| {
+                Box::new(crate::model_pin::ModelPinnedProvider::new(
+                    alias,
+                    &model,
+                    Box::new(std::sync::Arc::clone(arc)),
+                )) as Box<dyn ModelProvider>
+            })
+            .collect();
+        out.push(
+            ReliableModelProviderEntry::new(family, cooldown_key.clone(), primary_pinned)
+                .with_extra_providers(extra_pinned),
+        );
     }
 }
 
@@ -1391,7 +1448,9 @@ fn append_fallback_chain(
             entry.uri.as_deref(),
             &opts,
         ) {
-            Ok(built) => push_pinned_entries(out, config, family, &alias, built, None),
+            // Fallback entries use only their own Primary credential; reliability
+            // api_keys extras stay scoped to the primary alias entry.
+            Ok(built) => push_pinned_entries(out, config, family, &alias, built, Vec::new(), None),
             Err(e) => {
                 let profile = format!("[providers.models.{family}.{alias}]");
                 anyhow::bail!(

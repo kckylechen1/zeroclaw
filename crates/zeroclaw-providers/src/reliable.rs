@@ -13,33 +13,49 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// In-memory API-key rotation cursor + per-index cooldowns.
+/// Identity of a credential slot on one [`ReliableModelProviderEntry`].
 ///
-/// Source of truth for which pool index is cooled: live 429 evidence observed
-/// by this wrapper (not config). Created here — not a cache of config state.
-struct KeyRotationState {
-    next_idx: usize,
-    /// Last index handed out by select/rotate. Informational only: cooldown
-    /// MUST use the caller-supplied failed index, never this field after
-    /// concurrent rotators may have advanced it (#9190).
-    last_selected_key_idx: Option<usize>,
-    /// Cooldown deadlines keyed by the concrete key index that returned 429.
-    cooldowns: HashMap<usize, Instant>,
+/// Scoped per provider entry: each entry has its own `Primary` plus optional
+/// `Extra(i)` slots built from `[reliability].api_keys`. This is the cooldown
+/// key for live 429 evidence — not a cache of config secrets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum CredentialIdentity {
+    Primary,
+    Extra(usize),
 }
 
-impl KeyRotationState {
-    fn new() -> Self {
-        Self {
-            next_idx: 0,
-            last_selected_key_idx: None,
-            cooldowns: HashMap::new(),
+impl CredentialIdentity {
+    fn label(self) -> String {
+        match self {
+            Self::Primary => "primary".to_string(),
+            Self::Extra(i) => format!("extra:{i}"),
         }
     }
 }
 
-/// Stamp a cooldown on the concrete key index that failed.
-fn cooldown_key_locked(state: &mut KeyRotationState, failed_key_idx: usize, until: Instant) {
-    state.cooldowns.insert(failed_key_idx, until);
+/// One constructed model_provider bound to a single credential.
+///
+/// Source of truth for the secret material is the provider instance itself
+/// (built via the existing factory/constructors). We do **not** keep a parallel
+/// `api_keys: Vec<String>` on the wrapper.
+struct CredentialSlot {
+    identity: CredentialIdentity,
+    provider: Box<dyn ModelProvider>,
+}
+
+/// Per-entry live credential cooldowns (429 evidence). Created here.
+#[derive(Default)]
+struct EntryCredentialState {
+    cooldowns: HashMap<CredentialIdentity, Instant>,
+}
+
+/// Credential rotation state keyed by entry index.
+///
+/// Source of truth for which credential is cooled: live 429 evidence observed
+/// by this wrapper (not config).
+#[derive(Default)]
+struct CredentialRotationState {
+    by_entry: HashMap<usize, EntryCredentialState>,
 }
 
 /// Info about a model_provider fallback that occurred during a request.
@@ -639,7 +655,9 @@ fn is_empty_completion(resp: &ChatResponse) -> bool {
 pub(crate) struct ReliableModelProviderEntry {
     display_name: String,
     cooldown_key: String,
-    provider: Box<dyn ModelProvider>,
+    /// Primary first, then Extra(i). Each slot is a fully constructed provider
+    /// so every attempt uses a real credential (no set_api_key boundary).
+    credentials: Vec<CredentialSlot>,
 }
 
 impl ReliableModelProviderEntry {
@@ -651,8 +669,37 @@ impl ReliableModelProviderEntry {
         Self {
             display_name: display_name.into(),
             cooldown_key: cooldown_key.into(),
-            provider,
+            credentials: vec![CredentialSlot {
+                identity: CredentialIdentity::Primary,
+                provider,
+            }],
         }
+    }
+
+    /// Attach Extra(i) providers built from `[reliability].api_keys`.
+    /// Secrets live only inside each provider instance — not duplicated here.
+    pub(crate) fn with_extra_providers(mut self, extras: Vec<Box<dyn ModelProvider>>) -> Self {
+        for (i, provider) in extras.into_iter().enumerate() {
+            self.credentials.push(CredentialSlot {
+                identity: CredentialIdentity::Extra(i),
+                provider,
+            });
+        }
+        self
+    }
+
+    fn primary_provider(&self) -> &dyn ModelProvider {
+        self.credentials
+            .first()
+            .map(|slot| slot.provider.as_ref())
+            .expect("ReliableModelProviderEntry always has Primary")
+    }
+
+    fn credential_provider(&self, identity: CredentialIdentity) -> Option<&dyn ModelProvider> {
+        self.credentials
+            .iter()
+            .find(|slot| slot.identity == identity)
+            .map(|slot| slot.provider.as_ref())
     }
 }
 
@@ -666,16 +713,17 @@ pub struct ReliableModelProvider {
     model_providers: Vec<ReliableModelProviderEntry>,
     max_retries: u32,
     base_backoff_ms: u64,
-    /// Extra API keys for rotation (index tracks round-robin position).
-    api_keys: Vec<String>,
-    /// Round-robin cursor + per-index cooldowns for `api_keys`.
-    key_rotation: Mutex<KeyRotationState>,
+    /// Per-entry credential cooldowns (Primary|Extra(i)). SoT: live 429s.
+    credential_rotation: Mutex<CredentialRotationState>,
     /// Per-model failover chains. Test-only: model_name → [alt1, alt2, ...].
     model_fallbacks: HashMap<String, Vec<String>>,
     /// Transient provider cooldowns after retryable rate limits.
     /// Source of truth: live provider 429 / Retry-After evidence observed by
     /// this wrapper. It is intentionally in-memory and per wrapper instance.
     rate_limit_cooldowns: Mutex<HashMap<String, Instant>>,
+    /// Test-only: (entry_idx, identity) actually applied on each attempt.
+    #[cfg(test)]
+    applied_credentials: Mutex<Vec<(usize, CredentialIdentity)>>,
 }
 
 impl ReliableModelProvider {
@@ -706,16 +754,12 @@ impl ReliableModelProvider {
             model_providers,
             max_retries,
             base_backoff_ms: base_backoff_ms.max(50),
-            api_keys: Vec::new(),
-            key_rotation: Mutex::new(KeyRotationState::new()),
+            credential_rotation: Mutex::new(CredentialRotationState::default()),
             model_fallbacks: HashMap::new(),
             rate_limit_cooldowns: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            applied_credentials: Mutex::new(Vec::new()),
         }
-    }
-    /// Set additional API keys for round-robin rotation on rate-limit errors.
-    pub fn with_api_keys(mut self, keys: Vec<String>) -> Self {
-        self.api_keys = keys;
-        self
     }
 
     #[cfg(test)]
@@ -733,108 +777,99 @@ impl ReliableModelProvider {
         chain
     }
 
-    /// Default cooldown for a pool key after a retryable 429.
-    const API_KEY_COOLDOWN: Duration = Duration::from_secs(10);
+    /// Default cooldown for a credential after a retryable 429 without Retry-After.
+    const CREDENTIAL_COOLDOWN: Duration = Duration::from_secs(10);
 
-    /// Advance to the next API key (round-robin, no cooldown). Returns
-    /// `(index, key)` or `None` if no extra keys are configured.
-    fn select_next_api_key(&self) -> Option<(usize, &str)> {
-        if self.api_keys.is_empty() {
-            return None;
-        }
-        let idx = {
-            let mut state = self
-                .key_rotation
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let idx = state.next_idx % self.api_keys.len();
-            state.next_idx = state.next_idx.wrapping_add(1);
-            state.last_selected_key_idx = Some(idx);
-            idx
-        };
-        Some((idx, &self.api_keys[idx]))
-    }
+    /// Select a non-cooled credential for `entry_idx`. Prefers Primary, then
+    /// Extra(i) in order. Never returns a cooled identity. `None` = all cooled.
+    fn select_live_credential(
+        &self,
+        entry_idx: usize,
+        entry: &ReliableModelProviderEntry,
+    ) -> Option<CredentialIdentity> {
+        let mut state = self
+            .credential_rotation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry_state = state.by_entry.entry(entry_idx).or_default();
+        let now = Instant::now();
+        entry_state.cooldowns.retain(|_, deadline| *deadline > now);
 
-    /// Cool the concrete key index that returned 429, then select the next
-    /// non-cooled key. Callers must pass the index that actually failed —
-    /// never cool whatever is currently in `last_selected_key_idx` after
-    /// other concurrent rotators may have advanced it (#9190).
-    fn rotate_after_rate_limit(&self, failed_key_idx: usize) -> Option<(usize, &str)> {
-        if self.api_keys.is_empty() {
-            return None;
-        }
-        let key_count = self.api_keys.len();
-        let idx = {
-            let mut state = self
-                .key_rotation
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let now = Instant::now();
-            cooldown_key_locked(&mut state, failed_key_idx, now + Self::API_KEY_COOLDOWN);
-            state.cooldowns.retain(|_, deadline| *deadline > now);
-
-            let mut chosen = None;
-            for _ in 0..key_count {
-                let candidate = state.next_idx % key_count;
-                state.next_idx = state.next_idx.wrapping_add(1);
-                if !state.cooldowns.contains_key(&candidate) {
-                    chosen = Some(candidate);
-                    break;
-                }
+        for slot in &entry.credentials {
+            if !entry_state.cooldowns.contains_key(&slot.identity) {
+                return Some(slot.identity);
             }
-            // All keys cooled: still hand out the next index so callers can log.
-            let idx = chosen.unwrap_or_else(|| {
-                let fallback = state.next_idx % key_count;
-                state.next_idx = state.next_idx.wrapping_add(1);
-                fallback
-            });
-            state.last_selected_key_idx = Some(idx);
-            idx
-        };
-        Some((idx, &self.api_keys[idx]))
-    }
-
-    /// On a retryable 429: cool the pool key this attempt was using (if any),
-    /// then select the next key. `selected_key_idx` is the caller's local
-    /// snapshot of the index it was using — not the shared last_selected.
-    fn rotate_key_on_rate_limit(&self, selected_key_idx: &mut Option<usize>) -> Option<&str> {
-        let rotated = match *selected_key_idx {
-            Some(failed) => self.rotate_after_rate_limit(failed),
-            None => self.select_next_api_key(),
-        };
-        match rotated {
-            Some((idx, key)) => {
-                *selected_key_idx = Some(idx);
-                Some(key)
-            }
-            None => None,
         }
+        None
     }
 
-    /// Advance to the next API key and return it, or None if no extra keys configured.
-    #[cfg(test)]
-    fn rotate_key(&self) -> Option<&str> {
-        self.select_next_api_key().map(|(_, key)| key)
+    /// Cool the credential that actually returned 429. Honors Retry-After when present.
+    fn cool_credential(
+        &self,
+        entry_idx: usize,
+        identity: CredentialIdentity,
+        err: &anyhow::Error,
+    ) -> Duration {
+        let cooldown = parse_retry_after_ms(err)
+            .map(|ms| Duration::from_millis(ms.min(60_000)))
+            .unwrap_or(Self::CREDENTIAL_COOLDOWN);
+        let mut state = self
+            .credential_rotation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry_state = state.by_entry.entry(entry_idx).or_default();
+        entry_state
+            .cooldowns
+            .insert(identity, Instant::now() + cooldown);
+        cooldown
     }
 
     #[cfg(test)]
-    fn api_key_cooldown_active(&self, key_idx: usize) -> bool {
+    fn credential_cooldown_active(&self, entry_idx: usize, identity: CredentialIdentity) -> bool {
         let state = self
-            .key_rotation
+            .credential_rotation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state
-            .cooldowns
-            .get(&key_idx)
+            .by_entry
+            .get(&entry_idx)
+            .and_then(|s| s.cooldowns.get(&identity))
             .is_some_and(|deadline| Instant::now() < *deadline)
     }
 
     #[cfg(test)]
-    fn last_selected_key_idx(&self) -> Option<usize> {
-        self.key_rotation
+    fn take_applied_credentials(&self) -> Vec<(usize, CredentialIdentity)> {
+        std::mem::take(
+            &mut *self
+                .applied_credentials
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    #[cfg(test)]
+    fn record_applied_credential(&self, entry_idx: usize, identity: CredentialIdentity) {
+        self.applied_credentials
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .last_selected_key_idx
+            .push((entry_idx, identity));
+    }
+
+    /// Resolve a live credential for this attempt, or report all-cooled.
+    fn begin_credential_attempt<'a>(
+        &'a self,
+        entry_idx: usize,
+        entry: &'a ReliableModelProviderEntry,
+    ) -> Result<(CredentialIdentity, &'a dyn ModelProvider), ()> {
+        let Some(identity) = self.select_live_credential(entry_idx, entry) else {
+            return Err(());
+        };
+        let Some(provider) = entry.credential_provider(identity) else {
+            return Err(());
+        };
+        #[cfg(test)]
+        self.record_applied_credential(entry_idx, identity);
+        Ok((identity, provider))
     }
 
     /// Compute backoff duration, respecting Retry-After if present.
@@ -965,24 +1000,32 @@ impl ModelProvider for ReliableModelProvider {
     async fn warmup(&self) -> anyhow::Result<()> {
         for entry in &self.model_providers {
             let provider_name = entry.display_name.as_str();
-            ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_attrs(::serde_json::json!({"model_provider": provider_name})),
-                "Warming up model_provider connection pool"
-            );
-            if ProviderDispatch::from_ref(entry.provider.as_ref())
-                .warmup()
-                .await
-                .is_err()
-            {
+            for slot in &entry.credentials {
                 ::zeroclaw_log::record!(
-                    WARN,
+                    INFO,
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"model_provider": provider_name})),
-                    "Warmup failed (non-fatal)"
+                        .with_attrs(::serde_json::json!({
+                            "model_provider": provider_name,
+                            "credential": slot.identity.label(),
+                        })),
+                    "Warming up model_provider connection pool"
                 );
+                if ProviderDispatch::from_ref(slot.provider.as_ref())
+                    .warmup()
+                    .await
+                    .is_err()
+                {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "model_provider": provider_name,
+                                "credential": slot.identity.label(),
+                            })),
+                        "Warmup failed (non-fatal)"
+                    );
+                }
             }
         }
         Ok(())
@@ -997,17 +1040,12 @@ impl ModelProvider for ReliableModelProvider {
     ) -> anyhow::Result<String> {
         let models = self.model_chain(model);
         let mut failures = Vec::new();
-        // Local snapshot of the pool key index this call is using. Passed into
-        // rotate_key_on_rate_limit so cooldowns stamp the failed index, not a
-        // shared last_selected that concurrent rotators may have advanced.
-        let mut selected_key_idx: Option<usize> = None;
-
         // Outer: model fallback chain. Middle: model_provider priority. Inner: retries.
         // Each iteration: attempt one (model_provider, model) call. On success, return
         // immediately. On non-retryable error, break to next model_provider. On
         // retryable error, sleep with exponential backoff and retry.
         for current_model in &models {
-            for entry in &self.model_providers {
+            for (entry_idx, entry) in self.model_providers.iter().enumerate() {
                 let provider_name = entry.display_name.as_str();
                 if self.provider_should_skip_for_cooldown(entry) {
                     self.log_cooldown_skip(provider_name);
@@ -1020,7 +1058,33 @@ impl ModelProvider for ReliableModelProvider {
                 let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
 
                 for attempt in 0..=self.max_retries {
-                    match ProviderDispatch::from_ref(entry.provider.as_ref())
+                    let (applied_identity, provider) = match self
+                        .begin_credential_attempt(entry_idx, entry)
+                    {
+                        Ok(v) => v,
+                        Err(()) => {
+                            Self::record_cooldown_skip_failure(
+                                &mut failures,
+                                provider_name,
+                                current_model,
+                            );
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "model_provider": provider_name,
+                                    "model": *current_model,
+                                })),
+                                "All credentials cooled for model_provider; unavailable"
+                            );
+                            break;
+                        }
+                    };
+                    match ProviderDispatch::from_ref(provider)
                         .chat_with_system(system_prompt, message, current_model, temperature)
                         .await
                     {
@@ -1102,16 +1166,35 @@ impl ModelProvider for ReliableModelProvider {
                                 Some(&diagnostic),
                             );
 
-                            // Rate-limit with rotatable keys: cycle to the next API key
-                            // so the retry hits a different quota bucket.
-                            if rate_limited
-                                && !non_retryable_rate_limit
-                                && let Some(new_key) =
-                                    self.rotate_key_on_rate_limit(&mut selected_key_idx)
-                            {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
+                            let mut entry_credentials_exhausted = false;
+                            if rate_limited && !non_retryable_rate_limit {
+                                let cooldown =
+                                    self.cool_credential(entry_idx, applied_identity, &e);
+                                ::zeroclaw_log::record!(
+                                    WARN,
+                                    ::zeroclaw_log::Event::new(
+                                        module_path!(),
+                                        ::zeroclaw_log::Action::Note
+                                    )
+                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                    .with_attrs(
+                                        ::serde_json::json!({
+                                            "model_provider": provider_name,
+                                            "credential": applied_identity.label(),
+                                            "cooldown_ms": cooldown.as_millis(),
+                                            "error": error_detail,
+                                        })
+                                    ),
+                                    "Rate limited; cooling credential and retrying with next live key"
+                                );
+                                if self.select_live_credential(entry_idx, entry).is_none() {
+                                    entry_credentials_exhausted = true;
+                                    Self::record_cooldown_skip_failure(
+                                        &mut failures,
+                                        provider_name,
+                                        current_model,
+                                    );
+                                }
                             }
 
                             if non_retryable {
@@ -1135,13 +1218,25 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
-                                self.cool_down_rate_limited_provider(entry, current_model, &e);
+                            if entry_credentials_exhausted {
+                                if self.model_providers.len() > 1 {
+                                    self.cool_down_rate_limited_provider(entry, current_model, &e);
+                                }
                                 break;
                             }
 
                             if attempt < self.max_retries {
-                                let wait = self.compute_backoff(backoff_ms, &e);
+                                // Retry-After applies to the cooled credential.
+                                // When another live credential remains, try it
+                                // promptly instead of waiting out that cool-down.
+                                let wait = if rate_limited
+                                    && !non_retryable_rate_limit
+                                    && self.select_live_credential(entry_idx, entry).is_some()
+                                {
+                                    self.base_backoff_ms
+                                } else {
+                                    self.compute_backoff(backoff_ms, &e)
+                                };
                                 ::zeroclaw_log::record!(
                                     WARN,
                                     ::zeroclaw_log::Event::new(
@@ -1204,10 +1299,8 @@ impl ModelProvider for ReliableModelProvider {
         let mut failures = Vec::new();
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
-        let mut selected_key_idx: Option<usize> = None;
-
         for current_model in &models {
-            for entry in &self.model_providers {
+            for (entry_idx, entry) in self.model_providers.iter().enumerate() {
                 let provider_name = entry.display_name.as_str();
                 if self.provider_should_skip_for_cooldown(entry) {
                     self.log_cooldown_skip(provider_name);
@@ -1220,7 +1313,33 @@ impl ModelProvider for ReliableModelProvider {
                 let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
 
                 for attempt in 0..=self.max_retries {
-                    match ProviderDispatch::from_ref(entry.provider.as_ref())
+                    let (applied_identity, provider) = match self
+                        .begin_credential_attempt(entry_idx, entry)
+                    {
+                        Ok(v) => v,
+                        Err(()) => {
+                            Self::record_cooldown_skip_failure(
+                                &mut failures,
+                                provider_name,
+                                current_model,
+                            );
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "model_provider": provider_name,
+                                    "model": *current_model,
+                                })),
+                                "All credentials cooled for model_provider; unavailable"
+                            );
+                            break;
+                        }
+                    };
+                    match ProviderDispatch::from_ref(provider)
                         .chat_with_history(&effective_messages, current_model, temperature)
                         .await
                     {
@@ -1313,14 +1432,35 @@ impl ModelProvider for ReliableModelProvider {
                                 Some(&diagnostic),
                             );
 
-                            if rate_limited
-                                && !non_retryable_rate_limit
-                                && let Some(new_key) =
-                                    self.rotate_key_on_rate_limit(&mut selected_key_idx)
-                            {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
+                            let mut entry_credentials_exhausted = false;
+                            if rate_limited && !non_retryable_rate_limit {
+                                let cooldown =
+                                    self.cool_credential(entry_idx, applied_identity, &e);
+                                ::zeroclaw_log::record!(
+                                    WARN,
+                                    ::zeroclaw_log::Event::new(
+                                        module_path!(),
+                                        ::zeroclaw_log::Action::Note
+                                    )
+                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                    .with_attrs(
+                                        ::serde_json::json!({
+                                            "model_provider": provider_name,
+                                            "credential": applied_identity.label(),
+                                            "cooldown_ms": cooldown.as_millis(),
+                                            "error": error_detail,
+                                        })
+                                    ),
+                                    "Rate limited; cooling credential and retrying with next live key"
+                                );
+                                if self.select_live_credential(entry_idx, entry).is_none() {
+                                    entry_credentials_exhausted = true;
+                                    Self::record_cooldown_skip_failure(
+                                        &mut failures,
+                                        provider_name,
+                                        current_model,
+                                    );
+                                }
                             }
 
                             if non_retryable {
@@ -1344,13 +1484,25 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
-                                self.cool_down_rate_limited_provider(entry, current_model, &e);
+                            if entry_credentials_exhausted {
+                                if self.model_providers.len() > 1 {
+                                    self.cool_down_rate_limited_provider(entry, current_model, &e);
+                                }
                                 break;
                             }
 
                             if attempt < self.max_retries {
-                                let wait = self.compute_backoff(backoff_ms, &e);
+                                // Retry-After applies to the cooled credential.
+                                // When another live credential remains, try it
+                                // promptly instead of waiting out that cool-down.
+                                let wait = if rate_limited
+                                    && !non_retryable_rate_limit
+                                    && self.select_live_credential(entry_idx, entry).is_some()
+                                {
+                                    self.base_backoff_ms
+                                } else {
+                                    self.compute_backoff(backoff_ms, &e)
+                                };
                                 ::zeroclaw_log::record!(
                                     WARN,
                                     ::zeroclaw_log::Event::new(
@@ -1402,14 +1554,14 @@ impl ModelProvider for ReliableModelProvider {
     fn supports_native_tools(&self) -> bool {
         self.model_providers
             .first()
-            .map(|entry| entry.provider.supports_native_tools())
+            .map(|entry| entry.primary_provider().supports_native_tools())
             .unwrap_or(false)
     }
 
     fn supports_vision(&self) -> bool {
         self.model_providers
             .first()
-            .map(|entry| entry.provider.supports_vision())
+            .map(|entry| entry.primary_provider().supports_vision())
             .unwrap_or(false)
     }
 
@@ -1424,10 +1576,8 @@ impl ModelProvider for ReliableModelProvider {
         let mut failures = Vec::new();
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
-        let mut selected_key_idx: Option<usize> = None;
-
         for current_model in &models {
-            for entry in &self.model_providers {
+            for (entry_idx, entry) in self.model_providers.iter().enumerate() {
                 let provider_name = entry.display_name.as_str();
                 if self.provider_should_skip_for_cooldown(entry) {
                     self.log_cooldown_skip(provider_name);
@@ -1440,7 +1590,33 @@ impl ModelProvider for ReliableModelProvider {
                 let mut last_diagnostic: Option<ProviderErrorDiagnostic> = None;
 
                 for attempt in 0..=self.max_retries {
-                    match ProviderDispatch::from_ref(entry.provider.as_ref())
+                    let (applied_identity, provider) = match self
+                        .begin_credential_attempt(entry_idx, entry)
+                    {
+                        Ok(v) => v,
+                        Err(()) => {
+                            Self::record_cooldown_skip_failure(
+                                &mut failures,
+                                provider_name,
+                                current_model,
+                            );
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "model_provider": provider_name,
+                                    "model": *current_model,
+                                })),
+                                "All credentials cooled for model_provider; unavailable"
+                            );
+                            break;
+                        }
+                    };
+                    match ProviderDispatch::from_ref(provider)
                         .chat_with_tools(&effective_messages, tools, current_model, temperature)
                         .await
                     {
@@ -1534,14 +1710,35 @@ impl ModelProvider for ReliableModelProvider {
                                 Some(&diagnostic),
                             );
 
-                            if rate_limited
-                                && !non_retryable_rate_limit
-                                && let Some(new_key) =
-                                    self.rotate_key_on_rate_limit(&mut selected_key_idx)
-                            {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
+                            let mut entry_credentials_exhausted = false;
+                            if rate_limited && !non_retryable_rate_limit {
+                                let cooldown =
+                                    self.cool_credential(entry_idx, applied_identity, &e);
+                                ::zeroclaw_log::record!(
+                                    WARN,
+                                    ::zeroclaw_log::Event::new(
+                                        module_path!(),
+                                        ::zeroclaw_log::Action::Note
+                                    )
+                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                    .with_attrs(
+                                        ::serde_json::json!({
+                                            "model_provider": provider_name,
+                                            "credential": applied_identity.label(),
+                                            "cooldown_ms": cooldown.as_millis(),
+                                            "error": error_detail,
+                                        })
+                                    ),
+                                    "Rate limited; cooling credential and retrying with next live key"
+                                );
+                                if self.select_live_credential(entry_idx, entry).is_none() {
+                                    entry_credentials_exhausted = true;
+                                    Self::record_cooldown_skip_failure(
+                                        &mut failures,
+                                        provider_name,
+                                        current_model,
+                                    );
+                                }
                             }
 
                             if non_retryable {
@@ -1565,13 +1762,25 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
-                                self.cool_down_rate_limited_provider(entry, current_model, &e);
+                            if entry_credentials_exhausted {
+                                if self.model_providers.len() > 1 {
+                                    self.cool_down_rate_limited_provider(entry, current_model, &e);
+                                }
                                 break;
                             }
 
                             if attempt < self.max_retries {
-                                let wait = self.compute_backoff(backoff_ms, &e);
+                                // Retry-After applies to the cooled credential.
+                                // When another live credential remains, try it
+                                // promptly instead of waiting out that cool-down.
+                                let wait = if rate_limited
+                                    && !non_retryable_rate_limit
+                                    && self.select_live_credential(entry_idx, entry).is_some()
+                                {
+                                    self.base_backoff_ms
+                                } else {
+                                    self.compute_backoff(backoff_ms, &e)
+                                };
                                 ::zeroclaw_log::record!(
                                     WARN,
                                     ::zeroclaw_log::Event::new(
@@ -1630,10 +1839,8 @@ impl ModelProvider for ReliableModelProvider {
         let mut failures = Vec::new();
         let mut effective_messages = request.messages.to_vec();
         let mut context_truncated = false;
-        let mut selected_key_idx: Option<usize> = None;
-
         for current_model in &models {
-            for entry in &self.model_providers {
+            for (entry_idx, entry) in self.model_providers.iter().enumerate() {
                 let provider_name = entry.display_name.as_str();
                 if self.provider_should_skip_for_cooldown(entry) {
                     self.log_cooldown_skip(provider_name);
@@ -1651,7 +1858,33 @@ impl ModelProvider for ReliableModelProvider {
                         tools: request.tools,
                         thinking: request.thinking,
                     };
-                    match ProviderDispatch::from_ref(entry.provider.as_ref())
+                    let (applied_identity, provider) = match self
+                        .begin_credential_attempt(entry_idx, entry)
+                    {
+                        Ok(v) => v,
+                        Err(()) => {
+                            Self::record_cooldown_skip_failure(
+                                &mut failures,
+                                provider_name,
+                                current_model,
+                            );
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "model_provider": provider_name,
+                                    "model": *current_model,
+                                })),
+                                "All credentials cooled for model_provider; unavailable"
+                            );
+                            break;
+                        }
+                    };
+                    match ProviderDispatch::from_ref(provider)
                         .chat(req, current_model, temperature)
                         .await
                     {
@@ -1745,14 +1978,35 @@ impl ModelProvider for ReliableModelProvider {
                                 Some(&diagnostic),
                             );
 
-                            if rate_limited
-                                && !non_retryable_rate_limit
-                                && let Some(new_key) =
-                                    self.rotate_key_on_rate_limit(&mut selected_key_idx)
-                            {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
+                            let mut entry_credentials_exhausted = false;
+                            if rate_limited && !non_retryable_rate_limit {
+                                let cooldown =
+                                    self.cool_credential(entry_idx, applied_identity, &e);
+                                ::zeroclaw_log::record!(
+                                    WARN,
+                                    ::zeroclaw_log::Event::new(
+                                        module_path!(),
+                                        ::zeroclaw_log::Action::Note
+                                    )
+                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                    .with_attrs(
+                                        ::serde_json::json!({
+                                            "model_provider": provider_name,
+                                            "credential": applied_identity.label(),
+                                            "cooldown_ms": cooldown.as_millis(),
+                                            "error": error_detail,
+                                        })
+                                    ),
+                                    "Rate limited; cooling credential and retrying with next live key"
+                                );
+                                if self.select_live_credential(entry_idx, entry).is_none() {
+                                    entry_credentials_exhausted = true;
+                                    Self::record_cooldown_skip_failure(
+                                        &mut failures,
+                                        provider_name,
+                                        current_model,
+                                    );
+                                }
                             }
 
                             if non_retryable {
@@ -1776,13 +2030,25 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
-                                self.cool_down_rate_limited_provider(entry, current_model, &e);
+                            if entry_credentials_exhausted {
+                                if self.model_providers.len() > 1 {
+                                    self.cool_down_rate_limited_provider(entry, current_model, &e);
+                                }
                                 break;
                             }
 
                             if attempt < self.max_retries {
-                                let wait = self.compute_backoff(backoff_ms, &e);
+                                // Retry-After applies to the cooled credential.
+                                // When another live credential remains, try it
+                                // promptly instead of waiting out that cool-down.
+                                let wait = if rate_limited
+                                    && !non_retryable_rate_limit
+                                    && self.select_live_credential(entry_idx, entry).is_some()
+                                {
+                                    self.base_backoff_ms
+                                } else {
+                                    self.compute_backoff(backoff_ms, &e)
+                                };
                                 ::zeroclaw_log::record!(
                                     WARN,
                                     ::zeroclaw_log::Event::new(
@@ -1838,13 +2104,13 @@ impl ModelProvider for ReliableModelProvider {
     fn supports_streaming(&self) -> bool {
         self.model_providers
             .iter()
-            .any(|entry| entry.provider.supports_streaming())
+            .any(|entry| entry.primary_provider().supports_streaming())
     }
 
     fn supports_streaming_tool_events(&self) -> bool {
         self.model_providers
             .iter()
-            .any(|entry| entry.provider.supports_streaming_tool_events())
+            .any(|entry| entry.primary_provider().supports_streaming_tool_events())
     }
 
     fn stream_chat(
@@ -1858,7 +2124,7 @@ impl ModelProvider for ReliableModelProvider {
 
         for entry in &self.model_providers {
             let provider_name = entry.display_name.as_str();
-            let model_provider = entry.provider.as_ref();
+            let model_provider = entry.primary_provider();
             if !model_provider.supports_streaming() || !options.enabled {
                 continue;
             }
@@ -1933,7 +2199,7 @@ impl ModelProvider for ReliableModelProvider {
         // For streaming, we use the first model_provider that supports it and has streaming enabled
         for entry in &self.model_providers {
             let provider_name = entry.display_name.as_str();
-            let model_provider = entry.provider.as_ref();
+            let model_provider = entry.primary_provider();
             if !model_provider.supports_streaming() || !options.enabled {
                 continue;
             }
@@ -2006,7 +2272,7 @@ impl ModelProvider for ReliableModelProvider {
         // model_provider's stream_chat_with_history, preserving the full conversation.
         for entry in &self.model_providers {
             let provider_name = entry.display_name.as_str();
-            let model_provider = entry.provider.as_ref();
+            let model_provider = entry.primary_provider();
             if !model_provider.supports_streaming() || !options.enabled {
                 continue;
             }
@@ -2064,7 +2330,9 @@ impl ModelProvider for ReliableModelProvider {
 impl ::zeroclaw_api::attribution::Attributable for ReliableModelProvider {
     fn role(&self) -> ::zeroclaw_api::attribution::Role {
         match self.model_providers.first() {
-            Some(entry) => ::zeroclaw_api::attribution::Attributable::role(&*entry.provider),
+            Some(entry) => {
+                ::zeroclaw_api::attribution::Attributable::role(entry.primary_provider())
+            }
             None => ::zeroclaw_api::attribution::Role::System,
         }
     }
@@ -2074,7 +2342,9 @@ impl ::zeroclaw_api::attribution::Attributable for ReliableModelProvider {
         // as `role()`. Falls back to the wrapper's own configured alias
         // when no inner provider is registered.
         match self.model_providers.first() {
-            Some(entry) => ::zeroclaw_api::attribution::Attributable::alias(&*entry.provider),
+            Some(entry) => {
+                ::zeroclaw_api::attribution::Attributable::alias(entry.primary_provider())
+            }
             None => &self.alias,
         }
     }
@@ -3000,68 +3270,274 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    // ── New tests: auth rotation ──
+    // ── Credential rotation (real apply via constructed providers) ──
+
+    /// Mock that optionally rate-limits and records that it was invoked.
+    struct CredMock {
+        label: &'static str,
+        calls: Arc<AtomicUsize>,
+        rate_limit: bool,
+        response: &'static str,
+    }
+
+    #[async_trait]
+    impl ModelProvider for CredMock {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.rate_limit {
+                anyhow::bail!("429 Too Many Requests, Retry-After: 2");
+            }
+            Ok(format!("{}:{}", self.label, self.response))
+        }
+    }
+    impl ::zeroclaw_api::attribution::Attributable for CredMock {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Provider(
+                ::zeroclaw_api::attribution::ProviderKind::Model(
+                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+                ),
+            )
+        }
+        fn alias(&self) -> &str {
+            self.label
+        }
+    }
+
+    fn entry_with_creds(
+        name: &str,
+        primary: CredMock,
+        extras: Vec<CredMock>,
+    ) -> ReliableModelProviderEntry {
+        ReliableModelProviderEntry::new(name, name, Box::new(primary) as Box<dyn ModelProvider>)
+            .with_extra_providers(
+                extras
+                    .into_iter()
+                    .map(|m| Box::new(m) as Box<dyn ModelProvider>)
+                    .collect(),
+            )
+    }
 
     #[tokio::test]
-    async fn auth_rotation_cycles_keys() {
-        let model_provider = ReliableModelProvider::new(
-            "test",
-            vec![(
-                "p".into(),
-                Box::new(MockModelProvider {
+    async fn credential_rotation_applies_next_provider_after_429() {
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let extra_calls = Arc::new(AtomicUsize::new(0));
+        let entry = entry_with_creds(
+            "p",
+            CredMock {
+                label: "primary-key",
+                calls: Arc::clone(&primary_calls),
+                rate_limit: true,
+                response: "nope",
+            },
+            vec![CredMock {
+                label: "extra-0",
+                calls: Arc::clone(&extra_calls),
+                rate_limit: false,
+                response: "ok",
+            }],
+        );
+        let model_provider = ReliableModelProvider::new_with_entries("test", vec![entry], 1, 1);
+
+        let result = model_provider
+            .simple_chat("hello", "m", Some(0.0))
+            .await
+            .unwrap();
+        assert_eq!(result, "extra-0:ok");
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(extra_calls.load(Ordering::SeqCst), 1);
+
+        let applied = model_provider.take_applied_credentials();
+        assert_eq!(
+            applied,
+            vec![
+                (0, CredentialIdentity::Primary),
+                (0, CredentialIdentity::Extra(0)),
+            ],
+            "each attempt must record the credential actually applied"
+        );
+        assert!(
+            model_provider.credential_cooldown_active(0, CredentialIdentity::Primary),
+            "primary that returned 429 must be cooled"
+        );
+        assert!(
+            !model_provider.credential_cooldown_active(0, CredentialIdentity::Extra(0)),
+            "successful extra must not be cooled"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_429_cools_only_failing_credential() {
+        let entry = entry_with_creds(
+            "p",
+            CredMock {
+                label: "primary-key",
+                calls: Arc::new(AtomicUsize::new(0)),
+                rate_limit: true,
+                response: "nope",
+            },
+            vec![
+                CredMock {
+                    label: "extra-0",
                     calls: Arc::new(AtomicUsize::new(0)),
-                    fail_until_attempt: 0,
+                    rate_limit: false,
                     response: "ok",
-                    error: "",
-                }),
-            )],
-            0,
+                },
+                CredMock {
+                    label: "extra-1",
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    rate_limit: false,
+                    response: "ok",
+                },
+            ],
+        );
+        let model_provider = Arc::new(ReliableModelProvider::new_with_entries(
+            "test",
+            vec![entry],
             1,
-        )
-        .with_api_keys(vec!["key-a".into(), "key-b".into(), "key-c".into()]);
+            1,
+        ));
 
-        // Rotate 5 times, verify round-robin
-        let keys: Vec<&str> = (0..5)
-            .map(|_| model_provider.rotate_key().unwrap())
-            .collect();
-        assert_eq!(keys, vec!["key-a", "key-b", "key-c", "key-a", "key-b"]);
+        let a = {
+            let p = Arc::clone(&model_provider);
+            zeroclaw_spawn::spawn!(async move { p.simple_chat("a", "m", Some(0.0)).await })
+        };
+        let b = {
+            let p = Arc::clone(&model_provider);
+            zeroclaw_spawn::spawn!(async move { p.simple_chat("b", "m", Some(0.0)).await })
+        };
+        let _ = a.await.unwrap();
+        let _ = b.await.unwrap();
+
+        assert!(
+            model_provider.credential_cooldown_active(0, CredentialIdentity::Primary),
+            "primary is the failing credential under concurrent 429s"
+        );
+        assert!(
+            !model_provider.credential_cooldown_active(0, CredentialIdentity::Extra(0)),
+            "extra-0 must not be false-cooled"
+        );
+        assert!(
+            !model_provider.credential_cooldown_active(0, CredentialIdentity::Extra(1)),
+            "extra-1 must not be false-cooled"
+        );
     }
 
     #[tokio::test]
-    async fn auth_rotation_returns_none_when_empty() {
-        let model_provider = ReliableModelProvider::new("test", vec![], 0, 1);
-        assert!(model_provider.rotate_key().is_none());
+    async fn credential_identity_scoped_per_provider_entry() {
+        let entry_a = entry_with_creds(
+            "provider-a",
+            CredMock {
+                label: "a-primary",
+                calls: Arc::new(AtomicUsize::new(0)),
+                rate_limit: true,
+                response: "nope",
+            },
+            vec![CredMock {
+                label: "a-extra",
+                calls: Arc::new(AtomicUsize::new(0)),
+                rate_limit: true,
+                response: "nope",
+            }],
+        );
+        let entry_b = entry_with_creds(
+            "provider-b",
+            CredMock {
+                label: "b-primary",
+                calls: Arc::new(AtomicUsize::new(0)),
+                rate_limit: false,
+                response: "ok",
+            },
+            vec![CredMock {
+                label: "b-extra",
+                calls: Arc::new(AtomicUsize::new(0)),
+                rate_limit: false,
+                response: "unused",
+            }],
+        );
+        let model_provider = ReliableModelProvider::new_with_entries(
+            "test",
+            vec![entry_a, entry_b],
+            2, // enough retries to cool entry-a Primary+Extra then failover
+            1,
+        );
+
+        let result = model_provider
+            .simple_chat("hello", "m", Some(0.0))
+            .await
+            .unwrap();
+        assert_eq!(result, "b-primary:ok");
+
+        assert!(
+            model_provider.credential_cooldown_active(0, CredentialIdentity::Primary),
+            "entry 0 primary cooled"
+        );
+        assert!(
+            model_provider.credential_cooldown_active(0, CredentialIdentity::Extra(0)),
+            "entry 0 extra cooled"
+        );
+        assert!(
+            !model_provider.credential_cooldown_active(1, CredentialIdentity::Primary),
+            "entry 1 primary must remain independent (scoped per entry)"
+        );
+        assert!(
+            !model_provider.credential_cooldown_active(1, CredentialIdentity::Extra(0)),
+            "entry 1 extra must remain independent (scoped per entry)"
+        );
     }
 
-    /// #9190: cool the concrete failed index, not whatever last_selected
-    /// advanced to under concurrent/sequential rotators.
-    #[test]
-    fn rotate_after_rate_limit_cools_failed_index_not_last_selected() {
-        let model_provider = ReliableModelProvider::new("test", vec![], 0, 1).with_api_keys(vec![
-            "key-a".into(),
-            "key-b".into(),
-            "key-c".into(),
-        ]);
-
-        // Caller A was using key 0. Before A cools, caller B selects key 1
-        // into last_selected (simulating a concurrent rotate).
-        let (failed_idx, _) = model_provider.select_next_api_key().unwrap();
-        assert_eq!(failed_idx, 0);
-        let (other_idx, _) = model_provider.select_next_api_key().unwrap();
-        assert_eq!(other_idx, 1);
-        assert_eq!(model_provider.last_selected_key_idx(), Some(1));
-
-        // A cools the index that actually failed (0), not last_selected (1).
-        let (next_idx, _) = model_provider.rotate_after_rate_limit(failed_idx).unwrap();
-        assert!(
-            model_provider.api_key_cooldown_active(0),
-            "failed key index 0 must be cooled"
+    #[tokio::test]
+    async fn all_cooled_returns_unavailable_without_choosing_cooled() {
+        let entry = entry_with_creds(
+            "p",
+            CredMock {
+                label: "primary-key",
+                calls: Arc::new(AtomicUsize::new(0)),
+                rate_limit: true,
+                response: "nope",
+            },
+            vec![CredMock {
+                label: "extra-0",
+                calls: Arc::new(AtomicUsize::new(0)),
+                rate_limit: true,
+                response: "nope",
+            }],
         );
+        let model_provider = ReliableModelProvider::new_with_entries("test", vec![entry], 3, 1);
+
+        let err = model_provider
+            .simple_chat("hello", "m", Some(0.0))
+            .await
+            .expect_err("all credentials cooled must fail");
+        let msg = err.to_string();
         assert!(
-            !model_provider.api_key_cooldown_active(1),
-            "healthy key 1 must not be false-cooled via last_selected race"
+            msg.contains("All model_providers/models failed")
+                || msg.contains("unavailable")
+                || msg.contains("rate_limit"),
+            "expected unavailable-style failure, got: {msg}"
         );
-        assert_ne!(next_idx, 0, "selection after cool must skip the failed key");
+
+        // After both are cooled, select must refuse (never hand out a cooled key).
+        assert!(
+            model_provider
+                .select_live_credential(0, &model_provider.model_providers[0])
+                .is_none(),
+            "all-cooled must not choose a cooled credential"
+        );
+        let applied = model_provider.take_applied_credentials();
+        assert_eq!(
+            applied,
+            vec![
+                (0, CredentialIdentity::Primary),
+                (0, CredentialIdentity::Extra(0)),
+            ],
+            "each credential applied once, then unavailable — no cooled re-choice: {applied:?}"
+        );
     }
 
     // ── New tests: Retry-After parsing ──
