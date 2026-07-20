@@ -1,3 +1,105 @@
+use futures_util::StreamExt;
+
+/// Classification of an inbound media/HTTP failure for ack/cursor policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaFailureClass {
+    /// 4xx (except 429), oversize, invalid media, config — safe to ack/skip.
+    Permanent,
+    /// Network / 429 / 5xx — do not ack; retry with bounded backoff.
+    Transient,
+}
+
+/// Classify an HTTP status for inbound attachment downloads.
+pub fn classify_http_status(status: reqwest::StatusCode) -> MediaFailureClass {
+    if status.as_u16() == 429 || status.is_server_error() {
+        MediaFailureClass::Transient
+    } else if status.is_client_error() {
+        MediaFailureClass::Permanent
+    } else if status.is_success() {
+        // Caller should not use this for success; treat unknown non-success as transient.
+        MediaFailureClass::Transient
+    } else {
+        MediaFailureClass::Transient
+    }
+}
+
+/// Stream a response body with a cumulative size cap. Aborts without buffering
+/// the remainder once `max_bytes` would be exceeded (works without Content-Length).
+pub async fn stream_body_with_cap(
+    resp: reqwest::Response,
+    max_bytes: u64,
+) -> Result<Vec<u8>, StreamBodyError> {
+    if let Some(len) = resp.content_length()
+        && len > max_bytes
+    {
+        return Err(StreamBodyError::Oversize {
+            declared: Some(len),
+            max_bytes,
+        });
+    }
+    let mut stream = resp.bytes_stream();
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(StreamBodyError::Read)?;
+        let next = buf.len() as u64 + chunk.len() as u64;
+        if next > max_bytes {
+            return Err(StreamBodyError::Oversize {
+                declared: None,
+                max_bytes,
+            });
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+#[derive(Debug)]
+pub enum StreamBodyError {
+    Oversize {
+        declared: Option<u64>,
+        max_bytes: u64,
+    },
+    Read(reqwest::Error),
+}
+
+impl StreamBodyError {
+    pub fn failure_class(&self) -> MediaFailureClass {
+        match self {
+            Self::Oversize { .. } => MediaFailureClass::Permanent,
+            Self::Read(err) => {
+                if err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() {
+                    MediaFailureClass::Transient
+                } else {
+                    MediaFailureClass::Transient
+                }
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for StreamBodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Oversize {
+                declared,
+                max_bytes,
+            } => match declared {
+                Some(d) => write!(
+                    f,
+                    "body Content-Length {d} exceeds download limit {max_bytes}"
+                ),
+                None => write!(
+                    f,
+                    "streamed body exceeds download limit {max_bytes} without Content-Length"
+                ),
+            },
+            Self::Read(err) => write!(f, "body stream read failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for StreamBodyError {}
+
 /// Truncate a string to `max_chars` Unicode characters, appending "..." if truncated.
 pub fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
     match s.char_indices().nth(max_chars) {
@@ -477,5 +579,55 @@ mod tests {
                 input
             );
         }
+    }
+
+    #[test]
+    fn classify_http_status_permanent_vs_transient() {
+        assert_eq!(
+            classify_http_status(reqwest::StatusCode::BAD_REQUEST),
+            MediaFailureClass::Permanent
+        );
+        assert_eq!(
+            classify_http_status(reqwest::StatusCode::NOT_FOUND),
+            MediaFailureClass::Permanent
+        );
+        assert_eq!(
+            classify_http_status(reqwest::StatusCode::TOO_MANY_REQUESTS),
+            MediaFailureClass::Transient
+        );
+        assert_eq!(
+            classify_http_status(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            MediaFailureClass::Transient
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_body_with_cap_aborts_chunked_oversize() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = "x".repeat(64);
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = vec![0u8; 4096];
+            let _ = sock.read(&mut req).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/chunked.bin"))
+            .send()
+            .await
+            .unwrap();
+        let err = stream_body_with_cap(resp, 16).await.unwrap_err();
+        assert!(matches!(err, StreamBodyError::Oversize { .. }));
+        assert_eq!(err.failure_class(), MediaFailureClass::Permanent);
     }
 }

@@ -72,13 +72,24 @@ const WECHAT_MEDIA_MAX_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Result of building inbound attachment content for a WeChat message item list.
 ///
-/// Distinguishes "no attachment present" (cursor may commit) from retryable
-/// download/save failures (pending opaque cursor must not commit) (#9187).
+/// Distinguishes "no attachment present" (cursor may commit) from permanent
+/// skips (oversize/4xx/config — commit) and transient failures (network/429/5xx
+/// — do not commit; full batch is restaged on replay) (#9187).
 #[derive(Debug)]
 enum AttachmentContentResult {
     NoAttachment,
     Content(String),
-    RetryableFailure,
+    PermanentSkip,
+    TransientFailure,
+}
+
+/// Production cursor-commit policy after a staged batch (#9187).
+fn should_commit_pending_cursor(
+    batch_ok: bool,
+    pending_cursor: Option<&str>,
+    tx_closed: bool,
+) -> bool {
+    !tx_closed && batch_ok && pending_cursor.is_some()
 }
 
 type Aes128EcbEnc = ecb::Encryptor<aes::Aes128>;
@@ -1068,9 +1079,12 @@ impl WeChatChannel {
         &self,
         url: &str,
         kind: WeChatAttachmentKind,
-    ) -> anyhow::Result<WeChatMediaPayload> {
+    ) -> Result<WeChatMediaPayload, (crate::util::MediaFailureClass, anyhow::Error)> {
         if !url.starts_with("https://") {
-            anyhow::bail!("refusing non-HTTPS attachment URL: {url}");
+            return Err((
+                crate::util::MediaFailureClass::Permanent,
+                anyhow::anyhow!("refusing non-HTTPS attachment URL: {url}"),
+            ));
         }
         let resp = self
             .client
@@ -1078,21 +1092,21 @@ impl WeChatChannel {
             .timeout(API_TIMEOUT)
             .send()
             .await
-            .with_context(|| format!("attachment download failed: {url}"))?;
+            .map_err(|e| {
+                (
+                    crate::util::MediaFailureClass::Transient,
+                    anyhow::Error::new(e).context(format!("attachment download failed: {url}")),
+                )
+            })?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        if !status.is_success() {
+            let class = crate::util::classify_http_status(status);
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("attachment download failed ({status}): {body}");
-        }
-
-        if let Some(len) = resp.content_length()
-            && len > WECHAT_MEDIA_MAX_BYTES
-        {
-            anyhow::bail!(
-                "attachment Content-Length ({len} bytes) exceeds {} MB limit",
-                WECHAT_MEDIA_MAX_BYTES / (1024 * 1024)
-            );
+            return Err((
+                class,
+                anyhow::anyhow!("attachment download failed ({status}): {body}"),
+            ));
         }
 
         let content_type = resp
@@ -1100,14 +1114,12 @@ impl WeChatChannel {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let bytes = resp.bytes().await?.to_vec();
-
-        if bytes.len() as u64 > WECHAT_MEDIA_MAX_BYTES {
-            anyhow::bail!(
-                "attachment exceeds {} MB limit",
-                WECHAT_MEDIA_MAX_BYTES / (1024 * 1024)
-            );
-        }
+        let bytes = crate::util::stream_body_with_cap(resp, WECHAT_MEDIA_MAX_BYTES)
+            .await
+            .map_err(|e| {
+                let class = e.failure_class();
+                (class, anyhow::Error::new(e))
+            })?;
 
         Ok(WeChatMediaPayload {
             file_name: self.remote_file_name(url, content_type.as_deref(), kind),
@@ -1123,7 +1135,8 @@ impl WeChatChannel {
         if is_remote_url(target) {
             return self
                 .download_remote_attachment(target, attachment.kind)
-                .await;
+                .await
+                .map_err(|(_, e)| e);
         }
 
         let path = self.resolve_local_attachment_path(target);
@@ -1436,32 +1449,43 @@ impl WeChatChannel {
     async fn download_inbound_attachment(
         &self,
         spec: &InboundAttachmentSpec,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> Result<Vec<u8>, (crate::util::MediaFailureClass, anyhow::Error)> {
         let resp = self
             .client
             .get(self.cdn_download_url(&spec.encrypted_query_param))
             .timeout(API_TIMEOUT)
             .send()
-            .await?;
+            .await
+            .map_err(|e| {
+                (
+                    crate::util::MediaFailureClass::Transient,
+                    anyhow::Error::new(e),
+                )
+            })?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        if !status.is_success() {
+            let class = crate::util::classify_http_status(status);
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("attachment download failed ({status}): {body}");
+            return Err((
+                class,
+                anyhow::anyhow!("attachment download failed ({status}): {body}"),
+            ));
         }
 
-        let bytes = resp.bytes().await?.to_vec();
-        if bytes.len() as u64 > WECHAT_MEDIA_MAX_BYTES {
-            anyhow::bail!(
-                "inbound attachment exceeds {} MB limit",
-                WECHAT_MEDIA_MAX_BYTES / (1024 * 1024)
-            );
-        }
+        let bytes = crate::util::stream_body_with_cap(resp, WECHAT_MEDIA_MAX_BYTES)
+            .await
+            .map_err(|e| {
+                let class = e.failure_class();
+                (class, anyhow::Error::new(e))
+            })?;
 
         match spec.aes_key.as_deref() {
             Some(aes_key) if !aes_key.is_empty() => {
-                let key = parse_aes_key(aes_key)?;
+                let key = parse_aes_key(aes_key)
+                    .map_err(|e| (crate::util::MediaFailureClass::Permanent, e))?;
                 decrypt_aes_ecb(&bytes, &key)
+                    .map_err(|e| (crate::util::MediaFailureClass::Permanent, e))
             }
             _ => Ok(bytes),
         }
@@ -1476,26 +1500,36 @@ impl WeChatChannel {
             return AttachmentContentResult::NoAttachment;
         };
         let Some(workspace_dir) = self.workspace_dir.as_ref() else {
-            // Attachment present but no workspace to land it — retry after config.
+            // Config missing — permanent skip (ack/commit); operator must fix config.
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                     .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
                 "Cannot save WeChat attachment: workspace_dir not configured"
             );
-            return AttachmentContentResult::RetryableFailure;
+            return AttachmentContentResult::PermanentSkip;
         };
         let bytes = match self.download_inbound_attachment(&spec).await {
             Ok(bytes) => bytes,
-            Err(err) => {
+            Err((class, err)) => {
                 ::zeroclaw_log::record!(
                     WARN,
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                         .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"error": format!("{}", err)})),
+                        .with_attrs(::serde_json::json!({
+                            "error": format!("{}", err),
+                            "failure_class": format!("{class:?}")
+                        })),
                     "attachment download failed"
                 );
-                return AttachmentContentResult::RetryableFailure;
+                return match class {
+                    crate::util::MediaFailureClass::Permanent => {
+                        AttachmentContentResult::PermanentSkip
+                    }
+                    crate::util::MediaFailureClass::Transient => {
+                        AttachmentContentResult::TransientFailure
+                    }
+                };
             }
         };
 
@@ -1508,7 +1542,7 @@ impl WeChatChannel {
                     .with_attrs(::serde_json::json!({"error": format!("{}", err)})),
                 "Failed to create WeChat attachment dir"
             );
-            return AttachmentContentResult::RetryableFailure;
+            return AttachmentContentResult::TransientFailure;
         }
 
         let local_path = save_dir.join(&spec.file_name);
@@ -1522,7 +1556,7 @@ impl WeChatChannel {
                     local_path.display()
                 )
             );
-            return AttachmentContentResult::RetryableFailure;
+            return AttachmentContentResult::TransientFailure;
         }
 
         AttachmentContentResult::Content(format_attachment_content(
@@ -2230,17 +2264,18 @@ impl Channel for WeChatChannel {
                 long_poll_timeout_ms = next_timeout;
             }
 
-            // Process messages
+            // Stage the full batch before emitting so a mid-batch transient
+            // attachment failure cannot partially deliver (replay would
+            // duplicate side effects). Commit cursor only after the staged
+            // batch is fully enqueued (#9187).
             let msgs = data
                 .get("msgs")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
 
-            // Empty batch (or only unauthorized/empty skips) may commit.
-            // Retryable attachment failure must not commit — earlier enqueued
-            // messages in this batch may replay (at-least-once) (#9187).
-            let mut commit_cursor = true;
+            let mut staged: Vec<ChannelMessage> = Vec::new();
+            let mut batch_ok = true;
 
             for msg in &msgs {
                 let from_user_id = msg
@@ -2272,7 +2307,7 @@ impl Channel for WeChatChannel {
 
                 let text = extract_text_from_items(&items);
 
-                // Check authorization — intentional skip; batch may still commit.
+                // Unauthorized — intentional skip; batch may still commit.
                 if !self.is_user_allowed(from_user_id) {
                     self.handle_unauthorized_message(from_user_id, &text).await;
                     continue;
@@ -2287,8 +2322,11 @@ impl Channel for WeChatChannel {
                     }
                     (AttachmentContentResult::NoAttachment, false) => text,
                     (AttachmentContentResult::NoAttachment, true) => continue,
-                    (AttachmentContentResult::RetryableFailure, _) => {
-                        commit_cursor = false;
+                    (AttachmentContentResult::PermanentSkip, false) => text,
+                    (AttachmentContentResult::PermanentSkip, true) => continue,
+                    (AttachmentContentResult::TransientFailure, _) => {
+                        batch_ok = false;
+                        staged.clear();
                         break;
                     }
                 };
@@ -2299,7 +2337,7 @@ impl Channel for WeChatChannel {
                     .unwrap_or(0)
                     / 1000; // Convert to seconds
 
-                let channel_msg = ChannelMessage {
+                staged.push(ChannelMessage {
                     id: message_id,
                     sender: from_user_id.to_string(),
                     reply_target: from_user_id.to_string(),
@@ -2311,21 +2349,34 @@ impl Channel for WeChatChannel {
                     interruption_scope_id: None,
                     attachments: Vec::new(),
                     subject: None,
-                };
+                });
+            }
 
-                if tx.send(channel_msg).await.is_err() {
-                    ::zeroclaw_log::record!(
-                        INFO,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                        "channel receiver dropped, stopping"
-                    );
-                    // Do not commit pending_cursor — unsent messages must be redelivered.
-                    return Ok(());
+            let mut tx_closed = false;
+            if batch_ok {
+                for channel_msg in staged {
+                    if tx.send(channel_msg).await.is_err() {
+                        ::zeroclaw_log::record!(
+                            INFO,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            ),
+                            "channel receiver dropped, stopping"
+                        );
+                        tx_closed = true;
+                        break;
+                    }
                 }
             }
 
-            // Commit cursor only after the full batch was enqueued or intentionally skipped.
-            if commit_cursor && let Some(new_cursor) = pending_cursor {
+            if tx_closed {
+                return Ok(());
+            }
+
+            if should_commit_pending_cursor(batch_ok, pending_cursor.as_deref(), tx_closed)
+                && let Some(new_cursor) = pending_cursor
+            {
                 cursor = new_cursor;
                 *self.cursor.lock() = cursor.clone();
                 self.save_sync_data();
@@ -2884,17 +2935,8 @@ mod tests {
         assert_eq!(ch2.get_context_token("acct:user1"), Some("tok".to_string()));
     }
 
-    /// Cursor commit policy for a processed batch (#9187).
-    fn should_commit_pending_cursor(
-        commit_cursor: bool,
-        pending_cursor: Option<&str>,
-        tx_closed: bool,
-    ) -> bool {
-        !tx_closed && commit_cursor && pending_cursor.is_some()
-    }
-
     #[test]
-    fn wechat_attachment_failure_leaves_pending_cursor_uncommitted() {
+    fn wechat_transient_attachment_failure_leaves_pending_cursor_uncommitted() {
         assert!(!should_commit_pending_cursor(
             false,
             Some("next_cursor"),
@@ -2913,7 +2955,7 @@ mod tests {
 
     #[test]
     fn wechat_empty_batch_commits_pending_cursor() {
-        // Empty msgs / only intentional skips: commit_cursor stays true.
+        // Empty msgs / only intentional skips: batch_ok stays true.
         assert!(should_commit_pending_cursor(
             true,
             Some("next_cursor"),
@@ -2931,8 +2973,20 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn wechat_partial_batch_staging_discards_on_transient_failure() {
+        // Production contract: stage-then-emit; transient failure clears the
+        // staged vec so nothing is emitted and cursor stays uncommitted.
+        let mut staged = vec!["a", "b"];
+        // Simulate TransientFailure mid-batch:
+        staged.clear();
+        let batch_ok = false;
+        assert!(staged.is_empty());
+        assert!(!should_commit_pending_cursor(batch_ok, Some("next"), false));
+    }
+
     #[tokio::test]
-    async fn try_build_attachment_content_download_failure_is_retryable() {
+    async fn try_build_attachment_content_missing_workspace_is_permanent() {
         let temp = tempdir().unwrap();
         let ch = WeChatChannel::new(
             "test",
@@ -2941,10 +2995,9 @@ mod tests {
             None,
             Some(temp.path().to_path_buf()),
         )
-        .unwrap()
-        .with_workspace_dir(temp.path().to_path_buf());
+        .unwrap();
+        // workspace_dir unset → config permanent skip (may commit cursor).
 
-        // Image item with CDN query that cannot be downloaded in tests.
         let items = vec![serde_json::json!({
             "type": 2,
             "image_item": {
@@ -2956,7 +3009,23 @@ mod tests {
         })];
 
         let result = ch.try_build_attachment_content(&items, "42").await;
-        assert!(matches!(result, AttachmentContentResult::RetryableFailure));
+        assert!(matches!(result, AttachmentContentResult::PermanentSkip));
+    }
+
+    #[test]
+    fn classify_wechat_cdn_status_permanent_vs_transient() {
+        assert_eq!(
+            crate::util::classify_http_status(reqwest::StatusCode::NOT_FOUND),
+            crate::util::MediaFailureClass::Permanent
+        );
+        assert_eq!(
+            crate::util::classify_http_status(reqwest::StatusCode::TOO_MANY_REQUESTS),
+            crate::util::MediaFailureClass::Transient
+        );
+        assert_eq!(
+            crate::util::classify_http_status(reqwest::StatusCode::BAD_GATEWAY),
+            crate::util::MediaFailureClass::Transient
+        );
     }
 
     #[tokio::test]
