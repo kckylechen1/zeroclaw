@@ -4,8 +4,8 @@ use crate::cron::store::{
 };
 use crate::cron::{
     CronJob, DeliveryConfig, JobType, Schedule, SessionTarget, all_overdue_jobs, claim_job,
-    clear_stale_locks, due_jobs, next_run_for_schedule, release_job, skip_missed_run,
-    sync_declarative_jobs,
+    clear_stale_locks, due_jobs, next_run_for_schedule, reclaim_stale_locks, release_job,
+    skip_missed_run, sync_declarative_jobs,
 };
 use crate::security::SecurityPolicy;
 use anyhow::Result;
@@ -22,6 +22,14 @@ use zeroclaw_log::Instrument;
 
 const MIN_POLL_SECONDS: u64 = 5;
 const SHELL_JOB_TIMEOUT_SECS: u64 = 120;
+/// Wall-clock cap for agent cron jobs when the agent's runtime profile does
+/// not set `agentic_timeout_secs`. Keeps a hung `agent::run` from occupying a
+/// `max_concurrent` slot indefinitely (#9191).
+const DEFAULT_AGENT_JOB_TIMEOUT_SECS: u64 = 30 * 60;
+/// TTL for reclaiming `locked_at` during the poll loop. Matches the default
+/// agent job budget so a crash mid-run (without process exit) cannot wedge
+/// the scheduler until the next boot-time `clear_stale_locks` (#9191).
+const STALE_LOCK_TTL_SECS: u64 = DEFAULT_AGENT_JOB_TIMEOUT_SECS;
 const SCHEDULER_COMPONENT: &str = "scheduler";
 const CRON_AGENT_DEFAULT_EXCLUDED_TOOLS: &[&str] = &[
     "cron_add",
@@ -342,6 +350,33 @@ pub async fn run(
             _ = interval.tick() => {
                 // Keep scheduler liveness fresh even when there are no due jobs.
                 crate::health::mark_component_ok(SCHEDULER_COMPONENT);
+
+                // TTL reclaim: unlock jobs whose in-flight lock exceeded the
+                // stale TTL so hung/crashed runs do not block max_concurrent
+                // until the next process restart (#9191).
+                match reclaim_stale_locks(
+                    &config,
+                    Utc::now(),
+                    Duration::from_secs(STALE_LOCK_TTL_SECS),
+                ) {
+                    Ok(0) => {}
+                    Ok(cleared) => ::zeroclaw_log::record!(
+                        INFO,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({
+                                "cleared": cleared,
+                                "ttl_secs": STALE_LOCK_TTL_SECS
+                            })),
+                        "Reclaimed TTL-expired cron in-flight locks"
+                    ),
+                    Err(e) => ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                        "Failed to reclaim TTL-expired cron in-flight locks"
+                    ),
+                }
 
                 let jobs = match due_jobs(&config, Utc::now()) {
                     Ok(jobs) => jobs,
@@ -698,7 +733,8 @@ async fn execute_and_persist_job(
     // Release the in-flight lock claimed during selection (`claim_due_jobs`) now
     // that the run (and its reschedule/disable/delete in `persist_job_result`) is
     // done. A deleted one-shot row simply releases nothing. If this fails the lock
-    // is recovered by `clear_stale_locks` at the next startup
+    // is recovered by poll-loop `reclaim_stale_locks` (TTL) or boot-time
+    // `clear_stale_locks` (#9191).
     if let Err(e) = release_job(config, &job.id) {
         ::zeroclaw_log::record!(
             WARN,
@@ -784,9 +820,10 @@ async fn run_agent_job(
         // backend nor reach one via advertised memory tools
         memory_free: !job.uses_memory,
     };
+    let timeout = agent_job_timeout(config, agent_alias);
     let run_result = match job.session_target {
         SessionTarget::Main | SessionTarget::Isolated => {
-            Box::pin(
+            let run_fut = Box::pin(
                 crate::agent::run(
                     cron_config,
                     agent_alias,
@@ -804,8 +841,14 @@ async fn run_agent_job(
                     run_overrides,
                 )
                 .instrument(subagent_span),
-            )
-            .await
+            );
+            match time::timeout(timeout, run_fut).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(anyhow::anyhow!(
+                    "agent job timed out after {}s",
+                    timeout.as_secs()
+                )),
+            }
         }
     };
 
@@ -839,6 +882,20 @@ async fn run_agent_job(
             (false, format!("agent job failed: {e}"))
         }
     }
+}
+
+/// Resolve the wall-clock timeout for an agent cron job.
+///
+/// Prefers the owning agent's runtime-profile `agentic_timeout_secs` when set;
+/// otherwise uses [`DEFAULT_AGENT_JOB_TIMEOUT_SECS`] (30 minutes). Does not
+/// invent a new config key (#9191).
+fn agent_job_timeout(config: &Config, agent_alias: &str) -> Duration {
+    let secs = config
+        .runtime_profile_for_agent(agent_alias)
+        .and_then(|profile| profile.agentic_timeout_secs)
+        .unwrap_or(DEFAULT_AGENT_JOB_TIMEOUT_SECS)
+        .max(1);
+    Duration::from_secs(secs)
 }
 
 async fn persist_job_result(
@@ -1769,6 +1826,16 @@ mod tests {
             Box::pin(run_agent_job(&config, &security, "test-agent", &job)).await;
         assert!(!success);
         assert!(output.contains("agent job failed:"));
+    }
+
+    #[tokio::test]
+    async fn agent_job_timeout_defaults_to_thirty_minutes() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        assert_eq!(
+            agent_job_timeout(&config, "test-agent"),
+            Duration::from_secs(DEFAULT_AGENT_JOB_TIMEOUT_SECS)
+        );
     }
 
     #[tokio::test]
