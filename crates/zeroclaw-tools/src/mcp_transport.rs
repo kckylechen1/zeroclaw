@@ -1,11 +1,14 @@
 //! MCP transport abstraction — supports stdio, SSE, and HTTP transports.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use futures_util::stream::FuturesUnordered;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, Notify, oneshot};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 
@@ -17,13 +20,6 @@ const MAX_LINE_BYTES: usize = 4 * 1024 * 1024; // 4 MB
 
 /// Timeout for init/list operations (and non-tool stdio waits).
 const RECV_TIMEOUT_SECS: u64 = 30;
-
-/// Default stdio/`tools/call` wait when the server omits `tool_timeout_secs`.
-/// Kept in sync with `mcp_client::DEFAULT_TOOL_TIMEOUT_SECS`.
-const DEFAULT_STDIO_TOOL_TIMEOUT_SECS: u64 = 180;
-
-/// Hard ceiling for stdio tool-call waits (matches `mcp_client::MAX_TOOL_TIMEOUT_SECS`).
-const MAX_STDIO_TOOL_TIMEOUT_SECS: u64 = 600;
 
 /// Legacy default HTTP request timeout for non-tool MCP HTTP/SSE requests.
 const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 120;
@@ -53,14 +49,10 @@ fn http_request_timeout_secs(
 /// Stdio receive deadline for a request.
 ///
 /// Non-tool RPCs keep the short init/list budget. `tools/call` uses the
-/// configured per-server tool timeout when present, otherwise the client
-/// default (180s), capped at [`MAX_STDIO_TOOL_TIMEOUT_SECS`].
-fn stdio_recv_timeout_secs(request: &JsonRpcRequest, tool_timeout_secs: Option<u64>) -> u64 {
+/// canonical per-server policy from [`McpServerConfig::resolved_tool_timeout_secs`].
+fn stdio_recv_timeout_secs(request: &JsonRpcRequest, config: &McpServerConfig) -> u64 {
     if request.method == TOOLS_CALL_METHOD {
-        tool_timeout_secs
-            .unwrap_or(DEFAULT_STDIO_TOOL_TIMEOUT_SECS)
-            .min(MAX_STDIO_TOOL_TIMEOUT_SECS)
-            .max(1)
+        config.resolved_tool_timeout_secs()
     } else {
         RECV_TIMEOUT_SECS
     }
@@ -90,11 +82,14 @@ fn apply_request_timeout(
 
 // ── Transport Errors ───────────────────────────────────────────────────────
 
-/// Transport-level failures that are recoverable by reconnecting — resetting
-/// the session and re-running the MCP handshake — rather than surfacing to the
-/// caller. Distinct from a genuine tool/application error, which must be
-/// reported as-is and never retried.
-#[derive(Debug, thiserror::Error)]
+/// Transport-level failures.
+///
+/// Soft failures (`StaleSession`, `TransportClosed`, `ResponseTimeout`,
+/// `OutcomeUnknown`) mean the connection should be reset + re-handshaked for
+/// *future* calls. Side-effecting `tools/call` must **not** be auto-replayed
+/// after these unless the request was definitely never written
+/// ([`McpTransportError::NotSent`]).
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum McpTransportError {
     /// The server no longer recognizes our session (typically after it
     /// restarted). Surfaced from HTTP 404/410 responses.
@@ -111,240 +106,630 @@ pub enum McpTransportError {
     /// but must **not** automatically retry the same tool call.
     #[error("MCP transport timed out waiting for response")]
     ResponseTimeout,
+
+    /// The request was written (or write outcome is uncertain) and the transport
+    /// closed/reset before a matched response arrived. Do not auto-replay.
+    #[error("MCP tool call outcome unknown (transport closed after submit)")]
+    OutcomeUnknown,
+
+    /// The request was definitely not written to the wire; safe to retry.
+    #[error("MCP request was not sent")]
+    NotSent,
 }
 
 // ── Transport Trait ──────────────────────────────────────────────────────
 
 /// Abstract transport for MCP communication.
+///
+/// Methods take `&self` so callers never need a process-wide mutex across
+/// response waits. Stdio uses a dedicated worker (concurrent submits queue;
+/// stdin writes are serialized by that worker). HTTP/SSE keep their existing
+/// exclusive behavior via [`SerialTransport`].
 #[async_trait::async_trait]
 pub trait McpTransportConn: Send + Sync {
     /// Send a JSON-RPC request and receive the response.
-    async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse>;
+    async fn send_and_recv(&self, request: &JsonRpcRequest) -> Result<JsonRpcResponse>;
 
     /// Reset per-connection session state so the next operation re-establishes
-    /// a fresh session. Default is a no-op for stateless transports (stdio).
-    async fn reset(&mut self) -> Result<()> {
+    /// a fresh session. Default is a no-op for stateless transports.
+    async fn reset(&self) -> Result<()> {
         Ok(())
     }
 
     /// Close the connection.
+    async fn close(&self) -> Result<()>;
+}
+
+/// Exclusive (`&mut self`) transport used by HTTP/SSE; wrapped in
+/// [`SerialTransport`] for the shared [`McpTransportConn`] surface.
+#[async_trait::async_trait]
+trait ExclusiveMcpTransport: Send {
+    async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse>;
+    async fn reset(&mut self) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
 }
 
-// ── Stdio Transport ──────────────────────────────────────────────────────
-
-/// Stdio-based transport (spawn local process).
-pub struct StdioTransport {
-    child: Child,
-    stdin: tokio::process::ChildStdin,
-    stdout_lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
-    /// Per-server tool-call timeout from `McpServerConfig.tool_timeout_secs`.
-    tool_timeout_secs: Option<u64>,
-    /// Spawn parameters retained so [`Self::reset`] can respawn after desync.
-    spawn: StdioSpawnConfig,
+/// Serializes HTTP/SSE RPCs behind a mutex (conservative: preserves prior
+/// exclusive `&mut` behavior). Callers still do not hold a *server metadata*
+/// lock — only this transport-local mutex.
+struct SerialTransport<T> {
+    inner: Mutex<T>,
 }
 
-/// Immutable spawn recipe for a stdio MCP child.
-struct StdioSpawnConfig {
-    name: String,
-    command: String,
-    args: Vec<String>,
-    env: std::collections::HashMap<String, String>,
-}
-
-impl StdioTransport {
-    pub fn new(config: &McpServerConfig) -> Result<Self> {
-        let spawn = StdioSpawnConfig {
-            name: config.name.clone(),
-            command: config.command.clone(),
-            args: config.args.clone(),
-            env: config.env.clone(),
-        };
-        let (child, stdin, stdout_lines) = Self::spawn_child(&spawn)?;
-        Ok(Self {
-            child,
-            stdin,
-            stdout_lines,
-            tool_timeout_secs: config.tool_timeout_secs,
-            spawn,
-        })
-    }
-
-    fn spawn_child(
-        spawn: &StdioSpawnConfig,
-    ) -> Result<(
-        Child,
-        tokio::process::ChildStdin,
-        tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
-    )> {
-        let mut child = Command::new(&spawn.command)
-            .args(&spawn.args)
-            .envs(&spawn.env)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("failed to spawn MCP server `{}`", spawn.name))?;
-
-        let stdin = child.stdin.take().ok_or_else(|| {
-            ::zeroclaw_log::record!(
-                ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({
-                        "mcp_server": &spawn.name,
-                        "missing": "stdin",
-                    })),
-                "mcp_transport: no stdin on spawned MCP server"
-            );
-            anyhow::Error::msg(format!("no stdin on MCP server `{}`", spawn.name))
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            ::zeroclaw_log::record!(
-                ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({
-                        "mcp_server": &spawn.name,
-                        "missing": "stdout",
-                    })),
-                "mcp_transport: no stdout on spawned MCP server"
-            );
-            anyhow::Error::msg(format!("no stdout on MCP server `{}`", spawn.name))
-        })?;
-        let stdout_lines = BufReader::new(stdout).lines();
-        Ok((child, stdin, stdout_lines))
-    }
-
-    async fn send_raw(&mut self, line: &str) -> Result<()> {
-        self.stdin
-            .write_all(line.as_bytes())
-            .await
-            .context("failed to write to MCP server stdin")?;
-        self.stdin
-            .write_all(b"\n")
-            .await
-            .context("failed to write newline to MCP server stdin")?;
-        self.stdin.flush().await.context("failed to flush stdin")?;
-        Ok(())
-    }
-
-    async fn recv_raw(&mut self) -> Result<String> {
-        let line = self.stdout_lines.next_line().await?.ok_or_else(|| {
-            ::zeroclaw_log::record!(
-                ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-                "mcp_transport: MCP server closed stdout"
-            );
-            anyhow::Error::msg("MCP server closed stdout")
-        })?;
-        if line.len() > MAX_LINE_BYTES {
-            bail!("MCP response too large: {} bytes", line.len());
+impl<T> SerialTransport<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner: Mutex::new(inner),
         }
-        Ok(line)
     }
 }
 
 #[async_trait::async_trait]
-impl McpTransportConn for StdioTransport {
-    async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
-        let line = serde_json::to_string(request)?;
-        self.send_raw(&line).await?;
-        if request.id.is_none() {
-            return Ok(JsonRpcResponse {
-                jsonrpc: crate::mcp_protocol::JSONRPC_VERSION.to_string(),
-                id: None,
-                result: None,
-                error: None,
-            });
+impl<T> McpTransportConn for SerialTransport<T>
+where
+    T: ExclusiveMcpTransport,
+{
+    async fn send_and_recv(&self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
+        self.inner.lock().await.send_and_recv(request).await
+    }
+
+    async fn reset(&self) -> Result<()> {
+        self.inner.lock().await.reset().await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.inner.lock().await.close().await
+    }
+}
+
+// ── Stdio Transport (worker / request router) ────────────────────────────
+
+/// Classify a stdout JSON-RPC line. Server-to-client *requests* (objects with
+/// a `method` field) must never be accepted as responses, even when `id`
+/// collides with an in-flight client request.
+#[derive(Debug)]
+pub(crate) enum StdioInbound {
+    /// JSON-RPC response (`result` and/or `error`, no `method`).
+    Response(JsonRpcResponse),
+    /// Server → client request or notification (has `method`).
+    ServerMessage {
+        id: Option<serde_json::Value>,
+        method: String,
+    },
+    /// id-less noise / notification-shaped response without method.
+    Skippable,
+}
+
+pub(crate) fn classify_stdio_inbound(line: &str) -> Result<StdioInbound> {
+    let value: serde_json::Value =
+        serde_json::from_str(line).with_context(|| format!("invalid JSON-RPC message: {line}"))?;
+    if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
+        return Ok(StdioInbound::ServerMessage {
+            id: value.get("id").cloned(),
+            method: method.to_string(),
+        });
+    }
+    if value.get("id").is_none() {
+        return Ok(StdioInbound::Skippable);
+    }
+    let resp: JsonRpcResponse = serde_json::from_value(value)
+        .with_context(|| format!("invalid JSON-RPC response: {line}"))?;
+    Ok(StdioInbound::Response(resp))
+}
+
+/// Stdio transport handle. Owns only a command channel to a worker task that
+/// exclusively holds the child process pipes.
+///
+/// Concurrent `send_and_recv` callers do **not** hold a global server mutex
+/// across waits — they submit to the worker and await a oneshot. The worker
+/// serializes stdin writes (stdio is single-writer) and routes stdout replies
+/// by JSON-RPC id.
+pub struct StdioTransport {
+    /// Canonical spawn/timeout recipe — shared with [`crate::mcp_client::McpServer`].
+    /// Source of truth is this `Arc<McpServerConfig>`; no cloned spawn fields.
+    config: Arc<McpServerConfig>,
+    cmd_tx: mpsc::Sender<StdioWorkerCmd>,
+}
+
+enum StdioWorkerCmd {
+    Rpc {
+        request: JsonRpcRequest,
+        /// Fired when the caller future is dropped (timeout/cancel).
+        cancel: oneshot::Receiver<()>,
+        reply: oneshot::Sender<Result<JsonRpcResponse>>,
+    },
+    Reset {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Close {
+        reply: oneshot::Sender<Result<()>>,
+    },
+}
+
+struct StdioSession {
+    child: Child,
+    stdin: tokio::process::ChildStdin,
+    stdout_lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+}
+
+struct PendingRpc {
+    reply: oneshot::Sender<Result<JsonRpcResponse>>,
+    /// True once the request bytes were fully written.
+    written: bool,
+}
+
+/// Drop guard: signals the worker that the caller abandoned the wait.
+struct CancelOnDrop {
+    tx: Option<oneshot::Sender<()>>,
+}
+
+impl CancelOnDrop {
+    fn arm() -> (Self, oneshot::Receiver<()>) {
+        let (tx, rx) = oneshot::channel();
+        (Self { tx: Some(tx) }, rx)
+    }
+
+    fn disarm(&mut self) {
+        self.tx.take();
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(());
         }
-        let expected_id = request.id.clone();
-        let wait_secs = stdio_recv_timeout_secs(request, self.tool_timeout_secs);
-        let deadline = std::time::Instant::now() + Duration::from_secs(wait_secs);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                // Timed out while waiting — child stdout may still deliver a late
-                // reply that would poison the next call. Respawn immediately and
-                // surface a non-recoverable timeout (do not burn reconnect budget
-                // retrying the same hung tool).
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Timeout)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "mcp_server": &self.spawn.name,
-                            "timeout_secs": wait_secs,
-                            "method": &request.method,
-                        })),
-                    "MCP stdio: timeout waiting for response"
-                );
-                return Err(McpTransportError::ResponseTimeout.into());
+    }
+}
+
+impl StdioTransport {
+    pub fn new(config: Arc<McpServerConfig>) -> Result<Self> {
+        let session = spawn_stdio_session(&config)?;
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let worker_config = Arc::clone(&config);
+        zeroclaw_spawn::spawn!(async move {
+            stdio_worker(worker_config, session, cmd_rx).await;
+        });
+        Ok(Self { config, cmd_tx })
+    }
+
+    async fn send_cmd(&self, cmd: StdioWorkerCmd) -> Result<()> {
+        self.cmd_tx.send(cmd).await.map_err(|_| {
+            anyhow::Error::new(McpTransportError::TransportClosed).context(format!(
+                "MCP stdio worker unavailable for server `{}`",
+                self.config.name
+            ))
+        })
+    }
+}
+
+fn spawn_stdio_session(config: &McpServerConfig) -> Result<StdioSession> {
+    let mut command = Command::new(&config.command);
+    command
+        .args(&config.args)
+        .envs(&config.env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
+    // Own process group so reset can reap descendants (mirrors shell tool).
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn MCP server `{}`", config.name))?;
+
+    let stdin = child.stdin.take().ok_or_else(|| {
+        ::zeroclaw_log::record!(
+            ERROR,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "mcp_server": &config.name,
+                    "missing": "stdin",
+                })),
+            "mcp_transport: no stdin on spawned MCP server"
+        );
+        anyhow::Error::msg(format!("no stdin on MCP server `{}`", config.name))
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ::zeroclaw_log::record!(
+            ERROR,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "mcp_server": &config.name,
+                    "missing": "stdout",
+                })),
+            "mcp_transport: no stdout on spawned MCP server"
+        );
+        anyhow::Error::msg(format!("no stdout on MCP server `{}`", config.name))
+    })?;
+    Ok(StdioSession {
+        child,
+        stdin,
+        stdout_lines: BufReader::new(stdout).lines(),
+    })
+}
+
+async fn kill_and_reap_stdio_session(session: &mut StdioSession, server_name: &str) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = session.child.id()
+            && let Ok(pgid) = i32::try_from(pid)
+            && pgid > 0
+        {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Kill)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "mcp_server": server_name,
+                        "pgid": pgid,
+                        "signal": "SIGKILL",
+                    })),
+                "mcp_transport: reaping stdio MCP process group"
+            );
+            // SAFETY: pgid is the child's pid (== pgid when process_group(0)).
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
             }
-            let resp_line = match timeout(remaining, self.recv_raw()).await {
-                Ok(Ok(line)) => line,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => {
+        }
+    }
+    let _ = session.child.start_kill();
+    match timeout(Duration::from_secs(5), session.child.wait()).await {
+        Ok(Ok(status)) => {
+            ::zeroclaw_log::record!(
+                DEBUG,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_attrs(::serde_json::json!({
+                        "mcp_server": server_name,
+                        "exit": format!("{status:?}"),
+                    })),
+                "mcp_transport: stdio MCP child reaped"
+            );
+        }
+        Ok(Err(err)) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "mcp_server": server_name,
+                        "error": err.to_string(),
+                    })),
+                "mcp_transport: wait failed while reaping stdio MCP child"
+            );
+        }
+        Err(_) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Timeout)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({ "mcp_server": server_name })),
+                "mcp_transport: timed out waiting to reap stdio MCP child"
+            );
+        }
+    }
+}
+
+async fn write_stdio_line(stdin: &mut tokio::process::ChildStdin, line: &str) -> Result<()> {
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .context("failed to write to MCP server stdin")?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .context("failed to write newline to MCP server stdin")?;
+    stdin.flush().await.context("failed to flush stdin")?;
+    Ok(())
+}
+
+fn fail_pending(pending: &mut HashMap<serde_json::Value, PendingRpc>, err: McpTransportError) {
+    for (_, slot) in pending.drain() {
+        let e = if slot.written {
+            McpTransportError::OutcomeUnknown
+        } else {
+            err.clone()
+        };
+        let _ = slot.reply.send(Err(e.into()));
+    }
+}
+
+async fn respawn_stdio_session(
+    config: &McpServerConfig,
+    session: &mut Option<StdioSession>,
+) -> Result<()> {
+    if let Some(mut old) = session.take() {
+        kill_and_reap_stdio_session(&mut old, &config.name).await;
+    }
+    match spawn_stdio_session(config) {
+        Ok(new_session) => {
+            *session = Some(new_session);
+            Ok(())
+        }
+        Err(err) => {
+            *session = None;
+            Err(err).with_context(|| {
+                format!(
+                    "MCP server `{}` failed to spawn replacement stdio child after reset",
+                    config.name
+                )
+            })
+        }
+    }
+}
+
+async fn stdio_worker(
+    config: Arc<McpServerConfig>,
+    initial: StdioSession,
+    mut cmd_rx: mpsc::Receiver<StdioWorkerCmd>,
+) {
+    let mut session: Option<StdioSession> = Some(initial);
+    let mut pending: HashMap<serde_json::Value, PendingRpc> = HashMap::new();
+    // Completes with `Some(id)` only on explicit caller-cancel (Drop sends).
+    // `None` means the cancel sender was disarmed after a successful reply.
+    let mut cancels: FuturesUnordered<
+        std::pin::Pin<Box<dyn std::future::Future<Output = Option<serde_json::Value>> + Send>>,
+    > = FuturesUnordered::new();
+    // Per-pending response deadlines.
+    let mut deadlines: FuturesUnordered<
+        std::pin::Pin<Box<dyn std::future::Future<Output = serde_json::Value> + Send>>,
+    > = FuturesUnordered::new();
+
+    loop {
+        let has_session = session.is_some();
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                let Some(cmd) = cmd else { break; };
+                match cmd {
+                    StdioWorkerCmd::Rpc { request, cancel, reply } => {
+                        let Some(sess) = session.as_mut() else {
+                            let _ = reply.send(Err(McpTransportError::NotSent.into()));
+                            continue;
+                        };
+                        let line = match serde_json::to_string(&request) {
+                            Ok(l) => l,
+                            Err(e) => {
+                                let _ = reply.send(Err(e.into()));
+                                continue;
+                            }
+                        };
+                        // Serialize stdin writes here. Callers are not blocked on a
+                        // server-level mutex — only on this worker's write turn.
+                        if let Err(err) = write_stdio_line(&mut sess.stdin, &line).await {
+                            let _ = reply.send(Err(
+                                anyhow::Error::new(McpTransportError::NotSent).context(err)
+                            ));
+                            // Partial/failed write → connection dirty.
+                            let _ = respawn_stdio_session(&config, &mut session).await;
+                            fail_pending(&mut pending, McpTransportError::OutcomeUnknown);
+                            cancels.clear();
+                            deadlines.clear();
+                            continue;
+                        }
+                        if request.id.is_none() {
+                            let _ = reply.send(Ok(JsonRpcResponse {
+                                jsonrpc: crate::mcp_protocol::JSONRPC_VERSION.to_string(),
+                                id: None,
+                                result: None,
+                                error: None,
+                            }));
+                            continue;
+                        }
+                        let Some(id) = request.id.clone() else { continue; };
+                        let wait_secs = stdio_recv_timeout_secs(&request, &config);
+                        let id_for_cancel = id.clone();
+                        cancels.push(Box::pin(async move {
+                            match cancel.await {
+                                Ok(()) => Some(id_for_cancel),
+                                Err(_) => None, // disarmed after success
+                            }
+                        }));
+                        let id_for_deadline = id.clone();
+                        deadlines.push(Box::pin(async move {
+                            tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+                            id_for_deadline
+                        }));
+                        pending.insert(
+                            id,
+                            PendingRpc {
+                                reply,
+                                written: true,
+                            },
+                        );
+                    }
+                    StdioWorkerCmd::Reset { reply } => {
+                        fail_pending(&mut pending, McpTransportError::OutcomeUnknown);
+                        cancels.clear();
+                        deadlines.clear();
+                        let result = respawn_stdio_session(&config, &mut session).await;
+                        let _ = reply.send(result);
+                    }
+                    StdioWorkerCmd::Close { reply } => {
+                        fail_pending(&mut pending, McpTransportError::TransportClosed);
+                        cancels.clear();
+                        deadlines.clear();
+                        if let Some(mut sess) = session.take() {
+                            let _ = sess.stdin.shutdown().await;
+                            kill_and_reap_stdio_session(&mut sess, &config.name).await;
+                        }
+                        let _ = reply.send(Ok(()));
+                        break;
+                    }
+                }
+            }
+            line = async {
+                match session.as_mut() {
+                    Some(sess) => sess.stdout_lines.next_line().await,
+                    None => std::future::pending().await,
+                }
+            }, if has_session => {
+                match line {
+                    Ok(Some(resp_line)) => {
+                        if resp_line.len() > MAX_LINE_BYTES {
+                            ::zeroclaw_log::record!(
+                                ERROR,
+                                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                    .with_attrs(::serde_json::json!({
+                                        "mcp_server": &config.name,
+                                        "bytes": resp_line.len(),
+                                    })),
+                                "mcp_transport: MCP response too large"
+                            );
+                            fail_pending(&mut pending, McpTransportError::TransportClosed);
+                            let _ = respawn_stdio_session(&config, &mut session).await;
+                            cancels.clear();
+                            deadlines.clear();
+                            continue;
+                        }
+                        match classify_stdio_inbound(&resp_line) {
+                            Ok(StdioInbound::ServerMessage { id, method }) => {
+                                ::zeroclaw_log::record!(
+                                    DEBUG,
+                                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                                        .with_attrs(::serde_json::json!({
+                                            "mcp_server": &config.name,
+                                            "method": method,
+                                            "id": id,
+                                        })),
+                                    "MCP stdio: ignoring server-to-client request/notification"
+                                );
+                            }
+                            Ok(StdioInbound::Skippable) => {
+                                ::zeroclaw_log::record!(
+                                    DEBUG,
+                                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                                    "MCP stdio: skipping server notification while waiting for response"
+                                );
+                            }
+                            Ok(StdioInbound::Response(resp)) => {
+                                let Some(resp_id) = resp.id.clone() else {
+                                    continue;
+                                };
+                                if let Some(slot) = pending.remove(&resp_id) {
+                                    let _ = slot.reply.send(Ok(resp));
+                                } else {
+                                    ::zeroclaw_log::record!(
+                                        WARN,
+                                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                            .with_attrs(::serde_json::json!({
+                                                "mcp_server": &config.name,
+                                                "got_id": resp_id,
+                                            })),
+                                        "MCP stdio: skipping response with unmatched JSON-RPC id"
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                ::zeroclaw_log::record!(
+                                    WARN,
+                                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                        .with_attrs(::serde_json::json!({
+                                            "mcp_server": &config.name,
+                                            "error": err.to_string(),
+                                        })),
+                                    "MCP stdio: failed to parse inbound line"
+                                );
+                            }
+                        }
+                    }
+                    Ok(None) | Err(_) => {
+                        fail_pending(&mut pending, McpTransportError::TransportClosed);
+                        cancels.clear();
+                        deadlines.clear();
+                        let _ = respawn_stdio_session(&config, &mut session).await;
+                    }
+                }
+            }
+            canceled = futures_util::StreamExt::next(&mut cancels), if !cancels.is_empty() => {
+                if let Some(Some(id)) = canceled
+                    && let Some(slot) = pending.remove(&id)
+                {
+                    // Caller dropped during wait after a successful write.
+                    let _ = slot.reply.send(Err(McpTransportError::OutcomeUnknown.into()));
+                    fail_pending(&mut pending, McpTransportError::OutcomeUnknown);
+                    cancels.clear();
+                    deadlines.clear();
+                    let _ = respawn_stdio_session(&config, &mut session).await;
+                }
+            }
+            timed_out_id = futures_util::StreamExt::next(&mut deadlines), if !deadlines.is_empty() => {
+                if let Some(id) = timed_out_id
+                    && let Some(slot) = pending.remove(&id)
+                {
                     ::zeroclaw_log::record!(
                         WARN,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Timeout)
                             .with_outcome(::zeroclaw_log::EventOutcome::Failure)
                             .with_attrs(::serde_json::json!({
-                                "mcp_server": &self.spawn.name,
-                                "timeout_secs": wait_secs,
-                                "method": &request.method,
+                                "mcp_server": &config.name,
+                                "id": id,
                             })),
                         "MCP stdio: timeout waiting for response"
                     );
-                    return Err(McpTransportError::ResponseTimeout.into());
+                    let _ = slot
+                        .reply
+                        .send(Err(McpTransportError::ResponseTimeout.into()));
+                    // Reset so a late frame cannot poison the next call.
+                    fail_pending(&mut pending, McpTransportError::ResponseTimeout);
+                    cancels.clear();
+                    deadlines.clear();
+                    let _ = respawn_stdio_session(&config, &mut session).await;
                 }
-            };
-            let resp: JsonRpcResponse = serde_json::from_str(&resp_line)
-                .with_context(|| format!("invalid JSON-RPC response: {}", resp_line))?;
-            if resp.id.is_none() {
-                // Server-sent notification (e.g. `notifications/initialized`) — skip and
-                // keep waiting for the actual response to our request.
-                ::zeroclaw_log::record!(
-                    DEBUG,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                    "MCP stdio: skipping server notification while waiting for response"
-                );
-                continue;
             }
-            if resp.id != expected_id {
-                // Mismatched id — never attribute to the current request (late
-                // reply after a prior timeout, or server bug). Keep waiting.
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "mcp_server": &self.spawn.name,
-                            "expected_id": expected_id,
-                            "got_id": resp.id,
-                        })),
-                    "MCP stdio: skipping response with mismatched JSON-RPC id"
-                );
-                continue;
-            }
-            return Ok(resp);
         }
     }
 
-    async fn reset(&mut self) -> Result<()> {
-        // Best-effort kill; kill_on_drop also runs when `child` is replaced.
-        let _ = self.child.start_kill();
-        let (child, stdin, stdout_lines) = Self::spawn_child(&self.spawn)?;
-        self.child = child;
-        self.stdin = stdin;
-        self.stdout_lines = stdout_lines;
-        Ok(())
+    if let Some(mut sess) = session.take() {
+        kill_and_reap_stdio_session(&mut sess, &config.name).await;
+    }
+}
+
+#[async_trait::async_trait]
+impl McpTransportConn for StdioTransport {
+    async fn send_and_recv(&self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
+        let (mut cancel_guard, cancel_rx) = CancelOnDrop::arm();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send_cmd(StdioWorkerCmd::Rpc {
+            request: request.clone(),
+            cancel: cancel_rx,
+            reply: reply_tx,
+        })
+        .await?;
+        let result = reply_rx
+            .await
+            .map_err(|_| anyhow::Error::new(McpTransportError::OutcomeUnknown))?;
+        cancel_guard.disarm();
+        result
     }
 
-    async fn close(&mut self) -> Result<()> {
-        let _ = self.stdin.shutdown().await;
+    async fn reset(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send_cmd(StdioWorkerCmd::Reset { reply: reply_tx })
+            .await?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow::Error::new(McpTransportError::TransportClosed))?
+    }
+
+    async fn close(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        // Worker may already be gone on drop paths.
+        if self
+            .cmd_tx
+            .send(StdioWorkerCmd::Close { reply: reply_tx })
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        let _ = reply_rx.await;
         Ok(())
     }
 }
@@ -418,7 +803,7 @@ impl HttpTransport {
 }
 
 #[async_trait::async_trait]
-impl McpTransportConn for HttpTransport {
+impl ExclusiveMcpTransport for HttpTransport {
     async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
         let body = serde_json::to_string(request)?;
 
@@ -806,8 +1191,13 @@ async fn handle_sse_event(
         return;
     };
 
-    let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value.clone()) else {
-        let _ = serde_json::from_value::<JsonRpcRequest>(value);
+    // Server-to-client requests carry `method` and must not be treated as
+    // responses even when `id` collides with an in-flight client request.
+    if value.get("method").is_some() {
+        return;
+    }
+
+    let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value) else {
         return;
     };
 
@@ -975,7 +1365,7 @@ async fn read_first_jsonrpc_from_sse_response(
 }
 
 #[async_trait::async_trait]
-impl McpTransportConn for SseTransport {
+impl ExclusiveMcpTransport for SseTransport {
     async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
         self.ensure_connected().await?;
 
@@ -1202,11 +1592,14 @@ impl McpTransportConn for SseTransport {
 // ── Factory ──────────────────────────────────────────────────────────────
 
 /// Create a transport based on config.
-pub fn create_transport(config: &McpServerConfig) -> Result<Box<dyn McpTransportConn>> {
+///
+/// Stdio returns a shared worker handle. HTTP/SSE are wrapped in
+/// [`SerialTransport`] so their prior exclusive behavior is preserved.
+pub fn create_transport(config: Arc<McpServerConfig>) -> Result<Arc<dyn McpTransportConn>> {
     match config.transport {
-        McpTransport::Stdio => Ok(Box::new(StdioTransport::new(config)?)),
-        McpTransport::Http => Ok(Box::new(HttpTransport::new(config)?)),
-        McpTransport::Sse => Ok(Box::new(SseTransport::new(config)?)),
+        McpTransport::Stdio => Ok(Arc::new(StdioTransport::new(config)?)),
+        McpTransport::Http => Ok(Arc::new(SerialTransport::new(HttpTransport::new(&config)?))),
+        McpTransport::Sse => Ok(Arc::new(SerialTransport::new(SseTransport::new(&config)?))),
     }
 }
 
@@ -1318,8 +1711,12 @@ mod tests {
     #[test]
     fn stdio_recv_timeout_uses_short_budget_for_init() {
         let request = JsonRpcRequest::new(1, "initialize", serde_json::json!({}));
+        let config = McpServerConfig {
+            tool_timeout_secs: Some(McpServerConfig::MAX_TOOL_TIMEOUT_SECS),
+            ..Default::default()
+        };
         assert_eq!(
-            stdio_recv_timeout_secs(&request, Some(600)),
+            stdio_recv_timeout_secs(&request, &config),
             RECV_TIMEOUT_SECS
         );
     }
@@ -1327,25 +1724,89 @@ mod tests {
     #[test]
     fn stdio_recv_timeout_honors_configured_tool_call_timeout() {
         let request = JsonRpcRequest::new(1, TOOLS_CALL_METHOD, serde_json::json!({}));
-        assert_eq!(stdio_recv_timeout_secs(&request, Some(240)), 240);
+        let config = McpServerConfig {
+            tool_timeout_secs: Some(240),
+            ..Default::default()
+        };
+        assert_eq!(stdio_recv_timeout_secs(&request, &config), 240);
     }
 
     #[test]
-    fn stdio_recv_timeout_defaults_tool_call_to_client_budget() {
+    fn stdio_recv_timeout_defaults_tool_call_to_canonical_budget() {
         let request = JsonRpcRequest::new(1, TOOLS_CALL_METHOD, serde_json::json!({}));
+        let config = McpServerConfig::default();
         assert_eq!(
-            stdio_recv_timeout_secs(&request, None),
-            DEFAULT_STDIO_TOOL_TIMEOUT_SECS
+            stdio_recv_timeout_secs(&request, &config),
+            McpServerConfig::DEFAULT_TOOL_TIMEOUT_SECS
         );
     }
 
     #[test]
     fn stdio_recv_timeout_caps_tool_call_budget() {
         let request = JsonRpcRequest::new(1, TOOLS_CALL_METHOD, serde_json::json!({}));
+        let config = McpServerConfig {
+            tool_timeout_secs: Some(u64::MAX),
+            ..Default::default()
+        };
         assert_eq!(
-            stdio_recv_timeout_secs(&request, Some(u64::MAX)),
-            MAX_STDIO_TOOL_TIMEOUT_SECS
+            stdio_recv_timeout_secs(&request, &config),
+            McpServerConfig::MAX_TOOL_TIMEOUT_SECS
         );
+    }
+
+    #[test]
+    fn classify_stdio_skips_mismatched_response_shape_with_method() {
+        // Colliding id + method is a server request, not a client response.
+        let line = r#"{"jsonrpc":"2.0","id":7,"method":"roots/list","params":{}}"#;
+        match classify_stdio_inbound(line).expect("parse") {
+            StdioInbound::ServerMessage { id, method } => {
+                assert_eq!(id, Some(serde_json::json!(7)));
+                assert_eq!(method, "roots/list");
+            }
+            other => panic!("expected ServerMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_stdio_accepts_matching_response() {
+        let line = r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#;
+        match classify_stdio_inbound(line).expect("parse") {
+            StdioInbound::Response(resp) => {
+                assert_eq!(resp.id, Some(serde_json::json!(7)));
+                assert_eq!(
+                    resp.result
+                        .as_ref()
+                        .and_then(|v| v.get("ok"))
+                        .and_then(|v| v.as_bool()),
+                    Some(true)
+                );
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timeout_policy_lives_on_mcp_server_config_only() {
+        // Guard against re-introducing duplicate 180/600 constants in this module.
+        // Split needles so this assertion text cannot false-positive.
+        let src = include_str!("mcp_transport.rs");
+        let default_needle = ["const DEFAULT_STDIO_TOOL_", "TIMEOUT_SECS"].concat();
+        let max_needle = ["const MAX_STDIO_TOOL_", "TIMEOUT_SECS"].concat();
+        let spawn_needle = ["struct Stdio", "SpawnConfig"].concat();
+        assert!(
+            !src.contains(&default_needle),
+            "stdio must not redeclare the default tool timeout"
+        );
+        assert!(
+            !src.contains(&max_needle),
+            "stdio must not redeclare the max tool timeout"
+        );
+        assert!(
+            !src.contains(&spawn_needle),
+            "stdio must not clone spawn fields into StdioSpawnConfig"
+        );
+        assert_eq!(McpServerConfig::DEFAULT_TOOL_TIMEOUT_SECS, 180);
+        assert_eq!(McpServerConfig::MAX_TOOL_TIMEOUT_SECS, 600);
     }
 
     #[test]
@@ -1593,57 +2054,57 @@ mod tests {
     #[test]
     fn create_transport_stdio_fails_without_valid_command() {
         // Spawning a non-existent binary should fail
-        let config = McpServerConfig {
+        let config = Arc::new(McpServerConfig {
             name: "test-stdio".into(),
             transport: McpTransport::Stdio,
             command: "/usr/bin/zeroclaw_nonexistent_binary_abc123".into(),
             ..Default::default()
-        };
-        let result = create_transport(&config);
+        });
+        let result = create_transport(config);
         assert!(result.is_err());
     }
 
     #[test]
     fn create_transport_http_without_url_fails() {
-        let config = McpServerConfig {
+        let config = Arc::new(McpServerConfig {
             name: "test-http".into(),
             transport: McpTransport::Http,
             ..Default::default()
-        };
-        assert!(create_transport(&config).is_err());
+        });
+        assert!(create_transport(config).is_err());
     }
 
     #[test]
     fn create_transport_sse_without_url_fails() {
-        let config = McpServerConfig {
+        let config = Arc::new(McpServerConfig {
             name: "test-sse".into(),
             transport: McpTransport::Sse,
             ..Default::default()
-        };
-        assert!(create_transport(&config).is_err());
+        });
+        assert!(create_transport(config).is_err());
     }
 
     #[test]
     fn create_transport_http_with_url_succeeds() {
-        let config = McpServerConfig {
+        let config = Arc::new(McpServerConfig {
             name: "test-http".into(),
             transport: McpTransport::Http,
             url: Some("http://localhost:9999/mcp".into()),
             ..Default::default()
-        };
+        });
         // Build should succeed even if server isn't running
-        assert!(create_transport(&config).is_ok());
+        assert!(create_transport(config).is_ok());
     }
 
     #[test]
     fn create_transport_sse_with_url_succeeds() {
-        let config = McpServerConfig {
+        let config = Arc::new(McpServerConfig {
             name: "test-sse".into(),
             transport: McpTransport::Sse,
             url: Some("http://localhost:9999/sse".into()),
             ..Default::default()
-        };
-        assert!(create_transport(&config).is_ok());
+        });
+        assert!(create_transport(config).is_ok());
     }
 
     // ── HTTP session id whitespace handling ───────────────────────────────────
@@ -1705,7 +2166,9 @@ mod tests {
         };
         let mut transport = HttpTransport::new(&config).expect("build transport");
         transport.session_id = Some("stale-session".into());
-        transport.reset().await.expect("reset");
+        ExclusiveMcpTransport::reset(&mut transport)
+            .await
+            .expect("reset");
         assert!(transport.session_id.is_none());
     }
 
@@ -1730,8 +2193,7 @@ mod tests {
         // A 404 only signals a stale session when the request carried a session id.
         transport.session_id = Some("sess-1".into());
         let req = JsonRpcRequest::new(1, "tools/call", serde_json::json!({}));
-        let err = transport
-            .send_and_recv(&req)
+        let err = ExclusiveMcpTransport::send_and_recv(&mut transport, &req)
             .await
             .expect_err("404 should error");
         match err.downcast_ref::<McpTransportError>() {
@@ -1763,8 +2225,7 @@ mod tests {
         let mut transport = HttpTransport::new(&config).expect("build transport");
         assert!(transport.session_id.is_none());
         let req = JsonRpcRequest::new(1, "tools/call", serde_json::json!({}));
-        let err = transport
-            .send_and_recv(&req)
+        let err = ExclusiveMcpTransport::send_and_recv(&mut transport, &req)
             .await
             .expect_err("404 should error");
         assert!(
@@ -1798,12 +2259,142 @@ mod tests {
             guard.pending.insert(7, tx);
         }
 
-        transport.reset().await.expect("reset");
+        ExclusiveMcpTransport::reset(&mut transport)
+            .await
+            .expect("reset");
 
         assert_eq!(transport.stream_state, SseStreamState::Unknown);
         let guard = transport.shared.lock().await;
         assert!(guard.message_url.is_none());
         assert!(!guard.message_url_from_endpoint);
         assert!(guard.pending.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_reset_reaps_old_child_before_replacement() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
+        use tokio::time::{Duration, sleep};
+
+        fn process_is_alive(pid: u32) -> bool {
+            std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        }
+
+        async fn read_pid(path: &Path) -> u32 {
+            for _ in 0..50 {
+                if let Ok(raw) = tokio::fs::read_to_string(path).await
+                    && let Ok(pid) = raw.trim().parse()
+                {
+                    return pid;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+            panic!("stdio MCP test server did not write its pid");
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server_path = temp.path().join("hang-mcp.sh");
+        let pid_path = temp.path().join("hang-mcp.pid");
+        let mut script = std::fs::File::create(&server_path).expect("script");
+        script
+            .write_all(
+                br#"#!/bin/sh
+echo "$$" > "$1"
+# Stay alive until killed; ignore stdin.
+exec tail -f /dev/null
+"#,
+            )
+            .expect("write script");
+        drop(script);
+        let mut perms = std::fs::metadata(&server_path)
+            .expect("metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&server_path, perms).expect("chmod");
+
+        let config = Arc::new(McpServerConfig {
+            name: "hang".into(),
+            command: server_path.display().to_string(),
+            args: vec![pid_path.display().to_string()],
+            transport: McpTransport::Stdio,
+            ..Default::default()
+        });
+        let transport = StdioTransport::new(Arc::clone(&config)).expect("spawn");
+        let old_pid = read_pid(&pid_path).await;
+        assert!(process_is_alive(old_pid), "child should be alive");
+
+        // Remove pid file so the replacement write is observable.
+        let _ = std::fs::remove_file(&pid_path);
+        transport.reset().await.expect("reset must succeed");
+
+        for _ in 0..50 {
+            if !process_is_alive(old_pid) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !process_is_alive(old_pid),
+            "old child {old_pid} must be reaped before/at reset completion"
+        );
+        let new_pid = read_pid(&pid_path).await;
+        assert_ne!(old_pid, new_pid, "replacement child must be a new pid");
+        assert!(process_is_alive(new_pid));
+        transport.close().await.expect("close");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_failed_reset_is_surfaced() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Self-deleting script: first spawn succeeds; after reap, the script
+        // path is gone so replacement spawn fails and reset surfaces Err.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server_path = temp.path().join("once.sh");
+        let mut script = std::fs::File::create(&server_path).expect("script");
+        script
+            .write_all(
+                br#"#!/bin/sh
+rm -f "$0"
+exec tail -f /dev/null
+"#,
+            )
+            .expect("write");
+        drop(script);
+        let mut perms = std::fs::metadata(&server_path)
+            .expect("metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&server_path, perms).expect("chmod");
+
+        let config = Arc::new(McpServerConfig {
+            name: "once".into(),
+            command: server_path.display().to_string(),
+            args: vec![],
+            transport: McpTransport::Stdio,
+            ..Default::default()
+        });
+        let transport = StdioTransport::new(Arc::clone(&config)).expect("initial spawn");
+        // Give the script a moment to delete itself.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let err = transport
+            .reset()
+            .await
+            .expect_err("replacement spawn must fail and surface");
+        assert!(
+            err.to_string().contains("failed to spawn replacement")
+                || err.to_string().contains("failed to spawn"),
+            "got: {err:#}"
+        );
     }
 }

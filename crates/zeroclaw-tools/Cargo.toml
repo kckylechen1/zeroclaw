@@ -19,7 +19,7 @@ async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 directories = "6.0"
-futures-util = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 fluent = "0.16"
 glob = "0.3"
 hex = "0.4"
@@ -45,6 +45,7 @@ toml = "1.0"
 urlencoding = "2.1"
 uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
 which = "8.0"
+libc = "0.2"
 
 async-imap = { version = "0.11", features = ["runtime-tokio"], default-features = false }
 mail-parser = "0.11"
