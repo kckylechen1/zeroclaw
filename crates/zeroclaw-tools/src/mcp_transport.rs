@@ -15,8 +15,15 @@ use zeroclaw_config::schema::{McpServerConfig, McpTransport};
 /// Maximum bytes for a single JSON-RPC response.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024; // 4 MB
 
-/// Timeout for init/list operations.
+/// Timeout for init/list operations (and non-tool stdio waits).
 const RECV_TIMEOUT_SECS: u64 = 30;
+
+/// Default stdio/`tools/call` wait when the server omits `tool_timeout_secs`.
+/// Kept in sync with `mcp_client::DEFAULT_TOOL_TIMEOUT_SECS`.
+const DEFAULT_STDIO_TOOL_TIMEOUT_SECS: u64 = 180;
+
+/// Hard ceiling for stdio tool-call waits (matches `mcp_client::MAX_TOOL_TIMEOUT_SECS`).
+const MAX_STDIO_TOOL_TIMEOUT_SECS: u64 = 600;
 
 /// Legacy default HTTP request timeout for non-tool MCP HTTP/SSE requests.
 const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 120;
@@ -40,6 +47,22 @@ fn http_request_timeout_secs(
         tool_timeout_secs
     } else {
         Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS)
+    }
+}
+
+/// Stdio receive deadline for a request.
+///
+/// Non-tool RPCs keep the short init/list budget. `tools/call` uses the
+/// configured per-server tool timeout when present, otherwise the client
+/// default (180s), capped at [`MAX_STDIO_TOOL_TIMEOUT_SECS`].
+fn stdio_recv_timeout_secs(request: &JsonRpcRequest, tool_timeout_secs: Option<u64>) -> u64 {
+    if request.method == TOOLS_CALL_METHOD {
+        tool_timeout_secs
+            .unwrap_or(DEFAULT_STDIO_TOOL_TIMEOUT_SECS)
+            .min(MAX_STDIO_TOOL_TIMEOUT_SECS)
+            .max(1)
+    } else {
+        RECV_TIMEOUT_SECS
     }
 }
 
@@ -82,6 +105,12 @@ pub enum McpTransportError {
     /// (e.g. SSE EOF or connection reset).
     #[error("MCP transport connection closed")]
     TransportClosed,
+
+    /// A response deadline elapsed (stdio tool/init wait). The transport may be
+    /// desynchronized by a late reply — callers should reset + re-handshake,
+    /// but must **not** automatically retry the same tool call.
+    #[error("MCP transport timed out waiting for response")]
+    ResponseTimeout,
 }
 
 // ── Transport Trait ──────────────────────────────────────────────────────
@@ -106,22 +135,57 @@ pub trait McpTransportConn: Send + Sync {
 
 /// Stdio-based transport (spawn local process).
 pub struct StdioTransport {
-    _child: Child,
+    child: Child,
     stdin: tokio::process::ChildStdin,
     stdout_lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    /// Per-server tool-call timeout from `McpServerConfig.tool_timeout_secs`.
+    tool_timeout_secs: Option<u64>,
+    /// Spawn parameters retained so [`Self::reset`] can respawn after desync.
+    spawn: StdioSpawnConfig,
+}
+
+/// Immutable spawn recipe for a stdio MCP child.
+struct StdioSpawnConfig {
+    name: String,
+    command: String,
+    args: Vec<String>,
+    env: std::collections::HashMap<String, String>,
 }
 
 impl StdioTransport {
     pub fn new(config: &McpServerConfig) -> Result<Self> {
-        let mut child = Command::new(&config.command)
-            .args(&config.args)
-            .envs(&config.env)
+        let spawn = StdioSpawnConfig {
+            name: config.name.clone(),
+            command: config.command.clone(),
+            args: config.args.clone(),
+            env: config.env.clone(),
+        };
+        let (child, stdin, stdout_lines) = Self::spawn_child(&spawn)?;
+        Ok(Self {
+            child,
+            stdin,
+            stdout_lines,
+            tool_timeout_secs: config.tool_timeout_secs,
+            spawn,
+        })
+    }
+
+    fn spawn_child(
+        spawn: &StdioSpawnConfig,
+    ) -> Result<(
+        Child,
+        tokio::process::ChildStdin,
+        tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    )> {
+        let mut child = Command::new(&spawn.command)
+            .args(&spawn.args)
+            .envs(&spawn.env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("failed to spawn MCP server `{}`", config.name))?;
+            .with_context(|| format!("failed to spawn MCP server `{}`", spawn.name))?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
             ::zeroclaw_log::record!(
@@ -129,12 +193,12 @@ impl StdioTransport {
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
                     .with_outcome(::zeroclaw_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({
-                        "mcp_server": &config.name,
+                        "mcp_server": &spawn.name,
                         "missing": "stdin",
                     })),
                 "mcp_transport: no stdin on spawned MCP server"
             );
-            anyhow::Error::msg(format!("no stdin on MCP server `{}`", config.name))
+            anyhow::Error::msg(format!("no stdin on MCP server `{}`", spawn.name))
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
             ::zeroclaw_log::record!(
@@ -142,20 +206,15 @@ impl StdioTransport {
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
                     .with_outcome(::zeroclaw_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({
-                        "mcp_server": &config.name,
+                        "mcp_server": &spawn.name,
                         "missing": "stdout",
                     })),
                 "mcp_transport: no stdout on spawned MCP server"
             );
-            anyhow::Error::msg(format!("no stdout on MCP server `{}`", config.name))
+            anyhow::Error::msg(format!("no stdout on MCP server `{}`", spawn.name))
         })?;
         let stdout_lines = BufReader::new(stdout).lines();
-
-        Ok(Self {
-            _child: child,
-            stdin,
-            stdout_lines,
-        })
+        Ok((child, stdin, stdout_lines))
     }
 
     async fn send_raw(&mut self, line: &str) -> Result<()> {
@@ -201,15 +260,47 @@ impl McpTransportConn for StdioTransport {
                 error: None,
             });
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(RECV_TIMEOUT_SECS);
+        let expected_id = request.id.clone();
+        let wait_secs = stdio_recv_timeout_secs(request, self.tool_timeout_secs);
+        let deadline = std::time::Instant::now() + Duration::from_secs(wait_secs);
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                bail!("timeout waiting for MCP response");
+                // Timed out while waiting — child stdout may still deliver a late
+                // reply that would poison the next call. Respawn immediately and
+                // surface a non-recoverable timeout (do not burn reconnect budget
+                // retrying the same hung tool).
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Timeout)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "mcp_server": &self.spawn.name,
+                            "timeout_secs": wait_secs,
+                            "method": &request.method,
+                        })),
+                    "MCP stdio: timeout waiting for response"
+                );
+                return Err(McpTransportError::ResponseTimeout.into());
             }
-            let resp_line = timeout(remaining, self.recv_raw())
-                .await
-                .context("timeout waiting for MCP response")??;
+            let resp_line = match timeout(remaining, self.recv_raw()).await {
+                Ok(Ok(line)) => line,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Timeout)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "mcp_server": &self.spawn.name,
+                                "timeout_secs": wait_secs,
+                                "method": &request.method,
+                            })),
+                        "MCP stdio: timeout waiting for response"
+                    );
+                    return Err(McpTransportError::ResponseTimeout.into());
+                }
+            };
             let resp: JsonRpcResponse = serde_json::from_str(&resp_line)
                 .with_context(|| format!("invalid JSON-RPC response: {}", resp_line))?;
             if resp.id.is_none() {
@@ -222,8 +313,34 @@ impl McpTransportConn for StdioTransport {
                 );
                 continue;
             }
+            if resp.id != expected_id {
+                // Mismatched id — never attribute to the current request (late
+                // reply after a prior timeout, or server bug). Keep waiting.
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "mcp_server": &self.spawn.name,
+                            "expected_id": expected_id,
+                            "got_id": resp.id,
+                        })),
+                    "MCP stdio: skipping response with mismatched JSON-RPC id"
+                );
+                continue;
+            }
             return Ok(resp);
         }
+    }
+
+    async fn reset(&mut self) -> Result<()> {
+        // Best-effort kill; kill_on_drop also runs when `child` is replaced.
+        let _ = self.child.start_kill();
+        let (child, stdin, stdout_lines) = Self::spawn_child(&self.spawn)?;
+        self.child = child;
+        self.stdin = stdin;
+        self.stdout_lines = stdout_lines;
+        Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -1195,6 +1312,39 @@ mod tests {
         assert_eq!(
             transport.tool_timeout_secs,
             Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS + 60)
+        );
+    }
+
+    #[test]
+    fn stdio_recv_timeout_uses_short_budget_for_init() {
+        let request = JsonRpcRequest::new(1, "initialize", serde_json::json!({}));
+        assert_eq!(
+            stdio_recv_timeout_secs(&request, Some(600)),
+            RECV_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn stdio_recv_timeout_honors_configured_tool_call_timeout() {
+        let request = JsonRpcRequest::new(1, TOOLS_CALL_METHOD, serde_json::json!({}));
+        assert_eq!(stdio_recv_timeout_secs(&request, Some(240)), 240);
+    }
+
+    #[test]
+    fn stdio_recv_timeout_defaults_tool_call_to_client_budget() {
+        let request = JsonRpcRequest::new(1, TOOLS_CALL_METHOD, serde_json::json!({}));
+        assert_eq!(
+            stdio_recv_timeout_secs(&request, None),
+            DEFAULT_STDIO_TOOL_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn stdio_recv_timeout_caps_tool_call_budget() {
+        let request = JsonRpcRequest::new(1, TOOLS_CALL_METHOD, serde_json::json!({}));
+        assert_eq!(
+            stdio_recv_timeout_secs(&request, Some(u64::MAX)),
+            MAX_STDIO_TOOL_TIMEOUT_SECS
         );
     }
 
