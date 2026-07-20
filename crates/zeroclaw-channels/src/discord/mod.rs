@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 use zeroclaw_api::channel::{
@@ -777,6 +777,207 @@ fn channel_passes_filter(
     false
 }
 
+/// Bounded FIFO capacity for listener-owned MESSAGE_CREATE media/enqueue work.
+/// When full, the gateway loop applies backpressure via `reserve()` while still
+/// servicing heartbeats — accepted messages are never silently dropped (#9189).
+const MESSAGE_CREATE_QUEUE_CAPACITY: usize = 8;
+
+/// Owned MESSAGE_CREATE work item processed by the listener's ordered worker.
+struct MessageCreateJob {
+    atts: Vec<serde_json::Value>,
+    clean_content: String,
+    author_id: String,
+    message_id: String,
+    channel_id: String,
+    client: reqwest::Client,
+    workspace_dir: Option<PathBuf>,
+    transcription_manager: Option<std::sync::Arc<super::transcription::TranscriptionManager>>,
+    pending_approvals: Arc<AsyncMutex<HashMap<String, oneshot::Sender<ChannelApprovalResponse>>>>,
+    bot_token: String,
+    guild_ids: Vec<String>,
+    alias: String,
+    peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    listen_to_bots: bool,
+    mention_only: bool,
+    thread_channels: Arc<AsyncMutex<HashMap<String, Option<String>>>>,
+}
+
+/// Drain `rx` FIFO and invoke `process` for each item. Used by the Discord
+/// MESSAGE_CREATE path and covered by fault tests for ordering / cancellation.
+async fn run_ordered_worker<T, F, Fut>(mut rx: mpsc::Receiver<T>, mut process: F)
+where
+    F: FnMut(T) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    while let Some(item) = rx.recv().await {
+        process(item).await;
+    }
+}
+
+/// Listener-owned MESSAGE_CREATE pipeline: one bounded queue + one worker task.
+/// Drop aborts the worker; [`MessageCreatePipeline::shutdown`] closes the
+/// queue and joins (with timeout) before reconnect so no stale enqueue lands
+/// on a new session.
+struct MessageCreatePipeline {
+    tx: Option<mpsc::Sender<MessageCreateJob>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl MessageCreatePipeline {
+    fn start(orch_tx: mpsc::Sender<ChannelMessage>) -> Self {
+        let (tx, rx) = mpsc::channel(MESSAGE_CREATE_QUEUE_CAPACITY);
+        let handle = zeroclaw_spawn::spawn!(async move {
+            run_ordered_worker(rx, |job| {
+                let orch_tx = orch_tx.clone();
+                async move {
+                    deliver_message_create_job(job, &orch_tx).await;
+                }
+            })
+            .await;
+        });
+        Self {
+            tx: Some(tx),
+            handle: Some(handle),
+        }
+    }
+
+    fn sender(&self) -> mpsc::Sender<MessageCreateJob> {
+        self.tx
+            .as_ref()
+            .expect("MESSAGE_CREATE pipeline sender used after shutdown")
+            .clone()
+    }
+
+    async fn shutdown(&mut self) {
+        self.tx.take();
+        if let Some(mut handle) = self.handle.take() {
+            tokio::select! {
+                _ = &mut handle => {}
+                () = tokio::time::sleep(Duration::from_secs(5)) => {
+                    handle.abort();
+                }
+            }
+        }
+    }
+}
+
+impl Drop for MessageCreatePipeline {
+    fn drop(&mut self) {
+        self.tx.take();
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+async fn deliver_message_create_job(job: MessageCreateJob, tx: &mpsc::Sender<ChannelMessage>) {
+    let (attachment_text, media_attachments) = process_attachments(
+        &job.atts,
+        &job.client,
+        job.workspace_dir.as_deref(),
+        job.transcription_manager.as_deref(),
+    )
+    .await;
+    let final_content = if attachment_text.is_empty() {
+        job.clean_content
+    } else {
+        format!("{}\n\n[Attachments]\n{attachment_text}", job.clean_content)
+    };
+
+    // Intercept approval replies before forwarding to the agent.
+    if let Some((token, response)) = crate::util::parse_approval_reply(&final_content) {
+        let mut map = job.pending_approvals.lock().await;
+        if let Some(sender) = map.remove(&token) {
+            let _ = sender.send(response);
+            return;
+        }
+    }
+
+    if !job.message_id.is_empty() && !job.channel_id.is_empty() {
+        let reaction_channel = DiscordChannel::new(
+            job.bot_token.clone(),
+            job.guild_ids,
+            job.alias.clone(),
+            job.peer_resolver,
+            job.listen_to_bots,
+            job.mention_only,
+        );
+        let reaction_channel_id = job.channel_id.clone();
+        let reaction_message_id = job.message_id.clone();
+        let reaction_emoji = random_discord_ack_reaction().to_string();
+        zeroclaw_spawn::spawn!(async move {
+            if let Err(err) = reaction_channel
+                .add_reaction(&reaction_channel_id, &reaction_message_id, &reaction_emoji)
+                .await
+            {
+                ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"reaction_message_id": reaction_message_id, "err": err.to_string()})), "failed to add ACK reaction for message");
+            }
+        });
+    }
+
+    // Thread context decides `thread_ts` plus `interruption_scope_id`,
+    // which the orchestrator uses as part of the conversation-history
+    // key and the cancellation scope. When the lookup fails it falls
+    // back to `None` and the failure is not cached, so the next
+    // message in the same Discord thread will retry. The trade-off:
+    // the first message after a transient lookup miss is keyed
+    // without the thread suffix; once the cache warms, subsequent
+    // messages are keyed with it. History for that thread can split
+    // across two scopes until the warm-up completes. Acceptable
+    // because the lookup is bounded by `THREAD_LOOKUP_TIMEOUT` and
+    // the alternative (stalling the listener on a hung Discord call)
+    // is worse.
+    let thread_ts = if job.channel_id.is_empty() {
+        None
+    } else if discord_thread_parent(
+        &job.client,
+        &job.bot_token,
+        &job.thread_channels,
+        &job.channel_id,
+    )
+    .await
+    .is_some()
+    {
+        Some(job.channel_id.clone())
+    } else {
+        None
+    };
+
+    let channel_msg = ChannelMessage {
+        id: if job.message_id.is_empty() {
+            Uuid::new_v4().to_string()
+        } else {
+            format!("discord_{}", job.message_id)
+        },
+        sender: job.author_id.clone(),
+        reply_target: if job.channel_id.is_empty() {
+            job.author_id
+        } else {
+            job.channel_id
+        },
+        content: final_content,
+        channel: "discord".to_string(),
+        channel_alias: Some(job.alias),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        interruption_scope_id: thread_ts.clone(),
+        thread_ts,
+        attachments: media_attachments,
+        subject: None,
+    };
+
+    if tx.send(channel_msg).await.is_err() {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+            "orchestrator channel closed; dropping message"
+        );
+    }
+}
+
 /// Process Discord message attachments in a single pass.
 ///
 /// Returns the text block appended to the agent's prompt and the structured
@@ -805,6 +1006,23 @@ async fn process_attachments(
             .get("filename")
             .and_then(|v| v.as_str())
             .unwrap_or("file");
+        // Discord gateway attachment metadata includes `size` (bytes). Refuse
+        // before opening a download when the declared size already exceeds the cap.
+        if let Some(declared) = att.get("size").and_then(|v| v.as_u64())
+            && declared > DISCORD_ATTACHMENT_MAX_BYTES
+        {
+            ::zeroclaw_log::record!(
+                INFO,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_attrs(::serde_json::json!({
+                        "name": name,
+                        "declared_size": declared,
+                        "max_bytes": DISCORD_ATTACHMENT_MAX_BYTES
+                    })),
+                "skipping attachment: declared size exceeds download limit"
+            );
+            continue;
+        }
         let Some(url) = att.get("url").and_then(|v| v.as_str()) else {
             ::zeroclaw_log::record!(
                 WARN,
@@ -914,15 +1132,27 @@ const DISCORD_ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 /// Download an attachment URL into memory, with structured warn-logging on
 /// each failure mode. Returns `None` when the attachment should be skipped
 /// (including when it exceeds [`DISCORD_ATTACHMENT_MAX_BYTES`]).
+///
+/// Bytes are streamed chunk-by-chunk so an oversize body is aborted without
+/// buffering the full payload (including when `Content-Length` is absent).
 async fn download_attachment_bytes(
     client: &reqwest::Client,
     url: &str,
     name: &str,
 ) -> Option<Vec<u8>> {
+    download_attachment_bytes_limited(client, url, name, DISCORD_ATTACHMENT_MAX_BYTES).await
+}
+
+async fn download_attachment_bytes_limited(
+    client: &reqwest::Client,
+    url: &str,
+    name: &str,
+    max_bytes: u64,
+) -> Option<Vec<u8>> {
     match client.get(url).send().await {
         Ok(resp) if resp.status().is_success() => {
             if let Some(len) = resp.content_length()
-                && len > DISCORD_ATTACHMENT_MAX_BYTES
+                && len > max_bytes
             {
                 ::zeroclaw_log::record!(
                     INFO,
@@ -930,42 +1160,51 @@ async fn download_attachment_bytes(
                         .with_attrs(::serde_json::json!({
                             "name": name,
                             "content_length": len,
-                            "max_bytes": DISCORD_ATTACHMENT_MAX_BYTES
+                            "max_bytes": max_bytes
                         })),
                     "skipping attachment: Content-Length exceeds download limit"
                 );
                 return None;
             }
-            match resp.bytes().await {
-                Ok(b) => {
-                    if b.len() as u64 > DISCORD_ATTACHMENT_MAX_BYTES {
+            let mut stream = resp.bytes_stream();
+            let mut buf = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
                         ::zeroclaw_log::record!(
-                            INFO,
-                            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                                .with_attrs(::serde_json::json!({
-                                    "name": name,
-                                    "bytes": b.len(),
-                                    "max_bytes": DISCORD_ATTACHMENT_MAX_BYTES
-                                })),
-                            "skipping attachment: body exceeds download limit"
-                        );
-                        return None;
-                    }
-                    Some(b.to_vec())
-                }
-                Err(e) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                             .with_attrs(
                                 ::serde_json::json!({"name": name, "error": format!("{}", e)})
                             ),
-                        "failed to read attachment bytes"
+                            "failed to read attachment bytes"
+                        );
+                        return None;
+                    }
+                };
+                let next_len = buf.len() as u64 + chunk.len() as u64;
+                if next_len > max_bytes {
+                    ::zeroclaw_log::record!(
+                        INFO,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({
+                                "name": name,
+                                "bytes": next_len,
+                                "max_bytes": max_bytes
+                            })),
+                        "skipping attachment: streamed body exceeds download limit"
                     );
-                    None
+                    // Drop the stream/response without reading remaining chunks.
+                    return None;
                 }
+                buf.extend_from_slice(&chunk);
             }
+            Some(buf)
         }
         Ok(resp) => {
             ::zeroclaw_log::record!(
@@ -1696,6 +1935,11 @@ impl Channel for DiscordChannel {
         // the watchdog is disabled (recv will just pend forever).
         let _stall_tx_guard = stall_tx;
 
+        // Listener-owned bounded ordered worker for MESSAGE_CREATE media/enqueue.
+        // Shut down (join/abort) before reconnect so in-flight work cannot
+        // stale-enqueue into a new gateway session (#9189).
+        let mut message_pipeline = MessageCreatePipeline::start(tx.clone());
+
         loop {
             tokio::select! {
                 _ = stall_rx.recv() => {
@@ -2355,143 +2599,75 @@ impl Channel for DiscordChannel {
                     };
 
                     // Attachment download + enqueue must not block the gateway
-                    // select! heartbeat arm (#9189). Mirror INTERACTION_CREATE:
-                    // clone owned state and spawn the media/enqueue work.
-                    let client = self.http_client();
-                    let workspace_dir = self.workspace_dir.clone();
-                    let transcription_manager = self.transcription_manager.clone();
-                    let pending_approvals = Arc::clone(&self.pending_approvals);
-                    let bot_token = self.bot_token.clone();
-                    let guild_ids = self.guild_ids.clone();
-                    let alias = self.alias.clone();
-                    let peer_resolver = Arc::clone(&self.peer_resolver);
-                    let listen_to_bots = self.listen_to_bots;
-                    let mention_only = self.mention_only;
-                    let thread_channels = Arc::clone(&self.thread_channels);
-                    let author_id = author_id.to_string();
-                    let message_id = d
-                        .get("id")
-                        .and_then(|i| i.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let channel_id = d
-                        .get("channel_id")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let tx = tx.clone();
-
-                    zeroclaw_spawn::spawn!(async move {
-                        let (attachment_text, media_attachments) = process_attachments(
-                            &atts,
-                            &client,
-                            workspace_dir.as_deref(),
-                            transcription_manager.as_deref(),
-                        )
-                        .await;
-                        let final_content = if attachment_text.is_empty() {
-                            clean_content
-                        } else {
-                            format!("{clean_content}\n\n[Attachments]\n{attachment_text}")
-                        };
-
-                        // Intercept approval replies before forwarding to the agent.
-                        if let Some((token, response)) =
-                            crate::util::parse_approval_reply(&final_content)
-                        {
-                            let mut map = pending_approvals.lock().await;
-                            if let Some(sender) = map.remove(&token) {
-                                let _ = sender.send(response);
-                                return;
+                    // heartbeat arm (#9189). Enqueue onto the listener-owned
+                    // bounded ordered worker; when the queue is full, wait for a
+                    // slot via reserve() while still servicing heartbeats.
+                    let job = MessageCreateJob {
+                        atts,
+                        clean_content,
+                        author_id: author_id.to_string(),
+                        message_id: d
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        channel_id: d
+                            .get("channel_id")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        client: self.http_client(),
+                        workspace_dir: self.workspace_dir.clone(),
+                        transcription_manager: self.transcription_manager.clone(),
+                        pending_approvals: Arc::clone(&self.pending_approvals),
+                        bot_token: self.bot_token.clone(),
+                        guild_ids: self.guild_ids.clone(),
+                        alias: self.alias.clone(),
+                        peer_resolver: Arc::clone(&self.peer_resolver),
+                        listen_to_bots: self.listen_to_bots,
+                        mention_only: self.mention_only,
+                        thread_channels: Arc::clone(&self.thread_channels),
+                    };
+                    let job_tx = message_pipeline.sender();
+                    let mut stop_listen = false;
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = stall_rx.recv() => {
+                                ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), "breaking listen loop due to stall watchdog");
+                                stop_listen = true;
+                                break;
+                            }
+                            _ = hb_rx.recv() => {
+                                let d = if sequence >= 0 { json!(sequence) } else { json!(null) };
+                                let hb = json!({"op": 1, "d": d});
+                                if write.send(Message::Text(hb.to_string().into())).await.is_err() {
+                                    stop_listen = true;
+                                    break;
+                                }
+                            }
+                            permit = job_tx.reserve() => {
+                                match permit {
+                                    Ok(p) => p.send(job),
+                                    Err(_) => {
+                                        ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown), "MESSAGE_CREATE worker closed; stopping listener");
+                                        stop_listen = true;
+                                    }
+                                }
+                                break;
                             }
                         }
-
-                        if !message_id.is_empty() && !channel_id.is_empty() {
-                            let reaction_channel = DiscordChannel::new(
-                                bot_token.clone(),
-                                guild_ids,
-                                alias.clone(),
-                                peer_resolver,
-                                listen_to_bots,
-                                mention_only,
-                            );
-                            let reaction_channel_id = channel_id.clone();
-                            let reaction_message_id = message_id.clone();
-                            let reaction_emoji = random_discord_ack_reaction().to_string();
-                            zeroclaw_spawn::spawn!(async move {
-                                if let Err(err) = reaction_channel
-                                    .add_reaction(
-                                        &reaction_channel_id,
-                                        &reaction_message_id,
-                                        &reaction_emoji,
-                                    )
-                                    .await
-                                {
-                                    ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"reaction_message_id": reaction_message_id, "err": err.to_string()})), "failed to add ACK reaction for message");
-                                }
-                            });
-                        }
-
-                        // Thread context decides `thread_ts` plus `interruption_scope_id`,
-                        // which the orchestrator uses as part of the conversation-history
-                        // key and the cancellation scope. When the lookup fails it falls
-                        // back to `None` and the failure is not cached, so the next
-                        // message in the same Discord thread will retry. The trade-off:
-                        // the first message after a transient lookup miss is keyed
-                        // without the thread suffix; once the cache warms, subsequent
-                        // messages are keyed with it. History for that thread can split
-                        // across two scopes until the warm-up completes. Acceptable
-                        // because the lookup is bounded by `THREAD_LOOKUP_TIMEOUT` and
-                        // the alternative (stalling the listener on a hung Discord call)
-                        // is worse.
-                        let thread_ts = if channel_id.is_empty() {
-                            None
-                        } else if discord_thread_parent(
-                            &client,
-                            &bot_token,
-                            &thread_channels,
-                            &channel_id,
-                        )
-                        .await
-                        .is_some()
-                        {
-                            Some(channel_id.clone())
-                        } else {
-                            None
-                        };
-
-                        let channel_msg = ChannelMessage {
-                            id: if message_id.is_empty() {
-                                Uuid::new_v4().to_string()
-                            } else {
-                                format!("discord_{message_id}")
-                            },
-                            sender: author_id.clone(),
-                            reply_target: if channel_id.is_empty() {
-                                author_id
-                            } else {
-                                channel_id
-                            },
-                            content: final_content,
-                            channel: "discord".to_string(),
-                            channel_alias: Some(alias),
-                            timestamp: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs(),
-                            interruption_scope_id: thread_ts.clone(),
-                            thread_ts,
-                            attachments: media_attachments,
-                            subject: None,
-                        };
-
-                        if tx.send(channel_msg).await.is_err() {
-                            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown), "orchestrator channel closed; dropping message");
-                        }
-                    });
+                    }
+                    if stop_listen {
+                        break;
+                    }
                 }
             }
         }
+
+        // Cancel/join the ordered worker before reconnect so in-flight media
+        // work cannot enqueue into a subsequent gateway session.
+        message_pipeline.shutdown().await;
 
         // Clean up the watchdog task before returning so the outer
         // reconnection loop can start fresh.
@@ -4988,12 +5164,133 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[tokio::test]
+    async fn download_attachment_bytes_aborts_chunked_oversize_without_full_buffer() {
+        // Serve Transfer-Encoding: chunked with no Content-Length so the
+        // downloader must stream and abort once cumulative bytes exceed cap.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = "x".repeat(64);
+        zeroclaw_spawn::spawn!(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut req = vec![0u8; 4096];
+            let _ = sock.read(&mut req).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/chunked.bin");
+        let max_bytes = 16u64;
+        let result =
+            download_attachment_bytes_limited(&client, &url, "chunked.bin", max_bytes).await;
+        assert!(
+            result.is_none(),
+            "streamed body exceeding cap must abort without returning bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_attachments_skips_when_declared_size_exceeds_cap() {
+        let client = reqwest::Client::new();
+        let atts = vec![serde_json::json!({
+            "filename": "huge.bin",
+            "url": "https://cdn.example/huge.bin",
+            "content_type": "application/octet-stream",
+            "size": DISCORD_ATTACHMENT_MAX_BYTES + 1
+        })];
+        let (text, media) = process_attachments(&atts, &client, None, None).await;
+        assert!(text.is_empty());
+        assert!(media.is_empty());
+    }
+
     #[test]
     fn discord_attachment_limit_rejects_byte_counts_over_cap() {
-        // Mirrors the post-download body check in download_attachment_bytes
+        // Mirrors the streamed body check in download_attachment_bytes
         // without allocating a 25 MiB fixture in CI.
         assert!(16u64 <= DISCORD_ATTACHMENT_MAX_BYTES);
         assert!(DISCORD_ATTACHMENT_MAX_BYTES + 1 > DISCORD_ATTACHMENT_MAX_BYTES);
+    }
+
+    #[tokio::test]
+    async fn message_create_ordered_worker_preserves_arrival_order_with_slow_first() {
+        let (job_tx, job_rx) = mpsc::channel::<u8>(MESSAGE_CREATE_QUEUE_CAPACITY);
+        let (out_tx, mut out_rx) = mpsc::channel::<u8>(8);
+        let worker = zeroclaw_spawn::spawn!(async move {
+            run_ordered_worker(job_rx, |id| {
+                let out_tx = out_tx.clone();
+                async move {
+                    if id == 1 {
+                        tokio::time::sleep(Duration::from_millis(80)).await;
+                    }
+                    out_tx.send(id).await.unwrap();
+                }
+            })
+            .await;
+        });
+
+        job_tx.send(1).await.unwrap();
+        job_tx.send(2).await.unwrap();
+        drop(job_tx);
+
+        assert_eq!(out_rx.recv().await, Some(1));
+        assert_eq!(out_rx.recv().await, Some(2));
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn message_create_queue_applies_bounded_backpressure() {
+        let (job_tx, mut job_rx) = mpsc::channel::<u8>(1);
+        job_tx.send(1).await.unwrap();
+        assert!(
+            job_tx.try_send(2).is_err(),
+            "full bounded queue must apply backpressure instead of accepting"
+        );
+        assert_eq!(job_rx.recv().await, Some(1));
+        job_tx.try_send(2).unwrap();
+        assert_eq!(job_rx.recv().await, Some(2));
+    }
+
+    #[tokio::test]
+    async fn message_create_worker_cancel_prevents_stale_enqueue_after_stop() {
+        let (job_tx, job_rx) = mpsc::channel::<u8>(MESSAGE_CREATE_QUEUE_CAPACITY);
+        let (out_tx, mut out_rx) = mpsc::channel::<u8>(8);
+        let (entered_tx, entered_rx) = oneshot::channel::<()>();
+        let entered = Arc::new(std::sync::Mutex::new(Some(entered_tx)));
+        let worker = zeroclaw_spawn::spawn!(async move {
+            run_ordered_worker(job_rx, move |id| {
+                let out_tx = out_tx.clone();
+                let entered = Arc::clone(&entered);
+                async move {
+                    if id == 1 {
+                        if let Some(sig) = entered.lock().unwrap().take() {
+                            let _ = sig.send(());
+                        }
+                        // Hang until cancelled — simulates slow media on stop.
+                        std::future::pending::<()>().await;
+                    }
+                    let _ = out_tx.send(id).await;
+                }
+            })
+            .await;
+        });
+
+        job_tx.send(1).await.unwrap();
+        entered_rx.await.unwrap();
+        // Listener stop: close queue + abort worker before reconnect.
+        drop(job_tx);
+        worker.abort();
+        let _ = worker.await;
+
+        // A new session's sender must not observe stale completions from the
+        // cancelled worker; the hung job never enqueued id=1 to out.
+        assert!(out_rx.try_recv().is_err());
     }
 
     #[tokio::test]

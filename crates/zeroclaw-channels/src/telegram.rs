@@ -34,6 +34,21 @@ enum IncomingAttachmentKind {
     Document,
     Photo,
 }
+
+/// Disposition of an inbound Telegram update after parse/media handling.
+///
+/// Distinguishes intentional skips (ack/offset may advance) from retryable
+/// media/download/transcription failures (offset must not advance; stop and
+/// retry from that update) (#9188).
+#[derive(Debug)]
+enum InboundDisposition {
+    Deliver(ChannelMessage),
+    IntentionalSkip,
+    RetryableFailure,
+}
+
+/// Media-specific parser result. `None` = update is not this media kind.
+type MediaParseAttempt = Option<InboundDisposition>;
 const TELEGRAM_BIND_COMMAND: &str = "/bind";
 /// Telegram Bot API allows at most 100 commands via setMyCommands.
 const TELEGRAM_MAX_BOT_COMMANDS: usize = 100;
@@ -1705,13 +1720,8 @@ Allowlist Telegram username (without '@') or numeric user ID.",
     /// Attempt to parse a Telegram update as a document/photo attachment.
     ///
     /// Downloads the file to `{workspace_dir}/telegram_files/` and returns a
-    /// `ChannelMessage` with the local file path. Returns `None` if the message
-    /// is not an attachment, workspace_dir is not configured, or the file exceeds
-    /// size limits.
-    async fn try_parse_attachment_message(
-        &self,
-        update: &serde_json::Value,
-    ) -> Option<ChannelMessage> {
+    /// disposition. `None` means the update is not an attachment message.
+    async fn try_parse_attachment_message(&self, update: &serde_json::Value) -> MediaParseAttempt {
         let message = update.get("message")?;
         let attachment = Self::parse_attachment_metadata(message)?;
 
@@ -1727,7 +1737,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                     TELEGRAM_MAX_FILE_DOWNLOAD_BYTES / (1024 * 1024)
                 )
             );
-            return None;
+            return Some(InboundDisposition::IntentionalSkip);
         }
 
         let (username, sender_id, sender_identity) = Self::extract_sender_info(message);
@@ -1738,21 +1748,27 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         }
 
         if !self.is_any_user_allowed(identities.iter().copied()) {
-            return None;
+            return Some(InboundDisposition::IntentionalSkip);
         }
 
         // Apply mention_only gate before downloading. Photo / document
         // updates carry no `text` field, so the text-only gate in
         // `parse_update_message` can never see them and they used to slip
         // through unconditionally. See #6229.
-        let gated_caption =
-            self.check_media_mention_gate(message, attachment.caption.as_deref())?;
+        let Some(gated_caption) =
+            self.check_media_mention_gate(message, attachment.caption.as_deref())
+        else {
+            return Some(InboundDisposition::IntentionalSkip);
+        };
 
-        let chat_id = message
+        let Some(chat_id) = message
             .get("chat")
             .and_then(|chat| chat.get("id"))
             .and_then(serde_json::Value::as_i64)
-            .map(|id| id.to_string())?;
+            .map(|id| id.to_string())
+        else {
+            return Some(InboundDisposition::IntentionalSkip);
+        };
 
         let message_id = message
             .get("message_id")
@@ -1771,15 +1787,15 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         };
 
         // Ensure workspace directory is configured
-        let workspace = self.workspace_dir.as_ref().or_else(|| {
+        let Some(workspace) = self.workspace_dir.as_ref() else {
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                     .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
                 "Cannot save attachment: workspace_dir not configured"
             );
-            None
-        })?;
+            return Some(InboundDisposition::IntentionalSkip);
+        };
 
         let save_dir = workspace.join("telegram_files");
         if let Err(e) = tokio::fs::create_dir_all(&save_dir).await {
@@ -1790,7 +1806,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                     .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
                 "Failed to create telegram_files directory"
             );
-            return None;
+            return Some(InboundDisposition::RetryableFailure);
         }
 
         // Download file from Telegram
@@ -1804,7 +1820,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                         .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
                     "Failed to get attachment file path"
                 );
-                return None;
+                return Some(InboundDisposition::RetryableFailure);
             }
         };
 
@@ -1818,7 +1834,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                         .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
                     "Failed to download attachment"
                 );
-                return None;
+                return Some(InboundDisposition::RetryableFailure);
             }
         };
 
@@ -1841,7 +1857,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                     .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
                 &format!("Failed to save attachment to {}", local_path.display())
             );
-            return None;
+            return Some(InboundDisposition::RetryableFailure);
         }
 
         // Build message content.
@@ -1868,7 +1884,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             content = Self::prepend_forward_attribution(&attr, content);
         }
 
-        Some(ChannelMessage {
+        Some(InboundDisposition::Deliver(ChannelMessage {
             id: format!("telegram_{chat_id}_{message_id}"),
             sender: sender_identity,
             reply_target,
@@ -1883,19 +1899,24 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             interruption_scope_id: None,
             attachments: vec![],
             subject: None,
-        })
+        }))
     }
 
     /// Attempt to parse a Telegram update as a voice message and transcribe it.
     ///
-    /// Returns `None` if the message is not a voice message, transcription is disabled,
-    /// or the message exceeds duration limits.
-    async fn try_parse_voice_message(&self, update: &serde_json::Value) -> Option<ChannelMessage> {
-        let config = self.transcription.as_ref()?;
-        let manager = self.transcription_manager.as_deref()?;
+    /// `None` means the update is not a voice message (or transcription is not
+    /// configured at all). Configured-but-skipped / failed voice updates return
+    /// a typed [`InboundDisposition`].
+    async fn try_parse_voice_message(&self, update: &serde_json::Value) -> MediaParseAttempt {
         let message = update.get("message")?;
-
         let (file_id, duration) = Self::parse_voice_metadata(message)?;
+
+        let Some(config) = self.transcription.as_ref() else {
+            return Some(InboundDisposition::IntentionalSkip);
+        };
+        let Some(manager) = self.transcription_manager.as_deref() else {
+            return Some(InboundDisposition::IntentionalSkip);
+        };
 
         if duration > config.max_duration_secs {
             ::zeroclaw_log::record!(
@@ -1906,7 +1927,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                     config.max_duration_secs
                 )
             );
-            return None;
+            return Some(InboundDisposition::IntentionalSkip);
         }
 
         let (username, sender_id, sender_identity) = Self::extract_sender_info(message);
@@ -1917,7 +1938,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         }
 
         if !self.is_any_user_allowed(identities.iter().copied()) {
-            return None;
+            return Some(InboundDisposition::IntentionalSkip);
         }
 
         // Apply mention_only gate before downloading + transcribing. Voice
@@ -1928,13 +1949,21 @@ Allowlist Telegram username (without '@') or numeric user ID.",
         // The transcription itself is discarded; we only care whether the
         // gate returns Some (allowed) vs None (rejected).
         let voice_caption = message.get("caption").and_then(serde_json::Value::as_str);
-        self.check_media_mention_gate(message, voice_caption)?;
+        if self
+            .check_media_mention_gate(message, voice_caption)
+            .is_none()
+        {
+            return Some(InboundDisposition::IntentionalSkip);
+        }
 
-        let chat_id = message
+        let Some(chat_id) = message
             .get("chat")
             .and_then(|chat| chat.get("id"))
             .and_then(serde_json::Value::as_i64)
-            .map(|id| id.to_string())?;
+            .map(|id| id.to_string())
+        else {
+            return Some(InboundDisposition::IntentionalSkip);
+        };
 
         let message_id = message
             .get("message_id")
@@ -1963,7 +1992,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                         .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
                     "Failed to get voice file path"
                 );
-                return None;
+                return Some(InboundDisposition::RetryableFailure);
             }
         };
 
@@ -1983,7 +2012,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                         .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
                     "Failed to download voice file"
                 );
-                return None;
+                return Some(InboundDisposition::RetryableFailure);
             }
         };
 
@@ -1997,7 +2026,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                         .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
                     "Voice transcription failed"
                 );
-                return None;
+                return Some(InboundDisposition::RetryableFailure);
             }
         };
 
@@ -2007,7 +2036,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
                 "Voice transcription returned empty text, skipping"
             );
-            return None;
+            return Some(InboundDisposition::IntentionalSkip);
         }
 
         // Enter voice-chat mode so outgoing replies get a TTS voice note
@@ -2037,7 +2066,7 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             content
         };
 
-        Some(ChannelMessage {
+        Some(InboundDisposition::Deliver(ChannelMessage {
             id: format!("telegram_{chat_id}_{message_id}"),
             sender: sender_identity,
             reply_target,
@@ -2052,7 +2081,22 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             interruption_scope_id: None,
             attachments: vec![],
             subject: None,
-        })
+        }))
+    }
+
+    /// Resolve text / voice / attachment parsers into a single disposition.
+    async fn resolve_inbound_disposition(&self, update: &serde_json::Value) -> InboundDisposition {
+        if let Some(m) = self.parse_update_message(update) {
+            return InboundDisposition::Deliver(m);
+        }
+        if let Some(disposition) = self.try_parse_voice_message(update).await {
+            return disposition;
+        }
+        if let Some(disposition) = self.try_parse_attachment_message(update).await {
+            return disposition;
+        }
+        Box::pin(self.handle_unauthorized_message(update)).await;
+        InboundDisposition::IntentionalSkip
     }
 
     /// Extract sender username and display identity from a Telegram message object.
@@ -3872,50 +3916,49 @@ Ensure only one `zeroclaw` process is using this bot token."
                         continue;
                     }
 
-                    let msg = if let Some(m) = self.parse_update_message(update) {
-                        m
-                    } else if let Some(m) = self.try_parse_voice_message(update).await {
-                        m
-                    } else if let Some(m) = self.try_parse_attachment_message(update).await {
-                        m
-                    } else {
-                        Box::pin(self.handle_unauthorized_message(update)).await;
-                        // Handled without enqueue — safe to ack.
-                        if let Some(uid) = update_id {
-                            offset = uid + 1;
+                    match self.resolve_inbound_disposition(update).await {
+                        InboundDisposition::RetryableFailure => {
+                            // Do not advance offset — stop and retry from this update (#9188).
+                            break;
                         }
-                        continue;
-                    };
+                        InboundDisposition::IntentionalSkip => {
+                            // Callback/unauthorized/gated/oversized: safe to ack.
+                            if let Some(uid) = update_id {
+                                offset = uid + 1;
+                            }
+                        }
+                        InboundDisposition::Deliver(msg) => {
+                            if self.ack_reactions
+                                && let Some((reaction_chat_id, reaction_message_id)) =
+                                    Self::extract_update_message_target(update)
+                            {
+                                self.try_add_ack_reaction_nonblocking(
+                                    reaction_chat_id,
+                                    reaction_message_id,
+                                );
+                            }
 
-                    if self.ack_reactions
-                        && let Some((reaction_chat_id, reaction_message_id)) =
-                            Self::extract_update_message_target(update)
-                    {
-                        self.try_add_ack_reaction_nonblocking(
-                            reaction_chat_id,
-                            reaction_message_id,
-                        );
-                    }
+                            // Send "typing" indicator immediately when we receive a message
+                            let typing_body = serde_json::json!({
+                                "chat_id": &msg.reply_target,
+                                "action": "typing"
+                            });
+                            let _ = self
+                                .http_client()
+                                .post(self.api_url("sendChatAction"))
+                                .json(&typing_body)
+                                .send()
+                                .await; // Ignore errors for typing indicator
 
-                    // Send "typing" indicator immediately when we receive a message
-                    let typing_body = serde_json::json!({
-                        "chat_id": &msg.reply_target,
-                        "action": "typing"
-                    });
-                    let _ = self
-                        .http_client()
-                        .post(self.api_url("sendChatAction"))
-                        .json(&typing_body)
-                        .send()
-                        .await; // Ignore errors for typing indicator
+                            if tx.send(msg).await.is_err() {
+                                // Do not advance offset — unsent update must be redelivered (#9188).
+                                return Ok(());
+                            }
 
-                    if tx.send(msg).await.is_err() {
-                        // Do not advance offset — unsent update must be redelivered (#9188).
-                        return Ok(());
-                    }
-
-                    if let Some(uid) = update_id {
-                        offset = uid + 1;
+                            if let Some(uid) = update_id {
+                                offset = uid + 1;
+                            }
+                        }
                     }
                 }
             }
@@ -6348,7 +6391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_parse_voice_message_returns_none_when_transcription_disabled() {
+    async fn try_parse_voice_message_intentional_skip_when_transcription_disabled() {
         let mention_only = false;
         let ch = TelegramChannel::new(
             "token".into(),
@@ -6366,7 +6409,7 @@ mod tests {
         });
 
         let parsed = ch.try_parse_voice_message(&update).await;
-        assert!(parsed.is_none());
+        assert!(matches!(parsed, Some(InboundDisposition::IntentionalSkip)));
     }
 
     #[tokio::test]
@@ -6396,7 +6439,7 @@ mod tests {
         });
 
         let parsed = ch.try_parse_voice_message(&update).await;
-        assert!(parsed.is_none());
+        assert!(matches!(parsed, Some(InboundDisposition::IntentionalSkip)));
     }
 
     #[tokio::test]
@@ -6426,7 +6469,7 @@ mod tests {
         });
 
         let parsed = ch.try_parse_voice_message(&update).await;
-        assert!(parsed.is_none());
+        assert!(matches!(parsed, Some(InboundDisposition::IntentionalSkip)));
         assert!(ch.voice_transcriptions.lock().is_empty());
     }
 
@@ -6664,6 +6707,122 @@ mod tests {
             offset = uid + 1;
         }
         assert_eq!(offset, 43);
+    }
+
+    /// Apply listen-loop offset policy for a disposition. Returns whether the
+    /// batch must stop (retryable failure / tx closed) without advancing.
+    fn apply_offset_policy(
+        offset: &mut i64,
+        update_id: Option<i64>,
+        disposition: &InboundDisposition,
+        tx_closed: bool,
+    ) -> bool {
+        if tx_closed {
+            return true;
+        }
+        match disposition {
+            InboundDisposition::RetryableFailure => true,
+            InboundDisposition::IntentionalSkip | InboundDisposition::Deliver(_) => {
+                if let Some(uid) = update_id {
+                    *offset = uid + 1;
+                }
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn telegram_retryable_failure_leaves_offset_unchanged() {
+        let mut offset = 100_i64;
+        let stop = apply_offset_policy(
+            &mut offset,
+            Some(50),
+            &InboundDisposition::RetryableFailure,
+            false,
+        );
+        assert!(stop);
+        assert_eq!(offset, 100);
+    }
+
+    #[test]
+    fn telegram_intentional_skip_advances_offset() {
+        let mut offset = 100_i64;
+        let stop = apply_offset_policy(
+            &mut offset,
+            Some(50),
+            &InboundDisposition::IntentionalSkip,
+            false,
+        );
+        assert!(!stop);
+        assert_eq!(offset, 51);
+    }
+
+    #[test]
+    fn telegram_tx_close_leaves_offset_unchanged() {
+        let mut offset = 100_i64;
+        let msg = ChannelMessage {
+            id: "t".into(),
+            sender: "a".into(),
+            reply_target: "1".into(),
+            content: "hi".into(),
+            channel: "telegram".into(),
+            channel_alias: None,
+            timestamp: 0,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            subject: None,
+        };
+        let stop = apply_offset_policy(
+            &mut offset,
+            Some(50),
+            &InboundDisposition::Deliver(msg),
+            true,
+        );
+        assert!(stop);
+        assert_eq!(offset, 100);
+    }
+
+    #[tokio::test]
+    async fn try_parse_attachment_message_download_failure_is_retryable() {
+        use tempfile::tempdir;
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/bot.*/getFile"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let dir = tempdir().unwrap();
+        let mention_only = false;
+        let ch = TelegramChannel::new(
+            "token".into(),
+            "telegram_test_alias",
+            Arc::new(|| vec!["*".into()]),
+            mention_only,
+        )
+        .with_workspace_dir(dir.path().to_path_buf())
+        .with_api_base(mock_server.uri());
+
+        let update = serde_json::json!({
+            "message": {
+                "message_id": 9,
+                "document": {
+                    "file_id": "doc_file",
+                    "file_name": "notes.txt",
+                    "file_size": 12
+                },
+                "from": { "id": 123, "username": "alice" },
+                "chat": { "id": 456, "type": "private" }
+            }
+        });
+
+        let parsed = ch.try_parse_attachment_message(&update).await;
+        assert!(matches!(parsed, Some(InboundDisposition::RetryableFailure)));
     }
 
     // ── Attachment content format tests ──────────────────────────────

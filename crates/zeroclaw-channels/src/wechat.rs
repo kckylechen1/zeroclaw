@@ -70,6 +70,17 @@ const UPLOAD_MEDIA_TYPE_FILE: u32 = 3;
 /// Shared max size for inbound/outbound media handling.
 const WECHAT_MEDIA_MAX_BYTES: u64 = 100 * 1024 * 1024;
 
+/// Result of building inbound attachment content for a WeChat message item list.
+///
+/// Distinguishes "no attachment present" (cursor may commit) from retryable
+/// download/save failures (pending opaque cursor must not commit) (#9187).
+#[derive(Debug)]
+enum AttachmentContentResult {
+    NoAttachment,
+    Content(String),
+    RetryableFailure,
+}
+
 type Aes128EcbEnc = ecb::Encryptor<aes::Aes128>;
 type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 
@@ -1460,9 +1471,20 @@ impl WeChatChannel {
         &self,
         items: &[serde_json::Value],
         message_id: &str,
-    ) -> Option<String> {
-        let workspace_dir = self.workspace_dir.as_ref()?;
-        let spec = Self::find_inbound_attachment(items, message_id)?;
+    ) -> AttachmentContentResult {
+        let Some(spec) = Self::find_inbound_attachment(items, message_id) else {
+            return AttachmentContentResult::NoAttachment;
+        };
+        let Some(workspace_dir) = self.workspace_dir.as_ref() else {
+            // Attachment present but no workspace to land it — retry after config.
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                "Cannot save WeChat attachment: workspace_dir not configured"
+            );
+            return AttachmentContentResult::RetryableFailure;
+        };
         let bytes = match self.download_inbound_attachment(&spec).await {
             Ok(bytes) => bytes,
             Err(err) => {
@@ -1471,9 +1493,9 @@ impl WeChatChannel {
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                         .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                         .with_attrs(::serde_json::json!({"error": format!("{}", err)})),
-                    "attachment download skipped"
+                    "attachment download failed"
                 );
-                return None;
+                return AttachmentContentResult::RetryableFailure;
             }
         };
 
@@ -1486,7 +1508,7 @@ impl WeChatChannel {
                     .with_attrs(::serde_json::json!({"error": format!("{}", err)})),
                 "Failed to create WeChat attachment dir"
             );
-            return None;
+            return AttachmentContentResult::RetryableFailure;
         }
 
         let local_path = save_dir.join(&spec.file_name);
@@ -1500,10 +1522,10 @@ impl WeChatChannel {
                     local_path.display()
                 )
             );
-            return None;
+            return AttachmentContentResult::RetryableFailure;
         }
 
-        Some(format_attachment_content(
+        AttachmentContentResult::Content(format_attachment_content(
             spec.kind,
             &spec.file_name,
             &local_path,
@@ -2215,6 +2237,11 @@ impl Channel for WeChatChannel {
                 .cloned()
                 .unwrap_or_default();
 
+            // Empty batch (or only unauthorized/empty skips) may commit.
+            // Retryable attachment failure must not commit — earlier enqueued
+            // messages in this batch may replay (at-least-once) (#9187).
+            let mut commit_cursor = true;
+
             for msg in &msgs {
                 let from_user_id = msg
                     .get("from_user_id")
@@ -2245,7 +2272,7 @@ impl Channel for WeChatChannel {
 
                 let text = extract_text_from_items(&items);
 
-                // Check authorization
+                // Check authorization — intentional skip; batch may still commit.
                 if !self.is_user_allowed(from_user_id) {
                     self.handle_unauthorized_message(from_user_id, &text).await;
                     continue;
@@ -2254,10 +2281,16 @@ impl Channel for WeChatChannel {
                 let attachment_content =
                     self.try_build_attachment_content(&items, &message_id).await;
                 let content = match (attachment_content, text.is_empty()) {
-                    (Some(marker), true) => marker,
-                    (Some(marker), false) => format!("{marker}\n\n{text}"),
-                    (None, false) => text,
-                    (None, true) => continue,
+                    (AttachmentContentResult::Content(marker), true) => marker,
+                    (AttachmentContentResult::Content(marker), false) => {
+                        format!("{marker}\n\n{text}")
+                    }
+                    (AttachmentContentResult::NoAttachment, false) => text,
+                    (AttachmentContentResult::NoAttachment, true) => continue,
+                    (AttachmentContentResult::RetryableFailure, _) => {
+                        commit_cursor = false;
+                        break;
+                    }
                 };
 
                 let timestamp = msg
@@ -2291,8 +2324,8 @@ impl Channel for WeChatChannel {
                 }
             }
 
-            // Commit cursor only after the full batch was enqueued or skipped.
-            if let Some(new_cursor) = pending_cursor {
+            // Commit cursor only after the full batch was enqueued or intentionally skipped.
+            if commit_cursor && let Some(new_cursor) = pending_cursor {
                 cursor = new_cursor;
                 *self.cursor.lock() = cursor.clone();
                 self.save_sync_data();
@@ -2848,10 +2881,103 @@ mod tests {
         )
         .unwrap();
         assert_eq!(*ch2.cursor.lock(), "committed_cursor");
-        assert_eq!(
-            ch2.get_context_token("acct:user1"),
-            Some("tok".to_string())
-        );
+        assert_eq!(ch2.get_context_token("acct:user1"), Some("tok".to_string()));
+    }
+
+    /// Cursor commit policy for a processed batch (#9187).
+    fn should_commit_pending_cursor(
+        commit_cursor: bool,
+        pending_cursor: Option<&str>,
+        tx_closed: bool,
+    ) -> bool {
+        !tx_closed && commit_cursor && pending_cursor.is_some()
+    }
+
+    #[test]
+    fn wechat_attachment_failure_leaves_pending_cursor_uncommitted() {
+        assert!(!should_commit_pending_cursor(
+            false,
+            Some("next_cursor"),
+            false
+        ));
+    }
+
+    #[test]
+    fn wechat_tx_close_leaves_pending_cursor_uncommitted() {
+        assert!(!should_commit_pending_cursor(
+            true,
+            Some("next_cursor"),
+            true
+        ));
+    }
+
+    #[test]
+    fn wechat_empty_batch_commits_pending_cursor() {
+        // Empty msgs / only intentional skips: commit_cursor stays true.
+        assert!(should_commit_pending_cursor(
+            true,
+            Some("next_cursor"),
+            false
+        ));
+    }
+
+    #[test]
+    fn wechat_unauthorized_batch_may_commit_pending_cursor() {
+        // Unauthorized handling is an intentional skip; batch commit remains allowed.
+        assert!(should_commit_pending_cursor(
+            true,
+            Some("next_cursor"),
+            false
+        ));
+    }
+
+    #[tokio::test]
+    async fn try_build_attachment_content_download_failure_is_retryable() {
+        let temp = tempdir().unwrap();
+        let ch = WeChatChannel::new(
+            "test",
+            Arc::new(|| vec!["*".to_string()]),
+            None,
+            None,
+            Some(temp.path().to_path_buf()),
+        )
+        .unwrap()
+        .with_workspace_dir(temp.path().to_path_buf());
+
+        // Image item with CDN query that cannot be downloaded in tests.
+        let items = vec![serde_json::json!({
+            "type": 2,
+            "image_item": {
+                "media": {
+                    "encrypt_query_param": "not-a-real-param",
+                    "aes_key": "0123456789abcdef"
+                }
+            }
+        })];
+
+        let result = ch.try_build_attachment_content(&items, "42").await;
+        assert!(matches!(result, AttachmentContentResult::RetryableFailure));
+    }
+
+    #[tokio::test]
+    async fn try_build_attachment_content_no_attachment_is_explicit() {
+        let temp = tempdir().unwrap();
+        let ch = WeChatChannel::new(
+            "test",
+            Arc::new(|| vec!["*".to_string()]),
+            None,
+            None,
+            Some(temp.path().to_path_buf()),
+        )
+        .unwrap()
+        .with_workspace_dir(temp.path().to_path_buf());
+
+        let items = vec![serde_json::json!({
+            "type": 1,
+            "text_item": { "text": "hello" }
+        })];
+        let result = ch.try_build_attachment_content(&items, "7").await;
+        assert!(matches!(result, AttachmentContentResult::NoAttachment));
     }
 
     #[test]
