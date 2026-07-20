@@ -10,8 +10,9 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, bail};
+use parking_lot::RwLock;
 use serde_json::json;
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{Duration, timeout};
 
 use crate::mcp_prompt::{McpGetPromptResult, McpPromptsListResult};
@@ -21,31 +22,23 @@ use crate::mcp_transport::{McpTransportConn, McpTransportError, create_transport
 use zeroclaw_config::schema::McpServerConfig;
 
 /// Timeout for receiving a response from an MCP server during init/list.
-/// Prevents a hung server from blocking the daemon indefinitely.
 const RECV_TIMEOUT_SECS: u64 = 30;
 
-/// Default timeout for tool calls (seconds) when not configured per-server.
-const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 180;
+/// Retries only when the request was definitely not sent.
+const MAX_NOT_SENT_RETRIES: u32 = 2;
 
-/// Maximum allowed tool call timeout (seconds) — hard safety ceiling.
-const MAX_TOOL_TIMEOUT_SECS: u64 = 600;
-
-/// Maximum automatic reconnect attempts on a stale session or dropped
-/// transport before the tool-call error is surfaced to the caller.
-const MAX_RECONNECT_ATTEMPTS: u32 = 2;
-
-/// Fixed backoff between reconnect attempts (milliseconds).
+/// Fixed backoff between not-sent retry attempts (milliseconds).
 const RECONNECT_BACKOFF_MS: u64 = 500;
 
-/// Perform the MCP `initialize` + `notifications/initialized` handshake on a
-/// transport. Shared by the initial [`McpServer::connect`] and the
-/// reconnect-after-stale-session path in [`McpServer::call_tool`].
+/// Perform the MCP `initialize` + `notifications/initialized` handshake.
+/// Uses a caller-allocated id so recovery never collides with fixed ids.
 async fn handshake(
-    transport: &mut dyn McpTransportConn,
+    transport: &dyn McpTransportConn,
     server_name: &str,
+    init_id: u64,
 ) -> Result<McpServerCapabilities> {
     let init_req = JsonRpcRequest::new(
-        1,
+        init_id,
         "initialize",
         json!({
             "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -75,15 +68,12 @@ async fn handshake(
         );
     }
 
-    // Parse server-advertised capabilities from the initialize result.
     let capabilities = init_resp
         .result
         .as_ref()
         .map(McpServerCapabilities::from_init_result)
         .unwrap_or_default();
 
-    // Notify the server the client is initialized (notifications expect no
-    // response). Best effort — ignore errors.
     let notif = JsonRpcRequest::notification("notifications/initialized", json!({}));
     let _ = transport.send_and_recv(&notif).await;
 
@@ -91,8 +81,6 @@ async fn handshake(
 }
 
 /// Server-advertised MCP capabilities parsed from the `initialize` result.
-/// Sub-flags `subscribe` / `listChanged` are captured but currently unused
-/// (reserved for a future subscriptions spec).
 #[derive(Debug, Clone, Default)]
 pub struct McpServerCapabilities {
     pub(crate) resources: bool,
@@ -100,8 +88,6 @@ pub struct McpServerCapabilities {
 }
 
 impl McpServerCapabilities {
-    /// Parse from the raw `initialize` result value. A capability counts as
-    /// supported when its object key is present under `capabilities`.
     pub fn from_init_result(result: &serde_json::Value) -> Self {
         let caps = result.get("capabilities");
         let has = |key: &str| caps.and_then(|c| c.get(key)).is_some();
@@ -150,45 +136,49 @@ fn check_result_is_error(result: &serde_json::Value, op: &str, server_name: &str
     bail!("MCP `{op}` (server `{server_name}`) returned isError: {detail}");
 }
 
-// ── Internal server state ──────────────────────────────────────────────────
-
 struct McpServerInner {
-    config: McpServerConfig,
-    transport: Box<dyn McpTransportConn>,
+    config: Arc<McpServerConfig>,
+    transport: Arc<dyn McpTransportConn>,
     #[cfg(target_has_atomic = "64")]
     next_id: AtomicU64,
     #[cfg(not(target_has_atomic = "64"))]
     next_id: AtomicU32,
     tools: Vec<McpToolDef>,
-    capabilities: McpServerCapabilities,
+    capabilities: RwLock<McpServerCapabilities>,
+    /// Single coordinator for reset + re-handshake (no double-recovery).
+    recovery: AsyncMutex<()>,
 }
-
-// ── McpServer ──────────────────────────────────────────────────────────────
 
 /// A live connection to one MCP server (any transport).
 #[derive(Clone)]
 pub struct McpServer {
-    inner: Arc<Mutex<McpServerInner>>,
+    inner: Arc<McpServerInner>,
 }
 
 impl McpServer {
-    /// Connect to the server, perform the initialize handshake, and fetch the tool list.
+    fn alloc_id(&self) -> u64 {
+        self.inner.next_id.fetch_add(1, Ordering::Relaxed) as u64
+    }
+
     pub async fn connect(config: McpServerConfig) -> Result<Self> {
-        // Create transport based on config
-        let mut transport = create_transport(&config).with_context(|| {
+        let config = Arc::new(config);
+        let transport = create_transport(Arc::clone(&config)).with_context(|| {
             format!(
                 "failed to create transport for MCP server `{}`",
                 config.name
             )
         })?;
 
-        // Initialize handshake (initialize + initialized notification)
-        let capabilities = handshake(transport.as_mut(), &config.name).await?;
+        #[cfg(target_has_atomic = "64")]
+        let next_id = AtomicU64::new(1);
+        #[cfg(not(target_has_atomic = "64"))]
+        let next_id = AtomicU32::new(1);
 
-        // Fetch available tools
-        let id = 2u64;
-        let list_req = JsonRpcRequest::new(id, "tools/list", json!({}));
+        let init_id = next_id.fetch_add(1, Ordering::Relaxed) as u64;
+        let capabilities = handshake(transport.as_ref(), &config.name, init_id).await?;
 
+        let list_id = next_id.fetch_add(1, Ordering::Relaxed) as u64;
+        let list_req = JsonRpcRequest::new(list_id, "tools/list", json!({}));
         let list_resp = timeout(
             Duration::from_secs(RECV_TIMEOUT_SECS),
             transport.send_and_recv(&list_req),
@@ -202,13 +192,6 @@ impl McpServer {
         })??;
 
         let result = list_resp.result.ok_or_else(|| {
-            ::zeroclaw_log::record!(
-                ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({"mcp_server": &config.name})),
-                "mcp_client: tools/list returned no result"
-            );
             anyhow::Error::msg(format!(
                 "tools/list returned no result from `{}`",
                 config.name
@@ -216,260 +199,157 @@ impl McpServer {
         })?;
         let tool_list: McpToolsListResult = serde_json::from_value(result)
             .with_context(|| format!("failed to parse tools/list from `{}`", config.name))?;
-
         let tool_count = tool_list.tools.len();
 
         let inner = McpServerInner {
             config,
             transport,
-            #[cfg(target_has_atomic = "64")]
-            next_id: AtomicU64::new(3), // Start at 3 since we used 1 and 2
-            #[cfg(not(target_has_atomic = "64"))]
-            next_id: AtomicU32::new(3), // Start at 3 since we used 1 and 2
+            next_id,
             tools: tool_list.tools,
-            capabilities,
+            capabilities: RwLock::new(capabilities),
+            recovery: AsyncMutex::new(()),
         };
 
         ::zeroclaw_log::record!(
             INFO,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
             &format!(
-                "MCP server `{}` connected — {} tool(s) available",
-                inner.config.name, tool_count
+                "MCP server `{}` connected — {tool_count} tool(s) available",
+                inner.config.name
             )
         );
 
         Ok(Self {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(inner),
         })
     }
 
-    /// Tools advertised by this server.
     pub async fn tools(&self) -> Vec<McpToolDef> {
-        self.inner.lock().await.tools.clone()
+        self.inner.tools.clone()
     }
 
-    /// Server display name.
     pub async fn name(&self) -> String {
-        self.inner.lock().await.config.name.clone()
+        self.inner.config.name.clone()
     }
 
-    /// Server-advertised capabilities captured at handshake.
     pub async fn capabilities(&self) -> McpServerCapabilities {
-        self.inner.lock().await.capabilities.clone()
+        self.inner.capabilities.read().clone()
     }
 
-    /// Health-check the underlying transport without sending a real request.
-    /// Returns `true` when the transport is alive, `false` otherwise.
-    ///
-    /// Uses `try_lock` instead of `blocking_lock` because this method may be
-    /// called from async contexts (e.g. `health_check_all` during heartbeat
-    /// retries inside an async test or the tokio-based heartbeat worker).
     pub fn health_check(&self) -> bool {
-        self.inner
-            .try_lock()
-            .map(|mut inner| inner.transport.health_check())
-            .unwrap_or(true) // assume healthy if lock is contended
+        self.inner.transport.health_check()
     }
 
-    /// Identity comparison on the underlying transport handle. Two
-    /// `McpServer` values share the same connection iff `ptr_eq`
-    /// returns `true` — i.e. their inner `Arc<Mutex<McpServerInner>>`
-    /// points to the same allocation. Cheap Arc-level comparison, no
-    /// async, no lock.
-    ///
-    /// Used by the daemon's reconciliation layer to verify that a
-    /// "preserved" healthy server's live connection survives a
-    /// recovery tick without being silently disconnected and
-    /// respawned (the additive merge contract: a healthy handle
-    /// covers its name and is reused verbatim via `Arc::clone`).
     pub fn ptr_eq(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    /// Call a tool on this server. Returns the raw JSON result.
-    pub async fn call_tool(
-        &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let mut inner = self.inner.lock().await;
-
-        // Use per-server tool timeout if configured, otherwise default.
-        // Cap at MAX_TOOL_TIMEOUT_SECS for safety.
-        let tool_timeout = inner
-            .config
-            .tool_timeout_secs
-            .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS)
-            .min(MAX_TOOL_TIMEOUT_SECS);
-
-        let mut attempt = 0u32;
-        let resp = loop {
-            let id = inner.next_id.fetch_add(1, Ordering::Relaxed);
-            let req = JsonRpcRequest::new(
-                id,
-                "tools/call",
-                json!({ "name": tool_name, "arguments": arguments }),
-            );
-
-            let send_result = timeout(
-                Duration::from_secs(tool_timeout),
-                inner.transport.send_and_recv(&req),
-            )
-            .await
-            .map_err(|_| {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Timeout)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "mcp_server": &inner.config.name,
-                            "tool": tool_name,
-                            "timeout_secs": tool_timeout,
-                        })),
-                    "mcp_client: tool call timed out"
-                );
-                anyhow::Error::msg(format!(
-                    "MCP server `{}` timed out after {}s during tool call `{tool_name}`",
-                    inner.config.name, tool_timeout
-                ))
-            })?;
-
-            match send_result {
-                Ok(resp) => break resp,
-                Err(err) => {
-                    // Reconnect only on recoverable transport errors, within budget.
-                    let recoverable_reason = err
-                        .downcast_ref::<McpTransportError>()
-                        .map(|te| te.to_string());
-                    if let Some(reason) = recoverable_reason
-                        && attempt < MAX_RECONNECT_ATTEMPTS
-                    {
-                        attempt += 1;
-                        let server_name = inner.config.name.clone();
-                        ::zeroclaw_log::record!(
-                            WARN,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Reconnect
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({
-                                "mcp_server": &server_name,
-                                "tool": tool_name,
-                                "attempt": attempt,
-                                "max_attempts": MAX_RECONNECT_ATTEMPTS,
-                                "reason": &reason,
-                            })),
-                            "mcp_client: reconnecting after transport error and retrying tool call"
-                        );
-                        tokio::time::sleep(Duration::from_millis(RECONNECT_BACKOFF_MS)).await;
-                        inner.transport.reset().await.with_context(|| {
-                            format!(
-                                "MCP server `{server_name}` failed to reset transport during reconnect"
-                            )
-                        })?;
-                        let refreshed = handshake(inner.transport.as_mut(), &server_name)
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "MCP server `{server_name}` failed to re-handshake during reconnect"
-                                )
-                            })?;
-                        inner.capabilities = refreshed;
-                        continue;
-                    }
-                    return Err(err).with_context(|| {
-                        format!(
-                            "MCP server `{}` error during tool call `{tool_name}`",
-                            inner.config.name
-                        )
-                    });
-                }
-            }
-        };
-
-        if let Some(err) = resp.error {
-            bail!("MCP tool `{tool_name}` error {}: {}", err.code, err.message);
+    /// Generation-aware recovery coordinator: owns reset/respawn/handshake.
+    async fn recover_transport(&self, observed_gen: u64) -> Result<()> {
+        let _guard = self.inner.recovery.lock().await;
+        if self.inner.transport.generation() > observed_gen {
+            return Ok(());
         }
-
-        let result = resp.result.unwrap_or(serde_json::Value::Null);
-
-        // MCP servers signal *tool-execution* failures (as opposed to JSON-RPC
-        // protocol errors) with HTTP 200 + `result.isError: true` and the detail
-        // in `result.content[].text`, per the MCP spec. Surface it (scrubbed and
-        // length-bounded) so the failure is visible to the model and the log.
-        check_result_is_error(&result, tool_name, &inner.config.name)?;
-
-        Ok(result)
+        let server_name = self.inner.config.name.clone();
+        self.inner
+            .transport
+            .reset()
+            .await
+            .with_context(|| format!("MCP server `{server_name}` failed to reset transport"))?;
+        let init_id = self.alloc_id();
+        let caps = handshake(self.inner.transport.as_ref(), &server_name, init_id)
+            .await
+            .with_context(|| {
+                format!("MCP server `{server_name}` failed to re-handshake after transport reset")
+            })?;
+        *self.inner.capabilities.write() = caps;
+        Ok(())
     }
 
-    /// Generic JSON-RPC method dispatch with the same timeout, bounded
-    /// reconnect, and error surfacing as `call_tool`. Returns the raw
-    /// `result` value; callers apply any method-specific envelope handling.
-    pub(crate) async fn dispatch_method(
+    async fn rpc_with_policy(
         &self,
         rpc_method: &str,
         params: serde_json::Value,
+        allow_not_sent_retry: bool,
     ) -> Result<serde_json::Value> {
-        let mut inner = self.inner.lock().await;
+        let tool_timeout = self.inner.config.resolved_tool_timeout_secs();
+        let server_name = self.inner.config.name.clone();
+        let side_effecting = rpc_method == "tools/call";
+        let mut not_sent_attempt = 0u32;
 
-        let tool_timeout = inner
-            .config
-            .tool_timeout_secs
-            .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS)
-            .min(MAX_TOOL_TIMEOUT_SECS);
-
-        let mut attempt = 0u32;
         let resp = loop {
-            let id = inner.next_id.fetch_add(1, Ordering::Relaxed);
+            let id = self.alloc_id();
             let req = JsonRpcRequest::new(id, rpc_method, params.clone());
-
+            let observed_gen = self.inner.transport.generation();
             let send_result = timeout(
                 Duration::from_secs(tool_timeout),
-                inner.transport.send_and_recv(&req),
+                self.inner.transport.send_and_recv(&req),
             )
-            .await
-            .map_err(|_| {
-                anyhow::Error::msg(format!(
-                    "MCP server `{}` timed out after {}s during `{rpc_method}`",
-                    inner.config.name, tool_timeout
-                ))
-            })?;
+            .await;
 
             match send_result {
-                Ok(resp) => break resp,
-                Err(err) => {
-                    let recoverable_reason = err
-                        .downcast_ref::<McpTransportError>()
-                        .map(|te| te.to_string());
-                    if let Some(_reason) = recoverable_reason
-                        && attempt < MAX_RECONNECT_ATTEMPTS
+                Ok(Ok(resp)) => break resp,
+                Ok(Err(err)) => match err.downcast_ref::<McpTransportError>() {
+                    Some(McpTransportError::NotSent)
+                        if allow_not_sent_retry && not_sent_attempt < MAX_NOT_SENT_RETRIES =>
                     {
-                        attempt += 1;
-                        let server_name = inner.config.name.clone();
+                        not_sent_attempt += 1;
+                        if let Err(rec_err) = self.recover_transport(observed_gen).await {
+                            return Err(err).context(rec_err).context(format!(
+                                "MCP server `{server_name}` `{rpc_method}` failed; recovery also failed"
+                            ));
+                        }
                         tokio::time::sleep(Duration::from_millis(RECONNECT_BACKOFF_MS)).await;
-                        inner.transport.reset().await.with_context(|| {
-                            format!(
-                                "MCP server `{server_name}` failed to reset transport during reconnect"
-                            )
-                        })?;
-                        let refreshed = handshake(inner.transport.as_mut(), &server_name)
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "MCP server `{server_name}` failed to re-handshake during reconnect"
-                                )
-                            })?;
-                        inner.capabilities = refreshed;
                         continue;
                     }
-                    return Err(err).with_context(|| {
-                        format!(
-                            "MCP server `{}` error during `{rpc_method}`",
-                            inner.config.name
-                        )
-                    });
+                    Some(
+                        te @ (McpTransportError::StaleSession { .. }
+                        | McpTransportError::TransportClosed
+                        | McpTransportError::ResponseTimeout
+                        | McpTransportError::OutcomeUnknown),
+                    ) => {
+                        let reason = te.to_string();
+                        let recovery = self.recover_transport(observed_gen).await;
+                        let primary = if side_effecting
+                            || matches!(
+                                te,
+                                McpTransportError::OutcomeUnknown
+                                    | McpTransportError::ResponseTimeout
+                                    | McpTransportError::TransportClosed
+                                    | McpTransportError::StaleSession { .. }
+                            ) {
+                            anyhow::Error::new(McpTransportError::OutcomeUnknown).context(
+                                format!(
+                                    "MCP server `{server_name}` `{rpc_method}` outcome unknown ({reason})"
+                                ),
+                            )
+                        } else {
+                            err
+                        };
+                        return match recovery {
+                            Ok(()) => Err(primary),
+                            Err(rec_err) => Err(primary)
+                                .context(rec_err)
+                                .context("transport recovery failed after primary RPC error"),
+                        };
+                    }
+                    _ => {
+                        return Err(err).with_context(|| {
+                            format!("MCP server `{server_name}` error during `{rpc_method}`")
+                        });
+                    }
+                },
+                Err(_) => {
+                    let recovery = self.recover_transport(observed_gen).await;
+                    let primary = anyhow::Error::msg(format!(
+                        "MCP server `{server_name}` timed out after {tool_timeout}s during `{rpc_method}`"
+                    ));
+                    return match recovery {
+                        Ok(()) => Err(primary),
+                        Err(rec_err) => Err(primary)
+                            .context(rec_err)
+                            .context("transport recovery failed after timeout"),
+                    };
                 }
             }
         };
@@ -478,20 +358,37 @@ impl McpServer {
             bail!("MCP `{rpc_method}` error {}: {}", err.code, err.message);
         }
         let result = resp.result.unwrap_or(serde_json::Value::Null);
-        check_result_is_error(&result, rpc_method, &inner.config.name)?;
+        check_result_is_error(&result, rpc_method, &server_name)?;
         Ok(result)
     }
 
-    /// `resources/list` — capability-gated.
+    pub async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.rpc_with_policy(
+            "tools/call",
+            json!({ "name": tool_name, "arguments": arguments }),
+            true,
+        )
+        .await
+    }
+
+    pub(crate) async fn dispatch_method(
+        &self,
+        rpc_method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.rpc_with_policy(rpc_method, params, true).await
+    }
+
     pub async fn list_resources(&self, cursor: Option<String>) -> Result<McpResourcesListResult> {
-        {
-            let inner = self.inner.lock().await;
-            if !inner.capabilities.supports_resources() {
-                bail!(
-                    "MCP server `{}` does not support resources",
-                    inner.config.name
-                );
-            }
+        if !self.inner.capabilities.read().supports_resources() {
+            bail!(
+                "MCP server `{}` does not support resources",
+                self.inner.config.name
+            );
         }
         let params = match cursor {
             Some(c) => json!({ "cursor": c }),
@@ -501,16 +398,12 @@ impl McpServer {
         serde_json::from_value(raw).context("failed to parse resources/list result")
     }
 
-    /// `resources/read` — capability-gated.
     pub async fn read_resource(&self, uri: &str) -> Result<McpResourceContents> {
-        {
-            let inner = self.inner.lock().await;
-            if !inner.capabilities.supports_resources() {
-                bail!(
-                    "MCP server `{}` does not support resources",
-                    inner.config.name
-                );
-            }
+        if !self.inner.capabilities.read().supports_resources() {
+            bail!(
+                "MCP server `{}` does not support resources",
+                self.inner.config.name
+            );
         }
         let raw = self
             .dispatch_method("resources/read", json!({ "uri": uri }))
@@ -518,16 +411,12 @@ impl McpServer {
         serde_json::from_value(raw).context("failed to parse resources/read result")
     }
 
-    /// `prompts/list` — capability-gated.
     pub async fn list_prompts(&self, cursor: Option<String>) -> Result<McpPromptsListResult> {
-        {
-            let inner = self.inner.lock().await;
-            if !inner.capabilities.supports_prompts() {
-                bail!(
-                    "MCP server `{}` does not support prompts",
-                    inner.config.name
-                );
-            }
+        if !self.inner.capabilities.read().supports_prompts() {
+            bail!(
+                "MCP server `{}` does not support prompts",
+                self.inner.config.name
+            );
         }
         let params = match cursor {
             Some(c) => json!({ "cursor": c }),
@@ -537,20 +426,16 @@ impl McpServer {
         serde_json::from_value(raw).context("failed to parse prompts/list result")
     }
 
-    /// `prompts/get` — capability-gated.
     pub async fn get_prompt(
         &self,
         name: &str,
         arguments: serde_json::Value,
     ) -> Result<McpGetPromptResult> {
-        {
-            let inner = self.inner.lock().await;
-            if !inner.capabilities.supports_prompts() {
-                bail!(
-                    "MCP server `{}` does not support prompts",
-                    inner.config.name
-                );
-            }
+        if !self.inner.capabilities.read().supports_prompts() {
+            bail!(
+                "MCP server `{}` does not support prompts",
+                self.inner.config.name
+            );
         }
         let raw = self
             .dispatch_method(
@@ -641,36 +526,34 @@ impl McpRegistry {
 
         #[async_trait]
         impl McpTransportConn for NoopTransport {
-            async fn send_and_recv(
-                &mut self,
-                _request: &JsonRpcRequest,
-            ) -> Result<JsonRpcResponse> {
+            async fn send_and_recv(&self, _request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
                 unreachable!(
                     "for_test_with_server_count registry is only used for server_count/Arc equality"
                 )
             }
 
-            async fn close(&mut self) -> Result<()> {
+            async fn close(&self) -> Result<()> {
                 Ok(())
             }
         }
 
         fn stub_server(name: &str) -> McpServer {
             let inner = McpServerInner {
-                config: McpServerConfig {
+                config: Arc::new(McpServerConfig {
                     name: name.to_string(),
                     ..McpServerConfig::default()
-                },
-                transport: Box::new(NoopTransport),
+                }),
+                transport: Arc::new(NoopTransport),
                 #[cfg(target_has_atomic = "64")]
                 next_id: AtomicU64::new(0),
                 #[cfg(not(target_has_atomic = "64"))]
                 next_id: AtomicU32::new(0),
                 tools: Vec::new(),
-                capabilities: McpServerCapabilities::default(),
+                capabilities: RwLock::new(McpServerCapabilities::default()),
+                recovery: AsyncMutex::new(()),
             };
             McpServer {
-                inner: Arc::new(Mutex::new(inner)),
+                inner: Arc::new(inner),
             }
         }
 
@@ -789,36 +672,34 @@ impl McpRegistry {
 
         #[async_trait]
         impl McpTransportConn for NoopTransport {
-            async fn send_and_recv(
-                &mut self,
-                _request: &JsonRpcRequest,
-            ) -> Result<JsonRpcResponse> {
+            async fn send_and_recv(&self, _request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
                 unreachable!(
                     "for_test_make_stub_server is only used for identity / \
                      ptr_eq / server_count assertions — never for actual tool calls"
                 )
             }
 
-            async fn close(&mut self) -> Result<()> {
+            async fn close(&self) -> Result<()> {
                 Ok(())
             }
         }
 
         let inner = McpServerInner {
-            config: McpServerConfig {
+            config: Arc::new(McpServerConfig {
                 name: name.to_string(),
                 ..McpServerConfig::default()
-            },
-            transport: Box::new(NoopTransport),
+            }),
+            transport: Arc::new(NoopTransport),
             #[cfg(target_has_atomic = "64")]
             next_id: AtomicU64::new(0),
             #[cfg(not(target_has_atomic = "64"))]
             next_id: AtomicU32::new(0),
             tools: Vec::new(),
-            capabilities: McpServerCapabilities::default(),
+            capabilities: RwLock::new(McpServerCapabilities::default()),
+            recovery: AsyncMutex::new(()),
         };
         McpServer {
-            inner: std::sync::Arc::new(Mutex::new(inner)),
+            inner: Arc::new(inner),
         }
     }
 
@@ -830,8 +711,8 @@ impl McpRegistry {
     /// Tool definition for a given prefixed name (cloned).
     pub async fn get_tool_def(&self, prefixed_name: &str) -> Option<McpToolDef> {
         let (server_idx, original_name) = self.tool_index.get(prefixed_name)?;
-        let inner = self.servers[*server_idx].inner.lock().await;
-        inner
+        self.servers[*server_idx]
+            .inner
             .tools
             .iter()
             .find(|t| &t.name == original_name)
@@ -1079,6 +960,48 @@ impl McpRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Echo the request JSON-RPC id into a success response (strict id matching).
+    struct EchoRpcResult {
+        result: serde_json::Value,
+        session_id: Option<&'static str>,
+    }
+
+    impl wiremock::Respond for EchoRpcResult {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).unwrap_or_else(|_| serde_json::json!({}));
+            let id = body.get("id").cloned().unwrap_or(serde_json::json!(1));
+            let mut tmpl = wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": self.result,
+            }));
+            if let Some(sid) = self.session_id {
+                tmpl = tmpl.insert_header("Mcp-Session-Id", sid);
+            }
+            tmpl
+        }
+    }
+
+    struct EchoRpcError {
+        code: i32,
+        message: &'static str,
+    }
+
+    impl wiremock::Respond for EchoRpcError {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).unwrap_or_else(|_| serde_json::json!({}));
+            let id = body.get("id").cloned().unwrap_or(serde_json::json!(1));
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": self.code, "message": self.message},
+            }))
+        }
+    }
+
     use zeroclaw_config::schema::McpTransport;
 
     #[test]
@@ -1139,14 +1062,10 @@ mod tests {
         // initialize advertises prompts capability so the method is not gated.
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "initialize"})))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Mcp-Session-Id", "s")
-                    .set_body_json(json!({
-                        "jsonrpc":"2.0","id":1,
-                        "result":{"capabilities":{"prompts":{}}}
-                    })),
-            )
+            .respond_with(EchoRpcResult {
+                result: json!({"capabilities": {"prompts": {}}}),
+                session_id: Some("s"),
+            })
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -1158,18 +1077,19 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method":"tools/list"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jsonrpc":"2.0","id":2,"result":{"tools":[]}
-            })))
+            .respond_with(EchoRpcResult {
+                result: json!({"tools": []}),
+                session_id: None,
+            })
             .mount(&server)
             .await;
         // prompts/list returns a bare name plus a nextCursor.
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method":"prompts/list"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jsonrpc":"2.0","id":3,
-                "result":{"prompts":[{"name":"summarize"}],"nextCursor":"page2"}
-            })))
+            .respond_with(EchoRpcResult {
+                result: json!({"prompts":[{"name":"summarize"}],"nextCursor":"page2"}),
+                session_id: None,
+            })
             .mount(&server)
             .await;
 
@@ -1243,7 +1163,7 @@ mod tests {
             transport: McpTransport::Http,
             ..Default::default()
         };
-        let result = create_transport(&config);
+        let result = create_transport(Arc::new(config));
         assert!(result.is_err());
     }
 
@@ -1254,7 +1174,7 @@ mod tests {
             transport: McpTransport::Sse,
             ..Default::default()
         };
-        let result = create_transport(&config);
+        let result = create_transport(Arc::new(config));
         assert!(result.is_err());
     }
 
@@ -1318,7 +1238,7 @@ mod tests {
     #[async_trait::async_trait]
     impl McpTransportConn for FakeTransport {
         async fn send_and_recv(
-            &mut self,
+            &self,
             _request: &JsonRpcRequest,
         ) -> Result<crate::mcp_protocol::JsonRpcResponse> {
             Ok(crate::mcp_protocol::JsonRpcResponse {
@@ -1329,7 +1249,7 @@ mod tests {
             })
         }
 
-        async fn close(&mut self) -> Result<()> {
+        async fn close(&self) -> Result<()> {
             Ok(())
         }
     }
@@ -1337,20 +1257,21 @@ mod tests {
     /// Build an `McpServer` whose transport yields `result` on every call.
     fn server_returning(result: serde_json::Value) -> McpServer {
         let inner = McpServerInner {
-            config: McpServerConfig {
+            config: Arc::new(McpServerConfig {
                 name: "fake".into(),
                 ..Default::default()
-            },
-            transport: Box::new(FakeTransport { result }),
+            }),
+            transport: Arc::new(FakeTransport { result }),
             #[cfg(target_has_atomic = "64")]
             next_id: AtomicU64::new(3),
             #[cfg(not(target_has_atomic = "64"))]
             next_id: AtomicU32::new(3),
             tools: vec![],
-            capabilities: McpServerCapabilities::default(),
+            capabilities: RwLock::new(McpServerCapabilities::default()),
+            recovery: AsyncMutex::new(()),
         };
         McpServer {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(inner),
         }
     }
 
@@ -1360,20 +1281,21 @@ mod tests {
         result: serde_json::Value,
     ) -> McpServer {
         let inner = McpServerInner {
-            config: McpServerConfig {
+            config: Arc::new(McpServerConfig {
                 name: "fake".into(),
                 ..Default::default()
-            },
-            transport: Box::new(FakeTransport { result }),
+            }),
+            transport: Arc::new(FakeTransport { result }),
             #[cfg(target_has_atomic = "64")]
             next_id: AtomicU64::new(3),
             #[cfg(not(target_has_atomic = "64"))]
             next_id: AtomicU32::new(3),
             tools: vec![],
-            capabilities,
+            capabilities: RwLock::new(capabilities),
+            recovery: AsyncMutex::new(()),
         };
         McpServer {
-            inner: Arc::new(Mutex::new(inner)),
+            inner: Arc::new(inner),
         }
     }
 
@@ -1663,24 +1585,20 @@ done
 
     #[tokio::test]
     async fn call_tool_reconnects_on_stale_session() {
+        // Superseded semantics: stale session surfaces outcome-unknown (no tool
+        // replay); recovery prepares the next call.
         use wiremock::matchers::{body_partial_json, method};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-
-        // initialize → 200 + session header. Hit twice: initial connect plus the
-        // reconnect that follows the stale-session error.
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "initialize"})))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Mcp-Session-Id", "sess-1")
-                    .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {}})),
-            )
-            .expect(2)
+            .respond_with(EchoRpcResult {
+                result: json!({"capabilities": {}}),
+                session_id: Some("sess-1"),
+            })
             .mount(&server)
             .await;
-
         Mock::given(method("POST"))
             .and(body_partial_json(
                 json!({"method": "notifications/initialized"}),
@@ -1688,20 +1606,14 @@ done
             .respond_with(ResponseTemplate::new(202))
             .mount(&server)
             .await;
-
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "tools/list"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "result": {"tools": [{"name": "echo", "description": "d", "inputSchema": {"type": "object"}}]}
-            })))
-            .expect(1)
+            .respond_with(EchoRpcResult {
+                result: json!({"tools": [{"name": "echo", "description": "d", "inputSchema": {"type": "object"}}]}),
+                session_id: None,
+            })
             .mount(&server)
             .await;
-
-        // First tools/call → 404 (stale session). Highest priority, single use,
-        // so after it is exhausted the success mock below takes over.
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "tools/call"})))
             .respond_with(ResponseTemplate::new(404))
@@ -1710,13 +1622,12 @@ done
             .expect(1)
             .mount(&server)
             .await;
-
-        // Retried tools/call after reconnect → success.
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "tools/call"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jsonrpc": "2.0", "id": 3, "result": {"ok": true}
-            })))
+            .respond_with(EchoRpcResult {
+                result: json!({"ok": true}),
+                session_id: None,
+            })
             .expect(1)
             .mount(&server)
             .await;
@@ -1724,12 +1635,19 @@ done
         let srv = McpServer::connect(http_server_config(server.uri()))
             .await
             .expect("connect");
+        let err = srv
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("stale session must not auto-replay");
+        assert!(
+            format!("{err:#}").contains("outcome unknown"),
+            "got: {err:#}"
+        );
         let result = srv
             .call_tool("echo", json!({}))
             .await
-            .expect("call_tool should succeed after reconnect");
+            .expect("next call after recovery");
         assert_eq!(result, json!({"ok": true}));
-        server.verify().await;
     }
 
     #[tokio::test]
@@ -1746,7 +1664,7 @@ done
             .respond_with(
                 ResponseTemplate::new(200)
                     .insert_header("Mcp-Session-Id", "sess-1")
-                    .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {}})),
+                    .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {}})), // placeholder
             )
             .expect(1)
             .mount(&server)
@@ -1762,11 +1680,10 @@ done
 
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "tools/list"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "result": {"tools": [{"name": "echo", "description": "d", "inputSchema": {"type": "object"}}]}
-            })))
+            .respond_with(EchoRpcResult {
+                result: json!({"tools": [{"name": "echo", "description": "d", "inputSchema": {"type": "object"}}]}),
+                session_id: None,
+            })
             .mount(&server)
             .await;
 
@@ -1774,9 +1691,10 @@ done
         // Expected exactly once: no retry.
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "tools/call"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jsonrpc": "2.0", "id": 3, "error": {"code": -32000, "message": "boom"}
-            })))
+            .respond_with(EchoRpcError {
+                code: -32000,
+                message: "boom",
+            })
             .expect(1)
             .mount(&server)
             .await;
@@ -1806,7 +1724,7 @@ done
             .and(body_partial_json(json!({"method": "initialize"})))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {}})),
+                    .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {}})), // placeholder
             )
             .expect(1)
             .mount(&server)
@@ -1822,11 +1740,10 @@ done
 
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "tools/list"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "result": {"tools": [{"name": "echo", "description": "d", "inputSchema": {"type": "object"}}]}
-            })))
+            .respond_with(EchoRpcResult {
+                result: json!({"tools": [{"name": "echo", "description": "d", "inputSchema": {"type": "object"}}]}),
+                session_id: None,
+            })
             .mount(&server)
             .await;
 
@@ -1935,5 +1852,77 @@ done
             .await
             .expect_err("jsonrpc error should surface");
         assert!(err.to_string().contains("nope"), "got: {err}");
+    }
+    #[test]
+    fn no_duplicate_client_timeout_constants() {
+        let src = include_str!("mcp_client.rs");
+        let d = ["const DEFAULT_TOOL_", "TIMEOUT_SECS: u64"].concat();
+        let m = ["const MAX_TOOL_", "TIMEOUT_SECS: u64"].concat();
+        assert!(!src.contains(&d));
+        assert!(!src.contains(&m));
+    }
+
+    #[tokio::test]
+    async fn call_tool_stale_session_is_outcome_unknown_no_replay() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(EchoRpcResult {
+                result: json!({"capabilities": {}}),
+                session_id: Some("sess-1"),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "notifications/initialized"}),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/list"})))
+            .respond_with(EchoRpcResult {
+                result: json!({"tools": [{"name": "echo", "description": "d", "inputSchema": {"type": "object"}}]}),
+                session_id: None,
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(ResponseTemplate::new(404))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(EchoRpcResult {
+                result: json!({"ok": true}),
+                session_id: None,
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let srv = McpServer::connect(McpServerConfig {
+            name: "remote".into(),
+            transport: zeroclaw_config::schema::McpTransport::Http,
+            url: Some(server.uri()),
+            ..Default::default()
+        })
+        .await
+        .expect("connect");
+        let err = srv
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("no replay");
+        assert!(format!("{err:#}").contains("outcome unknown"), "{err:#}");
+        let ok = srv.call_tool("echo", json!({})).await.expect("next call");
+        assert_eq!(ok, json!({"ok": true}));
     }
 }

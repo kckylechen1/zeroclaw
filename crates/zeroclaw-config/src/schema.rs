@@ -4968,6 +4968,24 @@ pub struct McpServerConfig {
     pub pinned_resources: Vec<String>,
 }
 
+impl McpServerConfig {
+    /// Default tool-call timeout (seconds) when [`Self::tool_timeout_secs`] is unset.
+    ///
+    /// Single source of truth — clients and transports must resolve through
+    /// [`Self::resolved_tool_timeout_secs`] (or these associated constants).
+    pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 180;
+
+    /// Hard ceiling for [`Self::tool_timeout_secs`] (validation + runtime cap).
+    pub const MAX_TOOL_TIMEOUT_SECS: u64 = 600;
+
+    /// Resolve the effective tool-call timeout for this server.
+    pub fn resolved_tool_timeout_secs(&self) -> u64 {
+        self.tool_timeout_secs
+            .unwrap_or(Self::DEFAULT_TOOL_TIMEOUT_SECS)
+            .clamp(1, Self::MAX_TOOL_TIMEOUT_SECS)
+    }
+}
+
 /// External MCP client configuration (`[mcp]` section).
 #[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -9394,8 +9412,6 @@ fn service_selector_matches(selector: &str, service_key: &str) -> bool {
     false
 }
 
-const MCP_MAX_TOOL_TIMEOUT_SECS: u64 = 600;
-
 fn validate_mcp_config(config: &McpConfig) -> Result<()> {
     let mut seen_names = std::collections::HashSet::new();
     for (i, server) in config.servers.iter().enumerate() {
@@ -9419,9 +9435,10 @@ fn validate_mcp_config(config: &McpConfig) -> Result<()> {
                     "mcp.servers[{i}].tool_timeout_secs must be greater than 0"
                 );
             }
-            if timeout > MCP_MAX_TOOL_TIMEOUT_SECS {
+            if timeout > McpServerConfig::MAX_TOOL_TIMEOUT_SECS {
                 anyhow::bail!(
-                    "mcp.servers[{i}].tool_timeout_secs exceeds max {MCP_MAX_TOOL_TIMEOUT_SECS}"
+                    "mcp.servers[{i}].tool_timeout_secs exceeds max {}",
+                    McpServerConfig::MAX_TOOL_TIMEOUT_SECS
                 );
             }
         }
@@ -29525,7 +29542,7 @@ high_entropy_tokens = false
     #[test]
     async fn validate_mcp_config_rejects_timeout_exceeding_max() {
         let mut server = stdio_server("fs", "/usr/bin/mcp-fs");
-        server.tool_timeout_secs = Some(MCP_MAX_TOOL_TIMEOUT_SECS + 1);
+        server.tool_timeout_secs = Some(McpServerConfig::MAX_TOOL_TIMEOUT_SECS + 1);
         let cfg = McpConfig {
             enabled: true,
             servers: vec![server],
@@ -29538,7 +29555,7 @@ high_entropy_tokens = false
     #[test]
     async fn validate_mcp_config_allows_max_timeout_exactly() {
         let mut server = stdio_server("fs", "/usr/bin/mcp-fs");
-        server.tool_timeout_secs = Some(MCP_MAX_TOOL_TIMEOUT_SECS);
+        server.tool_timeout_secs = Some(McpServerConfig::MAX_TOOL_TIMEOUT_SECS);
         let cfg = McpConfig {
             enabled: true,
             servers: vec![server],

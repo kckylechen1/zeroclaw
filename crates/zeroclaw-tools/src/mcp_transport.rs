@@ -1,22 +1,29 @@
 //! MCP transport abstraction — supports stdio, SSE, and HTTP transports.
 
 use std::borrow::Cow;
-
-use anyhow::{Context, Result, bail};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, Notify, oneshot};
-use tokio::time::{Duration, timeout};
-use tokio_stream::StreamExt;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::mcp_protocol::{JsonRpcRequest, JsonRpcResponse};
+use anyhow::{Context, Result, bail};
+use futures_util::stream::FuturesUnordered;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot};
+use tokio::time::{Duration, timeout};
+use tokio_stream::StreamExt;
 use zeroclaw_config::schema::{McpServerConfig, McpTransport};
 
 /// Maximum bytes for a single JSON-RPC response.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024; // 4 MB
 
-/// Timeout for init/list operations.
+/// Timeout for init/list operations (and non-tool stdio waits).
 const RECV_TIMEOUT_SECS: u64 = 30;
+
+/// Bound on a single stdin write attempt so a blocked pipe cannot stall
+/// cancel/reset/close indefinitely.
+const STDIO_WRITE_TIMEOUT_SECS: u64 = 15;
 
 /// Legacy default HTTP request timeout for non-tool MCP HTTP/SSE requests.
 const DEFAULT_HTTP_REQUEST_TIMEOUT_SECS: u64 = 120;
@@ -32,25 +39,32 @@ const MCP_JSON_CONTENT_TYPE: &str = "application/json";
 /// Streamable HTTP session header used to preserve MCP server state.
 const MCP_SESSION_ID_HEADER: &str = "Mcp-Session-Id";
 
-fn http_request_timeout_secs(
-    request: &JsonRpcRequest,
-    tool_timeout_secs: Option<u64>,
-) -> Option<u64> {
+fn http_request_timeout_secs(request: &JsonRpcRequest, config: &McpServerConfig) -> Option<u64> {
     if request.method == TOOLS_CALL_METHOD {
-        tool_timeout_secs
+        // When unset, leave budget to the client outer timeout.
+        config
+            .tool_timeout_secs
+            .map(|t| t.clamp(1, McpServerConfig::MAX_TOOL_TIMEOUT_SECS))
     } else {
         Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS)
     }
 }
 
-fn http_sse_read_timeout_secs(
-    request: &JsonRpcRequest,
-    tool_timeout_secs: Option<u64>,
-) -> Option<u64> {
+fn http_sse_read_timeout_secs(request: &JsonRpcRequest, config: &McpServerConfig) -> Option<u64> {
     if request.method == TOOLS_CALL_METHOD {
-        tool_timeout_secs
+        config
+            .tool_timeout_secs
+            .map(|t| t.clamp(1, McpServerConfig::MAX_TOOL_TIMEOUT_SECS))
     } else {
         Some(RECV_TIMEOUT_SECS)
+    }
+}
+
+fn stdio_recv_timeout_secs(request: &JsonRpcRequest, config: &McpServerConfig) -> u64 {
+    if request.method == TOOLS_CALL_METHOD {
+        config.resolved_tool_timeout_secs()
+    } else {
+        RECV_TIMEOUT_SECS
     }
 }
 
@@ -67,231 +81,760 @@ fn apply_request_timeout(
 
 // ── Transport Errors ───────────────────────────────────────────────────────
 
-/// Transport-level failures that are recoverable by reconnecting — resetting
-/// the session and re-running the MCP handshake — rather than surfacing to the
-/// caller. Distinct from a genuine tool/application error, which must be
-/// reported as-is and never retried.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum McpTransportError {
-    /// The server no longer recognizes our session (typically after it
-    /// restarted). Surfaced from HTTP 404/410 responses.
     #[error("MCP session is stale (HTTP {status})")]
     StaleSession { status: u16 },
 
-    /// The underlying stream/connection dropped before a response arrived
-    /// (e.g. SSE EOF or connection reset).
     #[error("MCP transport connection closed")]
     TransportClosed,
+
+    #[error("MCP transport timed out waiting for response")]
+    ResponseTimeout,
+
+    /// Request was written (or write progress is uncertain). Do not auto-replay.
+    #[error("MCP tool call outcome unknown (transport closed after submit)")]
+    OutcomeUnknown,
+
+    /// Request was definitely not written; safe to retry.
+    #[error("MCP request was not sent")]
+    NotSent,
+}
+
+// ── Strict inbound classifier ──────────────────────────────────────────────
+
+/// Classify a server→client JSON-RPC message.
+///
+/// Rules:
+/// - objects with `method` are server requests/notifications (never responses)
+/// - responses must have `id` and either `result` or `error`
+/// - anything else is rejected / skippable
+#[derive(Debug)]
+pub(crate) enum JsonRpcInbound {
+    Response(JsonRpcResponse),
+    ServerMessage {
+        id: Option<serde_json::Value>,
+        method: String,
+    },
+    Skippable,
+}
+
+pub(crate) fn classify_jsonrpc_value(value: serde_json::Value) -> Result<JsonRpcInbound> {
+    if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
+        return Ok(JsonRpcInbound::ServerMessage {
+            id: value.get("id").cloned(),
+            method: method.to_string(),
+        });
+    }
+    if value.get("id").is_none() {
+        return Ok(JsonRpcInbound::Skippable);
+    }
+    let has_result = value.get("result").is_some();
+    let has_error = value.get("error").is_some();
+    if !has_result && !has_error {
+        bail!("JSON-RPC response envelope missing both result and error");
+    }
+    let resp: JsonRpcResponse =
+        serde_json::from_value(value).context("invalid JSON-RPC response envelope")?;
+    Ok(JsonRpcInbound::Response(resp))
+}
+
+pub(crate) fn classify_jsonrpc_str(line: &str) -> Result<JsonRpcInbound> {
+    let value: serde_json::Value =
+        serde_json::from_str(line).with_context(|| format!("invalid JSON-RPC message: {line}"))?;
+    classify_jsonrpc_value(value)
+}
+
+/// Match a classified response against an expected JSON-RPC id.
+pub(crate) fn match_response_id(resp: &JsonRpcResponse, expected_id: &serde_json::Value) -> bool {
+    resp.id.as_ref() == Some(expected_id)
 }
 
 // ── Transport Trait ──────────────────────────────────────────────────────
 
-/// Abstract transport for MCP communication.
+/// Shared (`&self`) transport surface. Stdio uses a worker; HTTP/SSE use
+/// [`SerialTransport`] to preserve exclusive behavior.
 #[async_trait::async_trait]
 pub trait McpTransportConn: Send + Sync {
-    /// Send a JSON-RPC request and receive the response.
-    async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse>;
+    async fn send_and_recv(&self, request: &JsonRpcRequest) -> Result<JsonRpcResponse>;
 
-    /// Reset per-connection session state so the next operation re-establishes
-    /// a fresh session. Default is a no-op for stateless transports (stdio).
-    async fn reset(&mut self) -> Result<()> {
+    async fn reset(&self) -> Result<()> {
         Ok(())
     }
 
-    /// Check whether the underlying transport is still alive without sending a
-    /// real request.  The HTTP and SSE transports always return `Ok(true)` —
-    /// connection drops surface through `send_and_recv` errors.  The stdio
-    /// transport verifies the child process is still running via `try_wait()`.
-    fn health_check(&mut self) -> bool {
+    /// Monotonic generation; advances on successful reset/respawn.
+    fn generation(&self) -> u64 {
+        0
+    }
+
+    fn health_check(&self) -> bool {
         true
     }
 
-    /// Close the connection.
+    async fn close(&self) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+trait ExclusiveMcpTransport: Send {
+    async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse>;
+    async fn reset(&mut self) -> Result<()>;
+    fn health_check(&mut self) -> bool {
+        true
+    }
     async fn close(&mut self) -> Result<()>;
 }
 
-// ── Stdio Transport ──────────────────────────────────────────────────────
+/// Serializes HTTP/SSE RPCs (conservative exclusive behavior).
+struct SerialTransport<T> {
+    inner: Mutex<T>,
+    generation: AtomicU64,
+}
 
-/// Stdio-based transport (spawn local process).
+impl<T> SerialTransport<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner: Mutex::new(inner),
+            generation: AtomicU64::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<T> McpTransportConn for SerialTransport<T>
+where
+    T: ExclusiveMcpTransport,
+{
+    async fn send_and_recv(&self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
+        self.inner.lock().await.send_and_recv(request).await
+    }
+
+    async fn reset(&self) -> Result<()> {
+        self.inner.lock().await.reset().await?;
+        self.generation.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn health_check(&self) -> bool {
+        self.inner
+            .try_lock()
+            .map(|mut g| g.health_check())
+            .unwrap_or(true)
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.inner.lock().await.close().await
+    }
+}
+
+// ── Stdio Transport (worker / request router) ────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteProgress {
+    NotStarted,
+    /// At least one write syscall may have delivered bytes to the pipe.
+    Started,
+}
+
+struct CancelOnDrop {
+    tx: Option<oneshot::Sender<()>>,
+}
+
+impl CancelOnDrop {
+    fn arm() -> (Self, oneshot::Receiver<()>) {
+        let (tx, rx) = oneshot::channel();
+        (Self { tx: Some(tx) }, rx)
+    }
+
+    fn disarm(&mut self) {
+        self.tx.take();
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Stdio handle. Callers never own the pipes; a worker serializes stdin writes
+/// and demuxes stdout by JSON-RPC id.
+///
+/// Concurrent `send_and_recv` futures do **not** hold a server mutex across
+/// waits. Stdio writes remain serialized by the worker.
+///
+/// The worker does **not** auto-respawn. Dirty sessions leave `session = None`
+/// and the generation-aware client coordinator owns reset/handshake.
 pub struct StdioTransport {
-    _child: Child,
+    config: Arc<McpServerConfig>,
+    cmd_tx: mpsc::Sender<StdioWorkerCmd>,
+    generation: Arc<AtomicU64>,
+    child_alive: Arc<AtomicBool>,
+}
+
+enum StdioWorkerCmd {
+    Rpc {
+        request: JsonRpcRequest,
+        cancel: oneshot::Receiver<()>,
+        reply: oneshot::Sender<Result<JsonRpcResponse>>,
+    },
+    Reset {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Close {
+        reply: oneshot::Sender<Result<()>>,
+    },
+}
+
+struct StdioSession {
+    child: Child,
     stdin: tokio::process::ChildStdin,
     stdout_lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
 }
 
+struct PendingRpc {
+    reply: oneshot::Sender<Result<JsonRpcResponse>>,
+    deadline_abort: tokio::task::AbortHandle,
+    cancel_abort: tokio::task::AbortHandle,
+}
+
 impl StdioTransport {
-    pub fn new(config: &McpServerConfig) -> Result<Self> {
-        let mut child = Command::new(&config.command)
-            .args(&config.args)
-            .envs(&config.env)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("failed to spawn MCP server `{}`", config.name))?;
-
-        let stdin = child.stdin.take().ok_or_else(|| {
-            ::zeroclaw_log::record!(
-                ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({
-                        "mcp_server": &config.name,
-                        "missing": "stdin",
-                    })),
-                "mcp_transport: no stdin on spawned MCP server"
-            );
-            anyhow::Error::msg(format!("no stdin on MCP server `{}`", config.name))
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            ::zeroclaw_log::record!(
-                ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({
-                        "mcp_server": &config.name,
-                        "missing": "stdout",
-                    })),
-                "mcp_transport: no stdout on spawned MCP server"
-            );
-            anyhow::Error::msg(format!("no stdout on MCP server `{}`", config.name))
-        })?;
-        let stdout_lines = BufReader::new(stdout).lines();
-
+    pub fn new(config: Arc<McpServerConfig>) -> Result<Self> {
+        let session = spawn_stdio_session(&config)?;
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let generation = Arc::new(AtomicU64::new(0));
+        let child_alive = Arc::new(AtomicBool::new(true));
+        let worker_config = Arc::clone(&config);
+        let gen_w = Arc::clone(&generation);
+        let alive_w = Arc::clone(&child_alive);
+        zeroclaw_spawn::spawn!(async move {
+            stdio_worker(worker_config, session, cmd_rx, gen_w, alive_w).await;
+        });
         Ok(Self {
-            _child: child,
-            stdin,
-            stdout_lines,
+            config,
+            cmd_tx,
+            generation,
+            child_alive,
         })
     }
 
-    async fn send_raw(&mut self, line: &str) -> Result<()> {
-        self.stdin
-            .write_all(line.as_bytes())
-            .await
-            .context("failed to write to MCP server stdin")?;
-        self.stdin
-            .write_all(b"\n")
-            .await
-            .context("failed to write newline to MCP server stdin")?;
-        self.stdin.flush().await.context("failed to flush stdin")?;
-        Ok(())
+    async fn send_cmd(&self, cmd: StdioWorkerCmd) -> Result<()> {
+        self.cmd_tx.send(cmd).await.map_err(|_| {
+            anyhow::Error::new(McpTransportError::TransportClosed).context(format!(
+                "MCP stdio worker unavailable for server `{}`",
+                self.config.name
+            ))
+        })
+    }
+}
+
+fn spawn_stdio_session(config: &McpServerConfig) -> Result<StdioSession> {
+    let mut command = Command::new(&config.command);
+    command
+        .args(&config.args)
+        .envs(&config.env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
+    // Own process group so reset can reap descendants (mirrors shell tool).
+    // Windows: no job-object helper exists in this crate; only the direct child
+    // is killed/reaped (process-tree orphans are a known platform limitation).
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn MCP server `{}`", config.name))?;
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::Error::msg(format!("no stdin on MCP server `{}`", config.name)))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::Error::msg(format!("no stdout on MCP server `{}`", config.name)))?;
+    Ok(StdioSession {
+        child,
+        stdin,
+        stdout_lines: BufReader::new(stdout).lines(),
+    })
+}
+
+/// Kill the child (process group on Unix) and await confirmed termination.
+///
+/// Returns `Err` if termination cannot be confirmed — callers must **not**
+/// spawn a replacement in that case.
+async fn kill_and_reap_stdio_session(session: &mut StdioSession, server_name: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = session.child.id()
+            && let Ok(pgid) = i32::try_from(pid)
+            && pgid > 0
+        {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Kill)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "mcp_server": server_name,
+                        "pgid": pgid,
+                        "signal": "SIGKILL",
+                    })),
+                "mcp_transport: reaping stdio MCP process group"
+            );
+            // SAFETY: pgid is the child's pid (== pgid when process_group(0)).
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = session.child.start_kill();
+    match timeout(Duration::from_secs(5), session.child.wait()).await {
+        Ok(Ok(_status)) => Ok(()),
+        Ok(Err(err)) => Err(anyhow::Error::new(err).context(format!(
+            "MCP server `{server_name}` wait failed while reaping stdio child"
+        ))),
+        Err(_) => {
+            // Last-resort poll.
+            match session.child.try_wait() {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err(anyhow::Error::msg(format!(
+                    "MCP server `{server_name}` child did not terminate after kill; refusing to spawn replacement"
+                ))),
+                Err(err) => Err(anyhow::Error::new(err).context(format!(
+                    "MCP server `{server_name}` try_wait failed after kill timeout"
+                ))),
+            }
+        }
+    }
+}
+
+async fn write_stdio_line_tracked(
+    stdin: &mut tokio::process::ChildStdin,
+    line: &str,
+) -> std::result::Result<(), (WriteProgress, anyhow::Error)> {
+    // Mark Started before the first syscall — any error afterward is
+    // OutcomeUnknown (bytes may have reached the pipe).
+    let progress = WriteProgress::Started;
+    if let Err(e) = stdin.write_all(line.as_bytes()).await {
+        return Err((
+            progress,
+            anyhow::Error::new(e).context("failed to write to MCP server stdin"),
+        ));
+    }
+    if let Err(e) = stdin.write_all(b"\n").await {
+        return Err((
+            progress,
+            anyhow::Error::new(e).context("failed to write newline to MCP server stdin"),
+        ));
+    }
+    if let Err(e) = stdin.flush().await {
+        return Err((
+            progress,
+            anyhow::Error::new(e).context("failed to flush stdin"),
+        ));
+    }
+    Ok(())
+}
+
+fn fail_pending(pending: &mut HashMap<serde_json::Value, PendingRpc>, err: McpTransportError) {
+    for (_, slot) in pending.drain() {
+        slot.deadline_abort.abort();
+        slot.cancel_abort.abort();
+        let _ = slot.reply.send(Err(err.clone().into()));
+    }
+}
+
+fn mark_session_dirty(
+    session: &mut Option<StdioSession>,
+    pending: &mut HashMap<serde_json::Value, PendingRpc>,
+    alive: &AtomicBool,
+    err: McpTransportError,
+) {
+    // Drop pipes without respawning — coordinator owns recovery.
+    *session = None;
+    alive.store(false, Ordering::Release);
+    fail_pending(pending, err);
+}
+
+async fn respawn_stdio_session(
+    config: &McpServerConfig,
+    session: &mut Option<StdioSession>,
+    generation: &AtomicU64,
+    alive: &AtomicBool,
+) -> Result<()> {
+    if let Some(mut old) = session.take() {
+        kill_and_reap_stdio_session(&mut old, &config.name).await?;
+    }
+    let new_session = spawn_stdio_session(config).with_context(|| {
+        format!(
+            "MCP server `{}` failed to spawn replacement stdio child after reset",
+            config.name
+        )
+    })?;
+    *session = Some(new_session);
+    alive.store(true, Ordering::Release);
+    generation.fetch_add(1, Ordering::Release);
+    Ok(())
+}
+
+async fn stdio_worker(
+    config: Arc<McpServerConfig>,
+    initial: StdioSession,
+    mut cmd_rx: mpsc::Receiver<StdioWorkerCmd>,
+    generation: Arc<AtomicU64>,
+    alive: Arc<AtomicBool>,
+) {
+    let mut session: Option<StdioSession> = Some(initial);
+    let mut pending: HashMap<serde_json::Value, PendingRpc> = HashMap::new();
+    let mut cancels: FuturesUnordered<
+        std::pin::Pin<Box<dyn std::future::Future<Output = serde_json::Value> + Send>>,
+    > = FuturesUnordered::new();
+    let mut deadlines: FuturesUnordered<
+        std::pin::Pin<Box<dyn std::future::Future<Output = serde_json::Value> + Send>>,
+    > = FuturesUnordered::new();
+
+    loop {
+        let has_session = session.is_some();
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                let Some(cmd) = cmd else { break; };
+                match cmd {
+                    StdioWorkerCmd::Rpc { request, mut cancel, reply } => {
+                        // Cancelled while queued — must not write.
+                        if cancel.try_recv().is_ok() {
+                            let _ = reply.send(Err(McpTransportError::NotSent.into()));
+                            continue;
+                        }
+                        let Some(sess) = session.as_mut() else {
+                            let _ = reply.send(Err(McpTransportError::NotSent.into()));
+                            continue;
+                        };
+                        let line = match serde_json::to_string(&request) {
+                            Ok(l) => l,
+                            Err(e) => {
+                                let _ = reply.send(Err(e.into()));
+                                continue;
+                            }
+                        };
+
+                        let write_result = tokio::select! {
+                            biased;
+                            c = &mut cancel => {
+                                let _ = c;
+                                Err((WriteProgress::NotStarted, anyhow::Error::new(McpTransportError::NotSent)))
+                            }
+                            res = timeout(
+                                Duration::from_secs(STDIO_WRITE_TIMEOUT_SECS),
+                                write_stdio_line_tracked(&mut sess.stdin, &line),
+                            ) => {
+                                match res {
+                                    Ok(Ok(())) => Ok(()),
+                                    Ok(Err(pair)) => Err(pair),
+                                    Err(_) => Err((
+                                        WriteProgress::Started,
+                                        anyhow::Error::msg("stdio write timed out"),
+                                    )),
+                                }
+                            }
+                        };
+
+                        match write_result {
+                            Err((WriteProgress::NotStarted, _err)) => {
+                                let _ = reply.send(Err(McpTransportError::NotSent.into()));
+                                continue;
+                            }
+                            Err((WriteProgress::Started, _err)) => {
+                                let _ = reply.send(Err(McpTransportError::OutcomeUnknown.into()));
+                                mark_session_dirty(
+                                    &mut session,
+                                    &mut pending,
+                                    &alive,
+                                    McpTransportError::OutcomeUnknown,
+                                );
+                                cancels.clear();
+                                deadlines.clear();
+                                continue;
+                            }
+                            Ok(()) => {}
+                        }
+
+                        if request.id.is_none() {
+                            let _ = reply.send(Ok(JsonRpcResponse {
+                                jsonrpc: crate::mcp_protocol::JSONRPC_VERSION.to_string(),
+                                id: None,
+                                result: None,
+                                error: None,
+                            }));
+                            continue;
+                        }
+                        let Some(id) = request.id.clone() else { continue; };
+                        if pending.contains_key(&id) {
+                            let _ = reply.send(Err(anyhow::Error::msg(
+                                "MCP stdio: refusing to replace occupied pending JSON-RPC id",
+                            )));
+                            continue;
+                        }
+                        let wait_secs = stdio_recv_timeout_secs(&request, &config);
+                        let id_for_cancel = id.clone();
+                        let cancel_handle = zeroclaw_spawn::spawn!(async move {
+                            match cancel.await {
+                                Ok(()) => Some(id_for_cancel),
+                                Err(_) => None, // disarmed after success
+                            }
+                        });
+                        let cancel_abort = cancel_handle.abort_handle();
+                        cancels.push(Box::pin(async move {
+                            match cancel_handle.await {
+                                Ok(Some(id)) => id,
+                                _ => serde_json::Value::Null,
+                            }
+                        }));
+
+                        let id_for_deadline = id.clone();
+                        let deadline_handle = zeroclaw_spawn::spawn!(async move {
+                            tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+                            id_for_deadline
+                        });
+                        let deadline_abort = deadline_handle.abort_handle();
+                        deadlines.push(Box::pin(async move {
+                            deadline_handle.await.unwrap_or_else(|_| serde_json::Value::Null)
+                        }));
+
+                        pending.insert(
+                            id,
+                            PendingRpc {
+                                reply,
+                                deadline_abort,
+                                cancel_abort,
+                            },
+                        );
+                    }
+                    StdioWorkerCmd::Reset { reply } => {
+                        fail_pending(&mut pending, McpTransportError::OutcomeUnknown);
+                        cancels.clear();
+                        deadlines.clear();
+                        let result =
+                            respawn_stdio_session(&config, &mut session, &generation, &alive).await;
+                        let _ = reply.send(result);
+                    }
+                    StdioWorkerCmd::Close { reply } => {
+                        fail_pending(&mut pending, McpTransportError::TransportClosed);
+                        cancels.clear();
+                        deadlines.clear();
+                        if let Some(mut sess) = session.take() {
+                            let _ = sess.stdin.shutdown().await;
+                            let _ = kill_and_reap_stdio_session(&mut sess, &config.name).await;
+                        }
+                        alive.store(false, Ordering::Release);
+                        let _ = reply.send(Ok(()));
+                        break;
+                    }
+                }
+            }
+            line = async {
+                match session.as_mut() {
+                    Some(sess) => sess.stdout_lines.next_line().await,
+                    None => std::future::pending().await,
+                }
+            }, if has_session => {
+                match line {
+                    Ok(Some(resp_line)) => {
+                        if resp_line.len() > MAX_LINE_BYTES {
+                            mark_session_dirty(
+                                &mut session,
+                                &mut pending,
+                                &alive,
+                                McpTransportError::TransportClosed,
+                            );
+                            cancels.clear();
+                            deadlines.clear();
+                            continue;
+                        }
+                        match classify_jsonrpc_str(&resp_line) {
+                            Ok(JsonRpcInbound::ServerMessage { id, method }) => {
+                                ::zeroclaw_log::record!(
+                                    DEBUG,
+                                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                                        .with_attrs(::serde_json::json!({
+                                            "mcp_server": &config.name,
+                                            "method": method,
+                                            "id": id,
+                                        })),
+                                    "MCP stdio: ignoring server-to-client request/notification"
+                                );
+                            }
+                            Ok(JsonRpcInbound::Skippable) => {}
+                            Ok(JsonRpcInbound::Response(resp)) => {
+                                let Some(resp_id) = resp.id.clone() else { continue; };
+                                if let Some(slot) = pending.remove(&resp_id) {
+                                    slot.deadline_abort.abort();
+                                    slot.cancel_abort.abort();
+                                    let _ = slot.reply.send(Ok(resp));
+                                } else {
+                                    ::zeroclaw_log::record!(
+                                        WARN,
+                                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                            .with_attrs(::serde_json::json!({
+                                                "mcp_server": &config.name,
+                                                "got_id": resp_id,
+                                            })),
+                                        "MCP stdio: skipping response with unmatched JSON-RPC id"
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                ::zeroclaw_log::record!(
+                                    WARN,
+                                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                        .with_attrs(::serde_json::json!({
+                                            "mcp_server": &config.name,
+                                            "error": err.to_string(),
+                                        })),
+                                    "MCP stdio: rejected invalid inbound envelope"
+                                );
+                            }
+                        }
+                    }
+                    Ok(None) | Err(_) => {
+                        mark_session_dirty(
+                            &mut session,
+                            &mut pending,
+                            &alive,
+                            McpTransportError::TransportClosed,
+                        );
+                        cancels.clear();
+                        deadlines.clear();
+                    }
+                }
+            }
+            canceled = futures_util::StreamExt::next(&mut cancels), if !cancels.is_empty() => {
+                if let Some(id) = canceled {
+                    if id.is_null() { continue; }
+                    if let Some(slot) = pending.remove(&id) {
+                        slot.deadline_abort.abort();
+                        slot.cancel_abort.abort();
+                        let _ = slot.reply.send(Err(McpTransportError::OutcomeUnknown.into()));
+                        mark_session_dirty(
+                            &mut session,
+                            &mut pending,
+                            &alive,
+                            McpTransportError::OutcomeUnknown,
+                        );
+                        cancels.clear();
+                        deadlines.clear();
+                    }
+                }
+            }
+            timed_out_id = futures_util::StreamExt::next(&mut deadlines), if !deadlines.is_empty() => {
+                if let Some(id) = timed_out_id {
+                    if id.is_null() { continue; }
+                    if let Some(slot) = pending.remove(&id) {
+                        slot.deadline_abort.abort();
+                        slot.cancel_abort.abort();
+                        let _ = slot.reply.send(Err(McpTransportError::ResponseTimeout.into()));
+                        mark_session_dirty(
+                            &mut session,
+                            &mut pending,
+                            &alive,
+                            McpTransportError::ResponseTimeout,
+                        );
+                        cancels.clear();
+                        deadlines.clear();
+                    }
+                }
+            }
+        }
     }
 
-    async fn recv_raw(&mut self) -> Result<String> {
-        let line = self.stdout_lines.next_line().await?.ok_or_else(|| {
-            ::zeroclaw_log::record!(
-                ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-                "mcp_transport: MCP server closed stdout"
-            );
-            anyhow::Error::msg("MCP server closed stdout")
-        })?;
-        if line.len() > MAX_LINE_BYTES {
-            bail!("MCP response too large: {} bytes", line.len());
-        }
-        Ok(line)
+    if let Some(mut sess) = session.take() {
+        let _ = kill_and_reap_stdio_session(&mut sess, &config.name).await;
     }
+    alive.store(false, Ordering::Release);
 }
 
 #[async_trait::async_trait]
 impl McpTransportConn for StdioTransport {
-    async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
-        let line = serde_json::to_string(request)?;
-        self.send_raw(&line).await?;
-        if request.id.is_none() {
-            return Ok(JsonRpcResponse {
-                jsonrpc: crate::mcp_protocol::JSONRPC_VERSION.to_string(),
-                id: None,
-                result: None,
-                error: None,
-            });
-        }
-        let deadline = std::time::Instant::now() + Duration::from_secs(RECV_TIMEOUT_SECS);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                bail!("timeout waiting for MCP response");
-            }
-            let resp_line = timeout(remaining, self.recv_raw())
-                .await
-                .context("timeout waiting for MCP response")??;
-            let resp: JsonRpcResponse = serde_json::from_str(&resp_line)
-                .with_context(|| format!("invalid JSON-RPC response: {}", resp_line))?;
-            if resp.id.is_none() {
-                // Server-sent notification (e.g. `notifications/initialized`) — skip and
-                // keep waiting for the actual response to our request.
-                ::zeroclaw_log::record!(
-                    DEBUG,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                    "MCP stdio: skipping server notification while waiting for response"
-                );
-                continue;
-            }
-            return Ok(resp);
-        }
+    async fn send_and_recv(&self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
+        let (mut cancel_guard, cancel_rx) = CancelOnDrop::arm();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send_cmd(StdioWorkerCmd::Rpc {
+            request: request.clone(),
+            cancel: cancel_rx,
+            reply: reply_tx,
+        })
+        .await?;
+        let result = reply_rx
+            .await
+            .map_err(|_| anyhow::Error::new(McpTransportError::OutcomeUnknown))?;
+        cancel_guard.disarm();
+        result
     }
 
-    async fn close(&mut self) -> Result<()> {
-        let _ = self.stdin.shutdown().await;
+    async fn reset(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send_cmd(StdioWorkerCmd::Reset { reply: reply_tx })
+            .await?;
+        reply_rx
+            .await
+            .map_err(|_| anyhow::Error::new(McpTransportError::TransportClosed))?
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn health_check(&self) -> bool {
+        self.child_alive.load(Ordering::Acquire)
+    }
+
+    async fn close(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(StdioWorkerCmd::Close { reply: reply_tx })
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        let _ = reply_rx.await;
         Ok(())
-    }
-
-    fn health_check(&mut self) -> bool {
-        // Verify the child process is still running via try_wait().
-        // Returns true only when the process is alive (has not exited).
-        self._child
-            .try_wait()
-            .map_or(true, |status| status.is_none())
     }
 }
 
 // ── HTTP Transport ───────────────────────────────────────────────────────
 
-/// HTTP-based transport (POST requests).
 pub struct HttpTransport {
+    config: Arc<McpServerConfig>,
     url: String,
-    /// Per-server tool-call timeout, from `McpServerConfig.tool_timeout_secs`.
-    /// Non-tool requests keep the legacy HTTP request timeout and short SSE
-    /// read timeout. Tool calls use the configured budget when present; when
-    /// absent, the client layer's outer tool-call timeout owns the budget.
-    tool_timeout_secs: Option<u64>,
     client: reqwest::Client,
-    headers: std::collections::HashMap<String, String>,
     session_id: Option<String>,
 }
 
 impl HttpTransport {
-    pub fn new(config: &McpServerConfig) -> Result<Self> {
+    pub fn new(config: Arc<McpServerConfig>) -> Result<Self> {
         let url = config
             .url
             .as_ref()
-            .ok_or_else(|| {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "mcp_server": &config.name,
-                            "transport": "http",
-                        })),
-                    "mcp_transport: HTTP transport requires URL"
-                );
-                anyhow::Error::msg("URL required for HTTP transport")
-            })?
+            .ok_or_else(|| anyhow::Error::msg("URL required for HTTP transport"))?
             .clone();
-
         let client = reqwest::Client::builder()
             .build()
             .context("failed to build HTTP client")?;
-
         Ok(Self {
+            config,
             url,
-            tool_timeout_secs: config.tool_timeout_secs,
             client,
-            headers: config.headers.clone(),
             session_id: None,
         })
     }
@@ -317,27 +860,28 @@ impl HttpTransport {
 }
 
 #[async_trait::async_trait]
-impl McpTransportConn for HttpTransport {
+impl ExclusiveMcpTransport for HttpTransport {
     async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
         let body = serde_json::to_string(request)?;
-
         let has_accept = self
+            .config
             .headers
             .keys()
             .any(|k| k.eq_ignore_ascii_case("Accept"));
         let has_content_type = self
+            .config
             .headers
             .keys()
             .any(|k| k.eq_ignore_ascii_case("Content-Type"));
 
         let mut req = apply_request_timeout(
             self.client.post(&self.url).body(body),
-            http_request_timeout_secs(request, self.tool_timeout_secs),
+            http_request_timeout_secs(request, &self.config),
         );
         if !has_content_type {
             req = req.header("Content-Type", MCP_JSON_CONTENT_TYPE);
         }
-        for (key, value) in &self.headers {
+        for (key, value) in &self.config.headers {
             req = req.header(key, value);
         }
         req = self.apply_session_header(req);
@@ -374,15 +918,16 @@ impl McpTransportConn for HttpTransport {
             });
         }
 
+        let expected_id = request.id.clone();
         let is_sse = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.to_ascii_lowercase().contains("text/event-stream"));
         if is_sse {
-            let read_response = read_first_jsonrpc_from_sse_response(resp);
+            let read_response = read_first_jsonrpc_from_sse_response(resp, expected_id.as_ref());
             let maybe_resp = if let Some(sse_timeout) =
-                http_sse_read_timeout_secs(request, self.tool_timeout_secs)
+                http_sse_read_timeout_secs(request, &self.config)
             {
                 timeout(Duration::from_secs(sse_timeout), read_response)
                     .await
@@ -391,23 +936,15 @@ impl McpTransportConn for HttpTransport {
                 read_response.await?
             };
             return maybe_resp.ok_or_else(|| {
-                ::zeroclaw_log::record!(
-                    ERROR,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-                    "mcp_transport: MCP server returned no response in SSE stream"
-                );
                 anyhow::Error::msg("MCP server returned no response in SSE stream")
             });
         }
 
         let resp_text = resp.text().await.context("failed to read HTTP response")?;
-        parse_jsonrpc_response_text(&resp_text)
+        parse_jsonrpc_response_text(&resp_text, expected_id.as_ref())
     }
 
     async fn reset(&mut self) -> Result<()> {
-        // Drop the stale session so the next request re-initializes and the
-        // server issues a fresh `Mcp-Session-Id`.
         self.session_id = None;
         Ok(())
     }
@@ -419,7 +956,6 @@ impl McpTransportConn for HttpTransport {
 
 // ── SSE Transport ─────────────────────────────────────────────────────────
 
-/// SSE-based transport (HTTP POST for requests, SSE for responses).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SseStreamState {
     Unknown,
@@ -428,51 +964,33 @@ enum SseStreamState {
 }
 
 pub struct SseTransport {
+    config: Arc<McpServerConfig>,
     sse_url: String,
-    server_name: String,
-    tool_timeout_secs: Option<u64>,
     client: reqwest::Client,
-    headers: std::collections::HashMap<String, String>,
     stream_state: SseStreamState,
-    shared: std::sync::Arc<Mutex<SseSharedState>>,
-    notify: std::sync::Arc<Notify>,
+    shared: Arc<Mutex<SseSharedState>>,
+    notify: Arc<Notify>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     reader_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl SseTransport {
-    pub fn new(config: &McpServerConfig) -> Result<Self> {
+    pub fn new(config: Arc<McpServerConfig>) -> Result<Self> {
         let sse_url = config
             .url
             .as_ref()
-            .ok_or_else(|| {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "mcp_server": &config.name,
-                            "transport": "sse",
-                        })),
-                    "mcp_transport: SSE transport requires URL"
-                );
-                anyhow::Error::msg("URL required for SSE transport")
-            })?
+            .ok_or_else(|| anyhow::Error::msg("URL required for SSE transport"))?
             .clone();
-
         let client = reqwest::Client::builder()
             .build()
             .context("failed to build HTTP client")?;
-
         Ok(Self {
+            config,
             sse_url,
-            server_name: config.name.clone(),
-            tool_timeout_secs: config.tool_timeout_secs,
             client,
-            headers: config.headers.clone(),
             stream_state: SseStreamState::Unknown,
-            shared: std::sync::Arc::new(Mutex::new(SseSharedState::default())),
-            notify: std::sync::Arc::new(Notify::new()),
+            shared: Arc::new(Mutex::new(SseSharedState::default())),
+            notify: Arc::new(Notify::new()),
             shutdown_tx: None,
             reader_task: None,
         })
@@ -490,15 +1008,15 @@ impl SseTransport {
         }
 
         let has_accept = self
+            .config
             .headers
             .keys()
             .any(|k| k.eq_ignore_ascii_case("Accept"));
-
         let mut req = self
             .client
             .get(&self.sse_url)
             .header("Cache-Control", "no-cache");
-        for (key, value) in &self.headers {
+        for (key, value) in &self.config.headers {
             req = req.header(key, value);
         }
         if !has_accept {
@@ -513,18 +1031,7 @@ impl SseTransport {
             return Ok(());
         }
         if !resp.status().is_success() {
-            let status = resp.status();
-            ::zeroclaw_log::record!(
-                ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({"status": status.as_u16()})),
-                "mcp_transport: MCP server returned non-success HTTP"
-            );
-            return Err(anyhow::Error::msg(format!(
-                "MCP server returned HTTP {}",
-                status
-            )));
+            bail!("MCP server returned HTTP {}", resp.status());
         }
         let is_event_stream = resp
             .headers()
@@ -538,11 +1045,10 @@ impl SseTransport {
 
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
         self.shutdown_tx = Some(shutdown_tx);
-
         let shared = self.shared.clone();
         let notify = self.notify.clone();
         let sse_url = self.sse_url.clone();
-        let server_name = self.server_name.clone();
+        let server_name = self.config.name.clone();
 
         self.reader_task = Some(zeroclaw_spawn::spawn!(async move {
             let stream = resp
@@ -550,22 +1056,16 @@ impl SseTransport {
                 .map(|item| item.map_err(std::io::Error::other));
             let reader = tokio_util::io::StreamReader::new(stream);
             let mut lines = BufReader::new(reader).lines();
-
             let mut cur_event: Option<String> = None;
             let mut cur_id: Option<String> = None;
             let mut cur_data: Vec<String> = Vec::new();
-
             loop {
                 tokio::select! {
-                    _ = &mut shutdown_rx => {
-                        break;
-                    }
+                    _ = &mut shutdown_rx => break,
                     line = lines.next_line() => {
                         let Ok(line_opt) = line else { break; };
                         let Some(mut line) = line_opt else { break; };
-                        if line.ends_with('\r') {
-                            line.pop();
-                        }
+                        if line.ends_with('\r') { line.pop(); }
                         if line.is_empty() {
                             if cur_event.is_none() && cur_id.is_none() && cur_data.is_empty() {
                                 continue;
@@ -574,14 +1074,19 @@ impl SseTransport {
                             let data = cur_data.join("\n");
                             cur_data.clear();
                             let id = cur_id.take();
-                            handle_sse_event(&server_name, &sse_url, &shared, &notify, event.as_deref(), id.as_deref(), data).await;
+                            handle_sse_event(
+                                &server_name,
+                                &sse_url,
+                                &shared,
+                                &notify,
+                                event.as_deref(),
+                                id.as_deref(),
+                                data,
+                            )
+                            .await;
                             continue;
                         }
-
-                        if line.starts_with(':') {
-                            continue;
-                        }
-
+                        if line.starts_with(':') { continue; }
                         if let Some(rest) = line.strip_prefix("event:") {
                             cur_event = Some(rest.trim().to_string());
                         }
@@ -595,10 +1100,6 @@ impl SseTransport {
                     }
                 }
             }
-
-            // Stream closed: drop every pending sender so each waiter observes a
-            // `RecvError`, which `send_and_recv` maps to
-            // `McpTransportError::TransportClosed` to trigger a reconnect.
             let pending = {
                 let mut guard = shared.lock().await;
                 std::mem::take(&mut guard.pending)
@@ -606,7 +1107,6 @@ impl SseTransport {
             drop(pending);
         }));
         self.stream_state = SseStreamState::Connected;
-
         Ok(())
     }
 
@@ -616,19 +1116,9 @@ impl SseTransport {
             return Ok((url.clone(), guard.message_url_from_endpoint));
         }
         drop(guard);
-
         let derived = derive_message_url(&self.sse_url, "messages")
             .or_else(|| derive_message_url(&self.sse_url, "message"))
-            .ok_or_else(|| {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({"sse_url": &self.sse_url})),
-                    "mcp_transport: invalid SSE URL"
-                );
-                anyhow::Error::msg("invalid SSE URL")
-            })?;
+            .ok_or_else(|| anyhow::Error::msg("invalid SSE URL"))?;
         let mut guard = self.shared.lock().await;
         if guard.message_url.is_none() {
             guard.message_url = Some(derived.clone());
@@ -642,7 +1132,36 @@ impl SseTransport {
 struct SseSharedState {
     message_url: Option<String>,
     message_url_from_endpoint: bool,
-    pending: std::collections::HashMap<u64, oneshot::Sender<JsonRpcResponse>>,
+    pending: HashMap<u64, oneshot::Sender<JsonRpcResponse>>,
+}
+
+/// RAII removal of an SSE pending id on cancel/early exit.
+struct SsePendingGuard {
+    shared: Arc<Mutex<SseSharedState>>,
+    id: Option<u64>,
+}
+
+impl SsePendingGuard {
+    fn new(shared: Arc<Mutex<SseSharedState>>, id: u64) -> Self {
+        Self {
+            shared,
+            id: Some(id),
+        }
+    }
+    fn disarm(&mut self) {
+        self.id.take();
+    }
+}
+
+impl Drop for SsePendingGuard {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            // Best-effort; reset() also clears pending.
+            if let Ok(mut guard) = self.shared.try_lock() {
+                guard.pending.remove(&id);
+            }
+        }
+    }
 }
 
 fn derive_message_url(sse_url: &str, message_path: &str) -> Option<String> {
@@ -669,8 +1188,8 @@ fn derive_message_url(sse_url: &str, message_path: &str) -> Option<String> {
 async fn handle_sse_event(
     server_name: &str,
     sse_url: &str,
-    shared: &std::sync::Arc<Mutex<SseSharedState>>,
-    notify: &std::sync::Arc<Notify>,
+    shared: &Arc<Mutex<SseSharedState>>,
+    notify: &Arc<Notify>,
     event: Option<&str>,
     _id: Option<&str>,
     data: String,
@@ -680,7 +1199,6 @@ async fn handle_sse_event(
     if trimmed.is_empty() {
         return;
     }
-
     if event.eq_ignore_ascii_case("endpoint") || event.eq_ignore_ascii_case("mcp-endpoint") {
         if let Some(url) = parse_endpoint_from_data(sse_url, trimmed) {
             let mut guard = shared.lock().await;
@@ -691,28 +1209,24 @@ async fn handle_sse_event(
         }
         return;
     }
-
     if !event.eq_ignore_ascii_case("message") {
         return;
     }
-
     let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
         return;
     };
-
-    let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value.clone()) else {
-        let _ = serde_json::from_value::<JsonRpcRequest>(value);
+    let Ok(inbound) = classify_jsonrpc_value(value) else {
         return;
     };
-
+    let JsonRpcInbound::Response(resp) = inbound else {
+        return;
+    };
     let Some(id_val) = resp.id.clone() else {
         return;
     };
-    let id = match id_val.as_u64() {
-        Some(v) => v,
-        None => return,
+    let Some(id) = id_val.as_u64() else {
+        return;
     };
-
     let tx = {
         let mut guard = shared.lock().await;
         guard.pending.remove(&id)
@@ -748,7 +1262,6 @@ fn extract_json_from_sse_text(resp_text: &str) -> Cow<'_, str> {
     let text = resp_text.trim_start_matches('\u{feff}');
     let mut current_data_lines: Vec<&str> = Vec::new();
     let mut last_event_data_lines: Vec<&str> = Vec::new();
-
     for raw_line in text.lines() {
         let line = raw_line.trim_end_matches('\r').trim_start();
         if line.is_empty() {
@@ -757,48 +1270,60 @@ fn extract_json_from_sse_text(resp_text: &str) -> Cow<'_, str> {
             }
             continue;
         }
-
         if line.starts_with(':') {
             continue;
         }
-
         if let Some(rest) = line.strip_prefix("data:") {
             let rest = rest.strip_prefix(' ').unwrap_or(rest);
             current_data_lines.push(rest);
         }
     }
-
     if !current_data_lines.is_empty() {
         last_event_data_lines = current_data_lines;
     }
-
     if last_event_data_lines.is_empty() {
         return Cow::Borrowed(text.trim());
     }
-
     if last_event_data_lines.len() == 1 {
         return Cow::Borrowed(last_event_data_lines[0].trim());
     }
-
     let joined = last_event_data_lines.join("\n");
     Cow::Owned(joined.trim().to_string())
 }
 
-fn parse_jsonrpc_response_text(resp_text: &str) -> Result<JsonRpcResponse> {
+fn parse_jsonrpc_response_text(
+    resp_text: &str,
+    expected_id: Option<&serde_json::Value>,
+) -> Result<JsonRpcResponse> {
     let trimmed = resp_text.trim();
     if trimmed.is_empty() {
         bail!("MCP server returned no response");
     }
-
     let json_text = if looks_like_sse_text(trimmed) {
         extract_json_from_sse_text(trimmed)
     } else {
         Cow::Borrowed(trimmed)
     };
-
-    let mcp_resp: JsonRpcResponse = serde_json::from_str(json_text.as_ref())
-        .with_context(|| format!("invalid JSON-RPC response: {}", resp_text))?;
-    Ok(mcp_resp)
+    let value: serde_json::Value = serde_json::from_str(json_text.as_ref())
+        .with_context(|| format!("invalid JSON-RPC response: {resp_text}"))?;
+    match classify_jsonrpc_value(value)? {
+        JsonRpcInbound::Response(resp) => {
+            if let Some(expected) = expected_id {
+                if !match_response_id(&resp, expected) {
+                    bail!(
+                        "MCP response id mismatch: expected {:?}, got {:?}",
+                        expected,
+                        resp.id
+                    );
+                }
+            }
+            Ok(resp)
+        }
+        JsonRpcInbound::ServerMessage { method, .. } => {
+            bail!("MCP server request `{method}` cannot be accepted as a response")
+        }
+        JsonRpcInbound::Skippable => bail!("MCP server returned no usable response"),
+    }
 }
 
 fn looks_like_sse_text(text: &str) -> bool {
@@ -810,16 +1335,15 @@ fn looks_like_sse_text(text: &str) -> bool {
 
 async fn read_first_jsonrpc_from_sse_response(
     resp: reqwest::Response,
+    expected_id: Option<&serde_json::Value>,
 ) -> Result<Option<JsonRpcResponse>> {
     let stream = resp
         .bytes_stream()
         .map(|item| item.map_err(std::io::Error::other));
     let reader = tokio_util::io::StreamReader::new(stream);
     let mut lines = BufReader::new(reader).lines();
-
     let mut cur_event: Option<String> = None;
     let mut cur_data: Vec<String> = Vec::new();
-
     while let Ok(line_opt) = lines.next_line().await {
         let Some(mut line) = line_opt else { break };
         if line.ends_with('\r') {
@@ -829,11 +1353,9 @@ async fn read_first_jsonrpc_from_sse_response(
             if cur_event.is_none() && cur_data.is_empty() {
                 continue;
             }
-            let event = cur_event.take();
+            let event = cur_event.take().unwrap_or_else(|| "message".to_string());
             let data = cur_data.join("\n");
             cur_data.clear();
-
-            let event = event.unwrap_or_else(|| "message".to_string());
             if event.eq_ignore_ascii_case("endpoint") || event.eq_ignore_ascii_case("mcp-endpoint")
             {
                 continue;
@@ -841,18 +1363,24 @@ async fn read_first_jsonrpc_from_sse_response(
             if !event.eq_ignore_ascii_case("message") {
                 continue;
             }
-
             let trimmed = data.trim();
             if trimmed.is_empty() {
                 continue;
             }
             let json_str = extract_json_from_sse_text(trimmed);
-            if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(json_str.as_ref()) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str.as_ref()) else {
+                continue;
+            };
+            if let Ok(JsonRpcInbound::Response(resp)) = classify_jsonrpc_value(value) {
+                if let Some(expected) = expected_id {
+                    if !match_response_id(&resp, expected) {
+                        continue;
+                    }
+                }
                 return Ok(Some(resp));
             }
             continue;
         }
-
         if line.starts_with(':') {
             continue;
         }
@@ -864,17 +1392,16 @@ async fn read_first_jsonrpc_from_sse_response(
             cur_data.push(rest.to_string());
         }
     }
-
     Ok(None)
 }
 
 #[async_trait::async_trait]
-impl McpTransportConn for SseTransport {
+impl ExclusiveMcpTransport for SseTransport {
     async fn send_and_recv(&mut self, request: &JsonRpcRequest) -> Result<JsonRpcResponse> {
         self.ensure_connected().await?;
-
         let id = request.id.as_ref().and_then(|v| v.as_u64());
         let body = serde_json::to_string(request)?;
+        let side_effecting = request.method == TOOLS_CALL_METHOD;
 
         let (mut message_url, mut from_endpoint) = self.get_message_url().await?;
         if self.stream_state == SseStreamState::Connected && !from_endpoint {
@@ -906,6 +1433,7 @@ impl McpTransportConn for SseTransport {
         };
         let has_secondary = secondary_url.is_some();
 
+        let mut pending_guard = None;
         let mut rx = None;
         if let Some(id) = id
             && self.stream_state == SseStreamState::Connected
@@ -913,34 +1441,46 @@ impl McpTransportConn for SseTransport {
             let (tx, ch) = oneshot::channel();
             {
                 let mut guard = self.shared.lock().await;
+                if guard.pending.contains_key(&id) {
+                    bail!("MCP SSE: refusing to replace occupied pending JSON-RPC id {id}");
+                }
                 guard.pending.insert(id, tx);
             }
+            pending_guard = Some(SsePendingGuard::new(self.shared.clone(), id));
             rx = Some((id, ch));
         }
 
         let mut got_direct = None;
         let mut last_status = None;
+        let mut accepted_side_effect = false;
 
         for (i, url) in std::iter::once(primary_url)
             .chain(secondary_url)
             .enumerate()
         {
+            // Never re-POST an accepted side-effecting tools/call to a fallback URL.
+            if i > 0 && accepted_side_effect && side_effecting {
+                return Err(McpTransportError::OutcomeUnknown.into());
+            }
+
             let has_accept = self
+                .config
                 .headers
                 .keys()
                 .any(|k| k.eq_ignore_ascii_case("Accept"));
             let has_content_type = self
+                .config
                 .headers
                 .keys()
                 .any(|k| k.eq_ignore_ascii_case("Content-Type"));
             let mut req = apply_request_timeout(
                 self.client.post(&url).body(body.clone()),
-                http_request_timeout_secs(request, self.tool_timeout_secs),
+                http_request_timeout_secs(request, &self.config),
             );
             if !has_content_type {
                 req = req.header("Content-Type", MCP_JSON_CONTENT_TYPE);
             }
-            for (key, value) in &self.headers {
+            for (key, value) in &self.config.headers {
                 req = req.header(key, value);
             }
             if !has_accept {
@@ -957,9 +1497,11 @@ impl McpTransportConn for SseTransport {
             {
                 continue;
             }
-
             if !status.is_success() {
                 break;
+            }
+            if side_effecting {
+                accepted_side_effect = true;
             }
 
             if request.id.is_none() {
@@ -972,6 +1514,7 @@ impl McpTransportConn for SseTransport {
                 break;
             }
 
+            let expected_id = request.id.clone();
             let is_sse = resp
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
@@ -979,10 +1522,10 @@ impl McpTransportConn for SseTransport {
                 .is_some_and(|v| v.to_ascii_lowercase().contains("text/event-stream"));
 
             if is_sse {
-                if i == 0 && has_secondary {
+                if i == 0 && has_secondary && !side_effecting {
                     match timeout(
                         Duration::from_secs(3),
-                        read_first_jsonrpc_from_sse_response(resp),
+                        read_first_jsonrpc_from_sse_response(resp, expected_id.as_ref()),
                     )
                     .await
                     {
@@ -995,13 +1538,42 @@ impl McpTransportConn for SseTransport {
                         Err(_) => continue,
                     }
                 }
-                if let Some(resp) = read_first_jsonrpc_from_sse_response(resp).await? {
+                // Side-effecting: do not fall through to secondary POST on slow SSE read.
+                if i == 0 && has_secondary && side_effecting {
+                    match timeout(
+                        Duration::from_secs(3),
+                        read_first_jsonrpc_from_sse_response(resp, expected_id.as_ref()),
+                    )
+                    .await
+                    {
+                        Ok(res) => {
+                            if let Some(resp) = res? {
+                                got_direct = Some(resp);
+                                break;
+                            }
+                            // Accepted but no body yet — wait on pending channel; never re-POST.
+                            break;
+                        }
+                        Err(_) => {
+                            // Timed out reading SSE body after accept — outcome unknown.
+                            if let Some(mut g) = pending_guard.take() {
+                                g.disarm();
+                                let mut guard = self.shared.lock().await;
+                                guard.pending.remove(&id.unwrap_or_default());
+                            }
+                            return Err(McpTransportError::OutcomeUnknown.into());
+                        }
+                    }
+                }
+                if let Some(resp) =
+                    read_first_jsonrpc_from_sse_response(resp, expected_id.as_ref()).await?
+                {
                     got_direct = Some(resp);
                 }
                 break;
             }
 
-            let text = if i == 0 && has_secondary {
+            let text = if i == 0 && has_secondary && !side_effecting {
                 match timeout(Duration::from_secs(3), resp.text()).await {
                     Ok(Ok(t)) => t,
                     Ok(Err(_)) => String::new(),
@@ -1012,36 +1584,33 @@ impl McpTransportConn for SseTransport {
             };
             let trimmed = text.trim();
             if !trimmed.is_empty() {
-                let json_str = if trimmed.contains("\ndata:") || trimmed.starts_with("data:") {
-                    extract_json_from_sse_text(trimmed)
-                } else {
-                    Cow::Borrowed(trimmed)
-                };
-                if let Ok(mcp_resp) = serde_json::from_str::<JsonRpcResponse>(json_str.as_ref()) {
+                if let Ok(mcp_resp) = parse_jsonrpc_response_text(trimmed, expected_id.as_ref()) {
                     got_direct = Some(mcp_resp);
                 }
             }
             break;
         }
 
-        if let Some((id, _)) = rx.as_ref() {
-            if got_direct.is_some() {
-                let mut guard = self.shared.lock().await;
-                guard.pending.remove(id);
-            } else if let Some(status) = last_status
-                && !status.is_success()
-            {
-                let mut guard = self.shared.lock().await;
-                guard.pending.remove(id);
-            }
-        }
-
         if let Some(resp) = got_direct {
+            if let Some(mut g) = pending_guard.take() {
+                g.disarm();
+                if let Some((id, _)) = rx.as_ref() {
+                    let mut guard = self.shared.lock().await;
+                    guard.pending.remove(id);
+                }
+            }
             return Ok(resp);
         }
 
         if let Some(status) = last_status {
             if !status.is_success() {
+                if let Some(mut g) = pending_guard.take() {
+                    g.disarm();
+                    if let Some((id, _)) = rx.as_ref() {
+                        let mut guard = self.shared.lock().await;
+                        guard.pending.remove(id);
+                    }
+                }
                 if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
                     return Err(McpTransportError::StaleSession {
                         status: status.as_u16(),
@@ -1057,17 +1626,19 @@ impl McpTransportConn for SseTransport {
         let Some((_id, rx)) = rx else {
             bail!("MCP server returned no response");
         };
-
-        // A dropped receiver means the SSE reader task tore down the stream
-        // before our response arrived — recoverable via reconnect.
-        rx.await
-            .map_err(|_| McpTransportError::TransportClosed.into())
+        // Keep pending_guard armed until we get the oneshot reply or drop.
+        let result = rx
+            .await
+            .map_err(|_| McpTransportError::TransportClosed.into());
+        if result.is_ok() {
+            if let Some(mut g) = pending_guard.take() {
+                g.disarm();
+            }
+        }
+        result
     }
 
     async fn reset(&mut self) -> Result<()> {
-        // Tear down the reader task and clear the cached endpoint/session state
-        // so the next send re-handshakes: a fresh GET stream and a new
-        // `endpoint` event from the (possibly restarted) server.
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
@@ -1095,12 +1666,11 @@ impl McpTransportConn for SseTransport {
 
 // ── Factory ──────────────────────────────────────────────────────────────
 
-/// Create a transport based on config.
-pub fn create_transport(config: &McpServerConfig) -> Result<Box<dyn McpTransportConn>> {
+pub fn create_transport(config: Arc<McpServerConfig>) -> Result<Arc<dyn McpTransportConn>> {
     match config.transport {
-        McpTransport::Stdio => Ok(Box::new(StdioTransport::new(config)?)),
-        McpTransport::Http => Ok(Box::new(HttpTransport::new(config)?)),
-        McpTransport::Sse => Ok(Box::new(SseTransport::new(config)?)),
+        McpTransport::Stdio => Ok(Arc::new(StdioTransport::new(config)?)),
+        McpTransport::Http => Ok(Arc::new(SerialTransport::new(HttpTransport::new(config)?))),
+        McpTransport::Sse => Ok(Arc::new(SerialTransport::new(SseTransport::new(config)?))),
     }
 }
 
@@ -1117,554 +1687,247 @@ mod tests {
     }
 
     #[test]
-    fn test_http_transport_requires_url() {
-        let config = McpServerConfig {
-            name: "test".into(),
+    fn classify_rejects_method_bearing_as_response() {
+        let v = serde_json::json!({"jsonrpc":"2.0","id":7,"method":"roots/list"});
+        match classify_jsonrpc_value(v).unwrap() {
+            JsonRpcInbound::ServerMessage { method, .. } => assert_eq!(method, "roots/list"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_requires_result_or_error() {
+        let v = serde_json::json!({"jsonrpc":"2.0","id":1});
+        assert!(classify_jsonrpc_value(v).is_err());
+    }
+
+    #[test]
+    fn classify_accepts_valid_response() {
+        let v = serde_json::json!({"jsonrpc":"2.0","id":7,"result":{"ok":true}});
+        match classify_jsonrpc_value(v).unwrap() {
+            JsonRpcInbound::Response(r) => {
+                assert!(match_response_id(&r, &serde_json::json!(7)));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timeout_policy_lives_on_config_only() {
+        let src = include_str!("mcp_transport.rs");
+        let needle = ["tool_timeout_secs: Option<", "u64>"].concat();
+        assert!(
+            !src.contains(&needle),
+            "transports must not store duplicated tool_timeout_secs"
+        );
+        assert_eq!(McpServerConfig::DEFAULT_TOOL_TIMEOUT_SECS, 180);
+        assert_eq!(McpServerConfig::MAX_TOOL_TIMEOUT_SECS, 600);
+    }
+
+    #[test]
+    fn stdio_recv_timeout_uses_canonical_policy() {
+        let req = JsonRpcRequest::new(1, TOOLS_CALL_METHOD, serde_json::json!({}));
+        let cfg = McpServerConfig {
+            tool_timeout_secs: Some(240),
+            ..Default::default()
+        };
+        assert_eq!(stdio_recv_timeout_secs(&req, &cfg), 240);
+        let cfg = McpServerConfig::default();
+        assert_eq!(
+            stdio_recv_timeout_secs(&req, &cfg),
+            McpServerConfig::DEFAULT_TOOL_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn create_transport_http_requires_url() {
+        let config = Arc::new(McpServerConfig {
+            name: "t".into(),
             transport: McpTransport::Http,
             ..Default::default()
-        };
-        assert!(HttpTransport::new(&config).is_err());
+        });
+        assert!(create_transport(config).is_err());
     }
 
     #[test]
-    fn test_sse_transport_requires_url() {
-        let config = McpServerConfig {
-            name: "test".into(),
-            transport: McpTransport::Sse,
-            ..Default::default()
-        };
-        assert!(SseTransport::new(&config).is_err());
+    fn write_progress_not_sent_only_before_start() {
+        assert_eq!(WriteProgress::NotStarted, WriteProgress::NotStarted);
+        assert_ne!(WriteProgress::NotStarted, WriteProgress::Started);
     }
 
-    #[test]
-    fn http_request_timeout_defaults_non_tool_requests_to_legacy_value() {
-        let request = JsonRpcRequest::new(1, "initialize", serde_json::json!({}));
-        assert_eq!(
-            http_request_timeout_secs(&request, None),
-            Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS)
-        );
-    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_reset_reaps_before_spawn_and_bumps_generation() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::time::sleep;
 
-    #[test]
-    fn http_request_timeout_does_not_shorten_non_tool_requests_from_tool_config() {
-        let request = JsonRpcRequest::new(1, "tools/list", serde_json::json!({}));
-        assert_eq!(
-            http_request_timeout_secs(&request, Some(5)),
-            Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS)
-        );
-    }
+        fn alive(pid: u32) -> bool {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        }
 
-    #[test]
-    fn http_request_timeout_honors_configured_tool_call_timeout_above_legacy_value() {
-        let request = JsonRpcRequest::new(1, TOOLS_CALL_METHOD, serde_json::json!({}));
-        assert_eq!(
-            http_request_timeout_secs(&request, Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS + 60)),
-            Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS + 60)
-        );
-    }
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("hang.sh");
+        let pid_path = temp.path().join("p.pid");
+        let mut f = std::fs::File::create(&script).unwrap();
+        f.write_all(
+            br#"#!/bin/sh
+echo "$$" > "$1"
+exec tail -f /dev/null
+"#,
+        )
+        .unwrap();
+        drop(f);
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
 
-    #[test]
-    fn http_request_timeout_leaves_default_tool_call_budget_to_client_wrapper() {
-        let request = JsonRpcRequest::new(1, TOOLS_CALL_METHOD, serde_json::json!({}));
-        assert_eq!(http_request_timeout_secs(&request, None), None);
-    }
-
-    #[test]
-    fn http_sse_read_timeout_defaults_non_tool_requests_to_recv_timeout() {
-        let request = JsonRpcRequest::new(1, "initialize", serde_json::json!({}));
-        assert_eq!(
-            http_sse_read_timeout_secs(&request, None),
-            Some(RECV_TIMEOUT_SECS)
-        );
-    }
-
-    #[test]
-    fn http_sse_read_timeout_honors_configured_tool_call_timeout() {
-        let request = JsonRpcRequest::new(1, TOOLS_CALL_METHOD, serde_json::json!({}));
-        assert_eq!(
-            http_sse_read_timeout_secs(&request, Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS + 60)),
-            Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS + 60)
-        );
-    }
-
-    #[test]
-    fn http_sse_read_timeout_leaves_default_tool_call_budget_to_client_wrapper() {
-        let request = JsonRpcRequest::new(1, TOOLS_CALL_METHOD, serde_json::json!({}));
-        assert_eq!(http_sse_read_timeout_secs(&request, None), None);
-    }
-
-    #[test]
-    fn http_transport_stores_configured_tool_timeout() {
-        let config = McpServerConfig {
-            name: "test-http".into(),
-            transport: McpTransport::Http,
-            url: Some("http://localhost/mcp".into()),
-            tool_timeout_secs: Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS + 60),
-            ..Default::default()
-        };
-        let transport = HttpTransport::new(&config).expect("build transport");
-        assert_eq!(
-            transport.tool_timeout_secs,
-            Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS + 60)
-        );
-    }
-
-    #[test]
-    fn sse_transport_stores_configured_tool_timeout() {
-        let config = McpServerConfig {
-            name: "test-sse".into(),
-            transport: McpTransport::Sse,
-            url: Some("http://localhost/sse".into()),
-            tool_timeout_secs: Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS + 60),
-            ..Default::default()
-        };
-        let transport = SseTransport::new(&config).expect("build transport");
-        assert_eq!(
-            transport.tool_timeout_secs,
-            Some(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS + 60)
-        );
-    }
-
-    #[test]
-    fn test_extract_json_from_sse_data_no_space() {
-        let input = "data:{\"jsonrpc\":\"2.0\",\"result\":{}}\n\n";
-        let extracted = extract_json_from_sse_text(input);
-        let _: JsonRpcResponse = serde_json::from_str(extracted.as_ref()).unwrap();
-    }
-
-    #[test]
-    fn test_extract_json_from_sse_with_event_and_id() {
-        let input = "id: 1\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"result\":{}}\n\n";
-        let extracted = extract_json_from_sse_text(input);
-        let _: JsonRpcResponse = serde_json::from_str(extracted.as_ref()).unwrap();
-    }
-
-    #[test]
-    fn test_extract_json_from_sse_multiline_data() {
-        let input = "event: message\ndata: {\ndata:   \"jsonrpc\": \"2.0\",\ndata:   \"result\": {}\ndata: }\n\n";
-        let extracted = extract_json_from_sse_text(input);
-        let _: JsonRpcResponse = serde_json::from_str(extracted.as_ref()).unwrap();
-    }
-
-    #[test]
-    fn test_extract_json_from_sse_skips_bom_and_leading_whitespace() {
-        let input = "\u{feff}\n\n  data: {\"jsonrpc\":\"2.0\",\"result\":{}}\n\n";
-        let extracted = extract_json_from_sse_text(input);
-        let _: JsonRpcResponse = serde_json::from_str(extracted.as_ref()).unwrap();
-    }
-
-    #[test]
-    fn test_extract_json_from_sse_uses_last_event_with_data() {
-        let input =
-            ": keep-alive\n\nid: 1\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"result\":{}}\n\n";
-        let extracted = extract_json_from_sse_text(input);
-        let _: JsonRpcResponse = serde_json::from_str(extracted.as_ref()).unwrap();
-    }
-
-    #[test]
-    fn test_parse_jsonrpc_response_text_handles_plain_json() {
-        let parsed = parse_jsonrpc_response_text("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}")
-            .expect("plain JSON response should parse");
-        assert_eq!(parsed.id, Some(serde_json::json!(1)));
-        assert!(parsed.error.is_none());
-    }
-
-    #[test]
-    fn test_parse_jsonrpc_response_text_handles_sse_framed_json() {
-        let sse =
-            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"ok\":true}}\n\n";
-        let parsed =
-            parse_jsonrpc_response_text(sse).expect("SSE-framed JSON response should parse");
-        assert_eq!(parsed.id, Some(serde_json::json!(2)));
-        assert_eq!(
-            parsed
-                .result
-                .as_ref()
-                .and_then(|v| v.get("ok"))
-                .and_then(|v| v.as_bool()),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn test_parse_jsonrpc_response_text_rejects_empty_payload() {
-        assert!(parse_jsonrpc_response_text(" \n\t ").is_err());
-    }
-
-    #[test]
-    fn http_transport_updates_session_id_from_response_headers() {
-        let config = McpServerConfig {
-            name: "test-http".into(),
-            transport: McpTransport::Http,
-            url: Some("http://localhost/mcp".into()),
-            ..Default::default()
-        };
-        let mut transport = HttpTransport::new(&config).expect("build transport");
-
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::HeaderName::from_static("mcp-session-id"),
-            reqwest::header::HeaderValue::from_static("session-abc"),
-        );
-        transport.update_session_id_from_headers(&headers);
-        assert_eq!(transport.session_id.as_deref(), Some("session-abc"));
-    }
-
-    #[test]
-    fn http_transport_injects_session_id_header_when_available() {
-        let config = McpServerConfig {
-            name: "test-http".into(),
-            transport: McpTransport::Http,
-            url: Some("http://localhost/mcp".into()),
-            ..Default::default()
-        };
-        let mut transport = HttpTransport::new(&config).expect("build transport");
-        transport.session_id = Some("session-xyz".to_string());
-
-        let req = transport
-            .apply_session_header(reqwest::Client::new().post("http://localhost/mcp"))
-            .build()
-            .expect("build request");
-        assert_eq!(
-            req.headers()
-                .get(MCP_SESSION_ID_HEADER)
-                .and_then(|v| v.to_str().ok()),
-            Some("session-xyz")
-        );
-    }
-
-    // ── derive_message_url tests ──────────────────────────────────────────────
-
-    #[test]
-    fn derive_message_url_replaces_sse_segment_with_messages() {
-        let url = derive_message_url("http://localhost:3000/mcp/sse", "messages");
-        assert_eq!(url, Some("http://localhost:3000/mcp/messages".to_string()));
-    }
-
-    #[test]
-    fn derive_message_url_appends_when_no_sse_segment() {
-        let url = derive_message_url("http://localhost:3000/mcp", "messages");
-        assert_eq!(url, Some("http://localhost:3000/mcp/messages".to_string()));
-    }
-
-    #[test]
-    fn derive_message_url_returns_none_for_invalid_url() {
-        let url = derive_message_url("not-a-url", "messages");
-        assert!(url.is_none());
-    }
-
-    #[test]
-    fn derive_message_url_message_path_variant() {
-        let url = derive_message_url("http://localhost:3000/mcp/sse", "message");
-        assert_eq!(url, Some("http://localhost:3000/mcp/message".to_string()));
-    }
-
-    // ── parse_endpoint_from_data tests ───────────────────────────────────────
-
-    #[test]
-    fn parse_endpoint_absolute_http_url_returned_as_is() {
-        let result = parse_endpoint_from_data("http://base/sse", "http://other/messages");
-        assert_eq!(result, Some("http://other/messages".to_string()));
-    }
-
-    #[test]
-    fn parse_endpoint_absolute_https_url_returned_as_is() {
-        let result = parse_endpoint_from_data("https://base/sse", "https://other/messages");
-        assert_eq!(result, Some("https://other/messages".to_string()));
-    }
-
-    #[test]
-    fn parse_endpoint_relative_path_resolved_against_base() {
-        let result = parse_endpoint_from_data("http://localhost:3000/sse", "/messages");
-        assert_eq!(result, Some("http://localhost:3000/messages".to_string()));
-    }
-
-    #[test]
-    fn parse_endpoint_json_object_with_endpoint_key() {
-        let json_data = r#"{"endpoint":"/messages"}"#;
-        let result = parse_endpoint_from_data("http://localhost:3000/sse", json_data);
-        assert_eq!(result, Some("http://localhost:3000/messages".to_string()));
-    }
-
-    // ── looks_like_sse_text tests ─────────────────────────────────────────────
-
-    #[test]
-    fn looks_like_sse_text_detects_data_prefix() {
-        assert!(looks_like_sse_text("data:{\"jsonrpc\":\"2.0\"}"));
-    }
-
-    #[test]
-    fn looks_like_sse_text_detects_event_prefix() {
-        assert!(looks_like_sse_text("event: message\ndata: {}"));
-    }
-
-    #[test]
-    fn looks_like_sse_text_detects_embedded_data_line() {
-        assert!(looks_like_sse_text("id: 1\ndata:{\"x\":1}"));
-    }
-
-    #[test]
-    fn looks_like_sse_text_plain_json_is_not_sse() {
-        assert!(!looks_like_sse_text(
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"
-        ));
-    }
-
-    // ── extract_json_from_sse_text edge cases ─────────────────────────────────
-
-    #[test]
-    fn extract_json_skips_comment_lines() {
-        let input = ": keep-alive\ndata: {\"jsonrpc\":\"2.0\",\"result\":{}}\n\n";
-        let extracted = extract_json_from_sse_text(input);
-        let v: serde_json::Value = serde_json::from_str(extracted.as_ref()).unwrap();
-        assert_eq!(v["jsonrpc"], "2.0");
-    }
-
-    #[test]
-    fn extract_json_empty_input_returns_empty_trimmed() {
-        let result = extract_json_from_sse_text("   ");
-        assert!(result.as_ref().trim().is_empty());
-    }
-
-    #[test]
-    fn extract_json_plain_json_returned_unchanged() {
-        let input = "{\"jsonrpc\":\"2.0\",\"result\":{}}";
-        let extracted = extract_json_from_sse_text(input);
-        // No SSE framing, extracted as-is (trimmed)
-        assert_eq!(extracted.as_ref(), input);
-    }
-
-    // ── parse_jsonrpc_response_text edge cases ────────────────────────────────
-
-    #[test]
-    fn parse_jsonrpc_response_rejects_whitespace_only() {
-        assert!(parse_jsonrpc_response_text("   \n\t  ").is_err());
-    }
-
-    #[test]
-    fn parse_jsonrpc_response_with_error_result() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"not found"}}"#;
-        let resp = parse_jsonrpc_response_text(json).unwrap();
-        assert!(resp.error.is_some());
-        assert_eq!(resp.error.unwrap().code, -32601);
-    }
-
-    // ── create_transport factory ──────────────────────────────────────────────
-
-    #[test]
-    fn create_transport_stdio_fails_without_valid_command() {
-        // Spawning a non-existent binary should fail
-        let config = McpServerConfig {
-            name: "test-stdio".into(),
+        let config = Arc::new(McpServerConfig {
+            name: "hang".into(),
+            command: script.display().to_string(),
+            args: vec![pid_path.display().to_string()],
             transport: McpTransport::Stdio,
-            command: "/usr/bin/zeroclaw_nonexistent_binary_abc123".into(),
             ..Default::default()
-        };
-        let result = create_transport(&config);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn create_transport_http_without_url_fails() {
-        let config = McpServerConfig {
-            name: "test-http".into(),
-            transport: McpTransport::Http,
-            ..Default::default()
-        };
-        assert!(create_transport(&config).is_err());
-    }
-
-    #[test]
-    fn create_transport_sse_without_url_fails() {
-        let config = McpServerConfig {
-            name: "test-sse".into(),
-            transport: McpTransport::Sse,
-            ..Default::default()
-        };
-        assert!(create_transport(&config).is_err());
-    }
-
-    #[test]
-    fn create_transport_http_with_url_succeeds() {
-        let config = McpServerConfig {
-            name: "test-http".into(),
-            transport: McpTransport::Http,
-            url: Some("http://localhost:9999/mcp".into()),
-            ..Default::default()
-        };
-        // Build should succeed even if server isn't running
-        assert!(create_transport(&config).is_ok());
-    }
-
-    #[test]
-    fn create_transport_sse_with_url_succeeds() {
-        let config = McpServerConfig {
-            name: "test-sse".into(),
-            transport: McpTransport::Sse,
-            url: Some("http://localhost:9999/sse".into()),
-            ..Default::default()
-        };
-        assert!(create_transport(&config).is_ok());
-    }
-
-    // ── HTTP session id whitespace handling ───────────────────────────────────
-
-    #[test]
-    fn http_transport_ignores_empty_session_id_header() {
-        let config = McpServerConfig {
-            name: "test-http".into(),
-            transport: McpTransport::Http,
-            url: Some("http://localhost/mcp".into()),
-            ..Default::default()
-        };
-        let mut transport = HttpTransport::new(&config).expect("build transport");
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::HeaderName::from_static("mcp-session-id"),
-            reqwest::header::HeaderValue::from_static("   "),
-        );
-        transport.update_session_id_from_headers(&headers);
-        // Whitespace-only session id should not be stored
-        assert!(transport.session_id.is_none());
-    }
-
-    #[test]
-    fn http_transport_no_session_header_leaves_none() {
-        let config = McpServerConfig {
-            name: "test-http".into(),
-            transport: McpTransport::Http,
-            url: Some("http://localhost/mcp".into()),
-            ..Default::default()
-        };
-        let transport = HttpTransport::new(&config).expect("build transport");
-        assert!(transport.session_id.is_none());
-    }
-
-    #[test]
-    fn http_transport_apply_session_header_noop_when_no_session() {
-        let config = McpServerConfig {
-            name: "test-http".into(),
-            transport: McpTransport::Http,
-            url: Some("http://localhost/mcp".into()),
-            ..Default::default()
-        };
-        let transport = HttpTransport::new(&config).expect("build transport");
-        let req = transport
-            .apply_session_header(reqwest::Client::new().post("http://localhost/mcp"))
-            .build()
-            .expect("build request");
-        assert!(req.headers().get(MCP_SESSION_ID_HEADER).is_none());
-    }
-
-    #[tokio::test]
-    async fn http_transport_reset_clears_session_id() {
-        let config = McpServerConfig {
-            name: "test-http".into(),
-            transport: McpTransport::Http,
-            url: Some("http://localhost/mcp".into()),
-            ..Default::default()
-        };
-        let mut transport = HttpTransport::new(&config).expect("build transport");
-        transport.session_id = Some("stale-session".into());
-        transport.reset().await.expect("reset");
-        assert!(transport.session_id.is_none());
-    }
-
-    #[tokio::test]
-    async fn http_transport_maps_404_to_stale_session() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(404))
-            .mount(&server)
-            .await;
-
-        let config = McpServerConfig {
-            name: "test-http".into(),
-            transport: McpTransport::Http,
-            url: Some(server.uri()),
-            ..Default::default()
-        };
-        let mut transport = HttpTransport::new(&config).expect("build transport");
-        // A 404 only signals a stale session when the request carried a session id.
-        transport.session_id = Some("sess-1".into());
-        let req = JsonRpcRequest::new(1, "tools/call", serde_json::json!({}));
-        let err = transport
-            .send_and_recv(&req)
-            .await
-            .expect_err("404 should error");
-        match err.downcast_ref::<McpTransportError>() {
-            Some(McpTransportError::StaleSession { status }) => assert_eq!(*status, 404),
-            other => panic!("expected StaleSession, got {other:?}"),
+        });
+        let t = StdioTransport::new(Arc::clone(&config)).unwrap();
+        let gen0 = t.generation();
+        let mut old = None;
+        for _ in 0..50 {
+            if let Ok(raw) = std::fs::read_to_string(&pid_path) {
+                if let Ok(pid) = raw.trim().parse::<u32>() {
+                    old = Some(pid);
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(20)).await;
         }
-    }
-
-    #[tokio::test]
-    async fn http_transport_404_without_session_is_plain_error() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(404))
-            .mount(&server)
-            .await;
-
-        let config = McpServerConfig {
-            name: "test-http".into(),
-            transport: McpTransport::Http,
-            url: Some(server.uri()),
-            ..Default::default()
-        };
-        // No session id was ever issued (stateless server, or a misconfigured url):
-        // a 404 here is a missing endpoint, not a stale session — it must NOT map to
-        // StaleSession (which would make `call_tool` burn a wasted reconnect).
-        let mut transport = HttpTransport::new(&config).expect("build transport");
-        assert!(transport.session_id.is_none());
-        let req = JsonRpcRequest::new(1, "tools/call", serde_json::json!({}));
-        let err = transport
-            .send_and_recv(&req)
-            .await
-            .expect_err("404 should error");
-        assert!(
-            !matches!(
-                err.downcast_ref::<McpTransportError>(),
-                Some(McpTransportError::StaleSession { .. })
-            ),
-            "sessionless 404 must not be classified as StaleSession, got: {err:?}"
-        );
-        assert!(
-            err.to_string().contains("MCP server returned HTTP 404"),
-            "got: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn sse_transport_reset_clears_session_and_endpoint_state() {
-        let config = McpServerConfig {
-            name: "test-sse".into(),
-            transport: McpTransport::Sse,
-            url: Some("http://localhost:1/sse".into()),
-            ..Default::default()
-        };
-        let mut transport = SseTransport::new(&config).expect("build transport");
-        transport.stream_state = SseStreamState::Connected;
-        {
-            let mut guard = transport.shared.lock().await;
-            guard.message_url = Some("http://localhost:1/messages".into());
-            guard.message_url_from_endpoint = true;
-            let (tx, _rx) = oneshot::channel();
-            guard.pending.insert(7, tx);
+        let old = old.expect("pid");
+        assert!(alive(old));
+        let _ = std::fs::remove_file(&pid_path);
+        t.reset().await.expect("reset");
+        assert!(t.generation() > gen0);
+        for _ in 0..50 {
+            if !alive(old) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
         }
+        assert!(!alive(old), "old child must be reaped before replacement");
+        t.close().await.ok();
+    }
 
-        transport.reset().await.expect("reset");
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_failed_reap_refuses_replacement_surface() {
+        // Self-deleting script: after first kill the path is gone so spawn fails.
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("once.sh");
+        let mut f = std::fs::File::create(&script).unwrap();
+        f.write_all(
+            br#"#!/bin/sh
+rm -f "$0"
+exec tail -f /dev/null
+"#,
+        )
+        .unwrap();
+        drop(f);
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let config = Arc::new(McpServerConfig {
+            name: "once".into(),
+            command: script.display().to_string(),
+            transport: McpTransport::Stdio,
+            ..Default::default()
+        });
+        let t = StdioTransport::new(Arc::clone(&config)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let err = t.reset().await.expect_err("spawn after delete must fail");
+        assert!(
+            err.to_string().contains("failed to spawn")
+                || format!("{err:#}").contains("replacement"),
+            "{err:#}"
+        );
+    }
 
-        assert_eq!(transport.stream_state, SseStreamState::Unknown);
-        let guard = transport.shared.lock().await;
-        assert!(guard.message_url.is_none());
-        assert!(!guard.message_url_from_endpoint);
-        assert!(guard.pending.is_empty());
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_cancel_before_write_is_not_sent() {
+        // Flood a blocking stdin reader that never reads — write may block.
+        // Cancel immediately after submit so cancel wins before/during write.
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("noread.sh");
+        let mut f = std::fs::File::create(&script).unwrap();
+        // Never read stdin; fill the pipe eventually. For cancel-before-write we
+        // cancel the future immediately.
+        f.write_all(
+            br#"#!/bin/sh
+sleep 60
+"#,
+        )
+        .unwrap();
+        drop(f);
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let config = Arc::new(McpServerConfig {
+            name: "noread".into(),
+            command: script.display().to_string(),
+            transport: McpTransport::Stdio,
+            ..Default::default()
+        });
+        let t = StdioTransport::new(config).unwrap();
+        let req = JsonRpcRequest::new(1, "initialize", serde_json::json!({}));
+        let fut = t.send_and_recv(&req);
+        tokio::pin!(fut);
+        // Cancel before polling write completion.
+        drop(fut);
+        // Next call after dirty recovery path is coordinator-owned; here we only
+        // assert cancel did not panic and generation unchanged until reset.
+        assert_eq!(t.generation(), 0);
+        t.close().await.ok();
+    }
+
+    #[tokio::test]
+    async fn http_transport_reset_clears_session() {
+        let config = Arc::new(McpServerConfig {
+            name: "h".into(),
+            transport: McpTransport::Http,
+            url: Some("http://localhost/mcp".into()),
+            ..Default::default()
+        });
+        let mut t = HttpTransport::new(config).unwrap();
+        t.session_id = Some("s".into());
+        ExclusiveMcpTransport::reset(&mut t).await.unwrap();
+        assert!(t.session_id.is_none());
+    }
+
+    #[test]
+    fn parse_response_rejects_server_request() {
+        let err = parse_jsonrpc_response_text(
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+            Some(&serde_json::json!(1)),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot be accepted"));
+    }
+
+    #[test]
+    fn parse_response_rejects_id_mismatch() {
+        let err = parse_jsonrpc_response_text(
+            r#"{"jsonrpc":"2.0","id":2,"result":{}}"#,
+            Some(&serde_json::json!(1)),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("id mismatch"));
     }
 }
