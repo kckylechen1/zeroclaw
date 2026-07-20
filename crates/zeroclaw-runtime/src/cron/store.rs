@@ -600,15 +600,51 @@ pub fn release_job(config: &Config, job_id: &str) -> Result<()> {
     })
 }
 
-pub fn clear_stale_locks(config: &Config) -> Result<usize> {
+/// Clear in-flight cron locks.
+///
+/// When `older_than` is `None`, every lock is cleared (startup recovery after
+/// process death). When `Some(cutoff)`, only locks with `locked_at < cutoff`
+/// are reclaimed — used by the poll loop for TTL-based recovery so a hung
+/// agent job cannot hold a `max_concurrent` slot until the next daemon restart
+/// (#9191).
+pub fn clear_stale_locks_before(
+    config: &Config,
+    older_than: Option<DateTime<Utc>>,
+) -> Result<usize> {
     let cleared = with_read_connection(config, |conn| {
-        conn.execute(
-            "UPDATE cron_jobs SET locked_at = NULL WHERE locked_at IS NOT NULL",
-            [],
-        )
-        .context("Failed to clear stale cron job locks")
+        match older_than {
+            None => conn
+                .execute(
+                    "UPDATE cron_jobs SET locked_at = NULL WHERE locked_at IS NOT NULL",
+                    [],
+                )
+                .context("Failed to clear stale cron job locks"),
+            Some(cutoff) => conn
+                .execute(
+                    "UPDATE cron_jobs SET locked_at = NULL \
+                     WHERE locked_at IS NOT NULL AND locked_at < ?1",
+                    params![cutoff.to_rfc3339()],
+                )
+                .context("Failed to reclaim TTL-expired cron job locks"),
+        }
     })?;
     Ok(cleared.unwrap_or(0))
+}
+
+/// Clear all in-flight locks (boot-time recovery).
+pub fn clear_stale_locks(config: &Config) -> Result<usize> {
+    clear_stale_locks_before(config, None)
+}
+
+/// Reclaim locks whose `locked_at` is older than `now - ttl`.
+pub fn reclaim_stale_locks(
+    config: &Config,
+    now: DateTime<Utc>,
+    ttl: std::time::Duration,
+) -> Result<usize> {
+    let ttl = chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(1800));
+    let cutoff = now - ttl;
+    clear_stale_locks_before(config, Some(cutoff))
 }
 
 pub fn record_run(
@@ -1669,6 +1705,38 @@ mod tests {
             clear_stale_locks(&config).unwrap(),
             0,
             "clearing again when idle releases nothing"
+        );
+    }
+
+    #[test]
+    fn reclaim_stale_locks_only_clears_locks_older_than_ttl() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let fresh = add_job(&config, "test-agent", "*/5 * * * *", "echo fresh").unwrap();
+        let stale = add_job(&config, "test-agent", "*/5 * * * *", "echo stale").unwrap();
+        force_due(&config, &fresh.id);
+        force_due(&config, &stale.id);
+
+        let now = Utc::now();
+        let stale_locked_at = now - chrono::Duration::seconds(3600);
+        assert!(claim_job(&config, &stale.id, stale_locked_at).unwrap());
+        assert!(claim_job(&config, &fresh.id, now).unwrap());
+
+        // TTL of 30 minutes: only the hour-old lock is reclaimed.
+        assert_eq!(
+            reclaim_stale_locks(&config, now, std::time::Duration::from_secs(30 * 60)).unwrap(),
+            1,
+            "only the lock older than the TTL should be reclaimed"
+        );
+
+        let due = due_jobs(&config, now).unwrap();
+        assert!(
+            due.iter().any(|j| j.id == stale.id),
+            "stale lock must be eligible again after TTL reclaim"
+        );
+        assert!(
+            !due.iter().any(|j| j.id == fresh.id),
+            "fresh in-flight lock must remain held"
         );
     }
 
