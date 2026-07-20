@@ -1,10 +1,11 @@
 use crate::cron::store::{
-    RunCompletionAction, persist_manual_run_result, persist_run_completion_state,
-    persist_run_result,
+    RunCompletionAction, persist_manual_run_result, persist_run_result_for_owner,
 };
+#[cfg(test)]
+use crate::cron::store::{persist_run_completion_state, persist_run_result};
 use crate::cron::{
     CronJob, DeliveryConfig, JobType, Schedule, SessionTarget, all_overdue_jobs, claim_job,
-    clear_stale_locks, due_jobs, next_run_for_schedule, reclaim_expired_leases, release_job,
+    due_jobs, next_run_for_schedule, reclaim_expired_leases_with_legacy, release_job,
     renew_job_lease, skip_missed_run, sync_declarative_jobs,
 };
 use crate::security::SecurityPolicy;
@@ -30,7 +31,10 @@ const CRON_JOB_TIMEOUT_SECS: u64 = 30 * 60;
 /// leases are reclaimed.
 const CRON_LEASE_TTL_SECS: u64 = 60;
 /// How often an in-flight job renews its owner-qualified lease.
+#[cfg(not(test))]
 const CRON_LEASE_HEARTBEAT_SECS: u64 = 20;
+#[cfg(test)]
+const CRON_LEASE_HEARTBEAT_SECS: u64 = 1;
 const SCHEDULER_COMPONENT: &str = "scheduler";
 const CRON_AGENT_DEFAULT_EXCLUDED_TOOLS: &[&str] = &[
     "cron_add",
@@ -315,28 +319,29 @@ pub async fn run(
         ),
     }
 
-    // ── Stale-lock recovery: any in-flight lock present at boot was left by a
-    //    run that died with the previous process. Clear it so those jobs are
-    //    eligible again instead of being wedged out of `due_jobs` forever.
-    match clear_stale_locks(&config) {
+    // ── Lease recovery: reclaim only expired owner-qualified leases and
+    //    legacy claim-time rows past TTL. Never clear unexpired live leases
+    //    (another rolling scheduler instance may still hold them).
+    let lease_ttl = Duration::from_secs(CRON_LEASE_TTL_SECS);
+    match reclaim_expired_leases_with_legacy(&config, Utc::now(), lease_ttl) {
         Ok(0) => {}
         Ok(cleared) => ::zeroclaw_log::record!(
             INFO,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                 .with_attrs(::serde_json::json!({"cleared": cleared})),
-            "Cleared stale cron in-flight locks at startup"
+            "Reclaimed expired cron leases at startup"
         ),
         Err(e) => ::zeroclaw_log::record!(
             WARN,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                 .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                 .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-            "Failed to clear stale cron in-flight locks at startup"
+            "Failed to reclaim expired cron leases at startup"
         ),
     }
 
     if config.scheduler.catch_up_on_startup {
-        catch_up_overdue_jobs(&config, &event_tx).await;
+        catch_up_overdue_jobs(&config, &event_tx, &cancel).await;
     } else {
         ::zeroclaw_log::record!(
             INFO,
@@ -352,8 +357,12 @@ pub async fn run(
                 // Keep scheduler liveness fresh even when there are no due jobs.
                 crate::health::mark_component_ok(SCHEDULER_COMPONENT);
 
-                // Reclaim only expired leases (live renewed leases stay held).
-                match reclaim_expired_leases(&config, Utc::now()) {
+                // Reclaim only expired leases + legacy claim-time rows past TTL.
+                match reclaim_expired_leases_with_legacy(
+                    &config,
+                    Utc::now(),
+                    Duration::from_secs(CRON_LEASE_TTL_SECS),
+                ) {
                     Ok(0) => {}
                     Ok(cleared) => ::zeroclaw_log::record!(
                         INFO,
@@ -439,7 +448,14 @@ fn resolve_owning_agent<'a>(config: &'a Config, job: &CronJob) -> Option<&'a str
 /// Fetch **all** overdue jobs (ignoring `max_tasks`) and execute them.
 /// Called once at scheduler startup so that jobs missed during downtime
 /// (e.g. late boot, daemon restart) are caught up immediately.
-async fn catch_up_overdue_jobs(config: &Config, event_tx: &EventBroadcast) {
+///
+/// Uses the scheduler's cancellation token so shutdown cancels catch-up
+/// the same way it cancels a normal poll batch.
+async fn catch_up_overdue_jobs(
+    config: &Config,
+    event_tx: &EventBroadcast,
+    cancel: &CancellationToken,
+) {
     let now = Utc::now();
     let jobs = match all_overdue_jobs(config, now) {
         Ok(jobs) => jobs,
@@ -477,7 +493,7 @@ async fn catch_up_overdue_jobs(config: &Config, event_tx: &EventBroadcast) {
         jobs,
         SCHEDULER_COMPONENT,
         event_tx,
-        CancellationToken::new(),
+        cancel.child_token(),
     )
     .await;
 
@@ -750,6 +766,7 @@ async fn execute_and_persist_job(
 
     // Heartbeat renews the owner-qualified lease while the job (including
     // retries) is running so a multi-attempt cron cannot be reclaimed mid-flight.
+    // SQLite renew runs on a blocking worker so Tokio threads stay free.
     let lease_ttl = Duration::from_secs(CRON_LEASE_TTL_SECS);
     let heartbeat = {
         let config = config.clone();
@@ -762,23 +779,62 @@ async fn execute_and_persist_job(
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        if let Err(e) = renew_job_lease(
-                            &config,
-                            &job_id,
-                            &owner,
-                            Utc::now(),
-                            lease_ttl,
-                        ) {
-                            ::zeroclaw_log::record!(
-                                WARN,
-                                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        let config = config.clone();
+                        let renew_job_id = job_id.clone();
+                        let owner = owner.clone();
+                        let renew_result = tokio::task::spawn_blocking(move || {
+                            renew_job_lease(
+                                &config,
+                                &renew_job_id,
+                                &owner,
+                                Utc::now(),
+                                lease_ttl,
+                            )
+                        })
+                        .await;
+                        match renew_result {
+                            Ok(Ok(true)) => {}
+                            Ok(Ok(false)) => {
+                                // Lost ownership: cancel underlying execution.
+                                ::zeroclaw_log::record!(
+                                    WARN,
+                                    ::zeroclaw_log::Event::new(
+                                        module_path!(),
+                                        ::zeroclaw_log::Action::Note
+                                    )
                                     .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                                    .with_attrs(::serde_json::json!({
-                                        "job_id": job_id,
-                                        "error": format!("{e}")
-                                    })),
+                                    .with_attrs(::serde_json::json!({"job_id": job_id})),
+                                    "Cron job: lease ownership lost; cancelling execution"
+                                );
+                                cancel.cancel();
+                                break;
+                            }
+                            Ok(Err(e)) => ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "job_id": job_id,
+                                    "error": format!("{e}")
+                                })),
                                 "Cron job: failed to renew lease heartbeat"
-                            );
+                            ),
+                            Err(e) => ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "job_id": job_id,
+                                    "error": format!("{e}")
+                                })),
+                                "Cron job: lease heartbeat worker join failed"
+                            ),
                         }
                     }
                     () = cancel.cancelled() => break,
@@ -789,8 +845,9 @@ async fn execute_and_persist_job(
 
     // Spawn the retry loop so the wall-clock timeout/cancel select does not
     // nest the full agent future type (keeps test rustc recursion in check).
+    // Retain the JoinHandle: timeout/shutdown must abort + await (not detach).
     let timeout = cron_job_timeout();
-    let run_task = {
+    let mut run_task = {
         let config = config.clone();
         let security = security.clone();
         let agent_alias = agent_alias.to_owned();
@@ -809,18 +866,24 @@ async fn execute_and_persist_job(
         )
     };
     let (success, output) = tokio::select! {
-        result = time::timeout(timeout, run_task) => match result {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(join_err)) => (
+        result = &mut run_task => match result {
+            Ok(outcome) => outcome,
+            Err(join_err) => (
                 false,
                 format!("cron job task failed: {join_err}"),
             ),
-            Err(_elapsed) => (
+        },
+        () = time::sleep(timeout) => {
+            run_task.abort();
+            let _ = run_task.await;
+            (
                 false,
                 format!("cron job timed out after {}s", timeout.as_secs()),
-            ),
+            )
         },
         () = cancel.cancelled() => {
+            run_task.abort();
+            let _ = run_task.await;
             (false, "cron job cancelled during scheduler shutdown".to_string())
         }
     };
@@ -829,34 +892,18 @@ async fn execute_and_persist_job(
     let _ = heartbeat.await;
 
     let finished_at = Utc::now();
-    let success = Box::pin(persist_job_result(
+    // Persist + release atomically/conditionally on owner token. An old owner
+    // that lost the lease cannot commit terminal state or clear a new lease.
+    let success = Box::pin(persist_job_result_for_owner(
         config,
         job,
+        owner,
         success,
         &output,
         started_at,
         finished_at,
     ))
     .await;
-
-    // Owner-qualified release: only this lease token can clear the lock.
-    // Cancellation and normal completion both release their own lease.
-    match release_job(config, &job.id, owner) {
-        Ok(true) => {}
-        Ok(false) => ::zeroclaw_log::record!(
-            DEBUG,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_attrs(::serde_json::json!({"job_id": job.id})),
-            "Cron job: lease already released or ownership changed"
-        ),
-        Err(e) => ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                .with_attrs(::serde_json::json!({"job_id": job.id, "error": format!("{}", e)})),
-            "Cron job: failed to release in-flight lease after run"
-        ),
-    }
 
     (job.id.clone(), success, output)
 }
@@ -998,6 +1045,9 @@ fn cron_job_timeout() -> Duration {
     Duration::from_secs(CRON_JOB_TIMEOUT_SECS)
 }
 
+/// Non-owner-gated persist used by delivery/classification unit tests and
+/// manual paths that do not hold a scheduler lease.
+#[cfg(test)]
 async fn persist_job_result(
     config: &Config,
     job: &CronJob,
@@ -1045,10 +1095,6 @@ async fn persist_job_result(
         );
 
         if action == RunCompletionAction::Delete {
-            // Best-effort fallback for the legacy behavior: a successful
-            // auto-delete one-shot should not be picked up again if the
-            // combined history+state transaction fails while inserting or
-            // pruning the run row.
             if let Err(disable_err) = persist_run_completion_state(
                 config,
                 job,
@@ -1065,24 +1111,106 @@ async fn persist_job_result(
                     "Failed to disable one-shot cron job after history persistence failure: "
                 );
             }
-        } else {
-            // For recurring jobs and non-delete one-shots, keep the scheduler
-            // moving even if run-history persistence fails.
-            if let Err(state_err) = persist_run_completion_state(
-                config,
-                job,
-                job_state_at,
-                &outcome.status,
-                Some(&outcome.output),
-                action,
-            ) {
-                ::zeroclaw_log::record!(
+        } else if let Err(state_err) = persist_run_completion_state(
+            config,
+            job,
+            job_state_at,
+            &outcome.status,
+            Some(&outcome.output),
+            action,
+        ) {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"state_err": state_err.to_string()})),
+                "Failed to update cron job state after history persistence failure: "
+            );
+        }
+    }
+
+    outcome.success
+}
+
+async fn persist_job_result_for_owner(
+    config: &Config,
+    job: &CronJob,
+    owner: &str,
+    success: bool,
+    output: &str,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+) -> bool {
+    let duration_ms = (finished_at - started_at).num_milliseconds();
+    let outcome = deliver_and_classify_run_result(
+        config,
+        job,
+        success,
+        output.to_string(),
+        CronDeliveryContext::Scheduled,
+    )
+    .await;
+
+    let action = if is_one_shot_auto_delete(job) && outcome.success {
+        RunCompletionAction::Delete
+    } else if matches!(job.schedule, Schedule::At { .. }) {
+        RunCompletionAction::Disable
+    } else {
+        RunCompletionAction::Reschedule
+    };
+
+    let job_state_at = Utc::now();
+    match persist_run_result_for_owner(
+        config,
+        job,
+        owner,
+        started_at,
+        finished_at,
+        job_state_at,
+        &outcome.status,
+        Some(&outcome.output),
+        duration_ms,
+        action,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"job_id": job.id})),
+                "Cron job: lost lease ownership; skipping terminal persist/release"
+            );
+            // Best-effort: only release if we somehow still hold the token.
+            let _ = release_job(config, &job.id, owner);
+        }
+        Err(e) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"e": e.to_string()})),
+                "Failed to persist scheduler run result for owner: "
+            );
+            // Owner-qualified release only — never clear another owner's lease.
+            match release_job(config, &job.id, owner) {
+                Ok(true) => {}
+                Ok(false) => ::zeroclaw_log::record!(
+                    DEBUG,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_attrs(::serde_json::json!({"job_id": job.id})),
+                    "Cron job: lease already released or ownership changed"
+                ),
+                Err(release_err) => ::zeroclaw_log::record!(
                     WARN,
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                         .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"state_err": state_err.to_string()})),
-                    "Failed to update cron job state after history persistence failure: "
-                );
+                        .with_attrs(::serde_json::json!({
+                            "job_id": job.id,
+                            "error": format!("{release_err}")
+                        })),
+                    "Cron job: failed to release in-flight lease after persist error"
+                ),
             }
         }
     }
@@ -2830,5 +2958,206 @@ mod tests {
         )
         .await;
         // If we got here without panic, the test passes.
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn cancel_aborts_and_awaits_running_job() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config
+            .risk_profiles
+            .entry(TEST_AGENT.into())
+            .or_default()
+            .allowed_commands = vec!["sh".into(), "sleep".into()];
+        let job = cron::add_job(&config, TEST_AGENT, "* * * * *", "sleep 60").unwrap();
+        let job_id = job.id.clone();
+        let owner = cron::claim_job(
+            &config,
+            &job_id,
+            Utc::now(),
+            std::time::Duration::from_secs(CRON_LEASE_TTL_SECS),
+        )
+        .unwrap()
+        .expect("claim");
+        let security = test_security(&config);
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+        let config_run = config.clone();
+        let job_run = job.clone();
+        let owner_run = owner.clone();
+
+        let started = std::time::Instant::now();
+        let join = zeroclaw_spawn::spawn!(async move {
+            execute_and_persist_job(
+                &config_run,
+                &security,
+                TEST_AGENT,
+                &job_run,
+                "cancel-abort",
+                &owner_run,
+                cancel_task,
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cancel.cancel();
+        let (finished_id, _success, output) = tokio::time::timeout(Duration::from_secs(5), join)
+            .await
+            .expect("abort+await must finish promptly")
+            .expect("join");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "cancelled job must not run out the sleep"
+        );
+        assert!(
+            output.contains("cancelled"),
+            "expected cancel output, got: {output}"
+        );
+        assert_eq!(finished_id, job_id);
+        // Own lease released so the job is claimable again.
+        assert!(
+            cron::claim_job(
+                &config,
+                &job_id,
+                Utc::now(),
+                std::time::Duration::from_secs(CRON_LEASE_TTL_SECS),
+            )
+            .unwrap()
+            .is_some(),
+            "cancel must release only the job's own lease"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn owner_loss_cancels_execution_without_terminal_commit() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config
+            .risk_profiles
+            .entry(TEST_AGENT.into())
+            .or_default()
+            .allowed_commands = vec!["sh".into(), "sleep".into()];
+        let job = cron::add_job(&config, TEST_AGENT, "* * * * *", "sleep 60").unwrap();
+        let now = Utc::now();
+        let old_owner = cron::claim_job(
+            &config,
+            &job.id,
+            now,
+            std::time::Duration::from_secs(CRON_LEASE_TTL_SECS),
+        )
+        .unwrap()
+        .expect("claim");
+        // Steal the lease before the run starts; first heartbeat renew sees Ok(false).
+        crate::cron::store::test_force_lock(
+            &config,
+            &job.id,
+            Some("new-owner"),
+            now + chrono::Duration::seconds(120),
+        )
+        .unwrap();
+
+        let security = test_security(&config);
+        let (_id, _ok, output) = tokio::time::timeout(
+            Duration::from_secs(5),
+            execute_and_persist_job(
+                &config,
+                &security,
+                TEST_AGENT,
+                &job,
+                "owner-loss",
+                &old_owner,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("owner-loss cancel must finish promptly");
+        assert!(
+            output.contains("cancelled") || !output.is_empty(),
+            "job should stop after ownership loss; output={output}"
+        );
+        assert_eq!(
+            crate::cron::store::test_lock_owner(&config, &job.id)
+                .unwrap()
+                .as_deref(),
+            Some("new-owner"),
+            "new owner's lease must remain"
+        );
+        assert!(
+            cron::list_runs(&config, &job.id, 10).unwrap().is_empty(),
+            "old owner must not persist terminal run history"
+        );
+    }
+
+    #[tokio::test]
+    async fn rolling_scheduler_startup_reclaim_keeps_live_lease() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let job = cron::add_job(&config, TEST_AGENT, "* * * * *", "echo rolling").unwrap();
+        let now = Utc::now();
+        let owner = cron::claim_job(
+            &config,
+            &job.id,
+            now,
+            std::time::Duration::from_secs(CRON_LEASE_TTL_SECS),
+        )
+        .unwrap()
+        .expect("claim");
+        assert!(
+            cron::renew_job_lease(
+                &config,
+                &job.id,
+                &owner,
+                now,
+                std::time::Duration::from_secs(CRON_LEASE_TTL_SECS),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            cron::reclaim_expired_leases_with_legacy(
+                &config,
+                now,
+                std::time::Duration::from_secs(CRON_LEASE_TTL_SECS),
+            )
+            .unwrap(),
+            0,
+            "rolling scheduler restart must not steal a live renewed lease"
+        );
+        assert!(cron::release_job(&config, &job.id, &owner).unwrap());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn catch_up_respects_scheduler_cancellation_token() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.scheduler.catch_up_on_startup = true;
+        config
+            .risk_profiles
+            .entry(TEST_AGENT.into())
+            .or_default()
+            .allowed_commands = vec!["sh".into(), "sleep".into()];
+        let job = cron::add_job(&config, TEST_AGENT, "* * * * *", "sleep 60").unwrap();
+        crate::cron::store::test_force_next_run(
+            &config,
+            &job.id,
+            Utc::now() - chrono::Duration::hours(1),
+        )
+        .unwrap();
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            catch_up_overdue_jobs(&config, &None, &cancel),
+        )
+        .await
+        .expect("catch-up with cancelled token must not hang");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "catch-up must honor scheduler cancellation"
+        );
     }
 }

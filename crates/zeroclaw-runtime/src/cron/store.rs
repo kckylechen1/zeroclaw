@@ -644,9 +644,11 @@ pub fn release_job(config: &Config, job_id: &str, owner: &str) -> Result<bool> {
 
 /// Clear in-flight cron locks.
 ///
-/// When `expired_before` is `None`, every lock is cleared (startup recovery
-/// after process death). When `Some(now)`, only leases with
-/// `locked_at < now` (expired) are reclaimed — live renewed leases are kept.
+/// When `expired_before` is `None`, every lock is cleared (test/admin helper
+/// only — production startup must never use this: it would steal live leases
+/// from other scheduler instances). When `Some(now)`, only leases with
+/// `locked_at < now` (expired under expiry semantics) are reclaimed — live
+/// renewed leases are kept.
 pub fn clear_stale_locks_before(
     config: &Config,
     expired_before: Option<DateTime<Utc>>,
@@ -672,24 +674,121 @@ pub fn clear_stale_locks_before(
     Ok(cleared.unwrap_or(0))
 }
 
-/// Clear all in-flight locks (boot-time recovery).
+/// Test/admin helper: clear every in-flight lock unconditionally.
+///
+/// Production startup and the poll loop must use
+/// [`reclaim_expired_leases_with_legacy`] instead so unexpired live leases
+/// (and in-TTL legacy claim-time rows) are never stolen.
 pub fn clear_stale_locks(config: &Config) -> Result<usize> {
     clear_stale_locks_before(config, None)
 }
 
 /// Reclaim leases whose expiry (`locked_at`) is before `now`.
+///
+/// Does **not** special-case legacy claim-time rows (`lock_owner IS NULL`);
+/// use [`reclaim_expired_leases_with_legacy`] at startup/poll.
 pub fn reclaim_expired_leases(config: &Config, now: DateTime<Utc>) -> Result<usize> {
     clear_stale_locks_before(config, Some(now))
+}
+
+/// Reclaim expired owner-qualified leases **and** legacy claim-time rows.
+///
+/// Modern rows store lease **expiry** in `locked_at` with a non-NULL
+/// `lock_owner`. Legacy rows (pre-owner-token) store **claim time** in
+/// `locked_at` with `lock_owner IS NULL`; those are treated as expired only
+/// once `locked_at + lease_ttl < now`. Unexpired live leases are never
+/// cleared — including across scheduler restart while another instance holds
+/// a renewed lease.
+pub fn reclaim_expired_leases_with_legacy(
+    config: &Config,
+    now: DateTime<Utc>,
+    lease_ttl: std::time::Duration,
+) -> Result<usize> {
+    let ttl =
+        chrono::Duration::from_std(lease_ttl).unwrap_or_else(|_| chrono::Duration::seconds(60));
+    let legacy_cutoff = now - ttl;
+    let cleared = with_read_connection(config, |conn| {
+        let modern = conn
+            .execute(
+                "UPDATE cron_jobs \
+                     SET locked_at = NULL, lock_owner = NULL \
+                     WHERE lock_owner IS NOT NULL \
+                       AND locked_at IS NOT NULL \
+                       AND locked_at < ?1",
+                params![now.to_rfc3339()],
+            )
+            .context("Failed to reclaim expired owner-qualified cron leases")?;
+        let legacy = conn
+            .execute(
+                "UPDATE cron_jobs \
+                     SET locked_at = NULL, lock_owner = NULL \
+                     WHERE lock_owner IS NULL \
+                       AND locked_at IS NOT NULL \
+                       AND locked_at < ?1",
+                params![legacy_cutoff.to_rfc3339()],
+            )
+            .context("Failed to reclaim expired legacy claim-time cron locks")?;
+        Ok(modern + legacy)
+    })?;
+    Ok(cleared.unwrap_or(0))
 }
 
 /// Backward-compatible name used by older call sites/tests.
 pub fn reclaim_stale_locks(
     config: &Config,
     now: DateTime<Utc>,
-    _ttl: std::time::Duration,
+    ttl: std::time::Duration,
 ) -> Result<usize> {
-    // TTL is no longer subtracted from claim time — `locked_at` is absolute expiry.
-    reclaim_expired_leases(config, now)
+    reclaim_expired_leases_with_legacy(config, now, ttl)
+}
+
+/// Test helper: overwrite lease columns directly (owner-token + expiry, or
+/// legacy claim-time with `owner = None`).
+#[cfg(test)]
+pub(crate) fn test_force_lock(
+    config: &Config,
+    job_id: &str,
+    owner: Option<&str>,
+    locked_at: DateTime<Utc>,
+) -> Result<()> {
+    with_initialized_connection(config, |conn| {
+        conn.execute(
+            "UPDATE cron_jobs SET locked_at = ?1, lock_owner = ?2 WHERE id = ?3",
+            params![locked_at.to_rfc3339(), owner, job_id],
+        )
+        .context("Failed to force cron lock for test")?;
+        Ok(())
+    })
+}
+
+/// Test helper: read current `lock_owner`.
+#[cfg(test)]
+pub(crate) fn test_lock_owner(config: &Config, job_id: &str) -> Result<Option<String>> {
+    with_initialized_connection(config, |conn| {
+        let owner = conn.query_row(
+            "SELECT lock_owner FROM cron_jobs WHERE id = ?1",
+            params![job_id],
+            |row| row.get(0),
+        )?;
+        Ok(owner)
+    })
+}
+
+/// Test helper: force `next_run` for overdue/catch-up tests.
+#[cfg(test)]
+pub(crate) fn test_force_next_run(
+    config: &Config,
+    job_id: &str,
+    next_run: DateTime<Utc>,
+) -> Result<()> {
+    with_initialized_connection(config, |conn| {
+        conn.execute(
+            "UPDATE cron_jobs SET next_run = ?1 WHERE id = ?2",
+            params![next_run.to_rfc3339(), job_id],
+        )
+        .context("Failed to force cron next_run for test")?;
+        Ok(())
+    })
 }
 
 pub fn record_run(
@@ -805,6 +904,69 @@ pub(crate) fn persist_run_result(
         tx.commit()
             .context("Failed to commit cron run result transaction")?;
         Ok(())
+    })
+}
+
+/// Persist run history + terminal job state + lease release atomically, gated
+/// on `owner` still holding the lock.
+///
+/// Returns `Ok(true)` when this owner committed terminal state and released.
+/// Returns `Ok(false)` when ownership was lost — the old owner must not commit
+/// reschedule/delete/disable or clear another owner's lease.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn persist_run_result_for_owner(
+    config: &Config,
+    job: &CronJob,
+    owner: &str,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    job_state_at: DateTime<Utc>,
+    status: &str,
+    output: Option<&str>,
+    duration_ms: i64,
+    action: RunCompletionAction,
+) -> Result<bool> {
+    let bounded_output = output.map(truncate_cron_output);
+
+    with_initialized_connection(config, |conn| {
+        let tx = conn.unchecked_transaction()?;
+
+        let still_owner: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM cron_jobs WHERE id = ?1 AND lock_owner = ?2",
+            params![job.id, owner],
+            |row| row.get(0),
+        )?;
+        if still_owner != 1 {
+            return Ok(false);
+        }
+
+        insert_run_and_prune(
+            &tx,
+            config,
+            &job.id,
+            started_at,
+            finished_at,
+            status,
+            bounded_output.as_deref(),
+            duration_ms,
+        )?;
+
+        if !apply_run_completion_state_for_owner(
+            &tx,
+            job,
+            owner,
+            job_state_at,
+            status,
+            bounded_output.as_deref(),
+            action,
+        )? {
+            // Ownership changed under us; drop the uncommitted txn (incl. run insert).
+            return Ok(false);
+        }
+
+        tx.commit()
+            .context("Failed to commit owner-gated cron run result transaction")?;
+        Ok(true)
     })
 }
 
@@ -1495,6 +1657,64 @@ fn apply_run_completion_state(
     Ok(())
 }
 
+/// Owner-gated terminal state update that also clears the lease in the same
+/// statement. Returns `Ok(true)` when the owner row was updated/deleted.
+fn apply_run_completion_state_for_owner(
+    conn: &Connection,
+    job: &CronJob,
+    owner: &str,
+    job_state_at: DateTime<Utc>,
+    status: &str,
+    output: Option<&str>,
+    action: RunCompletionAction,
+) -> Result<bool> {
+    let bounded_output = output.map(truncate_cron_output);
+
+    let changed = match action {
+        RunCompletionAction::Reschedule => {
+            let next_run = next_run_for_schedule(&job.schedule, job_state_at)?;
+            conn.execute(
+                "UPDATE cron_jobs
+                 SET next_run = ?1, last_run = ?2, last_status = ?3, last_output = ?4,
+                     locked_at = NULL, lock_owner = NULL
+                 WHERE id = ?5 AND lock_owner = ?6",
+                params![
+                    next_run.to_rfc3339(),
+                    job_state_at.to_rfc3339(),
+                    status,
+                    bounded_output.as_deref(),
+                    job.id,
+                    owner,
+                ],
+            )
+            .context("Failed to update cron job run state for owner")?
+        }
+        RunCompletionAction::Disable => conn
+            .execute(
+                "UPDATE cron_jobs
+                 SET enabled = 0, last_run = ?1, last_status = ?2, last_output = ?3,
+                     locked_at = NULL, lock_owner = NULL
+                 WHERE id = ?4 AND lock_owner = ?5",
+                params![
+                    job_state_at.to_rfc3339(),
+                    status,
+                    bounded_output.as_deref(),
+                    job.id,
+                    owner,
+                ],
+            )
+            .context("Failed to disable completed one-shot cron job for owner")?,
+        RunCompletionAction::Delete => conn
+            .execute(
+                "DELETE FROM cron_jobs WHERE id = ?1 AND lock_owner = ?2",
+                params![job.id, owner],
+            )
+            .context("Failed to delete completed one-shot cron job for owner")?,
+    };
+
+    Ok(changed == 1)
+}
+
 fn initialize_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
@@ -1603,6 +1823,45 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// Simulate a pre-owner-token row: claim-time in `locked_at`, no `lock_owner`.
+    fn force_legacy_claim_lock(config: &Config, job_id: &str, claimed_at: DateTime<Utc>) {
+        with_initialized_connection(config, |conn| {
+            conn.execute(
+                "UPDATE cron_jobs SET locked_at = ?1, lock_owner = NULL WHERE id = ?2",
+                params![claimed_at.to_rfc3339(), job_id],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn force_lock_owner(config: &Config, job_id: &str, owner: &str, expires: DateTime<Utc>) {
+        with_initialized_connection(config, |conn| {
+            conn.execute(
+                "UPDATE cron_jobs SET locked_at = ?1, lock_owner = ?2 WHERE id = ?3",
+                params![expires.to_rfc3339(), owner, job_id],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn lock_owner_of(config: &Config, job_id: &str) -> Option<String> {
+        with_initialized_connection(config, |conn| {
+            let owner: Option<String> = conn
+                .query_row(
+                    "SELECT lock_owner FROM cron_jobs WHERE id = ?1",
+                    params![job_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            Ok(owner)
+        })
+        .unwrap()
     }
 
     async fn recv_log_event(
@@ -1873,6 +2132,103 @@ mod tests {
             "fresh in-flight lease must remain held"
         );
         let _ = (stale_owner, fresh_owner);
+    }
+
+    #[test]
+    fn startup_reclaim_keeps_unexpired_live_leases() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let job = add_job(&config, "test-agent", "*/5 * * * *", "echo live").unwrap();
+        force_due(&config, &job.id);
+        let now = Utc::now();
+        let owner = claim(&config, &job.id, now);
+
+        assert_eq!(
+            reclaim_expired_leases_with_legacy(&config, now, std::time::Duration::from_secs(60))
+                .unwrap(),
+            0,
+            "startup must not clear an unexpired live lease"
+        );
+        assert_eq!(
+            lock_owner_of(&config, &job.id).as_deref(),
+            Some(owner.as_str())
+        );
+    }
+
+    #[test]
+    fn legacy_claim_time_rows_reclaimed_only_after_ttl() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let fresh = add_job(&config, "test-agent", "*/5 * * * *", "echo legacy-fresh").unwrap();
+        let stale = add_job(&config, "test-agent", "*/5 * * * *", "echo legacy-stale").unwrap();
+        force_due(&config, &fresh.id);
+        force_due(&config, &stale.id);
+        let now = Utc::now();
+        let ttl = std::time::Duration::from_secs(60);
+
+        force_legacy_claim_lock(&config, &fresh.id, now - chrono::Duration::seconds(10));
+        force_legacy_claim_lock(&config, &stale.id, now - chrono::Duration::seconds(120));
+
+        assert_eq!(
+            reclaim_expired_leases_with_legacy(&config, now, ttl).unwrap(),
+            1,
+            "only legacy claim-time rows past TTL are reclaimed"
+        );
+        assert!(
+            due_jobs(&config, now)
+                .unwrap()
+                .iter()
+                .any(|j| j.id == stale.id),
+            "expired legacy lock must become eligible"
+        );
+        assert!(
+            !due_jobs(&config, now)
+                .unwrap()
+                .iter()
+                .any(|j| j.id == fresh.id),
+            "in-TTL legacy claim-time row must be kept"
+        );
+    }
+
+    #[test]
+    fn old_owner_cannot_commit_terminal_persist() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let job = add_job(&config, "test-agent", "*/5 * * * *", "echo ok").unwrap();
+        force_due(&config, &job.id);
+        let now = Utc::now();
+        let old_owner = claim(&config, &job.id, now);
+        force_lock_owner(
+            &config,
+            &job.id,
+            "new-owner",
+            now + chrono::Duration::seconds(60),
+        );
+
+        let committed = persist_run_result_for_owner(
+            &config,
+            &job,
+            &old_owner,
+            now,
+            now,
+            now,
+            "ok",
+            Some("should-not-commit"),
+            1,
+            RunCompletionAction::Reschedule,
+        )
+        .unwrap();
+        assert!(!committed, "old owner must not commit terminal state");
+        assert_eq!(
+            lock_owner_of(&config, &job.id).as_deref(),
+            Some("new-owner"),
+            "new owner's lease must remain"
+        );
+        let runs = list_runs(&config, &job.id, 10).unwrap();
+        assert!(
+            runs.is_empty(),
+            "old owner must not insert run history either"
+        );
     }
 
     #[test]
