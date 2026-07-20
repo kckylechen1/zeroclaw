@@ -577,56 +577,97 @@ pub fn skip_missed_run(config: &Config, job: &CronJob, now: DateTime<Utc>) -> Re
     }
 }
 
-pub fn claim_job(config: &Config, job_id: &str, now: DateTime<Utc>) -> Result<bool> {
+/// Claim a job with an owner-qualified lease.
+///
+/// `locked_at` stores the lease **expiry** (not claim time). `lock_owner` is
+/// the canonical lease token. Returns `Some(owner)` on success.
+pub fn claim_job(
+    config: &Config,
+    job_id: &str,
+    now: DateTime<Utc>,
+    lease_ttl: std::time::Duration,
+) -> Result<Option<String>> {
+    let owner = uuid::Uuid::new_v4().to_string();
+    let ttl =
+        chrono::Duration::from_std(lease_ttl).unwrap_or_else(|_| chrono::Duration::seconds(60));
+    let expires = now + ttl;
     with_initialized_connection(config, |conn| {
         let claimed = conn
             .execute(
-                "UPDATE cron_jobs SET locked_at = ?1 WHERE id = ?2 AND locked_at IS NULL",
-                params![now.to_rfc3339(), job_id],
+                "UPDATE cron_jobs \
+                 SET locked_at = ?1, lock_owner = ?2 \
+                 WHERE id = ?3 AND locked_at IS NULL",
+                params![expires.to_rfc3339(), owner, job_id],
             )
             .context("Failed to claim cron job for execution")?;
-        Ok(claimed == 1)
+        Ok(if claimed == 1 { Some(owner) } else { None })
     })
 }
 
-pub fn release_job(config: &Config, job_id: &str) -> Result<()> {
+/// Extend a lease. Succeeds only when `owner` still holds the lock.
+pub fn renew_job_lease(
+    config: &Config,
+    job_id: &str,
+    owner: &str,
+    now: DateTime<Utc>,
+    lease_ttl: std::time::Duration,
+) -> Result<bool> {
+    let ttl =
+        chrono::Duration::from_std(lease_ttl).unwrap_or_else(|_| chrono::Duration::seconds(60));
+    let expires = now + ttl;
     with_initialized_connection(config, |conn| {
-        conn.execute(
-            "UPDATE cron_jobs SET locked_at = NULL WHERE id = ?1",
-            params![job_id],
-        )
-        .context("Failed to release cron job lock")?;
-        Ok(())
+        let updated = conn
+            .execute(
+                "UPDATE cron_jobs SET locked_at = ?1 \
+                 WHERE id = ?2 AND lock_owner = ?3",
+                params![expires.to_rfc3339(), job_id, owner],
+            )
+            .context("Failed to renew cron job lease")?;
+        Ok(updated == 1)
+    })
+}
+
+/// Release a lease. Succeeds only when `owner` still holds the lock — an old
+/// owner cannot clear a newer owner's lease.
+pub fn release_job(config: &Config, job_id: &str, owner: &str) -> Result<bool> {
+    with_initialized_connection(config, |conn| {
+        let updated = conn
+            .execute(
+                "UPDATE cron_jobs SET locked_at = NULL, lock_owner = NULL \
+                 WHERE id = ?1 AND lock_owner = ?2",
+                params![job_id, owner],
+            )
+            .context("Failed to release cron job lock")?;
+        Ok(updated == 1)
     })
 }
 
 /// Clear in-flight cron locks.
 ///
-/// When `older_than` is `None`, every lock is cleared (startup recovery after
-/// process death). When `Some(cutoff)`, only locks with `locked_at < cutoff`
-/// are reclaimed — used by the poll loop for TTL-based recovery so a hung
-/// agent job cannot hold a `max_concurrent` slot until the next daemon restart
-/// (#9191).
+/// When `expired_before` is `None`, every lock is cleared (startup recovery
+/// after process death). When `Some(now)`, only leases with
+/// `locked_at < now` (expired) are reclaimed — live renewed leases are kept.
 pub fn clear_stale_locks_before(
     config: &Config,
-    older_than: Option<DateTime<Utc>>,
+    expired_before: Option<DateTime<Utc>>,
 ) -> Result<usize> {
-    let cleared = with_read_connection(config, |conn| {
-        match older_than {
-            None => conn
-                .execute(
-                    "UPDATE cron_jobs SET locked_at = NULL WHERE locked_at IS NOT NULL",
-                    [],
-                )
-                .context("Failed to clear stale cron job locks"),
-            Some(cutoff) => conn
-                .execute(
-                    "UPDATE cron_jobs SET locked_at = NULL \
+    let cleared = with_read_connection(config, |conn| match expired_before {
+        None => conn
+            .execute(
+                "UPDATE cron_jobs \
+                     SET locked_at = NULL, lock_owner = NULL \
+                     WHERE locked_at IS NOT NULL",
+                [],
+            )
+            .context("Failed to clear stale cron job locks"),
+        Some(now) => conn
+            .execute(
+                "UPDATE cron_jobs \
+                     SET locked_at = NULL, lock_owner = NULL \
                      WHERE locked_at IS NOT NULL AND locked_at < ?1",
-                    params![cutoff.to_rfc3339()],
-                )
-                .context("Failed to reclaim TTL-expired cron job locks"),
-        }
+                params![now.to_rfc3339()],
+            )
+            .context("Failed to reclaim expired cron job leases"),
     })?;
     Ok(cleared.unwrap_or(0))
 }
@@ -636,15 +677,19 @@ pub fn clear_stale_locks(config: &Config) -> Result<usize> {
     clear_stale_locks_before(config, None)
 }
 
-/// Reclaim locks whose `locked_at` is older than `now - ttl`.
+/// Reclaim leases whose expiry (`locked_at`) is before `now`.
+pub fn reclaim_expired_leases(config: &Config, now: DateTime<Utc>) -> Result<usize> {
+    clear_stale_locks_before(config, Some(now))
+}
+
+/// Backward-compatible name used by older call sites/tests.
 pub fn reclaim_stale_locks(
     config: &Config,
     now: DateTime<Utc>,
-    ttl: std::time::Duration,
+    _ttl: std::time::Duration,
 ) -> Result<usize> {
-    let ttl = chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(1800));
-    let cutoff = now - ttl;
-    clear_stale_locks_before(config, Some(cutoff))
+    // TTL is no longer subtracted from claim time — `locked_at` is absolute expiry.
+    reclaim_expired_leases(config, now)
 }
 
 pub fn record_run(
@@ -1507,11 +1552,12 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
     // scheduler treats those as orphans (skip with warning) rather than
     // coercing them to a magic alias.
     add_column_if_missing(conn, "agent_alias", "TEXT NOT NULL DEFAULT ''")?;
-    // In-flight execution lock: RFC3339 timestamp of when a run claimed this job,
-    // or NULL when idle. `due_jobs`/`all_overdue_jobs` skip locked rows so a job that
-    // runs longer than the poll interval cannot be launched again while still in
-    // flight (see `claim_job`/`release_job` and
+    // In-flight lease: `locked_at` is the lease expiry (RFC3339), `lock_owner`
+    // is the canonical owner token. NULL/NULL when idle. `due_jobs` skips
+    // locked rows; renew extends expiry; release/reclaim are owner-qualified
+    // or expiry-gated (see `claim_job`/`renew_job_lease`/`release_job`).
     add_column_if_missing(conn, "locked_at", "TEXT")?;
+    add_column_if_missing(conn, "lock_owner", "TEXT")?;
 
     Ok(())
 }
@@ -1539,6 +1585,24 @@ mod tests {
 
     fn cron_db(config: &Config) -> std::path::PathBuf {
         cron_dir(config).join("jobs.db")
+    }
+
+    fn claim(config: &Config, job_id: &str, now: DateTime<Utc>) -> String {
+        claim_job(config, job_id, now, std::time::Duration::from_secs(60))
+            .unwrap()
+            .expect("claim should succeed")
+    }
+
+    fn force_lease_expiry(config: &Config, job_id: &str, expires: DateTime<Utc>) {
+        with_initialized_connection(config, |conn| {
+            conn.execute(
+                "UPDATE cron_jobs SET locked_at = ?1 WHERE id = ?2",
+                params![expires.to_rfc3339(), job_id],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
     }
 
     async fn recv_log_event(
@@ -1628,19 +1692,90 @@ mod tests {
         let job = add_job(&config, "test-agent", "*/5 * * * *", "echo ok").unwrap();
         let now = Utc::now();
 
+        let owner = claim(&config, &job.id, now);
         assert!(
-            claim_job(&config, &job.id, now).unwrap(),
-            "first claim should win"
-        );
-        assert!(
-            !claim_job(&config, &job.id, now).unwrap(),
+            claim_job(&config, &job.id, now, std::time::Duration::from_secs(60))
+                .unwrap()
+                .is_none(),
             "second claim must fail while the job is locked"
         );
 
-        release_job(&config, &job.id).unwrap();
+        assert!(release_job(&config, &job.id, &owner).unwrap());
         assert!(
-            claim_job(&config, &job.id, now).unwrap(),
+            claim_job(&config, &job.id, now, std::time::Duration::from_secs(60))
+                .unwrap()
+                .is_some(),
             "claim should win again after release"
+        );
+    }
+
+    #[test]
+    fn old_owner_cannot_release_new_owners_lease() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let job = add_job(&config, "test-agent", "*/5 * * * *", "echo ok").unwrap();
+        force_due(&config, &job.id);
+        let now = Utc::now();
+
+        let old_owner = claim(&config, &job.id, now);
+        assert!(release_job(&config, &job.id, &old_owner).unwrap());
+        let new_owner = claim(&config, &job.id, now);
+
+        assert!(
+            !release_job(&config, &job.id, &old_owner).unwrap(),
+            "old owner must not release the new owner's lease"
+        );
+        assert!(
+            due_jobs(&config, now).unwrap().is_empty(),
+            "lease must still be held by new owner"
+        );
+        assert!(release_job(&config, &job.id, &new_owner).unwrap());
+    }
+
+    #[test]
+    fn live_lease_renew_prevents_reclaim() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let job = add_job(&config, "test-agent", "*/5 * * * *", "echo ok").unwrap();
+        force_due(&config, &job.id);
+        let now = Utc::now();
+        let owner = claim(&config, &job.id, now);
+
+        force_lease_expiry(&config, &job.id, now - chrono::Duration::seconds(1));
+        assert!(
+            renew_job_lease(
+                &config,
+                &job.id,
+                &owner,
+                now,
+                std::time::Duration::from_secs(60)
+            )
+            .unwrap()
+        );
+
+        assert_eq!(
+            reclaim_expired_leases(&config, now).unwrap(),
+            0,
+            "renewed live lease must not be reclaimed"
+        );
+        assert!(release_job(&config, &job.id, &owner).unwrap());
+    }
+
+    #[test]
+    fn expired_lease_is_reclaimed() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let job = add_job(&config, "test-agent", "*/5 * * * *", "echo ok").unwrap();
+        force_due(&config, &job.id);
+        let now = Utc::now();
+        let _owner = claim(&config, &job.id, now);
+        force_lease_expiry(&config, &job.id, now - chrono::Duration::seconds(1));
+
+        assert_eq!(reclaim_expired_leases(&config, now).unwrap(), 1);
+        assert_eq!(
+            due_jobs(&config, now).unwrap().len(),
+            1,
+            "expired lease must make the job eligible again"
         );
     }
 
@@ -1661,7 +1796,7 @@ mod tests {
         );
         assert_eq!(all_overdue_jobs(&config, now).unwrap().len(), 1);
 
-        assert!(claim_job(&config, &job.id, now).unwrap());
+        let owner = claim(&config, &job.id, now);
 
         assert!(
             due_jobs(&config, now).unwrap().is_empty(),
@@ -1672,7 +1807,7 @@ mod tests {
             "a claimed (in-flight) job must not be re-selected by the catch-up path"
         );
 
-        release_job(&config, &job.id).unwrap();
+        assert!(release_job(&config, &job.id, &owner).unwrap());
         assert_eq!(
             due_jobs(&config, now).unwrap().len(),
             1,
@@ -1688,7 +1823,7 @@ mod tests {
         force_due(&config, &job.id);
         let now = Utc::now();
 
-        assert!(claim_job(&config, &job.id, now).unwrap());
+        let _owner = claim(&config, &job.id, now);
         assert!(due_jobs(&config, now).unwrap().is_empty());
 
         assert_eq!(
@@ -1709,7 +1844,7 @@ mod tests {
     }
 
     #[test]
-    fn reclaim_stale_locks_only_clears_locks_older_than_ttl() {
+    fn reclaim_expired_leases_only_clears_expired() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(&tmp);
         let fresh = add_job(&config, "test-agent", "*/5 * * * *", "echo fresh").unwrap();
@@ -1718,26 +1853,26 @@ mod tests {
         force_due(&config, &stale.id);
 
         let now = Utc::now();
-        let stale_locked_at = now - chrono::Duration::seconds(3600);
-        assert!(claim_job(&config, &stale.id, stale_locked_at).unwrap());
-        assert!(claim_job(&config, &fresh.id, now).unwrap());
+        let stale_owner = claim(&config, &stale.id, now);
+        let fresh_owner = claim(&config, &fresh.id, now);
+        force_lease_expiry(&config, &stale.id, now - chrono::Duration::seconds(3600));
 
-        // TTL of 30 minutes: only the hour-old lock is reclaimed.
         assert_eq!(
-            reclaim_stale_locks(&config, now, std::time::Duration::from_secs(30 * 60)).unwrap(),
+            reclaim_expired_leases(&config, now).unwrap(),
             1,
-            "only the lock older than the TTL should be reclaimed"
+            "only the expired lease should be reclaimed"
         );
 
         let due = due_jobs(&config, now).unwrap();
         assert!(
             due.iter().any(|j| j.id == stale.id),
-            "stale lock must be eligible again after TTL reclaim"
+            "expired lease must be eligible again after reclaim"
         );
         assert!(
             !due.iter().any(|j| j.id == fresh.id),
-            "fresh in-flight lock must remain held"
+            "fresh in-flight lease must remain held"
         );
+        let _ = (stale_owner, fresh_owner);
     }
 
     #[test]

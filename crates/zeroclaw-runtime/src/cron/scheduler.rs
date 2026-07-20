@@ -4,8 +4,8 @@ use crate::cron::store::{
 };
 use crate::cron::{
     CronJob, DeliveryConfig, JobType, Schedule, SessionTarget, all_overdue_jobs, claim_job,
-    clear_stale_locks, due_jobs, next_run_for_schedule, reclaim_stale_locks, release_job,
-    skip_missed_run, sync_declarative_jobs,
+    clear_stale_locks, due_jobs, next_run_for_schedule, reclaim_expired_leases, release_job,
+    renew_job_lease, skip_missed_run, sync_declarative_jobs,
 };
 use crate::security::SecurityPolicy;
 use anyhow::Result;
@@ -22,14 +22,15 @@ use zeroclaw_log::Instrument;
 
 const MIN_POLL_SECONDS: u64 = 5;
 const SHELL_JOB_TIMEOUT_SECS: u64 = 120;
-/// Wall-clock cap for agent cron jobs when the agent's runtime profile does
-/// not set `agentic_timeout_secs`. Keeps a hung `agent::run` from occupying a
-/// `max_concurrent` slot indefinitely (#9191).
-const DEFAULT_AGENT_JOB_TIMEOUT_SECS: u64 = 30 * 60;
-/// TTL for reclaiming `locked_at` during the poll loop. Matches the default
-/// agent job budget so a crash mid-run (without process exit) cannot wedge
-/// the scheduler until the next boot-time `clear_stale_locks` (#9191).
-const STALE_LOCK_TTL_SECS: u64 = DEFAULT_AGENT_JOB_TIMEOUT_SECS;
+/// Top-level wall-clock budget for one cron job execution **including**
+/// scheduler retries. Scoped to cron — not delegate `agentic_timeout_secs`
+/// (#9191 rework).
+const CRON_JOB_TIMEOUT_SECS: u64 = 30 * 60;
+/// Lease duration between heartbeats. Running jobs renew; only expired
+/// leases are reclaimed.
+const CRON_LEASE_TTL_SECS: u64 = 60;
+/// How often an in-flight job renews its owner-qualified lease.
+const CRON_LEASE_HEARTBEAT_SECS: u64 = 20;
 const SCHEDULER_COMPONENT: &str = "scheduler";
 const CRON_AGENT_DEFAULT_EXCLUDED_TOOLS: &[&str] = &[
     "cron_add",
@@ -351,30 +352,24 @@ pub async fn run(
                 // Keep scheduler liveness fresh even when there are no due jobs.
                 crate::health::mark_component_ok(SCHEDULER_COMPONENT);
 
-                // TTL reclaim: unlock jobs whose in-flight lock exceeded the
-                // stale TTL so hung/crashed runs do not block max_concurrent
-                // until the next process restart (#9191).
-                match reclaim_stale_locks(
-                    &config,
-                    Utc::now(),
-                    Duration::from_secs(STALE_LOCK_TTL_SECS),
-                ) {
+                // Reclaim only expired leases (live renewed leases stay held).
+                match reclaim_expired_leases(&config, Utc::now()) {
                     Ok(0) => {}
                     Ok(cleared) => ::zeroclaw_log::record!(
                         INFO,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                             .with_attrs(::serde_json::json!({
                                 "cleared": cleared,
-                                "ttl_secs": STALE_LOCK_TTL_SECS
+                                "lease_ttl_secs": CRON_LEASE_TTL_SECS
                             })),
-                        "Reclaimed TTL-expired cron in-flight locks"
+                        "Reclaimed expired cron job leases"
                     ),
                     Err(e) => ::zeroclaw_log::record!(
                         WARN,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                             .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                        "Failed to reclaim TTL-expired cron in-flight locks"
+                        "Failed to reclaim expired cron job leases"
                     ),
                 }
 
@@ -394,7 +389,27 @@ pub async fn run(
                 };
 
                 let jobs = claim_due_jobs(&config, jobs);
-                process_due_jobs(&config, jobs, SCHEDULER_COMPONENT, &event_tx).await;
+                // Batch is cancellable: shutdown selects against in-flight work.
+                let batch_cancel = cancel.child_token();
+                tokio::select! {
+                    () = process_due_jobs(
+                        &config,
+                        jobs,
+                        SCHEDULER_COMPONENT,
+                        &event_tx,
+                        batch_cancel.clone(),
+                    ) => {}
+                    () = cancel.cancelled() => {
+                        batch_cancel.cancel();
+                        crate::health::mark_component_ok(SCHEDULER_COMPONENT);
+                        ::zeroclaw_log::record!(
+                            INFO,
+                            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                            "Cron scheduler shutting down; cancelling in-flight batch"
+                        );
+                        return Ok(());
+                    }
+                }
             }
             _ = cancel.cancelled() => {
                 crate::health::mark_component_ok(SCHEDULER_COMPONENT);
@@ -457,7 +472,14 @@ async fn catch_up_overdue_jobs(config: &Config, event_tx: &EventBroadcast) {
     );
 
     let jobs = claim_due_jobs(config, jobs);
-    process_due_jobs(config, jobs, SCHEDULER_COMPONENT, event_tx).await;
+    process_due_jobs(
+        config,
+        jobs,
+        SCHEDULER_COMPONENT,
+        event_tx,
+        CancellationToken::new(),
+    )
+    .await;
 
     ::zeroclaw_log::record!(
         INFO,
@@ -612,49 +634,53 @@ async fn execute_job_with_retry(
     (false, last_output)
 }
 
-fn claim_due_jobs(config: &Config, jobs: Vec<CronJob>) -> Vec<CronJob> {
+fn claim_due_jobs(config: &Config, jobs: Vec<CronJob>) -> Vec<(CronJob, String)> {
+    let lease_ttl = Duration::from_secs(CRON_LEASE_TTL_SECS);
     jobs.into_iter()
-        .filter(|job| match claim_job(config, &job.id, Utc::now()) {
-            Ok(true) => true,
-            Ok(false) => {
-                ::zeroclaw_log::record!(
-                    DEBUG,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_attrs(::serde_json::json!({"job_id": job.id})),
-                    "Cron job already in flight; skipping duplicate launch"
-                );
-                false
-            }
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(
-                            ::serde_json::json!({"job_id": job.id, "error": format!("{}", e)})
-                        ),
-                    "Cron job: failed to claim in-flight lock; skipping launch"
-                );
-                false
-            }
-        })
+        .filter_map(
+            |job| match claim_job(config, &job.id, Utc::now(), lease_ttl) {
+                Ok(Some(owner)) => Some((job, owner)),
+                Ok(None) => {
+                    ::zeroclaw_log::record!(
+                        DEBUG,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({"job_id": job.id})),
+                        "Cron job already in flight; skipping duplicate launch"
+                    );
+                    None
+                }
+                Err(e) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(
+                                ::serde_json::json!({"job_id": job.id, "error": format!("{}", e)})
+                            ),
+                        "Cron job: failed to claim in-flight lock; skipping launch"
+                    );
+                    None
+                }
+            },
+        )
         .collect()
 }
 
 async fn process_due_jobs(
     config: &Config,
-    jobs: Vec<CronJob>,
+    jobs: Vec<(CronJob, String)>,
     component: &str,
     event_tx: &EventBroadcast,
+    cancel: CancellationToken,
 ) {
     // Refresh scheduler health on every successful poll cycle, including idle cycles.
     crate::health::mark_component_ok(component);
 
     let max_concurrent = config.scheduler.max_concurrent.max(1);
-    let mut in_flight = stream::iter(jobs.into_iter().filter_map(|job| {
+    let mut in_flight = stream::iter(jobs.into_iter().filter_map(|(job, owner)| {
         let Some(agent_alias) = resolve_owning_agent(config, &job) else {
             ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"job_id": job.id})), "Cron job has no owning agent; add the alias to an [agents.<x>].cron_jobs list");
-            let _ = release_job(config, &job.id);
+            let _ = release_job(config, &job.id, &owner);
             return None;
         };
         let agent_alias = agent_alias.to_owned();
@@ -662,12 +688,13 @@ async fn process_due_jobs(
             Ok(s) => Arc::new(s),
             Err(e) => {
                 ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"job_id": job.id, "agent": agent_alias, "error": format!("{}", e)})), "Cron job: failed to build SecurityPolicy for owning agent");
-                let _ = release_job(config, &job.id);
+                let _ = release_job(config, &job.id, &owner);
                 return None;
             }
         };
         let config = config.clone();
         let component = component.to_owned();
+        let job_cancel = cancel.child_token();
         Some(async move {
             Box::pin(execute_and_persist_job(
                 &config,
@@ -675,6 +702,8 @@ async fn process_due_jobs(
                 &agent_alias,
                 &job,
                 &component,
+                &owner,
+                job_cancel,
             ))
             .await
         })
@@ -710,15 +739,95 @@ async fn execute_and_persist_job(
     agent_alias: &str,
     job: &CronJob,
     component: &str,
+    owner: &str,
+    cancel: CancellationToken,
 ) -> (String, bool, String) {
     crate::health::mark_component_ok(component);
     warn_if_high_frequency_agent_job(job);
 
     let started_at = Utc::now();
     let span = zeroclaw_log::attribution_span!(job);
-    let (success, output) = Box::pin(execute_job_with_retry(config, security, agent_alias, job))
-        .instrument(span)
-        .await;
+
+    // Heartbeat renews the owner-qualified lease while the job (including
+    // retries) is running so a multi-attempt cron cannot be reclaimed mid-flight.
+    let lease_ttl = Duration::from_secs(CRON_LEASE_TTL_SECS);
+    let heartbeat = {
+        let config = config.clone();
+        let job_id = job.id.clone();
+        let owner = owner.to_string();
+        let cancel = cancel.clone();
+        zeroclaw_spawn::spawn!(async move {
+            let mut ticker = time::interval(Duration::from_secs(CRON_LEASE_HEARTBEAT_SECS));
+            ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        if let Err(e) = renew_job_lease(
+                            &config,
+                            &job_id,
+                            &owner,
+                            Utc::now(),
+                            lease_ttl,
+                        ) {
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                    .with_attrs(::serde_json::json!({
+                                        "job_id": job_id,
+                                        "error": format!("{e}")
+                                    })),
+                                "Cron job: failed to renew lease heartbeat"
+                            );
+                        }
+                    }
+                    () = cancel.cancelled() => break,
+                }
+            }
+        })
+    };
+
+    // Spawn the retry loop so the wall-clock timeout/cancel select does not
+    // nest the full agent future type (keeps test rustc recursion in check).
+    let timeout = cron_job_timeout();
+    let run_task = {
+        let config = config.clone();
+        let security = security.clone();
+        let agent_alias = agent_alias.to_owned();
+        let job = job.clone();
+        zeroclaw_spawn::spawn!(
+            async move {
+                Box::pin(execute_job_with_retry(
+                    &config,
+                    &security,
+                    &agent_alias,
+                    &job,
+                ))
+                .await
+            }
+            .instrument(span)
+        )
+    };
+    let (success, output) = tokio::select! {
+        result = time::timeout(timeout, run_task) => match result {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(join_err)) => (
+                false,
+                format!("cron job task failed: {join_err}"),
+            ),
+            Err(_elapsed) => (
+                false,
+                format!("cron job timed out after {}s", timeout.as_secs()),
+            ),
+        },
+        () = cancel.cancelled() => {
+            (false, "cron job cancelled during scheduler shutdown".to_string())
+        }
+    };
+
+    cancel.cancel(); // stop heartbeat
+    let _ = heartbeat.await;
+
     let finished_at = Utc::now();
     let success = Box::pin(persist_job_result(
         config,
@@ -730,19 +839,23 @@ async fn execute_and_persist_job(
     ))
     .await;
 
-    // Release the in-flight lock claimed during selection (`claim_due_jobs`) now
-    // that the run (and its reschedule/disable/delete in `persist_job_result`) is
-    // done. A deleted one-shot row simply releases nothing. If this fails the lock
-    // is recovered by poll-loop `reclaim_stale_locks` (TTL) or boot-time
-    // `clear_stale_locks` (#9191).
-    if let Err(e) = release_job(config, &job.id) {
-        ::zeroclaw_log::record!(
+    // Owner-qualified release: only this lease token can clear the lock.
+    // Cancellation and normal completion both release their own lease.
+    match release_job(config, &job.id, owner) {
+        Ok(true) => {}
+        Ok(false) => ::zeroclaw_log::record!(
+            DEBUG,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_attrs(::serde_json::json!({"job_id": job.id})),
+            "Cron job: lease already released or ownership changed"
+        ),
+        Err(e) => ::zeroclaw_log::record!(
             WARN,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                 .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                 .with_attrs(::serde_json::json!({"job_id": job.id, "error": format!("{}", e)})),
-            "Cron job: failed to release in-flight lock after run"
-        );
+            "Cron job: failed to release in-flight lease after run"
+        ),
     }
 
     (job.id.clone(), success, output)
@@ -820,10 +933,12 @@ async fn run_agent_job(
         // backend nor reach one via advertised memory tools
         memory_free: !job.uses_memory,
     };
-    let timeout = agent_job_timeout(config, agent_alias);
+    // Top-level wall-clock timeout wraps `execute_job_with_retry` (including
+    // retries). Individual agent attempts are not capped by delegate-only
+    // `agentic_timeout_secs`.
     let run_result = match job.session_target {
         SessionTarget::Main | SessionTarget::Isolated => {
-            let run_fut = Box::pin(
+            Box::pin(
                 crate::agent::run(
                     cron_config,
                     agent_alias,
@@ -841,14 +956,8 @@ async fn run_agent_job(
                     run_overrides,
                 )
                 .instrument(subagent_span),
-            );
-            match time::timeout(timeout, run_fut).await {
-                Ok(result) => result,
-                Err(_elapsed) => Err(anyhow::anyhow!(
-                    "agent job timed out after {}s",
-                    timeout.as_secs()
-                )),
-            }
+            )
+            .await
         }
     };
 
@@ -884,18 +993,9 @@ async fn run_agent_job(
     }
 }
 
-/// Resolve the wall-clock timeout for an agent cron job.
-///
-/// Prefers the owning agent's runtime-profile `agentic_timeout_secs` when set;
-/// otherwise uses [`DEFAULT_AGENT_JOB_TIMEOUT_SECS`] (30 minutes). Does not
-/// invent a new config key (#9191).
-fn agent_job_timeout(config: &Config, agent_alias: &str) -> Duration {
-    let secs = config
-        .runtime_profile_for_agent(agent_alias)
-        .and_then(|profile| profile.agentic_timeout_secs)
-        .unwrap_or(DEFAULT_AGENT_JOB_TIMEOUT_SECS)
-        .max(1);
-    Duration::from_secs(secs)
+/// Top-level cron job wall-clock timeout (covers complete retry budget).
+fn cron_job_timeout() -> Duration {
+    Duration::from_secs(CRON_JOB_TIMEOUT_SECS)
 }
 
 async fn persist_job_result(
@@ -1829,12 +1929,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_job_timeout_defaults_to_thirty_minutes() {
-        let tmp = TempDir::new().unwrap();
-        let config = test_config(&tmp).await;
+    async fn cron_job_timeout_is_thirty_minutes() {
         assert_eq!(
-            agent_job_timeout(&config, "test-agent"),
-            Duration::from_secs(DEFAULT_AGENT_JOB_TIMEOUT_SECS)
+            cron_job_timeout(),
+            Duration::from_secs(CRON_JOB_TIMEOUT_SECS)
         );
     }
 
@@ -1887,7 +1985,14 @@ mod tests {
         let component = unique_component("scheduler-idle");
 
         crate::health::mark_component_error(&component, "pre-existing error");
-        process_due_jobs(&config, Vec::new(), &component, &None).await;
+        process_due_jobs(
+            &config,
+            Vec::new(),
+            &component,
+            &None,
+            CancellationToken::new(),
+        )
+        .await;
 
         let snapshot = crate::health::snapshot_json();
         let entry = &snapshot["components"][component.as_str()];
@@ -1904,7 +2009,14 @@ mod tests {
         let component = unique_component("scheduler-fail");
 
         crate::health::mark_component_ok(&component);
-        process_due_jobs(&config, vec![job], &component, &None).await;
+        process_due_jobs(
+            &config,
+            vec![(job, "test-owner".into())],
+            &component,
+            &None,
+            CancellationToken::new(),
+        )
+        .await;
 
         let snapshot = crate::health::snapshot_json();
         let entry = &snapshot["components"][component.as_str()];
@@ -2553,7 +2665,14 @@ mod tests {
         let (tx, mut rx) = tokio::sync::broadcast::channel::<serde_json::Value>(16);
         let event_tx: EventBroadcast = Some(tx);
 
-        process_due_jobs(&config, vec![job], &component, &event_tx).await;
+        process_due_jobs(
+            &config,
+            vec![(job, "test-owner".into())],
+            &component,
+            &event_tx,
+            CancellationToken::new(),
+        )
+        .await;
 
         let event = rx.try_recv().expect("should receive a broadcast event");
         assert_eq!(event["type"], "cron_result");
@@ -2579,7 +2698,14 @@ mod tests {
         let (tx, mut rx) = tokio::sync::broadcast::channel::<serde_json::Value>(16);
         let event_tx: EventBroadcast = Some(tx);
 
-        process_due_jobs(&config, vec![job], &component, &event_tx).await;
+        process_due_jobs(
+            &config,
+            vec![(job, "test-owner".into())],
+            &component,
+            &event_tx,
+            CancellationToken::new(),
+        )
+        .await;
 
         let event = rx.try_recv().expect("should receive a broadcast event");
         assert_eq!(event["type"], "cron_result");
@@ -2600,6 +2726,7 @@ mod tests {
 
         let claimed = claim_due_jobs(&config, vec![job.clone()]);
         assert_eq!(claimed.len(), 1, "first selection claims the job");
+        let owner = claimed[0].1.clone();
 
         let claimed_again = claim_due_jobs(&config, vec![job.clone()]);
         assert!(
@@ -2607,7 +2734,7 @@ mod tests {
             "an in-flight job must be skipped by the next selection pass"
         );
 
-        cron::release_job(&config, &job.id).unwrap();
+        assert!(cron::release_job(&config, &job.id, &owner).unwrap());
         let after_release = claim_due_jobs(&config, vec![job]);
         assert_eq!(
             after_release.len(),
@@ -2629,16 +2756,37 @@ mod tests {
         // With an empty alias and an id bound to no [agents.<x>].cron_jobs list,
         // resolve_owning_agent returns None, so the job is skipped as an orphan.
         let job = cron::add_job(&config, TEST_AGENT, "* * * * *", "echo orphan").unwrap();
-        assert!(cron::claim_job(&config, &job.id, Utc::now()).unwrap());
+        let owner = cron::claim_job(
+            &config,
+            &job.id,
+            Utc::now(),
+            std::time::Duration::from_secs(CRON_LEASE_TTL_SECS),
+        )
+        .unwrap()
+        .expect("claim orphan job");
         let orphan = CronJob {
             agent_alias: String::new(),
             ..job.clone()
         };
 
-        process_due_jobs(&config, vec![orphan], &unique_component("orphan"), &None).await;
+        process_due_jobs(
+            &config,
+            vec![(orphan, owner)],
+            &unique_component("orphan"),
+            &None,
+            CancellationToken::new(),
+        )
+        .await;
 
         assert!(
-            cron::claim_job(&config, &job.id, Utc::now()).unwrap(),
+            cron::claim_job(
+                &config,
+                &job.id,
+                Utc::now(),
+                std::time::Duration::from_secs(CRON_LEASE_TTL_SECS),
+            )
+            .unwrap()
+            .is_some(),
             "a skipped orphan job's in-flight lock must be released, not leaked"
         );
     }
@@ -2651,7 +2799,14 @@ mod tests {
         let component = unique_component("broadcast-none");
 
         // event_tx = None — should complete without panic.
-        process_due_jobs(&config, vec![job], &component, &None).await;
+        process_due_jobs(
+            &config,
+            vec![(job, "test-owner".into())],
+            &component,
+            &None,
+            CancellationToken::new(),
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -2666,7 +2821,14 @@ mod tests {
         // process_due_jobs must not panic when there are no subscribers.
         let event_tx: EventBroadcast = Some(tx);
 
-        process_due_jobs(&config, vec![job], &component, &event_tx).await;
+        process_due_jobs(
+            &config,
+            vec![(job, "test-owner".into())],
+            &component,
+            &event_tx,
+            CancellationToken::new(),
+        )
+        .await;
         // If we got here without panic, the test passes.
     }
 }
