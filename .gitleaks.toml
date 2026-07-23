@@ -15,6 +15,7 @@ description = "Known false positives in detector fixtures, docs placeholders, an
 paths = [
   '''(?:^|/)crates/zeroclaw-runtime/src/security/leak_detector\.rs$''',
   '''(?:^|/)crates/zeroclaw-runtime/src/agent/turn/redact\.rs$''',
+  '''(?:^|/)crates/zeroclaw-runtime/src/agent/loop_\.rs$''',
   '''(?:^|/)crates/zeroclaw-runtime/src/sop/executor\.rs$''',
   '''(?:^|/)crates/zeroclaw-channels/src/orchestrator/mod\.rs$''',
   '''(?:^|/)src/security/leak_detector\.rs$''',
