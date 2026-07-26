@@ -79,9 +79,10 @@ ZeroClaw (this repo)
 
 ### Carried patches
 
-This branch exists to carry the smallest possible set of patches that Hyperion
-needs and upstream does not have. Every row states what upstream does today, so
-each rebase can re-test whether the patch is still needed.
+This is a fork. Rebasing onto upstream is how we pull their work in — it is not
+a reason to keep our own surface small. Every row below states what upstream does
+today so each rebase can re-test whether a patch has been absorbed; a patch that
+is still ours simply stays.
 
 | Patch | Upstream today | Status |
 |---|---|---|
@@ -90,7 +91,7 @@ each rebase can re-test whether the patch is still needed.
 | cron `allowed_tools = []` means deny-all | ships a test asserting the opposite (`empty_allowed_tools_stored_as_none`) | ✅ carried, deliberately conflicts |
 | `ModelProvider::set_credential` + real 429 rotation | logs "cannot apply … Retrying with original key" in 4 places | ✅ re-derived on upstream tip |
 | WeChat atomic / non-blocking state persistence | `write_private` still does blocking `std::fs::write`, non-atomic truncate, chmod after write | ⬜ not ported — `save_account_data` is sync `fn`; porting changes its signature and ripples to callers |
-| Tachi memory backend | absent | ↗ moved to the `tachi-memory` branch — not a Hyperion trading dependency |
+| Tachi memory backend | absent | ✅ carried, feature-gated behind `tachi` — the fork's own agent-memory backend, distinct from the Hyperion trading memory path |
 | HyperMemory custom CRUD backend | absent | ❌ retired (#634 option C) — never re-add |
 
 ### Known gaps neither side has fixed

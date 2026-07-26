@@ -7,6 +7,13 @@ Every "upstream today" cell was read out of `upstream/master` at `f3023663a`, no
 inferred from changelogs. Re-run those checks on the next rebase — a patch that
 upstream absorbs should be dropped, not carried out of habit.
 
+**This is a fork, not a downstream.** Rebasing exists to pull upstream's work in,
+not to keep our divergence small. Divergence is not a cost to be minimised: a
+patch earns its place by being useful here, and nothing needs to justify itself
+against "could this go upstream instead". The verdicts below drop commits that
+upstream has genuinely absorbed or that were pure noise — not commits that are
+merely ours.
+
 ## Verdicts
 
 | Old commit | Verdict | Why |
@@ -29,9 +36,13 @@ upstream absorbs should be dropped, not carried out of habit.
 | `17d49caaf` WeChat atomic persistence | **deferred** | same |
 | `e14cfef98` `c7025ff85` `aee449ea1` gitleaks/CI | **drop** | these fixed the *old* fork tip's CI. The gitleaks hook runs clean on this branch; re-derive only if it fires |
 | `68e40a53b` AGENTS.md Hyperion contract | **carry, rewritten** | upstream cut AGENTS.md from 278 to 59 lines. Taking upstream's file and appending the Hyperion section is the correct resolution; replaying the old diff would have reverted upstream's trim |
-| 13 × `tachi*` memory commits | **relocated** | branch `tachi-memory`. Not a Hyperion trading dependency by its own contract (trading memory routes through `hapi-memory` MCP on :6888), and it carries a memcore AGPL implication |
+| 13 × `tachi*` memory commits | **carry** | rebased onto this branch. Feature-gated behind `tachi`, so it costs nothing when off. It is not the Hyperion *trading* memory path — that still routes through `hapi-memory` MCP on :6888 — but it is the fork's own agent-memory backend and belongs on the main line |
 
-33 in, 9 out.
+33 old commits in; 23 commits on this branch. The nine rotation commits collapse
+into two re-derived ones. Six are genuinely dropped — three fmt/conflict-marker
+cleanups from the previous port, and three gitleaks/CI commits that were fixing
+the old fork tip's CI rather than anything real. Two (WeChat) are deferred for
+the reason below.
 
 ## The rotation patch, re-derived rather than replayed
 
