@@ -75,6 +75,13 @@ impl ModelPinnedProvider {
 
 #[async_trait]
 impl ModelProvider for ModelPinnedProvider {
+    /// Forward to the inner provider. Without this the pin swallows key
+    /// rotation: the default returns `false`, so a pinned provider would
+    /// report "cannot rotate" even when the provider underneath can.
+    fn set_credential(&self, key: Option<String>) -> bool {
+        self.inner.set_credential(key)
+    }
+
     fn capabilities(&self) -> super::traits::ProviderCapabilities {
         self.inner.capabilities()
     }

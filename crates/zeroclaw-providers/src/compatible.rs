@@ -38,7 +38,12 @@ pub struct OpenAiCompatibleModelProvider {
     pub alias: String,
     pub name: String,
     pub base_url: String,
-    pub credential: Option<String>,
+    /// Shared behind an `Arc<RwLock<_>>` so `ReliableModelProvider` can apply a
+    /// new key on 429 rotation through `&self`. Sharing (rather than deep-copying
+    /// on `Clone`) is deliberate: a cloned provider must observe later rotations,
+    /// otherwise the clone keeps authenticating with the key that just got
+    /// rate-limited.
+    pub credential: std::sync::Arc<parking_lot::RwLock<Option<String>>>,
     auth_service: Option<AuthService>,
     auth_model_provider: Option<String>,
     auth_profile_override: Option<String>,
@@ -546,7 +551,7 @@ impl OpenAiCompatibleBuilder {
             alias: self.alias,
             name,
             base_url,
-            credential: self.credential,
+            credential: std::sync::Arc::new(parking_lot::RwLock::new(self.credential)),
             auth_service: self.auth_service,
             auth_model_provider: self.auth_model_provider,
             auth_profile_override: self.auth_profile_override,
@@ -908,13 +913,15 @@ impl OpenAiCompatibleModelProvider {
     }
 
     async fn resolve_credential(&self) -> anyhow::Result<Option<String>> {
-        if self
-            .credential
+        // Snapshot once so a concurrent `set_credential` cannot make the
+        // emptiness check and the returned value disagree.
+        let credential = self.credential.read().clone();
+        if credential
             .as_deref()
             .map(str::trim)
             .is_some_and(|value| !value.is_empty())
         {
-            return Ok(self.credential.clone());
+            return Ok(credential);
         }
         let (Some(auth), Some(model_provider)) = (&self.auth_service, &self.auth_model_provider)
         else {
@@ -2446,6 +2453,11 @@ impl OpenAiCompatibleModelProvider {
 
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleModelProvider {
+    fn set_credential(&self, key: Option<String>) -> bool {
+        *self.credential.write() = key;
+        true
+    }
+
     fn capabilities(&self) -> zeroclaw_api::model_provider::ProviderCapabilities {
         zeroclaw_api::model_provider::ProviderCapabilities {
             native_tool_calling: self.native_tool_calling,
@@ -3554,13 +3566,16 @@ mod tests {
         );
         assert_eq!(p.name, "venice");
         assert_eq!(p.base_url, "https://api.venice.ai");
-        assert_eq!(p.credential.as_deref(), Some("venice-test-credential"));
+        assert_eq!(
+            p.credential.read().as_deref(),
+            Some("venice-test-credential")
+        );
     }
 
     #[test]
     fn creates_without_key() {
         let p = make_model_provider("test", "https://example.com", None);
-        assert!(p.credential.is_none());
+        assert!(p.credential.read().is_none());
     }
 
     // Regression: vLLM 0.19+ and spec-compliant validators reject

@@ -435,6 +435,16 @@ pub struct ModelInfo {
 
 #[async_trait]
 pub trait ModelProvider: Send + Sync + crate::attribution::Attributable {
+    /// Hot-swap the credential this provider authenticates with.
+    ///
+    /// Returns `true` only when the provider actually applied the new
+    /// credential. The default is `false` — a provider that cannot rotate at
+    /// runtime must say so, otherwise callers log "rotated to key ...abcd"
+    /// while the next request still carries the old key.
+    fn set_credential(&self, _key: Option<String>) -> bool {
+        false
+    }
+
     /// Query model_provider capabilities.
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::default()
@@ -703,6 +713,10 @@ pub trait ModelProvider: Send + Sync + crate::attribution::Attributable {
 /// boilerplate in test and production code.
 #[async_trait]
 impl<T: ModelProvider + ?Sized> ModelProvider for Arc<T> {
+    fn set_credential(&self, key: Option<String>) -> bool {
+        self.as_ref().set_credential(key)
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         self.as_ref().capabilities()
     }
