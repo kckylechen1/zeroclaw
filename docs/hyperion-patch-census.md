@@ -87,11 +87,19 @@ still not rotating.
    `explicit_only`. Upstream still auto-admits. The first line of defence is
    still server-side: expose no trading write tools on the hapi-edge profile
    the agent connects to.
-2. **One-shot durable approval.** Approvals and the session allow-list are
-   memory-only. Nothing binds an approval to a run + tool + args hash, and
-   nothing expires it on restart.
-3. **Durable audit outbox.** Upstream's tool receipts are HMAC'd with an
-   in-memory key, cover only successful calls, and do not survive a restart.
+2. ~~**One-shot durable approval.**~~ **Closed on this branch.**
+   `approval/store.rs` binds a grant to `(boot_id, run_id, tool_name,
+   args_hash)` and consumes it on first use via a single conditional
+   `UPDATE ... RETURNING`, so two racing calls cannot both redeem one grant.
+   The gate mints and redeems in one round trip, which is what proves the
+   executing call is the call the approver saw. Grants from a previous boot
+   are unredeemable by construction. Upstream still has neither.
+3. ~~**Durable audit outbox.**~~ **Closed on this branch** for the approval
+   path: every gate outcome is appended durably, including `auto_approved`
+   and `not_required` where no human was involved. Upstream's *tool
+   receipts* remain a separate gap — HMAC'd with an in-memory key, covering
+   only successful calls, gone on restart. Wiring receipts into this trail
+   is the obvious next step and is not done.
 4. **Non-blocking `spawn_subagent` + announce.** Still synchronous; the parent
    turn blocks until children finish. `delegate(background=true)` routes around
    part of this but has no progress or completion-announce path.
