@@ -1,0 +1,86 @@
+# Hyperion fork patch census
+
+Base: `upstream/master` @ `f3023663a`. Old fork: `hyperion-integration` @ `6b1d11867`
+(33 commits ahead of merge-base `efe1eb5b2`, 154 behind upstream).
+
+Every "upstream today" cell was read out of `upstream/master` at `f3023663a`, not
+inferred from changelogs. Re-run those checks on the next rebase — a patch that
+upstream absorbs should be dropped, not carried out of habit.
+
+## Verdicts
+
+| Old commit | Verdict | Why |
+|---|---|---|
+| `deb379d78` approval: always_ask under Full | **carry** | `approval/mod.rs:177` still returns `Approved` for Full autonomy before it looks at `always_ask` |
+| `6a907792c` config: absent vs empty allowed_tools | **carry** | upstream adopted `Option<Vec<String>>` but `policy.rs:2182` collapses `[]` → `None` → unrestricted |
+| `39b1683da` propagate Option allowed_tools | **carry** | follows from the above |
+| `86d1e650d` wrap test literals in Some | **carry** | follows from the above |
+| `273d70f58` cron: empty allowed_tools is deny-all | **carry, conflicting** | upstream ships `empty_allowed_tools_stored_as_none`, a test asserting the opposite intent. This patch renames it to `..._stored_as_deny_all`. Expect this to re-break on every rebase — loudly, which is the point |
+| `5470141f4` 429 rotation hot-swap | **re-derived** | see below |
+| `19e8d614d` skip rate-limited keys | **re-derived** | see below |
+| `c5fc1dfe6` skip provider cooldown after rotation | **re-derived** | see below |
+| `c9398657d` fail closed on all-cooling rotation | **re-derived** | see below |
+| `97686295b` set_credential via entry | **re-derived** | see below |
+| `3cca4e443` forward through ModelPinnedProvider | **re-derived** | see below |
+| `418c12c1c` drop conflict marker | **drop** | noise from the previous port |
+| `4aae590e9` restore fmt/clippy gates | **drop** | noise from the previous port |
+| `ce5307f66` rustfmt | **drop** | noise from the previous port |
+| `518fe442e` WeChat non-blocking persistence | **deferred** | still unfixed upstream — see "Open" below |
+| `17d49caaf` WeChat atomic persistence | **deferred** | same |
+| `e14cfef98` `c7025ff85` `aee449ea1` gitleaks/CI | **drop** | these fixed the *old* fork tip's CI. The gitleaks hook runs clean on this branch; re-derive only if it fires |
+| `68e40a53b` AGENTS.md Hyperion contract | **carry, rewritten** | upstream cut AGENTS.md from 278 to 59 lines. Taking upstream's file and appending the Hyperion section is the correct resolution; replaying the old diff would have reverted upstream's trim |
+| 13 × `tachi*` memory commits | **relocated** | branch `tachi-memory`. Not a Hyperion trading dependency by its own contract (trading memory routes through `hapi-memory` MCP on :6888), and it carries a memcore AGPL implication |
+
+33 in, 9 out.
+
+## The rotation patch, re-derived rather than replayed
+
+Replaying the nine rotation commits would have meant hand-resolving conflicts
+against upstream's 806-line rewrite of `reliable.rs` and its move of
+`OpenAiCompatibleModelProvider` construction to a builder. The net semantics
+were re-implemented on the new code instead:
+
+- `ModelProvider::set_credential(&self, Option<String>) -> bool`, defaulting to
+  `false`. The boolean is the point — it lets a provider that cannot rotate say
+  so instead of letting the caller log a rotation that did not happen.
+- `OpenAiCompatibleModelProvider.credential` behind `Arc<RwLock<_>>`.
+- `ModelPinnedProvider` forwards, so a pin does not swallow rotation.
+- Per-key cooldowns, so round-robin cannot return the key that just 429'd.
+- Rotation returns `None` when every key is cooling, and says so.
+- A successful swap suppresses the provider-wide cooldown.
+
+Two things from the original were deliberately dropped:
+
+- `as_any()` on the trait. It was never called; the `'static` bound on
+  `ModelProvider` existed only to support it. Both are gone.
+- The hand-written 24-field `Clone` impl. `Arc` sharing keeps `#[derive(Clone)]`
+  working *and* makes clones observe later rotations, which a deep copy would
+  silently miss.
+
+Scope limit worth knowing: only the OpenAI-compatible provider implements
+`set_credential`. Anthropic, OpenAI, OpenRouter and Azure providers keep their
+own `credential: Option<String>` fields and inherit the `false` default, so a
+429 on those logs "does not support runtime credential rotation" — honest, but
+still not rotating.
+
+## Open — neither upstream nor this branch
+
+1. **MCP tools bypass `allowed_tools`.** Any tool name containing `__` is
+   auto-admitted even under a non-empty allow-list — `config/helpers.rs:633`,
+   `tools/delegate.rs:942`, `tools/tool_search.rs:62`,
+   `tools/mcp_deferred.rs:181`, identical on both sides. First line of defence
+   stays server-side: expose no trading write tools on the hapi-edge profile
+   the agent connects to.
+2. **One-shot durable approval.** Approvals and the session allow-list are
+   memory-only. Nothing binds an approval to a run + tool + args hash, and
+   nothing expires it on restart.
+3. **Durable audit outbox.** Upstream's tool receipts are HMAC'd with an
+   in-memory key, cover only successful calls, and do not survive a restart.
+4. **Non-blocking `spawn_subagent` + announce.** Still synchronous; the parent
+   turn blocks until children finish. `delegate(background=true)` routes around
+   part of this but has no progress or completion-announce path.
+5. **WeChat state persistence.** `write_private` still does a blocking,
+   non-atomic `std::fs::write` and chmods *after* writing, so the file holding
+   the WeChat token is briefly readable at the default umask. Not ported here
+   because the fix changes `save_account_data` from a sync `fn` and ripples to
+   its callers; that is its own change, not a rebase carry.
