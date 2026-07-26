@@ -1,6 +1,13 @@
 //! Interactive approval workflow for supervised mode.
 //! Provides a pre-execution hook that prompts the user before tool calls,
 //! with session-scoped "Always" allowlists and audit logging.
+//!
+//! Both of those are process-local: the allow-list is keyed on a tool *name*
+//! and the audit log is a `Vec`. See [`store`] for the durable half — grants
+//! bound to one run, tool, and argument set, and a trail that survives a
+//! restart.
+
+pub mod store;
 
 use crate::security::AutonomyLevel;
 use chrono::Utc;
@@ -347,6 +354,99 @@ mod approval_precedence_tests {
             ApprovalRequirement::NotRequired
         );
         assert!(!manager.needs_approval("shell"));
+    }
+
+    // ── The unattended path ──────────────────────────────────────────
+    //
+    // A cron `JobType::Agent` run and a channel-driven turn both execute
+    // with nobody watching. On that path `ApprovalManager::for_non_interactive`
+    // sets `non_interactive_shell_requires_approval: false`, which drops
+    // `shell` to `NotRequired` — no approval at all. These tests pin the two
+    // things that keep a scheduled trading agent from reaching a shell at
+    // 03:00: `always_ask` outranking that bypass, and outranking Full
+    // autonomy above it.
+
+    fn unattended(
+        autonomy_level: AutonomyLevel,
+        always_ask: &[&str],
+        auto_approve: &[&str],
+    ) -> ApprovalManager {
+        ApprovalManager {
+            auto_approve: auto_approve
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect(),
+            always_ask: always_ask.iter().map(|tool| (*tool).to_string()).collect(),
+            autonomy_level,
+            non_interactive: true,
+            // Exactly what `for_non_interactive` builds.
+            non_interactive_shell_requires_approval: false,
+            session_allowlist: Mutex::new(HashSet::new()),
+            audit_log: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Without `always_ask`, the unattended path really does hand out `shell`
+    /// with no approval. This is the hazard the next test closes — asserting
+    /// it here keeps the pair honest: if upstream ever fixes this default,
+    /// this test fails and tells us the backstop is no longer load-bearing.
+    #[test]
+    fn unattended_shell_is_ungated_without_always_ask() {
+        let manager = unattended(AutonomyLevel::Supervised, &[], &[]);
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::NotRequired,
+            "documents the hazard: non_interactive drops shell to NotRequired"
+        );
+    }
+
+    /// The backstop. `always_ask` is consulted before the non-interactive
+    /// shell bypass, so a profile that lists `shell` still forces approval —
+    /// which, with no operator present, is a denial rather than a free shell.
+    #[test]
+    fn unattended_always_ask_outranks_the_non_interactive_shell_bypass() {
+        let manager = unattended(AutonomyLevel::Supervised, &["shell"], &[]);
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::Prompt,
+            "always_ask must be checked before the non_interactive bypass"
+        );
+    }
+
+    /// Both hazards at once: a profile mis-set to Full autonomy running
+    /// unattended. Upstream returns `Approved` here before ever looking at
+    /// `always_ask`; this fork looks first.
+    #[test]
+    fn unattended_full_autonomy_still_honors_always_ask() {
+        let manager = unattended(AutonomyLevel::Full, &["shell", "file_write"], &[]);
+
+        for tool_name in ["shell", "file_write"] {
+            assert_eq!(
+                manager.approval_requirement(tool_name),
+                ApprovalRequirement::Prompt,
+                "{tool_name} must still require approval under Full + unattended"
+            );
+        }
+    }
+
+    /// A prior "Always" answer must not survive into an unattended run for a
+    /// tool the profile marks `always_ask`.
+    #[test]
+    fn unattended_session_allowlist_cannot_unlock_an_always_ask_tool() {
+        let manager = unattended(AutonomyLevel::Full, &["shell"], &["shell"]);
+        manager.record_decision(
+            "shell",
+            &json!({"command": "rm -rf /"}),
+            &ApprovalResponse::Always,
+            "test",
+        );
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::Prompt
+        );
     }
 }
 

@@ -76,11 +76,16 @@ still not rotating.
 
 ## Open — neither upstream nor this branch
 
-1. **MCP tools bypass `allowed_tools`.** Any tool name containing `__` is
-   auto-admitted even under a non-empty allow-list — `config/helpers.rs:633`,
-   `tools/delegate.rs:942`, `tools/tool_search.rs:62`,
-   `tools/mcp_deferred.rs:181`, identical on both sides. First line of defence
-   stays server-side: expose no trading write tools on the hapi-edge profile
+1. ~~**MCP tools bypass `allowed_tools`.**~~ **Closed on this branch.** An
+   earlier draft of this list named four sites; only two were real. The other
+   two were misread: `config/helpers.rs:633` rejects `__` in *aliases*, and
+   `tools/mcp_deferred.rs:181` short-circuits suffix resolution for names that
+   are already fully qualified. Neither admits anything. The two real
+   auto-admits — `tools/delegate.rs` and `tools/tool_search.rs`, both
+   `... || name.contains("__")` — now consult
+   `risk_profile.mcp_discovered_tool_policy`, which defaults to
+   `explicit_only`. Upstream still auto-admits. The first line of defence is
+   still server-side: expose no trading write tools on the hapi-edge profile
    the agent connects to.
 2. **One-shot durable approval.** Approvals and the session allow-list are
    memory-only. Nothing binds an approval to a run + tool + args hash, and
