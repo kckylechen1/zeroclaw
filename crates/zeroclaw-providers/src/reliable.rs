@@ -784,6 +784,14 @@ pub struct ReliableModelProvider {
     /// Source of truth: live provider 429 / Retry-After evidence observed by
     /// this wrapper. It is intentionally in-memory and per wrapper instance.
     rate_limit_cooldowns: Mutex<HashMap<String, Instant>>,
+    /// Per-key cooldowns, keyed by the API key itself. A key that just earned a
+    /// 429 is parked here so round-robin cannot hand it straight back on the
+    /// very next attempt.
+    key_cooldowns: Mutex<HashMap<String, Instant>>,
+    /// The key this wrapper last installed on a provider, so the next 429 knows
+    /// which key to park. `None` means no rotation has happened yet and the
+    /// provider is still on its construction-time credential.
+    last_installed_key: Mutex<Option<String>>,
 }
 
 impl ReliableModelProvider {
@@ -818,6 +826,8 @@ impl ReliableModelProvider {
             key_index: AtomicUsize::new(0),
             model_fallbacks: HashMap::new(),
             rate_limit_cooldowns: Mutex::new(HashMap::new()),
+            key_cooldowns: Mutex::new(HashMap::new()),
+            last_installed_key: Mutex::new(None),
         }
     }
     /// Set additional API keys for round-robin rotation on rate-limit errors.
@@ -841,13 +851,119 @@ impl ReliableModelProvider {
         chain
     }
 
-    /// Advance to the next API key and return it, or None if no extra keys configured.
-    fn rotate_key(&self) -> Option<&str> {
+    /// Advance to the next API key that is not inside a cooldown window.
+    ///
+    /// `None` means either no keys are configured or every configured key is
+    /// still cooling. Callers must treat `None` as "no rotation happened" —
+    /// handing back a cooling key would retry straight into the quota that
+    /// just rejected us.
+    fn rotate_key(&self) -> Option<String> {
         if self.api_keys.is_empty() {
             return None;
         }
-        let idx = self.key_index.fetch_add(1, Ordering::Relaxed) % self.api_keys.len();
-        Some(&self.api_keys[idx])
+
+        let now = Instant::now();
+        let mut cooldowns = self
+            .key_cooldowns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cooldowns.retain(|_, until| *until > now);
+
+        // One full pass over the ring: every key gets considered exactly once,
+        // and the index still advances so callers keep round-robining.
+        (0..self.api_keys.len()).find_map(|_| {
+            let idx = self.key_index.fetch_add(1, Ordering::Relaxed) % self.api_keys.len();
+            let candidate = &self.api_keys[idx];
+            (!cooldowns.contains_key(candidate)).then(|| candidate.clone())
+        })
+    }
+
+    /// Park `key` for the same window the provider asked us to back off for.
+    fn cool_down_key(&self, key: String, err: &anyhow::Error) {
+        let cooldown = parse_retry_after_ms(err)
+            .map(|ms| Duration::from_millis(ms.min(60_000)))
+            .unwrap_or(Self::RATE_LIMIT_COOLDOWN);
+        self.key_cooldowns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, Instant::now() + cooldown);
+    }
+
+    /// Rotate to a fresh API key and actually install it on `entry`'s provider.
+    ///
+    /// Returns `true` only when a key was selected *and* the provider reported
+    /// that it applied it. `false` means the next attempt will reuse the
+    /// current credential, so the caller must fall back to cooling the whole
+    /// provider rather than retrying into the same exhausted quota.
+    fn rotate_and_apply_key(
+        &self,
+        entry: &ReliableModelProviderEntry,
+        err: &anyhow::Error,
+        provider_name: &str,
+        error_detail: &str,
+    ) -> bool {
+        if self.api_keys.is_empty() {
+            return false;
+        }
+
+        // Park the key that just earned this 429 before picking the next one.
+        let spent = self
+            .last_installed_key
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(spent) = spent {
+            self.cool_down_key(spent, err);
+        }
+
+        let Some(new_key) = self.rotate_key() else {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "model_provider": provider_name,
+                        "error": error_detail,
+                        "api_keys": self.api_keys.len(),
+                    })),
+                "Rate limited; every configured API key is cooling down — not rotating"
+            );
+            return false;
+        };
+
+        let applied = entry.provider().set_credential(Some(new_key.clone()));
+        let tail = &new_key[new_key.len().saturating_sub(4)..];
+        if applied {
+            *self
+                .last_installed_key
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(new_key.clone());
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "model_provider": provider_name,
+                        "error": error_detail,
+                    })),
+                &format!("Rate limited; rotated to API key ending ...{tail}")
+            );
+        } else {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "model_provider": provider_name,
+                        "error": error_detail,
+                    })),
+                &format!(
+                    "Rate limited; selected API key ending ...{tail} but this provider does not \
+                     support runtime credential rotation — retrying with the original key"
+                )
+            );
+        }
+        applied
     }
 
     /// Compute backoff duration, respecting Retry-After if present.
@@ -1114,14 +1230,14 @@ impl ModelProvider for ReliableModelProvider {
 
                             // Rate-limit with rotatable keys: cycle to the next API key
                             // so the retry hits a different quota bucket.
-                            if rate_limited
+                            let rotated = rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
-                            {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
-                            }
+                                && self.rotate_and_apply_key(
+                                    entry,
+                                    &e,
+                                    provider_name,
+                                    &error_detail,
+                                );
 
                             if non_retryable {
                                 ::zeroclaw_log::record!(
@@ -1144,7 +1260,10 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
+                            // A successful key swap already moved us to a fresh
+                            // quota bucket — cooling the whole provider on top
+                            // of that would strand a provider that is fine.
+                            if rate_limited && !rotated && self.model_providers.len() > 1 {
                                 self.cool_down_rate_limited_provider(entry, current_model, &e);
                                 break;
                             }
@@ -1322,14 +1441,14 @@ impl ModelProvider for ReliableModelProvider {
                                 Some(&diagnostic),
                             );
 
-                            if rate_limited
+                            let rotated = rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
-                            {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
-                            }
+                                && self.rotate_and_apply_key(
+                                    entry,
+                                    &e,
+                                    provider_name,
+                                    &error_detail,
+                                );
 
                             if non_retryable {
                                 ::zeroclaw_log::record!(
@@ -1352,7 +1471,10 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
+                            // A successful key swap already moved us to a fresh
+                            // quota bucket — cooling the whole provider on top
+                            // of that would strand a provider that is fine.
+                            if rate_limited && !rotated && self.model_providers.len() > 1 {
                                 self.cool_down_rate_limited_provider(entry, current_model, &e);
                                 break;
                             }
@@ -1571,14 +1693,14 @@ impl ModelProvider for ReliableModelProvider {
                                 Some(&diagnostic),
                             );
 
-                            if rate_limited
+                            let rotated = rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
-                            {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
-                            }
+                                && self.rotate_and_apply_key(
+                                    entry,
+                                    &e,
+                                    provider_name,
+                                    &error_detail,
+                                );
 
                             if non_retryable {
                                 ::zeroclaw_log::record!(
@@ -1601,7 +1723,10 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
+                            // A successful key swap already moved us to a fresh
+                            // quota bucket — cooling the whole provider on top
+                            // of that would strand a provider that is fine.
+                            if rate_limited && !rotated && self.model_providers.len() > 1 {
                                 self.cool_down_rate_limited_provider(entry, current_model, &e);
                                 break;
                             }
@@ -1781,14 +1906,14 @@ impl ModelProvider for ReliableModelProvider {
                                 Some(&diagnostic),
                             );
 
-                            if rate_limited
+                            let rotated = rate_limited
                                 && !non_retryable_rate_limit
-                                && let Some(new_key) = self.rotate_key()
-                            {
-                                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"model_provider": provider_name, "error": error_detail})), &format!("Rate limited; key rotation selected key ending ...{} \
-                                     but cannot apply (ModelProvider trait has no set_api_key). \
-                                     Retrying with original key.", &new_key[new_key.len().saturating_sub(4)..]));
-                            }
+                                && self.rotate_and_apply_key(
+                                    entry,
+                                    &e,
+                                    provider_name,
+                                    &error_detail,
+                                );
 
                             if non_retryable {
                                 ::zeroclaw_log::record!(
@@ -1811,7 +1936,10 @@ impl ModelProvider for ReliableModelProvider {
                                 break;
                             }
 
-                            if rate_limited && self.model_providers.len() > 1 {
+                            // A successful key swap already moved us to a fresh
+                            // quota bucket — cooling the whole provider on top
+                            // of that would strand a provider that is fine.
+                            if rate_limited && !rotated && self.model_providers.len() > 1 {
                                 self.cool_down_rate_limited_provider(entry, current_model, &e);
                                 break;
                             }
@@ -3182,7 +3310,7 @@ mod tests {
         .with_api_keys(vec!["key-a".into(), "key-b".into(), "key-c".into()]);
 
         // Rotate 5 times, verify round-robin
-        let keys: Vec<&str> = (0..5)
+        let keys: Vec<String> = (0..5)
             .map(|_| model_provider.rotate_key().unwrap())
             .collect();
         assert_eq!(keys, vec!["key-a", "key-b", "key-c", "key-a", "key-b"]);
@@ -5275,5 +5403,179 @@ mod tests {
             "ReliableModelProvider must not surface as model_provider_type=reliable",
         );
         zeroclaw_log::clear_broadcast_hook();
+    }
+
+    // ── Key rotation actually reaches the provider ──
+
+    /// Records the credential in force on every call and can be built with or
+    /// without runtime-rotation support, so tests can pin both branches.
+    struct KeyRotationMock {
+        calls: Arc<AtomicUsize>,
+        credential: parking_lot::RwLock<Option<String>>,
+        keys_seen: parking_lot::Mutex<Vec<Option<String>>>,
+        fail_until_attempt: usize,
+        supports_rotation: bool,
+    }
+
+    impl KeyRotationMock {
+        fn new(initial_key: &str, fail_until_attempt: usize, supports_rotation: bool) -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                credential: parking_lot::RwLock::new(Some(initial_key.to_string())),
+                keys_seen: parking_lot::Mutex::new(Vec::new()),
+                fail_until_attempt,
+                supports_rotation,
+            }
+        }
+
+        fn keys_seen(&self) -> Vec<Option<String>> {
+            self.keys_seen.lock().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for KeyRotationMock {
+        fn set_credential(&self, key: Option<String>) -> bool {
+            if !self.supports_rotation {
+                return false;
+            }
+            *self.credential.write() = key;
+            true
+        }
+
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.keys_seen.lock().push(self.credential.read().clone());
+            if attempt <= self.fail_until_attempt {
+                anyhow::bail!("429 Too Many Requests: rate limit exceeded");
+            }
+            Ok("ok".to_string())
+        }
+
+        async fn chat_with_history(
+            &self,
+            _messages: &[ChatMessage],
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.keys_seen.lock().push(self.credential.read().clone());
+            if attempt <= self.fail_until_attempt {
+                anyhow::bail!("429 Too Many Requests: rate limit exceeded");
+            }
+            Ok("ok".to_string())
+        }
+    }
+
+    impl ::zeroclaw_api::attribution::Attributable for KeyRotationMock {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Provider(
+                ::zeroclaw_api::attribution::ProviderKind::Model(
+                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+                ),
+            )
+        }
+        fn alias(&self) -> &str {
+            "KeyRotationMock"
+        }
+    }
+
+    /// The regression this branch exists for: upstream selects a new key, logs
+    /// that it did, and then retries with the old one. The retry must carry the
+    /// rotated key.
+    #[tokio::test]
+    async fn rate_limit_installs_the_rotated_key_on_the_provider() {
+        let mock = Arc::new(KeyRotationMock::new("key-original", 1, true));
+        let model_provider = ReliableModelProvider::new(
+            "test",
+            vec![("primary".into(), Box::new(Arc::clone(&mock)))],
+            2,
+            1,
+        )
+        .with_api_keys(vec!["key-rotated".into()]);
+
+        let result = model_provider
+            .chat_with_system(None, "hello", "test-model", Some(0.0))
+            .await
+            .unwrap();
+
+        assert_eq!(result, "ok");
+        assert_eq!(
+            mock.keys_seen(),
+            vec![
+                Some("key-original".to_string()),
+                Some("key-rotated".to_string()),
+            ],
+            "the retry after a 429 must authenticate with the rotated key",
+        );
+    }
+
+    /// A provider that cannot rotate must not be reported as rotated — the
+    /// caller relies on `false` to fall back to cooling the whole provider.
+    #[tokio::test]
+    async fn provider_without_rotation_support_keeps_its_original_key() {
+        let mock = Arc::new(KeyRotationMock::new("key-original", 1, false));
+        let model_provider = ReliableModelProvider::new(
+            "test",
+            vec![("primary".into(), Box::new(Arc::clone(&mock)))],
+            2,
+            1,
+        )
+        .with_api_keys(vec!["key-rotated".into()]);
+
+        let result = model_provider
+            .chat_with_system(None, "hello", "test-model", Some(0.0))
+            .await
+            .unwrap();
+
+        assert_eq!(result, "ok");
+        assert_eq!(
+            mock.keys_seen(),
+            vec![
+                Some("key-original".to_string()),
+                Some("key-original".to_string()),
+            ],
+            "a provider that returns false from set_credential must keep its key",
+        );
+    }
+
+    /// Round-robin must not hand back a key that is still inside the cooldown
+    /// window it earned by being rate-limited.
+    #[tokio::test]
+    async fn rotation_skips_a_key_that_is_cooling_down() {
+        let model_provider = ReliableModelProvider::new("test", vec![], 0, 1)
+            .with_api_keys(vec!["key-a".into(), "key-b".into()]);
+
+        let err = anyhow::anyhow!("429 Too Many Requests: rate limit exceeded");
+        model_provider.cool_down_key("key-a".to_string(), &err);
+
+        // Five draws, none of which may be the cooling key.
+        for _ in 0..5 {
+            assert_eq!(model_provider.rotate_key(), Some("key-b".to_string()));
+        }
+    }
+
+    /// Fail closed: when every key is cooling there is no honest rotation to
+    /// report, so `rotate_key` returns None rather than recycling a dead key.
+    #[tokio::test]
+    async fn rotation_fails_closed_when_every_key_is_cooling() {
+        let model_provider = ReliableModelProvider::new("test", vec![], 0, 1)
+            .with_api_keys(vec!["key-a".into(), "key-b".into()]);
+
+        let err = anyhow::anyhow!("429 Too Many Requests: rate limit exceeded");
+        model_provider.cool_down_key("key-a".to_string(), &err);
+        model_provider.cool_down_key("key-b".to_string(), &err);
+
+        assert_eq!(
+            model_provider.rotate_key(),
+            None,
+            "every key cooling must read as 'no rotation', never as a silent reuse",
+        );
     }
 }
