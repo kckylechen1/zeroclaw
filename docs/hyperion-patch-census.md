@@ -95,3 +95,56 @@ still not rotating.
    the WeChat token is briefly readable at the default umask. Not ported here
    because the fix changes `save_account_data` from a sync `fn` and ripples to
    its callers; that is its own change, not a rebase carry.
+
+## The memcore pin
+
+`crates/zeroclaw-memory/Cargo.toml` pins `memcore` to tachi rev `7ae2c0a0`.
+That rev is **diverged from tachi main, not behind it**: it is tachi's
+`dd1dc14a` plus one commit that was never merged there —
+`chore(memcore): align rusqlite to 0.37 for ZeroClaw workspace co-existence`.
+Bumping the pin naively drops that commit and the build stops resolving.
+
+Tachi main is 468 commits ahead, ≥100 of them touching `crates/memcore`
+(schema v23 migration, authorizer/guard boundaries, trigger inventory,
+evidence guards). Its `memcore` version string is still `1.9.0`, so the
+version number carries no signal — compare revs, not versions.
+
+### Why the pin is stuck
+
+```
+memcore @ tachi main   → rusqlite 0.38 → libsqlite3-sys 0.36
+matrix-sdk-sqlite 0.18 → rusqlite 0.37 → libsqlite3-sys 0.35
+```
+
+Both link the native `sqlite3` library, and cargo permits exactly one package
+with a given `links` value. `matrix-sdk-sqlite 0.18` is the latest release on
+crates.io with no 0.38-based successor, and `channel-matrix` ships in
+`dist_extra_features` and `ci-all` — so ZeroClaw cannot simply move to 0.38
+without dropping the Matrix channel from distribution builds.
+
+### Measured, not assumed
+
+- The memcore API surface this fork uses is eight symbols — `MemoryStore`,
+  `MemoryEntry`, `SearchOptions`, `HybridWeights`, `AnchorKind`,
+  `NEAR_DUP_RAW_SCAN_CAP`, `near_duplicate_raw_pairs`, `types::default_tier`.
+  All eight still resolve at tachi main. `default_tier` moved into
+  `types/entry.rs`, but `types.rs` re-exports with `pub use entry::*`.
+- memcore at tachi main **compiles against rusqlite 0.37**.
+- With the requirement widened, a full workspace check with `tachi` *and*
+  `channel-matrix` both enabled resolves to a single `libsqlite3-sys` and
+  builds clean.
+
+So the blocker was never the API and never the code — only the exact-version
+pin in tachi's workspace manifest.
+
+### Unblock
+
+tachi PR [#1453](https://github.com/kckylechen1/tachi/pull/1453) widens that
+manifest to `rusqlite = ">=0.37, <0.39"`. Standalone tachi still resolves to
+0.38, so nothing changes there; a consumer holding 0.37 unifies instead of
+failing.
+
+**When #1453 merges:** point `memcore` at the merged `main` rev and delete the
+carried compatibility commit for good. Then verify the schema **v23** migration
+against real data before trusting it — the existing `.tachi/` store predates it,
+and that check must not run during market hours.
