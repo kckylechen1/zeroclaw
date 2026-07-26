@@ -5,6 +5,7 @@ use super::context::TurnCtx;
 use super::events::StreamDelta;
 use super::redact::scrub_credentials;
 use crate::agent::tool_execution::ToolExecutionOutcome;
+use crate::approval::store::AuditDecision;
 use crate::approval::{ApprovalRequest, ApprovalRequirement, ApprovalResponse};
 use std::time::Duration;
 
@@ -28,6 +29,27 @@ pub(crate) async fn gate_tool_approval(
         .approval
         .map(|mgr| mgr.approval_requirement(tool_name))
         .unwrap_or(ApprovalRequirement::NotRequired);
+
+    // Outcomes that never reach a human still belong on the durable trail:
+    // "nobody was asked, at 03:00" is the row an investigation needs most.
+    if let Some(mgr) = ctx.approval
+        && approval_requirement != ApprovalRequirement::Prompt
+    {
+        let decision = match approval_requirement {
+            ApprovalRequirement::Approved => AuditDecision::AutoApproved,
+            _ => AuditDecision::NotRequired,
+        };
+        mgr.record_audit(
+            ctx.turn_id,
+            ctx.agent_alias,
+            tool_name,
+            tool_args,
+            decision,
+            None,
+            Some(ctx.channel_name),
+        );
+    }
+
     if let Some(mgr) = ctx.approval
         && approval_requirement == ApprovalRequirement::Prompt
     {
@@ -94,6 +116,24 @@ pub(crate) async fn gate_tool_approval(
 
         let decision_channel = decided_by.unwrap_or_else(|| ctx.channel_name.to_string());
         mgr.record_decision(tool_name, tool_args, &decision, &decision_channel);
+
+        // The durable counterpart of `record_decision`, which only writes to
+        // an in-memory Vec. A denial is evidence too, so it lands here before
+        // the early return below.
+        let audited = match &decision {
+            ApprovalResponse::Yes | ApprovalResponse::Always => AuditDecision::Granted,
+            ApprovalResponse::No => AuditDecision::Denied,
+            ApprovalResponse::ReplaceWith(_) => AuditDecision::Denied,
+        };
+        mgr.record_audit(
+            ctx.turn_id,
+            ctx.agent_alias,
+            tool_name,
+            tool_args,
+            audited,
+            Some(&decision_channel),
+            Some(ctx.channel_name),
+        );
 
         if decision == ApprovalResponse::No {
             let denied = "Denied by user.".to_string();
@@ -166,6 +206,57 @@ pub(crate) async fn gate_tool_approval(
         }
 
         if matches!(decision, ApprovalResponse::Yes | ApprovalResponse::Always) {
+            // Mint a grant bound to this run, this tool, and this exact
+            // argument set, then consume it right here. The round trip is the
+            // check: it proves the call about to execute is the call that was
+            // shown to the approver. Without it, "approved" is a boolean that
+            // has already forgotten what it was approving.
+            mgr.grant_one_shot(
+                ctx.turn_id,
+                tool_name,
+                tool_args,
+                &decision_channel,
+                ctx.channel_name,
+            );
+
+            if let Err(failure) = mgr.redeem_one_shot(ctx.turn_id, tool_name, tool_args) {
+                let reason = format!(
+                    "Approval could not be redeemed for this call ({failure:?}); refusing to \
+                     execute on an approval that does not match it."
+                );
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_category(::zeroclaw_log::EventCategory::Tool)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "model": ctx.model,
+                            "iteration": iteration + 1,
+                            "tool": tool_name,
+                            "failure": format!("{failure:?}"),
+                            "trace_id": ctx.turn_id,
+                        })),
+                    "approval_grant_not_redeemable"
+                );
+                mgr.record_audit(
+                    ctx.turn_id,
+                    ctx.agent_alias,
+                    tool_name,
+                    tool_args,
+                    AuditDecision::Blocked,
+                    Some(&decision_channel),
+                    Some(ctx.channel_name),
+                );
+                return ApprovalGateOutcome::Deny(ToolExecutionOutcome {
+                    output: reason.clone(),
+                    success: false,
+                    error_reason: Some(reason),
+                    duration: Duration::ZERO,
+                    receipt: None,
+                    output_data: None,
+                });
+            }
+
             approval_requirement = ApprovalRequirement::Approved;
         }
     }

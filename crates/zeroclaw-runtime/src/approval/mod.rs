@@ -103,8 +103,13 @@ pub struct ApprovalManager {
     non_interactive_shell_requires_approval: bool,
     /// Session-scoped allowlist built from "Always" responses.
     session_allowlist: Mutex<HashSet<String>>,
-    /// Audit trail of approval decisions.
+    /// Audit trail of approval decisions. Process-local: a restart erases it.
     audit_log: Mutex<Vec<ApprovalLogEntry>>,
+    /// Durable half. When present, every gate outcome is also appended to a
+    /// trail that survives a restart, and approvals mint a one-shot grant
+    /// bound to the exact call. Absent in tests and for callers that have no
+    /// data directory, in which case behaviour is unchanged.
+    store: Option<std::sync::Arc<store::ApprovalStore>>,
 }
 
 impl ApprovalManager {
@@ -118,6 +123,7 @@ impl ApprovalManager {
             non_interactive_shell_requires_approval: false,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            store: None,
         }
     }
 
@@ -130,6 +136,7 @@ impl ApprovalManager {
             non_interactive_shell_requires_approval: false,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            store: None,
         }
     }
 
@@ -142,6 +149,7 @@ impl ApprovalManager {
             non_interactive_shell_requires_approval: true,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            store: None,
         }
     }
 
@@ -164,6 +172,7 @@ impl ApprovalManager {
             non_interactive_shell_requires_approval: self.non_interactive_shell_requires_approval,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            store: None,
         }
     }
 
@@ -267,6 +276,134 @@ impl ApprovalManager {
     pub fn prompt_cli(&self, request: &ApprovalRequest) -> ApprovalResponse {
         prompt_cli_interactive(request)
     }
+
+    // ── Durable half ────────────────────────────────────────────────
+
+    /// Attach a durable store. Without one this manager behaves exactly as
+    /// before, which is the point: the store is an addition, never a
+    /// precondition for the gate working.
+    #[must_use]
+    pub fn with_store(mut self, store: std::sync::Arc<store::ApprovalStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn has_store(&self) -> bool {
+        self.store.is_some()
+    }
+
+    /// Append one gate outcome to the durable trail.
+    ///
+    /// A store write failure is logged and swallowed. Refusing the tool call
+    /// because an audit row could not be written would convert a bookkeeping
+    /// fault into an outage; the loud log is the alarm.
+    pub fn record_audit(
+        &self,
+        run_id: &str,
+        agent: Option<&str>,
+        tool_name: &str,
+        args: &serde_json::Value,
+        decision: store::AuditDecision,
+        approver: Option<&str>,
+        channel: Option<&str>,
+    ) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let summary = summarize_args(args);
+        if let Err(err) = store.record(
+            Some(run_id),
+            agent,
+            tool_name,
+            args,
+            &summary,
+            decision,
+            approver,
+            channel,
+        ) {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "tool": tool_name,
+                        "decision": decision.as_str(),
+                        "error": format!("{err}"),
+                    })),
+                "approval audit write failed — this decision is not on the durable trail"
+            );
+        }
+    }
+
+    /// Mint a one-shot grant for exactly this call. Returns the grant id when
+    /// a store is attached.
+    pub fn grant_one_shot(
+        &self,
+        run_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+        approver: &str,
+        channel: &str,
+    ) -> Option<String> {
+        let store = self.store.as_ref()?;
+        match store.grant(
+            run_id,
+            tool_name,
+            args,
+            approver,
+            channel,
+            chrono::Duration::seconds(store::DEFAULT_GRANT_TTL_SECS),
+        ) {
+            Ok(grant) => Some(grant.approval_id),
+            Err(err) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "tool": tool_name,
+                            "error": format!("{err}"),
+                        })),
+                    "could not persist approval grant"
+                );
+                None
+            }
+        }
+    }
+
+    /// Consume the grant covering this exact call.
+    ///
+    /// `Ok(())` when there is no store — a caller without durable approvals
+    /// must not start failing closed on a feature it never enabled. With a
+    /// store, an approval covers one execution of one argument set.
+    pub fn redeem_one_shot(
+        &self,
+        run_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<(), store::RedeemFailure> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        match store.redeem(run_id, tool_name, args) {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(failure)) => Err(failure),
+            Err(err) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "tool": tool_name,
+                            "error": format!("{err}"),
+                        })),
+                    "approval grant lookup failed — treating as no grant"
+                );
+                Err(store::RedeemFailure::NoGrant)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -292,6 +429,7 @@ mod approval_precedence_tests {
             non_interactive_shell_requires_approval: false,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            store: None,
         }
     }
 
@@ -383,6 +521,7 @@ mod approval_precedence_tests {
             non_interactive_shell_requires_approval: false,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            store: None,
         }
     }
 
@@ -429,6 +568,97 @@ mod approval_precedence_tests {
                 "{tool_name} must still require approval under Full + unattended"
             );
         }
+    }
+
+    // ── The durable half, as the gate uses it ────────────────────────
+
+    fn with_store(manager: ApprovalManager, dir: &std::path::Path) -> ApprovalManager {
+        let store = super::store::ApprovalStore::open(dir, "boot-1").expect("store opens");
+        manager.with_store(std::sync::Arc::new(store))
+    }
+
+    /// A manager with no store must behave exactly as before. The durable
+    /// half is an addition; a caller that never enabled it must not start
+    /// failing closed on it.
+    #[test]
+    fn without_a_store_redemption_is_a_no_op() {
+        let manager = manager(AutonomyLevel::Supervised, &["shell"], &[]);
+        assert!(!manager.has_store());
+        assert!(
+            manager
+                .redeem_one_shot("run-1", "shell", &json!({"command": "ls"}))
+                .is_ok(),
+            "no store must mean no new refusals"
+        );
+    }
+
+    /// The gate's grant-then-redeem round trip: it succeeds for the call that
+    /// was approved.
+    #[test]
+    fn a_grant_redeems_for_the_call_it_was_issued_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = with_store(manager(AutonomyLevel::Supervised, &["shell"], &[]), dir.path());
+        let args = json!({"command": "ls"});
+
+        manager.grant_one_shot("run-1", "shell", &args, "owner", "cli");
+        assert!(manager.redeem_one_shot("run-1", "shell", &args).is_ok());
+    }
+
+    /// The point of the round trip. If the arguments change between the
+    /// approval and the execution, the approval does not cover the call —
+    /// an approved `ls` must not become an approved `rm -rf /`.
+    #[test]
+    fn a_grant_does_not_redeem_for_mutated_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = with_store(manager(AutonomyLevel::Supervised, &["shell"], &[]), dir.path());
+
+        manager.grant_one_shot("run-1", "shell", &json!({"command": "ls"}), "owner", "cli");
+
+        assert_eq!(
+            manager.redeem_one_shot("run-1", "shell", &json!({"command": "rm -rf /"})),
+            Err(super::store::RedeemFailure::NoGrant),
+            "an approval must not carry over to different arguments"
+        );
+    }
+
+    /// One approval, one execution. A second identical call in the same run
+    /// needs its own approval rather than riding the first.
+    #[test]
+    fn a_grant_does_not_cover_a_repeat_of_the_same_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = with_store(manager(AutonomyLevel::Supervised, &["shell"], &[]), dir.path());
+        let args = json!({"command": "ls"});
+
+        manager.grant_one_shot("run-1", "shell", &args, "owner", "cli");
+        assert!(manager.redeem_one_shot("run-1", "shell", &args).is_ok());
+        assert_eq!(
+            manager.redeem_one_shot("run-1", "shell", &args),
+            Err(super::store::RedeemFailure::AlreadyConsumed)
+        );
+    }
+
+    /// An unattended auto-approval reaches the durable trail even though no
+    /// human ever saw it. This is the row that answers "who approved the
+    /// 03:00 call" with "nobody, and here is the proof".
+    #[test]
+    fn an_unattended_decision_reaches_the_durable_trail() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = with_store(unattended(AutonomyLevel::Full, &[], &[]), dir.path());
+
+        manager.record_audit(
+            "run-1",
+            Some("trader"),
+            "shell",
+            &json!({"command": "ls"}),
+            super::store::AuditDecision::NotRequired,
+            None,
+            Some("cron"),
+        );
+
+        let store = super::store::ApprovalStore::open(dir.path(), "boot-2").unwrap();
+        let rows = store.audit_for_run("run-1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].2, "not_required");
     }
 
     /// A prior "Always" answer must not survive into an unattended run for a
