@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::autonomy::AutonomyLevel;
-use crate::autonomy::{DelegationMode, DelegationPolicy};
+use crate::autonomy::{DelegationMode, DelegationPolicy, McpDiscoveredToolPolicy};
 use crate::policy::{default_allowed_commands, default_forbidden_paths};
 use crate::schema::{RiskProfileConfig, RuntimeProfileConfig};
 
@@ -85,6 +85,7 @@ fn locked_down_risk() -> RiskProfileConfig {
         approval_route: None,
         allowed_tools: None,
         excluded_tools: vec![],
+        mcp_discovered_tool_policy: McpDiscoveredToolPolicy::default(),
         sandbox_enabled: Some(true),
         sandbox_backend: None,
         firejail_args: vec![],
@@ -109,6 +110,7 @@ fn balanced_risk() -> RiskProfileConfig {
         approval_route: None,
         allowed_tools: None,
         excluded_tools: vec![],
+        mcp_discovered_tool_policy: McpDiscoveredToolPolicy::default(),
         sandbox_enabled: Some(true),
         sandbox_backend: None,
         firejail_args: vec![],
@@ -133,6 +135,7 @@ fn yolo_risk() -> RiskProfileConfig {
         approval_route: None,
         allowed_tools: None,
         excluded_tools: vec![],
+        mcp_discovered_tool_policy: McpDiscoveredToolPolicy::default(),
         sandbox_enabled: Some(false),
         sandbox_backend: None,
         firejail_args: vec![],

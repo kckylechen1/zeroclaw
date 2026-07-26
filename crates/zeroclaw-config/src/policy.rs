@@ -192,6 +192,9 @@ pub struct SecurityPolicy {
     /// allowed set comes from `allowed_tools` or from the unrestricted
     /// default). `None` and `Some(vec![])` both mean "exclude nothing".
     pub excluded_tools: Option<Vec<String>>,
+    /// Whether a non-empty `allowed_tools` auto-admits runtime-discovered
+    /// MCP tools. Mirrors `RiskProfileConfig.mcp_discovered_tool_policy`.
+    pub mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy,
     /// Tools that never require approval in this profile. Mirrors
     /// `RiskProfileConfig.auto_approve`.
     pub auto_approve: Vec<String>,
@@ -497,6 +500,7 @@ impl Default for SecurityPolicy {
             shell_timeout_secs: 60,
             allowed_tools: None,
             excluded_tools: None,
+            mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy::default(),
             auto_approve: vec![],
             always_ask: vec![],
             sandbox_enabled: None,
@@ -2185,6 +2189,7 @@ impl SecurityPolicy {
             } else {
                 Some(risk_profile.excluded_tools.clone())
             },
+            mcp_discovered_tool_policy: risk_profile.mcp_discovered_tool_policy,
             auto_approve: risk_profile.auto_approve.clone(),
             always_ask: risk_profile.always_ask.clone(),
             sandbox_enabled: risk_profile.sandbox_enabled,
@@ -2551,6 +2556,10 @@ mod tests {
             approval_route: None,
             allowed_tools: Some(vec!["shell".into(), "memory_recall".into()]),
             excluded_tools: vec!["spawn_subagent".into()],
+            // Deliberately the non-default variant: propagation of a field
+            // whose value equals the default is indistinguishable from the
+            // field being dropped on the floor.
+            mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
             sandbox_enabled: Some(true),
             sandbox_backend: Some("firejail".into()),
             firejail_args: vec!["--net=none".into()],
@@ -2591,6 +2600,11 @@ mod tests {
             policy.excluded_tools.as_deref(),
             Some(&["spawn_subagent".to_string()][..]),
             "excluded_tools must reach the policy"
+        );
+        assert_eq!(
+            policy.mcp_discovered_tool_policy,
+            crate::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
+            "mcp_discovered_tool_policy must reach the policy"
         );
         assert_eq!(policy.sandbox_enabled, Some(true), "sandbox_enabled");
         assert_eq!(

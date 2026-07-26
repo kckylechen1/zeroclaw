@@ -7,6 +7,7 @@ use async_trait::async_trait;
 
 use crate::mcp_deferred::{ActivatedToolSet, DeferredMcpToolSet};
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
+use zeroclaw_config::autonomy::McpDiscoveredToolPolicy;
 
 /// Default maximum number of search results.
 const DEFAULT_MAX_RESULTS: usize = 5;
@@ -18,6 +19,10 @@ pub struct ToolAccessPolicy {
     pub allowed: Option<Vec<String>>,
     pub caller_allowed: Option<Vec<String>>,
     pub denied: Option<Vec<String>>,
+    /// Whether a non-empty `allowed` list auto-admits runtime-discovered MCP
+    /// tools. Defaults to `ExplicitOnly`, so a call site that forgets to pass
+    /// it fails closed rather than open.
+    pub mcp_discovered: McpDiscoveredToolPolicy,
 }
 
 impl ToolAccessPolicy {
@@ -25,8 +30,12 @@ impl ToolAccessPolicy {
         allowed_tools: Option<&[String]>,
         excluded_tools: Option<&[String]>,
         caller_allowed: Option<&[String]>,
+        mcp_discovered: McpDiscoveredToolPolicy,
     ) -> Option<Self> {
-        let mut policy = Self::default();
+        let mut policy = Self {
+            mcp_discovered,
+            ..Self::default()
+        };
         if let Some(list) = allowed_tools {
             policy.allowed = Some(list.to_vec());
         }
@@ -53,13 +62,16 @@ impl ToolAccessPolicy {
             return false;
         }
 
-        // Risk-profile gate: MCP `<server>__<tool>` names are auto-admitted
-        // when the list is non-empty. An explicit empty list (`Some(vec![])`)
-        // still means "deny everything".
+        // Risk-profile gate. An explicit empty list (`Some(vec![])`) means
+        // "deny everything". Whether a non-empty list also admits unlisted
+        // MCP `<server>__<tool>` names is the profile's call — under the
+        // default `ExplicitOnly` it does not.
         let risk_ok = match self.allowed.as_ref() {
             None => true,
             Some(list) if list.is_empty() => false,
-            Some(list) => list.iter().any(|t| t == name) || name.contains("__"),
+            Some(list) => {
+                list.iter().any(|t| t == name) || self.mcp_discovered.admits_unlisted(name)
+            }
         };
         if !risk_ok {
             return false;
@@ -732,8 +744,13 @@ mod tests {
         // The risk-profile gate is wide (unrestricted), so the MCP
         // auto-admit would happily pass any `__` name. The caller-supplied
         // per-run list narrows down to a single non-MCP tool (`cron_add`).
-        let policy = ToolAccessPolicy::from_security(None, None, Some(&["cron_add".to_string()]))
-            .expect("caller-supplied list should produce a policy");
+        let policy = ToolAccessPolicy::from_security(
+            None,
+            None,
+            Some(&["cron_add".to_string()]),
+            McpDiscoveredToolPolicy::AutoAdmit,
+        )
+        .expect("caller-supplied list should produce a policy");
 
         assert!(
             policy.is_tool_allowed("cron_add"),
@@ -758,6 +775,7 @@ mod tests {
             Some(&["shell".to_string()]),
             None,
             Some(&["shell".to_string(), "github__search".to_string()]),
+            McpDiscoveredToolPolicy::AutoAdmit,
         )
         .expect("risk + caller lists should produce a policy");
 
@@ -784,6 +802,7 @@ mod tests {
             Some(&["shell".to_string()]),
             Some(&["filesystem__write_file".to_string()]),
             Some(&["shell".to_string(), "filesystem__write_file".to_string()]),
+            McpDiscoveredToolPolicy::AutoAdmit,
         )
         .expect("policy with all three fields should be constructed");
 
@@ -792,5 +811,64 @@ mod tests {
             !policy.is_tool_allowed("filesystem__write_file"),
             "denylist subtracts even when both gates would admit"
         );
+    }
+
+    // ── explicit_only: an MCP server cannot grant itself reach ──
+
+    /// The default posture. A non-empty allow-list means what it says: an
+    /// MCP tool nobody listed is not reachable, even though its name has
+    /// the `<server>__<tool>` shape that used to be a free pass.
+    #[test]
+    fn explicit_only_rejects_unlisted_mcp_names() {
+        let policy = ToolAccessPolicy::from_security(
+            Some(&["shell".to_string(), "hapi-edge__snapshot".to_string()]),
+            None,
+            None,
+            McpDiscoveredToolPolicy::ExplicitOnly,
+        )
+        .expect("risk list should produce a policy");
+
+        assert!(policy.is_tool_allowed("shell"));
+        assert!(
+            policy.is_tool_allowed("hapi-edge__snapshot"),
+            "an MCP tool named in the allow-list must still be reachable"
+        );
+        assert!(
+            !policy.is_tool_allowed("hapi-edge__portfolio_buy"),
+            "an unlisted MCP tool must be rejected — this is the whole point \
+             of explicit_only: a server that grows a trading tool gains no \
+             reach until someone names it"
+        );
+    }
+
+    /// Same inputs, opposite policy — proves the gate is the flag and not
+    /// some other filter incidentally rejecting the name.
+    #[test]
+    fn auto_admit_still_admits_unlisted_mcp_names() {
+        let policy = ToolAccessPolicy::from_security(
+            Some(&["shell".to_string()]),
+            None,
+            None,
+            McpDiscoveredToolPolicy::AutoAdmit,
+        )
+        .expect("risk list should produce a policy");
+
+        assert!(policy.is_tool_allowed("hapi-edge__portfolio_buy"));
+    }
+
+    /// Explicit-only does not weaken the empty-list rule: `Some(vec![])`
+    /// still denies everything, MCP-shaped or not.
+    #[test]
+    fn explicit_only_keeps_empty_list_as_deny_all() {
+        let policy = ToolAccessPolicy::from_security(
+            Some(&[]),
+            None,
+            None,
+            McpDiscoveredToolPolicy::ExplicitOnly,
+        )
+        .expect("empty risk list should still produce a policy");
+
+        assert!(!policy.is_tool_allowed("shell"));
+        assert!(!policy.is_tool_allowed("hapi-edge__snapshot"));
     }
 }

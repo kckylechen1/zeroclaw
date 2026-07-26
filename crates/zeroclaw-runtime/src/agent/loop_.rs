@@ -257,13 +257,15 @@ pub fn mcp_tool_access_policy(
         security.allowed_tools.as_deref(),
         security.excluded_tools.as_deref(),
         caller_allowed,
+        security.mcp_discovered_tool_policy,
     )
 }
 
 /// Whether an MCP tool name is admitted by `policy` (a `None` policy admits
-/// everything). The risk-profile denylist always wins; the allowlist
-/// auto-admits `<server>__<tool>` names so a restrictive allowlist does not
-/// silently drop a configured server's tools.
+/// everything). The risk-profile denylist always wins. Whether the allowlist
+/// also admits unlisted `<server>__<tool>` names is the profile's
+/// `mcp_discovered_tool_policy`; under the default `explicit_only` it does
+/// not, so a server that grows a tool gains no reach until it is named.
 pub fn eager_mcp_tool_allowed(
     name: &str,
     policy: Option<&zeroclaw_tools::tool_search::ToolAccessPolicy>,
@@ -13630,6 +13632,7 @@ Let me check the result."#;
             None,
             Some(&excluded),
             None,
+            zeroclaw_config::autonomy::McpDiscoveredToolPolicy::default(),
         )
         .expect("denylist yields a policy");
 
@@ -14875,6 +14878,10 @@ Let me check the result."#;
         let policy = TestPolicy {
             allowed_tools: Some(vec!["fs__read_file".into(), "slack__post".into()]),
             excluded_tools: Some(vec!["slack__post".into()]),
+            // This test is about the interaction of the two gates, which only
+            // has something to say while the risk gate auto-admits.
+            mcp_discovered_tool_policy:
+                zeroclaw_config::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
             ..TestPolicy::default()
         };
         let caller = vec!["fs__read_file".to_string(), "github__search".to_string()];
@@ -14956,6 +14963,8 @@ Let me check the result."#;
     fn eager_mcp_policy_uses_security_policy_without_caller_gate_on_process_message() {
         let policy = TestPolicy {
             allowed_tools: Some(vec!["fs__read_file".into()]),
+            mcp_discovered_tool_policy:
+                zeroclaw_config::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
             ..TestPolicy::default()
         };
         let access_policy = super::mcp_tool_access_policy(&policy, None);
@@ -14964,10 +14973,32 @@ Let me check the result."#;
             super::eager_mcp_tool_allowed("fs__read_file", access_policy.as_ref()),
             "process_message eager MCP should use the agent SecurityPolicy allowlist"
         );
-        // github__search contains "__" → auto-admitted even though not in allowed_tools
+        // Under `auto_admit`, `github__search` rides its `__` shape in even
+        // though nobody listed it.
         assert!(
             super::eager_mcp_tool_allowed("github__search", access_policy.as_ref()),
-            "runtime-discovered MCP tools are auto-admitted (subject only to excluded_tools)"
+            "runtime-discovered MCP tools are auto-admitted under auto_admit"
+        );
+    }
+
+    /// The default posture on the same path: eager registration must not
+    /// admit an MCP tool the profile never named. This is the gap that let a
+    /// server hand the agent a new tool between restarts.
+    #[test]
+    fn eager_mcp_policy_rejects_unlisted_mcp_names_under_explicit_only() {
+        let policy = TestPolicy {
+            allowed_tools: Some(vec!["fs__read_file".into()]),
+            ..TestPolicy::default()
+        };
+        let access_policy = super::mcp_tool_access_policy(&policy, None);
+
+        assert!(
+            super::eager_mcp_tool_allowed("fs__read_file", access_policy.as_ref()),
+            "a listed MCP tool must still register eagerly"
+        );
+        assert!(
+            !super::eager_mcp_tool_allowed("github__search", access_policy.as_ref()),
+            "an unlisted MCP tool must not register eagerly by default"
         );
     }
 
@@ -15033,6 +15064,10 @@ Let me check the result."#;
         let policy = TestPolicy {
             allowed_tools: Some(vec!["fs__read_file".into()]),
             excluded_tools: Some(vec!["slack__post".into()]),
+            // The subject here is that tools and the delegate handle stay in
+            // lockstep, which needs a name that gets in without being listed.
+            mcp_discovered_tool_policy:
+                zeroclaw_config::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
             ..TestPolicy::default()
         };
         let access_policy = super::mcp_tool_access_policy(&policy, None);

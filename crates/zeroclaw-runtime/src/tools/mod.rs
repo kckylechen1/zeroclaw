@@ -1633,7 +1633,12 @@ mod tests {
 
         // Deny mcp_prompts → only mcp_resources present.
         let policy =
-            ToolAccessPolicy::from_security(None, Some(&["mcp_prompts".to_string()]), None);
+            ToolAccessPolicy::from_security(
+                None,
+                Some(&["mcp_prompts".to_string()]),
+                None,
+                zeroclaw_config::autonomy::McpDiscoveredToolPolicy::default(),
+            );
         let one = build_mcp_capability_tools(&registry, policy.as_ref());
         let names: Vec<_> = one.iter().map(|t| t.name().to_string()).collect();
         assert!(names.contains(&"mcp_resources".to_string()));

@@ -26,6 +26,50 @@ pub enum AutonomyLevel {
     Full,
 }
 
+/// How a non-empty `allowed_tools` list treats tools discovered at runtime
+/// from MCP servers, whose names carry a `<server>__<tool>` shape.
+///
+/// The distinction matters because MCP tool sets are not known when the
+/// allow-list is written: a server can add a tool at any time, and under
+/// [`Self::AutoAdmit`] that tool is reachable the moment it appears, without
+/// anyone editing config. For an agent that can move money or touch
+/// production, "whatever that server offers next" is not an allow-list.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    zeroclaw_macros::ConfigEnum,
+)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum McpDiscoveredToolPolicy {
+    /// An MCP tool must be named in `allowed_tools` like any other tool.
+    /// A server that grows a new tool does not gain reach until someone
+    /// says so. This is the default.
+    #[default]
+    ExplicitOnly,
+    /// Any `<server>__<tool>` name is admitted once `allowed_tools` is
+    /// non-empty; the list only constrains built-in tools. Upstream's
+    /// behavior, kept as an escape hatch for setups that rely on it.
+    AutoAdmit,
+}
+
+impl McpDiscoveredToolPolicy {
+    /// Whether `name` is admitted purely by virtue of looking like an MCP
+    /// tool. Only ever true under [`Self::AutoAdmit`].
+    #[must_use]
+    pub fn admits_unlisted(self, name: &str) -> bool {
+        self == Self::AutoAdmit && name.contains("__")
+    }
+}
+
 /// Delegation mode for a risk profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]

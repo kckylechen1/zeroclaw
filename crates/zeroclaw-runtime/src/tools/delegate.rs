@@ -920,6 +920,10 @@ impl DelegateTool {
             } else {
                 Some(profile.excluded_tools.clone())
             },
+            // Must be carried explicitly: this constructor hand-picks fields
+            // and lets `..default()` supply the rest, so a gate left out here
+            // silently reverts to the default posture for delegated runs.
+            mcp_discovered_tool_policy: profile.mcp_discovered_tool_policy,
             ..SecurityPolicy::default()
         })
     }
@@ -935,7 +939,10 @@ impl DelegateTool {
         match policy.allowed_tools.as_ref() {
             None => true,
             Some(list) if list.is_empty() => false,
-            Some(list) => list.iter().any(|t| t == name) || name.contains("__"),
+            Some(list) => {
+                list.iter().any(|t| t == name)
+                    || policy.mcp_discovered_tool_policy.admits_unlisted(name)
+            }
         }
     }
 
@@ -3376,6 +3383,20 @@ mod tests {
         agentic_risk_profiles_with_excluded(allowed_tools, Vec::new())
     }
 
+    /// Same, with an explicit MCP-discovery posture. Needed because the
+    /// default is now `explicit_only`, so a test that means to exercise
+    /// auto-admit has to ask for it.
+    fn agentic_risk_profiles_with_mcp(
+        allowed_tools: Vec<String>,
+        mcp: zeroclaw_config::autonomy::McpDiscoveredToolPolicy,
+    ) -> HashMap<String, RiskProfileConfig> {
+        let mut profiles = agentic_risk_profiles(allowed_tools);
+        if let Some(profile) = profiles.get_mut("agentic_test") {
+            profile.mcp_discovered_tool_policy = mcp;
+        }
+        profiles
+    }
+
     fn agentic_risk_profiles_with_excluded(
         allowed_tools: Vec<String>,
         excluded_tools: Vec<String>,
@@ -5282,7 +5303,10 @@ mod tests {
     #[test]
     fn delegate_admits_with_mcp_auto_admits_double_underscore_mcp_names() {
         let tool = DelegateTool::new(HashMap::new(), None, test_security())
-            .with_risk_profiles(agentic_risk_profiles(vec!["shell".to_string()]))
+            .with_risk_profiles(agentic_risk_profiles_with_mcp(
+                vec!["shell".to_string()],
+                zeroclaw_config::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
+            ))
             .with_parent_tools(Arc::new(RwLock::new(Vec::new())));
 
         let policy = tool
@@ -5294,17 +5318,40 @@ mod tests {
             DelegateTool::delegate_admits_with_mcp(&policy, "shell"),
             "explicit allow-list entry must be admitted"
         );
-        // A runtime-discovered MCP wrapper (matching `<server>__<tool>`) is
-        // auto-admitted even though it is not in `allowed_tools`. This is
-        // the destructive capability the reviewer called out.
+        // Under the opt-in `auto_admit` posture a runtime-discovered MCP
+        // wrapper is admitted without being listed. This is the destructive
+        // capability the reviewer called out; it is no longer the default.
         assert!(
             DelegateTool::delegate_admits_with_mcp(&policy, "filesystem__write_file"),
-            "double-underscore MCP name must be auto-admitted"
+            "double-underscore MCP name must be auto-admitted under auto_admit"
         );
         // Non-MCP names outside the allow-list still get rejected.
         assert!(
             !DelegateTool::delegate_admits_with_mcp(&policy, "memory_recall"),
             "non-MCP names outside allow-list must be rejected"
+        );
+    }
+
+    /// The counterpart, and the default. Same allow-list, same MCP name,
+    /// opposite posture — so the gate is provably the flag.
+    #[test]
+    fn delegate_admits_with_mcp_rejects_unlisted_mcp_names_under_explicit_only() {
+        let tool = DelegateTool::new(HashMap::new(), None, test_security())
+            .with_risk_profiles(agentic_risk_profiles(vec!["shell".to_string()]))
+            .with_parent_tools(Arc::new(RwLock::new(Vec::new())));
+
+        let policy = tool
+            .resolve_tool_policy("agentic_test")
+            .expect("agentic_test risk profile is configured");
+
+        assert!(
+            DelegateTool::delegate_admits_with_mcp(&policy, "shell"),
+            "explicit allow-list entry must still be admitted"
+        );
+        assert!(
+            !DelegateTool::delegate_admits_with_mcp(&policy, "filesystem__write_file"),
+            "an unlisted MCP name must be rejected by default — a delegate \
+             must not reach a tool nobody granted it"
         );
     }
 
@@ -5315,6 +5362,7 @@ mod tests {
             Some(&["shell".to_string()]),
             None,
             Some(&["shell".to_string()]),
+            zeroclaw_config::autonomy::McpDiscoveredToolPolicy::default(),
         )
         .expect("policy");
         assert!(policy.is_tool_allowed("shell"));

@@ -11714,6 +11714,13 @@ pub struct RiskProfileConfig {
     /// `<server>__<tool>` MCP names that would otherwise be auto-admitted
     /// by the `allowed_tools` MCP exception described above.
     pub excluded_tools: Vec<String>,
+    /// Whether a non-empty `allowed_tools` auto-admits runtime-discovered
+    /// MCP tools. Defaults to
+    /// [`McpDiscoveredToolPolicy::ExplicitOnly`][crate::autonomy::McpDiscoveredToolPolicy::ExplicitOnly]:
+    /// an MCP tool must be named like any other. Set `auto_admit` to restore
+    /// the permissive behavior described on `allowed_tools` above.
+    #[serde(default)]
+    pub mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy,
     // ── Sandbox (from security.sandbox) ─────────────────────────────
     /// Whether the sandbox is enabled for this profile. `None` inherits global.
     pub sandbox_enabled: Option<bool>,
@@ -11740,6 +11747,7 @@ impl Default for RiskProfileConfig {
             approval_route: None,
             allowed_tools: None,
             excluded_tools: Vec::new(),
+            mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy::default(),
             sandbox_enabled: None,
             sandbox_backend: None,
             firejail_args: Vec::new(),
