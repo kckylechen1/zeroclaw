@@ -373,6 +373,67 @@ impl TaskRegistry for SqliteTaskStore {
         Ok(collect_skipping_bad_rows(rows))
     }
 
+    async fn claim_undelivered_children(
+        &self,
+        parent_id: &str,
+    ) -> Result<Vec<zeroclaw_api::announce::Announcement>> {
+        use zeroclaw_api::announce::Announcement;
+
+        let conn = self.conn.lock();
+        // One statement claims and returns. Splitting the read from the flag
+        // would let two wakers announce the same completion, and an announced
+        // completion becomes a parent turn — so a double read is a double run.
+        //
+        // `output` and `error` are selected explicitly because `TaskRecord`
+        // does not carry them: announcing a completion without its result
+        // would tell the parent that something finished while withholding
+        // what it produced.
+        let mut stmt = conn
+            .prepare_cached(
+                "UPDATE tasks SET delivered = 1
+                  WHERE parent_id = ?1
+                    AND delivered = 0
+                    AND status IN ('completed','failed','cancelled','lost','timed_out')
+              RETURNING id, agent, status, output, error, finished_at",
+            )
+            .context("prepare claim undelivered children")?;
+        let rows = stmt
+            .query_map(params![parent_id], |row| {
+                let status: String = row.get("status")?;
+                Ok((
+                    Announcement {
+                        task_id: row.get("id")?,
+                        agent: row.get("agent")?,
+                        // Placeholder; replaced below once the status parses.
+                        outcome: zeroclaw_api::announce::AnnouncedOutcome::Lost,
+                        output: row.get("output")?,
+                        detail: row.get("error")?,
+                        finished_at: row.get("finished_at")?,
+                    },
+                    status,
+                ))
+            })
+            .context("claim undelivered children")?;
+
+        let mut claimed = Vec::new();
+        for row in rows {
+            let (mut announcement, status) = row.context("read claimed child")?;
+            // A row selected by the terminal-status filter above must map; a
+            // status that does not is a schema drift worth failing on rather
+            // than silently reporting as lost.
+            let parsed = status_from_db(&status)?;
+            let Some(outcome) = super::task_registry::announced_outcome(parsed) else {
+                anyhow::bail!(
+                    "claimed child {} has non-terminal status {status:?}",
+                    announcement.task_id
+                );
+            };
+            announcement.outcome = outcome;
+            claimed.push(announcement);
+        }
+        Ok(claimed)
+    }
+
     async fn reconcile_lost(&self, id: &str, now_boot_id: &str) -> Result<bool> {
         let conn = self.conn.lock();
         let rec = conn
@@ -402,6 +463,7 @@ impl TaskRegistry for SqliteTaskStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroclaw_api::announce::AnnouncedOutcome;
 
     fn rec(id: &str, agent: &str, owner_pid: u32, boot: &str) -> TaskRecord {
         TaskRecord {
@@ -458,6 +520,179 @@ mod tests {
         assert_eq!(s.list_running().await.unwrap().len(), 2); // a + c
         assert_eq!(s.list_by_agent("main").await.unwrap().len(), 2); // a + b
         assert_eq!(s.count_by_agent("main").unwrap(), 2);
+    }
+
+    fn child_of(id: &str, parent: &str, status: TaskStatus) -> TaskRecord {
+        TaskRecord {
+            parent_id: Some(parent.into()),
+            status,
+            ..rec(id, "main", 1, "boot-1")
+        }
+    }
+
+    /// The invariant the whole announce path rests on: a completion is claimed
+    /// once. An announced completion becomes a parent turn, so claiming twice
+    /// means the parent acts on the same result twice.
+    #[tokio::test]
+    async fn a_completion_is_claimed_exactly_once() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("kid", "mum", TaskStatus::Completed))
+            .await
+            .unwrap();
+
+        let first = s.claim_undelivered_children("mum").await.unwrap();
+        assert_eq!(first.len(), 1, "the completion must be claimable once");
+        assert_eq!(first[0].task_id, "kid");
+
+        let second = s.claim_undelivered_children("mum").await.unwrap();
+        assert!(
+            second.is_empty(),
+            "a second waker must not re-announce a delivered completion"
+        );
+    }
+
+    /// The point of announcing at all. A parent told "your child finished"
+    /// without being told what it produced has learned nothing it can act on —
+    /// and `TaskRecord` drops these columns, so this is easy to get wrong.
+    #[tokio::test]
+    async fn an_announcement_carries_the_result_not_just_the_verdict() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("worker", "mum", TaskStatus::Running))
+            .await
+            .unwrap();
+        s.update_status(
+            "worker",
+            TaskStatus::Completed,
+            Some("the answer is 42".into()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let claimed = s.claim_undelivered_children("mum").await.unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(
+            claimed[0].output.as_deref(),
+            Some("the answer is 42"),
+            "the child's output must survive into the announcement"
+        );
+    }
+
+    /// A failure must arrive with its reason attached, or the parent can only
+    /// report that something went wrong.
+    #[tokio::test]
+    async fn a_failed_child_announces_why() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("worker", "mum", TaskStatus::Running))
+            .await
+            .unwrap();
+        s.update_status(
+            "worker",
+            TaskStatus::Failed,
+            None,
+            Some("provider refused the request".into()),
+        )
+        .await
+        .unwrap();
+
+        let claimed = s.claim_undelivered_children("mum").await.unwrap();
+        assert_eq!(claimed[0].outcome, AnnouncedOutcome::Failed);
+        assert_eq!(
+            claimed[0].detail.as_deref(),
+            Some("provider refused the request")
+        );
+    }
+
+    /// Failure, timeout, cancellation and loss are all news the parent needs.
+    /// Announcing only success would leave a parent waiting forever on a child
+    /// that died — silence is the one outcome that must never be reported.
+    #[tokio::test]
+    async fn every_terminal_outcome_is_announced_not_just_success() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        for (id, status) in [
+            ("done", TaskStatus::Completed),
+            ("broke", TaskStatus::Failed),
+            ("stopped", TaskStatus::Cancelled),
+            ("vanished", TaskStatus::Lost),
+            ("slow", TaskStatus::TimedOut),
+        ] {
+            s.create(child_of(id, "mum", status)).await.unwrap();
+        }
+
+        let claimed = s.claim_undelivered_children("mum").await.unwrap();
+        let mut ids: Vec<&str> = claimed.iter().map(|r| r.task_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["broke", "done", "slow", "stopped", "vanished"]);
+
+        let mut outcomes: Vec<&str> =
+            claimed.iter().map(|r| r.outcome.as_str()).collect();
+        outcomes.sort_unstable();
+        assert_eq!(
+            outcomes,
+            vec!["cancelled", "completed", "failed", "lost", "timed_out"],
+            "each status must map to its own outcome, not collapse"
+        );
+    }
+
+    /// A child still working is not news yet.
+    #[tokio::test]
+    async fn a_running_child_is_not_announced() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("busy", "mum", TaskStatus::Running))
+            .await
+            .unwrap();
+        s.create(child_of("resting", "mum", TaskStatus::Paused))
+            .await
+            .unwrap();
+
+        assert!(s.claim_undelivered_children("mum").await.unwrap().is_empty());
+    }
+
+    /// One parent's results must never surface in another parent's turn.
+    #[tokio::test]
+    async fn claims_are_scoped_to_one_parent() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("mine", "mum", TaskStatus::Completed))
+            .await
+            .unwrap();
+        s.create(child_of("theirs", "dad", TaskStatus::Completed))
+            .await
+            .unwrap();
+
+        let mine = s.claim_undelivered_children("mum").await.unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].task_id, "mine");
+
+        let theirs = s.claim_undelivered_children("dad").await.unwrap();
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].task_id, "theirs");
+    }
+
+    /// Several children finishing together arrive as one batch, so a parent
+    /// with ten workers wakes once rather than ten times.
+    #[tokio::test]
+    async fn simultaneous_completions_arrive_as_one_batch() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        for i in 0..10 {
+            s.create(child_of(&format!("kid{i}"), "mum", TaskStatus::Completed))
+                .await
+                .unwrap();
+        }
+        assert_eq!(s.claim_undelivered_children("mum").await.unwrap().len(), 10);
+        assert!(s.claim_undelivered_children("mum").await.unwrap().is_empty());
+    }
+
+    /// A parentless task belongs to nobody's conversation and must never be
+    /// swept into one.
+    #[tokio::test]
+    async fn a_task_without_a_parent_is_never_claimed() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        let mut orphan = rec("solo", "main", 1, "boot-1");
+        orphan.status = TaskStatus::Completed;
+        s.create(orphan).await.unwrap();
+
+        assert!(s.claim_undelivered_children("mum").await.unwrap().is_empty());
+        assert!(s.claim_undelivered_children("").await.unwrap().is_empty());
     }
 
     #[tokio::test]

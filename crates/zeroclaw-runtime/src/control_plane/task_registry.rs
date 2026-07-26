@@ -130,6 +130,48 @@ pub trait TaskRegistry: Send + Sync {
     /// authoritative for it. Returns `false` (no write) when another live daemon
     /// owns it. See [`crate::control_plane::authority::is_authoritative`].
     async fn reconcile_lost(&self, id: &str, now_boot_id: &str) -> anyhow::Result<bool>;
+
+    /// Claim finished-but-unannounced children of `parent_id`, marking them
+    /// delivered in the same statement that returns them.
+    ///
+    /// The claim and the flag move together on purpose. A background task's
+    /// result is announced back into its parent's conversation, and announcing
+    /// the same completion twice would have the parent act on it twice — which
+    /// for a tool call means doing it twice. Reading first and flagging after
+    /// leaves a window where a second waker sees the same row.
+    ///
+    /// Every terminal status is claimable, not just success: a child that
+    /// failed, timed out, was cancelled or was lost to a restart is news the
+    /// parent needs. Silence is the one outcome that must never be reported.
+    /// Claim finished-but-unannounced children of `parent_id` as
+    /// announcements, ready for the parent's next turn.
+    ///
+    /// Returns announcements rather than [`TaskRecord`]s because the record
+    /// type does not carry a task's output or error — those live in the store
+    /// and are dropped on the way into a `TaskRecord`. Announcing without them
+    /// would tell a parent that something finished while withholding what it
+    /// produced, which is the one thing the parent actually needs.
+    async fn claim_undelivered_children(
+        &self,
+        parent_id: &str,
+    ) -> anyhow::Result<Vec<zeroclaw_api::announce::Announcement>>;
+}
+
+/// Map a terminal task status onto the announced outcome. `None` for a task
+/// still in flight — an unfinished task is not news.
+#[must_use]
+pub fn announced_outcome(
+    status: TaskStatus,
+) -> Option<zeroclaw_api::announce::AnnouncedOutcome> {
+    use zeroclaw_api::announce::AnnouncedOutcome;
+    Some(match status {
+        TaskStatus::Completed => AnnouncedOutcome::Completed,
+        TaskStatus::Failed => AnnouncedOutcome::Failed,
+        TaskStatus::Cancelled => AnnouncedOutcome::Cancelled,
+        TaskStatus::TimedOut => AnnouncedOutcome::TimedOut,
+        TaskStatus::Lost => AnnouncedOutcome::Lost,
+        TaskStatus::Running | TaskStatus::Paused => return None,
+    })
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! ZeroClaw API layer — trait definitions and shared types.
 
 pub mod agent;
+pub mod announce;
 pub mod attribution;
 pub mod channel;
 pub mod elicitation;
