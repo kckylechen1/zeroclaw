@@ -468,6 +468,15 @@ pub struct Config {
     #[nested]
     pub runtime_profiles: HashMap<String, RuntimeProfileConfig>,
 
+    /// Named persona dial sets (`[personas.<alias>]`) — how an agent talks.
+    ///
+    /// Authored, never learned, and unable to widen what an agent may do:
+    /// these are delivery settings, in the same family as `reasoning_effort`.
+    /// Authority lives on `[risk_profiles.<alias>]`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[nested]
+    pub personas: HashMap<String, crate::persona::PersonaKnobs>,
+
     /// Named skill bundles (`[skill_bundles.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -3558,6 +3567,11 @@ pub struct AliasedAgentConfig {
     #[tab(General)]
     #[serde(default)]
     pub risk_profile: crate::providers::RiskProfileRef,
+    /// Which `[personas.<alias>]` dial set shapes this agent's voice. Absent
+    /// leaves every dial at `medium`, which renders no persona text at all.
+    #[tab(General)]
+    #[serde(default)]
+    pub persona: crate::providers::PersonaRef,
     /// Runtime profile alias (e.g. `"default"`). Resolves agentic/iteration settings.
     #[tab(General)]
     #[serde(default)]
@@ -3737,6 +3751,7 @@ impl Default for AliasedAgentConfig {
             channels: Vec::new(),
             model_provider: crate::providers::ModelProviderRef::default(),
             risk_profile: crate::providers::RiskProfileRef::default(),
+            persona: crate::providers::PersonaRef::default(),
             runtime_profile: crate::providers::RuntimeProfileRef::default(),
             skill_bundles: Vec::new(),
             knowledge_bundles: Vec::new(),
@@ -17509,6 +17524,7 @@ impl Default for Config {
             agents: HashMap::new(),
             risk_profiles: HashMap::new(),
             runtime_profiles: HashMap::new(),
+            personas: HashMap::new(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),
@@ -24901,6 +24917,7 @@ auto_save = true
             delegate: DelegateToolConfig::default(),
             agents: HashMap::new(),
             runtime_profiles: HashMap::new(),
+            personas: HashMap::new(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),
@@ -25773,6 +25790,7 @@ default_temperature = 0.7
             agents: HashMap::new(),
             risk_profiles: HashMap::new(),
             runtime_profiles: HashMap::new(),
+            personas: HashMap::new(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),

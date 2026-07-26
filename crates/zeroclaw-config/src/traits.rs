@@ -31,6 +31,7 @@ pub enum AliasSource {
     Channels,
     RiskProfiles,
     RuntimeProfiles,
+    Personas,
     Agents,
     SkillBundles,
     KnowledgeBundles,
@@ -47,6 +48,7 @@ impl AliasSource {
             Self::Channels => "channels",
             Self::RiskProfiles => "risk_profiles",
             Self::RuntimeProfiles => "runtime_profiles",
+            Self::Personas => "personas",
             Self::Agents => "agents",
             Self::SkillBundles => "skill_bundles",
             Self::KnowledgeBundles => "knowledge_bundles",
@@ -152,6 +154,10 @@ impl HasPropKind for crate::providers::ChannelRef {
 impl HasPropKind for crate::providers::RiskProfileRef {
     const PROP_KIND: PropKind = PropKind::AliasRef;
     const ALIAS_SOURCE: Option<AliasSource> = Some(AliasSource::RiskProfiles);
+}
+impl HasPropKind for crate::providers::PersonaRef {
+    const PROP_KIND: PropKind = PropKind::AliasRef;
+    const ALIAS_SOURCE: Option<AliasSource> = Some(AliasSource::Personas);
 }
 impl HasPropKind for crate::providers::RuntimeProfileRef {
     const PROP_KIND: PropKind = PropKind::AliasRef;
