@@ -72,15 +72,26 @@ to escape the tool list, so it stays forbidden.
 ## The line this does not defend
 
 Everything above is client-side. It stops the agent from *calling* a trading
-write tool; it does not stop that tool from existing. The first line of defence
-is server-side and is not in this repository:
+write tool; it does not stop that tool from existing.
 
-```
-hapi-edge --profile quant_qa_read_only
-```
+**A server-side read-only profile does not exist yet.** An earlier draft of this
+file named `hapi-edge --profile quant_qa_read_only` as the first line of defence.
+That profile is a frozen DRAFT spec in the Hyperion repo
+(`docs/InProgress/runtime/TOOL_AUTHORITY_CATALOG_FROZEN_SPEC_DRAFT.md`) with no
+implementation — a survey of `internal/`, `cmd/` and `deploy/` found zero
+references to it, and `docs/Spec/tool_authority_catalog.yaml` does not exist.
 
-A profile that never exposes `portfolio_buy` / `portfolio_sell` cannot be
-bypassed by any config mistake here. Treat this file as the second line.
+What hapi-edge ships today is `HAPI_TOOL_PROFILE` with `standard` / `facade` /
+`full|admin` (`internal/mcpserver/tools.go:25-66`). These switch which tools are
+*registered*, not what they may do. Each tool carries a `ReadOnly` field, but it
+is only emitted as an MCP `ReadOnlyHint` annotation for the client — it is not
+enforced as an access gate anywhere in the server.
+
+So until that catalog ships, **the layers in this file are the only enforcement
+that exists**, and `facade` profile plus this allow-list is the narrowest
+reachable configuration. That is a thinner defence than "server-side first,
+client-side second" implies. Treat closing the catalog as a prerequisite for
+letting an unattended agent anywhere near execution-tier tools.
 
 ## Enforced by
 
