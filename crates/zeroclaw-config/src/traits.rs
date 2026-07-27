@@ -32,6 +32,7 @@ pub enum AliasSource {
     RiskProfiles,
     RuntimeProfiles,
     Personas,
+    Cards,
     Agents,
     SkillBundles,
     KnowledgeBundles,
@@ -49,6 +50,7 @@ impl AliasSource {
             Self::RiskProfiles => "risk_profiles",
             Self::RuntimeProfiles => "runtime_profiles",
             Self::Personas => "personas",
+            Self::Cards => "cards",
             Self::Agents => "agents",
             Self::SkillBundles => "skill_bundles",
             Self::KnowledgeBundles => "knowledge_bundles",
@@ -158,6 +160,13 @@ impl HasPropKind for crate::providers::RiskProfileRef {
 impl HasPropKind for crate::providers::PersonaRef {
     const PROP_KIND: PropKind = PropKind::AliasRef;
     const ALIAS_SOURCE: Option<AliasSource> = Some(AliasSource::Personas);
+}
+impl HasPropKind for crate::providers::CardRef {
+    const PROP_KIND: PropKind = PropKind::AliasRef;
+    const ALIAS_SOURCE: Option<AliasSource> = Some(AliasSource::Cards);
+}
+impl HasPropKind for Vec<crate::card::ToolGrant> {
+    const PROP_KIND: PropKind = PropKind::ObjectArray;
 }
 impl HasPropKind for crate::providers::RuntimeProfileRef {
     const PROP_KIND: PropKind = PropKind::AliasRef;

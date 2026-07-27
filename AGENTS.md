@@ -60,6 +60,39 @@ The architecture map routes task-specific documentation. Consult `docs/book/src/
 
 ---
 
+## Where New Types Go
+
+Measured, not stylistic: `crates/zeroclaw-config/src/schema.rs` is ~37k lines
+holding 252 config structs and ~390 derive macros. One debug rlib of that crate
+is **254 MB**, and it sits on `agent-runtime`'s mandatory path — so every
+consumer pays for every subsystem's config whether or not the feature is on.
+Upstream's own manifest states the cause: "All channel schema types compile
+unconditionally."
+
+The release binary is fine — 21 MB, because LTO discards what is never
+instantiated. The cost lands on build time and disk, and it compounds: turning
+off 30 of 36 channels changes the dependency graph by 3.5%.
+
+So the rule for anything new:
+
+1. **Shared wire/domain types go in `zeroclaw-api`.** It is already the types
+   crate — 7.9k lines, deps limited to serde, tokio and small utilities. A type
+   two crates both name belongs here, not in whichever crate happened to define
+   it first.
+2. **Logic stays where it runs.** `zeroclaw-api` holds the shape; the crate
+   that owns the behaviour holds the behaviour. A consumer that only needs to
+   *read* a result must not have to link the runtime that produces it.
+3. **New config sections get their own module** under `zeroclaw-config/src/`,
+   not another block in `schema.rs`. See `persona.rs` and `card.rs`.
+4. **Do not restructure `schema.rs` to fix this.** It grows ~6k lines a month
+   upstream; a fork that reorganises it re-fights that churn every rebase, and
+   measurement says the ceiling on the win is small — removing an entire derive
+   (`JsonSchema`) cuts the rlib by 16%.
+
+The rule is "new things follow the new shape", not "go fix the old shape".
+New files rebase for free; edits inside upstream's hot files are charged at the
+rate upstream churns them.
+
 ## Hyperion Integration Context
 
 This repo is the primary agent harness for the **Hyperion** quantitative trading

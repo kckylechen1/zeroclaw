@@ -468,6 +468,14 @@ pub struct Config {
     #[nested]
     pub runtime_profiles: HashMap<String, RuntimeProfileConfig>,
 
+    /// Named agent cards (`[cards.<alias>]`) — one authored unit carrying an
+    /// agent's voice, its tool grants, and the profile supplying the rest of
+    /// its authority. A card owns tools; its risk profile owns everything
+    /// else.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[nested]
+    pub cards: HashMap<String, crate::card::AgentCard>,
+
     /// Named persona dial sets (`[personas.<alias>]`) — how an agent talks.
     ///
     /// Authored, never learned, and unable to widen what an agent may do:
@@ -3572,6 +3580,13 @@ pub struct AliasedAgentConfig {
     #[tab(General)]
     #[serde(default)]
     pub persona: crate::providers::PersonaRef,
+    /// Which `[cards.<alias>]` defines this agent. A card supersedes the
+    /// separate `persona` and `risk_profile` pointers: setting both a card and
+    /// either of those is refused at validation rather than resolved by a
+    /// precedence rule nobody would remember.
+    #[tab(General)]
+    #[serde(default)]
+    pub card: crate::providers::CardRef,
     /// Runtime profile alias (e.g. `"default"`). Resolves agentic/iteration settings.
     #[tab(General)]
     #[serde(default)]
@@ -3752,6 +3767,7 @@ impl Default for AliasedAgentConfig {
             model_provider: crate::providers::ModelProviderRef::default(),
             risk_profile: crate::providers::RiskProfileRef::default(),
             persona: crate::providers::PersonaRef::default(),
+            card: crate::providers::CardRef::default(),
             runtime_profile: crate::providers::RuntimeProfileRef::default(),
             skill_bundles: Vec::new(),
             knowledge_bundles: Vec::new(),
@@ -17525,6 +17541,7 @@ impl Default for Config {
             risk_profiles: HashMap::new(),
             runtime_profiles: HashMap::new(),
             personas: HashMap::new(),
+            cards: HashMap::new(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),
@@ -19441,6 +19458,44 @@ impl Config {
                 );
             }
         }
+        // Cards: a card carries an agent's voice and its tool grants as one
+        // authored unit. Letting it sit alongside the pointers it supersedes
+        // would mean an agent's real authority depends on a precedence rule,
+        // and the failure mode of a forgotten precedence rule is an agent
+        // reaching further than its author believed. Refuse the ambiguity.
+        for (alias, agent) in &self.agents {
+            let card = agent.card.as_str().trim();
+            if card.is_empty() {
+                continue;
+            }
+            let Some(definition) = self.cards.get(card) else {
+                validation_bail!(
+                    DanglingReference,
+                    format!("agents.{alias}.card"),
+                    "agents.{alias}.card = {card:?} but no [cards.{card}] entry is configured"
+                );
+            };
+            if let Err(reason) = definition.validate() {
+                validation_bail!(
+                    InvalidFormat,
+                    format!("cards.{card}.grants"),
+                    "cards.{card}: {reason}"
+                );
+            }
+            for (field, value) in [
+                ("persona", agent.persona.as_str()),
+                ("risk_profile", agent.risk_profile.as_str()),
+            ] {
+                if !value.trim().is_empty() {
+                    validation_bail!(
+                        InvalidFormat,
+                        format!("agents.{alias}.{field}"),
+                        "agents.{alias} sets both card = {card:?} and {field} = {value:?}; \
+                         a card already carries both, so set the card alone or drop it"
+                    );
+                }
+            }
+        }
         // Heartbeat agent: when heartbeat is enabled, the agent field
         // must name a configured agent.
         if self.heartbeat.enabled {
@@ -20589,12 +20644,24 @@ impl Config {
             // global fallback, so an enabled agent with no profile can't
             // gate its actions. Run this check last so the more specific
             // dangling/format errors above surface first.
+            //
+            // A carded agent satisfies this through its card, which carries a
+            // profile of its own. The invariant is unchanged — every enabled
+            // agent still has exactly one profile — only where it is written
+            // moves.
             if agent.enabled && agent.risk_profile.trim().is_empty() {
-                validation_bail!(
-                    RequiredFieldEmpty,
-                    format!("agents.{alias}.risk_profile"),
-                    "agents.{alias}.risk_profile must reference a configured [risk_profiles.<alias>] entry",
-                );
+                let carded_profile = self
+                    .cards
+                    .get(agent.card.as_str().trim())
+                    .map(|card| card.risk_profile.as_str().trim())
+                    .filter(|profile| !profile.is_empty());
+                if carded_profile.is_none() {
+                    validation_bail!(
+                        RequiredFieldEmpty,
+                        format!("agents.{alias}.risk_profile"),
+                        "agents.{alias}.risk_profile must reference a configured [risk_profiles.<alias>] entry",
+                    );
+                }
             }
 
             // delegates: explicit roster entries must point at OTHER
@@ -24918,6 +24985,7 @@ auto_save = true
             agents: HashMap::new(),
             runtime_profiles: HashMap::new(),
             personas: HashMap::new(),
+            cards: HashMap::new(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),
@@ -25791,6 +25859,7 @@ default_temperature = 0.7
             risk_profiles: HashMap::new(),
             runtime_profiles: HashMap::new(),
             personas: HashMap::new(),
+            cards: HashMap::new(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),
@@ -35382,6 +35451,152 @@ allowed_users = []
                 && msg.contains("providers.models.custom.does-not-exist is not configured"),
             "expected DanglingReference for agent summary_provider, got: {msg}"
         );
+    }
+
+    // ── Cards ────────────────────────────────────────────────────────
+
+    fn card_config(agent_body: &str, extra: &str) -> String {
+        format!(
+            r#"
+            [providers.models.custom.default]
+            api_key = "k"
+            model = "qwen3.6-plus"
+            uri = "https://example.com/v1"
+            wire_api = "chat_completions"
+
+            [risk_profiles.default]
+            level = "supervised"
+
+            [personas.terse]
+            directness = "xhigh"
+
+            [cards.analyst]
+            persona = "terse"
+            risk_profile = "default"
+
+            [cards.analyst.grants]
+            tools = [{{ tool = "memory_recall", class = "local_read" }}]
+
+            {extra}
+
+            [agents.default]
+            enabled = true
+            model_provider = "custom.default"
+            {agent_body}
+        "#
+        )
+    }
+
+    #[tokio::test]
+    async fn config_validate_accepts_an_agent_defined_solely_by_a_card() {
+        let cfg: Config = toml::from_str(&card_config(r#"card = "analyst""#, "")).unwrap();
+        cfg.validate().expect("a card alone is a complete definition");
+    }
+
+    #[tokio::test]
+    async fn config_validate_rejects_a_card_pointing_nowhere() {
+        let cfg: Config = toml::from_str(&card_config(r#"card = "ghost""#, "")).unwrap();
+        let msg = format!("{:#}", cfg.validate().expect_err("dangling card must fail"));
+        assert!(
+            msg.contains("cards.ghost"),
+            "the error must name the missing card: {msg}"
+        );
+    }
+
+    /// The ambiguity this refuses: with both set, an agent's real authority
+    /// depends on a precedence rule, and a forgotten precedence rule means an
+    /// agent reaching further than its author believed.
+    #[tokio::test]
+    async fn config_validate_rejects_an_agent_setting_both_card_and_risk_profile() {
+        let cfg: Config = toml::from_str(&card_config(
+            r#"card = "analyst"
+            risk_profile = "default""#,
+            "",
+        ))
+        .unwrap();
+        let msg = format!(
+            "{:#}",
+            cfg.validate().expect_err("card plus risk_profile is ambiguous")
+        );
+        assert!(
+            msg.contains("risk_profile") && msg.contains("card"),
+            "the error must name both halves of the conflict: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_validate_rejects_an_agent_setting_both_card_and_persona() {
+        let cfg: Config = toml::from_str(&card_config(
+            r#"card = "analyst"
+            persona = "terse""#,
+            "",
+        ))
+        .unwrap();
+        let msg = format!(
+            "{:#}",
+            cfg.validate().expect_err("card plus persona is ambiguous")
+        );
+        assert!(msg.contains("persona"), "{msg}");
+    }
+
+    /// A malformed grant list must fail at load, not at the first dispatch.
+    #[tokio::test]
+    async fn config_validate_rejects_a_card_granting_one_tool_twice() {
+        let toml = card_config(
+            r#"card = "dupe""#,
+            r#"
+            [cards.dupe]
+            risk_profile = "default"
+
+            [cards.dupe.grants]
+            tools = [
+              { tool = "shell", class = "local_act" },
+              { tool = "shell", class = "local_read" },
+            ]
+            "#,
+        );
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        let msg = format!(
+            "{:#}",
+            cfg.validate().expect_err("a duplicate grant must fail")
+        );
+        assert!(msg.contains("twice"), "{msg}");
+    }
+
+    /// The invariant a card must not be able to dodge: every enabled agent
+    /// has exactly one risk profile. A card may supply it, but a card without
+    /// one has to fail exactly as a bare agent without one does — otherwise
+    /// "define it with a card" becomes a way to run ungated.
+    #[tokio::test]
+    async fn a_card_without_a_risk_profile_cannot_gate_an_agent() {
+        let toml = card_config(
+            r#"card = "ungated""#,
+            r#"
+            [cards.ungated]
+            persona = "terse"
+
+            [cards.ungated.grants]
+            tools = [{ tool = "shell", class = "local_act" }]
+            "#,
+        );
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        let msg = format!(
+            "{:#}",
+            cfg.validate()
+                .expect_err("a card carrying no profile must not gate an agent")
+        );
+        assert!(
+            msg.contains("risk_profile"),
+            "the error must point at the missing profile: {msg}"
+        );
+    }
+
+    /// Agents that never opted into cards must be untouched by any of this.
+    #[tokio::test]
+    async fn config_validate_leaves_uncarded_agents_alone() {
+        let cfg: Config = toml::from_str(&card_config(r#"risk_profile = "default""#, "")).unwrap();
+        cfg.validate()
+            .expect("an agent without a card keeps working exactly as before");
     }
 
     // profile-level summary_provider validated by the new profile loop.

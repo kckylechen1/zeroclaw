@@ -138,6 +138,7 @@ define_provider_ref!(ChannelRef, "channels");
 define_provider_ref!(RiskProfileRef, "risk_profiles");
 define_provider_ref!(RuntimeProfileRef, "runtime_profiles");
 define_provider_ref!(PersonaRef, "personas");
+define_provider_ref!(CardRef, "cards");
 
 pub const MAX_FALLBACK_DEPTH: usize = 3;
 
