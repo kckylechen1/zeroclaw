@@ -1724,11 +1724,24 @@ pub fn skills_to_tools(
     skills_to_tools_with_context(skills, security, &[])
 }
 
+/// Build the wrapper for a skill-declared `builtin` / `mcp` elevation, or
+/// `None` when it must not exist.
+///
+/// The elevation registry is deliberately unfiltered — a skill has to be able
+/// to *name* a tool the agent cannot call directly, or elevation would have no
+/// purpose. What it must not do is *reach* one the profile never granted.
+///
+/// The check has to happen here rather than at registration, because a wrapper
+/// is named after its skill: `is_tool_allowed("research__fetch")` asks about a
+/// name no allow-list will ever contain, and answers "denied" for a legitimate
+/// wrapper while saying nothing about what it delegates to. Authority belongs
+/// to the target.
 fn resolve_elevated_tool(
     skill_name: &str,
     tool: &SkillTool,
     kind_label: &str,
     resolution_registry: &[std::sync::Arc<dyn zeroclaw_api::tool::Tool>],
+    security: &crate::security::SecurityPolicy,
 ) -> Option<Box<dyn zeroclaw_api::tool::Tool>> {
     let Some(target_name) = tool.target.as_deref() else {
         ::zeroclaw_log::record!(
@@ -1742,6 +1755,31 @@ fn resolve_elevated_tool(
         );
         return None;
     };
+    // Only the allow-list gates elevation, never `excluded_tools`. The two mean
+    // different things and conflating them breaks the feature: `excluded_tools`
+    // says "do not hand the model this tool directly", and a scoped wrapper with
+    // locked arguments is precisely the sanctioned way to reach it anyway. An
+    // allow-list is the agent's authority boundary, and elevation must not cross
+    // it — a skill may narrow what the agent can already do, never widen it.
+    let outside_allow_list = security
+        .allowed_tools
+        .as_ref()
+        .is_some_and(|list| !list.iter().any(|t| t == target_name));
+    if outside_allow_list {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "skill": skill_name,
+                    "skill_tool": tool.name,
+                    "delegates_to": target_name,
+                    "kind": kind_label,
+                })),
+            "Skill elevation refused: it delegates to a tool this profile does not allow"
+        );
+        return None;
+    }
     match resolution_registry.iter().find(|t| t.name() == target_name) {
         Some(target) => Some(Box::new(crate::skills::skill_tool::SkillBuiltinTool::new(
             skill_name,
@@ -1821,14 +1859,14 @@ pub fn skills_to_tools_with_context_and_runtime(
                 }
                 "builtin" => {
                     if let Some(t) =
-                        resolve_elevated_tool(&skill.name, tool, "builtin", unfiltered_registry)
+                        resolve_elevated_tool(&skill.name, tool, "builtin", unfiltered_registry, &security)
                     {
                         tools.push(t);
                     }
                 }
                 "mcp" => {
                     if let Some(t) =
-                        resolve_elevated_tool(&skill.name, tool, "MCP", unfiltered_registry)
+                        resolve_elevated_tool(&skill.name, tool, "MCP", unfiltered_registry, &security)
                     {
                         tools.push(t);
                     }
@@ -4135,6 +4173,169 @@ mod prompt_callable_name_tests {
         )));
         // unknown kinds are never callable.
         assert!(!skill_tool_is_prompt_callable(&tool("x", "weird")));
+    }
+
+    fn elevating_skill(target: &str) -> Skill {
+        let mut elevated = tool("reach", "mcp");
+        elevated.target = Some(target.to_string());
+        Skill {
+            name: "ops".to_string(),
+            description: "d".to_string(),
+            description_localizations: Default::default(),
+            version: "1.0.0".to_string(),
+            author: None,
+            tags: Vec::new(),
+            tools: vec![elevated],
+            prompts: Vec::new(),
+            slash_options: Vec::new(),
+            location: None,
+        }
+    }
+
+    fn policy_allowing(tools: &[&str]) -> std::sync::Arc<crate::security::SecurityPolicy> {
+        std::sync::Arc::new(crate::security::SecurityPolicy {
+            allowed_tools: Some(tools.iter().map(|t| (*t).to_string()).collect()),
+            ..crate::security::SecurityPolicy::default()
+        })
+    }
+
+    /// A stand-in for a connected MCP server tool, so the resolution registry
+    /// actually contains the target. Without this the elevation fails at the
+    /// registry lookup and the policy gate is never reached — a test using an
+    /// empty registry passes whether or not the gate exists.
+    struct FakeMcpTool(&'static str);
+
+    #[async_trait::async_trait]
+    impl zeroclaw_api::tool::Tool for FakeMcpTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "fake mcp tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> anyhow::Result<zeroclaw_api::tool::ToolResult> {
+            unreachable!("registration-time test never executes the target")
+        }
+    }
+
+    impl zeroclaw_api::attribution::Attributable for FakeMcpTool {
+        fn role(&self) -> zeroclaw_api::attribution::Role {
+            zeroclaw_api::attribution::Role::Tool(zeroclaw_api::attribution::ToolKind::Plugin)
+        }
+        fn alias(&self) -> &str {
+            self.0
+        }
+    }
+
+    fn registry_with(
+        name: &'static str,
+    ) -> Vec<std::sync::Arc<dyn zeroclaw_api::tool::Tool>> {
+        vec![std::sync::Arc::new(FakeMcpTool(name))]
+    }
+
+    /// The hole a cold review found: a wrapper is named after its skill, so
+    /// filtering on the wrapper's own name asks about a string no allow-list
+    /// contains. An `mcp` elevation therefore reached a server tool the profile
+    /// never granted, under a name the profile could not deny.
+    #[test]
+    fn elevation_cannot_reach_a_tool_the_profile_never_granted() {
+        let skill = elevating_skill("images__generate");
+        let registered: Vec<String> = crate::skills::skills_to_tools_with_context(
+            std::slice::from_ref(&skill),
+            policy_allowing(&["memory_recall"]),
+            &registry_with("images__generate"),
+        )
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+
+        assert!(
+            registered.is_empty(),
+            "the target is present and resolvable, so only the authority gate can \
+             stop this; a skill must not reach an ungranted MCP tool by wrapping \
+             it: {registered:?}"
+        );
+    }
+
+    /// The other half, and the reason the test above is not vacuous: refusing
+    /// every elevation would also "fix" the hole while destroying the feature.
+    /// Same skill, same registry, only the grant differs.
+    #[test]
+    fn elevation_still_works_when_the_target_is_granted() {
+        let skill = elevating_skill("images__generate");
+        let registered: Vec<String> = crate::skills::skills_to_tools_with_context(
+            std::slice::from_ref(&skill),
+            policy_allowing(&["images__generate"]),
+            &registry_with("images__generate"),
+        )
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+
+        assert_eq!(
+            registered.len(),
+            1,
+            "a granted target must still elevate: {registered:?}"
+        );
+    }
+
+    /// `excluded_tools` must NOT gate elevation, and the distinction is easy to
+    /// lose: `SecurityPolicy::is_tool_allowed` folds both lists together, so
+    /// reaching for it here would silently break the sanctioned use of skills.
+    ///
+    /// "Do not hand the model raw `shell`" and "this agent may never touch
+    /// `shell`" are different statements. A scoped wrapper with locked arguments
+    /// is the answer to the first; only the second is an authority boundary.
+    #[test]
+    fn excluded_tools_does_not_gate_elevation_only_the_allow_list_does() {
+        let mut elevated = tool("reach", "builtin");
+        elevated.target = Some("shell".to_string());
+        let skill = Skill {
+            name: "ops".to_string(),
+            description: "d".to_string(),
+            description_localizations: Default::default(),
+            version: "1.0.0".to_string(),
+            author: None,
+            tags: Vec::new(),
+            tools: vec![elevated],
+            prompts: Vec::new(),
+            slash_options: Vec::new(),
+            location: None,
+        };
+
+        let excluded_only = std::sync::Arc::new(crate::security::SecurityPolicy {
+            excluded_tools: Some(vec!["shell".to_string()]),
+            ..crate::security::SecurityPolicy::default()
+        });
+        let registered = crate::skills::skills_to_tools_with_context(
+            std::slice::from_ref(&skill),
+            excluded_only,
+            &registry_with("shell"),
+        );
+        assert_eq!(
+            registered.len(),
+            1,
+            "excluding the raw tool is exactly when a scoped wrapper is wanted; \
+             gating elevation on it would delete the feature"
+        );
+    }
+
+    /// An unrestricted profile keeps today's behaviour: `allowed_tools = None`
+    /// means no allow-list, so elevation is not gated by one.
+    #[test]
+    fn an_unrestricted_profile_does_not_gate_elevation() {
+        let policy = crate::security::SecurityPolicy::default();
+        assert!(
+            policy.allowed_tools.is_none(),
+            "default policy must stay unrestricted, or this test proves nothing"
+        );
+        assert!(policy.is_tool_allowed("images__generate"));
     }
 
     #[test]

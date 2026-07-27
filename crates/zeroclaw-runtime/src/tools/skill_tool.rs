@@ -322,6 +322,18 @@ impl SkillBuiltinTool {
             advertised_schema,
         }
     }
+
+    /// The tool this wrapper actually invokes.
+    ///
+    /// Registration has to know this. A wrapper is named after its skill, so
+    /// filtering on the wrapper's own name asks the wrong question: the
+    /// authority that matters belongs to what it delegates to, not to what it
+    /// is called. Without this, a skill declaring `kind = "mcp"` around an
+    /// unlisted server tool reaches it under a name no allow-list mentions.
+    #[must_use]
+    pub fn target_tool_name(&self) -> &str {
+        self.target_tool.name()
+    }
 }
 
 /// Merge caller args with manifest `locked` args. Locked args ALWAYS win — the
