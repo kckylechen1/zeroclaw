@@ -20650,12 +20650,24 @@ impl Config {
             // agent still has exactly one profile — only where it is written
             // moves.
             if agent.enabled && agent.risk_profile.trim().is_empty() {
+                let card = agent.card.as_str().trim();
                 let carded_profile = self
                     .cards
-                    .get(agent.card.as_str().trim())
+                    .get(card)
                     .map(|card| card.risk_profile.as_str().trim())
                     .filter(|profile| !profile.is_empty());
-                if carded_profile.is_none() {
+                if let Some(carded_profile) = carded_profile {
+                    // A card profile is still only a reference; accepting a
+                    // dangling alias makes the agent look gated while no
+                    // policy exists to enforce at runtime.
+                    if !self.risk_profiles.contains_key(carded_profile) {
+                        validation_bail!(
+                            DanglingReference,
+                            format!("cards.{card}.risk_profile"),
+                            "cards.{card}.risk_profile = {carded_profile:?} but no [risk_profiles.{carded_profile}] entry is configured",
+                        );
+                    }
+                } else {
                     validation_bail!(
                         RequiredFieldEmpty,
                         format!("agents.{alias}.risk_profile"),
@@ -35491,6 +35503,52 @@ allowed_users = []
     async fn config_validate_accepts_an_agent_defined_solely_by_a_card() {
         let cfg: Config = toml::from_str(&card_config(r#"card = "analyst""#, "")).unwrap();
         cfg.validate().expect("a card alone is a complete definition");
+    }
+
+    #[tokio::test]
+    async fn config_validate_rejects_carded_agent_with_nonexistent_risk_profile() {
+        let toml = card_config(
+            r#"card = "orphan""#,
+            r#"
+            [cards.orphan]
+            persona = "terse"
+            risk_profile = "ghost"
+
+            [cards.orphan.grants]
+            tools = [{ tool = "memory_recall", class = "local_read" }]
+            "#,
+        );
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        let msg = format!(
+            "{:#}",
+            cfg.validate()
+                .expect_err("carded agent with dangling risk_profile must fail")
+        );
+        assert!(
+            msg.contains("orphan") && msg.contains("ghost"),
+            "the error must name the card and missing risk profile: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_validate_accepts_carded_agent_with_existing_risk_profile() {
+        let toml = card_config(
+            r#"card = "auditor""#,
+            r#"
+            [risk_profiles.auditor]
+            level = "supervised"
+
+            [cards.auditor]
+            persona = "terse"
+            risk_profile = "auditor"
+
+            [cards.auditor.grants]
+            tools = [{ tool = "memory_recall", class = "local_read" }]
+            "#,
+        );
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        cfg.validate()
+            .expect("carded agent with a configured risk profile must validate");
     }
 
     #[tokio::test]
