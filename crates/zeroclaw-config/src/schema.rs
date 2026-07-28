@@ -3907,6 +3907,14 @@ impl Config {
     /// by construction for every carded agent (see that doc comment). Any
     /// site comparing or gating on "this agent's risk profile" should call
     /// this, not `agent.risk_profile` directly.
+    ///
+    /// Narrower contract than `risk_profile_for_agent`, on purpose: this
+    /// returns the alias WITHOUT confirming a `[risk_profiles.<alias>]`
+    /// entry exists, so a dangling alias comes back `Some`. That matches
+    /// what the raw comparisons it replaced did (they never checked
+    /// existence either), and `risk_profile_for_agent` still fails closed
+    /// by doing the map lookup on top. A caller that needs "the profile
+    /// exists" must use that function, not this one.
     #[must_use]
     fn resolved_risk_profile_alias(&self, agent_alias: &str) -> Option<&str> {
         let agent = self.agents.get(agent_alias)?;
@@ -37348,6 +37356,13 @@ model_provider = \"ollama.default\"
     /// `reachable_delegate_target_configs` back to `caller.risk_profile.trim()`
     /// / `agent.risk_profile.trim()` turns this red; so does adding a new
     /// raw read anywhere else in the file's production code.
+    ///
+    /// Known limit (cold review of 3a3e2a92f): the matcher is line-local,
+    /// so a read split across lines (`agent.` newline `risk_profile`)
+    /// slips past it. This is a text scan standing in for a visibility
+    /// boundary, not a compiler — it catches the shape people actually
+    /// write, and issue #21's stronger options (rename the field, or make
+    /// it private) remain the real fix if evasion ever becomes a concern.
     ///
     /// One entry on the allowlist is not "legitimate" in the same sense as
     /// the rest: `AliasedAgentConfig::is_dispatchable` (schema.rs, near the

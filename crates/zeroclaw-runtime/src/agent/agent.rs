@@ -1659,6 +1659,15 @@ impl Agent {
                 // prompt-building pipeline; `None` when the agent has no persona
                 // configured (direct or via card) or every dial sits at medium,
                 // which renders the `## Voice` section as nothing.
+                //
+                // Known cost of once-at-construction (cold review of
+                // eb9b155e7): a live `config/set` edit to `agents.<alias>.persona`
+                // or `personas.<alias>.*` does not reach an already-built Agent —
+                // `rpc/dispatch.rs`'s live-session refresh fires only for
+                // model_provider props. The section stays as constructed until
+                // the session is rebuilt. Accepted: persona edits are rare and
+                // reconnect heals it; widening the refresh matcher is the fix if
+                // that ever stops being true.
                 config
                     .persona_for_agent(agent_alias)
                     .and_then(zeroclaw_config::persona::PersonaKnobs::to_prompt_section),
