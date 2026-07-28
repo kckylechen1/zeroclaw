@@ -1503,6 +1503,29 @@ impl DelegateTool {
                     owner_boot_id: cp.boot_id.clone(),
                     heartbeat_at: None,
                     depth: self.depth,
+                    // No parent-id producer exists: `self` here is always the
+                    // top-level DelegateTool for whatever turn is currently
+                    // running (background/parallel re-delegation never
+                    // reaches this call with `self.depth > 0` — the "delegate"
+                    // tool name is filtered out of every delegated target's
+                    // own sub-agent registry, both Bounded
+                    // (`execute_agentic_with_admission`'s
+                    // `tool.name() != Self::NAME` filter) and Independent
+                    // (`independent_agentic_tools_for_target`'s
+                    // `tools.retain(|tool| tool.name() != Self::NAME)`)).
+                    // Whether *that* top-level turn is itself a tracked
+                    // control-plane task (e.g. a SubAgent run) is unknown
+                    // here: nothing threads a "current turn's own task id"
+                    // into `DelegateTool` (`new`/`new_with_options` in this
+                    // file always construct with no such id, and their sole
+                    // caller, `all_tools_with_runtime` in
+                    // `crates/zeroclaw-runtime/src/tools/mod.rs`, has none to
+                    // give). `None` is correct for a genuinely top-level
+                    // delegate call and merely the best available answer for
+                    // a turn that is itself nested — see the dispatch report
+                    // for the plumbing (`AgentRunOverrides` field +
+                    // `all_tools_with_runtime` wiring) that would
+                    // disambiguate the two.
                     parent_id: None,
                     originator_route: None,
                     delivered: false,

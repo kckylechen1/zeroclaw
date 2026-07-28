@@ -207,6 +207,27 @@ impl Tool for SpawnSubagentTool {
                     owner_boot_id: cp.boot_id.clone(),
                     heartbeat_at: None,
                     depth: u32::from(self.is_subagent_caller),
+                    // Same gap as `delegate.rs`'s background-delegation
+                    // producer: `SpawnSubagentTool` is constructed once per
+                    // registry build (`all_tools_with_runtime` in
+                    // `crates/zeroclaw-runtime/src/tools/mod.rs`) with no
+                    // concept of "the control-plane task id of the turn
+                    // currently running me". `is_subagent_caller` already
+                    // rules out a subagent spawning a subagent (the depth-1
+                    // cap refuses before this point), so every `execute()`
+                    // that reaches here belongs to a non-subagent turn — but
+                    // that turn can itself be a tracked task (e.g. a
+                    // background/parallel delegate's own sub-turn, which
+                    // *does* carry this shared tool instance into a Bounded
+                    // target's registry — `execute_agentic_with_admission`
+                    // only filters the "delegate" tool name, not
+                    // "spawn_subagent"). Because the tool instance is shared
+                    // across calls, a struct field cannot disambiguate which
+                    // task is calling; only ambient per-call context (e.g. a
+                    // task-local threaded through the tool-call loop, the way
+                    // `TOOL_LOOP_SESSION_KEY` already is) could. `None` is
+                    // correct for a genuinely top-level spawn and the best
+                    // available answer otherwise — see the dispatch report.
                     parent_id: None,
                     originator_route: None,
                     delivered: false,
