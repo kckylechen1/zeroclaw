@@ -592,9 +592,8 @@ impl AcpServer {
             return None;
         }
         config
-            .agent(alias)
-            .filter(|agent| agent.is_dispatchable())
-            .map(|_| alias.to_string())
+            .agent_is_dispatchable(alias)
+            .then(|| alias.to_string())
     }
 
     /// Shared validation for explicit `agentAlias`, `?agent=`, config defaults,
@@ -611,7 +610,7 @@ impl AcpServer {
                 ),
                 data: None,
             }),
-            Some(agent) if !agent.is_dispatchable() => Err(RpcError {
+            Some(_) if !config.agent_is_dispatchable(agent_alias) => Err(RpcError {
                 code: INVALID_PARAMS,
                 message: format!("Agent `{agent_alias}` is not enabled for dispatch"),
                 data: None,

@@ -3790,20 +3790,6 @@ impl Default for AliasedAgentConfig {
     }
 }
 
-impl AliasedAgentConfig {
-    /// True when this agent has the bindings required to dispatch a turn:
-    /// enabled, non-empty `model_provider`, `risk_profile`, and
-    /// `runtime_profile`. `Config::validate()` emits the per-field errors
-    /// that, when all passed, mean this returns `true`.
-    #[must_use]
-    pub fn is_dispatchable(&self) -> bool {
-        self.enabled
-            && !self.model_provider.trim().is_empty()
-            && !self.risk_profile.trim().is_empty()
-            && !self.runtime_profile.trim().is_empty()
-    }
-}
-
 /// One `[channels.<type>.<alias>]` block, with the owning agent (if any)
 /// resolved via `agents.<agent>.channels`. Returned by
 /// `Config::channels_by_alias()`.
@@ -3931,6 +3917,32 @@ impl Config {
             return None;
         }
         Some(carded_profile)
+    }
+
+    /// True when `agent_alias` names a configured, enabled agent with the
+    /// bindings required to dispatch a turn: non-empty `model_provider`, a
+    /// risk profile that resolves via [`Self::resolved_risk_profile_alias`]
+    /// (so a carded agent's card-supplied profile counts, not just the raw
+    /// `agents.<alias>.risk_profile` field, which is empty by construction
+    /// for every carded agent), and non-empty `runtime_profile`.
+    ///
+    /// This lives on `Config`, not `AliasedAgentConfig`, because the
+    /// risk-profile leg needs `Config::cards` to follow a card — the same
+    /// reason `resolved_risk_profile_alias` itself is a `Config` method
+    /// (#21, sixth instance: `AliasedAgentConfig::is_dispatchable` used to
+    /// read the raw field directly and reported every valid carded agent as
+    /// undispatchable; that method has been removed, this replaces it, and
+    /// both call sites in
+    /// `zeroclaw-channels/src/orchestrator/acp_server.rs` now call this).
+    #[must_use]
+    pub fn agent_is_dispatchable(&self, agent_alias: &str) -> bool {
+        let Some(agent) = self.agents.get(agent_alias) else {
+            return false;
+        };
+        agent.enabled
+            && !agent.model_provider.trim().is_empty()
+            && self.resolved_risk_profile_alias(agent_alias).is_some()
+            && !agent.runtime_profile.trim().is_empty()
     }
 
     /// Resolve the persona dial set for an explicit agent alias.
@@ -19577,11 +19589,21 @@ impl Config {
                 );
             }
         }
-        // Cards: a card carries an agent's voice and its tool grants as one
-        // authored unit. Letting it sit alongside the pointers it supersedes
-        // would mean an agent's real authority depends on a precedence rule,
-        // and the failure mode of a forgotten precedence rule is an agent
-        // reaching further than its author believed. Refuse the ambiguity.
+        // Cards: a card carries an agent's voice, its tool grants, and its
+        // MCP reach as one authored unit. Letting it sit alongside the
+        // pointers/fields it supersedes would mean an agent's real
+        // authority depends on a precedence rule, and the failure mode of a
+        // forgotten precedence rule is an agent reaching further than its
+        // author believed. Refuse the ambiguity.
+        //
+        // `mcp_bundles` is checked here too: `Config::resolved_agent_config`
+        // has a carded agent's `cards[card].grants.mcp_bundles` REPLACE
+        // `agents.<alias>.mcp_bundles` outright (not union), so a raw
+        // `mcp_bundles` left on a carded agent is silently ignored — the
+        // same forgotten-precedence hazard this check exists to kill.
+        // Configs that set `mcp_bundles` on an agent as a pre-card
+        // workaround must drop it once the agent is carded: the card is now
+        // the sole authority for that agent's MCP reach.
         for (alias, agent) in &self.agents {
             let card = agent.card.as_str().trim();
             if card.is_empty() {
@@ -19613,6 +19635,18 @@ impl Config {
                          a card already carries both, so set the card alone or drop it"
                     );
                 }
+            }
+            // `mcp_bundles` is a `Vec<String>`, not a `&str` field, so it
+            // cannot join the loop above — same check, own arm.
+            if !agent.mcp_bundles.is_empty() {
+                validation_bail!(
+                    InvalidFormat,
+                    format!("agents.{alias}.mcp_bundles"),
+                    "agents.{alias} sets both card = {card:?} and mcp_bundles = {:?}; \
+                     the card already carries the agent's MCP reach, so set the card \
+                     alone or drop mcp_bundles",
+                    agent.mcp_bundles
+                );
             }
         }
         // Heartbeat agent: when heartbeat is enabled, the agent field
@@ -35716,6 +35750,55 @@ allowed_users = []
         assert!(msg.contains("persona"), "{msg}");
     }
 
+    /// `mcp_bundles` joins the card mutual-exclusion check (#21): a card's
+    /// `grants.mcp_bundles` REPLACES the raw field (`resolved_agent_config`),
+    /// so setting both leaves the raw field silently ignored — the same
+    /// forgotten-precedence hazard `persona`/`risk_profile` are already
+    /// guarded against above.
+    #[tokio::test]
+    async fn config_validate_rejects_an_agent_setting_both_card_and_mcp_bundles() {
+        let cfg: Config = toml::from_str(&card_config(
+            r#"card = "analyst"
+            mcp_bundles = ["b1"]"#,
+            "",
+        ))
+        .unwrap();
+        let msg = format!(
+            "{:#}",
+            cfg.validate()
+                .expect_err("card plus mcp_bundles is ambiguous")
+        );
+        assert!(
+            msg.contains("mcp_bundles") && msg.contains("card"),
+            "the error must name both halves of the conflict: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_validate_accepts_a_card_only_agent_with_no_raw_mcp_bundles() {
+        let cfg: Config = toml::from_str(&card_config(r#"card = "analyst""#, "")).unwrap();
+        cfg.validate()
+            .expect("a card-only agent with no raw mcp_bundles must validate");
+    }
+
+    #[tokio::test]
+    async fn config_validate_accepts_an_mcp_bundles_only_agent_without_a_card() {
+        // The bundle must actually exist: the pre-existing dangling-reference
+        // check on `agents.<alias>.mcp_bundles` fires otherwise, and this
+        // test is about the card-exclusion arm, not that one.
+        let toml = card_config(
+            r#"risk_profile = "default"
+            mcp_bundles = ["b1"]"#,
+            r#"
+            [mcp_bundles.b1]
+            servers = []
+            "#,
+        );
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        cfg.validate()
+            .expect("an uncarded agent's own mcp_bundles must validate on their own");
+    }
+
     /// A malformed grant list must fail at load, not at the first dispatch.
     #[tokio::test]
     async fn config_validate_rejects_a_card_granting_one_tool_twice() {
@@ -37317,24 +37400,113 @@ model_provider = \"ollama.default\"
 
     #[test]
     async fn whitespace_only_model_provider_is_not_dispatchable() {
-        // whitespace-only model_provider should not be dispatchable
-        let agent = AliasedAgentConfig {
-            enabled: true,
-            risk_profile: "default".into(),
-            runtime_profile: "default".into(),
+        let cfg = config_with_dispatchable_agent(AliasedAgentConfig {
             model_provider: "   ".into(),
-            ..Default::default()
-        };
-        assert!(!agent.is_dispatchable());
-        // non-empty model_provider should be dispatchable
-        let agent = AliasedAgentConfig {
+            ..fully_dispatchable_agent()
+        });
+        assert!(
+            !cfg.agent_is_dispatchable("a"),
+            "whitespace-only model_provider should not be dispatchable"
+        );
+
+        let cfg = config_with_dispatchable_agent(fully_dispatchable_agent());
+        assert!(
+            cfg.agent_is_dispatchable("a"),
+            "non-empty model_provider should be dispatchable"
+        );
+    }
+
+    /// An uncarded agent missing `risk_profile` still gates — unchanged by
+    /// #21's fix, which only changes how a *carded* agent's profile
+    /// resolves.
+    #[test]
+    async fn missing_risk_profile_is_not_dispatchable_when_uncarded() {
+        let cfg = config_with_dispatchable_agent(AliasedAgentConfig {
+            risk_profile: String::new().into(),
+            ..fully_dispatchable_agent()
+        });
+        assert!(!cfg.agent_is_dispatchable("a"));
+    }
+
+    #[test]
+    async fn missing_runtime_profile_is_not_dispatchable() {
+        let cfg = config_with_dispatchable_agent(AliasedAgentConfig {
+            runtime_profile: String::new().into(),
+            ..fully_dispatchable_agent()
+        });
+        assert!(!cfg.agent_is_dispatchable("a"));
+    }
+
+    #[test]
+    async fn disabled_agent_is_not_dispatchable() {
+        let cfg = config_with_dispatchable_agent(AliasedAgentConfig {
+            enabled: false,
+            ..fully_dispatchable_agent()
+        });
+        assert!(!cfg.agent_is_dispatchable("a"));
+    }
+
+    #[test]
+    async fn unknown_alias_is_not_dispatchable() {
+        let cfg = config_with_dispatchable_agent(fully_dispatchable_agent());
+        assert!(!cfg.agent_is_dispatchable("does-not-exist"));
+    }
+
+    /// #21, sixth instance — the discriminator. A valid, enabled carded
+    /// agent must pass `Config::agent_is_dispatchable`, even though its raw
+    /// `risk_profile` field is forced empty by construction (the card
+    /// carries the profile instead; see `carded()`). The deleted
+    /// `AliasedAgentConfig::is_dispatchable` read that raw field directly,
+    /// so it would have rejected this exact agent — reproduce that old
+    /// expression inline (the method no longer exists to call) to prove
+    /// the bug it fixed. Reverting `agent_is_dispatchable` to read
+    /// `agent.risk_profile` directly instead of
+    /// `resolved_risk_profile_alias` turns the first assertion red.
+    #[test]
+    async fn carded_agent_is_dispatchable_where_the_old_raw_check_was_not() {
+        let mut cfg = config_with_dispatchable_agent(fully_dispatchable_agent());
+        insert_card(&mut cfg, "a_card", "shared");
+        carded(&mut cfg, "a", "a_card");
+
+        assert!(cfg.agent_is_dispatchable("a"), "carded agent must dispatch");
+
+        let agent = cfg.agent("a").unwrap();
+        let old_raw_field_logic = agent.enabled
+            && !agent.model_provider.trim().is_empty()
+            && !agent.risk_profile.trim().is_empty()
+            && !agent.runtime_profile.trim().is_empty();
+        assert!(
+            !old_raw_field_logic,
+            "discriminator broken: the old raw-field check should reject this \
+             carded agent (raw risk_profile is empty by construction) — if it \
+             no longer does, this fixture stopped exercising the card path"
+        );
+    }
+
+    #[test]
+    async fn carded_agent_with_dangling_card_is_not_dispatchable() {
+        let mut cfg = config_with_dispatchable_agent(fully_dispatchable_agent());
+        carded(&mut cfg, "a", "no-such-card");
+        assert!(
+            !cfg.agent_is_dispatchable("a"),
+            "a card alias with no [cards.<alias>] entry must not resolve a risk profile"
+        );
+    }
+
+    fn fully_dispatchable_agent() -> AliasedAgentConfig {
+        AliasedAgentConfig {
             enabled: true,
             risk_profile: "default".into(),
             runtime_profile: "default".into(),
             model_provider: "gpt4".into(),
             ..Default::default()
-        };
-        assert!(agent.is_dispatchable());
+        }
+    }
+
+    fn config_with_dispatchable_agent(agent: AliasedAgentConfig) -> Config {
+        let mut cfg = Config::default();
+        cfg.agents.insert("a".to_string(), agent);
+        cfg
     }
 
     /// Structural guard against a *sixth* raw `.risk_profile` read showing up
@@ -37344,9 +37516,14 @@ model_provider = \"ollama.default\"
     /// agents). Fixed instances so far: `resolved_risk_profile_alias` /
     /// `risk_profile_for_agent` (the resolver itself), the `validate()`
     /// dangling-reference and card-exclusivity checks (which must inspect
-    /// the raw field — that is what they are validating), and
-    /// `reachable_delegate_target_configs` (fixed by this same patch, now
-    /// routed through `resolved_risk_profile_alias`).
+    /// the raw field — that is what they are validating),
+    /// `reachable_delegate_target_configs`, and the sixth instance,
+    /// `AliasedAgentConfig::is_dispatchable` — that method read the raw
+    /// field directly and reported every valid carded agent as
+    /// undispatchable; it has been deleted (its only callers were the two
+    /// `acp_server.rs` RPC call sites, both now switched to
+    /// `Config::agent_is_dispatchable`, which routes through
+    /// `resolved_risk_profile_alias`).
     ///
     /// This re-reads this file's own production source (everything before
     /// `mod tests`, so this doc comment's own mentions of the field name
@@ -37363,17 +37540,6 @@ model_provider = \"ollama.default\"
     /// boundary, not a compiler — it catches the shape people actually
     /// write, and issue #21's stronger options (rename the field, or make
     /// it private) remain the real fix if evasion ever becomes a concern.
-    ///
-    /// One entry on the allowlist is not "legitimate" in the same sense as
-    /// the rest: `AliasedAgentConfig::is_dispatchable` (schema.rs, near the
-    /// test above) also reads the raw field and is *also* wrong for a
-    /// carded agent — it reports a fully dispatchable carded agent as not
-    /// dispatchable. It is carved out here, not fixed, because fixing it
-    /// needs `Config::cards` and `is_dispatchable` only has `&self` on
-    /// `AliasedAgentConfig`; its only two callers are in
-    /// `zeroclaw-channels/src/orchestrator/acp_server.rs`, outside this
-    /// patch's file scope. Do not add further names to this list without
-    /// the same kind of justification recorded next to them.
     #[test]
     async fn no_new_raw_risk_profile_reads_outside_the_resolver_and_validation() {
         const SRC: &str = include_str!(concat!(
@@ -37391,13 +37557,10 @@ model_provider = \"ollama.default\"
         //     are validating the raw field itself (e.g. "is it set alongside
         //     a card", "does it point at a real risk_profiles entry"); they
         //     must see the unresolved value, not the card-following one.
-        //   - `is_dispatchable`: a known, unfixed, out-of-file-scope
-        //     instance of this exact bug — see the doc comment above.
         const ALLOWED_FNS: &[&str] = &[
             "resolved_risk_profile_alias",
             "risk_profile_for_agent",
             "validate",
-            "is_dispatchable",
         ];
 
         let mut current_fn: Option<&str> = None;
