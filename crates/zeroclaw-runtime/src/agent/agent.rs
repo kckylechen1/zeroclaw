@@ -827,7 +827,7 @@ impl AgentBuilder {
             })?,
             prompt_builder: self
                 .prompt_builder
-                .unwrap_or_else(SystemPromptBuilder::with_defaults),
+                .unwrap_or_else(|| SystemPromptBuilder::with_defaults(None)),
             tool_dispatcher: self.tool_dispatcher.ok_or_else(|| {
                 ::zeroclaw_log::record!(
                     ERROR,
@@ -1651,7 +1651,18 @@ impl Agent {
                     config.effective_memory_recall_limit(agent_alias),
                 ),
             )
-            .prompt_builder(SystemPromptBuilder::with_defaults())
+            .prompt_builder(SystemPromptBuilder::with_defaults(
+                // Resolved once, here, where `&Config` and the alias are both in
+                // hand — not re-resolved per turn. Mirrors the identical
+                // `persona_for_agent(...).and_then(to_prompt_section)` expression
+                // used by `agent/loop_.rs` and `agent/turn/mod.rs` for the other
+                // prompt-building pipeline; `None` when the agent has no persona
+                // configured (direct or via card) or every dial sits at medium,
+                // which renders the `## Voice` section as nothing.
+                config
+                    .persona_for_agent(agent_alias)
+                    .and_then(zeroclaw_config::persona::PersonaKnobs::to_prompt_section),
+            ))
             .config(
                 config
                     .resolved_agent_config(agent_alias)
@@ -4260,6 +4271,154 @@ mod tests {
         assert!(xml_prompt.contains("## Tools"));
         assert!(xml_prompt.contains("echo"));
         assert!(xml_prompt.contains("## Tool Use Protocol"));
+    }
+
+    /// Builds an `Agent` the way `from_config` wires persona in (see
+    /// `agent.rs`'s `from_config`): resolve `config.persona_for_agent(alias)`,
+    /// render it, and hand the rendered section straight to
+    /// `SystemPromptBuilder::with_defaults`. Skips the network/provider
+    /// machinery `from_config` also does, since that is orthogonal to whether
+    /// persona reaches this pipeline's built prompt.
+    fn build_agent_with_persona_from_config(
+        config: &zeroclaw_config::schema::Config,
+        agent_alias: &str,
+    ) -> Agent {
+        let memory_cfg = zeroclaw_config::schema::MemoryConfig {
+            backend: "none".into(),
+            ..zeroclaw_config::schema::MemoryConfig::default()
+        };
+        let workspace = tempfile::TempDir::new().expect("temp dir");
+        let mem: Arc<dyn Memory> = Arc::from(
+            zeroclaw_memory::create_memory(&memory_cfg, workspace.path(), None)
+                .expect("memory creation should succeed with valid config"),
+        );
+        let observer: Arc<dyn Observer> = Arc::from(crate::observability::NoopObserver {});
+        let persona_section = config
+            .persona_for_agent(agent_alias)
+            .and_then(zeroclaw_config::persona::PersonaKnobs::to_prompt_section);
+
+        Agent::builder()
+            .model_provider(Box::new(MockModelProvider {
+                responses: Mutex::new(vec![]),
+            }))
+            .tools(vec![Box::new(MockTool)])
+            .memory(mem)
+            .observer(observer)
+            .tool_dispatcher(Box::new(NativeToolDispatcher))
+            .workspace_dir(workspace.keep())
+            .prompt_builder(SystemPromptBuilder::with_defaults(persona_section))
+            .build()
+            .expect("agent builder should succeed with valid config")
+    }
+
+    /// A card that names a persona reaches this pipeline's built prompt —
+    /// closing the gap `606e2ea19` left open for `Agent::build_system_prompt`.
+    #[test]
+    fn carded_agent_persona_reaches_this_pipelines_built_prompt() {
+        let toml = r#"
+            [providers.models.custom.default]
+            api_key = "k"
+            model = "test-model"
+            uri = "https://example.com/v1"
+            wire_api = "chat_completions"
+
+            [risk_profiles.default]
+            level = "supervised"
+
+            [personas.terse]
+            directness = "xhigh"
+
+            [cards.analyst]
+            persona = "terse"
+            risk_profile = "default"
+
+            [cards.analyst.grants]
+            tools = [{ tool = "memory_recall", class = "local_read" }]
+
+            [agents.default]
+            enabled = true
+            model_provider = "custom.default"
+            card = "analyst"
+        "#;
+        let config: zeroclaw_config::schema::Config = toml::from_str(toml).expect("valid config");
+
+        let agent = build_agent_with_persona_from_config(&config, "default");
+        let prompt = agent.build_system_prompt().unwrap();
+
+        assert!(prompt.contains("## Voice"), "carded persona must render a Voice section");
+        assert!(
+            prompt.contains("Lead with the verdict"),
+            "the card's `terse` persona's xhigh directness dial must be the text that renders"
+        );
+    }
+
+    /// A direct (uncarded) `agents.<alias>.persona` reaches this pipeline's
+    /// built prompt too.
+    #[test]
+    fn direct_persona_agent_reaches_this_pipelines_built_prompt() {
+        let toml = r#"
+            [providers.models.custom.default]
+            api_key = "k"
+            model = "test-model"
+            uri = "https://example.com/v1"
+            wire_api = "chat_completions"
+
+            [risk_profiles.default]
+            level = "supervised"
+
+            [personas.terse]
+            directness = "xhigh"
+
+            [agents.default]
+            enabled = true
+            model_provider = "custom.default"
+            risk_profile = "default"
+            persona = "terse"
+        "#;
+        let config: zeroclaw_config::schema::Config = toml::from_str(toml).expect("valid config");
+
+        let agent = build_agent_with_persona_from_config(&config, "default");
+        let prompt = agent.build_system_prompt().unwrap();
+
+        assert!(
+            prompt.contains("## Voice"),
+            "a direct persona field must render a Voice section"
+        );
+        assert!(
+            prompt.contains("Lead with the verdict"),
+            "the direct `terse` persona's xhigh directness dial must be the text that renders"
+        );
+    }
+
+    /// An agent with neither a card nor a direct persona must produce no
+    /// `## Voice` section at all — the regression guard for every existing
+    /// agent that predates persona dials.
+    #[test]
+    fn agent_with_no_persona_configured_has_no_voice_section() {
+        let toml = r#"
+            [providers.models.custom.default]
+            api_key = "k"
+            model = "test-model"
+            uri = "https://example.com/v1"
+            wire_api = "chat_completions"
+
+            [risk_profiles.default]
+            level = "supervised"
+
+            [agents.default]
+            enabled = true
+            model_provider = "custom.default"
+            risk_profile = "default"
+        "#;
+        let config: zeroclaw_config::schema::Config = toml::from_str(toml).expect("valid config");
+
+        let agent = build_agent_with_persona_from_config(&config, "default");
+        let prompt = agent.build_system_prompt().unwrap();
+
+        assert!(
+            !prompt.contains("## Voice"),
+            "no persona configured must mean no Voice section"
+        );
     }
 
     mod surface2_tests {
