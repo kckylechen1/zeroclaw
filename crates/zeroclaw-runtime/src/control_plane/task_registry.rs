@@ -193,6 +193,34 @@ pub trait TaskRegistry: Send + Sync {
         &self,
         parent_id: &str,
     ) -> anyhow::Result<Vec<zeroclaw_api::announce::Announcement>>;
+
+    /// Put claimed children back: clear `delivered` for exactly `ids`, so a
+    /// claim that never reached the model can be claimed again.
+    ///
+    /// [`Self::claim_undelivered_children`] commits `delivered = 1` before its
+    /// caller has done anything with the announcements, which is what makes a
+    /// completion arrive exactly once. The cost is that everything between the
+    /// claim and the model actually reading the text is a window in which the
+    /// announcement can be destroyed: the claiming turn can still fail — on
+    /// tool-spec construction, vision routing, message preparation, the tool
+    /// budget — before any provider call happens. Those rows are then flagged
+    /// delivered while no one has seen them, and nothing will ever look at
+    /// them again. This method is how a caller that failed in that window
+    /// hands the news back, trading exactly-once for at-least-once on the
+    /// failure path, which is the correct trade: a parent shown a completion
+    /// twice can reconcile, a parent never shown it cannot.
+    ///
+    /// Idempotent, and returns the number of rows actually changed — a second
+    /// call for the same ids changes nothing and reports `0`, because the
+    /// UPDATE matches only rows that are currently `delivered = 1`. An empty
+    /// `ids` is a no-op returning `0`.
+    ///
+    /// Deliberately **not** filtered on terminal status. Every id handed here
+    /// came out of a claim, and the claim's own WHERE clause admits terminal
+    /// rows only, so the filter would be dead weight that reads as if it were
+    /// guarding something. Ids that do not exist, or are already
+    /// `delivered = 0`, simply match nothing.
+    async fn unclaim_children(&self, ids: &[String]) -> anyhow::Result<usize>;
 }
 
 /// Map a terminal task status onto the announced outcome. `None` for a task

@@ -272,6 +272,18 @@ async fn forward_history_trim_notice(
     }
 }
 
+/// Keep every announcement this turn claimed marked delivered.
+///
+/// Called only at a success exit. A streamed turn can claim more than once —
+/// the opening user message plus each mid-turn steering message — so the
+/// guards are disarmed as a set; missing one would hand a completion the model
+/// has already read back to the store, and the next turn would repeat it.
+fn disarm_announcement_guards(guards: &mut [crate::agent::loop_::UnclaimOnDrop]) {
+    for guard in guards {
+        guard.disarm();
+    }
+}
+
 pub struct Agent {
     model_provider: Box<dyn ModelProvider>,
     tools: Vec<Box<dyn Tool>>,
@@ -1053,12 +1065,24 @@ impl Agent {
         ))
     }
 
+    /// Build this turn's user message and put it in history.
+    ///
+    /// Returns the claim guard for any background announcements spliced into
+    /// that message. The caller **must** hold it until the turn has reached the
+    /// provider and disarm it there; dropping it earlier returns the
+    /// announcements to the store, which is exactly what should happen when the
+    /// turn dies on one of the fallible steps between here and the provider
+    /// call (`agent/turn/mod.rs` lines 528/535/566/584 versus :628).
+    ///
+    /// Called once per user message, which includes each mid-turn steering
+    /// message: see the steering call site for why a second claim inside one
+    /// turn is deliberate.
     async fn append_streamed_user_message_to_history(
         &mut self,
         user_message: &str,
         new_msgs: &mut Vec<ConversationMessage>,
         turn_id: &str,
-    ) {
+    ) -> Option<crate::agent::loop_::UnclaimOnDrop> {
         // Memory context is injected once in the engine, keyed on the
         // ingress origin (agent::memory_inject).
         if self.auto_save {
@@ -1093,15 +1117,14 @@ impl Agent {
         // It rides in the user message, which is what puts it in `history` and
         // in `new_msgs` — the parent can refer back to what it was told,
         // exactly like every other per-turn context at this site.
-        let announcements = crate::agent::loop_::claim_child_announcements_context()
-            .await
-            .unwrap_or_default();
+        let (announcements, guard) = crate::agent::loop_::claim_announcements_for_turn(true).await;
         let now = self.current_turn_datetime().format("%Y-%m-%d %H:%M:%S %Z");
         let enriched = format!("{announcements}[{now}] {user_message}");
 
         let user_msg = ConversationMessage::Chat(ChatMessage::user(enriched));
         new_msgs.push(user_msg.clone());
         self.history.push(user_msg);
+        guard
     }
 
     pub fn set_memory_session_id(&mut self, session_id: Option<String>) {
@@ -2253,10 +2276,10 @@ impl Agent {
 
         // Same claim-once-per-turn contract as
         // `append_streamed_user_message_to_history`; `turn` builds its user
-        // message inline instead of going through that helper.
-        let announcements = crate::agent::loop_::claim_child_announcements_context()
-            .await
-            .unwrap_or_default();
+        // message inline instead of going through that helper, so it holds its
+        // own guard and disarms it at this function's success exits.
+        let (announcements, mut announcement_guard) =
+            crate::agent::loop_::claim_announcements_for_turn(true).await;
         let enriched =
             format!("{announcements}[CURRENT DATE & TIME: {date_str}]\n\n{user_message}");
 
@@ -2306,6 +2329,12 @@ impl Agent {
                         cached.clone(),
                     )));
                 let _ = self.trim_history(Some(&turn_id));
+                // Cache hit: no provider call, but the block is durably in
+                // `self.history` for the next turn. See the same exit in
+                // `turn_streamed_with_steering_state`.
+                if let Some(guard) = announcement_guard.as_mut() {
+                    guard.disarm();
+                }
                 return Ok(cached);
             }
             self.observer.record_event(&ObserverEvent::CacheMiss {
@@ -2465,6 +2494,11 @@ impl Agent {
 
         let _ = self.trim_history(Some(&turn_id));
 
+        // Success point: the tool loop returned, so the provider was called
+        // with the history containing the announcement block.
+        if let Some(guard) = announcement_guard.as_mut() {
+            guard.disarm();
+        }
         Ok(response)
     }
 
@@ -2568,8 +2602,15 @@ impl Agent {
             self.observer_agent_alias(),
             Some(turn_id.clone()),
         );
-        self.append_streamed_user_message_to_history(user_message, &mut new_msgs, &turn_id)
-            .await;
+        // One guard per user message claimed into this turn: the opening one
+        // here, plus one for each mid-turn steering message drained below.
+        // They are disarmed together at every success exit; any other exit
+        // drops them armed and the announcements go back to the store.
+        let mut announcement_guards: Vec<crate::agent::loop_::UnclaimOnDrop> = Vec::new();
+        announcement_guards.extend(
+            self.append_streamed_user_message_to_history(user_message, &mut new_msgs, &turn_id)
+                .await,
+        );
 
         let active_dispatcher = {
             let base_provider_messages = self.tool_dispatcher.to_provider_messages(&self.history);
@@ -2626,6 +2667,11 @@ impl Agent {
                 forward_history_trim_notice(&event_tx, notice).await;
                 self.observer.record_event(&ObserverEvent::TurnComplete);
                 committed_response.push_str(&cached);
+                // A cache hit is a completed turn: no provider call happened,
+                // but the announcement block is in `self.history`, which this
+                // pipeline carries into the next turn — so the news is not
+                // lost, and returning it to the store would show it twice.
+                disarm_announcement_guards(&mut announcement_guards);
                 return Ok(StreamedTurnSuccess {
                     response: committed_response,
                     new_messages: new_msgs,
@@ -2693,13 +2739,23 @@ impl Agent {
 
             // Steering drain: each accepted mid-turn message becomes its own
             // enriched user turn in both transcripts before the next round.
+            //
+            // This claims again inside a turn that already claimed once, and
+            // that is deliberate, not an oversight: a steering message is a
+            // fresh user turn in everything but name, it gets its own round
+            // with the provider, and any child that finished since the turn
+            // started is news the model can still act on. Delivering it with
+            // the message that triggered it is better than holding it back
+            // until the whole turn ends.
             for steering_message in crate::agent::loop_::drain_steering_messages(&mut steering_rx) {
-                self.append_streamed_user_message_to_history(
-                    &steering_message,
-                    &mut new_msgs,
-                    &turn_id,
-                )
-                .await;
+                announcement_guards.extend(
+                    self.append_streamed_user_message_to_history(
+                        &steering_message,
+                        &mut new_msgs,
+                        &turn_id,
+                    )
+                    .await,
+                );
                 if let Some(ConversationMessage::Chat(user_msg)) = new_msgs.last() {
                     loop_history.push(user_msg.clone());
                 }
@@ -2880,6 +2936,11 @@ impl Agent {
                         &event_tx,
                     )
                     .await;
+                    // Success point: the round loop returned, which means the
+                    // provider was called and the model read every user
+                    // message this turn appended — the opening one and each
+                    // steering message.
+                    disarm_announcement_guards(&mut announcement_guards);
                     return Ok(StreamedTurnSuccess {
                         response: committed_response,
                         new_messages: new_msgs,
@@ -9687,6 +9748,19 @@ mod tests {
             assert!(
                 in_history,
                 "the announcement must persist in the conversation history"
+            );
+
+            // The turn reached the provider, so its guard was disarmed: the
+            // row stays delivered instead of being handed back for a repeat.
+            // (The second turn finding nothing above already implies this;
+            // this reads the store directly so the reason is unambiguous.)
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            assert!(
+                fixture.is_delivered("acp-kid").await,
+                "a completion the model has read must stay delivered"
             );
         }
 

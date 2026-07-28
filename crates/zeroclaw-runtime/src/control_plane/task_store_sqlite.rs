@@ -611,6 +611,52 @@ impl TaskRegistry for SqliteTaskStore {
         Ok(claimed)
     }
 
+    async fn unclaim_children(&self, ids: &[String]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.lock();
+        // One id per statement, all inside one transaction, rather than the
+        // obvious single set-membership UPDATE binding every id at once. That
+        // is not a performance choice — a batch here is one turn's
+        // announcements, a handful of rows — it is a deliberate concession to
+        // this file's structural guard
+        // `every_sql_status_filter_is_built_from_terminal_status_sql_list_not_hand_typed`,
+        // which fails any set-membership clause in this file's production
+        // source that is not immediately followed by
+        // `terminal_status_sql_list()`'s `{}` placeholder. A list of ids bound
+        // with `?` is not the hand-typed status literal that guard exists to
+        // catch, but it does not match the shape either, and weakening a guard
+        // to fit new code is how the drift it prevents gets back in. Do not
+        // "optimise" this back into a set-membership clause without dealing
+        // with that test first.
+        //
+        // The transaction is what keeps the batch all-or-nothing, which the
+        // single statement would have given for free.
+        //
+        // `delivered = 1` in each WHERE is what makes this idempotent: a
+        // repeat call matches nothing and reports zero rows changed, so a
+        // retry cannot manufacture a second delivery of the same completion.
+        //
+        // No terminal-status filter on purpose — see the trait doc: these ids
+        // came out of a claim, whose own WHERE clause admits terminal rows
+        // only, so they are terminal by construction.
+        let tx = conn
+            .unchecked_transaction()
+            .context("begin unclaim children")?;
+        let mut changed = 0usize;
+        {
+            let mut stmt = tx
+                .prepare_cached("UPDATE tasks SET delivered = 0 WHERE delivered = 1 AND id = ?1")
+                .context("prepare unclaim children")?;
+            for id in ids {
+                changed += stmt.execute(params![id]).context("unclaim children")?;
+            }
+        }
+        tx.commit().context("commit unclaim children")?;
+        Ok(changed)
+    }
+
     async fn reconcile_lost(&self, id: &str, now_boot_id: &str) -> Result<bool> {
         let conn = self.conn.lock();
         let rec = conn
@@ -845,6 +891,103 @@ mod tests {
             status,
             ..rec(id, "main", 1, "boot-1")
         }
+    }
+
+    /// The escape hatch for a claim that never reached the model: the rows go
+    /// back, and the next claim finds them again.
+    ///
+    /// Without this, a turn that consumed its announcements and then failed
+    /// before its provider call would have destroyed them — the flag says
+    /// delivered, and nothing looks at a delivered row twice.
+    #[tokio::test]
+    async fn unclaimed_children_become_claimable_again() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("kid", "mum", TaskStatus::Completed))
+            .await
+            .unwrap();
+
+        let claimed = s.claim_undelivered_children("mum").await.unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert!(
+            s.claim_undelivered_children("mum").await.unwrap().is_empty(),
+            "the claim consumed it"
+        );
+
+        let returned = s.unclaim_children(&["kid".to_string()]).await.unwrap();
+        assert_eq!(returned, 1, "one row went back");
+
+        let reclaimed = s.claim_undelivered_children("mum").await.unwrap();
+        assert_eq!(reclaimed.len(), 1, "the announcement is news again");
+        assert_eq!(reclaimed[0].task_id, "kid");
+    }
+
+    /// A retry must not manufacture a second delivery: the second unclaim
+    /// matches nothing, because the row is no longer flagged delivered.
+    #[tokio::test]
+    async fn unclaiming_twice_changes_nothing_the_second_time() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("kid", "mum", TaskStatus::Completed))
+            .await
+            .unwrap();
+        s.claim_undelivered_children("mum").await.unwrap();
+
+        let ids = vec!["kid".to_string()];
+        assert_eq!(s.unclaim_children(&ids).await.unwrap(), 1);
+        assert_eq!(
+            s.unclaim_children(&ids).await.unwrap(),
+            0,
+            "idempotent: nothing left to return"
+        );
+        assert_eq!(
+            s.claim_undelivered_children("mum").await.unwrap().len(),
+            1,
+            "and the row was returned exactly once, not twice"
+        );
+    }
+
+    /// One failed turn must not resurrect announcements another turn has
+    /// already shown its parent. Only the ids handed over come back.
+    #[tokio::test]
+    async fn unclaim_touches_only_the_ids_it_is_given() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("mine", "mum", TaskStatus::Completed))
+            .await
+            .unwrap();
+        s.create(child_of("theirs", "dad", TaskStatus::Completed))
+            .await
+            .unwrap();
+        s.claim_undelivered_children("mum").await.unwrap();
+        s.claim_undelivered_children("dad").await.unwrap();
+
+        let returned = s.unclaim_children(&["mine".to_string()]).await.unwrap();
+        assert_eq!(returned, 1);
+
+        assert_eq!(
+            s.claim_undelivered_children("mum").await.unwrap().len(),
+            1,
+            "the returned announcement is claimable again"
+        );
+        assert!(
+            s.claim_undelivered_children("dad").await.unwrap().is_empty(),
+            "another parent's delivered announcement must stay delivered"
+        );
+    }
+
+    /// A guard with nothing to return must not issue a statement that could
+    /// match anything at all.
+    #[tokio::test]
+    async fn unclaiming_no_ids_is_a_no_op() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("kid", "mum", TaskStatus::Completed))
+            .await
+            .unwrap();
+        s.claim_undelivered_children("mum").await.unwrap();
+
+        assert_eq!(s.unclaim_children(&[]).await.unwrap(), 0);
+        assert!(
+            s.claim_undelivered_children("mum").await.unwrap().is_empty(),
+            "an empty unclaim must not return anything"
+        );
     }
 
     /// The invariant the whole announce path rests on: a completion is claimed

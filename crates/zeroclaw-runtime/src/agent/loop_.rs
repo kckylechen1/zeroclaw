@@ -552,12 +552,19 @@ fn child_announcement_store() -> Option<Arc<dyn crate::control_plane::TaskRegist
 /// prompt the model is already reasoning about, and (worse) would race the
 /// same rows against the next turn's claim.
 ///
-/// Ordering is load-bearing. `claim_undelivered_children` marks the rows
-/// delivered in the same statement that returns them, so once it succeeds the
-/// announcements exist nowhere else: anything fallible between the claim and
-/// the model seeing the text would lose them. Hence claim, then render — and
-/// rendering is infallible string building ([`AnnouncementBatch::to_context_block`])
-/// whose only caller-side step is a `format!` into the turn's user message.
+/// Ordering is load-bearing, and injection is **not** the end of it.
+/// `claim_undelivered_children` marks the rows delivered in the same statement
+/// that returns them, so once it succeeds the announcements exist nowhere else.
+/// Rendering is infallible string building
+/// ([`AnnouncementBatch::to_context_block`]) and so is splicing the result into
+/// the turn's user message — but that message goes into a *local* history
+/// vector, and the model has still not seen it. Between there and the provider
+/// call sit four fallible steps, every one of which returns `?` on a turn that
+/// has already consumed its announcements: `build_iteration_tool_specs`
+/// (`agent/turn/mod.rs:528`), `resolve_vision_provider` (`:535`),
+/// `prepare_messages_for_iteration` (`:566`) and `enforce_tool_loop_budget`
+/// (`:584`); the provider is not called until `:628`. That window is why every
+/// claim comes with an [`UnclaimOnDrop`] guard.
 ///
 /// A claim failure is logged and swallowed: the waker must never break a turn.
 /// Nothing is lost in that case, because a failed claim marks nothing delivered
@@ -570,7 +577,7 @@ fn child_announcement_store() -> Option<Arc<dyn crate::control_plane::TaskRegist
 /// model. [`run`] is the exception and gates on it: it claims only when it
 /// scoped the key itself, because a nested `run` inherits its caller's key and
 /// claiming there would deliver the caller's children into the nested turn.
-pub(crate) async fn claim_child_announcements_context() -> Option<String> {
+pub(crate) async fn claim_child_announcements_context() -> Option<ClaimedAnnouncements> {
     let session_key = current_session_key()?;
     let store = child_announcement_store()?;
     let announcements = match store.claim_undelivered_children(&session_key).await {
@@ -594,25 +601,205 @@ pub(crate) async fn claim_child_announcements_context() -> Option<String> {
     if announcements.is_empty() {
         return None;
     }
-    let claimed = announcements.len();
-    let block = zeroclaw_api::announce::AnnouncementBatch {
+    let ids: Vec<String> = announcements
+        .iter()
+        .map(|a| a.task_id.clone())
+        .collect();
+    // Rendering is infallible from here on: the batch is non-empty (checked
+    // above) and `to_context_block` returns `None` only for an empty batch, so
+    // there is deliberately no `?` — nor any other early exit — between the
+    // committed claim and the guard that can hand these rows back.
+    let batch = zeroclaw_api::announce::AnnouncementBatch {
         parent_task_id: session_key.clone(),
         announcements,
-    }
-    .to_context_block()?;
+    };
+    let block = batch.to_context_block().unwrap_or_else(|| {
+        debug_assert!(false, "a non-empty batch always renders a context block");
+        String::new()
+    });
     ::zeroclaw_log::record!(
         INFO,
         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
             .with_category(::zeroclaw_log::EventCategory::Agent)
             .with_attrs(::serde_json::json!({
                 "session_key": session_key,
-                "claimed": claimed,
+                "claimed": ids.len(),
             })),
         "Announcing finished background children into this turn"
     );
-    // Trailing blank line: the block is spliced directly above the timestamped
-    // user message, the same shape hardware RAG context uses at these sites.
-    Some(format!("{block}\n"))
+    Some(ClaimedAnnouncements {
+        // Trailing blank line: the block is spliced directly above the
+        // timestamped user message, the same shape hardware RAG context uses.
+        context: format!("{block}\n"),
+        guard: UnclaimOnDrop::armed(store, ids, session_key),
+    })
+}
+
+/// Claim for a turn, split into the text to splice in and the guard that must
+/// outlive the provider call.
+///
+/// `should_claim` is the caller's ownership answer (see
+/// [`claim_child_announcements_context`]'s "one claimant per conversation");
+/// `false` claims nothing and yields no guard, so a caller that must not claim
+/// cannot accidentally hold one.
+pub(crate) async fn claim_announcements_for_turn(
+    should_claim: bool,
+) -> (String, Option<UnclaimOnDrop>) {
+    if !should_claim {
+        return (String::new(), None);
+    }
+    match claim_child_announcements_context().await {
+        Some(claimed) => {
+            let (context, guard) = claimed.into_parts();
+            (context, Some(guard))
+        }
+        None => (String::new(), None),
+    }
+}
+
+/// One turn's claimed announcements: the text to splice in, and the guard that
+/// gives them back if this turn never reaches the model.
+pub(crate) struct ClaimedAnnouncements {
+    context: String,
+    guard: UnclaimOnDrop,
+}
+
+impl ClaimedAnnouncements {
+    /// Split into the context block and its guard. The caller must keep the
+    /// guard alive until the turn has succeeded, then [`UnclaimOnDrop::disarm`]
+    /// it; dropping it earlier hands the announcements back to the store.
+    pub(crate) fn into_parts(self) -> (String, UnclaimOnDrop) {
+        (self.context, self.guard)
+    }
+}
+
+/// Hands claimed announcements back to the store unless the turn that claimed
+/// them got them in front of the model.
+///
+/// The claim commits `delivered = 1` before anything can be done with the
+/// announcements — that is what makes a completion arrive exactly once, and it
+/// is not negotiable, because the alternative (read, then flag) lets two wakers
+/// announce the same completion. The consequence is a window: a turn can claim,
+/// splice the text into a local history vector, and *still* fail before the
+/// provider is ever called. Those rows would be flagged delivered with nobody
+/// having read them, and nothing would ever look at them again.
+///
+/// So the failure path trades exactly-once for at-least-once. On drop while
+/// armed, the ids go back to `delivered = 0` and the next turn under the same
+/// key claims them again. A parent shown a completion twice can reconcile it; a
+/// parent never shown it cannot.
+///
+/// Sibling turns make this sharper, not softer: one-shot `run()`s of the same
+/// alias share the synthetic `agent:<alias>` key
+/// ([`synthetic_session_key_for_run`]), so without this guard run A's failure
+/// before its provider call would permanently destroy the announcement of a
+/// child that run B dispatched.
+///
+/// **Residual window, stated plainly.** `Drop` cannot await, so the unclaim is
+/// dispatched as a detached task and is fire-and-forget by necessity. If the
+/// process dies between the drop and that task's UPDATE, the rows stay
+/// `delivered = 1` having been seen by nobody, and no later turn will find
+/// them. That requires process death inside a narrow interval, and it is the
+/// one hole left in the chain — it is not closed here, it is named here.
+pub(crate) struct UnclaimOnDrop {
+    store: Arc<dyn crate::control_plane::TaskRegistry>,
+    ids: Vec<String>,
+    session_key: String,
+    armed: bool,
+}
+
+impl UnclaimOnDrop {
+    fn armed(
+        store: Arc<dyn crate::control_plane::TaskRegistry>,
+        ids: Vec<String>,
+        session_key: String,
+    ) -> Self {
+        Self {
+            store,
+            ids,
+            session_key,
+            armed: true,
+        }
+    }
+
+    /// The turn got these announcements to the model. Keep them delivered.
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for UnclaimOnDrop {
+    fn drop(&mut self) {
+        if !self.armed || self.ids.is_empty() {
+            return;
+        }
+        let store = Arc::clone(&self.store);
+        let ids = std::mem::take(&mut self.ids);
+        let session_key = self.session_key.clone();
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_category(::zeroclaw_log::EventCategory::Agent)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "session_key": session_key,
+                    "task_ids": ids,
+                })),
+            "Turn ended before its claimed background announcements reached the model; \
+             returning them to the store so a later turn announces them again"
+        );
+        // `Drop` cannot await, so the UPDATE is dispatched as a detached task.
+        // Spawning needs a runtime: without one there is nowhere to dispatch
+        // to, and panicking here — in a destructor — would take the process
+        // with it. Say so instead.
+        if tokio::runtime::Handle::try_current().is_err() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_category(::zeroclaw_log::EventCategory::Agent)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "session_key": session_key,
+                        "task_ids": ids,
+                    })),
+                "No runtime to return unseen background announcements on; \
+                 these completions stay flagged delivered but were never read"
+            );
+            return;
+        }
+        zeroclaw_spawn::spawn!(async move {
+            match store.unclaim_children(&ids).await {
+                Ok(0) => {}
+                Ok(returned) => {
+                    ::zeroclaw_log::record!(
+                        INFO,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_category(::zeroclaw_log::EventCategory::Agent)
+                            .with_attrs(::serde_json::json!({
+                                "session_key": session_key,
+                                "returned": returned,
+                            })),
+                        "Returned unseen background announcements to the store"
+                    );
+                }
+                Err(error) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                            .with_category(::zeroclaw_log::EventCategory::Agent)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "session_key": session_key,
+                                "task_ids": ids,
+                                "error": error.to_string(),
+                            })),
+                        "Could not return unseen background announcements; \
+                         these completions are now flagged delivered but were never read"
+                    );
+                }
+            }
+        });
+    }
 }
 
 /// Test seam: the fully enriched user message a turn is about to send, so the
@@ -720,6 +907,41 @@ pub(crate) mod announce_test_support {
         ) -> Vec<zeroclaw_api::announce::Announcement> {
             let store: &dyn TaskRegistry = self.store.as_ref();
             store.claim_undelivered_children(parent).await.expect("claim")
+        }
+
+        /// The store as the guard takes it, for tests that drive
+        /// [`super::UnclaimOnDrop`] directly.
+        pub(crate) fn store_handle(&self) -> Arc<dyn TaskRegistry> {
+            Arc::clone(&self.store) as Arc<dyn TaskRegistry>
+        }
+
+        /// Whether `id` currently reads as delivered. Read-only — unlike
+        /// [`Self::claim`] it does not consume the announcement.
+        pub(crate) async fn is_delivered(&self, id: &str) -> bool {
+            let store: &dyn TaskRegistry = self.store.as_ref();
+            store
+                .get(id)
+                .await
+                .expect("get task")
+                .expect("task exists")
+                .delivered
+        }
+
+        /// Wait for `id` to be returned to the store by a dropped guard.
+        ///
+        /// The unclaim rides a detached task (a destructor cannot await), so a
+        /// test has to give the runtime a chance to run it. Bounded: returns
+        /// `false` rather than hanging if it never lands, so a broken guard
+        /// fails the assertion instead of the test timing out.
+        pub(crate) async fn wait_until_returned(&self, id: &str) -> bool {
+            for _ in 0..200 {
+                if !self.is_delivered(id).await {
+                    return true;
+                }
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            false
         }
 
         /// User messages captured so far that carry `marker`. The filter keeps
@@ -2171,11 +2393,15 @@ pub async fn run(
             // context channel hardware RAG uses, so it lands in the turn's
             // conversation history and the model can refer back to it.
             // Only when this run owns the key: see `owns_session_key`.
-            let announcements = if owns_session_key {
-                claim_child_announcements_context().await.unwrap_or_default()
-            } else {
-                String::new()
-            };
+            //
+            // The guard lives until the tool loop returns `Ok` below. Until
+            // then the block is only in a local `history` vec, and this turn
+            // can still die before the provider is called (`agent/turn/mod.rs`
+            // lines 528/535/566/584 all `?` ahead of the call at :628) — in
+            // which case the announcements go back to the store rather than
+            // being lost with the turn.
+            let (announcements, mut announcement_guard) =
+                claim_announcements_for_turn(owns_session_key).await;
             let context = format!("{hw_context}{announcements}");
             let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
             let enriched = if context.is_empty() {
@@ -2304,6 +2530,15 @@ pub async fn run(
                     .await
                 {
                     Ok(resp) => {
+                        // Success point for this turn: the tool loop only
+                        // returns `Ok` after the provider call, so the model
+                        // has read the history containing the announcement
+                        // block. A model-switch retry deliberately does not
+                        // disarm — it loops with the same history and the
+                        // block has still not been read.
+                        if let Some(guard) = announcement_guard.as_mut() {
+                            guard.disarm();
+                        }
                         response = resp;
                         break;
                     }
@@ -2705,11 +2940,11 @@ pub async fn run(
                 // One claim per interactive turn (this is the per-turn body;
                 // the prompt rebuilds below only touch the system message),
                 // and only when this run owns the key: see `owns_session_key`.
-                let announcements = if owns_session_key {
-                    claim_child_announcements_context().await.unwrap_or_default()
-                } else {
-                    String::new()
-                };
+                // The guard is disarmed where this turn's tool loop returns
+                // `Ok`; a turn that dies before the provider call hands its
+                // announcements back for the next prompt at the `>` prompt.
+                let (announcements, mut announcement_guard) =
+                    claim_announcements_for_turn(owns_session_key).await;
                 let context = format!("{hw_context}{announcements}");
                 let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
                 let enriched = if context.is_empty() {
@@ -2867,10 +3102,22 @@ pub async fn run(
                         )
                         .await
                     {
-                        Ok(resp) => break resp,
+                        Ok(resp) => {
+                            // Success point: the tool loop returns `Ok` only
+                            // after the provider call, so the model has read
+                            // this turn's history.
+                            if let Some(guard) = announcement_guard.as_mut() {
+                                guard.disarm();
+                            }
+                            break resp;
+                        }
                         Err(e) => {
                             if is_tool_loop_cancelled(&e) {
                                 eprintln!("\n\x1b[2m(cancelled)\x1b[0m");
+                                // Deliberately still armed: a Ctrl+C can land
+                                // before the provider call as easily as after,
+                                // and re-announcing to the next prompt is the
+                                // recoverable side of that ambiguity.
                                 break String::new();
                             }
                             if let Some((new_model_provider, new_model)) =
@@ -3632,7 +3879,11 @@ pub async fn process_message(
         // shape, so it is always the claimant for whatever key it inherits and
         // needs no ownership gate of the kind `run()` carries. With no key in
         // scope the claim is a no-op and the turn is unchanged.
-        let announcements = claim_child_announcements_context().await.unwrap_or_default();
+        //
+        // The guard is disarmed once the turn below returns `Ok`; every
+        // fallible step between here and the provider call would otherwise
+        // consume these announcements without the model reading them.
+        let (announcements, mut announcement_guard) = claim_announcements_for_turn(true).await;
         let context = format!("{hw_context}{announcements}");
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
         let enriched = if context.is_empty() {
@@ -3668,7 +3919,7 @@ pub async fn process_message(
             .as_ref()
             .map(|c| c as &dyn zeroclaw_api::channel::Channel);
 
-        zeroclaw_api::NATIVE_THINKING_OVERRIDE
+        let turn_result = zeroclaw_api::NATIVE_THINKING_OVERRIDE
             .scope(
                 thinking_params.native_thinking,
                 agent_turn_with_sop_reassembly(
@@ -3714,7 +3965,16 @@ pub async fn process_message(
                     Some(SopStepReassembly { config: &config }),
                 ),
             )
-            .await
+            .await;
+        // Success point for this entry point: the turn returns `Ok` only after
+        // the provider call, so the announcements have been read. On `Err` the
+        // guard drops still armed and returns them to the store.
+        if turn_result.is_ok()
+            && let Some(guard) = announcement_guard.as_mut()
+        {
+            guard.disarm();
+        }
+        turn_result
     };
     __zc_body
         .instrument(__zc_scope_span)
@@ -16536,15 +16796,22 @@ Pin 13: LED
             .await;
         }
 
-        /// The whole point of the chain: a parent's next turn carries what its
-        /// children produced — once. A second turn must find nothing, because
-        /// the claim marked those rows delivered.
+        /// The whole point of the chain, and the failure it must survive.
         ///
-        /// Discriminating line: `assert_eq!(second_block_count, 0)` — drop the
-        /// claim's delivered-flagging (or claim per prompt build instead of per
-        /// turn) and the same completion is announced again.
+        /// The turn claims its child and splices the block into its user
+        /// message — then dies without the model ever reading it (this config's
+        /// provider is a closed port, and the four `?`s at
+        /// `agent/turn/mod.rs:528/535/566/584` are the same shape). Because the
+        /// claim already committed `delivered = 1`, an unguarded implementation
+        /// destroys that completion permanently. The guard hands it back, so
+        /// the next turn announces it again: at-least-once on the failure path.
+        ///
+        /// Discriminating line: `assert!(returned, ...)` — disarm the guard
+        /// unconditionally (or never construct one) and the row stays
+        /// `delivered = 1` with nobody having read it, which is exactly the
+        /// permanent loss this exists to prevent.
         #[tokio::test]
-        async fn a_turn_injects_its_claimed_children_once_then_the_claim_is_empty() {
+        async fn a_turn_that_dies_before_the_provider_hands_its_announcements_back() {
             let fixture = Fixture::install();
             let dir = tempfile::tempdir().expect("tempdir");
             let alias = "announce-once-agent";
@@ -16568,14 +16835,95 @@ Pin 13: LED
                 "the child's verdict and output must both reach the parent: {first}"
             );
 
+            // The turn failed at the provider, so the announcement it consumed
+            // must come back rather than die with it.
+            let returned = fixture.wait_until_returned("kid-1").await;
+            assert!(
+                returned,
+                "a turn that never reached the model must return its claimed announcements"
+            );
+
+            // And the next turn really does announce it again.
             one_shot_turn(config_for(alias, dir.path()), alias, "second-turn-marker").await;
             let second = fixture.messages_containing("second-turn-marker");
             assert_eq!(second.len(), 1, "expected one second turn: {second:?}");
-            let second_block_count = second[0].matches("## Background tasks finished").count();
-            assert_eq!(
-                second_block_count, 0,
-                "a delivered completion must never be announced twice: {}",
+            assert!(
+                second[0].contains("[completed] kid-1"),
+                "the returned announcement must be delivered by a later turn: {}",
                 second[0]
+            );
+        }
+
+        /// The other half of the trade: a guard that is disarmed keeps its
+        /// announcements delivered, so a completion the model has read is never
+        /// shown twice.
+        ///
+        /// This is the guard in isolation because the `run()` entry point in
+        /// these tests can never reach a provider — the success path with a
+        /// real turn is pinned on the `Agent` pipeline, which has a working
+        /// mock provider (`agent.rs`'s
+        /// `turn_streamed_injects_claimed_children_once_under_the_ambient_key`).
+        ///
+        /// Discriminating line: `assert!(fixture.is_delivered("kid").await)` —
+        /// make `disarm` a no-op and the row is handed back despite having been
+        /// read, and the parent hears the same completion twice.
+        #[tokio::test]
+        async fn a_disarmed_guard_leaves_its_announcements_delivered() {
+            let fixture = Fixture::install();
+            fixture.finished_child("kid", "some-key", "done").await;
+            let claimed = fixture.claim("some-key").await;
+            assert_eq!(claimed.len(), 1);
+
+            {
+                let mut guard = crate::agent::loop_::UnclaimOnDrop::armed(
+                    fixture.store_handle(),
+                    vec!["kid".to_string()],
+                    "some-key".to_string(),
+                );
+                guard.disarm();
+            }
+            // Give any (incorrectly) spawned unclaim the same chance to land
+            // that the failure-path test gives the real one.
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            assert!(
+                fixture.is_delivered("kid").await,
+                "a disarmed guard must not return what the model already read"
+            );
+        }
+
+        /// A dropped guard returns exactly the ids it was holding — not every
+        /// delivered row, and not another turn's.
+        ///
+        /// Discriminating line: `assert!(fixture.is_delivered("someone-elses-kid").await)`
+        /// — widen the UPDATE (drop the `id IN (...)` clause, or key it on the
+        /// parent instead of the ids) and a failed turn resurrects completions
+        /// other parents have already been shown.
+        #[tokio::test]
+        async fn a_dropped_guard_returns_only_the_ids_it_holds() {
+            let fixture = Fixture::install();
+            fixture.finished_child("my-kid", "my-key", "mine").await;
+            fixture
+                .finished_child("someone-elses-kid", "other-key", "theirs")
+                .await;
+            assert_eq!(fixture.claim("my-key").await.len(), 1);
+            assert_eq!(fixture.claim("other-key").await.len(), 1);
+
+            drop(crate::agent::loop_::UnclaimOnDrop::armed(
+                fixture.store_handle(),
+                vec!["my-kid".to_string()],
+                "my-key".to_string(),
+            ));
+
+            assert!(
+                fixture.wait_until_returned("my-kid").await,
+                "the guard's own id must come back"
+            );
+            assert!(
+                fixture.is_delivered("someone-elses-kid").await,
+                "no other row may be touched"
             );
         }
 
