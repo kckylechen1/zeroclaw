@@ -1083,8 +1083,21 @@ impl Agent {
             });
         }
 
+        // Finished background children, claimed once for this turn. The
+        // session key is ambient: ACP (`orchestrator/acp_server.rs:1478`), RPC
+        // (`rpc/turn.rs:69`) and gateway-WS (`gateway/ws.rs:995`) each scope it
+        // directly around this call, so this pipeline reads it rather than
+        // inventing one — and each of those is an outer entry point, so this
+        // turn is the claimant for that key and needs no ownership gate of the
+        // kind `agent::run` carries for its nested case.
+        // It rides in the user message, which is what puts it in `history` and
+        // in `new_msgs` — the parent can refer back to what it was told,
+        // exactly like every other per-turn context at this site.
+        let announcements = crate::agent::loop_::claim_child_announcements_context()
+            .await
+            .unwrap_or_default();
         let now = self.current_turn_datetime().format("%Y-%m-%d %H:%M:%S %Z");
-        let enriched = format!("[{now}] {user_message}");
+        let enriched = format!("{announcements}[{now}] {user_message}");
 
         let user_msg = ConversationMessage::Chat(ChatMessage::user(enriched));
         new_msgs.push(user_msg.clone());
@@ -2238,7 +2251,14 @@ impl Agent {
         let date_str =
             format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} {tz}");
 
-        let enriched = format!("[CURRENT DATE & TIME: {date_str}]\n\n{user_message}");
+        // Same claim-once-per-turn contract as
+        // `append_streamed_user_message_to_history`; `turn` builds its user
+        // message inline instead of going through that helper.
+        let announcements = crate::agent::loop_::claim_child_announcements_context()
+            .await
+            .unwrap_or_default();
+        let enriched =
+            format!("{announcements}[CURRENT DATE & TIME: {date_str}]\n\n{user_message}");
 
         self.history
             .push(ConversationMessage::Chat(ChatMessage::user(enriched)));
@@ -9561,6 +9581,219 @@ mod tests {
              provider/model (ollama/llama3); captured events: {events:?}"
         );
         drop(events);
+    }
+
+    /// The waker on the `Agent` pipeline.
+    ///
+    /// This pipeline never invents a session key — ACP, RPC and gateway-WS
+    /// scope one around the whole turn — so these drive real turns inside a
+    /// scope, against a real `SqliteTaskStore` and the real atomic claim, and
+    /// read back what the provider was actually handed.
+    mod child_announcements {
+        use super::*;
+        use crate::agent::loop_::announce_test_support::AnnounceFixture;
+        use crate::agent::loop_::scope_session_key;
+
+        fn capture_agent(seen: Arc<Mutex<Vec<String>>>, streamed: bool) -> Agent {
+            let provider = Box::new(MultimodalCaptureProvider {
+                seen_user_messages: seen,
+                streamed,
+            });
+            let memory_cfg = zeroclaw_config::schema::MemoryConfig {
+                backend: "none".into(),
+                ..zeroclaw_config::schema::MemoryConfig::default()
+            };
+            let mem: Arc<dyn Memory> = Arc::from(
+                zeroclaw_memory::create_memory(&memory_cfg, std::path::Path::new("/tmp"), None)
+                    .expect("memory creation should succeed with valid config"),
+            );
+            let observer: Arc<dyn Observer> = Arc::from(crate::observability::NoopObserver {});
+            Agent::builder()
+                .model_provider(provider)
+                .tools(vec![])
+                .memory(mem)
+                .observer(observer)
+                .tool_dispatcher(Box::new(NativeToolDispatcher))
+                .workspace_dir(std::path::PathBuf::from("/tmp"))
+                .build()
+                .expect("agent builder should succeed with valid config")
+        }
+
+        /// A streamed turn under a caller-scoped key carries its finished
+        /// children into the message the provider sees, and into the history
+        /// the parent keeps — once. The next turn has nothing left to claim.
+        ///
+        /// Discriminating line: `assert_eq!(second.matches("## Background tasks
+        /// finished").count(), 0)` — claim anywhere other than once per turn
+        /// (e.g. per provider round, which this turn has two of) and the same
+        /// completion is spliced in again.
+        #[tokio::test]
+        async fn turn_streamed_injects_claimed_children_once_under_the_ambient_key() {
+            let fixture = AnnounceFixture::install();
+            fixture
+                .finished_child("acp-kid", "acp:session-9", "the report is ready")
+                .await;
+
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let mut agent = capture_agent(Arc::clone(&seen), true);
+
+            scope_session_key(Some("acp:session-9".to_string()), async {
+                let (tx, _rx) = tokio::sync::mpsc::channel::<TurnEvent>(16);
+                agent
+                    .turn_streamed("what is the status", tx, None)
+                    .await
+                    .expect("turn_streamed should succeed");
+                let (tx2, _rx2) = tokio::sync::mpsc::channel::<TurnEvent>(16);
+                agent
+                    .turn_streamed("and now", tx2, None)
+                    .await
+                    .expect("second turn_streamed should succeed");
+            })
+            .await;
+
+            let captured = seen.lock().clone();
+            let first = captured
+                .iter()
+                .find(|msg| msg.contains("what is the status"))
+                .expect("first turn's user message reached the provider");
+            assert_eq!(
+                first.matches("## Background tasks finished").count(),
+                1,
+                "the block must reach the model exactly once: {first}"
+            );
+            assert!(
+                first.contains("[completed] acp-kid") && first.contains("the report is ready"),
+                "verdict and output must both arrive: {first}"
+            );
+
+            let second = captured
+                .iter()
+                .find(|msg| msg.contains("and now"))
+                .expect("second turn's user message reached the provider");
+            assert_eq!(
+                second.matches("## Background tasks finished").count(),
+                0,
+                "a delivered completion must not be announced again: {second}"
+            );
+
+            // It has to survive in history too, or the parent cannot refer
+            // back to what it was told.
+            let in_history = agent.history.iter().any(|msg| match msg {
+                ConversationMessage::Chat(chat) => {
+                    chat.role == "user" && chat.content.contains("[completed] acp-kid")
+                }
+                _ => false,
+            });
+            assert!(
+                in_history,
+                "the announcement must persist in the conversation history"
+            );
+        }
+
+        /// The non-streamed `turn` builds its user message inline rather than
+        /// through `append_streamed_user_message_to_history`, so it is wired
+        /// separately and asserted separately.
+        ///
+        /// Discriminating line: `assert!(msg.contains("[completed] rpc-kid"))` —
+        /// wire only the streamed helper and this path stays deaf.
+        #[tokio::test]
+        async fn turn_injects_claimed_children_under_the_ambient_key() {
+            let fixture = AnnounceFixture::install();
+            fixture
+                .finished_child("rpc-kid", "rpc:conv-3", "42")
+                .await;
+
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let mut agent = capture_agent(Arc::clone(&seen), false);
+
+            scope_session_key(Some("rpc:conv-3".to_string()), async {
+                agent.turn("what did they find").await.expect("turn");
+            })
+            .await;
+
+            let captured = seen.lock().clone();
+            let msg = captured
+                .iter()
+                .find(|msg| msg.contains("what did they find"))
+                .expect("the user message reached the provider");
+            assert!(
+                msg.contains("[completed] rpc-kid") && msg.contains("42"),
+                "a non-streamed turn must carry its finished children: {msg}"
+            );
+        }
+
+        /// A turn under a key that owns nothing must not touch another
+        /// parent's announcements.
+        ///
+        /// Discriminating line: `assert_eq!(fixture.claim("acp:owner").await.len(),
+        /// 1)` — claim on anything but the ambient key and the owning parent
+        /// never hears from its child.
+        #[tokio::test]
+        async fn a_turn_under_another_key_neither_injects_nor_steals() {
+            let fixture = AnnounceFixture::install();
+            fixture
+                .finished_child("owned-kid", "acp:owner", "not for you")
+                .await;
+
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let mut agent = capture_agent(Arc::clone(&seen), true);
+
+            scope_session_key(Some("acp:stranger".to_string()), async {
+                let (tx, _rx) = tokio::sync::mpsc::channel::<TurnEvent>(16);
+                agent
+                    .turn_streamed("unrelated question", tx, None)
+                    .await
+                    .expect("turn_streamed should succeed");
+            })
+            .await;
+
+            let captured = seen.lock().clone();
+            let msg = captured
+                .iter()
+                .find(|msg| msg.contains("unrelated question"))
+                .expect("the user message reached the provider");
+            assert!(
+                !msg.contains("## Background tasks finished") && !msg.contains("not for you"),
+                "another parent's child must not appear here: {msg}"
+            );
+            assert_eq!(
+                fixture.claim("acp:owner").await.len(),
+                1,
+                "the owning parent's announcement must still be waiting"
+            );
+        }
+
+        /// No daemon, no announcements, no breakage.
+        ///
+        /// Discriminating line: the turn returning `Ok` at all — treat the
+        /// absent control plane as anything but "nothing to announce" and this
+        /// turn dies instead of running.
+        #[tokio::test]
+        async fn no_control_plane_leaves_the_turn_untouched() {
+            let _fixture = AnnounceFixture::install_without_control_plane();
+
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let mut agent = capture_agent(Arc::clone(&seen), true);
+
+            scope_session_key(Some("acp:no-plane".to_string()), async {
+                let (tx, _rx) = tokio::sync::mpsc::channel::<TurnEvent>(16);
+                agent
+                    .turn_streamed("still works", tx, None)
+                    .await
+                    .expect("a turn must not depend on a control plane");
+            })
+            .await;
+
+            let captured = seen.lock().clone();
+            let msg = captured
+                .iter()
+                .find(|msg| msg.contains("still works"))
+                .expect("the user message reached the provider");
+            assert!(
+                !msg.contains("## Background tasks finished"),
+                "nothing to announce without a control plane: {msg}"
+            );
+        }
     }
 }
 
