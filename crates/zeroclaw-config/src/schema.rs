@@ -3879,14 +3879,33 @@ impl Config {
     /// no profile set or names a missing entry, returns `None` and the
     /// caller decides how to handle it (validation rejects this shape at
     /// load time; the runtime treating `None` as a config error).
+    ///
+    /// A carded agent (`agents.<alias>.card` set) has an empty
+    /// `agent.risk_profile` by construction — validation forbids setting
+    /// both — and instead resolves through `cards[card].risk_profile`. That
+    /// is the same invariant, only relocated: see `AgentCard::risk_profile`'s
+    /// doc, "the card owns tools, the profile owns the rest". This lookup
+    /// follows the card so every caller asking "what governs this agent's
+    /// autonomy/sandbox/shell allow-list/always_ask" gets an answer whether
+    /// or not the agent is carded. Tool grants are a separate concern —
+    /// carded agents' `allowed_tools` come from the card, not from whatever
+    /// this returns; see `SecurityPolicy::for_agent`.
     #[must_use]
     pub fn risk_profile_for_agent(&self, agent_alias: &str) -> Option<&RiskProfileConfig> {
         let agent = self.agents.get(agent_alias)?;
         let profile_alias = agent.risk_profile.trim();
-        if profile_alias.is_empty() {
+        if !profile_alias.is_empty() {
+            return self.risk_profiles.get(profile_alias);
+        }
+        let card = agent.card.as_str().trim();
+        if card.is_empty() {
             return None;
         }
-        self.risk_profiles.get(profile_alias)
+        let carded_profile = self.cards.get(card)?.risk_profile.as_str().trim();
+        if carded_profile.is_empty() {
+            return None;
+        }
+        self.risk_profiles.get(carded_profile)
     }
 
     /// Resolve the delegate targets `caller_alias` may reach:

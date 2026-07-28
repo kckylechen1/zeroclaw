@@ -2209,7 +2209,8 @@ impl SecurityPolicy {
                 "SecurityPolicy::for_agent: agent has no resolvable risk_profile"
             );
             anyhow::Error::msg(format!(
-                "agents.{agent_alias} has no resolvable risk_profile (load-time validation should have caught this)"
+                "agents.{agent_alias} has no resolvable risk_profile: neither agents.{agent_alias}.risk_profile nor (via its card, if set) cards.<card>.risk_profile names a configured [risk_profiles.<alias>] entry. \
+                 Config::validate() rejects this at load time, but load_or_init only warns and boots anyway on a failed validation — fix the config or re-check why validation did not run"
             ))
         })?;
         let runtime_profile = config.runtime_profile_for_agent(agent_alias);
@@ -2229,7 +2230,38 @@ impl SecurityPolicy {
         })?;
         let mut policy = Self::from_profiles(risk_profile, runtime_profile, &agent_workspace);
         if let Some(agent_cfg) = config.agents.get(agent_alias) {
-            policy.risk_profile_name = agent_cfg.risk_profile.trim().to_string();
+            let direct_profile = agent_cfg.risk_profile.trim();
+            if !direct_profile.is_empty() {
+                policy.risk_profile_name = direct_profile.to_string();
+            }
+            // Carded agent: `agent_cfg.risk_profile` is empty by
+            // construction (validation forbids setting both).
+            // `risk_profile_for_agent` already followed the card to resolve
+            // the `RiskProfileConfig` above (autonomy, sandbox, shell
+            // allow-list, `always_ask` — "the profile owns the rest," per
+            // `AgentCard::risk_profile`'s doc). What it does NOT do is touch
+            // tools: that accessor is also read directly elsewhere for a
+            // profile's OWN `allowed_tools`/`excluded_tools` fields (e.g.
+            // `spawn_subagent.rs`'s self-permission check), so folding the
+            // card's grants into it there would let a card-granted tool be
+            // silently gated by an unrelated profile's tool list, or vice
+            // versa. Tool grants are resolved only here, once, as a
+            // deliberate override.
+            let card_alias = agent_cfg.card.as_str().trim();
+            if !card_alias.is_empty() {
+                if let Some(card) = config.cards.get(card_alias) {
+                    let card_profile = card.risk_profile.as_str().trim();
+                    if !card_profile.is_empty() {
+                        policy.risk_profile_name = card_profile.to_string();
+                    }
+                    // `to_allowed_tools()` is always `Some`, never `None` —
+                    // an empty grant list means deny-everything, not
+                    // unrestricted. Preserve that: this is a full
+                    // replacement of the profile's own `allowed_tools`, not
+                    // an intersection with it.
+                    policy.allowed_tools = card.grants.to_allowed_tools();
+                }
+            }
         }
         policy.config_path = Some(config.config_path.clone());
         // Runtime data dir: same predicate extends there so state files
@@ -4471,6 +4503,151 @@ risk_profile = "shell_only"
         assert!(
             !policy.workspace_only,
             "unrestricted_filesystem=true must flip workspace_only off at the policy level"
+        );
+    }
+
+    // ── Cards: a card-only agent must resolve, and its grants must be the
+    // sole source of allowed_tools ────────────
+
+    /// Builds a `Config` with one `[risk_profiles.<profile_alias>]` entry and
+    /// one `[cards.<card_alias>]` entry naming it, wired to a single agent
+    /// defined solely by `card = <card_alias>` (no `risk_profile` set —
+    /// mirrors what `Config::validate()` requires for a carded agent).
+    fn carded_agent_config(
+        card_alias: &str,
+        profile_alias: &str,
+        grants: Vec<crate::card::ToolGrant>,
+    ) -> crate::schema::Config {
+        use crate::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+
+        let mut cfg = Config {
+            data_dir: PathBuf::from(format!("/tmp/zeroclaw-carded-{card_alias}")),
+            config_path: PathBuf::from(format!("/tmp/zeroclaw-carded-{card_alias}/config.toml")),
+            ..Config::default()
+        };
+        cfg.risk_profiles
+            .insert(profile_alias.into(), RiskProfileConfig::default());
+        cfg.cards.insert(
+            card_alias.into(),
+            crate::card::AgentCard {
+                risk_profile: profile_alias.into(),
+                grants: crate::card::CardGrants {
+                    tools: grants,
+                    ..crate::card::CardGrants::default()
+                },
+                ..crate::card::AgentCard::default()
+            },
+        );
+        cfg.agents.insert(
+            "carded_agent".into(),
+            AliasedAgentConfig {
+                card: card_alias.into(),
+                // risk_profile deliberately left empty — validation forbids
+                // setting both card and risk_profile on the same agent.
+                ..AliasedAgentConfig::default()
+            },
+        );
+        cfg
+    }
+
+    #[test]
+    fn a_carded_agent_resolves_and_its_allowed_tools_is_exactly_the_cards_grants() {
+        use crate::card::{GrantClass, ToolGrant};
+
+        let cfg = carded_agent_config(
+            "trader_card",
+            "trading_readonly",
+            vec![
+                ToolGrant::new("memory_recall", GrantClass::LocalRead),
+                ToolGrant::new("hapi-edge__snapshot", GrantClass::LocalRead),
+            ],
+        );
+
+        let policy = SecurityPolicy::for_agent(&cfg, "carded_agent")
+            .expect("a card-only agent must construct a SecurityPolicy");
+
+        assert_eq!(
+            policy.allowed_tools,
+            Some(vec![
+                "memory_recall".to_string(),
+                "hapi-edge__snapshot".to_string(),
+            ]),
+            "allowed_tools must equal exactly the card's granted tool names"
+        );
+    }
+
+    #[test]
+    fn is_tool_allowed_follows_the_cards_grants_exactly() {
+        use crate::card::{GrantClass, ToolGrant};
+
+        let cfg = carded_agent_config(
+            "trader_card",
+            "trading_readonly",
+            vec![ToolGrant::new("memory_recall", GrantClass::LocalRead)],
+        );
+        let policy = SecurityPolicy::for_agent(&cfg, "carded_agent").unwrap();
+
+        assert!(
+            policy.is_tool_allowed("memory_recall"),
+            "a tool the card grants must be allowed"
+        );
+        assert!(
+            !policy.is_tool_allowed("shell"),
+            "a tool the card does not grant must be denied"
+        );
+    }
+
+    #[test]
+    fn a_card_with_no_grants_denies_every_tool_not_unrestricted() {
+        let cfg = carded_agent_config("empty_card", "trading_readonly", vec![]);
+        let policy = SecurityPolicy::for_agent(&cfg, "carded_agent").unwrap();
+
+        assert_eq!(
+            policy.allowed_tools,
+            Some(vec![]),
+            "an empty grant list must compile to deny-all (Some(vec![])), never to \
+             None (unrestricted)"
+        );
+        assert!(!policy.is_tool_allowed("memory_recall"));
+        assert!(!policy.is_tool_allowed("shell"));
+    }
+
+    #[test]
+    fn an_uncarded_agents_policy_is_unchanged() {
+        use crate::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+
+        let mut cfg = Config {
+            data_dir: PathBuf::from("/tmp/zeroclaw-uncarded"),
+            config_path: PathBuf::from("/tmp/zeroclaw-uncarded/config.toml"),
+            ..Config::default()
+        };
+        cfg.risk_profiles.insert(
+            "default".into(),
+            RiskProfileConfig {
+                allowed_tools: Some(vec!["shell".to_string(), "file_read".to_string()]),
+                ..RiskProfileConfig::default()
+            },
+        );
+        cfg.agents.insert(
+            "plain_agent".into(),
+            AliasedAgentConfig {
+                risk_profile: "default".into(),
+                ..AliasedAgentConfig::default()
+            },
+        );
+
+        let policy = SecurityPolicy::for_agent(&cfg, "plain_agent").unwrap();
+
+        assert_eq!(
+            policy.allowed_tools,
+            Some(vec!["shell".to_string(), "file_read".to_string()]),
+            "an uncarded agent's allowed_tools must come from its risk_profile, \
+             untouched by card resolution — this is the regression guard"
+        );
+        assert_eq!(
+            policy.risk_profile_name, "default",
+            "an uncarded agent's risk_profile_name must still be its own direct \
+             risk_profile field, not affected by card resolution"
         );
     }
 
