@@ -1582,3 +1582,164 @@ async fn erroring_persistence_does_not_gate_delivery_or_take_down_the_actor() {
     assert!(survivor.await.unwrap().unwrap().is_success());
     harness.actor.abort();
 }
+
+// ── Drop: abandoned pending/active children ─────────────────────────────
+
+/// One pending (never promoted) and one active (promoted, still running)
+/// child both live when the coordinator is dropped: each must get exactly
+/// one `record_finish`, `Lost`, `delivered = false` — never zero (the
+/// unbounded-Running-row bug this test pins) and never more than one.
+#[tokio::test]
+async fn drop_with_pending_and_active_children_records_one_lost_finish_each() {
+    let persistence = RecordingPersistence::default();
+    let mut harness = harness_with_persistence(
+        RunnerOptions {
+            wait_before_start: true,
+            ..RunnerOptions::default()
+        },
+        CoordinatorConfig::default(),
+        persistence.clone(),
+    );
+
+    // First child: released past its `start` gate, so it promotes to active
+    // before the second child even exists — a later `broadcast` subscriber
+    // does not see an already-sent message, which is what keeps the second
+    // child from also promoting.
+    let active_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("drop-active", false)).await }
+    });
+    tokio::task::yield_now().await;
+    let _ = harness.start.send(());
+    assert_eq!(harness.started.recv().await.as_deref(), Some("drop-active"));
+
+    // Second child: subscribes fresh, after that `start` message already
+    // went out, so it blocks — pending, never promoted.
+    let pending_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("drop-pending", false)).await }
+    });
+    tokio::task::yield_now().await;
+
+    harness.actor.abort();
+    // Awaiting the aborted handle is what makes the drop deterministic: the
+    // task (and the `Coordinator` it owns) is fully torn down by the time
+    // this resolves, not merely "requested to stop".
+    let _ = harness.actor.await;
+
+    let mut finishes: Vec<_> = persistence
+        .calls()
+        .into_iter()
+        .filter(|call| matches!(call, PersistenceCall::Finish { .. }))
+        .collect();
+    finishes.sort_by(|a, b| match (a, b) {
+        (PersistenceCall::Finish { child_id: x, .. }, PersistenceCall::Finish { child_id: y, .. }) => {
+            x.cmp(y)
+        }
+        _ => unreachable!(),
+    });
+    assert_eq!(
+        finishes,
+        vec![
+            PersistenceCall::Finish {
+                child_id: "drop-active".to_owned(),
+                outcome: ChildOutcome::Lost,
+                delivered: false,
+            },
+            PersistenceCall::Finish {
+                child_id: "drop-pending".to_owned(),
+                outcome: ChildOutcome::Lost,
+                delivered: false,
+            },
+        ],
+        "every child still pending or active at Drop must get exactly one \
+         Lost, undelivered record_finish"
+    );
+
+    let _ = active_spawn.await;
+    let _ = pending_spawn.await;
+}
+
+/// A child that already finished normally before Drop must not get a second,
+/// Drop-time write — `finish_child` already made the one write it gets.
+#[tokio::test]
+async fn drop_after_normal_completion_does_not_double_write() {
+    let persistence = RecordingPersistence::default();
+    let mut harness = harness_with_persistence(
+        RunnerOptions::default(),
+        CoordinatorConfig::default(),
+        persistence.clone(),
+    );
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("drop-after-finish", false)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("drop-after-finish")
+    );
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().is_success());
+    let _ = harness.completions.recv().await;
+
+    harness.actor.abort();
+    let _ = harness.actor.await;
+
+    let finishes: Vec<_> = persistence
+        .calls()
+        .into_iter()
+        .filter(|call| matches!(call, PersistenceCall::Finish { .. }))
+        .collect();
+    assert_eq!(
+        finishes,
+        vec![PersistenceCall::Finish {
+            child_id: "drop-after-finish".to_owned(),
+            outcome: ChildOutcome::Completed,
+            delivered: true,
+        }],
+        "a child already moved into `completed` before Drop must not be \
+         written again — no Lost row for work that already got a real ending"
+    );
+}
+
+/// A persistence backend that errors on every call must not turn Drop's
+/// abandoned-child write into a panic.
+#[tokio::test]
+async fn erroring_persistence_during_drop_does_not_panic() {
+    let persistence = RecordingPersistence {
+        error_every_call: true,
+        ..RecordingPersistence::default()
+    };
+    let harness = harness_with_persistence(
+        RunnerOptions {
+            wait_before_start: true,
+            ..RunnerOptions::default()
+        },
+        CoordinatorConfig::default(),
+        persistence.clone(),
+    );
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("drop-error", false)).await }
+    });
+    tokio::task::yield_now().await; // subscribed to `start`, blocked — pending
+
+    harness.actor.abort();
+    // If `record_finish` inside Drop unwound instead of logging, that panic
+    // would surface here as `JoinError::is_panic()`, not `is_cancelled()`.
+    let joined = harness.actor.await;
+    assert!(
+        joined.is_err_and(|error| error.is_cancelled()),
+        "Drop's persistence write must log an error, never panic"
+    );
+
+    assert!(
+        persistence
+            .calls()
+            .iter()
+            .any(|call| matches!(call, PersistenceCall::Finish { child_id, .. } if child_id == "drop-error")),
+        "record_finish must still have been attempted for the abandoned child"
+    );
+
+    let _ = spawn.await;
+}

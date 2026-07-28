@@ -16,10 +16,10 @@
 //! `SqliteTaskStore::create_sync`/`finish_task_sync` are the synchronous
 //! entry points that lock the same `Mutex<Connection>` and call the same
 //! record functions the async path does — so this type holds the concrete
-//! store directly. Threading a `SubagentPersistence` into
-//! `zeroclaw_coordinator::Coordinator` (a field the coordinator does not yet
-//! have) is later work, same as `ChildPersistence`'s own doc says about
-//! plugging any implementation in at all.
+//! store directly. The coordinator carries its port as a generic field
+//! (`Coordinator::with_persistence`); plugging THIS implementation in at a
+//! daemon boot site is the remaining wiring, owned by the phase that
+//! instantiates the actor.
 //!
 //! ## The `agent`/`parent_id` field choice
 //!

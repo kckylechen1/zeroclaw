@@ -829,19 +829,83 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
             child.cancellation.cancel();
         }
     }
+
+    /// Give every child still in `pending` or `active` at Drop a `record_finish`
+    /// write, so none of them is left `Running` forever in a store that can
+    /// only be reclaimed by a same-boot reaper keyed on a heartbeat this row
+    /// never got.
+    ///
+    /// `Lost` is the only honest outcome here: its own definition is "the
+    /// process that owned it went away before it reported anything", and Drop
+    /// running IS the owner going away — there is no run future left to poll
+    /// for a real ending, cancellation tokens fire but nothing consumes their
+    /// effect once `run()` has already returned or the actor task is being
+    /// torn down. `ChildResult::default()` was deliberately made `Lost` for
+    /// exactly this no-information ending; this reuses it rather than
+    /// inventing a second spelling of the same fact. `delivered` is always
+    /// `false`: nobody in-process ever received this result, by construction
+    /// — a child with a real ending already left `pending`/`active` through
+    /// `finish_child`, which already made its own `record_finish` call, so
+    /// there is no double write here for anything that actually finished.
+    ///
+    /// Persistence errors here are logged, never propagated: `Drop` must not
+    /// panic, and a store that cannot be written at shutdown is no more fatal
+    /// here than it is at spawn or finish time.
+    fn record_abandoned_children(&mut self) {
+        let ids: Vec<String> = self
+            .pending
+            .keys()
+            .chain(self.active.keys())
+            .cloned()
+            .collect();
+        for id in ids {
+            let child_session_id = self
+                .active
+                .get(&id)
+                .map(|child| child.child_session_id.clone())
+                .unwrap_or_default();
+            let result = ChildResult {
+                outcome: ChildOutcome::Lost,
+                detail: Some(
+                    "coordinator dropped while the child was still pending or active"
+                        .to_owned(),
+                ),
+                child_id: id.clone(),
+                child_session_id,
+                ..Default::default()
+            };
+            if let Err(error) = self.persistence.record_finish(&id, &result, false) {
+                ::zeroclaw_log::record!(
+                    ERROR,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "child_id": id,
+                            "error": error.to_string(),
+                        })),
+                    "coordinator: failed to persist an abandoned child's Lost \
+                     row during Drop"
+                );
+            }
+        }
+    }
 }
 
 fn belongs_to_session(request: &ChildRequest, parent_session_id: Option<&str>) -> bool {
     parent_session_id.is_none_or(|id| request.parent_session_id == id)
 }
 
-/// Dropping the coordinator cancels every child it was holding.
+/// Dropping the coordinator cancels every child it was holding, and gives
+/// every child still `pending` or `active` a last, honest `record_finish`.
 ///
-/// The actor is the only thing that would ever have delivered their results, so
-/// a child that outlives it is work nobody will ever read.
+/// The actor is the only thing that would ever have delivered their results,
+/// so a child that outlives it is work nobody will ever read — and, without
+/// the `record_finish` write, work whose persisted row would be stuck
+/// `Running` forever (see [`Self::record_abandoned_children`]).
 impl<R: ChildRunner, P: ChildPersistence> Drop for Coordinator<R, P> {
     fn drop(&mut self) {
         self.cancel_all_children();
+        self.record_abandoned_children();
     }
 }
 
