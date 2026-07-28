@@ -13584,6 +13584,7 @@ dependencies = [
  "wiremock",
  "zeroclaw-api",
  "zeroclaw-config",
+ "zeroclaw-coordinator",
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-macros",

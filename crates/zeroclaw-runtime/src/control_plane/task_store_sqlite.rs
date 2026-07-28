@@ -97,6 +97,32 @@ impl SqliteTaskStore {
             .context("delete tasks by agent")?;
         Ok(n as u64)
     }
+
+    /// Synchronous counterpart to [`TaskRegistry::create`], for callers that
+    /// cannot `.await` — namely `zeroclaw_coordinator::ChildPersistence`,
+    /// whose `record_spawn` is a sync `&mut self` method (see
+    /// `control_plane::subagent_persistence`). Locks the same `Mutex<Connection>`
+    /// and calls the same [`insert_task_record`] the async `create` wraps —
+    /// no SQL duplicated, no `block_on`.
+    pub(crate) fn create_sync(&self, rec: TaskRecord) -> Result<()> {
+        let conn = self.conn.lock();
+        insert_task_record(&conn, rec)
+    }
+
+    /// Synchronous counterpart to [`TaskRegistry::finish_task`] — see
+    /// `create_sync`'s doc for why this exists and what it does not do
+    /// differently from the async path.
+    pub(crate) fn finish_task_sync(
+        &self,
+        id: &str,
+        status: TaskStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+        delivered: bool,
+    ) -> Result<bool> {
+        let conn = self.conn.lock();
+        finish_task_record(&conn, id, status, output, error, delivered)
+    }
 }
 
 fn migrate_schema(conn: &Connection) -> Result<()> {

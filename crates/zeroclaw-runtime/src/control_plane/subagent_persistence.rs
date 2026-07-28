@@ -1,0 +1,303 @@
+//! Wiring-phase-2a implementation of `zeroclaw_coordinator::ChildPersistence`
+//! against the control-plane's SQLite task store.
+//!
+//! `ChildPersistence` is defined but not implemented in `zeroclaw-coordinator`
+//! (see that crate's `persistence` module doc) because the coordinator crate
+//! is not allowed to know about `zeroclaw-runtime`'s `TaskStatus`/`TaskRecord`
+//! vocabulary. This module is the other half: it lives downstream, where both
+//! vocabularies are in scope, and does nothing but translate between them.
+//!
+//! ## Why this holds `Arc<SqliteTaskStore>`, not `ControlPlaneHandle`
+//!
+//! `ChildPersistence::record_spawn`/`record_finish` are synchronous `&mut
+//! self` methods (the coordinator actor is a single-writer state machine, not
+//! an async pipeline — see the trait's own doc for why). `ControlPlaneHandle`
+//! only exposes `Arc<dyn TaskRegistry>`, whose methods are all `async fn`.
+//! `SqliteTaskStore::create_sync`/`finish_task_sync` are the synchronous
+//! entry points that lock the same `Mutex<Connection>` and call the same
+//! record functions the async path does — so this type holds the concrete
+//! store directly. Threading a `SubagentPersistence` into
+//! `zeroclaw_coordinator::Coordinator` (a field the coordinator does not yet
+//! have) is later work, same as `ChildPersistence`'s own doc says about
+//! plugging any implementation in at all.
+//!
+//! ## The `agent`/`parent_id` field choice
+//!
+//! `TaskRecord::agent` is "the agent alias that owns and executes this task"
+//! (used by alias-delete cascades), and every existing producer
+//! (`spawn_subagent.rs`, `delegate.rs`) fills it with the *parent's* alias,
+//! not the child's `agent_type` (which is a role, e.g. `"explore"`, not an
+//! alias). `ChildRequest` carries no separate alias field, only
+//! `parent_session_id`; that is the closest identity available; it is also
+//! the value written into `parent_id`, so a coordinator-spawned child's row
+//! and the row `claim_undelivered_children` looks up children under land on
+//! the same string.
+
+use std::sync::Arc;
+
+use zeroclaw_coordinator::{ChildOutcome, ChildPersistence, ChildRequest, ChildResult};
+
+use super::task_registry::{TaskKind, TaskRecord, TaskStatus};
+use super::task_store_sqlite::SqliteTaskStore;
+
+/// `ChildPersistence` backed by the control-plane's SQLite task store.
+pub struct SubagentPersistence {
+    store: Arc<SqliteTaskStore>,
+    owner_boot_id: String,
+}
+
+impl SubagentPersistence {
+    #[must_use]
+    pub fn new(store: Arc<SqliteTaskStore>, owner_boot_id: String) -> Self {
+        Self {
+            store,
+            owner_boot_id,
+        }
+    }
+}
+
+/// Total map from a child's outcome to the control plane's terminal
+/// vocabulary.
+///
+/// Exhaustive, no wildcard arm — mirrors `zeroclaw_coordinator::outcome`'s
+/// own `From<ChildOutcome> for AnnouncedOutcome`, and for the same reason: if
+/// either enum gains a variant, this match stops compiling instead of
+/// silently swallowing the new case into some existing arm. Every arm here
+/// lands on a status inside `TaskStatus::TERMINAL` — checked by
+/// `every_child_outcome_maps_to_a_status_the_store_accepts_as_terminal` below
+/// — so the result is always a legal `finish_task`/`finish_task_sync` input;
+/// there is no case where this function hands back a non-terminal status.
+#[must_use]
+pub fn child_outcome_to_task_status(outcome: ChildOutcome) -> TaskStatus {
+    match outcome {
+        ChildOutcome::Completed => TaskStatus::Completed,
+        ChildOutcome::Failed => TaskStatus::Failed,
+        ChildOutcome::Cancelled => TaskStatus::Cancelled,
+        ChildOutcome::TimedOut => TaskStatus::TimedOut,
+        ChildOutcome::Lost => TaskStatus::Lost,
+    }
+}
+
+impl ChildPersistence for SubagentPersistence {
+    /// Create the row for a newly spawned child, in `Running` — the only
+    /// non-terminal state a coordinator-spawned child is ever written in.
+    ///
+    /// This is the first production writer of `parent_id`: every existing
+    /// `TaskRecord` producer in this crate (`spawn_subagent.rs`,
+    /// `delegate.rs`) sets it to `None` today, because none of them carry a
+    /// caller-supplied parent identity the way `ChildRequest` does.
+    fn record_spawn(&mut self, request: &ChildRequest) {
+        let rec = TaskRecord {
+            id: request.child_id.clone(),
+            kind: TaskKind::Subagent,
+            agent: request.parent_session_id.clone(),
+            status: TaskStatus::Running,
+            owner_pid: std::process::id(),
+            owner_boot_id: self.owner_boot_id.clone(),
+            heartbeat_at: None,
+            depth: request.overrides.spawn_depth.unwrap_or(0),
+            parent_id: Some(request.parent_session_id.clone()),
+            originator_route: None,
+            delivered: false,
+            idem_key: None,
+            principal_id: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            finished_at: None,
+        };
+        let child_id = request.child_id.clone();
+        if let Err(error) = self.store.create_sync(rec) {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "child_id": child_id,
+                        "error": format!("{error:#}"),
+                    })),
+                "control-plane: failed to persist a coordinator child's spawn row"
+            );
+        }
+    }
+
+    /// Write a child's ending in one statement — `finish_task_sync` (the
+    /// sync twin of [`super::task_registry::TaskRegistry::finish_task`])
+    /// already carries terminal status, output, error and `delivered`
+    /// together; this method only maps `ChildResult`'s shape onto its
+    /// parameters, it does not perform a second write.
+    fn record_finish(&mut self, child_id: &str, result: &ChildResult, delivered: bool) {
+        let status = child_outcome_to_task_status(result.outcome);
+        let output = result.output.as_ref();
+        let error = result.detail.as_deref();
+        if let Err(error) = self
+            .store
+            .finish_task_sync(child_id, status, Some(output), error, delivered)
+        {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "child_id": child_id,
+                        "error": format!("{error:#}"),
+                    })),
+                "control-plane: failed to persist a coordinator child's finish row"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use zeroclaw_coordinator::{CancelToken, ChildOutcome, ChildOverrides, ChildRequest, ChildResult};
+
+    use super::*;
+    use crate::control_plane::task_registry::TaskRegistry;
+
+    fn request(child_id: &str, parent_session_id: &str) -> ChildRequest {
+        ChildRequest {
+            child_id: child_id.into(),
+            prompt: "do it".into(),
+            description: "d".into(),
+            agent_type: "explore".into(),
+            parent_session_id: parent_session_id.into(),
+            parent_prompt_id: None,
+            resume_from: None,
+            cwd: None,
+            overrides: ChildOverrides::default(),
+            run_in_background: false,
+            surface_completion: true,
+            await_to_completion: false,
+            fork_context: false,
+            cancel_token: CancelToken::new(),
+        }
+    }
+
+    fn harness() -> (SubagentPersistence, Arc<SqliteTaskStore>) {
+        let store = Arc::new(SqliteTaskStore::new_in_memory().unwrap());
+        (
+            SubagentPersistence::new(Arc::clone(&store), "boot-1".into()),
+            store,
+        )
+    }
+
+    /// Pins the ordering contract `claim_undelivered_children`'s own doc
+    /// describes: a non-terminal row (spawned, still running) is invisible
+    /// to the claim query, and `record_spawn` is the write that finally puts
+    /// `parent_id` on the row at all.
+    #[tokio::test]
+    async fn spawn_write_sets_parent_id_and_is_invisible_to_claim_while_running() {
+        let (mut persistence, store) = harness();
+        persistence.record_spawn(&request("kid", "mum"));
+
+        let rec = store.get("kid").await.unwrap().expect("row must exist");
+        assert_eq!(rec.parent_id.as_deref(), Some("mum"));
+        assert_eq!(rec.status, TaskStatus::Running);
+        assert_eq!(rec.kind, TaskKind::Subagent);
+
+        assert!(
+            store
+                .claim_undelivered_children("mum")
+                .await
+                .unwrap()
+                .is_empty(),
+            "a still-running child must not be claimable"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_delivered_false_is_claimed_exactly_once_with_output_and_error_intact() {
+        let (mut persistence, store) = harness();
+        persistence.record_spawn(&request("kid", "mum"));
+
+        let result = ChildResult {
+            outcome: ChildOutcome::Failed,
+            output: Arc::from("partial output"),
+            detail: Some("boom".into()),
+            child_id: "kid".into(),
+            ..Default::default()
+        };
+        persistence.record_finish("kid", &result, false);
+
+        let claimed = store.claim_undelivered_children("mum").await.unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].task_id, "kid");
+        assert_eq!(claimed[0].output.as_deref(), Some("partial output"));
+        assert_eq!(claimed[0].detail.as_deref(), Some("boom"));
+
+        assert!(
+            store
+                .claim_undelivered_children("mum")
+                .await
+                .unwrap()
+                .is_empty(),
+            "a second claim must not re-announce an already-claimed completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_delivered_true_is_never_claimed() {
+        let (mut persistence, store) = harness();
+        persistence.record_spawn(&request("kid", "mum"));
+
+        let result = ChildResult {
+            outcome: ChildOutcome::Completed,
+            output: Arc::from("done"),
+            child_id: "kid".into(),
+            ..Default::default()
+        };
+        persistence.record_finish("kid", &result, true);
+
+        assert!(
+            store
+                .claim_undelivered_children("mum")
+                .await
+                .unwrap()
+                .is_empty(),
+            "a child finished with delivered = true must never be claimable"
+        );
+    }
+
+    /// Every `ChildOutcome` variant must round-trip into a `TaskStatus` the
+    /// store accepts as terminal. `record_finish` swallows a write failure
+    /// into a log line (the trait returns nothing to propagate an error
+    /// through), so this test does not trust the call alone — it reads the
+    /// row back and asserts the status actually changed, which is what would
+    /// go red if `finish_task_sync` ever rejected one of these as
+    /// non-terminal (see `finish_task_record`'s `anyhow::ensure!`).
+    #[tokio::test]
+    async fn every_child_outcome_maps_to_a_status_the_store_accepts_as_terminal() {
+        for outcome in [
+            ChildOutcome::Completed,
+            ChildOutcome::Failed,
+            ChildOutcome::Cancelled,
+            ChildOutcome::TimedOut,
+            ChildOutcome::Lost,
+        ] {
+            let (mut persistence, store) = harness();
+            let child_id = format!("kid-{outcome:?}");
+            persistence.record_spawn(&request(&child_id, "mum"));
+
+            let status = child_outcome_to_task_status(outcome);
+            assert!(
+                status.is_terminal(),
+                "{outcome:?} mapped to non-terminal status {status:?}"
+            );
+
+            let result = ChildResult {
+                outcome,
+                output: Arc::from("x"),
+                child_id: child_id.clone(),
+                ..Default::default()
+            };
+            persistence.record_finish(&child_id, &result, false);
+
+            let rec = store.get(&child_id).await.unwrap().unwrap();
+            assert_eq!(
+                rec.status, status,
+                "{outcome:?} did not actually transition the row to the mapped status"
+            );
+        }
+    }
+}
