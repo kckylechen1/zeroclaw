@@ -353,6 +353,56 @@ fn update_task_status_record(
     .context("update task status")
 }
 
+/// Move `id` straight from non-terminal to (terminal status, output, error,
+/// delivered) in one UPDATE. See [`TaskRegistry::finish_task`] doc comment
+/// for why this must be one statement, not two.
+///
+/// `output`/`error` use `COALESCE` the same way `update_task_status_record`
+/// does, so passing `None` preserves whatever the row already carries rather
+/// than clobbering it. `finished_at` is set unconditionally to "now" — safe
+/// because the WHERE guard below only ever lets this branch run against a
+/// row that was non-terminal a moment ago, so this is always the row's first
+/// terminal transition.
+fn finish_task_record(
+    conn: &Connection,
+    id: &str,
+    status: TaskStatus,
+    output: Option<&str>,
+    error: Option<&str>,
+    delivered: bool,
+) -> Result<bool> {
+    anyhow::ensure!(
+        status.is_terminal(),
+        "finish_task requires a terminal status, got {status:?}"
+    );
+    let finished_at = chrono::Utc::now().to_rfc3339();
+    let sql = format!(
+        "UPDATE tasks
+            SET status = ?1,
+                output = COALESCE(?2, output),
+                error  = COALESCE(?3, error),
+                finished_at = ?4,
+                delivered = ?5
+          WHERE id = ?6
+            AND status NOT IN ({})",
+        terminal_status_sql_list()
+    );
+    let n = conn
+        .execute(
+            &sql,
+            params![
+                status_to_db(status),
+                output,
+                error,
+                finished_at,
+                delivered as i64,
+                id,
+            ],
+        )
+        .context("finish task")?;
+    Ok(n > 0)
+}
+
 fn claim_task_owner_record(
     conn: &Connection,
     id: &str,
@@ -404,6 +454,18 @@ impl TaskRegistry for SqliteTaskStore {
         let conn = self.conn.lock();
         update_task_status_record(&conn, id, status, output, error)?;
         Ok(())
+    }
+
+    async fn finish_task(
+        &self,
+        id: &str,
+        status: TaskStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+        delivered: bool,
+    ) -> Result<bool> {
+        let conn = self.conn.lock();
+        finish_task_record(&conn, id, status, output, error, delivered)
     }
 
     async fn claim_owner(&self, id: &str, owner_pid: u32, owner_boot_id: &str) -> Result<()> {
@@ -609,6 +671,146 @@ mod tests {
         assert_eq!(s.list_running().await.unwrap().len(), 2); // a + c
         assert_eq!(s.list_by_agent("main").await.unwrap().len(), 2); // a + b
         assert_eq!(s.count_by_agent("main").unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn finish_task_sets_terminal_output_error_and_finished_at() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(rec("a", "main", 1, "boot-1")).await.unwrap();
+        let did = s
+            .finish_task(
+                "a",
+                TaskStatus::Failed,
+                Some("partial output"),
+                Some("boom"),
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(did, "a non-terminal row must be finished");
+        let got = s.get("a").await.unwrap().unwrap();
+        assert_eq!(got.status, TaskStatus::Failed);
+        assert!(got.finished_at.is_some());
+        assert!(got.delivered);
+
+        // TaskRecord doesn't carry output/error; read them straight off the row.
+        let conn = s.conn.lock();
+        let (output, error): (Option<String>, Option<String>) = conn
+            .query_row("SELECT output, error FROM tasks WHERE id = 'a'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        drop(conn);
+        assert_eq!(
+            output.as_deref(),
+            Some("partial output"),
+            "output must survive finish_task"
+        );
+        assert_eq!(
+            error.as_deref(),
+            Some("boom"),
+            "error must survive finish_task"
+        );
+    }
+
+    /// The whole point of this method: `finished` and `delivered` land in one
+    /// write, so a child finished with `delivered = true` is never offered to
+    /// `claim_undelivered_children` — there is no window where it was
+    /// terminal-but-undelivered for a concurrent claim to catch.
+    #[tokio::test]
+    async fn finish_task_delivered_true_is_never_claimed() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("kid", "mum", TaskStatus::Running))
+            .await
+            .unwrap();
+        s.finish_task("kid", TaskStatus::Completed, Some("done"), None, true)
+            .await
+            .unwrap();
+
+        assert!(
+            s.claim_undelivered_children("mum").await.unwrap().is_empty(),
+            "a child finished with delivered = true must not be claimable"
+        );
+    }
+
+    /// A child finished with `delivered = false` (the coordinator has not yet
+    /// handed the result to a waiter) is exactly the row
+    /// `claim_undelivered_children` exists to find, and only once.
+    #[tokio::test]
+    async fn finish_task_delivered_false_is_claimed_exactly_once() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("kid", "mum", TaskStatus::Running))
+            .await
+            .unwrap();
+        s.finish_task("kid", TaskStatus::Completed, Some("done"), None, false)
+            .await
+            .unwrap();
+
+        let first = s.claim_undelivered_children("mum").await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].task_id, "kid");
+        assert_eq!(first[0].output.as_deref(), Some("done"));
+
+        let second = s.claim_undelivered_children("mum").await.unwrap();
+        assert!(
+            second.is_empty(),
+            "a second waker must not re-announce a completion already claimed"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_task_rejects_a_non_terminal_status() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(rec("a", "main", 1, "boot-1")).await.unwrap();
+
+        let err = s
+            .finish_task("a", TaskStatus::Running, None, None, true)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("terminal"),
+            "error must say why: {err}"
+        );
+
+        // Rejected before any write: the row must be untouched.
+        let got = s.get("a").await.unwrap().unwrap();
+        assert_eq!(got.status, TaskStatus::Running);
+        assert!(!got.delivered);
+    }
+
+    /// A terminal row is never re-finished by a second call — mirrors
+    /// `update_status`'s existing "NOT IN terminal" guard. Decided behavior:
+    /// no-op, reported via `Ok(false)`, not an error and not a silent
+    /// overwrite of the first outcome.
+    #[tokio::test]
+    async fn finish_task_does_not_re_finish_an_already_terminal_row() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(rec("a", "main", 1, "boot-1")).await.unwrap();
+        s.finish_task("a", TaskStatus::Completed, Some("first"), None, false)
+            .await
+            .unwrap();
+
+        let did = s
+            .finish_task(
+                "a",
+                TaskStatus::Failed,
+                Some("second"),
+                Some("oops"),
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !did,
+            "an already-terminal row must not be re-finished"
+        );
+
+        let got = s.get("a").await.unwrap().unwrap();
+        assert_eq!(got.status, TaskStatus::Completed, "first outcome sticks");
+        assert!(
+            !got.delivered,
+            "the second call's delivered=true must not overwrite the first outcome"
+        );
     }
 
     fn child_of(id: &str, parent: &str, status: TaskStatus) -> TaskRecord {

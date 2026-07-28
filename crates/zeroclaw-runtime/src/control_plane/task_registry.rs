@@ -141,6 +141,34 @@ pub trait TaskRegistry: Send + Sync {
     /// owns it. See [`crate::control_plane::authority::is_authoritative`].
     async fn reconcile_lost(&self, id: &str, now_boot_id: &str) -> anyhow::Result<bool>;
 
+    /// Atomically transition `id` straight to a terminal `status`, recording
+    /// `output`/`error` and the `delivered` flag in the same write.
+    ///
+    /// This exists because "finish the task" and "flag it delivered" used to
+    /// be two separate writes (`update_status` then a second call). Between
+    /// those two writes the row is terminal-but-undelivered — exactly the
+    /// shape [`claim_undelivered_children`] selects on — so a concurrent
+    /// claim could land in that window, announce the completion, and then
+    /// the second write would stamp `delivered` over a result already
+    /// handed to a waiting caller (or worse, race it). A single UPDATE that
+    /// moves the row from non-terminal straight to (terminal status,
+    /// output, error, delivered) leaves no window in which the row is
+    /// claimable-but-mislabelled.
+    ///
+    /// Rejects a non-terminal `status` (use `update_status` for those).
+    /// Returns `Ok(false)` — no write performed — when `id` does not exist
+    /// or is already terminal; a terminal task is never silently
+    /// re-finished, matching `update_status`'s existing "NOT IN terminal"
+    /// guard.
+    async fn finish_task(
+        &self,
+        id: &str,
+        status: TaskStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+        delivered: bool,
+    ) -> anyhow::Result<bool>;
+
     /// Claim finished-but-unannounced children of `parent_id`, marking them
     /// delivered in the same statement that returns them.
     ///
