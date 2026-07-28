@@ -3892,10 +3892,27 @@ impl Config {
     /// this returns; see `SecurityPolicy::for_agent`.
     #[must_use]
     pub fn risk_profile_for_agent(&self, agent_alias: &str) -> Option<&RiskProfileConfig> {
+        let profile_alias = self.resolved_risk_profile_alias(agent_alias)?;
+        self.risk_profiles.get(profile_alias)
+    }
+
+    /// Resolve the risk-profile *alias* (not the `RiskProfileConfig` itself)
+    /// that governs `agent_alias`: a direct `agents.<alias>.risk_profile` if
+    /// non-empty, else the card's `risk_profile` when one governs this agent,
+    /// else `None`. This is the single resolution [`Self::risk_profile_for_agent`]
+    /// performs — extracted so callers that need to *compare* two agents'
+    /// governing profile (rather than look one profile up) can do so without
+    /// re-deriving the card-follow logic and, in doing so, silently reading
+    /// the raw `agent.risk_profile` field instead — the field that is empty
+    /// by construction for every carded agent (see that doc comment). Any
+    /// site comparing or gating on "this agent's risk profile" should call
+    /// this, not `agent.risk_profile` directly.
+    #[must_use]
+    fn resolved_risk_profile_alias(&self, agent_alias: &str) -> Option<&str> {
         let agent = self.agents.get(agent_alias)?;
         let profile_alias = agent.risk_profile.trim();
         if !profile_alias.is_empty() {
-            return self.risk_profiles.get(profile_alias);
+            return Some(profile_alias);
         }
         let card = agent.card.as_str().trim();
         if card.is_empty() {
@@ -3905,7 +3922,7 @@ impl Config {
         if carded_profile.is_empty() {
             return None;
         }
-        self.risk_profiles.get(carded_profile)
+        Some(carded_profile)
     }
 
     /// Resolve the persona dial set for an explicit agent alias.
@@ -3968,6 +3985,14 @@ impl Config {
     /// Deduped, sorted; unknown caller yields empty. Disabled targets are
     /// never reachable. Explicit entries override the bounded mode used for
     /// implicit same-profile peers.
+    ///
+    /// The implicit same-profile-peer check compares
+    /// [`Self::resolved_risk_profile_alias`], not the raw `agent.risk_profile`
+    /// field, on both the caller and every candidate: a carded agent's
+    /// `agent.risk_profile` is empty by construction (its profile lives on
+    /// its card), so comparing the raw field would silently drop a carded
+    /// agent out of this roster in either role even when its card's profile
+    /// matches.
     #[must_use]
     pub fn reachable_delegate_target_configs(
         &self,
@@ -3980,16 +4005,15 @@ impl Config {
         let mut targets: std::collections::BTreeMap<String, DelegateExecutionMode> =
             std::collections::BTreeMap::new();
 
-        if caller.delegate_same_risk_profile {
-            let caller_profile = caller.risk_profile.trim();
-            if !caller_profile.is_empty() {
-                for (alias, agent) in &self.agents {
-                    if alias.as_str() != caller_alias
-                        && agent.enabled
-                        && agent.risk_profile.trim() == caller_profile
-                    {
-                        targets.insert(alias.clone(), DelegateExecutionMode::Bounded);
-                    }
+        if caller.delegate_same_risk_profile
+            && let Some(caller_profile) = self.resolved_risk_profile_alias(caller_alias)
+        {
+            for (alias, agent) in &self.agents {
+                if alias.as_str() != caller_alias
+                    && agent.enabled
+                    && self.resolved_risk_profile_alias(alias) == Some(caller_profile)
+                {
+                    targets.insert(alias.clone(), DelegateExecutionMode::Bounded);
                 }
             }
         }
@@ -36796,6 +36820,98 @@ allowed_users = []
         );
     }
 
+    // ── Carded agents in the implicit same-profile-peer roster (#21) ──
+    //
+    // `reachable_delegate_target_configs` used to compare the raw
+    // `agent.risk_profile` field on both the caller and every candidate.
+    // That field is empty by construction for a carded agent (its profile
+    // lives on `cards[card].risk_profile` instead — see
+    // `Config::resolved_risk_profile_alias`), so a carded agent silently
+    // dropped out of this roster in either role even when its card's
+    // profile matched. These four cases are the fix's discriminator: they
+    // fail if the comparison reverts to `caller.risk_profile.trim()` /
+    // `agent.risk_profile.trim()` instead of the resolved alias.
+
+    fn insert_card(cfg: &mut Config, card_alias: &str, risk_profile: &str) {
+        cfg.cards.insert(
+            card_alias.to_string(),
+            crate::card::AgentCard {
+                risk_profile: risk_profile.into(),
+                ..crate::card::AgentCard::default()
+            },
+        );
+    }
+
+    /// Strip an agent's direct `risk_profile` and point it at a card
+    /// instead — the shape validation requires (never both set).
+    fn carded(cfg: &mut Config, agent_alias: &str, card_alias: &str) {
+        let agent = cfg.agents.get_mut(agent_alias).unwrap();
+        agent.risk_profile = String::new().into();
+        agent.card = card_alias.into();
+    }
+
+    #[test]
+    async fn reachable_targets_includes_uncarded_peer_of_a_carded_caller() {
+        // aaa is carded; its card's profile ("shared") matches aaatools'
+        // direct profile. Without resolving the caller through its card,
+        // `caller.risk_profile.trim()` is empty and the whole implicit-peer
+        // branch is skipped — aaatools would be missing from the roster.
+        let mut cfg = delegate_roster_config();
+        insert_card(&mut cfg, "aaa_card", "shared");
+        carded(&mut cfg, "aaa", "aaa_card");
+        assert_eq!(
+            cfg.reachable_delegate_targets("aaa"),
+            vec!["aaatools"],
+            "a carded caller must reach an uncarded peer whose profile matches the card's"
+        );
+    }
+
+    #[test]
+    async fn reachable_targets_includes_a_carded_candidate_of_an_uncarded_caller() {
+        // aaatools is carded; its card's profile ("shared") matches aaa's
+        // direct profile. Without resolving the candidate through its card,
+        // `agent.risk_profile.trim()` is empty and never equals "shared" —
+        // aaatools would be missing from the roster even though aaa is
+        // uncarded and unaffected.
+        let mut cfg = delegate_roster_config();
+        insert_card(&mut cfg, "aaatools_card", "shared");
+        carded(&mut cfg, "aaatools", "aaatools_card");
+        assert_eq!(
+            cfg.reachable_delegate_targets("aaa"),
+            vec!["aaatools"],
+            "an uncarded caller must reach a carded peer whose card's profile matches"
+        );
+    }
+
+    #[test]
+    async fn reachable_targets_excludes_carded_pair_with_different_resolved_profiles() {
+        // Both carded, but the cards name different profiles ("shared" vs
+        // "lore"). The implicit same-profile rule must still exclude them —
+        // resolving through cards must not paper over an actual mismatch.
+        let mut cfg = delegate_roster_config();
+        insert_card(&mut cfg, "aaa_card", "shared");
+        insert_card(&mut cfg, "aaatools_card", "lore");
+        carded(&mut cfg, "aaa", "aaa_card");
+        carded(&mut cfg, "aaatools", "aaatools_card");
+        assert!(
+            cfg.reachable_delegate_targets("aaa").is_empty(),
+            "carded agents with different resolved profiles must not become implicit peers"
+        );
+    }
+
+    #[test]
+    async fn reachable_targets_uncarded_behaviour_is_unchanged() {
+        // Regression guard: an entirely uncarded roster must resolve
+        // identically to before the resolved-alias comparison was
+        // introduced. No agent here has a `card` set, so
+        // `resolved_risk_profile_alias` takes the same direct-field branch
+        // the old raw-field comparison did.
+        let cfg = delegate_roster_config();
+        assert_eq!(cfg.reachable_delegate_targets("aaa"), vec!["aaatools"]);
+        assert_eq!(cfg.reachable_delegate_targets("aaatools"), vec!["aaa"]);
+        assert!(cfg.reachable_delegate_targets("aaalore").is_empty());
+    }
+
     #[test]
     async fn reachable_targets_excludes_disabled_explicit_delegate() {
         let mut cfg = delegate_roster_config();
@@ -37211,5 +37327,140 @@ model_provider = \"ollama.default\"
             ..Default::default()
         };
         assert!(agent.is_dispatchable());
+    }
+
+    /// Structural guard against a *sixth* raw `.risk_profile` read showing up
+    /// in this file (#21: `agents.<alias>.risk_profile` is forced empty for
+    /// every carded agent, so any comparison or gate reading it directly
+    /// instead of resolving through the card is silently wrong for carded
+    /// agents). Fixed instances so far: `resolved_risk_profile_alias` /
+    /// `risk_profile_for_agent` (the resolver itself), the `validate()`
+    /// dangling-reference and card-exclusivity checks (which must inspect
+    /// the raw field — that is what they are validating), and
+    /// `reachable_delegate_target_configs` (fixed by this same patch, now
+    /// routed through `resolved_risk_profile_alias`).
+    ///
+    /// This re-reads this file's own production source (everything before
+    /// `mod tests`, so this doc comment's own mentions of the field name
+    /// can't trip itself) and fails if a `.risk_profile` dot-access (the
+    /// singular field, not the `.risk_profiles` map) appears inside any
+    /// function other than the allowlisted ones below. Reverting
+    /// `reachable_delegate_target_configs` back to `caller.risk_profile.trim()`
+    /// / `agent.risk_profile.trim()` turns this red; so does adding a new
+    /// raw read anywhere else in the file's production code.
+    ///
+    /// One entry on the allowlist is not "legitimate" in the same sense as
+    /// the rest: `AliasedAgentConfig::is_dispatchable` (schema.rs, near the
+    /// test above) also reads the raw field and is *also* wrong for a
+    /// carded agent — it reports a fully dispatchable carded agent as not
+    /// dispatchable. It is carved out here, not fixed, because fixing it
+    /// needs `Config::cards` and `is_dispatchable` only has `&self` on
+    /// `AliasedAgentConfig`; its only two callers are in
+    /// `zeroclaw-channels/src/orchestrator/acp_server.rs`, outside this
+    /// patch's file scope. Do not add further names to this list without
+    /// the same kind of justification recorded next to them.
+    #[test]
+    async fn no_new_raw_risk_profile_reads_outside_the_resolver_and_validation() {
+        const SRC: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/schema.rs"
+        ));
+        let production_src = SRC.split("mod tests").next().unwrap_or(SRC);
+
+        // Functions that legitimately read `agent.risk_profile` (or, for the
+        // resolver, `cards[card].risk_profile`) directly:
+        //   - `resolved_risk_profile_alias` / `risk_profile_for_agent`: the
+        //     single resolution helper this whole guard exists to funnel
+        //     every other caller through.
+        //   - `validate`: the dangling-reference and card-exclusivity checks
+        //     are validating the raw field itself (e.g. "is it set alongside
+        //     a card", "does it point at a real risk_profiles entry"); they
+        //     must see the unresolved value, not the card-following one.
+        //   - `is_dispatchable`: a known, unfixed, out-of-file-scope
+        //     instance of this exact bug — see the doc comment above.
+        const ALLOWED_FNS: &[&str] = &[
+            "resolved_risk_profile_alias",
+            "risk_profile_for_agent",
+            "validate",
+            "is_dispatchable",
+        ];
+
+        let mut current_fn: Option<&str> = None;
+        let mut offenders = Vec::new();
+
+        for (i, line) in production_src.lines().enumerate() {
+            if let Some(name) = fn_name_declared_on(line) {
+                current_fn = Some(name);
+            }
+
+            if line.trim_start().starts_with("//") {
+                continue; // doc comments and line comments never gate anything
+            }
+
+            if line_reads_raw_risk_profile_field(line)
+                && !current_fn.is_some_and(|f| ALLOWED_FNS.contains(&f))
+            {
+                offenders.push(format!(
+                    "line {} (fn {:?}): {}",
+                    i + 1,
+                    current_fn,
+                    line.trim()
+                ));
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "found a raw `.risk_profile` field read outside the allowlisted resolver/\
+             validation functions {ALLOWED_FNS:?} — carded agents force this field \
+             empty, so gating or comparing on it directly is silently wrong for them; \
+             route through `Config::resolved_risk_profile_alias` instead:\n{}",
+            offenders.join("\n")
+        );
+
+        /// The function name a top-level `fn` (or `pub fn`, `async fn`,
+        /// `pub(crate) fn`, `pub async fn`, ...) declaration line introduces,
+        /// if this line is one.
+        fn fn_name_declared_on(line: &str) -> Option<&str> {
+            let trimmed = line.trim_start();
+            let after_fn = trimmed
+                .strip_prefix("pub(crate) async fn ")
+                .or_else(|| trimmed.strip_prefix("pub(crate) fn "))
+                .or_else(|| trimmed.strip_prefix("pub async fn "))
+                .or_else(|| trimmed.strip_prefix("pub fn "))
+                .or_else(|| trimmed.strip_prefix("async fn "))
+                .or_else(|| trimmed.strip_prefix("fn "))?;
+            let end = after_fn
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(after_fn.len());
+            if end == 0 {
+                None
+            } else {
+                Some(&after_fn[..end])
+            }
+        }
+
+        /// Whether `line` dot-accesses the singular `risk_profile` field
+        /// (`.risk_profile` not immediately followed by another identifier
+        /// character — which rules out `.risk_profiles` the map and
+        /// `.risk_profile_for_agent(...)`/`.risk_profile_declared` etc., were
+        /// such names ever added).
+        fn line_reads_raw_risk_profile_field(line: &str) -> bool {
+            const NEEDLE: &str = ".risk_profile";
+            let mut search_from = 0;
+            while let Some(idx) = line[search_from..].find(NEEDLE) {
+                let abs = search_from + idx;
+                let after = abs + NEEDLE.len();
+                let boundary = line[after..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+                if boundary {
+                    return true;
+                }
+                search_from = after;
+            }
+            false
+        }
     }
 }
