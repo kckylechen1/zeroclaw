@@ -143,6 +143,55 @@ pub fn build_system_prompt_with_mode_and_autonomy(
     // the model to treat tool calls as invisible infrastructure.
     show_tool_calls: bool,
 ) -> String {
+    build_system_prompt_with_persona(
+        workspace_dir,
+        model_name,
+        tools,
+        skills,
+        identity_config,
+        bootstrap_max_chars,
+        autonomy_config,
+        native_tool_specs_present,
+        skills_prompt_mode,
+        compact_context,
+        max_system_prompt_chars,
+        inject_memory,
+        show_tool_calls,
+        None,
+    )
+}
+
+/// Like [`build_system_prompt_with_mode_and_autonomy`] but additionally
+/// accepts a pre-rendered persona `## Voice` section
+/// ([`zeroclaw_config::persona::PersonaKnobs::to_prompt_section`]).
+/// `persona_section: None` (the case `build_system_prompt_with_mode_and_autonomy`
+/// always passes) produces byte-identical output to before this section
+/// existed.
+#[allow(clippy::too_many_arguments)]
+pub fn build_system_prompt_with_persona(
+    workspace_dir: &std::path::Path,
+    model_name: &str,
+    tools: &[(&str, &str)],
+    skills: &[Skill],
+    identity_config: Option<&zeroclaw_config::schema::IdentityConfig>,
+    bootstrap_max_chars: Option<usize>,
+    autonomy_config: Option<&zeroclaw_config::schema::RiskProfileConfig>,
+    native_tool_specs_present: bool,
+    skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode,
+    compact_context: bool,
+    max_system_prompt_chars: usize,
+    inject_memory: bool,
+    show_tool_calls: bool,
+    // Rendered `## Voice` section for this agent's persona dials, or `None`
+    // when the agent has no persona configured (direct or via card) or every
+    // dial sits at `medium`. Placement is deliberate and not caller-movable:
+    // after the anti-narration and tool-honesty blocks below (so a persona
+    // dial can never soften either hard behavioural constraint) and before
+    // the tools list (so the truncation budget at the bottom of this
+    // function, which keeps the *top* of the prompt, cuts the tools list
+    // before it ever cuts the agent's voice).
+    persona_section: Option<&str>,
+) -> String {
     use std::fmt::Write;
     let mut prompt = String::with_capacity(8192);
     let has_tools = !tools.is_empty() || native_tool_specs_present;
@@ -170,6 +219,18 @@ pub fn build_system_prompt_with_mode_and_autonomy(
              - If a tool call fails, report the error — never make up data to fill the gap.\n\
              - When unsure whether a tool call succeeded, ask the user rather than guessing.\n\n",
         );
+    }
+
+    // ── 0c. Voice (persona dials) ───────────────────────────────
+    // Must sit after the two hard behavioural blocks above (a persona dial
+    // must never be able to displace anti-narration or tool honesty) and
+    // before the tools list below (so it survives the tail truncation at
+    // the bottom of this function, which keeps the top of the prompt).
+    if let Some(section) = persona_section
+        && !section.is_empty()
+    {
+        prompt.push_str(section);
+        prompt.push('\n');
     }
 
     // ── 1. Tooling ──────────────────────────────────────────────
@@ -606,5 +667,110 @@ mod tests {
             !prompt.contains("## Tool Authorization"),
             "Tool Authorization should be skipped when no power tools (shell/file_write/file_edit) are registered"
         );
+    }
+
+    fn build_with_persona(tools: &[(&str, &str)], persona_section: Option<&str>) -> String {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let autonomy = zeroclaw_config::schema::RiskProfileConfig::default();
+        build_system_prompt_with_persona(
+            workspace.path(),
+            "test-model",
+            tools,
+            &[],
+            None,
+            Some(512),
+            Some(&autonomy),
+            false,
+            SkillsPromptInjectionMode::Full,
+            false,
+            0,
+            true,
+            false,
+            persona_section,
+        )
+    }
+
+    /// `## Voice` must land after both hard behavioural blocks (anti-narration,
+    /// tool honesty) and before the tools list — a persona dial must never be
+    /// able to displace either, and truncation keeps only the top of the
+    /// prompt, so voice has to sit high enough to survive it.
+    #[test]
+    fn voice_section_lands_after_honesty_blocks_and_before_tools() {
+        let tools = [("shell", "Run a shell command")];
+        let prompt = build_with_persona(&tools, Some("## Voice\n\n- Be terse.\n"));
+
+        let narration_pos = prompt
+            .find("## CRITICAL: No Tool Narration")
+            .expect("anti-narration block present");
+        let honesty_pos = prompt
+            .find("## CRITICAL: Tool Honesty")
+            .expect("tool honesty block present");
+        let voice_pos = prompt.find("## Voice").expect("Voice section present");
+        let tools_pos = prompt.find("## Tools").expect("Tools section present");
+
+        assert!(
+            narration_pos < voice_pos && honesty_pos < voice_pos,
+            "Voice must come after both anti-narration and tool-honesty blocks"
+        );
+        assert!(
+            voice_pos < tools_pos,
+            "Voice must come before the tools list"
+        );
+    }
+
+    /// Regression guard: `build_system_prompt_with_mode_and_autonomy` (every
+    /// caller that predates persona wiring) must never emit `## Voice` —
+    /// its `persona_section` is hard-wired to `None`.
+    #[test]
+    fn no_persona_produces_no_voice_section() {
+        let tools = [("shell", "Run a shell command")];
+        let prompt = build_with_persona(&tools, None);
+        assert!(
+            !prompt.contains("## Voice"),
+            "no persona section should mean no Voice heading"
+        );
+    }
+
+    /// Byte-identical regression guard: the pre-existing entry point must
+    /// produce the exact same output before and after persona wiring, since
+    /// it always passes `persona_section: None` through to the new function.
+    #[test]
+    fn build_system_prompt_with_mode_and_autonomy_is_byte_identical_to_persona_none() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let autonomy = zeroclaw_config::schema::RiskProfileConfig::default();
+        let tools = [("shell", "Run a shell command")];
+
+        let via_old_entry_point = build_system_prompt_with_mode_and_autonomy(
+            workspace.path(),
+            "test-model",
+            &tools,
+            &[],
+            None,
+            Some(512),
+            Some(&autonomy),
+            false,
+            SkillsPromptInjectionMode::Full,
+            false,
+            0,
+            true,
+            false,
+        );
+        let via_new_entry_point_with_no_persona = build_system_prompt_with_persona(
+            workspace.path(),
+            "test-model",
+            &tools,
+            &[],
+            None,
+            Some(512),
+            Some(&autonomy),
+            false,
+            SkillsPromptInjectionMode::Full,
+            false,
+            0,
+            true,
+            false,
+            None,
+        );
+        assert_eq!(via_old_entry_point, via_new_entry_point_with_no_persona);
     }
 }

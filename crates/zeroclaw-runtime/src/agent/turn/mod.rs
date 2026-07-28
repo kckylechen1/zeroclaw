@@ -1485,6 +1485,9 @@ fn build_owned_step_system_prompt(
     } else {
         None
     };
+    let persona_section = config
+        .persona_for_agent(alias)
+        .and_then(zeroclaw_config::persona::PersonaKnobs::to_prompt_section);
     crate::agent::loop_::build_system_prompt_for_turn(
         &config.agent_workspace_dir(alias),
         &owned.model,
@@ -1504,6 +1507,7 @@ fn build_owned_step_system_prompt(
         owned.agent.resolved.max_system_prompt_chars,
         true,
         config.channels.show_tool_calls,
+        persona_section.as_deref(),
         None,
     )
 }

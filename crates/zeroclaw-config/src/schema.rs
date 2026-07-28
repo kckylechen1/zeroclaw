@@ -3908,6 +3908,35 @@ impl Config {
         self.risk_profiles.get(carded_profile)
     }
 
+    /// Resolve the persona dial set for an explicit agent alias.
+    ///
+    /// Mirrors [`Self::risk_profile_for_agent`]'s resolution order exactly:
+    /// a direct `agents.<alias>.persona` wins; else follow the card
+    /// (`agents.<alias>.card` -> `cards[card].persona`); else `None`. A
+    /// carded agent's own `agent.persona` field is empty by construction
+    /// (validation forbids setting both a card and a persona), so a carded
+    /// agent always resolves through the card once one names a persona.
+    /// `None` means "no dials configured" — the caller renders no `## Voice`
+    /// section, not an error, unlike the risk-profile case where every
+    /// enabled agent must resolve to one.
+    #[must_use]
+    pub fn persona_for_agent(&self, agent_alias: &str) -> Option<&crate::persona::PersonaKnobs> {
+        let agent = self.agents.get(agent_alias)?;
+        let persona_alias = agent.persona.as_str().trim();
+        if !persona_alias.is_empty() {
+            return self.personas.get(persona_alias);
+        }
+        let card = agent.card.as_str().trim();
+        if card.is_empty() {
+            return None;
+        }
+        let carded_persona = self.cards.get(card)?.persona.as_str().trim();
+        if carded_persona.is_empty() {
+            return None;
+        }
+        self.personas.get(carded_persona)
+    }
+
     /// Resolve the delegate targets `caller_alias` may reach:
     /// same-profile peers when `delegate_same_risk_profile` is set, unioned
     /// with the explicit `delegates` roster, minus the caller. Single
@@ -4176,6 +4205,22 @@ impl Config {
     #[must_use]
     pub fn resolved_agent_config(&self, agent_alias: &str) -> Option<AliasedAgentConfig> {
         let mut out = self.agents.get(agent_alias)?.clone();
+        // A card's `grants.mcp_bundles` REPLACES `agents.<alias>.mcp_bundles`,
+        // it does not union with it — the same rule the card's tool grants
+        // follow (a card is meant to be the complete statement of an agent's
+        // reach; a union would mean the card no longer tells you what the
+        // agent can reach). Fail closed: a carded agent whose card grants no
+        // bundles gets no servers, even if the raw agent field (the pointer
+        // the card supersedes) still has entries left over from before it
+        // was carded.
+        let card = out.card.as_str().trim().to_string();
+        if !card.is_empty() {
+            out.mcp_bundles = self
+                .cards
+                .get(card.as_str())
+                .map(|c| c.grants.mcp_bundles.clone())
+                .unwrap_or_default();
+        }
         let mut resolved = ResolvedRuntime {
             max_tool_iterations: self.effective_max_tool_iterations(agent_alias),
             max_history_messages: self.effective_max_history_messages(agent_alias),
@@ -35674,6 +35719,138 @@ allowed_users = []
         let cfg: Config = toml::from_str(&card_config(r#"risk_profile = "default""#, "")).unwrap();
         cfg.validate()
             .expect("an agent without a card keeps working exactly as before");
+    }
+
+    // ── persona_for_agent ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn persona_for_agent_follows_the_card() {
+        let cfg: Config = toml::from_str(&card_config(r#"card = "analyst""#, "")).unwrap();
+        let persona = cfg
+            .persona_for_agent("default")
+            .expect("a carded agent whose card names a persona resolves it");
+        assert_eq!(persona.directness, crate::persona::PersonaLevel::Xhigh);
+    }
+
+    #[tokio::test]
+    async fn persona_for_agent_resolves_a_direct_persona_on_an_uncarded_agent() {
+        let cfg: Config = toml::from_str(&card_config(r#"persona = "terse""#, "")).unwrap();
+        let persona = cfg
+            .persona_for_agent("default")
+            .expect("an uncarded agent's direct persona field resolves");
+        assert_eq!(persona.directness, crate::persona::PersonaLevel::Xhigh);
+    }
+
+    #[tokio::test]
+    async fn persona_for_agent_is_none_for_an_agent_with_neither() {
+        let cfg: Config = toml::from_str(&card_config(r#"risk_profile = "default""#, "")).unwrap();
+        assert!(
+            cfg.persona_for_agent("default").is_none(),
+            "an agent with no card and no direct persona has no dials"
+        );
+    }
+
+    // ── resolved_agent_config: card mcp_bundles ─────────────────────
+
+    #[tokio::test]
+    async fn resolved_agent_config_mcp_bundles_come_from_the_card() {
+        // The agent also names a stale `mcp_bundles` entry of its own — the
+        // pointer the card supersedes. It must be ignored, not unioned in:
+        // reading the card alone must tell you the agent's whole MCP reach.
+        let toml = r#"
+            [providers.models.custom.default]
+            api_key = "k"
+            model = "qwen3.6-plus"
+            uri = "https://example.com/v1"
+            wire_api = "chat_completions"
+
+            [risk_profiles.default]
+            level = "supervised"
+
+            [personas.terse]
+            directness = "xhigh"
+
+            [[mcp.servers]]
+            name = "hyperion"
+            transport = "stdio"
+            command = "/usr/bin/hyperion-mcp"
+
+            [[mcp.servers]]
+            name = "stale"
+            transport = "stdio"
+            command = "/usr/bin/stale-mcp"
+
+            [mcp_bundles.hyperion_read]
+            servers = ["hyperion"]
+
+            [mcp_bundles.stale_bundle]
+            servers = ["stale"]
+
+            [cards.analyst]
+            persona = "terse"
+            risk_profile = "default"
+
+            [cards.analyst.grants]
+            tools = [{ tool = "memory_recall", class = "local_read" }]
+            mcp_bundles = ["hyperion_read"]
+
+            [agents.default]
+            enabled = true
+            model_provider = "custom.default"
+            card = "analyst"
+            mcp_bundles = ["stale_bundle"]
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+
+        let granted: Vec<String> = cfg
+            .mcp_servers_for_agent("default")
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            granted,
+            vec!["hyperion".to_string()],
+            "a carded agent's MCP reach comes from the card's grants, and equals them exactly \
+             (replaces the agent's own stale mcp_bundles rather than unioning with it)"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_agent_config_carded_agent_with_no_card_bundles_gets_no_servers() {
+        let toml = r#"
+            [providers.models.custom.default]
+            api_key = "k"
+            model = "qwen3.6-plus"
+            uri = "https://example.com/v1"
+            wire_api = "chat_completions"
+
+            [risk_profiles.default]
+            level = "supervised"
+
+            [[mcp.servers]]
+            name = "hyperion"
+            transport = "stdio"
+            command = "/usr/bin/hyperion-mcp"
+
+            [mcp_bundles.hyperion_read]
+            servers = ["hyperion"]
+
+            [cards.bare]
+            risk_profile = "default"
+
+            [cards.bare.grants]
+            tools = [{ tool = "memory_recall", class = "local_read" }]
+
+            [agents.default]
+            enabled = true
+            model_provider = "custom.default"
+            card = "bare"
+        "#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(
+            cfg.mcp_servers_for_agent("default").is_empty(),
+            "a carded agent whose card grants no bundles gets no servers"
+        );
     }
 
     // profile-level summary_provider validated by the new profile loop.

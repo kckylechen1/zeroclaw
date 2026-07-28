@@ -599,6 +599,9 @@ pub(crate) fn build_system_prompt_for_turn(
     max_system_prompt_chars: usize,
     inject_memory: bool,
     show_tool_calls: bool,
+    // Rendered `## Voice` section for this agent's persona, or `None`. See
+    // `system_prompt::build_system_prompt_with_persona` for placement rules.
+    persona_section: Option<&str>,
     thinking_prefix: Option<&str>,
 ) -> Result<String> {
     let native_tools = model_provider.supports_native_tools();
@@ -623,7 +626,7 @@ pub(crate) fn build_system_prompt_for_turn(
         &mut turn_tool_descs,
         &mut turn_deferred_section,
     );
-    let mut system_prompt = crate::agent::system_prompt::build_system_prompt_with_mode_and_autonomy(
+    let mut system_prompt = crate::agent::system_prompt::build_system_prompt_with_persona(
         agent_workspace,
         model_name,
         &turn_tool_descs,
@@ -637,6 +640,7 @@ pub(crate) fn build_system_prompt_for_turn(
         max_system_prompt_chars,
         inject_memory,
         show_tool_calls,
+        persona_section,
     );
 
     if expose_text_tool_protocol {
@@ -1159,6 +1163,12 @@ pub async fn run(
             )
         })?
         .clone();
+    // Rendered once and reused across every prompt build in this turn, same
+    // as `risk_profile` above — the persona resolution is stable for the
+    // whole call, only the tool/skill surface changes per rebuild.
+    let persona_section = config
+        .persona_for_agent(agent_alias)
+        .and_then(zeroclaw_config::persona::PersonaKnobs::to_prompt_section);
     let memory_composite = {
         use zeroclaw_config::multi_agent::MemoryBackendKind;
         match agent.memory.backend {
@@ -1655,6 +1665,7 @@ pub async fn run(
             eff_max_system_prompt_chars,
             true,
             config.channels.show_tool_calls,
+            persona_section.as_deref(),
             None,
         )?;
 
@@ -1751,6 +1762,7 @@ pub async fn run(
                 eff_max_system_prompt_chars,
                 true,
                 config.channels.show_tool_calls,
+                persona_section.as_deref(),
                 thinking_params.system_prompt_prefix.as_deref(),
             )?;
 
@@ -1872,6 +1884,7 @@ pub async fn run(
                         eff_max_system_prompt_chars,
                         true,
                         config.channels.show_tool_calls,
+                        persona_section.as_deref(),
                         thinking_params.system_prompt_prefix.as_deref(),
                     )?;
                 }
@@ -2422,6 +2435,7 @@ pub async fn run(
                             eff_max_system_prompt_chars,
                             true,
                             config.channels.show_tool_calls,
+                            persona_section.as_deref(),
                             thinking_params.system_prompt_prefix.as_deref(),
                         )?;
                     }
@@ -2805,6 +2819,9 @@ pub async fn process_message(
             )
         })?
         .clone();
+    let persona_section = config
+        .persona_for_agent(agent_alias)
+        .and_then(zeroclaw_config::persona::PersonaKnobs::to_prompt_section);
     let memory_composite = {
         use zeroclaw_config::multi_agent::MemoryBackendKind;
         match agent.memory.backend {
@@ -3150,22 +3167,22 @@ pub async fn process_message(
             &mut deferred_section,
         );
         let agent_workspace = config.agent_workspace_dir(agent_alias);
-        let mut system_prompt =
-            crate::agent::system_prompt::build_system_prompt_with_mode_and_autonomy(
-                &agent_workspace,
-                &model_name,
-                &tool_descs,
-                &skills,
-                Some(&agent.identity),
-                bootstrap_max_chars,
-                Some(&risk_profile),
-                native_tool_specs_present,
-                eff_prompt_injection_mode,
-                eff_compact_context,
-                eff_max_system_prompt_chars,
-                false,
-                config.channels.show_tool_calls,
-            );
+        let mut system_prompt = crate::agent::system_prompt::build_system_prompt_with_persona(
+            &agent_workspace,
+            &model_name,
+            &tool_descs,
+            &skills,
+            Some(&agent.identity),
+            bootstrap_max_chars,
+            Some(&risk_profile),
+            native_tool_specs_present,
+            eff_prompt_injection_mode,
+            eff_compact_context,
+            eff_max_system_prompt_chars,
+            false,
+            config.channels.show_tool_calls,
+            persona_section.as_deref(),
+        );
         if expose_text_tool_protocol {
             system_prompt.push_str(&build_tool_instructions_for_names(
                 &tools_registry,
@@ -12814,6 +12831,7 @@ Let me check the result."#;
             true,
             false,
             None,
+            None,
         )
         .expect("startup prompt should build");
         assert!(startup_prompt.contains(NATIVE_TOOLS_TASK_FRAMING));
@@ -12845,6 +12863,7 @@ Let me check the result."#;
             usize::MAX,
             true,
             false,
+            None,
             None,
         )
         .expect("no-tools turn prompt should build");
@@ -12881,10 +12900,82 @@ Let me check the result."#;
             true,
             false,
             None,
+            None,
         )
         .expect("tools turn prompt should build");
         assert!(tools_turn_prompt.contains(NATIVE_TOOLS_TASK_FRAMING));
         assert!(!tools_turn_prompt.contains(NO_TOOLS_TASK_FRAMING));
+    }
+
+    /// Regression guard for the `persona_section` parameter added to
+    /// `build_system_prompt_for_turn`: it must forward verbatim into the
+    /// built prompt when set, and add nothing when `None` (every caller of
+    /// this function before persona wiring).
+    #[test]
+    fn build_system_prompt_for_turn_forwards_persona_section() {
+        use zeroclaw_config::schema::{RiskProfileConfig, SkillsPromptInjectionMode};
+
+        let workspace = tempdir().unwrap();
+        let provider = ScriptedModelProvider::from_text_responses(vec!["ok"]);
+        let tools_registry: Vec<Box<dyn crate::tools::Tool>> = Vec::new();
+        let tool_descs: Vec<(&str, &str)> = Vec::new();
+        let risk_profile = RiskProfileConfig::default();
+
+        let with_persona = super::build_system_prompt_for_turn(
+            workspace.path(),
+            "test-model",
+            &tool_descs,
+            "",
+            &[],
+            None,
+            None,
+            &risk_profile,
+            &provider,
+            &tools_registry,
+            &[],
+            None,
+            false,
+            SkillsPromptInjectionMode::Full,
+            false,
+            usize::MAX,
+            true,
+            false,
+            Some("## Voice\n\n- Be terse.\n"),
+            None,
+        )
+        .expect("prompt with persona section should build");
+        assert!(
+            with_persona.contains("## Voice"),
+            "persona_section: Some(..) must reach the built prompt"
+        );
+
+        let without_persona = super::build_system_prompt_for_turn(
+            workspace.path(),
+            "test-model",
+            &tool_descs,
+            "",
+            &[],
+            None,
+            None,
+            &risk_profile,
+            &provider,
+            &tools_registry,
+            &[],
+            None,
+            false,
+            SkillsPromptInjectionMode::Full,
+            false,
+            usize::MAX,
+            true,
+            false,
+            None,
+            None,
+        )
+        .expect("prompt without persona section should build");
+        assert!(
+            !without_persona.contains("## Voice"),
+            "persona_section: None must add no Voice section"
+        );
     }
 
     #[test]
