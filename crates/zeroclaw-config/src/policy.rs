@@ -2262,6 +2262,20 @@ impl SecurityPolicy {
                 // the card author's own choice (`AgentCard::risk_profile`),
                 // so its exclusions are part of the authored posture.
                 policy.allowed_tools = card.grants.to_allowed_tools();
+                // `CardGrants`'s own doc says naming is the only way to
+                // grant — there is no "all". `McpDiscoveredToolPolicy::AutoAdmit`
+                // is documented as a profile-level "escape hatch for setups
+                // that rely on it"; a card cannot mean "auto-admit" because
+                // naming is its entire semantics, so when a card governs,
+                // that escape hatch closes regardless of what the profile it
+                // points at says. Left at the profile's own setting, an
+                // MCP-permissive profile would let `admits_unlisted` (and
+                // `tool_search.rs`'s own admission check) re-admit any
+                // `<server>__<tool>`-shaped name the card never granted —
+                // every consumer of `for_agent` (independent-mode delegation,
+                // top-level carded agents) inherits that hole otherwise.
+                policy.mcp_discovered_tool_policy =
+                    crate::autonomy::McpDiscoveredToolPolicy::ExplicitOnly;
             }
         }
         policy.config_path = Some(config.config_path.clone());
@@ -4519,6 +4533,24 @@ risk_profile = "shell_only"
         profile_alias: &str,
         grants: Vec<crate::card::ToolGrant>,
     ) -> crate::schema::Config {
+        carded_agent_config_with_mcp_policy(
+            card_alias,
+            profile_alias,
+            grants,
+            crate::autonomy::McpDiscoveredToolPolicy::default(),
+        )
+    }
+
+    /// Same shape as [`carded_agent_config`], but lets a test pin the named
+    /// profile's own `mcp_discovered_tool_policy` — needed to prove the
+    /// card-governed override forces `ExplicitOnly` regardless of what the
+    /// profile it points at says.
+    fn carded_agent_config_with_mcp_policy(
+        card_alias: &str,
+        profile_alias: &str,
+        grants: Vec<crate::card::ToolGrant>,
+        mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy,
+    ) -> crate::schema::Config {
         use crate::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
 
         let mut cfg = Config {
@@ -4526,8 +4558,13 @@ risk_profile = "shell_only"
             config_path: PathBuf::from(format!("/tmp/zeroclaw-carded-{card_alias}/config.toml")),
             ..Config::default()
         };
-        cfg.risk_profiles
-            .insert(profile_alias.into(), RiskProfileConfig::default());
+        cfg.risk_profiles.insert(
+            profile_alias.into(),
+            RiskProfileConfig {
+                mcp_discovered_tool_policy,
+                ..RiskProfileConfig::default()
+            },
+        );
         cfg.cards.insert(
             card_alias.into(),
             crate::card::AgentCard {
@@ -4649,6 +4686,68 @@ risk_profile = "shell_only"
             policy.risk_profile_name, "default",
             "an uncarded agent's risk_profile_name must still be its own direct \
              risk_profile field, not affected by card resolution"
+        );
+    }
+
+    #[test]
+    fn a_carded_agents_mcp_discovered_tool_policy_is_forced_to_explicit_only() {
+        use crate::card::{GrantClass, ToolGrant};
+
+        // The named profile deliberately sets the permissive variant: a
+        // card cannot mean "auto-admit" because naming is its entire
+        // semantics (`CardGrants`' own doc — "there is no 'all'"),
+        // regardless of what the profile it points at says.
+        let cfg = carded_agent_config_with_mcp_policy(
+            "trader_card",
+            "trading_readonly",
+            vec![ToolGrant::new("memory_recall", GrantClass::LocalRead)],
+            crate::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
+        );
+
+        let policy = SecurityPolicy::for_agent(&cfg, "carded_agent").unwrap();
+
+        assert_eq!(
+            policy.mcp_discovered_tool_policy,
+            crate::autonomy::McpDiscoveredToolPolicy::ExplicitOnly,
+            "a card governs this agent, so the profile's AutoAdmit escape \
+             hatch must be closed regardless"
+        );
+    }
+
+    #[test]
+    fn an_uncarded_agents_mcp_discovered_tool_policy_keeps_auto_admit() {
+        use crate::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+
+        // Regression guard: no card governs this agent, so `for_agent` must
+        // not touch `mcp_discovered_tool_policy` at all — it stays whatever
+        // the profile itself set.
+        let mut cfg = Config {
+            data_dir: PathBuf::from("/tmp/zeroclaw-uncarded-mcp"),
+            config_path: PathBuf::from("/tmp/zeroclaw-uncarded-mcp/config.toml"),
+            ..Config::default()
+        };
+        cfg.risk_profiles.insert(
+            "default".into(),
+            RiskProfileConfig {
+                mcp_discovered_tool_policy: crate::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
+                ..RiskProfileConfig::default()
+            },
+        );
+        cfg.agents.insert(
+            "plain_agent".into(),
+            AliasedAgentConfig {
+                risk_profile: "default".into(),
+                ..AliasedAgentConfig::default()
+            },
+        );
+
+        let policy = SecurityPolicy::for_agent(&cfg, "plain_agent").unwrap();
+
+        assert_eq!(
+            policy.mcp_discovered_tool_policy,
+            crate::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
+            "an uncarded agent's mcp_discovered_tool_policy must come from its \
+             risk_profile, untouched by card resolution"
         );
     }
 

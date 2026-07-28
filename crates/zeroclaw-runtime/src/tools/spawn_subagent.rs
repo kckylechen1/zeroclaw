@@ -101,12 +101,55 @@ impl Tool for SpawnSubagentTool {
             });
         }
 
-        let risk_profile = self.config.risk_profile_for_agent(&self.parent_alias);
-        if let Some(rp) = risk_profile {
-            let excluded = rp.excluded_tools.iter().any(|t| t == "spawn_subagent");
+        // The "allowed" half asks a different question depending on whether
+        // a card governs this agent: for a carded agent, the registry's
+        // `allowed_tools` came from `card.grants` (`SecurityPolicy::for_agent`,
+        // `zeroclaw-config/src/policy.rs`), NOT from the named profile's own
+        // `allowed_tools` — so consulting the profile's list here would gate
+        // on a list the registry never used, and a card granting
+        // `spawn_subagent` whose profile's `allowed_tools` omits it would be
+        // admitted by the registry and then refuse itself here, blaming a
+        // risk_profile that was never consulted. The "excluded" half is not
+        // card-aware in either case: the named profile's `excluded_tools`
+        // subtracts from a card's grants too (`AgentCard::risk_profile`'s
+        // doc — deny wins), so it must still gate a carded agent.
+        if let Some(card) = self.config.card_for_agent(&self.parent_alias) {
+            let card_alias = self
+                .config
+                .agents
+                .get(&self.parent_alias)
+                .map(|a| a.card.as_str())
+                .unwrap_or_default();
+            let card_grants_it = card.grants.tools.iter().any(|g| g.tool == Self::NAME);
+            let profile_excludes_it = self
+                .config
+                .risk_profile_for_agent(&self.parent_alias)
+                .is_some_and(|rp| rp.excluded_tools.iter().any(|t| t == Self::NAME));
+            if !card_grants_it {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "spawn_subagent: refused — card '{card_alias}' governing agent '{}' does not grant spawn_subagent",
+                        self.parent_alias
+                    )),
+                });
+            }
+            if profile_excludes_it {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "spawn_subagent: refused — agent '{}' risk_profile excludes spawn_subagent (deny wins over card '{card_alias}'s grant)",
+                        self.parent_alias
+                    )),
+                });
+            }
+        } else if let Some(rp) = self.config.risk_profile_for_agent(&self.parent_alias) {
+            let excluded = rp.excluded_tools.iter().any(|t| t == Self::NAME);
             let allowed_when_listed = match &rp.allowed_tools {
                 None => true,
-                Some(tools) => tools.iter().any(|t| t == "spawn_subagent"),
+                Some(tools) => tools.iter().any(|t| t == Self::NAME),
             };
             if excluded || !allowed_when_listed {
                 return Ok(ToolResult {
@@ -456,6 +499,145 @@ mod tests {
         assert!(
             err.contains("risk_profile") && err.contains("spawn_subagent"),
             "expected risk_profile-gate refusal naming spawn_subagent, got: {err:?}"
+        );
+    }
+
+    // ── card-aware gate: a carded parent's self-check consults the card's
+    // grants, not the profile's own allowed_tools ──
+
+    /// Builds a `Config` with one `[risk_profiles.<profile_alias>]` entry and
+    /// one `[cards.<card_alias>]` entry naming it, wired to a single agent
+    /// defined solely by `card = <card_alias>` (no `risk_profile` set,
+    /// matching what `Config::validate()` requires for a carded agent).
+    fn carded_config_with_agent(
+        alias: &str,
+        card_alias: &str,
+        card_grants_spawn_subagent: bool,
+        profile: RiskProfileConfig,
+    ) -> Config {
+        use zeroclaw_config::card::{AgentCard, CardGrants, GrantClass, ToolGrant};
+
+        let mut config = Config::default();
+        config
+            .risk_profiles
+            .insert("carded_profile".to_string(), profile);
+        config.cards.insert(
+            card_alias.to_string(),
+            AgentCard {
+                risk_profile: "carded_profile".into(),
+                grants: CardGrants {
+                    tools: if card_grants_spawn_subagent {
+                        vec![ToolGrant::new(
+                            SpawnSubagentTool::NAME,
+                            GrantClass::LocalAct,
+                        )]
+                    } else {
+                        vec![]
+                    },
+                    ..CardGrants::default()
+                },
+                ..AgentCard::default()
+            },
+        );
+        config.agents.insert(
+            alias.to_string(),
+            AliasedAgentConfig {
+                card: card_alias.into(),
+                // risk_profile deliberately left empty — validation forbids
+                // setting both card and risk_profile on the same agent.
+                ..AliasedAgentConfig::default()
+            },
+        );
+        config
+    }
+
+    #[tokio::test]
+    async fn carded_parent_not_refused_when_profiles_allowed_tools_omits_it_but_card_grants_it() {
+        // This is the registry/tool disagreement case the fix targets: the
+        // registry's allowed_tools came from the card's grants (`for_agent`),
+        // not from the profile's own `allowed_tools` — so a profile that
+        // omits "spawn_subagent" from a non-empty `allowed_tools` must not
+        // make the self-check refuse a tool the card actually granted.
+        let config = carded_config_with_agent(
+            "alpha",
+            "trader_card",
+            true,
+            RiskProfileConfig {
+                allowed_tools: Some(vec!["shell".into()]),
+                ..RiskProfileConfig::default()
+            },
+        );
+        let tool = SpawnSubagentTool::new(
+            Arc::new(config),
+            "alpha",
+            Arc::new(SecurityPolicy::default()),
+        );
+        let result = tool
+            .execute(json!({ "prompt": "hello" }))
+            .await
+            .expect("execute returns Ok");
+        let err = result.error.as_deref().unwrap_or_default();
+        assert!(
+            !err.contains("does not grant spawn_subagent")
+                && !err.contains("does not list spawn_subagent"),
+            "a card-granted spawn_subagent must not be refused by the self-check \
+             merely because the profile's own allowed_tools omits it, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn carded_parent_refused_when_card_does_not_grant_it_and_message_names_the_card() {
+        let config = carded_config_with_agent(
+            "alpha",
+            "trader_card",
+            false,
+            RiskProfileConfig::default(),
+        );
+        let tool = SpawnSubagentTool::new(
+            Arc::new(config),
+            "alpha",
+            Arc::new(SecurityPolicy::default()),
+        );
+        let result = tool
+            .execute(json!({ "prompt": "hello" }))
+            .await
+            .expect("execute returns Ok with structured failure");
+        assert!(!result.success);
+        let err = result.error.as_deref().unwrap_or_default();
+        assert!(
+            err.contains("trader_card") && err.contains("does not grant spawn_subagent"),
+            "refusal must name the card that governs this agent, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn carded_parent_refused_when_profile_excludes_it_even_though_card_grants_it() {
+        // Deny wins: the named profile's own excluded_tools subtracts from
+        // the card's grants regardless (documented ruling carried over from
+        // the fail-closed fix this self-check must not undo).
+        let config = carded_config_with_agent(
+            "alpha",
+            "trader_card",
+            true,
+            RiskProfileConfig {
+                excluded_tools: vec![SpawnSubagentTool::NAME.to_string()],
+                ..RiskProfileConfig::default()
+            },
+        );
+        let tool = SpawnSubagentTool::new(
+            Arc::new(config),
+            "alpha",
+            Arc::new(SecurityPolicy::default()),
+        );
+        let result = tool
+            .execute(json!({ "prompt": "hello" }))
+            .await
+            .expect("execute returns Ok with structured failure");
+        assert!(!result.success);
+        let err = result.error.as_deref().unwrap_or_default();
+        assert!(
+            err.contains("excludes spawn_subagent"),
+            "a profile exclusion must still refuse a carded agent, got: {err:?}"
         );
     }
 
