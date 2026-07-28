@@ -585,12 +585,16 @@ impl DelegateTool {
         }
 
         let target_agent = config.agents.get(target_alias)?;
-        let target_risk_profile = target_agent.risk_profile.trim();
-        if target_risk_profile.is_empty() {
-            return None;
-        }
-
-        let profile = config.risk_profiles.get(target_risk_profile)?;
+        // `risk_profile_for_agent` follows `agent.card -> cards[card].risk_profile`
+        // when the raw `agent.risk_profile` field is empty; config validation
+        // forces that field empty for any card-defined agent
+        // (zeroclaw-config/src/schema.rs ~19504), so reading the raw field
+        // directly here (as this function used to) silently skips the
+        // always_ask check for every carded target.
+        let profile = config.risk_profile_for_agent(target_alias)?;
+        // Display-only: mirrors `risk_profile_for_agent`'s precedence to name
+        // the profile in the log/error text. Does not gate the decision above.
+        let target_risk_profile = Self::risk_profile_display_name(config, target_agent);
         let always_ask_entries: Vec<String> = profile
             .always_ask
             .iter()
@@ -629,6 +633,27 @@ impl DelegateTool {
                 Self::INDEPENDENT_ALWAYS_ASK_DOC_REF
             )),
         })
+    }
+
+    /// Human-readable risk-profile name for log/error text: the agent's own
+    /// `risk_profile` field, or (since a card forces that field empty) its
+    /// card's `risk_profile`. Mirrors `Config::risk_profile_for_agent`'s
+    /// precedence but returns the name instead of the resolved
+    /// `RiskProfileConfig` — display only, never the security decision.
+    fn risk_profile_display_name(config: &Config, agent: &AliasedAgentConfig) -> String {
+        let direct = agent.risk_profile.trim();
+        if !direct.is_empty() {
+            return direct.to_string();
+        }
+        let card = agent.card.as_str().trim();
+        if card.is_empty() {
+            return String::new();
+        }
+        config
+            .cards
+            .get(card)
+            .map(|c| c.risk_profile.as_str().trim().to_string())
+            .unwrap_or_default()
     }
 
     fn build_target_provider(
@@ -913,7 +938,11 @@ impl DelegateTool {
         }
 
         let profile = self.risk_profiles.get(risk_profile)?;
-        Some(SecurityPolicy {
+        Some(Self::security_policy_from_profile(profile))
+    }
+
+    fn security_policy_from_profile(profile: &RiskProfileConfig) -> SecurityPolicy {
+        SecurityPolicy {
             allowed_tools: profile.allowed_tools.clone(),
             excluded_tools: if profile.excluded_tools.is_empty() {
                 None
@@ -925,7 +954,33 @@ impl DelegateTool {
             // silently reverts to the default posture for delegated runs.
             mcp_discovered_tool_policy: profile.mcp_discovered_tool_policy,
             ..SecurityPolicy::default()
-        })
+        }
+    }
+
+    /// Resolve the tool policy an agentic delegate target runs under.
+    ///
+    /// When `root_config` is loaded (production), goes through
+    /// `Config::risk_profile_for_agent`, the single source of truth that
+    /// follows `agent.card -> cards[card].risk_profile` — the raw
+    /// `agent_config.risk_profile` field is empty for any card-defined agent
+    /// (config validation forces it), so looking that field up directly (as
+    /// the call site used to) always fails for a carded target and agentic
+    /// delegation to it errors out entirely.
+    ///
+    /// When `root_config` is `None` (legacy test constructors with no card
+    /// awareness at all), falls back to the flat `self.risk_profiles` lookup
+    /// keyed by the raw field, preserving prior behavior exactly.
+    fn resolve_agentic_tool_policy(
+        &self,
+        agent_name: &str,
+        agent_config: &AliasedAgentConfig,
+    ) -> Option<SecurityPolicy> {
+        match self.root_config.as_ref() {
+            Some(config) => config
+                .risk_profile_for_agent(agent_name)
+                .map(Self::security_policy_from_profile),
+            None => self.resolve_tool_policy(&agent_config.risk_profile),
+        }
     }
 
     fn delegate_admits_with_mcp(policy: &SecurityPolicy, name: &str) -> bool {
@@ -2490,12 +2545,15 @@ impl DelegateTool {
         temperature: Option<f64>,
         admission: DelegateAdmission,
     ) -> anyhow::Result<ToolResult> {
-        let Some(tool_policy) = self.resolve_tool_policy(&agent_config.risk_profile) else {
+        let Some(tool_policy) = self.resolve_agentic_tool_policy(agent_name, agent_config) else {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
                 error: Some(format!(
-                    "Agent '{agent_name}' is agentic but risk_profile '{}' is not configured",
+                    "Agent '{agent_name}' is agentic but its risk profile is not configured: \
+                     checked agent.risk_profile ({:?}) and, if the agent is defined by a \
+                     card, the card's risk_profile; neither resolved to a configured \
+                     [risk_profiles.*] entry",
                     agent_config.risk_profile
                 )),
             });
@@ -3387,6 +3445,94 @@ mod tests {
             runtime_profile: "agentic_test".into(),
             ..Default::default()
         }
+    }
+
+    /// Builds a root `Config` plus the `AliasedAgentConfig` for one agentic
+    /// delegate target, either carded (card's `risk_profile` supplies the
+    /// profile, agent-level `risk_profile` stays empty as `Config::validate`
+    /// requires) or plain (agent-level `risk_profile` set directly, no card).
+    /// Returns `(config, agent_config)` so callers can wire both a
+    /// `DelegateTool::with_root_config` and the raw `agent_config` argument
+    /// `resolve_agentic_tool_policy` takes.
+    fn agentic_config_with_target(carded: bool) -> (Arc<Config>, AliasedAgentConfig) {
+        use zeroclaw_config::card::AgentCard;
+
+        let root = std::env::temp_dir().join(format!(
+            "zeroclaw-delegate-agentic-card-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut config = Config {
+            data_dir: root.join("data"),
+            config_path: root.join("config.toml"),
+            ..Config::default()
+        };
+        config.risk_profiles.insert(
+            "agentic_profile".to_string(),
+            RiskProfileConfig {
+                allowed_tools: Some(vec!["echo_tool".to_string()]),
+                ..RiskProfileConfig::default()
+            },
+        );
+        let agent_config = if carded {
+            config.cards.insert(
+                "agentic_card".to_string(),
+                AgentCard {
+                    risk_profile: "agentic_profile".into(),
+                    ..AgentCard::default()
+                },
+            );
+            AliasedAgentConfig {
+                card: "agentic_card".into(),
+                model_provider: "openrouter.agentic".into(),
+                runtime_profile: "agentic_test".into(),
+                ..AliasedAgentConfig::default()
+            }
+        } else {
+            AliasedAgentConfig {
+                risk_profile: "agentic_profile".into(),
+                model_provider: "openrouter.agentic".into(),
+                runtime_profile: "agentic_test".into(),
+                ..AliasedAgentConfig::default()
+            }
+        };
+        config
+            .agents
+            .insert("agentic_target".to_string(), agent_config.clone());
+        (Arc::new(config), agent_config)
+    }
+
+    #[test]
+    fn resolve_agentic_tool_policy_resolves_for_carded_target() {
+        // Regression guard for the fail-closed defect: a carded agent's
+        // `agent.risk_profile` field is empty by construction (config
+        // validation forbids setting both a card and a direct risk_profile).
+        // The old call site read that raw empty field directly and always
+        // failed for a carded target, so agentic delegation to it could
+        // never work at all.
+        let (config, agent_config) = agentic_config_with_target(true);
+        let tool = DelegateTool::new(config.agents.clone(), None, test_security())
+            .with_root_config(config);
+
+        let policy = tool
+            .resolve_agentic_tool_policy("agentic_target", &agent_config)
+            .expect("carded agentic target must resolve a tool policy via its card's risk_profile");
+        assert_eq!(policy.allowed_tools, Some(vec!["echo_tool".to_string()]));
+    }
+
+    #[test]
+    fn resolve_agentic_tool_policy_unchanged_for_uncarded_target_with_root_config() {
+        // Regression guard: an uncarded agent (plain `agent.risk_profile`,
+        // no card) must resolve exactly as before once `root_config` is
+        // wired — the reroute to `Config::risk_profile_for_agent` must not
+        // regress the common case it's layered on top of.
+        let (config, agent_config) = agentic_config_with_target(false);
+        let tool = DelegateTool::new(config.agents.clone(), None, test_security())
+            .with_root_config(config);
+
+        let policy = tool
+            .resolve_agentic_tool_policy("agentic_target", &agent_config)
+            .expect("uncarded agentic target must still resolve a tool policy");
+        assert_eq!(policy.allowed_tools, Some(vec!["echo_tool".to_string()]));
     }
 
     fn agentic_runtime_profiles(max_iterations: usize) -> HashMap<String, RuntimeProfileConfig> {
@@ -6788,6 +6934,118 @@ mod tests {
         assert!(
             tool.independent_always_ask_refusal("target").is_none(),
             "bounded mode must leave always_ask handling to the normal approval path"
+        );
+    }
+
+    /// Same as `config_with_always_ask_delegate`, except "target" is defined
+    /// solely by a card (`agents.target.card = "target_card"`), which is the
+    /// only way `agents.target.risk_profile` is legitimately empty per
+    /// `Config::validate()` (a card and a direct `risk_profile` are mutually
+    /// exclusive). The card's own `risk_profile` points at the same
+    /// `target_profile` with `always_ask` entries.
+    fn config_with_always_ask_delegate_via_card(mode: DelegateExecutionMode) -> Arc<Config> {
+        use zeroclaw_config::autonomy::{DelegationMode, DelegationPolicy};
+        use zeroclaw_config::schema::{RiskProfileConfig, RuntimeProfileConfig};
+        use zeroclaw_config::card::AgentCard;
+
+        let root = std::env::temp_dir().join(format!(
+            "zeroclaw-delegate-always-ask-card-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut config = Config {
+            data_dir: root.join("data"),
+            config_path: root.join("config.toml"),
+            ..Config::default()
+        };
+        config.risk_profiles.insert(
+            "caller_profile".to_string(),
+            RiskProfileConfig {
+                delegation_policy: DelegationPolicy {
+                    mode: DelegationMode::Allow,
+                },
+                ..RiskProfileConfig::default()
+            },
+        );
+        config.risk_profiles.insert(
+            "target_profile".to_string(),
+            RiskProfileConfig {
+                always_ask: vec![" shell ".to_string(), String::new()],
+                ..RiskProfileConfig::default()
+            },
+        );
+        config.cards.insert(
+            "target_card".to_string(),
+            AgentCard {
+                risk_profile: "target_profile".into(),
+                ..AgentCard::default()
+            },
+        );
+        config.runtime_profiles.insert(
+            "bounded".to_string(),
+            RuntimeProfileConfig {
+                max_delegation_depth: 3,
+                ..RuntimeProfileConfig::default()
+            },
+        );
+        config.agents.insert(
+            "caller".to_string(),
+            AliasedAgentConfig {
+                risk_profile: "caller_profile".into(),
+                runtime_profile: "bounded".into(),
+                model_provider: "ollama.caller".into(),
+                delegates: vec![DelegateTargetConfig {
+                    agent: "target".to_string(),
+                    mode,
+                }],
+                ..AliasedAgentConfig::default()
+            },
+        );
+        config.agents.insert(
+            "target".to_string(),
+            AliasedAgentConfig {
+                // No `risk_profile` set directly: the card supplies it. Setting
+                // both would fail `Config::validate()`.
+                card: "target_card".into(),
+                runtime_profile: "bounded".into(),
+                model_provider: "ollama.target".into(),
+                ..AliasedAgentConfig::default()
+            },
+        );
+        Arc::new(config)
+    }
+
+    #[tokio::test]
+    async fn independent_delegate_rejects_carded_target_always_ask() {
+        // Regression guard for the fail-open defect: a target defined solely
+        // by a card has an empty `agent.risk_profile` field by construction
+        // (config validation forbids setting both). Reading that raw field
+        // used to make `independent_always_ask_refusal` treat the carded
+        // target as if it had no risk profile at all ("nothing to evaluate",
+        // proceed) instead of resolving the card's `always_ask` entries.
+        let config = config_with_always_ask_delegate_via_card(DelegateExecutionMode::Independent);
+        let tool = delegate_tool_for_config(config);
+
+        let result = tool
+            .execute(json!({
+                "agent": "target",
+                "prompt": "check the system",
+            }))
+            .await
+            .unwrap();
+
+        let error = result
+            .error
+            .expect("carded independent target with always_ask must reject, not silently proceed");
+        assert!(!result.success);
+        assert!(
+            error.contains(
+                "delegate target \"target\" cannot run in independent mode from \"caller\""
+            ),
+            "expected target/caller context, got: {error}"
+        );
+        assert!(
+            error.contains("risk profile \"target_profile\" has always_ask entries (shell)"),
+            "expected the card-resolved profile name and trimmed always_ask entries, got: {error}"
         );
     }
 
