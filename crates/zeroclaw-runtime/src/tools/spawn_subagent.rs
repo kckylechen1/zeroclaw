@@ -13,7 +13,44 @@ use serde_json::json;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::schema::Config;
+use zeroclaw_coordinator::{
+    CancelToken, ChildOverrides, ChildRequest, CommandSender, CoordinatorCommand, SpawnCommand,
+};
 use zeroclaw_log::scope;
+
+/// Test seam for [`coordinator_commands`]: a per-test `CommandSender`, so a
+/// background-spawn test can drive a real, locally-booted coordinator
+/// (`control_plane::coordinator_host::start` against a throwaway
+/// `ControlPlaneHandle`, the same way that module's own tests do) without
+/// going through `control_plane::global`'s process-wide `OnceLock` — which
+/// cannot be uninstalled between tests and would leak into every other test
+/// in this binary (see that module's doc, and
+/// `agent::loop_::CHILD_ANNOUNCEMENT_STORE_TEST_HOOK` for the same pattern
+/// used for the same reason).
+#[cfg(test)]
+static COMMAND_SENDER_TEST_HOOK: std::sync::Mutex<Option<CommandSender>> =
+    std::sync::Mutex::new(None);
+
+/// Where the background path gets the live coordinator's command channel.
+///
+/// Production always reads the process-global control-plane
+/// (`crate::control_plane::control_plane()`); tests may inject a per-test
+/// sender through [`COMMAND_SENDER_TEST_HOOK`] instead. `None` either way
+/// means "no coordinator is running in this process" — the caller's job is
+/// to refuse a background spawn on that, not to guess.
+fn coordinator_commands() -> Option<CommandSender> {
+    #[cfg(test)]
+    {
+        if let Some(hooked) = COMMAND_SENDER_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return Some(hooked);
+        }
+    }
+    crate::control_plane::control_plane().and_then(|cp| cp.commands.clone())
+}
 
 /// Spawn an ephemeral SubAgent that inherits the parent agent's
 /// identity and runs a focused prompt under the same alias.
@@ -54,6 +91,147 @@ impl SpawnSubagentTool {
         self.is_subagent_caller = is_subagent_caller;
         self
     }
+
+    /// The detached path: hand the child to the coordinator and return
+    /// immediately, instead of driving `agent::run` in-turn.
+    ///
+    /// Every gate (depth-1 cap, card/risk-profile self-check, prompt
+    /// validation, the rate-limit budget) has already run in `execute`
+    /// before this is called — see the call site's comment.
+    async fn execute_background(&self, prompt: String) -> Result<ToolResult> {
+        let Some(commands) = coordinator_commands() else {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(
+                    "spawn_subagent: background=true requires a coordinator, and none is \
+                     running in this process (no daemon control-plane, or a control-plane \
+                     started without one — see `ControlPlaneHandle::commands`). Retry without \
+                     `background`, or run this under the daemon."
+                        .into(),
+                ),
+            });
+        };
+
+        let child_id = uuid::Uuid::new_v4().to_string();
+
+        // Identity convention (decided): `parent_alias` is this tool's own
+        // parent alias — a detached child is still this agent, not a
+        // different agent type (matches the synchronous path above, which
+        // spawns via `SubAgentSpawn::for_agent_with_policy(&self.config,
+        // &self.parent_alias, ...)`).
+        //
+        // `parent_session_id` MUST match the fallback `agent::run` adopts
+        // for an unscoped turn byte-for-byte
+        // (`agent::loop_::synthetic_session_key_for_run`,
+        // `format!("agent:{agent_alias}")`, `crates/zeroclaw-runtime/src/agent/loop_.rs`):
+        // that is the key `agent::loop_::claim_child_announcements_context`
+        // claims under at the start of the parent's *next* turn, and
+        // `SubagentPersistence::record_spawn`
+        // (`control_plane/subagent_persistence.rs`) files this row's
+        // `parent_id` under exactly what we put here. The fallback is the
+        // SAME function `run()` uses to establish its synthetic key — one
+        // copy, not two spellings that could drift; drift here does not
+        // fail loudly, it files the child under a name no turn ever asks
+        // about and the parent waits forever.
+        let parent_session_id = crate::agent::loop_::current_session_key()
+            .unwrap_or_else(|| {
+                crate::agent::loop_::synthetic_session_key_for_run(&self.parent_alias)
+            });
+
+        const MAX_DESCRIPTION_CHARS: usize = 200;
+        let description = if prompt.chars().count() > MAX_DESCRIPTION_CHARS {
+            let truncated: String = prompt.chars().take(MAX_DESCRIPTION_CHARS).collect();
+            format!("spawn_subagent (background): {truncated}…")
+        } else {
+            format!("spawn_subagent (background): {prompt}")
+        };
+
+        let request = ChildRequest {
+            child_id: child_id.clone(),
+            prompt,
+            description,
+            // Inherits the parent's own identity — same reasoning as
+            // `parent_session_id` above: this is the parent agent running
+            // unattended, not a different configured agent type.
+            agent_type: self.parent_alias.clone(),
+            parent_session_id,
+            parent_alias: self.parent_alias.clone(),
+            // `spawn_subagent.rs`'s synchronous path has no concept of "the
+            // control-plane task id of the turn currently running me" either
+            // (see the `parent_id: None` comment a few lines below in the
+            // synchronous body) — same gap, same answer.
+            parent_prompt_id: None,
+            resume_from: None,
+            cwd: None,
+            overrides: ChildOverrides::default(),
+            // Detached: `coordinator.rs::handle_spawn` sets
+            // `handle_only = request.run_in_background`, so this child never
+            // gets a foreground budget and its spawning turn never blocks on
+            // it — the defining line for what "Detached" means on this
+            // protocol.
+            run_in_background: true,
+            // The announce chain (`agent::loop_::claim_child_announcements_context`)
+            // is how the parent ever learns this child's outcome; suppressing
+            // completion surfacing here would make a detached child's ending
+            // unreachable by design.
+            surface_completion: true,
+            // Moot once `run_in_background` is true: `coordinator.rs::handle_spawn`
+            // only sets a `foreground_deadline` when
+            // `!request.run_in_background && !request.await_to_completion`,
+            // so this flag has no effect here. `false` for clarity.
+            await_to_completion: false,
+            fork_context: false,
+            cancel_token: CancelToken::new(),
+        };
+
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        // `_result_rx` is deliberately never awaited: this ticket's own
+        // "does NOT poll, await, or fetch results for background children"
+        // is one reason, and the protocol gives a second, independent one —
+        // `coordinator.rs::finish_child` only ever answers this oneshot with
+        // the child's *terminal* `ChildResult` (`let sent =
+        // respond_to.send(output.result.clone())...`), sent whenever the
+        // child actually finishes. There is no separate "accepted, here is
+        // an interim handle" reply for an explicit `run_in_background: true`
+        // spawn: that interim `backgrounded: true` reply exists only on the
+        // *foreground-budget-elapsed* path
+        // (`state.rs::background_at_deadline`), which requires
+        // `foreground_deadline` to be `Some`, and `handle_spawn` never sets
+        // that when `run_in_background` is true. Awaiting `_result_rx` here
+        // would block this call until the child's real ending — exactly the
+        // synchronous behaviour "background" is supposed to skip. Dropping
+        // it is harmless: `finish_child`'s own delivered-bookkeeping
+        // (`if !handle_only { foreground_delivered = sent; ... }`) never
+        // consults whether anyone received that send while `handle_only` is
+        // true, which it is here from the moment this spawns.
+        if let Err(error) = commands.0.send(CoordinatorCommand::Spawn(SpawnCommand {
+            request: Box::new(request),
+            result_tx,
+        })) {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!(
+                    "spawn_subagent: background spawn failed — the coordinator actor is not \
+                     accepting commands (channel closed): {error}"
+                )),
+            });
+        }
+
+        Ok(ToolResult {
+            success: true,
+            // `child_id=<id>` is a stable, parseable token (see this
+            // module's own tests) — everything after it is prose for the
+            // model, not for a caller trying to extract the id.
+            output: format!(
+                "subagent started detached (background), child_id={child_id}. It is running \
+                 unattended; its outcome will be announced in a future turn, not returned here."
+            )
+            .into(),
+            error: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -79,6 +257,10 @@ impl Tool for SpawnSubagentTool {
                 "prompt": {
                     "type": "string",
                     "description": "The task or question for the SubAgent. Be specific and self-contained — the SubAgent does not see this conversation's history."
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run the SubAgent detached instead of waiting for it in this turn. Requires a running coordinator (the daemon); returns immediately with the child's id, and its outcome is announced into a future turn rather than returned here. Defaults to false (wait for the SubAgent's response, as before)."
                 }
             },
             "required": ["prompt"]
@@ -187,6 +369,25 @@ impl Tool for SpawnSubagentTool {
             }
         };
 
+        // Additive, optional, default false: absent (or explicitly `false`)
+        // takes the synchronous path below byte-identically. A present but
+        // non-bool value is rejected here rather than coerced, matching the
+        // uniform "structured argument-validation failure" shape `prompt`
+        // above already established.
+        let background = match args.get("background") {
+            None => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(_) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(
+                        "spawn_subagent: 'background' must be a boolean when present".into(),
+                    ),
+                });
+            }
+        };
+
         if let Err(error) = self
             .security
             .enforce_tool_operation(ToolOperation::Act, Self::NAME)
@@ -196,6 +397,16 @@ impl Tool for SpawnSubagentTool {
                 output: ToolOutput::default(),
                 error: Some(error),
             });
+        }
+
+        // Every gate above (depth-1 cap, card/risk-profile self-check,
+        // prompt validation, the rate-limit budget) has already run and
+        // already applies identically to a detached spawn — a background
+        // request is not a way around any of them. Everything below this
+        // point is the synchronous in-turn path; the detached path forks off
+        // here instead.
+        if background {
+            return self.execute_background(prompt).await;
         }
 
         let subagent_ctx = match SubAgentSpawn::for_agent_with_policy(
@@ -781,5 +992,285 @@ mod tests {
             !Attributable::alias(tool.as_ref()).is_empty(),
             "Attributable::alias on a Tool must be non-empty so composite keys never produce `.<bare>`"
         );
+    }
+
+    // ── `background: true` — the detached path ──
+
+    mod background {
+        use super::*;
+        use crate::control_plane::boot::ControlPlaneHandle;
+        use crate::control_plane::coordinator_host;
+        use crate::control_plane::task_registry::{TaskRegistry, TaskStatus};
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+
+        /// `COMMAND_SENDER_TEST_HOOK` is a single process-global slot: two of
+        /// these tests installing it concurrently would clobber each other's
+        /// sender. Same shape as `agent::loop_`'s own `SERIALIZE` guard
+        /// around its process-global test hooks, for the same reason.
+        static SERIALIZE: StdMutex<()> = StdMutex::new(());
+
+        /// A live coordinator actor wired the same way
+        /// `coordinator_host.rs`'s own tests boot one — a real
+        /// `ControlPlaneHandle` over a tempdir-backed `SqliteTaskStore`, a
+        /// real `Coordinator::with_persistence`, a real `NativeChildRunner`
+        /// — with its `CommandSender` installed into
+        /// [`COMMAND_SENDER_TEST_HOOK`] so [`coordinator_commands`] finds it
+        /// without touching the process-wide `OnceLock`.
+        struct BootedCoordinator {
+            _serialize: std::sync::MutexGuard<'static, ()>,
+            _dir: tempfile::TempDir,
+            handle: ControlPlaneHandle,
+            actor: Option<tokio::task::JoinHandle<()>>,
+        }
+
+        impl Drop for BootedCoordinator {
+            fn drop(&mut self) {
+                *COMMAND_SENDER_TEST_HOOK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+                if let Some(actor) = self.actor.take() {
+                    actor.abort();
+                }
+            }
+        }
+
+        async fn boot(config: Config) -> BootedCoordinator {
+            let serialize = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().expect("tempdir");
+            let handle = ControlPlaneHandle::start(dir.path())
+                .await
+                .expect("start control plane");
+            let host = coordinator_host::start(
+                Arc::new(config),
+                Arc::clone(&handle.sqlite_store),
+                handle.boot_id.clone(),
+            );
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(host.commands);
+            BootedCoordinator {
+                _serialize: serialize,
+                _dir: dir,
+                handle,
+                actor: Some(host.actor),
+            }
+        }
+
+        /// Pull the `child_id=<id>` token out of the tool's own success
+        /// message (see `execute_background`'s doc on that format).
+        fn extract_child_id(output: &str) -> &str {
+            let after = output
+                .split("child_id=")
+                .nth(1)
+                .expect("success output must carry child_id=");
+            after
+                .split(|c: char| c == ',' || c == '.' || c.is_whitespace())
+                .next()
+                .expect("child_id token must not be empty")
+        }
+
+        async fn wait_for_terminal(
+            store: &crate::control_plane::SqliteTaskStore,
+            id: &str,
+            timeout: Duration,
+        ) -> crate::control_plane::TaskRecord {
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                if let Some(rec) = store.get(id).await.expect("store read") {
+                    if rec.status.is_terminal() {
+                        return rec;
+                    }
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "child {id} never reached a terminal status within {timeout:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        /// Discriminating line: `assert!(result.success, ...)` returning
+        /// before the child's own turn can possibly have finished (there is
+        /// no live model provider in this harness — the turn fails fast, but
+        /// the tool call itself must not have waited for that). A
+        /// synchronous implementation that awaits the child would still make
+        /// this assertion pass (the child fails fast) but would fail the
+        /// row-exists-immediately-after-yield_now check below, which is the
+        /// real discriminator between "returned immediately" and "awaited
+        /// the child".
+        #[tokio::test]
+        async fn background_spawn_returns_immediately_with_a_child_id_and_row() {
+            let alias = "bg-alpha";
+            let config = config_with_agent(alias);
+            let fixture = boot(config.clone()).await;
+
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let result = tool
+                .execute(json!({ "prompt": "do the background thing", "background": true }))
+                .await
+                .expect("execute returns Ok");
+            assert!(
+                result.success,
+                "background spawn must report success immediately: {:?}",
+                result.error
+            );
+            let child_id = extract_child_id(result.output.as_str()).to_string();
+
+            // Let the actor's task get polled once — `handle_spawn` inserts
+            // into `pending` and calls `record_spawn` synchronously within
+            // the same command-branch arm, so one yield is enough (same
+            // reasoning as `coordinator_host.rs`'s own
+            // `drop_after_abort_marks_a_mid_flight_child_lost_in_the_real_store`).
+            tokio::task::yield_now().await;
+
+            let row = fixture
+                .handle
+                .sqlite_store
+                .get(&child_id)
+                .await
+                .expect("store read")
+                .expect("record_spawn must have written the row");
+            assert_eq!(
+                row.parent_id.as_deref(),
+                Some(format!("agent:{alias}").as_str()),
+                "parent_id must be the same key agent::run's fallback claims under"
+            );
+            assert_eq!(row.agent, alias, "agent column carries the parent alias");
+
+            // The runner has no live model provider, so the child's own turn
+            // fails fast — it still must land terminal, not linger Running
+            // forever, and it must carry a detail (not silently "succeed").
+            let finished = wait_for_terminal(
+                &fixture.handle.sqlite_store,
+                &child_id,
+                Duration::from_secs(10),
+            )
+            .await;
+            assert_eq!(
+                finished.status,
+                TaskStatus::Failed,
+                "no live model provider in this harness — the child must fail, not succeed"
+            );
+        }
+
+        /// Discriminating line: `assert!(err.contains("no coordinator") ||
+        /// err.contains("coordinator"))` together with `!result.success` —
+        /// a silent fallback to the synchronous path would instead try to
+        /// run the child in-turn (and fail for an unrelated reason, or
+        /// succeed), never naming "no coordinator" at all.
+        #[tokio::test]
+        async fn background_true_with_no_coordinator_is_a_structured_failure() {
+            let alias = "bg-no-coordinator";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let result = tool
+                .execute(json!({ "prompt": "hello", "background": true }))
+                .await
+                .expect("execute returns Ok with structured failure");
+            assert!(!result.success);
+            let err = result.error.as_deref().unwrap_or_default();
+            assert!(
+                err.contains("coordinator"),
+                "refusal must name the missing coordinator, got: {err:?}"
+            );
+        }
+
+        /// Discriminating line: `assert_eq!(row.parent_id.as_deref(), Some(...))`
+        /// — a hand-rolled fallback that drifts from `agent::run`'s
+        /// (`agent::loop_::synthetic_session_key_for_run`) would still spawn
+        /// successfully but file the row under a key the waker never claims,
+        /// silently orphaning every detached child's announcement.
+        #[tokio::test]
+        async fn parent_key_fallback_is_agent_colon_alias_with_no_ambient_session_key() {
+            let alias = "bg-fallback-alias";
+            let config = config_with_agent(alias);
+            let fixture = boot(config.clone()).await;
+
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let result = tool
+                .execute(json!({ "prompt": "hello", "background": true }))
+                .await
+                .expect("execute returns Ok");
+            assert!(result.success, "unexpected failure: {:?}", result.error);
+            let child_id = extract_child_id(result.output.as_str()).to_string();
+
+            tokio::task::yield_now().await;
+            let row = fixture
+                .handle
+                .sqlite_store
+                .get(&child_id)
+                .await
+                .expect("store read")
+                .expect("row must exist");
+            assert_eq!(row.parent_id.as_deref(), Some(format!("agent:{alias}").as_str()));
+        }
+
+        /// Absent/`false` `background` must take the byte-identical
+        /// synchronous path — every pre-existing test above this module
+        /// already pins that behaviour by never setting `background` at
+        /// all; this test only pins that an *explicit* `false` is the same
+        /// as absent.
+        #[tokio::test]
+        async fn explicit_background_false_matches_the_default_synchronous_path() {
+            let alias = "alpha";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let with_false = tool
+                .execute(json!({ "prompt": "hello", "background": false }))
+                .await
+                .expect("execute returns Ok");
+            let without = tool
+                .execute(json!({ "prompt": "hello" }))
+                .await
+                .expect("execute returns Ok");
+            assert_eq!(
+                with_false.success, without.success,
+                "explicit background=false must behave like the field's absence"
+            );
+            assert_eq!(
+                with_false.error.is_some(),
+                without.error.is_some(),
+                "explicit background=false must behave like the field's absence"
+            );
+        }
+
+        #[tokio::test]
+        async fn background_non_bool_is_a_structured_validation_failure() {
+            let alias = "alpha";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let result = tool
+                .execute(json!({ "prompt": "hello", "background": "yes" }))
+                .await
+                .expect("execute returns Ok with structured failure");
+            assert!(!result.success);
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("background"),
+                "expected a background-validation error, got: {:?}",
+                result.error
+            );
+        }
     }
 }
