@@ -118,7 +118,11 @@ impl Tool for SpawnSubagentTool {
                 .config
                 .agents
                 .get(&self.parent_alias)
-                .map(|a| a.card.as_str())
+                // Trimmed to match how `card_for_agent` resolved it — a padded
+                // alias in config must not print differently in the refusal
+                // than the name that actually gated the branch (codex review
+                // of ba37d54bd, finding 3c).
+                .map(|a| a.card.as_str().trim())
                 .unwrap_or_default();
             let card_grants_it = card.grants.tools.iter().any(|g| g.tool == Self::NAME);
             let profile_excludes_it = self
