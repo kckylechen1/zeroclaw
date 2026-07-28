@@ -38,6 +38,7 @@ fn request(id: &str) -> ChildRequest {
         description: "test".to_owned(),
         agent_type: "general-purpose".to_owned(),
         parent_session_id: "parent".to_owned(),
+        parent_alias: "parent-alias".to_owned(),
         parent_prompt_id: None,
         resume_from: None,
         cwd: None,

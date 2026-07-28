@@ -41,6 +41,17 @@ pub struct ChildRequest {
     /// Which agent definition the child runs as.
     pub agent_type: String,
     pub parent_session_id: String,
+    /// The agent alias that owns the parent session — NOT a role/agent-type
+    /// spelling like `"explore"`.
+    ///
+    /// This is what belongs in a persisted `TaskRecord.agent` (documented
+    /// there as "the agent alias that owns and executes this task", and read
+    /// by alias-keyed admin cascades) and, downstream of that, in
+    /// `Announcement.agent` ("the agent alias that ran, which for a subagent
+    /// is the parent's own"). `parent_session_id` stays session identity: the
+    /// value `TaskRecord.parent_id` is keyed on, used to look up a session's
+    /// children — it is a different axis than "whose alias owns this row".
+    pub parent_alias: String,
     /// The parent turn that launched this child.
     ///
     /// Cancelling a turn cancels the children that turn spawned, and nothing

@@ -6,14 +6,18 @@
 // This file was CHANGED by ZeroClaw Labs: assertions were moved onto this
 // crate's outcome vocabulary; the workflow-owner test was dropped with the
 // workflow owner, and the usage-accounting halves of the outstanding test went
-// with the usage commands; three tests that upstream did not have were ADDED,
-// for cancel-at-promote, child-panic containment, and the buffered-completion
-// bound. See ../LICENSE and ../NOTICE.
+// with the usage commands; four tests that upstream did not have were ADDED,
+// for cancel-at-promote, child-panic containment, the buffered-completion
+// bound, and (wiring phase 2b) a recording `ChildPersistence` mock covering
+// `record_spawn`/`record_finish` call counts, the `delivered` flag, and a
+// persistence backend that errors on every call. See ../LICENSE and
+// ../NOTICE.
 
 use super::*;
 use crate::backend::ChannelBackend;
 use crate::cancel::CancelToken;
 use crate::outcome::ChildOutcome;
+use crate::persistence::PersistenceError;
 use crate::state::{
     ChildProgress, MAX_COMPLETED_ENTRIES, MAX_PENDING_COMPLETIONS, SendBoxFuture, StartedChild,
 };
@@ -21,6 +25,7 @@ use crate::types::{
     CancelOutcome, ChildCompletionSummary, ChildStatus, CompletionsCommand, ListActiveCommand,
     LoopUnitActiveCommand, OutstandingCommand, OutstandingReply, RegistryCounts,
 };
+use std::sync::Mutex;
 use tokio::sync::oneshot;
 
 #[derive(Clone)]
@@ -208,6 +213,7 @@ fn request(id: &str, background: bool) -> ChildRequest {
         description: "test child".to_owned(),
         agent_type: "explore".to_owned(),
         parent_session_id: "parent".to_owned(),
+        parent_alias: "parent-alias".to_owned(),
         parent_prompt_id: Some("prompt".to_owned()),
         resume_from: None,
         cwd: None,
@@ -278,6 +284,56 @@ fn harness_with_options(options: RunnerOptions, config: CoordinatorConfig) -> Ha
                 started: started_tx,
             },
             config,
+        )
+        .run(),
+    );
+    Harness {
+        backend: ChannelBackend::new(command_tx),
+        start,
+        finish,
+        promote_gate,
+        promote_reached,
+        promote_acks,
+        completions,
+        requests,
+        started,
+        actor,
+    }
+}
+
+/// Same wiring as [`harness_with_options`], but backed by
+/// `Coordinator::with_persistence` instead of `Coordinator::new` — the only
+/// difference the persistence-mock tests need.
+fn harness_with_persistence(
+    options: RunnerOptions,
+    config: CoordinatorConfig,
+    persistence: RecordingPersistence,
+) -> Harness {
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let (start, _) = tokio::sync::broadcast::channel(4);
+    let (finish, _) = tokio::sync::broadcast::channel(4);
+    let (promote_gate, _) = tokio::sync::broadcast::channel(4);
+    let (promote_reached_tx, promote_reached) = mpsc::unbounded_channel();
+    let (promote_acks_tx, promote_acks) = mpsc::unbounded_channel();
+    let (completion_tx, completions) = mpsc::unbounded_channel();
+    let (request_tx, requests) = mpsc::unbounded_channel();
+    let (started_tx, started) = mpsc::unbounded_channel();
+    let actor = tokio::spawn(
+        Coordinator::with_persistence(
+            command_rx,
+            TestRunner {
+                options,
+                start: start.clone(),
+                finish: finish.clone(),
+                promote_gate: promote_gate.clone(),
+                promote_reached: promote_reached_tx,
+                promote_acks: promote_acks_tx,
+                completions: completion_tx,
+                requests: request_tx,
+                started: started_tx,
+            },
+            config,
+            persistence,
         )
         .run(),
     );
@@ -1217,5 +1273,312 @@ async fn completed_cache_evicts_oldest_entry_at_cap() {
             .await
             .is_some()
     );
+    harness.actor.abort();
+}
+
+// ── ChildPersistence wiring ─────────────────────────────────────────────
+
+/// One observed call into a [`RecordingPersistence`].
+#[derive(Debug, Clone, PartialEq)]
+enum PersistenceCall {
+    Spawn {
+        child_id: String,
+        parent_session_id: String,
+        parent_alias: String,
+    },
+    Finish {
+        child_id: String,
+        outcome: ChildOutcome,
+        delivered: bool,
+    },
+}
+
+/// Records every call it receives; optionally errors on every call, to prove
+/// the actor treats persistence as an observer, never a gate.
+#[derive(Clone, Default)]
+struct RecordingPersistence {
+    calls: Arc<Mutex<Vec<PersistenceCall>>>,
+    error_every_call: bool,
+}
+
+impl RecordingPersistence {
+    fn calls(&self) -> Vec<PersistenceCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl ChildPersistence for RecordingPersistence {
+    fn record_spawn(&mut self, request: &ChildRequest) -> Result<(), PersistenceError> {
+        self.calls.lock().unwrap().push(PersistenceCall::Spawn {
+            child_id: request.child_id.clone(),
+            parent_session_id: request.parent_session_id.clone(),
+            parent_alias: request.parent_alias.clone(),
+        });
+        if self.error_every_call {
+            return Err(PersistenceError("record_spawn: simulated failure".into()));
+        }
+        Ok(())
+    }
+
+    fn record_finish(
+        &mut self,
+        child_id: &str,
+        result: &ChildResult,
+        delivered: bool,
+    ) -> Result<(), PersistenceError> {
+        self.calls.lock().unwrap().push(PersistenceCall::Finish {
+            child_id: child_id.to_owned(),
+            outcome: result.outcome,
+            delivered,
+        });
+        if self.error_every_call {
+            return Err(PersistenceError("record_finish: simulated failure".into()));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn spawn_records_exactly_one_record_spawn_with_the_right_identity() {
+    let persistence = RecordingPersistence::default();
+    let mut harness = harness_with_persistence(
+        RunnerOptions::default(),
+        CoordinatorConfig::default(),
+        persistence.clone(),
+    );
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("persisted-spawn", false)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("persisted-spawn")
+    );
+
+    assert_eq!(
+        persistence.calls(),
+        vec![PersistenceCall::Spawn {
+            child_id: "persisted-spawn".to_owned(),
+            parent_session_id: "parent".to_owned(),
+            parent_alias: "parent-alias".to_owned(),
+        }],
+        "record_spawn must fire exactly once, before the child has run at all"
+    );
+
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().is_success());
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn foreground_completion_records_one_finish_delivered_true() {
+    let persistence = RecordingPersistence::default();
+    let mut harness = harness_with_persistence(
+        RunnerOptions::default(),
+        CoordinatorConfig::default(),
+        persistence.clone(),
+    );
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("delivered-inline", false)).await }
+    });
+    tokio::task::yield_now().await;
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().is_success());
+    let _ = harness.completions.recv().await;
+
+    let finishes: Vec<_> = persistence
+        .calls()
+        .into_iter()
+        .filter(|call| matches!(call, PersistenceCall::Finish { .. }))
+        .collect();
+    assert_eq!(
+        finishes,
+        vec![PersistenceCall::Finish {
+            child_id: "delivered-inline".to_owned(),
+            outcome: ChildOutcome::Completed,
+            delivered: true,
+        }],
+        "record_finish must fire exactly once, delivered=true, when the \
+         foreground spawn caller already got the result inline"
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn undelivered_completion_records_one_finish_delivered_false() {
+    let persistence = RecordingPersistence::default();
+    let mut harness = harness_with_persistence(
+        RunnerOptions::default(),
+        CoordinatorConfig::default(),
+        persistence.clone(),
+    );
+    // `background`: nobody blocks on the spawn reply, and no waiter attaches
+    // either, so the completion is nobody's to consume in-process.
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("nobody-consumed", true)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("nobody-consumed")
+    );
+    let _ = harness.finish.send(());
+    let _ = spawn.await;
+    let _ = harness.completions.recv().await;
+
+    let finishes: Vec<_> = persistence
+        .calls()
+        .into_iter()
+        .filter(|call| matches!(call, PersistenceCall::Finish { .. }))
+        .collect();
+    assert_eq!(
+        finishes,
+        vec![PersistenceCall::Finish {
+            child_id: "nobody-consumed".to_owned(),
+            outcome: ChildOutcome::Completed,
+            delivered: false,
+        }],
+        "record_finish must fire exactly once, delivered=false, when no \
+         foreground caller and no waiter consumed the result in-process"
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn cancelled_child_records_one_finish_with_cancelled_outcome() {
+    let persistence = RecordingPersistence::default();
+    let mut harness = harness_with_persistence(
+        RunnerOptions::default(),
+        CoordinatorConfig::default(),
+        persistence.clone(),
+    );
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("to-cancel", false)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("to-cancel"));
+
+    assert!(matches!(
+        harness.backend.cancel("to-cancel").await,
+        CancelOutcome::Cancelled
+    ));
+    assert_eq!(
+        spawn.await.unwrap().unwrap().outcome,
+        ChildOutcome::Cancelled
+    );
+    let _ = harness.completions.recv().await;
+
+    let finishes: Vec<_> = persistence
+        .calls()
+        .into_iter()
+        .filter(|call| matches!(call, PersistenceCall::Finish { .. }))
+        .collect();
+    assert_eq!(
+        finishes,
+        vec![PersistenceCall::Finish {
+            child_id: "to-cancel".to_owned(),
+            outcome: ChildOutcome::Cancelled,
+            delivered: true,
+        }],
+        "a cancelled child must still reach record_finish exactly once, \
+         carrying the Cancelled outcome"
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn panicking_child_records_one_finish_with_failed_outcome() {
+    let persistence = RecordingPersistence::default();
+    let mut harness = harness_with_persistence(
+        RunnerOptions::default(),
+        CoordinatorConfig::default(),
+        persistence.clone(),
+    );
+
+    let result = harness
+        .backend
+        .spawn(request("boom-2", false))
+        .await
+        .expect("the actor must survive its child and still answer");
+    assert_eq!(result.outcome, ChildOutcome::Failed);
+    let _ = harness.completions.recv().await;
+
+    let finishes: Vec<_> = persistence
+        .calls()
+        .into_iter()
+        .filter(|call| matches!(call, PersistenceCall::Finish { .. }))
+        .collect();
+    assert_eq!(
+        finishes,
+        vec![PersistenceCall::Finish {
+            child_id: "boom-2".to_owned(),
+            // Donor-faithful ruling from `ChildPersistence`'s port: a
+            // panicking child is finished through the ordinary path as an
+            // outcome the store already knows how to accept, not a sixth
+            // vocabulary entry.
+            outcome: ChildOutcome::Failed,
+            delivered: true,
+        }],
+        "a panicking child must still reach record_finish exactly once"
+    );
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn erroring_persistence_does_not_gate_delivery_or_take_down_the_actor() {
+    let persistence = RecordingPersistence {
+        error_every_call: true,
+        ..RecordingPersistence::default()
+    };
+    let mut harness = harness_with_persistence(
+        RunnerOptions::default(),
+        CoordinatorConfig::default(),
+        persistence.clone(),
+    );
+
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("errors-ok", false)).await }
+    });
+    assert_eq!(harness.started.recv().await.as_deref(), Some("errors-ok"));
+    let _ = harness.finish.send(());
+    let result = spawn
+        .await
+        .unwrap()
+        .expect("an erroring persistence must not stop delivery");
+    assert!(result.is_success());
+    let _ = harness.completions.recv().await;
+
+    // Both the spawn-time write and the finish-time write were attempted
+    // (and both errored) — persistence is an observer, not a gate.
+    assert_eq!(
+        persistence.calls(),
+        vec![
+            PersistenceCall::Spawn {
+                child_id: "errors-ok".to_owned(),
+                parent_session_id: "parent".to_owned(),
+                parent_alias: "parent-alias".to_owned(),
+            },
+            PersistenceCall::Finish {
+                child_id: "errors-ok".to_owned(),
+                outcome: ChildOutcome::Completed,
+                delivered: true,
+            },
+        ]
+    );
+
+    // The actor is still alive and answers normally after two persistence
+    // failures.
+    let survivor = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("survivor-after-errors", true)).await }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("survivor-after-errors")
+    );
+    let _ = harness.finish.send(());
+    assert!(survivor.await.unwrap().unwrap().is_success());
     harness.actor.abort();
 }

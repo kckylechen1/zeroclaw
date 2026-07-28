@@ -31,6 +31,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::outcome::ChildOutcome;
+use crate::persistence::{ChildPersistence, NoopPersistence};
 use crate::state::{
     ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, ChildRunFuture, CompletedChild,
     InternalEvent, ListRequest, MAX_PENDING_COMPLETIONS, PendingChild, ProgressFuture,
@@ -50,12 +51,18 @@ use crate::state::{
 };
 
 /// Channel-owned child lifecycle actor.
-pub struct Coordinator<R: ChildRunner> {
+///
+/// `P` is the durability seam ([`ChildPersistence`]), defaulted to
+/// [`NoopPersistence`] so [`Coordinator::new`] keeps building the same
+/// unpersisted actor this crate has always built; a host that wants writes
+/// through to a store uses [`Coordinator::with_persistence`] instead.
+pub struct Coordinator<R: ChildRunner, P: ChildPersistence = NoopPersistence> {
     commands: mpsc::UnboundedReceiver<CoordinatorCommand>,
     internal_tx: mpsc::UnboundedSender<InternalEvent<R::Control>>,
     internal_rx: mpsc::UnboundedReceiver<InternalEvent<R::Control>>,
     runner: R,
     config: CoordinatorConfig,
+    persistence: P,
     pending: HashMap<String, PendingChild>,
     active: HashMap<String, ActiveChild<R::Control>>,
     completed: HashMap<String, CompletedChild>,
@@ -71,10 +78,30 @@ pub struct Coordinator<R: ChildRunner> {
 }
 
 impl<R: ChildRunner> Coordinator<R> {
+    /// Build a coordinator with no durability seam plugged in.
+    ///
+    /// Behaviourally identical to this crate before it took a persistence
+    /// port at all — see [`Coordinator::with_persistence`] to plug one in.
     pub fn new(
         commands: mpsc::UnboundedReceiver<CoordinatorCommand>,
         runner: R,
         config: CoordinatorConfig,
+    ) -> Self {
+        Self::with_persistence(commands, runner, config, NoopPersistence)
+    }
+}
+
+impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
+    /// Build a coordinator backed by `persistence`.
+    ///
+    /// See [`ChildPersistence`] for the two-moment write-through contract
+    /// this actor calls it under; a write failure there is logged and never
+    /// blocks, delays, or unwinds a spawn or a finish.
+    pub fn with_persistence(
+        commands: mpsc::UnboundedReceiver<CoordinatorCommand>,
+        runner: R,
+        config: CoordinatorConfig,
+        persistence: P,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::unbounded_channel();
         Self {
@@ -83,6 +110,7 @@ impl<R: ChildRunner> Coordinator<R> {
             internal_rx,
             runner,
             config,
+            persistence,
             pending: HashMap::new(),
             active: HashMap::new(),
             completed: HashMap::new(),
@@ -377,6 +405,25 @@ impl<R: ChildRunner> Coordinator<R> {
                 explicitly_killed: false,
             },
         );
+        // The row must exist before the child can possibly finish: a crash
+        // between "accepted into pending" and "actually run" must still leave
+        // a Running row behind for the reaper. Persistence is an observer
+        // here, not a gate — a write failure is logged loudly and the spawn
+        // proceeds regardless.
+        if let Err(error) = self.persistence.record_spawn(&request) {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "child_id": request.child_id,
+                        "parent_session_id": request.parent_session_id,
+                        "error": error.to_string(),
+                    })),
+                "coordinator: failed to persist a child's spawn row; the spawn \
+                 proceeds unpersisted"
+            );
+        }
         self.running_count_changed();
         let reporter = ChildReporter {
             child_id: id.clone(),
@@ -580,6 +627,29 @@ impl<R: ChildRunner> Coordinator<R> {
             explicitly_killed,
             should_surface,
         };
+        // One write, after the disposition is known: `delivered` is true when
+        // the coordinator's own foreground path already handed this result to
+        // a parent, in-process — the spawn caller's inline reply or a
+        // blocking waiter. See `ChildPersistence::record_finish`'s doc for why
+        // this must be a single call, not a terminal write followed by a
+        // separate delivered write. Persistence is an observer, not a gate —
+        // a write failure is logged loudly and the actor carries on.
+        let delivered = disposition.foreground_delivered || disposition.waiter_delivered;
+        if let Err(error) = self.persistence.record_finish(id, &output.result, delivered) {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "child_id": id,
+                        "delivered": delivered,
+                        "error": error.to_string(),
+                    })),
+                "coordinator: failed to persist a child's finish row; the \
+                 ending was still delivered to every in-process waiter and \
+                 caller"
+            );
+        }
         self.completed.insert(id.to_owned(), completed);
         self.completed_order.push_back(id.to_owned());
         self.running_count_changed();
@@ -769,7 +839,7 @@ fn belongs_to_session(request: &ChildRequest, parent_session_id: Option<&str>) -
 ///
 /// The actor is the only thing that would ever have delivered their results, so
 /// a child that outlives it is work nobody will ever read.
-impl<R: ChildRunner> Drop for Coordinator<R> {
+impl<R: ChildRunner, P: ChildPersistence> Drop for Coordinator<R, P> {
     fn drop(&mut self) {
         self.cancel_all_children();
     }

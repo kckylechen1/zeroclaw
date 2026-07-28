@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
-use super::{ChildControl, ChildRunner, Coordinator, belongs_to_session};
+use super::{ChildControl, ChildPersistence, ChildRunner, Coordinator, belongs_to_session};
 use crate::state::{
     BlockingWaiter, ChildProgress, CompletedChild, ListRequest, OUTPUT_UNAVAILABLE_PLACEHOLDER,
     ProgressFuture, ProgressTarget, RunningSeed, completed_inspection, completed_snapshot,
@@ -25,7 +25,7 @@ use crate::types::{ChildInspection, ChildSnapshot};
 /// Default wait for a blocking query that names no timeout.
 const DEFAULT_BLOCKING_QUERY_TIMEOUT_MS: u64 = 30_000;
 
-impl<R: ChildRunner> Coordinator<R> {
+impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
     pub(super) fn handle_query(
         &mut self,
         id: String,

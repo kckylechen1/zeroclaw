@@ -61,16 +61,46 @@
 //! synchronous internally. A sync trait matches the caller it will have and
 //! the implementation it will get; there is no round trip to design around.
 //!
-//! ## What this is not
+//! ## Error posture: an observer, not a gate
 //!
-//! This trait is defined, not wired: no field on [`Coordinator`](crate::Coordinator)
-//! holds a `dyn ChildPersistence` yet, and nothing in this crate calls
-//! [`ChildPersistence::record_spawn`] or [`ChildPersistence::record_finish`].
-//! Plugging a real implementation in — sqlite or otherwise — and threading it
-//! through `handle_spawn` / `finish_child` is later work, owned by whoever
-//! owns that store.
+//! Both methods return [`Result<(), PersistenceError>`](PersistenceError) so
+//! [`Coordinator`](crate::Coordinator) can log a write failure once, in one
+//! place, the same way for every implementation — instead of relying on each
+//! implementation to remember to log its own failures. A `Err` here never
+//! stops, delays, or unwinds the spawn or the finish it was called from: a
+//! daemon that cannot write its ledger still does its work, it just does it
+//! loudly. The no-op default returns `Ok(())` unconditionally, so
+//! [`NoopPersistence`] never has anything to log.
+//!
+//! ## Wiring
+//!
+//! [`Coordinator`](crate::Coordinator) holds a `P: ChildPersistence` field
+//! (defaulted to [`NoopPersistence`] so existing callers of
+//! `Coordinator::new` see zero behavior change), and calls
+//! [`ChildPersistence::record_spawn`] from `handle_spawn` once a child is
+//! accepted into `pending`, and [`ChildPersistence::record_finish`] from
+//! `finish_child` exactly once, after the delivery disposition is computed.
+//! Plugging in a real implementation — sqlite or otherwise — is
+//! [`Coordinator::with_persistence`](crate::Coordinator::with_persistence).
 
 use crate::types::{ChildRequest, ChildResult};
+
+/// Failure detail from a persistence write.
+///
+/// Carries only a message: the concrete store's error type lives downstream
+/// of this crate (this crate does not depend on any store), so this is the
+/// only shape a `ChildPersistence` implementation can hand back without this
+/// crate knowing what a sqlite error, or any other store's error, looks like.
+#[derive(Debug, Clone)]
+pub struct PersistenceError(pub String);
+
+impl std::fmt::Display for PersistenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PersistenceError {}
 
 /// Write-through port for the coordinator's durability seam.
 ///
@@ -85,8 +115,9 @@ pub trait ChildPersistence {
     /// Called once per child, at spawn, before the child has run at all.
     /// There is no corresponding "active" write: nothing about a running
     /// child changes what would be persisted here.
-    fn record_spawn(&mut self, request: &ChildRequest) {
+    fn record_spawn(&mut self, request: &ChildRequest) -> Result<(), PersistenceError> {
         let _ = request;
+        Ok(())
     }
 
     /// Write a child's ending: terminal status, output, error detail, and
@@ -99,8 +130,14 @@ pub trait ChildPersistence {
     /// MUST write `outcome`/`output`/`detail`/`delivered` together, in a
     /// single statement — see the module doc for the double-announce race
     /// that reopens if the terminal write and the delivered write are split.
-    fn record_finish(&mut self, child_id: &str, result: &ChildResult, delivered: bool) {
+    fn record_finish(
+        &mut self,
+        child_id: &str,
+        result: &ChildResult,
+        delivered: bool,
+    ) -> Result<(), PersistenceError> {
         let _ = (child_id, result, delivered);
+        Ok(())
     }
 }
 
@@ -128,6 +165,7 @@ mod tests {
             description: "d".into(),
             agent_type: "explore".into(),
             parent_session_id: "parent".into(),
+            parent_alias: "parent-alias".into(),
             parent_prompt_id: None,
             resume_from: None,
             cwd: None,
@@ -141,20 +179,21 @@ mod tests {
     }
 
     /// The shipped no-op must not panic or change behavior — a host that
-    /// never plugs in a store gets exactly what it has today.
+    /// never plugs in a store gets exactly what it has today, and never sees
+    /// an `Err` to log.
     #[test]
     fn noop_persistence_accepts_both_calls_without_effect() {
         let mut persistence = NoopPersistence;
         let request = request();
-        persistence.record_spawn(&request);
+        assert!(persistence.record_spawn(&request).is_ok());
         let result = ChildResult {
             outcome: ChildOutcome::Completed,
             output: Arc::from("done"),
             child_id: "c1".into(),
             ..Default::default()
         };
-        persistence.record_finish("c1", &result, true);
-        // Reaching here without a panic is the whole assertion: there is no
-        // observable state to inspect on a no-op.
+        assert!(persistence.record_finish("c1", &result, true).is_ok());
+        // Beyond both calls returning `Ok(())`, there is no observable state
+        // to inspect on a no-op.
     }
 }

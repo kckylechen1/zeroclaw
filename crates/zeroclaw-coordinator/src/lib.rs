@@ -36,10 +36,12 @@
 //! ZeroClaw's five terminal outcomes, one-to-one with `AnnouncedOutcome`, and
 //! the `From` conversions in [`outcome`] are the only place that vocabulary
 //! edge is crossed — everything else in this crate still speaks
-//! `ChildOutcome`. [`ChildPersistence`] defines the durability seam without
-//! implementing it: no field on [`Coordinator`] holds one yet, so a host that
-//! wires nothing in gets [`NoopPersistence`]'s behavior, which is the same
-//! in-memory-only behavior this crate has always had.
+//! `ChildOutcome`. [`ChildPersistence`] defines the durability seam and
+//! [`Coordinator`] calls it, but this crate still ships no implementation of
+//! it: [`Coordinator::new`] defaults the seam to [`NoopPersistence`], so a
+//! host that plugs nothing in through
+//! [`Coordinator::with_persistence`](Coordinator::with_persistence) gets the
+//! same in-memory-only behavior this crate has always had.
 
 mod backend;
 mod cancel;
@@ -56,7 +58,7 @@ pub use backend::{
 pub use cancel::CancelToken;
 pub use coordinator::Coordinator;
 pub use outcome::ChildOutcome;
-pub use persistence::{ChildPersistence, NoopPersistence};
+pub use persistence::{ChildPersistence, NoopPersistence, PersistenceError};
 pub use state::{
     ChildCompletion, ChildControl, ChildProgress, ChildReporter, ChildRunOutput, ChildRunRequest,
     ChildRunner, CompletionDisposition, CoordinatorConfig, LocalBoxFuture, MAX_COMPLETED_ENTRIES,

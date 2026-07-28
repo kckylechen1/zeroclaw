@@ -27,15 +27,24 @@
 //! (used by alias-delete cascades), and every existing producer
 //! (`spawn_subagent.rs`, `delegate.rs`) fills it with the *parent's* alias,
 //! not the child's `agent_type` (which is a role, e.g. `"explore"`, not an
-//! alias). `ChildRequest` carries no separate alias field, only
-//! `parent_session_id`; that is the closest identity available; it is also
-//! the value written into `parent_id`, so a coordinator-spawned child's row
-//! and the row `claim_undelivered_children` looks up children under land on
-//! the same string.
+//! alias). `ChildRequest::parent_alias` carries exactly that alias — added
+//! for this purpose after a cold review spelled out what alias-keyed
+//! cascades would do to a session id filed in an alias column.
+//! `parent_id` stays `parent_session_id`: session identity is what
+//! `claim_undelivered_children` keys children under.
+//!
+//! ## Error posture
+//!
+//! Store failures are returned as `Err(PersistenceError)`, not logged here:
+//! the coordinator logs a write failure once, at its own call sites, the
+//! same way for every implementation. Loud in one place, not half-loud in
+//! two.
 
 use std::sync::Arc;
 
-use zeroclaw_coordinator::{ChildOutcome, ChildPersistence, ChildRequest, ChildResult};
+use zeroclaw_coordinator::{
+    ChildOutcome, ChildPersistence, ChildRequest, ChildResult, PersistenceError,
+};
 
 use super::task_registry::{TaskKind, TaskRecord, TaskStatus};
 use super::task_store_sqlite::SqliteTaskStore;
@@ -86,11 +95,11 @@ impl ChildPersistence for SubagentPersistence {
     /// `TaskRecord` producer in this crate (`spawn_subagent.rs`,
     /// `delegate.rs`) sets it to `None` today, because none of them carry a
     /// caller-supplied parent identity the way `ChildRequest` does.
-    fn record_spawn(&mut self, request: &ChildRequest) {
+    fn record_spawn(&mut self, request: &ChildRequest) -> Result<(), PersistenceError> {
         let rec = TaskRecord {
             id: request.child_id.clone(),
             kind: TaskKind::Subagent,
-            agent: request.parent_session_id.clone(),
+            agent: request.parent_alias.clone(),
             status: TaskStatus::Running,
             owner_pid: std::process::id(),
             owner_boot_id: self.owner_boot_id.clone(),
@@ -104,19 +113,9 @@ impl ChildPersistence for SubagentPersistence {
             started_at: chrono::Utc::now().to_rfc3339(),
             finished_at: None,
         };
-        let child_id = request.child_id.clone();
-        if let Err(error) = self.store.create_sync(rec) {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({
-                        "child_id": child_id,
-                        "error": format!("{error:#}"),
-                    })),
-                "control-plane: failed to persist a coordinator child's spawn row"
-            );
-        }
+        self.store
+            .create_sync(rec)
+            .map_err(|e| PersistenceError(format!("{e:#}")))
     }
 
     /// Write a child's ending in one statement — `finish_task_sync` (the
@@ -124,24 +123,29 @@ impl ChildPersistence for SubagentPersistence {
     /// already carries terminal status, output, error and `delivered`
     /// together; this method only maps `ChildResult`'s shape onto its
     /// parameters, it does not perform a second write.
-    fn record_finish(&mut self, child_id: &str, result: &ChildResult, delivered: bool) {
+    fn record_finish(
+        &mut self,
+        child_id: &str,
+        result: &ChildResult,
+        delivered: bool,
+    ) -> Result<(), PersistenceError> {
         let status = child_outcome_to_task_status(result.outcome);
         let output = result.output.as_ref();
         let error = result.detail.as_deref();
-        if let Err(error) = self
+        // `finish_task_sync` returns whether a row actually transitioned.
+        // For a coordinator child the spawn row always precedes the finish,
+        // so "no non-terminal row matched" is an anomaly worth surfacing,
+        // not a silent no-op — without it a lost spawn write would make the
+        // finish vanish too and nobody would ever hear about either.
+        match self
             .store
             .finish_task_sync(child_id, status, Some(output), error, delivered)
         {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({
-                        "child_id": child_id,
-                        "error": format!("{error:#}"),
-                    })),
-                "control-plane: failed to persist a coordinator child's finish row"
-            );
+            Ok(true) => Ok(()),
+            Ok(false) => Err(PersistenceError(format!(
+                "no non-terminal row for child {child_id:?}; spawn write missing or row already finished"
+            ))),
+            Err(e) => Err(PersistenceError(format!("{e:#}"))),
         }
     }
 }
@@ -161,6 +165,7 @@ mod tests {
             prompt: "do it".into(),
             description: "d".into(),
             agent_type: "explore".into(),
+            parent_alias: "parent-alias".into(),
             parent_session_id: parent_session_id.into(),
             parent_prompt_id: None,
             resume_from: None,
@@ -189,10 +194,11 @@ mod tests {
     #[tokio::test]
     async fn spawn_write_sets_parent_id_and_is_invisible_to_claim_while_running() {
         let (mut persistence, store) = harness();
-        persistence.record_spawn(&request("kid", "mum"));
+        persistence.record_spawn(&request("kid", "mum")).expect("spawn write");
 
         let rec = store.get("kid").await.unwrap().expect("row must exist");
         assert_eq!(rec.parent_id.as_deref(), Some("mum"));
+        assert_eq!(rec.agent, "parent-alias", "agent column carries the alias, not the session id");
         assert_eq!(rec.status, TaskStatus::Running);
         assert_eq!(rec.kind, TaskKind::Subagent);
 
@@ -209,7 +215,7 @@ mod tests {
     #[tokio::test]
     async fn finish_delivered_false_is_claimed_exactly_once_with_output_and_error_intact() {
         let (mut persistence, store) = harness();
-        persistence.record_spawn(&request("kid", "mum"));
+        persistence.record_spawn(&request("kid", "mum")).expect("spawn write");
 
         let result = ChildResult {
             outcome: ChildOutcome::Failed,
@@ -218,7 +224,9 @@ mod tests {
             child_id: "kid".into(),
             ..Default::default()
         };
-        persistence.record_finish("kid", &result, false);
+        persistence
+            .record_finish("kid", &result, false)
+            .expect("finish write");
 
         let claimed = store.claim_undelivered_children("mum").await.unwrap();
         assert_eq!(claimed.len(), 1);
@@ -239,7 +247,7 @@ mod tests {
     #[tokio::test]
     async fn finish_delivered_true_is_never_claimed() {
         let (mut persistence, store) = harness();
-        persistence.record_spawn(&request("kid", "mum"));
+        persistence.record_spawn(&request("kid", "mum")).expect("spawn write");
 
         let result = ChildResult {
             outcome: ChildOutcome::Completed,
@@ -247,7 +255,9 @@ mod tests {
             child_id: "kid".into(),
             ..Default::default()
         };
-        persistence.record_finish("kid", &result, true);
+        persistence
+            .record_finish("kid", &result, true)
+            .expect("finish write");
 
         assert!(
             store
@@ -260,12 +270,11 @@ mod tests {
     }
 
     /// Every `ChildOutcome` variant must round-trip into a `TaskStatus` the
-    /// store accepts as terminal. `record_finish` swallows a write failure
-    /// into a log line (the trait returns nothing to propagate an error
-    /// through), so this test does not trust the call alone — it reads the
-    /// row back and asserts the status actually changed, which is what would
-    /// go red if `finish_task_sync` ever rejected one of these as
-    /// non-terminal (see `finish_task_record`'s `anyhow::ensure!`).
+    /// store accepts as terminal. The call's own `Result` now surfaces a
+    /// rejected write, but this test still does not trust the call alone —
+    /// it reads the row back and asserts the status actually changed, which
+    /// is what would go red if `finish_task_sync` ever rejected one of these
+    /// as non-terminal (see `finish_task_record`'s `anyhow::ensure!`).
     #[tokio::test]
     async fn every_child_outcome_maps_to_a_status_the_store_accepts_as_terminal() {
         for outcome in [
@@ -277,7 +286,7 @@ mod tests {
         ] {
             let (mut persistence, store) = harness();
             let child_id = format!("kid-{outcome:?}");
-            persistence.record_spawn(&request(&child_id, "mum"));
+            persistence.record_spawn(&request(&child_id, "mum")).expect("spawn write");
 
             let status = child_outcome_to_task_status(outcome);
             assert!(
@@ -291,7 +300,9 @@ mod tests {
                 child_id: child_id.clone(),
                 ..Default::default()
             };
-            persistence.record_finish(&child_id, &result, false);
+            persistence
+                .record_finish(&child_id, &result, false)
+                .expect("finish write");
 
             let rec = store.get(&child_id).await.unwrap().unwrap();
             assert_eq!(
