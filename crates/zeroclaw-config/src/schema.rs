@@ -3937,6 +3937,29 @@ impl Config {
         self.personas.get(carded_persona)
     }
 
+    /// Resolve the card that governs an explicit agent alias, if any.
+    ///
+    /// Mirrors [`Self::risk_profile_for_agent`]'s and
+    /// [`Self::persona_for_agent`]'s card-following, but for the card itself
+    /// rather than something the card points at: `agents.<alias>.card` names
+    /// a `[cards.<alias>]` entry. Returns `None` when the agent has no card
+    /// set, or when it names one that does not exist (a dangling reference —
+    /// validation rejects this shape at load time; the runtime treats
+    /// `None` the same as "uncarded"). This is the single accessor for
+    /// "which card governs this agent" — callers that need the card's tool
+    /// grants, persona, or risk profile by hand should go through this
+    /// rather than re-deriving `agent.card.as_str().trim()` +
+    /// `self.cards.get(..)` themselves.
+    #[must_use]
+    pub fn card_for_agent(&self, agent_alias: &str) -> Option<&crate::card::AgentCard> {
+        let agent = self.agents.get(agent_alias)?;
+        let card = agent.card.as_str().trim();
+        if card.is_empty() {
+            return None;
+        }
+        self.cards.get(card)
+    }
+
     /// Resolve the delegate targets `caller_alias` may reach:
     /// same-profile peers when `delegate_same_risk_profile` is set, unioned
     /// with the explicit `delegates` roster, minus the caller. Single

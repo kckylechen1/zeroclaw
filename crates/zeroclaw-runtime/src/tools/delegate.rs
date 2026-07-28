@@ -967,6 +967,19 @@ impl DelegateTool {
     /// the call site used to) always fails for a carded target and agentic
     /// delegation to it errors out entirely.
     ///
+    /// A carded target additionally gets its tool reach overridden from the
+    /// card's own grants, mirroring `SecurityPolicy::for_agent`
+    /// (`zeroclaw-config/src/policy.rs`): the profile named by
+    /// `risk_profile_for_agent` supplies autonomy/sandbox/shell
+    /// allow-list/`always_ask`, but `allowed_tools` is a full replacement
+    /// with `card.grants.to_allowed_tools()` — the profile's own tool list
+    /// is not this target's grant. Naming is the only way onto a card, so
+    /// `mcp_discovered_tool_policy` is also forced to `ExplicitOnly`: left
+    /// at the profile's own setting, an MCP-permissive profile would let
+    /// `delegate_admits_with_mcp`'s `admits_unlisted` check readmit any
+    /// `<server>__<tool>`-shaped name the card never granted, reopening the
+    /// hole the `allowed_tools` override just closed.
+    ///
     /// When `root_config` is `None` (legacy test constructors with no card
     /// awareness at all), falls back to the flat `self.risk_profiles` lookup
     /// keyed by the raw field, preserving prior behavior exactly.
@@ -976,9 +989,17 @@ impl DelegateTool {
         agent_config: &AliasedAgentConfig,
     ) -> Option<SecurityPolicy> {
         match self.root_config.as_ref() {
-            Some(config) => config
-                .risk_profile_for_agent(agent_name)
-                .map(Self::security_policy_from_profile),
+            Some(config) => {
+                let mut policy = config
+                    .risk_profile_for_agent(agent_name)
+                    .map(Self::security_policy_from_profile)?;
+                if let Some(card) = config.card_for_agent(agent_name) {
+                    policy.allowed_tools = card.grants.to_allowed_tools();
+                    policy.mcp_discovered_tool_policy =
+                        zeroclaw_config::autonomy::McpDiscoveredToolPolicy::ExplicitOnly;
+                }
+                Some(policy)
+            }
             None => self.resolve_tool_policy(&agent_config.risk_profile),
         }
     }
@@ -3451,11 +3472,24 @@ mod tests {
     /// delegate target, either carded (card's `risk_profile` supplies the
     /// profile, agent-level `risk_profile` stays empty as `Config::validate`
     /// requires) or plain (agent-level `risk_profile` set directly, no card).
+    /// `mcp_discovered_tool_policy` is the profile's own posture — tests that
+    /// need to check the carded override forces `ExplicitOnly` regardless
+    /// set it to `AutoAdmit` here.
+    ///
+    /// The carded case's card grants exactly `card_tool`, deliberately
+    /// disjoint from the profile's own `allowed_tools` (`echo_tool`): a test
+    /// asserting `card_tool` is admitted and `echo_tool` is refused can only
+    /// pass if `allowed_tools` actually came from the card, not from the
+    /// profile it points at — the direction this packet's bug got backwards.
+    ///
     /// Returns `(config, agent_config)` so callers can wire both a
     /// `DelegateTool::with_root_config` and the raw `agent_config` argument
     /// `resolve_agentic_tool_policy` takes.
-    fn agentic_config_with_target(carded: bool) -> (Arc<Config>, AliasedAgentConfig) {
-        use zeroclaw_config::card::AgentCard;
+    fn agentic_config_with_target(
+        carded: bool,
+        mcp_discovered_tool_policy: zeroclaw_config::autonomy::McpDiscoveredToolPolicy,
+    ) -> (Arc<Config>, AliasedAgentConfig) {
+        use zeroclaw_config::card::{AgentCard, CardGrants, GrantClass, ToolGrant};
 
         let root = std::env::temp_dir().join(format!(
             "zeroclaw-delegate-agentic-card-{}",
@@ -3470,6 +3504,7 @@ mod tests {
             "agentic_profile".to_string(),
             RiskProfileConfig {
                 allowed_tools: Some(vec!["echo_tool".to_string()]),
+                mcp_discovered_tool_policy,
                 ..RiskProfileConfig::default()
             },
         );
@@ -3478,6 +3513,10 @@ mod tests {
                 "agentic_card".to_string(),
                 AgentCard {
                     risk_profile: "agentic_profile".into(),
+                    grants: CardGrants {
+                        tools: vec![ToolGrant::new("card_tool", GrantClass::LocalRead)],
+                        ..CardGrants::default()
+                    },
                     ..AgentCard::default()
                 },
             );
@@ -3503,20 +3542,55 @@ mod tests {
 
     #[test]
     fn resolve_agentic_tool_policy_resolves_for_carded_target() {
-        // Regression guard for the fail-closed defect: a carded agent's
-        // `agent.risk_profile` field is empty by construction (config
-        // validation forbids setting both a card and a direct risk_profile).
-        // The old call site read that raw empty field directly and always
-        // failed for a carded target, so agentic delegation to it could
-        // never work at all.
-        let (config, agent_config) = agentic_config_with_target(true);
+        // Regression guard for the fail-closed defect (agent.risk_profile
+        // empty by construction for a carded agent) AND the over-grant
+        // defect (the card's own grants, not the profile's allowed_tools,
+        // must be what the policy admits).
+        let (config, agent_config) = agentic_config_with_target(
+            true,
+            zeroclaw_config::autonomy::McpDiscoveredToolPolicy::ExplicitOnly,
+        );
         let tool = DelegateTool::new(config.agents.clone(), None, test_security())
             .with_root_config(config);
 
         let policy = tool
             .resolve_agentic_tool_policy("agentic_target", &agent_config)
             .expect("carded agentic target must resolve a tool policy via its card's risk_profile");
-        assert_eq!(policy.allowed_tools, Some(vec!["echo_tool".to_string()]));
+        assert_eq!(policy.allowed_tools, Some(vec!["card_tool".to_string()]));
+        assert!(
+            DelegateTool::delegate_admits_with_mcp(&policy, "card_tool"),
+            "a tool the card grants must be admitted"
+        );
+        assert!(
+            !DelegateTool::delegate_admits_with_mcp(&policy, "echo_tool"),
+            "a tool only the profile's own allowed_tools names, but the card \
+             does not grant, must be refused — the card is a replacement, \
+             not a union with the profile's tool list"
+        );
+    }
+
+    #[test]
+    fn resolve_agentic_tool_policy_carded_target_refuses_unlisted_mcp_under_auto_admit() {
+        // The card's grants are a closed world: naming is the only way in.
+        // Even when the profile the card points at is configured to
+        // auto-admit any double-underscore MCP name, a carded target must
+        // not inherit that — an MCP-discovered tool the card never named
+        // stays refused.
+        let (config, agent_config) = agentic_config_with_target(
+            true,
+            zeroclaw_config::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
+        );
+        let tool = DelegateTool::new(config.agents.clone(), None, test_security())
+            .with_root_config(config);
+
+        let policy = tool
+            .resolve_agentic_tool_policy("agentic_target", &agent_config)
+            .expect("carded agentic target must resolve a tool policy via its card's risk_profile");
+        assert!(
+            !DelegateTool::delegate_admits_with_mcp(&policy, "filesystem__write_file"),
+            "an unlisted MCP-discovered tool must be refused for a carded \
+             target regardless of the profile's mcp_discovered_tool_policy"
+        );
     }
 
     #[test]
@@ -3524,8 +3598,13 @@ mod tests {
         // Regression guard: an uncarded agent (plain `agent.risk_profile`,
         // no card) must resolve exactly as before once `root_config` is
         // wired — the reroute to `Config::risk_profile_for_agent` must not
-        // regress the common case it's layered on top of.
-        let (config, agent_config) = agentic_config_with_target(false);
+        // regress the common case it's layered on top of. No card exists,
+        // so `resolve_agentic_tool_policy`'s card-override branch never
+        // runs and `allowed_tools` stays the profile's own list.
+        let (config, agent_config) = agentic_config_with_target(
+            false,
+            zeroclaw_config::autonomy::McpDiscoveredToolPolicy::ExplicitOnly,
+        );
         let tool = DelegateTool::new(config.agents.clone(), None, test_security())
             .with_root_config(config);
 

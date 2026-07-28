@@ -2247,20 +2247,21 @@ impl SecurityPolicy {
             // silently gated by an unrelated profile's tool list, or vice
             // versa. Tool grants are resolved only here, once, as a
             // deliberate override.
-            let card_alias = agent_cfg.card.as_str().trim();
-            if !card_alias.is_empty() {
-                if let Some(card) = config.cards.get(card_alias) {
-                    let card_profile = card.risk_profile.as_str().trim();
-                    if !card_profile.is_empty() {
-                        policy.risk_profile_name = card_profile.to_string();
-                    }
-                    // `to_allowed_tools()` is always `Some`, never `None` —
-                    // an empty grant list means deny-everything, not
-                    // unrestricted. Preserve that: this is a full
-                    // replacement of the profile's own `allowed_tools`, not
-                    // an intersection with it.
-                    policy.allowed_tools = card.grants.to_allowed_tools();
+            if let Some(card) = config.card_for_agent(agent_alias) {
+                let card_profile = card.risk_profile.as_str().trim();
+                if !card_profile.is_empty() {
+                    policy.risk_profile_name = card_profile.to_string();
                 }
+                // `to_allowed_tools()` is always `Some`, never `None` —
+                // an empty grant list means deny-everything, not
+                // unrestricted. Preserve that: this is a full replacement of
+                // the profile's `allowed_tools` only — the profile's own
+                // `excluded_tools` still applies on top (deny wins; see
+                // `is_tool_allowed`), so a profile exclusion can veto a card
+                // grant. That subtraction is deliberate: the named profile is
+                // the card author's own choice (`AgentCard::risk_profile`),
+                // so its exclusions are part of the authored posture.
+                policy.allowed_tools = card.grants.to_allowed_tools();
             }
         }
         policy.config_path = Some(config.config_path.clone());

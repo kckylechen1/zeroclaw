@@ -191,7 +191,13 @@ pub struct AgentCard {
     pub persona: crate::providers::PersonaRef,
     /// Which `[risk_profiles.<alias>]` supplies the settings that are not tool
     /// grants: autonomy level, sandbox, shell command allow-list, and the
-    /// `always_ask` backstop. The card owns tools; the profile owns the rest.
+    /// `always_ask` backstop. The card owns tools; the profile owns the rest —
+    /// with one exception: the named profile's own `excluded_tools` still
+    /// subtracts from the card's grants (`SecurityPolicy::for_agent` replaces
+    /// only `allowed_tools`; `is_tool_allowed` is `allowed && !excluded`
+    /// regardless of where `allowed` came from). That is deliberate, not a
+    /// leak: this profile is the card author's own choice, so its exclusions
+    /// are part of the authored posture, and deny-wins fails safe.
     pub risk_profile: crate::providers::RiskProfileRef,
     /// What this agent may reach.
     #[nested]
