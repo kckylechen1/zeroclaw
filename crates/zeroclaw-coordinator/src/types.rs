@@ -1,0 +1,760 @@
+// Derived from grok-build (Apache-2.0), revision
+// 1adcd1f477870e4a97bacbd6be78c8a3bfbac46d, from
+// `.../grok_build/task/types.rs`.
+// Copyright 2023-2026 SpaceXAI. Licensed under the Apache License, Version 2.0.
+//
+// This file was CHANGED by ZeroClaw Labs: the outcome vocabulary is
+// ZeroClaw's (`ChildOutcome`) rather than upstream's success/cancelled
+// booleans; the `Resources` injection glue (`register_resource!`,
+// `TaskModelValidator`, `SubagentForegroundWait`, `GoalLoopActive`, the depth
+// and session-id resources), the tool-kind capability filtering, the
+// model-argument sanitizers, usage accounting, the workflow owner, and the
+// unused multi-wait request were dropped; `educe`'s Debug-ignore derives were
+// replaced with hand-written `Debug` impls where needed.
+// See ../LICENSE and ../NOTICE.
+
+//! Request, reply, and command types for child coordination.
+//!
+//! Request data is deliberately separate from command reply envelopes: the
+//! coordinator actor owns every reply sender and every lifecycle transition,
+//! while a child runner receives only plain request data. One command enum goes
+//! down one channel, so there is exactly one order of events.
+
+use std::fmt;
+use std::sync::Arc;
+
+use tokio::sync::{mpsc, oneshot};
+
+use crate::cancel::CancelToken;
+use crate::outcome::ChildOutcome;
+
+// ── Spawn ────────────────────────────────────────────────────────────────
+
+/// Everything a runner needs to start one child.
+#[derive(Debug, Clone)]
+pub struct ChildRequest {
+    /// Stable id for the child, chosen by the caller. Also the id under which
+    /// the child can later be queried or cancelled.
+    pub child_id: String,
+    pub prompt: String,
+    pub description: String,
+    /// Which agent definition the child runs as.
+    pub agent_type: String,
+    pub parent_session_id: String,
+    /// The parent turn that launched this child.
+    ///
+    /// Cancelling a turn cancels the children that turn spawned, and nothing
+    /// else: children from earlier turns keep running.
+    pub parent_prompt_id: Option<String>,
+    /// Resume from a previously completed child's conversation.
+    pub resume_from: Option<String>,
+    /// Explicit working directory for the child. Validated by the runner.
+    pub cwd: Option<String>,
+    pub overrides: ChildOverrides,
+    /// Launched as background work.
+    ///
+    /// Background does not mean fire-and-forget: the completion still reaches
+    /// the parent when `surface_completion` is set, and cancelling the parent
+    /// turn still cancels the child.
+    pub run_in_background: bool,
+    /// When false the child's completion is never buffered for the parent —
+    /// used by internal children whose existence the parent must not see.
+    pub surface_completion: bool,
+    /// Wait for the real ending however long it takes: no foreground budget.
+    pub await_to_completion: bool,
+    /// Seed the child with the parent's conversation before `prompt`.
+    /// A successful `resume_from` takes precedence.
+    pub fork_context: bool,
+    pub cancel_token: CancelToken,
+}
+
+/// Per-spawn overrides. `None` means "inherit from the parent or the role".
+#[derive(Debug, Clone, Default)]
+pub struct ChildOverrides {
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    /// Named persona to apply to the child.
+    pub persona: Option<String>,
+    /// Cap, in bytes, on the output carried in this child's completion summary.
+    pub completion_output_cap: Option<usize>,
+    pub spawn_depth: Option<u32>,
+    pub output_token_budget: Option<u64>,
+    /// Groups children belonging to one repeating unit of work, so a host can
+    /// ask whether that unit still has anything in flight.
+    pub loop_task_id: Option<String>,
+}
+
+/// Spawn command envelope owned by the coordinator mailbox.
+pub struct SpawnCommand {
+    pub request: Box<ChildRequest>,
+    pub result_tx: oneshot::Sender<ChildResult>,
+}
+
+impl fmt::Debug for SpawnCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpawnCommand")
+            .field("request", &self.request)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::ops::Deref for SpawnCommand {
+    type Target = ChildRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
+impl SpawnCommand {
+    /// Build and send a reply while the plain request remains borrowable.
+    ///
+    /// For channel adapters and deterministic test harnesses; production
+    /// lifecycle replies belong to the coordinator.
+    ///
+    /// # Errors
+    ///
+    /// Returns the built result when the spawn caller is gone.
+    pub fn respond_with(
+        self,
+        build: impl FnOnce(&ChildRequest) -> ChildResult,
+    ) -> Result<(), ChildResult> {
+        let result = build(&self.request);
+        self.result_tx.send(result)
+    }
+}
+
+// ── Result ───────────────────────────────────────────────────────────────
+
+/// What a child run produced.
+#[derive(Debug, Clone)]
+pub struct ChildResult {
+    pub outcome: ChildOutcome,
+    /// The child's final output text.
+    ///
+    /// `Arc<str>` because a child's output can be its whole transcript and it
+    /// is cloned into every per-consumer summary; cloning must stay a refcount
+    /// bump.
+    pub output: Arc<str>,
+    /// Why it ended the way it did. Populated for every non-success outcome, so
+    /// a reader that looks only here still learns something.
+    pub detail: Option<String>,
+    pub child_id: String,
+    /// The child's own session id, once it has one.
+    pub child_session_id: String,
+    pub tool_calls: u32,
+    pub turns: u32,
+    pub duration_ms: u64,
+    pub tokens_used: u64,
+    pub output_tokens_used: u64,
+    pub total_tokens_used: u64,
+    /// Path to the isolated worktree, if one was created for the child.
+    pub worktree_path: Option<String>,
+    /// This reply is a handle-off, not an ending: the child exceeded its
+    /// foreground budget and is *still running*. Its real ending arrives later
+    /// through a query or a buffered completion.
+    pub backgrounded: bool,
+}
+
+impl Default for ChildResult {
+    /// A result carrying no information is [`ChildOutcome::Lost`].
+    ///
+    /// The default must never read as success, and it must not claim a clean
+    /// failure either — nothing here knows whether the work happened. Every
+    /// site that means "failed" says so explicitly.
+    fn default() -> Self {
+        Self {
+            outcome: ChildOutcome::Lost,
+            output: Arc::from(""),
+            detail: None,
+            child_id: String::new(),
+            child_session_id: String::new(),
+            tool_calls: 0,
+            turns: 0,
+            duration_ms: 0,
+            tokens_used: 0,
+            output_tokens_used: 0,
+            total_tokens_used: 0,
+            worktree_path: None,
+            backgrounded: false,
+        }
+    }
+}
+
+impl ChildResult {
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        self.outcome.is_success()
+    }
+}
+
+// ── Query ────────────────────────────────────────────────────────────────
+
+/// Look up one child's current state.
+pub struct QueryCommand {
+    pub child_id: String,
+    /// Restrict the lookup to children owned by this parent session.
+    pub parent_session_id: Option<String>,
+    /// Wait (up to `timeout_ms`) for a terminal state before replying.
+    pub block: bool,
+    /// Max wait when blocking. Defaults to 30s.
+    pub timeout_ms: Option<u64>,
+    pub respond_to: oneshot::Sender<Option<ChildSnapshot>>,
+}
+
+impl fmt::Debug for QueryCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueryCommand")
+            .field("child_id", &self.child_id)
+            .field("parent_session_id", &self.parent_session_id)
+            .field("block", &self.block)
+            .field("timeout_ms", &self.timeout_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Point-in-time view of one child.
+#[derive(Debug, Clone)]
+pub struct ChildSnapshot {
+    pub child_id: String,
+    pub description: String,
+    pub agent_type: String,
+    pub status: ChildStatus,
+    /// Wall-clock start time (epoch ms).
+    pub started_at_epoch_ms: u64,
+    pub duration_ms: u64,
+    pub persona: Option<String>,
+}
+
+impl ChildSnapshot {
+    /// Whether the child is still in flight — the liveness rule every blocking
+    /// query loops on.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        matches!(
+            self.status,
+            ChildStatus::Running { .. } | ChildStatus::Initializing
+        )
+    }
+}
+
+/// Lifecycle metadata for presentation and extension callers.
+#[derive(Debug, Clone)]
+pub struct ChildInspection {
+    pub snapshot: ChildSnapshot,
+    pub parent_session_id: String,
+    pub child_session_id: String,
+    pub fork_parent_prompt_id: Option<String>,
+    pub resumed_from: Option<String>,
+}
+
+/// Where a child is in its life.
+///
+/// The terminal states are one variant carrying a [`ChildOutcome`], not one
+/// variant per ending: a reader that handles "finished" cannot forget to handle
+/// a newly added ending, and there is only ever one vocabulary for how a run
+/// ended.
+#[derive(Debug, Clone)]
+pub enum ChildStatus {
+    /// Being set up — resolving config, preparing a workspace, starting the
+    /// session. A query during this phase reports initializing, never
+    /// "not found".
+    Initializing,
+    /// Running. Fields are pulled from the child at query time.
+    Running {
+        turn_count: u32,
+        tool_call_count: u32,
+        tokens_used: u64,
+        context_window_tokens: u64,
+        /// Context window usage as a percentage (0–100).
+        context_usage_pct: u8,
+        /// Distinct tool names called so far.
+        tools_used: Vec<String>,
+        error_count: u32,
+    },
+    /// Ended. `outcome` says how.
+    Finished {
+        outcome: ChildOutcome,
+        output: String,
+        detail: Option<String>,
+        tool_calls: u32,
+        turns: u32,
+        worktree_path: Option<String>,
+    },
+}
+
+impl ChildStatus {
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Finished { .. })
+    }
+
+    /// The outcome for a finished child, `None` while it is still in flight.
+    #[must_use]
+    pub fn outcome(&self) -> Option<ChildOutcome> {
+        match self {
+            Self::Finished { outcome, .. } => Some(*outcome),
+            _ => None,
+        }
+    }
+}
+
+// ── Cancel ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum CancelTarget {
+    ChildId(String),
+    /// Every child spawned by one parent turn.
+    ParentPromptId(String),
+}
+
+pub struct CancelCommand {
+    pub parent_session_id: Option<String>,
+    pub target: CancelTarget,
+    pub respond_to: oneshot::Sender<CancelOutcome>,
+}
+
+impl fmt::Debug for CancelCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CancelCommand")
+            .field("parent_session_id", &self.parent_session_id)
+            .field("target", &self.target)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum CancelOutcome {
+    Cancelled,
+    /// Nothing to cancel: it had already ended, this way.
+    AlreadyFinished { outcome: ChildOutcome },
+    NotFound,
+}
+
+// ── Completion buffering ─────────────────────────────────────────────────
+
+/// A finished child, as handed to the parent between turns.
+///
+/// Session ownership lives on the coordinator's internal buffer entry, so a
+/// delivered summary carries no owner field.
+#[derive(Debug, Clone)]
+pub struct ChildCompletionSummary {
+    pub child_id: String,
+    pub agent_type: String,
+    pub description: String,
+    pub outcome: ChildOutcome,
+    pub duration_ms: u64,
+    pub tool_calls: u32,
+    pub turns: u32,
+    /// The child's final output, refcount-shared with [`ChildResult::output`].
+    pub output: Arc<str>,
+}
+
+/// Drain buffered completion summaries.
+pub struct CompletionsCommand {
+    pub parent_session_id: Option<String>,
+    /// Ids the caller has already surfaced by other means.
+    pub suppress_ids: Vec<String>,
+    pub respond_to: oneshot::Sender<Vec<ChildCompletionSummary>>,
+}
+
+impl fmt::Debug for CompletionsCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CompletionsCommand")
+            .field("parent_session_id", &self.parent_session_id)
+            .field("suppress_ids", &self.suppress_ids)
+            .finish_non_exhaustive()
+    }
+}
+
+// ── Outstanding work ─────────────────────────────────────────────────────
+
+/// What one parent turn still has in flight.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutstandingReply {
+    /// Turn-blocking children still pending or active.
+    pub live_ids: Vec<String>,
+    /// A background child is still running: it does not block the turn, but the
+    /// turn is not the end of the story either.
+    pub background_live: bool,
+}
+
+pub struct OutstandingCommand {
+    pub parent_session_id: String,
+    pub prompt_id: String,
+    pub respond_to: oneshot::Sender<OutstandingReply>,
+}
+
+impl fmt::Debug for OutstandingCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OutstandingCommand")
+            .field("parent_session_id", &self.parent_session_id)
+            .field("prompt_id", &self.prompt_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegistryCounts {
+    pub pending: usize,
+    pub active: usize,
+    pub completed: usize,
+}
+
+pub struct RegistryCountsCommand {
+    pub respond_to: oneshot::Sender<RegistryCounts>,
+}
+
+impl fmt::Debug for RegistryCountsCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegistryCountsCommand").finish()
+    }
+}
+
+// ── Inspection ───────────────────────────────────────────────────────────
+
+/// Full metadata plus a resolved progress snapshot.
+pub struct InspectCommand {
+    pub child_id: String,
+    pub parent_session_id: Option<String>,
+    pub respond_to: oneshot::Sender<Option<ChildInspection>>,
+}
+
+impl fmt::Debug for InspectCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InspectCommand")
+            .field("child_id", &self.child_id)
+            .field("parent_session_id", &self.parent_session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Every running child owned by one parent session.
+pub struct ListRunningCommand {
+    pub parent_session_id: String,
+    pub respond_to: oneshot::Sender<Vec<ChildInspection>>,
+}
+
+impl fmt::Debug for ListRunningCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ListRunningCommand")
+            .field("parent_session_id", &self.parent_session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Lightweight summary of a running child.
+#[derive(Debug, Clone)]
+pub struct ActiveChildSummary {
+    pub child_id: String,
+    pub agent_type: String,
+    pub description: String,
+    /// Wall-clock time since spawn.
+    pub elapsed_ms: u64,
+}
+
+/// List running children cheaply, without pulling live progress.
+pub struct ListActiveCommand {
+    pub parent_session_id: String,
+    pub respond_to: oneshot::Sender<Vec<ActiveChildSummary>>,
+}
+
+impl fmt::Debug for ListActiveCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ListActiveCommand")
+            .field("parent_session_id", &self.parent_session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Reference to a child spawned during one parent turn.
+#[derive(Debug, Clone)]
+pub struct SpawnedChildRef {
+    pub child_id: String,
+    pub child_session_id: String,
+    pub agent_type: String,
+    pub description: String,
+    pub persona: Option<String>,
+    pub resumed_from: Option<String>,
+}
+
+pub struct SpawnedRefsCommand {
+    pub parent_session_id: String,
+    pub prompt_id: String,
+    pub respond_to: oneshot::Sender<Vec<SpawnedChildRef>>,
+}
+
+impl fmt::Debug for SpawnedRefsCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpawnedRefsCommand")
+            .field("parent_session_id", &self.parent_session_id)
+            .field("prompt_id", &self.prompt_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Whether a repeating unit of work still has children in flight.
+pub struct LoopUnitActiveCommand {
+    pub task_id: String,
+    pub respond_to: oneshot::Sender<bool>,
+}
+
+impl fmt::Debug for LoopUnitActiveCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoopUnitActiveCommand")
+            .field("task_id", &self.task_id)
+            .finish_non_exhaustive()
+    }
+}
+
+// ── Resume ───────────────────────────────────────────────────────────────
+
+/// In-memory source data a runner needs to resume a finished child.
+#[derive(Debug, Clone)]
+pub struct ResumeSource {
+    pub child_id: String,
+    pub child_session_id: String,
+    pub child_cwd: String,
+    pub worktree_path: Option<String>,
+    pub snapshot_ref: Option<String>,
+    pub agent_type: String,
+    pub persona: Option<String>,
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ResumeLookup {
+    /// The source is still running; resuming it would fork a live child.
+    Active,
+    Completed(ResumeSource),
+    Missing,
+}
+
+// ── Type validation / description ────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ValidateTypeOutcome {
+    Ok,
+    /// The type does not resolve. `available` is sorted.
+    Unknown { available: Vec<String> },
+    Disabled,
+    NotAllowed { allowed: Vec<String> },
+    /// Could not be checked. Distinct from `Unknown`: the type may be fine.
+    ValidationUnavailable,
+}
+
+pub struct ValidateTypeCommand {
+    pub agent_type: String,
+    pub parent_session_id: String,
+    pub respond_to: oneshot::Sender<ValidateTypeOutcome>,
+}
+
+impl fmt::Debug for ValidateTypeCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ValidateTypeCommand")
+            .field("agent_type", &self.agent_type)
+            .field("parent_session_id", &self.parent_session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Outcome of describing an agent type without spawning it.
+///
+/// Mirrors [`ValidateTypeOutcome`] one variant at a time, plus `Unavailable`
+/// for infrastructure trouble, so a caller maps every variant to a reason.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum DescribeOutcome {
+    Ok(ChildTypeSummary),
+    Unknown { available: Vec<String> },
+    NotAllowed { allowed: Vec<String> },
+    Disabled,
+    /// Could not be obtained — treat as fail-open.
+    Unavailable,
+}
+
+/// What a child of some agent type would be able to do.
+///
+/// Built by the runner from the same resolution a real spawn performs, so the
+/// described tools are the tools the child would actually get. Tool names are
+/// keyed by the host's own tool-kind spelling; this crate has no tool registry
+/// and does not interpret them.
+#[derive(Debug, Clone, Default)]
+pub struct ChildTypeSummary {
+    pub tool_names: std::collections::BTreeMap<String, String>,
+    pub can_read: bool,
+    pub can_search: bool,
+    pub can_execute: bool,
+}
+
+pub struct DescribeTypeCommand {
+    pub agent_type: String,
+    /// Host override deciding which harness flavour resolves the toolset.
+    /// `None` means the parent decides.
+    pub harness_agent_type: Option<String>,
+    pub parent_session_id: String,
+    pub respond_to: oneshot::Sender<DescribeOutcome>,
+}
+
+impl fmt::Debug for DescribeTypeCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DescribeTypeCommand")
+            .field("agent_type", &self.agent_type)
+            .field("harness_agent_type", &self.harness_agent_type)
+            .field("parent_session_id", &self.parent_session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+// ── The command channel ──────────────────────────────────────────────────
+
+/// Every message the coordinator accepts.
+///
+/// Exhaustive on purpose: adding a command forces every match to account for
+/// it, and one enum down one channel is what makes the actor a single writer.
+#[derive(Debug)]
+pub enum CoordinatorCommand {
+    Spawn(SpawnCommand),
+    Query(QueryCommand),
+    Cancel(CancelCommand),
+    ListActive(ListActiveCommand),
+    ListRunning(ListRunningCommand),
+    Completions(CompletionsCommand),
+    /// Fire-and-forget: drop buffered completions owned by a session that no
+    /// longer exists, so an unloaded session cannot leak into the buffer.
+    DiscardSessionCompletions {
+        parent_session_id: String,
+    },
+    Outstanding(OutstandingCommand),
+    RegistryCounts(RegistryCountsCommand),
+    Inspect(InspectCommand),
+    SpawnedRefs(SpawnedRefsCommand),
+    ValidateType(ValidateTypeCommand),
+    DescribeType(DescribeTypeCommand),
+    LoopUnitActive(LoopUnitActiveCommand),
+}
+
+/// Clonable handle for sending coordinator commands.
+#[derive(Clone)]
+pub struct CommandSender(pub mpsc::UnboundedSender<CoordinatorCommand>);
+
+impl fmt::Debug for CommandSender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CommandSender").finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ChildCompletionSummary, ChildOutcome, ChildSnapshot, ChildStatus, CommandSender,
+        CompletionsCommand, CoordinatorCommand,
+    };
+
+    fn running() -> ChildStatus {
+        ChildStatus::Running {
+            turn_count: 0,
+            tool_call_count: 0,
+            tokens_used: 0,
+            context_window_tokens: 0,
+            context_usage_pct: 0,
+            tools_used: vec![],
+            error_count: 0,
+        }
+    }
+
+    fn finished(outcome: ChildOutcome) -> ChildStatus {
+        ChildStatus::Finished {
+            outcome,
+            output: "done".into(),
+            detail: None,
+            tool_calls: 1,
+            turns: 1,
+            worktree_path: None,
+        }
+    }
+
+    #[test]
+    fn every_outcome_is_terminal() {
+        for outcome in [
+            ChildOutcome::Completed,
+            ChildOutcome::Failed,
+            ChildOutcome::Cancelled,
+            ChildOutcome::TimedOut,
+            ChildOutcome::Lost,
+        ] {
+            let status = finished(outcome);
+            assert!(status.is_terminal(), "{outcome:?} must be terminal");
+            assert_eq!(status.outcome(), Some(outcome));
+        }
+    }
+
+    #[test]
+    fn in_flight_states_are_not_terminal() {
+        assert!(!running().is_terminal());
+        assert!(!ChildStatus::Initializing.is_terminal());
+        assert_eq!(running().outcome(), None);
+    }
+
+    #[test]
+    fn snapshot_is_running_covers_initializing() {
+        let snapshot = |status| ChildSnapshot {
+            child_id: "c".into(),
+            description: "d".into(),
+            agent_type: "explore".into(),
+            status,
+            started_at_epoch_ms: 0,
+            duration_ms: 0,
+            persona: None,
+        };
+        assert!(snapshot(ChildStatus::Initializing).is_running());
+        assert!(snapshot(running()).is_running());
+        assert!(!snapshot(finished(ChildOutcome::Completed)).is_running());
+    }
+
+    #[test]
+    fn completions_command_round_trips_through_the_channel() {
+        use tokio::sync::{mpsc, oneshot};
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<CoordinatorCommand>();
+        let sender = CommandSender(tx);
+        let (respond_to, mut response_rx) = oneshot::channel();
+
+        sender
+            .0
+            .send(CoordinatorCommand::Completions(CompletionsCommand {
+                parent_session_id: Some("parent".into()),
+                suppress_ids: vec!["id-1".into()],
+                respond_to,
+            }))
+            .unwrap();
+
+        let command = rx.try_recv().unwrap();
+        let CoordinatorCommand::Completions(request) = command else {
+            panic!("expected Completions");
+        };
+        assert_eq!(request.parent_session_id.as_deref(), Some("parent"));
+        assert_eq!(request.suppress_ids, vec!["id-1"]);
+
+        request
+            .respond_to
+            .send(vec![ChildCompletionSummary {
+                child_id: "sub-1".into(),
+                agent_type: "explore".into(),
+                description: "test task".into(),
+                outcome: ChildOutcome::Completed,
+                duration_ms: 1500,
+                tool_calls: 7,
+                turns: 3,
+                output: std::sync::Arc::from("child answer"),
+            }])
+            .unwrap();
+
+        let delivered = response_rx.try_recv().unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].child_id, "sub-1");
+        assert!(delivered[0].outcome.is_success());
+        assert_eq!(delivered[0].duration_ms, 1500);
+    }
+}

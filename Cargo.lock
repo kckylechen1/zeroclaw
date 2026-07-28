@@ -13216,6 +13216,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-coordinator"
+version = "0.8.3"
+dependencies = [
+ "futures-util",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "zeroclaw-desktop"
 version = "0.8.3"
 dependencies = [
