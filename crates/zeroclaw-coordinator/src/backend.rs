@@ -8,8 +8,12 @@
 // `Resources` bag could inject a transport; this crate is injected by
 // constructor), leaving the concrete channel backend with inherent methods;
 // `ToolError` was replaced by this crate's own `CoordinatorError`; the
-// workflow-owner drop-cancel guard went with the workflow owner; `tracing`
-// calls were dropped; the timeout env var was renamed to ZeroClaw's namespace.
+// workflow-owner drop-cancel guard went with the workflow owner; the timeout
+// env var was renamed to ZeroClaw's namespace. Upstream's `tracing` calls were
+// dropped when this crate had no logging dependency; six of the "actor is
+// unreachable" branches below (spawn, query, cancel, cancel_parent_prompt,
+// validate_type, describe_agent_type) now log through `zeroclaw_log::record!`
+// now that the wiring phase has taken that dependency.
 // See ../LICENSE and ../NOTICE.
 
 //! Client side of the coordinator's command channel.
@@ -121,16 +125,34 @@ impl ChannelBackend {
         if let Some(parent_session_id) = self.parent_session_id.as_deref() {
             request.parent_session_id = parent_session_id.to_owned();
         }
+        let child_id = request.child_id.clone();
         let (respond_to, response_rx) = oneshot::channel();
-        self.tx
+        let send_result = self
+            .tx
             .send(CoordinatorCommand::Spawn(SpawnCommand {
                 request: Box::new(request),
                 result_tx: respond_to,
             }))
-            .map_err(|_| CoordinatorError::ChannelClosed)?;
-        response_rx
-            .await
-            .map_err(|_| CoordinatorError::ResultChannelDropped)
+            .map_err(|_| CoordinatorError::ChannelClosed);
+        let result = match send_result {
+            Ok(()) => response_rx
+                .await
+                .map_err(|_| CoordinatorError::ResultChannelDropped),
+            Err(error) => Err(error),
+        };
+        if let Err(ref error) = result {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "child_id": child_id,
+                        "error": error.to_string(),
+                    })),
+                "coordinator backend: spawn could not reach a result for the child"
+            );
+        }
+        result
     }
 
     /// Look up a child's state, optionally waiting for it to finish.
@@ -149,6 +171,14 @@ impl ChannelBackend {
             respond_to,
         }));
         if sent.is_err() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({ "child_id": id })),
+                "coordinator backend: query found the actor's command channel \
+                 closed; answering None rather than \"not running\""
+            );
             return None;
         }
         response_rx.await.ok().flatten()
@@ -163,6 +193,14 @@ impl ChannelBackend {
             respond_to,
         }));
         if sent.is_err() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({ "child_id": id })),
+                "coordinator backend: cancel found the actor's command channel \
+                 closed; answering NotFound rather than \"already cancelled\""
+            );
             return CancelOutcome::NotFound;
         }
         response_rx.await.unwrap_or(CancelOutcome::NotFound)
@@ -180,6 +218,14 @@ impl ChannelBackend {
             }))
             .is_err()
         {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({ "parent_prompt_id": parent_prompt_id })),
+                "coordinator backend: cancel_parent_prompt found the actor's \
+                 command channel closed; nothing was told to stop"
+            );
             return CancelOutcome::NotFound;
         }
         response_rx.await.unwrap_or(CancelOutcome::NotFound)
@@ -275,6 +321,18 @@ impl ChannelBackend {
             }))
             .is_err()
         {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "agent_type": agent_type,
+                        "parent_session_id": parent_session_id,
+                    })),
+                "coordinator backend: validate_type found the actor's command \
+                 channel closed; answering ValidationUnavailable rather than \
+                 Unknown"
+            );
             return ValidateTypeOutcome::ValidationUnavailable;
         }
         match tokio::time::timeout(validate_type_timeout(), response_rx).await {
@@ -308,6 +366,19 @@ impl ChannelBackend {
             }))
             .is_err()
         {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "agent_type": agent_type,
+                        "harness_agent_type": harness_agent_type,
+                        "parent_session_id": parent_session_id,
+                    })),
+                "coordinator backend: describe_agent_type found the actor's \
+                 command channel closed; answering Unavailable (fail-open) \
+                 rather than Unknown"
+            );
             return DescribeOutcome::Unavailable;
         }
         match tokio::time::timeout(validate_type_timeout(), response_rx).await {

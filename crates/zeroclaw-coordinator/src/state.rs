@@ -7,8 +7,11 @@
 // outstanding-count helper were removed (owner is the parent session/task
 // only); results speak ZeroClaw's `ChildOutcome` instead of success/cancelled
 // booleans; the three terminal snapshot variants collapsed into one
-// `ChildStatus::Finished`; `tracing` calls were dropped (this crate has no
-// logging dependency); the panic guard that upstream got from
+// `ChildStatus::Finished`; upstream's `tracing` calls were dropped when this
+// crate had no logging dependency, and one of them (the auto-background
+// warning in `background_at_deadline`) is restored here through
+// `zeroclaw_log::record!` now that the wiring phase has taken that
+// dependency; the panic guard that upstream got from
 // `futures::FutureExt::catch_unwind` is implemented here instead, because this
 // crate's `futures-util` is built without the `std` feature that provides it.
 // See ../LICENSE and ../NOTICE.
@@ -543,6 +546,17 @@ pub(crate) fn background_at_deadline(
         return;
     }
     if let Some(respond_to) = child.take_reply() {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Timeout)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({
+                    "child_id": child.id(),
+                    "child_session_id": child.child_session_id(),
+                })),
+            "coordinator: spawn caller's foreground budget elapsed; handing off a \
+             background handle while the child keeps running"
+        );
         // An interim handoff, not an ending. The default outcome is
         // `Lost` — never `Completed` — so no consumer of this reply can record
         // a finished status for a child that is still running. Callers branch

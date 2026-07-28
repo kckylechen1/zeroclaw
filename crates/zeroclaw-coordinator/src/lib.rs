@@ -30,16 +30,22 @@
 //!
 //! ## What this crate deliberately does not do
 //!
-//! It has no tool frontend, no persistence, and no dependency on the rest of
-//! the ZeroClaw workspace. [`ChildOutcome`] is defined here rather than
-//! imported from `zeroclaw-api` so that the wiring phase decides that
-//! dependency edge on purpose; its variants are ZeroClaw's five terminal
-//! outcomes, one-to-one, so that mapping is a rename and never a translation.
+//! It has no tool frontend. [`ChildOutcome`] stays defined here rather than
+//! becoming a re-export of `zeroclaw_api::announce::AnnouncedOutcome`, even
+//! now that the wiring phase has taken the dependency: its variants are
+//! ZeroClaw's five terminal outcomes, one-to-one with `AnnouncedOutcome`, and
+//! the `From` conversions in [`outcome`] are the only place that vocabulary
+//! edge is crossed — everything else in this crate still speaks
+//! `ChildOutcome`. [`ChildPersistence`] defines the durability seam without
+//! implementing it: no field on [`Coordinator`] holds one yet, so a host that
+//! wires nothing in gets [`NoopPersistence`]'s behavior, which is the same
+//! in-memory-only behavior this crate has always had.
 
 mod backend;
 mod cancel;
 mod coordinator;
 mod outcome;
+mod persistence;
 mod state;
 mod types;
 
@@ -50,6 +56,7 @@ pub use backend::{
 pub use cancel::CancelToken;
 pub use coordinator::Coordinator;
 pub use outcome::ChildOutcome;
+pub use persistence::{ChildPersistence, NoopPersistence};
 pub use state::{
     ChildCompletion, ChildControl, ChildProgress, ChildReporter, ChildRunOutput, ChildRunRequest,
     ChildRunner, CompletionDisposition, CoordinatorConfig, LocalBoxFuture, MAX_COMPLETED_ENTRIES,

@@ -13220,8 +13220,11 @@ name = "zeroclaw-coordinator"
 version = "0.8.3"
 dependencies = [
  "futures-util",
+ "serde_json",
  "tokio",
  "tokio-util",
+ "zeroclaw-api",
+ "zeroclaw-log",
 ]
 
 [[package]]

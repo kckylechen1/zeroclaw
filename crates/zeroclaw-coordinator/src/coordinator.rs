@@ -4,11 +4,14 @@
 // Copyright 2023-2026 SpaceXAI. Licensed under the Apache License, Version 2.0.
 //
 // This file was CHANGED by ZeroClaw Labs: the usage-accounting commands and
-// their `PromptScope` state, the workflow owner with its cancel-drain waiters,
-// and the `tracing` calls were removed; results speak ZeroClaw's
-// `ChildOutcome`; the child-panic guard is this crate's `ChildRunFuture`
-// instead of `futures::FutureExt::catch_unwind`; the completed-record eviction
-// and the buffered-completion bound are single-sourced in `state`.
+// their `PromptScope` state, and the workflow owner with its cancel-drain
+// waiters, were removed; upstream's `tracing` calls were dropped when this
+// crate had no logging dependency, and the child-runner-panicked error is
+// restored here through `zeroclaw_log::record!` now that the wiring phase has
+// taken that dependency; results speak ZeroClaw's `ChildOutcome`; the
+// child-panic guard is this crate's `ChildRunFuture` instead of
+// `futures::FutureExt::catch_unwind`; the completed-record eviction and the
+// buffered-completion bound are single-sourced in `state`.
 // See ../LICENSE and ../NOTICE.
 
 //! The single-writer coordinator actor.
@@ -600,6 +603,30 @@ impl<R: ChildRunner> Coordinator<R> {
         let Some(request) = request else {
             return;
         };
+        // This is the one event where the actor knows something no one else
+        // can reconstruct. Under `panic = "abort"` (this workspace's release
+        // profiles) the underlying unwind never reaches this code at all —
+        // see `ChildRunFuture`'s doc in `state.rs` — so in a release build
+        // this call site never fires and the failure surfaces only as an
+        // ordinary `ChildOutcome::Failed` completion. In dev and test builds,
+        // where `catch_unwind` is live, this log is the only place the fact
+        // of the panic — as opposed to just "the child failed" — is ever
+        // recorded. That is why it is ERROR, not DEBUG: gating it behind
+        // `debug_enabled()` would make the one build where this is
+        // observable also the one build where it is easiest to miss.
+        ::zeroclaw_log::record!(
+            ERROR,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "child_id": request.child_id,
+                    "agent_type": request.agent_type,
+                    "parent_session_id": request.parent_session_id,
+                })),
+            "coordinator: child runtime panicked; reporting it as an ordinary \
+             failed completion so every waiter, spawn caller, and buffer still \
+             gets an ending"
+        );
         self.finish_child(
             id,
             ChildRunOutput {
