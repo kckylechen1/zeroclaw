@@ -3,6 +3,7 @@
 
 pub mod authority;
 pub mod boot;
+pub mod coordinator_host;
 pub mod global;
 pub mod goal_task;
 pub mod reaper;
@@ -12,6 +13,7 @@ pub mod task_store_sqlite;
 
 pub use authority::is_authoritative;
 pub use boot::ControlPlaneHandle;
+pub use coordinator_host::CoordinatorHost;
 pub use global::{control_plane, init_control_plane};
 pub use goal_task::{
     GoalBlocker, GoalBlockerKind, GoalPauseReason, GoalPauseState, GoalTaskRecord,
