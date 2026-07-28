@@ -165,6 +165,75 @@ fn status_from_db(s: &str) -> Result<TaskStatus> {
         .with_context(|| format!("unknown task status {s:?}"))
 }
 
+/// A SQL `(...)` fragment listing every terminal status, spelled exactly as
+/// `status_from_db` parses it back, for use after either `IN` or `NOT IN`.
+/// Built from `TaskStatus::TERMINAL` via `status_to_db` (the same serde round
+/// trip every other column uses) rather than a hand-typed string, so no SQL
+/// filter in this file can drift from the on-disk spelling the way four
+/// independently maintained copies once could — see
+/// `every_sql_status_filter_is_built_from_terminal_status_sql_list_not_hand_typed`
+/// below, which fails if any filter reverts to a hand-typed literal list.
+/// Safe to inline directly into SQL text: every value comes from the enum,
+/// never from untrusted input. The output is a pure function of
+/// `TaskStatus::TERMINAL` (stable order, no randomness), so it is also safe
+/// to use as a `prepare_cached` key: identical input always yields the
+/// identical string, and rusqlite's statement cache keys on that exact
+/// string (see `StatementCache::get`, which caches on `sql.trim()`).
+fn terminal_status_sql_list() -> String {
+    TaskStatus::TERMINAL
+        .iter()
+        .map(|&s| format!("'{}'", status_to_db(s)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Resolve one claimed child's outcome and, when it had to be degraded, the
+/// detail explaining why.
+///
+/// By the time a caller has a `status` string to hand this function, the
+/// UPDATE that flagged the row delivered has already run (see the comment on
+/// `claim_undelivered_children`). So there is no "reject and let it be
+/// re-claimed" available here — every status this function is given must
+/// leave with *some* outcome. Today, `claim_undelivered_children`'s WHERE
+/// filter is derived from the same source this function parses against, so
+/// every status reaching here is expected to map cleanly — this branch is a
+/// deliberate defensive net against that guarantee ever being broken by a
+/// future refactor (a hand-edited SQL string, a filter built a different
+/// way), not a path this binary exercises in normal operation. A status that
+/// does not map degrades to `Lost`, the outcome that exists for exactly "the
+/// work may or may not have happened; go and check" — with a `Some` detail
+/// carrying the raw status, so the degrade is visible to whoever reads the
+/// announcement, not just to the log.
+fn resolve_claimed_outcome(
+    task_id: &str,
+    status: &str,
+) -> (zeroclaw_api::announce::AnnouncedOutcome, Option<String>) {
+    use zeroclaw_api::announce::AnnouncedOutcome;
+
+    let mapped = status_from_db(status)
+        .ok()
+        .and_then(super::task_registry::announced_outcome);
+    if let Some(outcome) = mapped {
+        return (outcome, None);
+    }
+
+    ::zeroclaw_log::record!(
+        WARN,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+            .with_attrs(::serde_json::json!({ "task_id": task_id, "status": status })),
+        "control-plane: claimed child has a status that does not map to an announced \
+         outcome; already flagged delivered, so reporting it as lost rather than \
+         dropping it"
+    );
+    (
+        AnnouncedOutcome::Lost,
+        Some(format!(
+            "task ended with unrecognised status {status:?}; treated as lost"
+        )),
+    )
+}
+
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
     let kind_s: String = row.get("kind")?;
     let status_s: String = row.get("status")?;
@@ -267,14 +336,18 @@ fn update_task_status_record(
     let finished_at = status
         .is_terminal()
         .then(|| chrono::Utc::now().to_rfc3339());
-    conn.execute(
+    let sql = format!(
         "UPDATE tasks
             SET status = ?1,
                 output = COALESCE(?2, output),
                 error  = COALESCE(?3, error),
                 finished_at = COALESCE(?4, finished_at)
           WHERE id = ?5
-            AND status NOT IN ('completed','failed','cancelled','lost','timed_out')",
+            AND status NOT IN ({})",
+        terminal_status_sql_list()
+    );
+    conn.execute(
+        &sql,
         params![status_to_db(status), output, error, finished_at, id],
     )
     .context("update task status")
@@ -286,16 +359,17 @@ fn claim_task_owner_record(
     owner_pid: u32,
     owner_boot_id: &str,
 ) -> Result<usize> {
-    conn.execute(
+    let sql = format!(
         "UPDATE tasks
             SET owner_pid = ?1,
                 owner_boot_id = ?2,
                 heartbeat_at = NULL
           WHERE id = ?3
-            AND status NOT IN ('completed','failed','cancelled','lost','timed_out')",
-        params![owner_pid as i64, owner_boot_id, id],
-    )
-    .context("claim task owner")
+            AND status NOT IN ({})",
+        terminal_status_sql_list()
+    );
+    conn.execute(&sql, params![owner_pid as i64, owner_boot_id, id])
+        .context("claim task owner")
 }
 
 #[async_trait::async_trait]
@@ -377,7 +451,7 @@ impl TaskRegistry for SqliteTaskStore {
         &self,
         parent_id: &str,
     ) -> Result<Vec<zeroclaw_api::announce::Announcement>> {
-        use zeroclaw_api::announce::Announcement;
+        use zeroclaw_api::announce::{Announcement, AnnouncedOutcome};
 
         let conn = self.conn.lock();
         // One statement claims and returns. Splitting the read from the flag
@@ -388,14 +462,16 @@ impl TaskRegistry for SqliteTaskStore {
         // does not carry them: announcing a completion without its result
         // would tell the parent that something finished while withholding
         // what it produced.
+        let sql = format!(
+            "UPDATE tasks SET delivered = 1
+              WHERE parent_id = ?1
+                AND delivered = 0
+                AND status IN ({})
+          RETURNING id, agent, status, output, error, finished_at",
+            terminal_status_sql_list()
+        );
         let mut stmt = conn
-            .prepare_cached(
-                "UPDATE tasks SET delivered = 1
-                  WHERE parent_id = ?1
-                    AND delivered = 0
-                    AND status IN ('completed','failed','cancelled','lost','timed_out')
-              RETURNING id, agent, status, output, error, finished_at",
-            )
+            .prepare_cached(&sql)
             .context("prepare claim undelivered children")?;
         let rows = stmt
             .query_map(params![parent_id], |row| {
@@ -404,8 +480,8 @@ impl TaskRegistry for SqliteTaskStore {
                     Announcement {
                         task_id: row.get("id")?,
                         agent: row.get("agent")?,
-                        // Placeholder; replaced below once the status parses.
-                        outcome: zeroclaw_api::announce::AnnouncedOutcome::Lost,
+                        // Placeholder; replaced below once the status is read.
+                        outcome: AnnouncedOutcome::Lost,
                         output: row.get("output")?,
                         detail: row.get("error")?,
                         finished_at: row.get("finished_at")?,
@@ -415,20 +491,33 @@ impl TaskRegistry for SqliteTaskStore {
             })
             .context("claim undelivered children")?;
 
+        // By the time a row reaches this loop, the UPDATE above has already
+        // committed `delivered = 1` for it — this connection runs in
+        // autocommit with no explicit transaction wrapping claim + decode. So
+        // returning `Err` from here would not fail the claim; it would only
+        // fail *reporting* a claim that already happened, and the row can
+        // never be re-claimed. That makes every exit from this loop a
+        // degrade-and-continue, never a bail: a row that cannot be read at
+        // all is logged and skipped (its task id is unknown, so it cannot
+        // even be named in the log), and a row whose status cannot be mapped
+        // to an outcome is announced as `Lost` — the outcome that exists for
+        // exactly this "go and check" situation — with a detail explaining
+        // why, rather than vanishing from the parent's view entirely.
         let mut claimed = Vec::new();
         for row in rows {
-            let (mut announcement, status) = row.context("read claimed child")?;
-            // A row selected by the terminal-status filter above must map; a
-            // status that does not is a schema drift worth failing on rather
-            // than silently reporting as lost.
-            let parsed = status_from_db(&status)?;
-            let Some(outcome) = super::task_registry::announced_outcome(parsed) else {
-                anyhow::bail!(
-                    "claimed child {} has non-terminal status {status:?}",
-                    announcement.task_id
-                );
+            let (mut announcement, status) = match row {
+                Ok(v) => v,
+                Err(e) => {
+                    log_unreadable_task_row(e);
+                    continue;
+                }
             };
+            let (outcome, degraded_detail) =
+                resolve_claimed_outcome(&announcement.task_id, &status);
             announcement.outcome = outcome;
+            if degraded_detail.is_some() {
+                announcement.detail = degraded_detail;
+            }
             claimed.push(announcement);
         }
         Ok(claimed)
@@ -746,5 +835,241 @@ mod tests {
         assert_eq!(got.owner_pid, 42);
         assert_eq!(got.owner_boot_id, "boot-new");
         assert!(got.heartbeat_at.is_none());
+    }
+
+    /// T2 — coverage. `TaskStatus::TERMINAL` is the single source that
+    /// `is_terminal`, `announced_outcome`, and the SQL filter above all now
+    /// derive from or are checked against. This is the test that must fail
+    /// if someone adds a terminal variant to `TaskStatus` and forgets to
+    /// teach `announced_outcome` about it — pre-fix, that was exactly how
+    /// the SQL filter, the parser, and the outcome map could drift apart
+    /// without anything noticing.
+    #[test]
+    fn every_terminal_status_announces_and_is_in_the_sql_filter() {
+        let sql_list = terminal_status_sql_list();
+        for status in TaskStatus::TERMINAL {
+            assert!(
+                crate::control_plane::task_registry::announced_outcome(status).is_some(),
+                "{status:?} is in TaskStatus::TERMINAL but announced_outcome returns None"
+            );
+            let spelling = status_to_db(status);
+            assert!(
+                sql_list.contains(&format!("'{spelling}'")),
+                "{status:?} (spelled {spelling:?}) is in TaskStatus::TERMINAL but missing \
+                 from the derived SQL filter: {sql_list}"
+            );
+        }
+    }
+
+    /// Structural guard against a *third* copy of the terminal-status literal
+    /// showing up in this file. `every_terminal_status_announces_and_is_in_the_sql_filter`
+    /// above only checks that `terminal_status_sql_list()` itself is complete; it
+    /// says nothing about whether some *other* line in this file went back to
+    /// spelling the set out by hand instead of calling that function — which is
+    /// exactly how `update_task_status_record` and `claim_task_owner_record` each
+    /// grew their own hardcoded `NOT IN ('completed','failed','cancelled','lost',
+    /// 'timed_out')` before this pass.
+    ///
+    /// This test re-reads this file's own production source (everything before
+    /// `mod tests`, so this test's own text — which necessarily mentions the
+    /// literal pattern — can't trip itself) and fails if any `IN (` / `NOT IN (`
+    /// status filter is not immediately followed by the `{}` placeholder that
+    /// `terminal_status_sql_list()` fills in at call time. Reverting either
+    /// `update_task_status_record`'s or `claim_task_owner_record`'s `NOT IN ({})`
+    /// back to a hand-typed list of quoted statuses turns this red; so does
+    /// adding a brand-new hand-typed status filter anywhere else in the file.
+    #[test]
+    fn every_sql_status_filter_is_built_from_terminal_status_sql_list_not_hand_typed() {
+        const SRC: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/control_plane/task_store_sqlite.rs"
+        ));
+        let production_src = SRC.split("mod tests").next().unwrap_or(SRC);
+
+        let offenders: Vec<String> = production_src
+            .lines()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                let idx = line.find("IN (")?;
+                let after_paren = &line[idx + "IN (".len()..];
+                if after_paren.starts_with("{})") {
+                    None
+                } else {
+                    Some(format!("line {}: {}", i + 1, line.trim()))
+                }
+            })
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "found a SQL status filter not built from terminal_status_sql_list() \
+             (expected every `IN (`/`NOT IN (` here to be immediately followed by \
+             the `{{}}` placeholder):\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// A status this binary cannot map must still leave with an outcome —
+    /// `Lost`, with a detail naming the raw status — never an `Err`, since by
+    /// the time `resolve_claimed_outcome` is called the row is already
+    /// flagged delivered and cannot be re-claimed if this failed instead.
+    #[test]
+    fn an_unmappable_status_degrades_to_lost_with_a_detail() {
+        let (outcome, detail) = resolve_claimed_outcome("t1", "not_a_real_status");
+        assert_eq!(outcome, AnnouncedOutcome::Lost);
+        let detail = detail.expect("degrade must explain itself");
+        assert!(
+            detail.contains("not_a_real_status"),
+            "detail must name the raw status: {detail}"
+        );
+    }
+
+    /// T1 — partial-decode does not lose the batch.
+    ///
+    /// The UPDATE ... RETURNING that claims children runs as one statement
+    /// against every matched row, so `delivered = 1` is set for all three
+    /// children below in the same statement execution that yields their
+    /// RETURNING rows — regardless of which of those rows this test can go
+    /// on to decode on the Rust side. Corrupting `bad`'s `output` column to a
+    /// BLOB (not a value `String`/`Option<String>` can convert from) makes
+    /// `row.get("output")` fail inside the row-mapping closure — the "row
+    /// that cannot be read at all" exit — while leaving `bad`'s `status`
+    /// untouched, so it still matches the terminal filter and still gets
+    /// flagged delivered along with its siblings.
+    ///
+    /// (A corrupted *status* column, by contrast, cannot reach this loop at
+    /// all post-fix: the WHERE filter is now derived from the exact same
+    /// serde spellings `status_from_db` parses, so a status string that
+    /// fails to parse can never match the filter in the first place — it is
+    /// simply never selected, not degraded. That is a real, deliberate
+    /// consequence of single-sourcing the terminal list, not an oversight;
+    /// see `resolve_claimed_outcome`'s own direct test above for coverage of
+    /// the degrade branch that guards against this filter and the parser
+    /// ever drifting apart again.)
+    #[tokio::test]
+    async fn a_corrupt_row_does_not_sink_its_siblings() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("good1", "mum", TaskStatus::Completed))
+            .await
+            .unwrap();
+        s.create(child_of("bad", "mum", TaskStatus::Completed))
+            .await
+            .unwrap();
+        s.create(child_of("good2", "mum", TaskStatus::Failed))
+            .await
+            .unwrap();
+
+        {
+            let conn = s.conn.lock();
+            conn.execute("UPDATE tasks SET output = X'DEADBEEF' WHERE id = 'bad'", [])
+                .expect("corrupt bad's output column with a BLOB");
+        }
+
+        let claimed = s.claim_undelivered_children("mum").await.unwrap();
+        let mut ids: Vec<&str> = claimed.iter().map(|a| a.task_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec!["good1", "good2"],
+            "the unreadable row must be skipped, not crash the whole claim, and must not \
+             fabricate an announcement it cannot actually build"
+        );
+
+        // The corrupt row was still flagged delivered by the same UPDATE
+        // statement that flagged its siblings — it is gone from view (never
+        // announced, never reappears) rather than retried forever. That is
+        // the accepted trade-off for a row this binary cannot even read: see
+        // `resolve_claimed_outcome`'s doc comment.
+        let conn = s.conn.lock();
+        let bad_delivered: i64 = conn
+            .query_row("SELECT delivered FROM tasks WHERE id = 'bad'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bad_delivered, 1, "the unreadable row was still claimed, just not announced");
+        drop(conn);
+
+        let second = s.claim_undelivered_children("mum").await.unwrap();
+        assert!(
+            second.is_empty(),
+            "delivered-once must still hold: no row is re-offered on a second claim"
+        );
+    }
+
+    /// T3 — record an empirical fact, do not assert one not observed.
+    ///
+    /// A single UPDATE statement (RETURNING or not) is atomic across every
+    /// row it matches — that much is ordinary SQLite semantics and is not
+    /// what this test probes. What this test probes is narrower and less
+    /// obvious: if the *caller* does not step a RETURNING statement to
+    /// completion (`SQLITE_DONE`) — which is exactly what the pre-fix
+    /// `anyhow::bail!` did, by returning `Err` and letting the local `rows`
+    /// variable drop mid-iteration — does rusqlite's `Rows::drop` (which
+    /// calls `sqlite3_reset` on the still-active statement; see
+    /// `rusqlite::row::Rows`'s `Drop` impl) roll back the writes that
+    /// statement already made, including for rows already yielded via
+    /// RETURNING before the abandonment? Or does each row's write commit as
+    /// it is yielded, independent of whether later rows are ever stepped to?
+    ///
+    /// MEASURED, not assumed. Three undelivered terminal children, one
+    /// `next()`, then the statement is dropped: all three come back
+    /// `delivered = 1`. Two facts fall out of that single number.
+    ///
+    /// First, abandoning the iteration rolls back nothing. An earlier draft
+    /// of this test asserted the opposite, reasoning from `Rows::drop`
+    /// calling `sqlite3_reset` on a still-active statement; the run refuted
+    /// it (`left: 3, right: 0`). Reset is not rollback.
+    ///
+    /// Second — and this is why one step flags three rows — SQLite runs the
+    /// UPDATE to completion *before* yielding the first RETURNING row. The
+    /// output is buffered; it is not a cursor that writes as you walk it.
+    ///
+    /// Together those settle how literally to read this function's
+    /// pre-fix failure: every matched row was durably flagged delivered
+    /// before the decode loop ever saw its first row, so a `bail!` anywhere
+    /// in that loop lost the *entire batch* permanently — the rows can
+    /// never be re-selected, and the parent never learns any of its
+    /// children finished. Not starvation-by-retry, which would at least
+    /// leave the data recoverable. Permanent, silent loss. Hence the fix:
+    /// once the claim has run, drain it completely and announce everything,
+    /// degrading what cannot be decoded rather than dropping it.
+    #[tokio::test]
+    async fn abandoning_a_returning_statement_still_commits_every_matched_row() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        for id in ["a", "b", "c"] {
+            s.create(child_of(id, "mum", TaskStatus::Completed))
+                .await
+                .unwrap();
+        }
+
+        {
+            let conn = s.conn.lock();
+            let mut stmt = conn
+                .prepare(
+                    "UPDATE tasks SET delivered = 1
+                      WHERE parent_id = 'mum' AND delivered = 0 AND status = 'completed'
+                  RETURNING id",
+                )
+                .unwrap();
+            let mut rows = stmt.query([]).unwrap();
+            // Step exactly once, then let `rows` (and `stmt`) drop un-stepped
+            // to SQLITE_DONE — reproducing what the pre-fix bail! did to the
+            // production statement via early return.
+            let _first: String = rows.next().unwrap().unwrap().get(0).unwrap();
+        }
+
+        let conn = s.conn.lock();
+        let delivered: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE parent_id = 'mum' AND delivered = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            delivered, 3,
+            "measured: stepping a RETURNING statement once and dropping it still leaves \
+             every matched row flagged. The UPDATE completes before the first row is \
+             yielded, and abandoning the iteration rolls back nothing — which is why a \
+             bail! in the decode loop used to lose the whole claimed batch for good."
+        );
     }
 }

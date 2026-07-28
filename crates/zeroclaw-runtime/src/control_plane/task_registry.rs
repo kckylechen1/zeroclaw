@@ -38,17 +38,27 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    /// Every status a task can no longer transition out of.
+    ///
+    /// Single-sourced on purpose: `is_terminal`, `announced_outcome`, and the
+    /// terminal-status SQL filter in `task_store_sqlite` all used to keep their
+    /// own hand-written copy of this set, plus serde's on-disk spelling made a
+    /// fourth. Adding a terminal variant to the enum and forgetting one of
+    /// those copies was a silent way to drop announcements — now there is one
+    /// list, and the other three are derived from it (or, for the SQL filter,
+    /// tested against it; see `task_store_sqlite::tests`).
+    pub const TERMINAL: [TaskStatus; 5] = [
+        TaskStatus::Completed,
+        TaskStatus::Failed,
+        TaskStatus::Cancelled,
+        TaskStatus::Lost,
+        TaskStatus::TimedOut,
+    ];
+
     /// A task is terminal once it can no longer transition. The reaper only
     /// reconciles non-terminal records.
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            TaskStatus::Completed
-                | TaskStatus::Failed
-                | TaskStatus::Cancelled
-                | TaskStatus::Lost
-                | TaskStatus::TimedOut
-        )
+        Self::TERMINAL.contains(&self)
     }
 }
 
