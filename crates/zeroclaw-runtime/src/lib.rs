@@ -40,6 +40,7 @@ pub mod skillforge;
 pub mod skills;
 pub mod sop;
 pub mod subagent;
+pub mod subagent_host;
 pub mod tools;
 pub mod trust;
 pub mod tunnel;
