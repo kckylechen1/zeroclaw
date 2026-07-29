@@ -62,7 +62,8 @@ pub use persistence::{ChildPersistence, NoopPersistence, PersistenceError};
 pub use state::{
     ChildCompletion, ChildControl, ChildProgress, ChildReporter, ChildRunOutput, ChildRunRequest,
     ChildRunner, CompletionDisposition, CoordinatorConfig, LocalBoxFuture, MAX_COMPLETED_ENTRIES,
-    MAX_PENDING_COMPLETIONS, SendBoxFuture, StartedChild, cap_completion_output, completion_summary,
+    MAX_PENDING_COMPLETIONS, SendBoxFuture, StartedChild, at_child_capacity, cap_completion_output,
+    completion_summary, exceeds_spawn_depth,
 };
 pub use types::{
     ActiveChildSummary, CancelCommand, CancelOutcome, CancelTarget, ChildCompletionSummary,

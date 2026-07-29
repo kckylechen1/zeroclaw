@@ -177,6 +177,36 @@ pub struct CoordinatorConfig {
     /// polling tool needs that, because the inline reminder is the parent's
     /// only chance to see the output.
     pub buffered_completion_output_cap: Option<usize>,
+    /// Deepest spawn generation the actor will admit, counting a top-level
+    /// child as depth 0.
+    ///
+    /// The number is inherited from the delegation path, which is the only
+    /// place in this workspace that already enforces a recursion depth:
+    /// `DelegateTool::resolve_max_depth`
+    /// (`zeroclaw-runtime/src/tools/delegate.rs`) falls back to `3` when the
+    /// runtime profile names no `max_delegation_depth`, and its own gate
+    /// compares the *caller's* depth against it, so the deepest child that
+    /// can exist there carries depth == the configured maximum. This gate
+    /// compares the *child's* resolved depth against the same bound and so
+    /// admits exactly the same set of generations.
+    ///
+    /// `0` disables the gate, matching `resolve_max_depth`'s
+    /// `.filter(|&d| d > 0)` treatment of a zero profile value and
+    /// `DelegateTool::at_background_capacity`'s "`cap == 0` disables the
+    /// backstop".
+    pub max_spawn_depth: u32,
+    /// Runaway backstop: how many children may be pending or active at once.
+    ///
+    /// Inherited verbatim from
+    /// `DelegateTool::MAX_CONCURRENT_BACKGROUND_DELEGATIONS = 128`
+    /// (`zeroclaw-runtime/src/tools/delegate.rs`), whose rationale applies
+    /// unchanged here: each child is a full agent loop, so an unbounded
+    /// spawner — a runaway loop or a model that keeps calling the tool — must
+    /// hit a wall somewhere. Normal use stays well under it.
+    ///
+    /// `0` disables the backstop, same convention as
+    /// `DelegateTool::at_background_capacity`.
+    pub max_concurrent_children: usize,
 }
 
 impl Default for CoordinatorConfig {
@@ -185,8 +215,37 @@ impl Default for CoordinatorConfig {
             foreground_budget: std::time::Duration::from_secs(45),
             buffer_completions: false,
             buffered_completion_output_cap: None,
+            max_spawn_depth: 3,
+            max_concurrent_children: 128,
         }
     }
+}
+
+/// Pure predicate for the spawn-depth gate — separated from the actor's live
+/// registry read so it is unit-testable, the way delegation's own backstop
+/// predicate is.
+///
+/// `depth` is the depth of the child being admitted, not its parent's:
+/// `ChildOverrides::spawn_depth` is what the sole existing reader of that
+/// field files as the child's own `TaskRecord.depth`
+/// (`zeroclaw-runtime/src/control_plane/subagent_persistence.rs`). A child at
+/// exactly `max` is therefore admitted and only its would-be child is not —
+/// which is the same frontier delegation draws when it refuses a caller whose
+/// own depth has already reached `max_delegation_depth`.
+#[must_use]
+pub fn exceeds_spawn_depth(depth: u32, max: u32) -> bool {
+    max != 0 && depth > max
+}
+
+/// Pure predicate for the concurrency backstop, mirroring
+/// `DelegateTool::at_background_capacity` including its `cap == 0` escape.
+///
+/// `in_flight` is the count *before* admitting this request, so the request
+/// that brings the registry to exactly `cap` is admitted and the next one is
+/// not.
+#[must_use]
+pub fn at_child_capacity(in_flight: usize, cap: usize) -> bool {
+    cap != 0 && in_flight >= cap
 }
 
 /// The runner's channel back into the actor.

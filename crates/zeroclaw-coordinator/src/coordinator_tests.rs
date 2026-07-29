@@ -1743,3 +1743,223 @@ async fn erroring_persistence_during_drop_does_not_panic() {
 
     let _ = spawn.await;
 }
+
+// ── Admission gates ──────────────────────────────────────────────────────
+
+/// Await a spawn that must be refused at admission.
+///
+/// Bounded on purpose. A refusal is supposed to come straight back down the
+/// caller's reply channel, so any wait at all means the request was admitted
+/// instead — and an admitted background child answers only at its real
+/// ending, which is to say never, for a test that has not released the
+/// runner. Without the bound a regression in either gate hangs the test
+/// binary rather than failing it.
+async fn refused_spawn(backend: &ChannelBackend, request: ChildRequest) -> ChildResult {
+    tokio::time::timeout(std::time::Duration::from_secs(5), backend.spawn(request))
+        .await
+        .expect(
+            "a refused spawn must answer immediately; blocking means the request was admitted",
+        )
+        .expect("the refusal must arrive as a result, not a channel error")
+}
+
+#[test]
+fn spawn_depth_predicate_admits_the_limit_and_disables_at_zero() {
+    // The child at exactly the limit is legal; only the next generation is not.
+    assert!(!crate::state::exceeds_spawn_depth(2, 3));
+    assert!(!crate::state::exceeds_spawn_depth(3, 3));
+    assert!(crate::state::exceeds_spawn_depth(4, 3));
+    // `0` disables, the same escape delegation's own depth resolution has.
+    assert!(!crate::state::exceeds_spawn_depth(9_999, 0));
+    // A zero-depth child is admitted even by the tightest live limit.
+    assert!(!crate::state::exceeds_spawn_depth(0, 1));
+}
+
+#[test]
+fn child_capacity_predicate_admits_the_request_that_fills_the_cap() {
+    // `in_flight` is the count before admitting, so filling the last slot is
+    // still an admission and only the one after it is refused.
+    assert!(!crate::state::at_child_capacity(1, 2));
+    assert!(crate::state::at_child_capacity(2, 2));
+    assert!(crate::state::at_child_capacity(3, 2));
+    // `0` disables the backstop.
+    assert!(!crate::state::at_child_capacity(9_999, 0));
+}
+
+#[tokio::test]
+async fn declared_spawn_depth_is_admitted_at_the_limit_and_refused_one_deeper() {
+    let mut harness = harness_with_config(
+        false,
+        CoordinatorConfig {
+            max_spawn_depth: 2,
+            ..CoordinatorConfig::default()
+        },
+    );
+
+    // Exactly at the limit: admitted, and the runner really receives it.
+    let mut at_limit = request("at-limit", true);
+    at_limit.overrides.spawn_depth = Some(2);
+    let admitted = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(at_limit).await }
+    });
+    let observed = harness.requests.recv().await.unwrap();
+    assert_eq!(observed.child_id, "at-limit");
+    assert_eq!(observed.overrides.spawn_depth, Some(2));
+
+    // One deeper: refused structurally — a result carrying the reason, no
+    // panic, no success, and nothing handed to the runner.
+    let mut too_deep = request("too-deep", true);
+    too_deep.overrides.spawn_depth = Some(3);
+    let refused = refused_spawn(&harness.backend, too_deep).await;
+    assert!(
+        !refused.is_success(),
+        "a spawn past the depth limit must not report success"
+    );
+    assert_eq!(refused.child_id, "too-deep");
+    let detail = refused.detail.expect("a refusal must say why");
+    assert!(
+        detail.contains("spawn depth limit reached (3/2)"),
+        "the refusal must name the depth and the limit, got: {detail}"
+    );
+    assert!(
+        harness.requests.try_recv().is_err(),
+        "a refused spawn must never reach the runner"
+    );
+
+    let _ = harness.finish.send(());
+    assert!(admitted.await.unwrap().unwrap().is_success());
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn spawn_depth_descends_from_a_live_spawner_and_a_declaration_cannot_undercut_it() {
+    let mut harness = harness_with_config(
+        false,
+        CoordinatorConfig {
+            max_spawn_depth: 1,
+            ..CoordinatorConfig::default()
+        },
+    );
+
+    // Generation 0: no live spawner, so depth resolves to 0.
+    let root = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("root", true)).await }
+    });
+    let observed_root = harness.requests.recv().await.unwrap();
+    assert_eq!(observed_root.overrides.spawn_depth, Some(0));
+    assert_eq!(harness.started.recv().await.as_deref(), Some("root"));
+
+    // Generation 1: spawned by a live child, declaring nothing. Depth is
+    // derived as parent + 1 and lands exactly on the limit, so it is admitted.
+    let mut child = request("child", true);
+    child.parent_session_id = "root".to_owned();
+    let admitted = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(child).await }
+    });
+    let observed_child = harness.requests.recv().await.unwrap();
+    assert_eq!(
+        observed_child.overrides.spawn_depth,
+        Some(1),
+        "a child of a live child inherits parent depth + 1"
+    );
+    // Re-parenting has already flattened this away, which is exactly why the
+    // depth must be carried on the record instead of recomputed from ancestry.
+    assert_eq!(observed_child.parent_session_id, "parent");
+    assert_eq!(harness.started.recv().await.as_deref(), Some("child"));
+
+    // Generation 2, declaring depth 0 to try to escape: the declaration may
+    // raise the derived floor, never lower it, so this is still generation 2.
+    let mut grandchild = request("grandchild", true);
+    grandchild.parent_session_id = "child".to_owned();
+    grandchild.overrides.spawn_depth = Some(0);
+    let refused = refused_spawn(&harness.backend, grandchild).await;
+    assert!(
+        !refused.is_success(),
+        "declaring depth 0 must not buy a deeper generation admission"
+    );
+    let detail = refused.detail.expect("a refusal must say why");
+    assert!(
+        detail.contains("spawn depth limit reached (2/1)"),
+        "the refusal must report the derived depth, not the declared one, got: {detail}"
+    );
+    assert!(
+        harness.requests.try_recv().is_err(),
+        "a refused spawn must never reach the runner"
+    );
+
+    let _ = harness.finish.send(());
+    assert!(root.await.unwrap().unwrap().is_success());
+    assert!(admitted.await.unwrap().unwrap().is_success());
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn concurrency_backstop_fills_the_cap_then_refuses_structurally() {
+    // `wait_before_start` keeps admitted children parked in `pending`, which
+    // is half of the in-flight population the gate counts.
+    let mut harness = harness_with_config(
+        true,
+        CoordinatorConfig {
+            max_concurrent_children: 2,
+            ..CoordinatorConfig::default()
+        },
+    );
+
+    let first = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("first", true)).await }
+    });
+    assert_eq!(harness.requests.recv().await.unwrap().child_id, "first");
+
+    // The request that brings the registry to exactly the cap is admitted.
+    let second = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("second", true)).await }
+    });
+    assert_eq!(harness.requests.recv().await.unwrap().child_id, "second");
+
+    // The one past it is refused, with a reason, and never runs.
+    let refused = refused_spawn(&harness.backend, request("third", true)).await;
+    assert!(
+        !refused.is_success(),
+        "a spawn past the concurrency cap must not report success"
+    );
+    assert_eq!(refused.child_id, "third");
+    let detail = refused.detail.expect("a refusal must say why");
+    assert!(
+        detail.contains("too many children in flight (limit 2)"),
+        "the refusal must name the limit, got: {detail}"
+    );
+    assert!(
+        harness.requests.try_recv().is_err(),
+        "a refused spawn must never reach the runner"
+    );
+    assert_eq!(
+        harness.backend.registry_counts().await,
+        RegistryCounts {
+            pending: 2,
+            active: 0,
+            completed: 0,
+        },
+        "a refusal must not leave a record behind"
+    );
+
+    // Draining the in-flight set makes room again: the backstop throttles, it
+    // does not latch.
+    let _ = harness.start.send(());
+    let _ = harness.finish.send(());
+    assert!(first.await.unwrap().unwrap().is_success());
+    assert!(second.await.unwrap().unwrap().is_success());
+    let readmitted = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(request("fourth", true)).await }
+    });
+    assert_eq!(harness.requests.recv().await.unwrap().child_id, "fourth");
+    let _ = harness.start.send(());
+    let _ = harness.finish.send(());
+    assert!(readmitted.await.unwrap().unwrap().is_success());
+    harness.actor.abort();
+}

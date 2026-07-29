@@ -358,7 +358,14 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
         // A child spawned BY a child is re-parented onto the root parent: the
         // grandparent is the only session that can act on it, and the
         // intermediate child must not surface work the parent never asked for.
-        if let Some((root_parent, loop_task_id)) = self
+        //
+        // The same lookup answers the depth question, and it has to answer it
+        // *here*: re-parenting overwrites `parent_session_id` with the root's,
+        // so once this block has run there is no longer any way to tell a
+        // grandchild from a child by looking at the request. The spawner's own
+        // resolved depth is read off its live record while the link still
+        // exists.
+        let spawner_depth = self
             .active
             .values()
             .find(|child| child.child_session_id == request.parent_session_id)
@@ -366,15 +373,40 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
                 (
                     child.request.parent_session_id.clone(),
                     child.request.overrides.loop_task_id.clone(),
+                    child.request.overrides.spawn_depth.unwrap_or(0),
                 )
-            })
+            });
+        let inherited_depth = if let Some((root_parent, loop_task_id, parent_depth)) = spawner_depth
         {
             request.parent_session_id = root_parent;
             request.surface_completion = false;
             if request.overrides.loop_task_id.is_none() {
                 request.overrides.loop_task_id = loop_task_id;
             }
-        }
+            // Monotonic descent, the same rule delegation states as
+            // `with_depth(parent.depth + 1)`.
+            parent_depth.saturating_add(1)
+        } else {
+            // No live spawner: this is a top-level child, depth 0 — the same
+            // default `subagent_persistence.rs` already applies when the field
+            // is absent.
+            0
+        };
+        // A caller may declare the child's depth (delegation knows its own and
+        // will hand it over), but a declaration can only ever raise the floor
+        // the actor derived, never lower it: otherwise the deepest child in a
+        // chain escapes the gate simply by omitting the field or claiming 0,
+        // and a cap the capped party can opt out of is not a cap.
+        let depth = request
+            .overrides
+            .spawn_depth
+            .unwrap_or(0)
+            .max(inherited_depth);
+        // Written back so it is what everything downstream sees: the spawn row
+        // `record_spawn` files (`TaskRecord.depth`, until now always 0 because
+        // nothing ever populated this field), and this child's own record,
+        // which is what the next generation's lookup above reads.
+        request.overrides.spawn_depth = Some(depth);
         let id = request.child_id.clone();
         if self.pending.contains_key(&id)
             || self.active.contains_key(&id)
@@ -383,6 +415,45 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
             let _ = command.result_tx.send(ChildResult {
                 outcome: ChildOutcome::Failed,
                 detail: Some(format!("child id '{id}' already exists")),
+                child_id: id.clone(),
+                child_session_id: id,
+                ..Default::default()
+            });
+            return;
+        }
+        // Admission gates. Both refuse the way the duplicate-id check above
+        // refuses — a `Failed` result carrying the reason down the caller's own
+        // reply channel — because that is the only channel a spawn caller has:
+        // there is no unwinding here (the actor is single-writer; a panic takes
+        // every other child with it) and no admitting-then-killing either,
+        // which would bill the caller for a run that was never allowed.
+        if crate::state::exceeds_spawn_depth(depth, self.config.max_spawn_depth) {
+            let _ = command.result_tx.send(ChildResult {
+                outcome: ChildOutcome::Failed,
+                detail: Some(format!(
+                    "spawn depth limit reached ({depth}/{max}): this child would be generation \
+                     {depth}, deeper than the coordinator admits. Nothing was started.",
+                    max = self.config.max_spawn_depth
+                )),
+                child_id: id.clone(),
+                child_session_id: id,
+                ..Default::default()
+            });
+            return;
+        }
+        // In-flight is `pending + active`, the same population the actor
+        // already reports as its running count.
+        if crate::state::at_child_capacity(
+            self.pending.len() + self.active.len(),
+            self.config.max_concurrent_children,
+        ) {
+            let _ = command.result_tx.send(ChildResult {
+                outcome: ChildOutcome::Failed,
+                detail: Some(format!(
+                    "too many children in flight (limit {max}). Wait for some to finish or \
+                     cancel one before starting more. Nothing was started.",
+                    max = self.config.max_concurrent_children
+                )),
                 child_id: id.clone(),
                 child_session_id: id,
                 ..Default::default()
