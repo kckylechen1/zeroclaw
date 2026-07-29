@@ -563,19 +563,29 @@ impl TaskRegistry for SqliteTaskStore {
             .context("prepare claim undelivered children")?;
         let rows = stmt
             .query_map(params![parent_id], |row| {
-                let status: String = row.get("status")?;
-                Ok((
-                    Announcement {
-                        task_id: row.get("id")?,
-                        agent: row.get("agent")?,
-                        // Placeholder; replaced below once the status is read.
-                        outcome: AnnouncedOutcome::Lost,
-                        output: row.get("output")?,
-                        detail: row.get("error")?,
-                        finished_at: row.get("finished_at")?,
-                    },
-                    status,
-                ))
+                // `id` is `TEXT PRIMARY KEY NOT NULL`, so it decodes whenever
+                // the row itself is readable at all. Read it alone, first,
+                // before touching any column a forward-incompat writer could
+                // have gotten wrong — everything else is decoded inside the
+                // nested closure below so a failure there comes back paired
+                // with this id, instead of taking the whole row down with it.
+                let task_id: String = row.get("id")?;
+                let rest: rusqlite::Result<(
+                    String,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                )> = (|| {
+                    Ok((
+                        row.get::<_, String>("agent")?,
+                        row.get::<_, String>("status")?,
+                        row.get::<_, Option<String>>("output")?,
+                        row.get::<_, Option<String>>("error")?,
+                        row.get::<_, Option<String>>("finished_at")?,
+                    ))
+                })();
+                Ok((task_id, rest))
             })
             .context("claim undelivered children")?;
 
@@ -585,28 +595,71 @@ impl TaskRegistry for SqliteTaskStore {
         // returning `Err` from here would not fail the claim; it would only
         // fail *reporting* a claim that already happened, and the row can
         // never be re-claimed. That makes every exit from this loop a
-        // degrade-and-continue, never a bail: a row that cannot be read at
-        // all is logged and skipped (its task id is unknown, so it cannot
-        // even be named in the log), and a row whose status cannot be mapped
-        // to an outcome is announced as `Lost` — the outcome that exists for
-        // exactly this "go and check" situation — with a detail explaining
-        // why, rather than vanishing from the parent's view entirely.
+        // degrade-and-announce, never a silent drop — with exactly one
+        // exception. A row whose `id` cannot be read at all (the closure
+        // above never got past its first `?`) truly has nothing to name: it
+        // is logged and skipped, because there is no id left to put in an
+        // `Announcement`. Every other column failing to decode still leaves
+        // the id in hand, so it is announced as `Lost` with a detail naming
+        // the decode failure — the row is already consumed, and reporting
+        // nothing would be indistinguishable to the parent from the child
+        // still running.
         let mut claimed = Vec::new();
         for row in rows {
-            let (mut announcement, status) = match row {
+            let (task_id, rest) = match row {
                 Ok(v) => v,
                 Err(e) => {
                     log_unreadable_task_row(e);
                     continue;
                 }
             };
-            let (outcome, degraded_detail) =
-                resolve_claimed_outcome(&announcement.task_id, &status);
-            announcement.outcome = outcome;
-            if degraded_detail.is_some() {
-                announcement.detail = degraded_detail;
+            match rest {
+                Ok((agent, status, output, error, finished_at)) => {
+                    let (outcome, degraded_detail) = resolve_claimed_outcome(&task_id, &status);
+                    claimed.push(Announcement {
+                        task_id,
+                        agent,
+                        outcome,
+                        output,
+                        detail: degraded_detail.or(error),
+                        finished_at,
+                    });
+                }
+                Err(e) => {
+                    // The id decoded but some other column did not — a
+                    // different failure than `resolve_claimed_outcome`'s "the
+                    // status decoded but does not map to a known outcome":
+                    // here the row's shape did not match what this query
+                    // expected at all (e.g. a column a different binary wrote
+                    // with the wrong SQLite storage class). This row is
+                    // already flagged delivered and can never be re-claimed,
+                    // so this is the only chance left to tell the parent it
+                    // ever existed.
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "task_id": task_id,
+                                "error": format!("{e}"),
+                            })),
+                        "control-plane: claimed child's id decoded but the rest of its row did \
+                         not; announcing it as lost rather than letting an already-delivered \
+                         row vanish"
+                    );
+                    claimed.push(Announcement {
+                        task_id: task_id.clone(),
+                        agent: "unknown".to_string(),
+                        outcome: AnnouncedOutcome::Lost,
+                        output: None,
+                        detail: Some(format!(
+                            "task {task_id:?} was claimed but its row could not be fully \
+                             decoded: {e}"
+                        )),
+                        finished_at: None,
+                    });
+                }
             }
-            claimed.push(announcement);
         }
         Ok(claimed)
     }
@@ -1295,7 +1348,7 @@ mod tests {
         );
     }
 
-    /// T1 — partial-decode does not lose the batch.
+    /// T1 — partial-decode does not lose the batch, and does not lose the row.
     ///
     /// The UPDATE ... RETURNING that claims children runs as one statement
     /// against every matched row, so `delivered = 1` is set for all three
@@ -1303,20 +1356,23 @@ mod tests {
     /// RETURNING rows — regardless of which of those rows this test can go
     /// on to decode on the Rust side. Corrupting `bad`'s `output` column to a
     /// BLOB (not a value `String`/`Option<String>` can convert from) makes
-    /// `row.get("output")` fail inside the row-mapping closure — the "row
-    /// that cannot be read at all" exit — while leaving `bad`'s `status`
-    /// untouched, so it still matches the terminal filter and still gets
-    /// flagged delivered along with its siblings.
+    /// `row.get::<_, Option<String>>("output")` fail inside the row-mapping
+    /// closure, but only *after* `bad`'s `id` — a `TEXT PRIMARY KEY NOT
+    /// NULL` column this corruption never touches — has already decoded.
+    /// So `bad` is not the "row that cannot be read at all" case: its name
+    /// is known, it is already consumed (`delivered = 1`), and it must come
+    /// back announced as `Lost` rather than vanish, same as its siblings
+    /// come back with their real outcomes.
     ///
     /// (A corrupted *status* column, by contrast, cannot reach this loop at
-    /// all post-fix: the WHERE filter is now derived from the exact same
-    /// serde spellings `status_from_db` parses, so a status string that
-    /// fails to parse can never match the filter in the first place — it is
-    /// simply never selected, not degraded. That is a real, deliberate
-    /// consequence of single-sourcing the terminal list, not an oversight;
-    /// see `resolve_claimed_outcome`'s own direct test above for coverage of
-    /// the degrade branch that guards against this filter and the parser
-    /// ever drifting apart again.)
+    /// all: the WHERE filter is derived from the exact same serde spellings
+    /// `status_from_db` parses, so a status string that fails to parse can
+    /// never match the filter in the first place — it is simply never
+    /// selected, not degraded. That is a real, deliberate consequence of
+    /// single-sourcing the terminal list, not an oversight; see
+    /// `resolve_claimed_outcome`'s own direct test above for coverage of the
+    /// degrade branch that guards against this filter and the parser ever
+    /// drifting apart again.)
     #[tokio::test]
     async fn a_corrupt_row_does_not_sink_its_siblings() {
         let s = SqliteTaskStore::new_in_memory().unwrap();
@@ -1341,27 +1397,94 @@ mod tests {
         ids.sort_unstable();
         assert_eq!(
             ids,
-            vec!["good1", "good2"],
-            "the unreadable row must be skipped, not crash the whole claim, and must not \
-             fabricate an announcement it cannot actually build"
+            vec!["bad", "good1", "good2"],
+            "a row whose id decoded must still be announced, even when another column on \
+             it did not — the claim must not crash, and the named row must not disappear"
         );
 
-        // The corrupt row was still flagged delivered by the same UPDATE
-        // statement that flagged its siblings — it is gone from view (never
-        // announced, never reappears) rather than retried forever. That is
-        // the accepted trade-off for a row this binary cannot even read: see
-        // `resolve_claimed_outcome`'s doc comment.
+        let bad = claimed
+            .iter()
+            .find(|a| a.task_id == "bad")
+            .expect("bad's id decoded, so it must be present");
+        assert_eq!(
+            bad.outcome,
+            AnnouncedOutcome::Lost,
+            "a row that could not be fully decoded has no reliable result to report"
+        );
+        assert!(
+            bad.detail.as_deref().is_some_and(|d| !d.is_empty()),
+            "the degrade must explain itself: {:?}",
+            bad.detail
+        );
+
+        // The corrupt row was flagged delivered by the same UPDATE statement
+        // that flagged its siblings, and it was just announced above — it
+        // must not be silently retried, because a second claim announcing
+        // the same completion twice would be a double-run, not a recovery.
         let conn = s.conn.lock();
         let bad_delivered: i64 = conn
             .query_row("SELECT delivered FROM tasks WHERE id = 'bad'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(bad_delivered, 1, "the unreadable row was still claimed, just not announced");
+        assert_eq!(bad_delivered, 1, "the corrupt row was consumed by the claim");
         drop(conn);
 
         let second = s.claim_undelivered_children("mum").await.unwrap();
         assert!(
             second.is_empty(),
             "delivered-once must still hold: no row is re-offered on a second claim"
+        );
+    }
+
+    /// Discriminating test for the id-first decode fix: corrupt a non-id
+    /// column (`agent`, written as a BLOB — not an INTEGER, because `agent`
+    /// has TEXT column affinity and SQLite would silently coerce an inserted
+    /// integer literal into its text representation before storage, which
+    /// would decode as `String` just fine and defeat the point; a BLOB has
+    /// no such affinity conversion and `String`'s `FromSql` genuinely fails
+    /// on it) and check every part of the contract this row must now
+    /// satisfy. Pre-fix, this row's `id` was read inside the same fallible
+    /// closure as `agent`, so the whole row's decode failed as one unit and
+    /// was silently dropped — `continue`d out of the loop with no id ever
+    /// recovered from the `Err`. Reverting the fix's id-first read (decoding
+    /// the whole row at once, `continue`ing on any single column's failure)
+    /// must turn this test — and only this test — red.
+    #[tokio::test]
+    async fn a_non_id_decode_failure_is_announced_lost_not_dropped() {
+        let s = SqliteTaskStore::new_in_memory().unwrap();
+        s.create(child_of("kid", "mum", TaskStatus::Completed))
+            .await
+            .unwrap();
+
+        {
+            let conn = s.conn.lock();
+            conn.execute("UPDATE tasks SET agent = X'DEADBEEF' WHERE id = 'kid'", [])
+                .expect("corrupt kid's agent column with a BLOB");
+        }
+
+        let claimed = s.claim_undelivered_children("mum").await.unwrap();
+        let kid = claimed
+            .iter()
+            .find(|a| a.task_id == "kid")
+            .expect("claim must return the id even though `agent` failed to decode");
+        assert_eq!(
+            kid.outcome,
+            AnnouncedOutcome::Lost,
+            "a row this binary could not fully decode has no reliable result"
+        );
+        assert!(
+            kid.detail.as_deref().is_some_and(|d| !d.is_empty()),
+            "the detail must name the decode failure: {:?}",
+            kid.detail
+        );
+
+        let conn = s.conn.lock();
+        let delivered: i64 = conn
+            .query_row("SELECT delivered FROM tasks WHERE id = 'kid'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            delivered, 1,
+            "the row was consumed by the UPDATE ... RETURNING regardless of decode outcome — \
+             which is exactly why it must be announced, not silently skipped"
         );
     }
 
