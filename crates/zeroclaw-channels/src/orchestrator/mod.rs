@@ -117,6 +117,7 @@ use zeroclaw_memory::MEMORY_CONTEXT_OPEN;
 use zeroclaw_memory::{self, Memory};
 use zeroclaw_providers::reliable::{scope_provider_fallback, take_last_provider_fallback};
 use zeroclaw_providers::{self, ChatMessage, ModelProvider, ProviderDispatch};
+use zeroclaw_runtime::agent::claim_announcements_for_scoped_turn;
 use zeroclaw_runtime::agent::loop_::{
     LoopKnobs, ResolvedAgentExecution, ResolvedIo, ResolvedModelAccess, ResolvedRuntimeKnobs,
     ToolLoop, append_pinned_mcp_section, apply_text_tool_prompt_policy,
@@ -1137,6 +1138,40 @@ fn compose_outgoing_user_turn_with_context(preamble: &str, raw_user_content: &st
     }
     parts.push(raw_user_content);
     parts.join("\n\n")
+}
+
+/// Splice a claimed background-announcement block above this turn's user
+/// message, in place.
+///
+/// Shape mirrors the runtime's own claim sites (`loop_.rs`'s
+/// `format!("{context}[{now}] {msg}")`): the block first, then the user's text,
+/// with no separator of our own — the block carries its own trailing newline
+/// from `claim_child_announcements_context`.
+///
+/// **Only the last message, and only when it is the user turn.** That is this
+/// module's existing convention for "the message this turn is about": the
+/// turn-context preamble is composed onto `history.last_mut()` under the same
+/// `role == "user"` test, and the runtime's claim sites all splice into a user
+/// message they build as the final one. Reaching further back would put the
+/// block above text the model reads earlier, out of order with the news it
+/// describes.
+///
+/// Returns whether the block landed. `false` means the model will never read
+/// it, and the caller must let its `UnclaimOnDrop` guard drop armed so the
+/// announcements go back to the store for a later turn. Takes a slice rather
+/// than a `Vec` on purpose: there is no shape in which pushing a new message
+/// here is right, so the signature refuses it.
+fn prepend_context_to_last_user_turn(history: &mut [ChatMessage], block: &str) -> bool {
+    if block.is_empty() {
+        return false;
+    }
+    match history.last_mut() {
+        Some(last) if last.role == "user" => {
+            last.content = format!("{block}{}", last.content);
+            true
+        }
+        _ => false,
+    }
 }
 
 fn timestamp_channel_user_content(content: &str) -> String {
@@ -5333,6 +5368,53 @@ async fn process_channel_message_body(
         Some(ctx.agent_alias.to_string()),
         Some(turn_id.clone()),
     );
+
+    // Finished background children, claimed once for this turn and spliced
+    // above the user message, so a Detached completion actually reaches the
+    // person on Telegram/Discord/etc. instead of sitting delivered-to-nobody.
+    //
+    // **Claimed through the scoping entry point, not the ambient one.** This
+    // turn owns `history_key`, but it only scopes it around the tool-loop
+    // future below (`scope_session_key(Some(history_key.clone()), tool_loop)`),
+    // which is built after `history` — so an ambient claim here would read no
+    // key at all and be a silent no-op. The runtime scopes the key for us.
+    //
+    // **Once per turn, not once per model-switch retry.** A retry re-enters the
+    // loop with this same `history`, so the block is still in front of the
+    // model on the second attempt; claiming inside the loop would consume the
+    // next batch of announcements for a turn that already has one.
+    //
+    // **Divergence from the CLI/Agent claim sites, deliberate:** the block goes
+    // into this turn's local `history` only, never into the per-sender
+    // conversation cache — `append_sender_turn` above already persisted the
+    // plain user text, and rewriting that entry would re-show the same
+    // completion at the top of every later turn. The consequence is that later
+    // turns' history does not carry the block; that is accepted, because
+    // delivered-exactly-once is the contract and the assistant's persisted
+    // reply is the durable record of what it was told.
+    //
+    // **Above the turn-context preamble, not between it and the user's text —
+    // and that is a divergence, not a mirror.** The CLI site composes
+    // `{hw_context}{announcements}[{now}] {msg}` (`agent/loop_.rs`), putting the
+    // news closest to the message it is news about. Here the preamble is already
+    // composed onto the user turn by the time this claim runs, because the claim
+    // is deliberately late: it sits below the reply-intent precheck, so a turn
+    // that decides to stay silent never consumes a batch, and the window in
+    // which the guard has to hand rows back is as narrow as this function
+    // allows. The ordering is what that narrower window costs.
+    //
+    // Nothing fallible sits between here and the provider call that the guard
+    // does not already cover: the splice is infallible, and every path from the
+    // retry loop that fails before the provider leaves the guard armed.
+    let (announcements, mut announcement_guard) =
+        claim_announcements_for_scoped_turn(&history_key).await;
+    if !prepend_context_to_last_user_turn(&mut history, &announcements) {
+        // Nothing was spliced (no user turn to hang it on), so the model will
+        // never read these. Drop the guard armed right here: the rows go back
+        // to the store and a later turn announces them again.
+        announcement_guard = None;
+    }
+
     let (llm_result, fallback_info) = scope_provider_fallback(async {
         let llm_result = loop {
             let thread_scope_id = msg
@@ -5545,6 +5627,25 @@ async fn process_channel_message_body(
         (llm_result, fb)
     })
     .await;
+
+    // Success point for this turn's claimed announcements: the tool loop
+    // returns `Ok(Ok(_))` only after the provider was called with the history
+    // holding the block, so the model has read it — the same criterion the
+    // runtime's claim sites disarm on (`agent/loop_.rs:2536` for the CLI turn,
+    // `agent/agent.rs:2497` for the `Agent` pipeline).
+    //
+    // Every other arm deliberately leaves the guard armed, and each is a case
+    // where the model may never have seen these messages: `Cancelled` (the
+    // select fired before or during the call), `Completed(Err(_))` (the whole
+    // tool loop timed out), and `Completed(Ok(Err(_)))` (it failed — including
+    // failing before the provider call). A model-switch retry does not reach
+    // here at all: it `continue`s the loop with the same history, and the
+    // announcements have still not been read.
+    if matches!(&llm_result, LlmExecutionResult::Completed(Ok(Ok(_))))
+        && let Some(guard) = announcement_guard.as_mut()
+    {
+        guard.disarm();
+    }
 
     // Attribute the closing event to the final route and attach aggregate
     // usage. Explicit completion records the normal duration; the guard's
@@ -27467,6 +27568,134 @@ Done."#;
             compose_outgoing_user_turn_with_context("[turn-context] x\n\n", "hello"),
             "[turn-context] x\n\n\n\nhello"
         );
+    }
+
+    // ─── background-announcement splice (fork #22) ─────────────
+
+    /// The block lands as a PREFIX of the turn's user message, block first,
+    /// with no separator added here — the runtime's block brings its own
+    /// trailing newline, exactly as `loop_.rs` splices it.
+    ///
+    /// Discriminating line: the `assert_eq!` on the composed content — swap the
+    /// `format!` operands and the model reads the announcement as a footer
+    /// under the user's request instead of context above it.
+    #[test]
+    fn prepend_context_prefixes_the_last_user_turn_when_it_is_last() {
+        let mut history = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::assistant("earlier reply"),
+            ChatMessage::user("[2026-07-29 10:00:00 UTC] what happened?"),
+        ];
+
+        let spliced =
+            prepend_context_to_last_user_turn(&mut history, "## Background tasks finished\nkid\n\n");
+
+        assert!(spliced, "a user turn was present, so the block must land");
+        assert_eq!(
+            history[2].content,
+            "## Background tasks finished\nkid\n\n[2026-07-29 10:00:00 UTC] what happened?"
+        );
+        assert_eq!(history.len(), 3, "the splice must not add a message");
+        assert_eq!(
+            history[1].content, "earlier reply",
+            "no other turn may be rewritten"
+        );
+    }
+
+    /// The choice, stated: only the LAST message, and only when it is the user
+    /// turn — an earlier user message is not reached back for. Nothing is
+    /// pushed, nothing is rewritten, and the `false` return is what tells the
+    /// caller to let its claim guard drop armed.
+    ///
+    /// Discriminating line: `assert!(!spliced)` — drop the `role == "user"`
+    /// test and the block is grafted onto an assistant message (or a
+    /// tool-result turn), where it reads as something the model said.
+    #[test]
+    fn prepend_context_is_a_noop_when_the_last_message_is_not_the_user_turn() {
+        let mut history = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("[2026-07-29 10:00:00 UTC] earlier question"),
+            ChatMessage::assistant("assistant has the last word"),
+        ];
+        let before = history.clone();
+
+        let spliced = prepend_context_to_last_user_turn(&mut history, "## Background tasks\nkid\n");
+
+        assert!(
+            !spliced,
+            "no user turn to prefix means the block never reaches the model"
+        );
+        assert_eq!(history.len(), before.len(), "nothing may be pushed");
+        for (after, before) in history.iter().zip(before.iter()) {
+            assert_eq!(after.content, before.content, "history must be untouched");
+        }
+    }
+
+    /// Empty history is the same no-op, and reports the same `false`.
+    ///
+    /// Discriminating line: `assert!(!spliced)` — report `true` here and a
+    /// caller would disarm a guard for announcements nobody read.
+    #[test]
+    fn prepend_context_is_a_noop_on_empty_history() {
+        let mut history: Vec<ChatMessage> = Vec::new();
+
+        let spliced = prepend_context_to_last_user_turn(&mut history, "## Background tasks\nkid\n");
+
+        assert!(!spliced, "there is nothing to prefix");
+        assert!(history.is_empty(), "nothing may be pushed");
+    }
+
+    /// An empty block is not a delivery: it must not be reported as spliced,
+    /// so a caller can never read "landed" for a turn that says nothing.
+    ///
+    /// Discriminating line: `assert!(!spliced)` — drop the empty-block guard
+    /// and the function returns `true` having changed nothing.
+    #[test]
+    fn prepend_context_reports_no_splice_for_an_empty_block() {
+        let mut history = vec![ChatMessage::user("[2026-07-29 10:00:00 UTC] hi")];
+
+        let spliced = prepend_context_to_last_user_turn(&mut history, "");
+
+        assert!(!spliced, "an empty block is nothing to deliver");
+        assert_eq!(history[0].content, "[2026-07-29 10:00:00 UTC] hi");
+    }
+
+    /// The wiring that makes a channel turn hear its finished children — claim,
+    /// splice, disarm — has no unit-testable seam: `process_channel_message_body`
+    /// takes a live orchestrator context (providers, registries, channel handles,
+    /// approval manager) that no test here constructs. The splice helper above is
+    /// covered behaviourally; the three call sites that use it are pinned by
+    /// reading this file's own production text, the way the control plane pins its
+    /// SQL status filters.
+    ///
+    /// Discriminating line: each `assert!` below. Delete the claim and fork #22 is
+    /// back — every Detached completion silent on every channel, with the whole
+    /// suite still green, which is exactly how it went unnoticed the first time.
+    /// Delete the splice and the rows are claimed but never read. Widen the disarm
+    /// arm past `Completed(Ok(Ok(_)))` and a turn that never reached its provider
+    /// keeps announcements flagged delivered-to-nobody.
+    #[test]
+    fn the_channel_turn_claims_splices_and_disarms_its_background_announcements() {
+        const SRC: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/orchestrator/mod.rs"
+        ));
+        // Production text only: this test necessarily contains the same literals
+        // it searches for, and would otherwise satisfy itself.
+        let production = SRC.split("\nmod tests {").next().unwrap_or(SRC);
+
+        for needle in [
+            "claim_announcements_for_scoped_turn(&history_key).await",
+            "prepend_context_to_last_user_turn(&mut history, &announcements)",
+            "if matches!(&llm_result, LlmExecutionResult::Completed(Ok(Ok(_))))",
+            "guard.disarm();",
+        ] {
+            assert!(
+                production.contains(needle),
+                "the channel turn's background-announcement wiring lost `{needle}`; \
+                 a Detached child that finishes now announces to nobody (fork #22)"
+            );
+        }
     }
 
     // ─── endpreamble tests ─────────────────────────────────────

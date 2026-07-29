@@ -657,6 +657,41 @@ pub(crate) async fn claim_announcements_for_turn(
     }
 }
 
+/// Claim for a turn whose caller owns the conversation key but builds its
+/// messages *outside* the future that scopes it.
+///
+/// [`claim_announcements_for_turn`] reads the ambient key
+/// ([`current_session_key`]), which is the right shape for every turn that
+/// assembles its user message inside its own [`scope_session_key`] — the CLI
+/// `run` turns, [`process_message`] and the [`crate::agent::Agent`] pipeline all
+/// are. An outer turn shape that scopes the key only around the tool-loop future
+/// is not: at turn-assembly time nothing has been scoped yet, the ambient key
+/// reads `None`, and a claim there is silently a no-op. **Today the channel
+/// orchestrator is the only such caller** (`orchestrator/mod.rs`: the key is
+/// scoped at the `scope_session_key(Some(history_key.clone()), tool_loop)` line,
+/// long after `history` is built).
+///
+/// So this scopes the key itself and delegates. The one-claimant reasoning, the
+/// claim/render ordering and the guard contract stay in
+/// [`claim_child_announcements_context`] and are not restated here — a second
+/// copy of that reasoning is exactly how the two drift apart.
+///
+/// The caller is asserting ownership of `session_key` by calling this at all
+/// (the `should_claim` gate [`claim_announcements_for_turn`] carries for `run`'s
+/// nested case has no analogue here: an outer turn shape is never nested inside
+/// another turn). It must hold the returned guard until the provider has been
+/// called with the spliced text, then [`UnclaimOnDrop::disarm`] it; on any
+/// earlier exit the guard drops armed and the announcements go back.
+pub async fn claim_announcements_for_scoped_turn(
+    session_key: &str,
+) -> (String, Option<UnclaimOnDrop>) {
+    scope_session_key(
+        Some(session_key.to_owned()),
+        claim_announcements_for_turn(true),
+    )
+    .await
+}
+
 /// One turn's claimed announcements: the text to splice in, and the guard that
 /// gives them back if this turn never reaches the model.
 pub(crate) struct ClaimedAnnouncements {
@@ -701,7 +736,12 @@ impl ClaimedAnnouncements {
 /// `delivered = 1` having been seen by nobody, and no later turn will find
 /// them. That requires process death inside a narrow interval, and it is the
 /// one hole left in the chain — it is not closed here, it is named here.
-pub(crate) struct UnclaimOnDrop {
+///
+/// Public because [`claim_announcements_for_scoped_turn`] hands it across a
+/// crate boundary, and that is the point: the `Drop` semantics travel with the
+/// value, so an out-of-crate caller that returns early — or is cancelled, or
+/// panics — gives the announcements back without knowing it has to.
+pub struct UnclaimOnDrop {
     store: Arc<dyn crate::control_plane::TaskRegistry>,
     ids: Vec<String>,
     session_key: String,
@@ -723,7 +763,7 @@ impl UnclaimOnDrop {
     }
 
     /// The turn got these announcements to the model. Keep them delivered.
-    pub(crate) fn disarm(&mut self) {
+    pub fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -16891,6 +16931,81 @@ Pin 13: LED
             assert!(
                 fixture.is_delivered("kid").await,
                 "a disarmed guard must not return what the model already read"
+            );
+        }
+
+        /// The claim entry point for outer turn shapes scopes the key it is
+        /// given, so a caller with no ambient key still claims that key's
+        /// children. This is the channel orchestrator's shape: it owns
+        /// `history_key` but assembles the turn outside the future that scopes
+        /// it, so at claim time `current_session_key()` reads `None`.
+        ///
+        /// Discriminating line: `assert!(!block.is_empty())` — take the
+        /// `scope_session_key` wrapper out of
+        /// `claim_announcements_for_scoped_turn` and the inner claim reads the
+        /// ambient key, finds nothing in scope, claims nothing, and every
+        /// Detached completion is silent on the channel again (fork #22).
+        #[tokio::test]
+        async fn scoped_claim_entry_point_claims_under_the_key_it_is_given() {
+            let fixture = Fixture::install();
+            fixture
+                .finished_child("kid", "telegram:chat-7", "the answer is 42")
+                .await;
+            assert!(
+                crate::agent::loop_::current_session_key().is_none(),
+                "this test must run with no ambient key, or it proves nothing"
+            );
+
+            let (block, guard) =
+                crate::agent::loop_::claim_announcements_for_scoped_turn("telegram:chat-7").await;
+
+            assert!(
+                !block.is_empty(),
+                "a terminal undelivered child must render a block for the key it was filed under"
+            );
+            assert!(
+                block.contains("[completed] kid") && block.contains("the answer is 42"),
+                "the child's verdict and output must both reach the caller: {block}"
+            );
+            assert!(
+                fixture.is_delivered("kid").await,
+                "the claim commits `delivered` before returning, same as every other claimant"
+            );
+            let mut guard =
+                guard.expect("a claim that consumed rows must yield an armed guard to hand back");
+            // The channel turn disarms only after its provider call; this test
+            // stands in for that so the row is not returned under the later
+            // assertions.
+            guard.disarm();
+        }
+
+        /// The same entry point claims nothing when the key has no finished
+        /// children — no empty block to splice, and no guard to hold.
+        ///
+        /// Discriminating line: `assert!(block.is_empty())` — a caller that gets
+        /// a non-empty string here splices an empty announcement header above
+        /// every user message on a quiet conversation.
+        #[tokio::test]
+        async fn scoped_claim_entry_point_with_no_children_yields_no_block_and_no_guard() {
+            let fixture = Fixture::install();
+            fixture
+                .finished_child("someone-elses-kid", "other-key", "theirs")
+                .await;
+
+            let (block, guard) =
+                crate::agent::loop_::claim_announcements_for_scoped_turn("telegram:chat-7").await;
+
+            assert!(
+                block.is_empty(),
+                "no finished children under this key means nothing to say: {block}"
+            );
+            assert!(
+                guard.is_none(),
+                "no claim means no guard: holding one would return rows it never took"
+            );
+            assert!(
+                !fixture.is_delivered("someone-elses-kid").await,
+                "another key's child must stay claimable by the parent that owns it"
             );
         }
 
