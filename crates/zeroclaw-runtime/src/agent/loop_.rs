@@ -724,6 +724,19 @@ impl ClaimedAnnouncements {
 /// key claims them again. A parent shown a completion twice can reconcile it; a
 /// parent never shown it cannot.
 ///
+/// **The criterion is a turn that succeeded, not a provider that was called.**
+/// External review read the disarm sites as claiming the latter and found the
+/// gap in it: a turn can reach its provider and still fail afterwards —
+/// streaming the generated text, preparing or executing tool calls,
+/// cancellation mid-batch — and every one of those drops this guard armed
+/// even though the model demonstrably read the block. Announcing again there
+/// is correct rather than merely tolerated, and that is the reason the rule is
+/// written this way round: the block is spliced into the turn's *local*
+/// history, while every caller persists its user message before the splice, so
+/// a turn that dies takes the block down with it and the next turn's history
+/// does not carry it. Disarming on provider contact would erase the
+/// announcement from the only two places it could still be read.
+///
 /// Sibling turns make this sharper, not softer: one-shot `run()`s of the same
 /// alias share the synthetic `agent:<alias>` key
 /// ([`synthetic_session_key_for_run`]), so without this guard run A's failure
@@ -736,6 +749,11 @@ impl ClaimedAnnouncements {
 /// `delivered = 1` having been seen by nobody, and no later turn will find
 /// them. That requires process death inside a narrow interval, and it is the
 /// one hole left in the chain — it is not closed here, it is named here.
+/// `panic = "abort"` in the release and dist profiles (`Cargo.toml`) widens
+/// the same hole from the other side: an abort runs no destructors at all, so
+/// in a shipped binary a panicking turn never reaches this `Drop`. RAII
+/// narrows this window; it cannot close it, and no reading of this type should
+/// suggest otherwise.
 ///
 /// Public because [`claim_announcements_for_scoped_turn`] hands it across a
 /// crate boundary, and that is the point: the `Drop` semantics travel with the
@@ -16973,9 +16991,10 @@ Pin 13: LED
             );
             let mut guard =
                 guard.expect("a claim that consumed rows must yield an armed guard to hand back");
-            // The channel turn disarms only after its provider call; this test
-            // stands in for that so the row is not returned under the later
-            // assertions.
+            // The channel turn disarms only once its whole turn has succeeded
+            // (not merely once its provider was called — see `UnclaimOnDrop`);
+            // this test stands in for that so the row is not returned under
+            // the later assertions.
             guard.disarm();
         }
 

@@ -9750,8 +9750,11 @@ mod tests {
                 "the announcement must persist in the conversation history"
             );
 
-            // The turn reached the provider, so its guard was disarmed: the
-            // row stays delivered instead of being handed back for a repeat.
+            // The turn succeeded, so its guard was disarmed: the row stays
+            // delivered instead of being handed back for a repeat. (Reaching
+            // the provider is necessary for that, not sufficient — a turn that
+            // fails after the call still hands its announcements back, and
+            // `UnclaimOnDrop` explains why that is the wanted behaviour.)
             // (The second turn finding nothing above already implies this;
             // this reads the store directly so the reason is unambiguous.)
             for _ in 0..20 {

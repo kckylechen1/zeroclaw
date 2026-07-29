@@ -1165,6 +1165,15 @@ mod tests {
         /// succeed), never naming "no coordinator" at all.
         #[tokio::test]
         async fn background_true_with_no_coordinator_is_a_structured_failure() {
+            // The negative test needs `SERIALIZE` more than the positive ones
+            // do: they install a sender into the process-global hook and only
+            // race each other, while this one asserts the hook is *empty* and
+            // races every single one of them. Without this guard it passes
+            // alone, passes most full runs, and goes red exactly when the
+            // scheduler happens to overlap it with a `BootedCoordinator` —
+            // a test that lies at random about a path the whole Detached mode
+            // depends on.
+            let _serialize = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
             let alias = "bg-no-coordinator";
             let tool = SpawnSubagentTool::new(
                 Arc::new(config_with_agent(alias)),
