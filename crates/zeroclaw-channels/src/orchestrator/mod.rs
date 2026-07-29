@@ -5406,12 +5406,34 @@ async fn process_channel_message_body(
     // Nothing fallible sits between here and the provider call that the guard
     // does not already cover: the splice is infallible, and every path from the
     // retry loop that fails before the provider leaves the guard armed.
+    //
+    // **Two limits of "one claimant per conversation" on this surface, named
+    // rather than assumed away.** First, `history_key` is not the dispatch key:
+    // Matrix folds thread roots into one history key while the interruption
+    // scope keeps them apart, so two workers for the same conversation can
+    // reach this line concurrently. SQLite's single claiming statement keeps
+    // that safe — no row is read twice — but one batch can arrive split across
+    // two turns. Second, the disarm below means the model read the block, not
+    // that the user received anything: an outbound send can still fail
+    // afterwards. That is deliberate. The assistant's reply is persisted to
+    // this conversation's history either way, so the agent keeps what it was
+    // told; handing the rows back on a send failure would re-announce a
+    // completion it has already acted on.
     let (announcements, mut announcement_guard) =
         claim_announcements_for_scoped_turn(&history_key).await;
     if !prepend_context_to_last_user_turn(&mut history, &announcements) {
         // Nothing was spliced (no user turn to hang it on), so the model will
         // never read these. Drop the guard armed right here: the rows go back
         // to the store and a later turn announces them again.
+        //
+        // This is reachable, not theoretical. A cache whose tail is a `tool`
+        // message — an interrupted tool-calling turn, persisted before its
+        // assistant reply — makes `normalize_cached_channel_turns` merge this
+        // turn's user content *into* that tool message, so the last role here
+        // is `tool` and both this splice and the turn-context preamble above
+        // no-op. It costs one turn, not the announcement: the rows go back,
+        // the completed turn persists an assistant message, and the next turn
+        // normalizes to a user tail again.
         announcement_guard = None;
     }
 
