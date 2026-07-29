@@ -95,9 +95,129 @@ pub struct ChildOverrides {
     pub loop_task_id: Option<String>,
 }
 
+// ── Admission ────────────────────────────────────────────────────────────
+
+/// Why the coordinator refused to admit a spawn.
+///
+/// A refusal is decided *before any child exists*, so it is deliberately not a
+/// [`ChildResult`]: there is no run whose outcome could be reported, and a
+/// refusal dressed as a failed result is indistinguishable from a child that
+/// started and failed. That disguise is what let the detached spawn path drop
+/// its reply receiver — defensible for a terminal result, fatal for a refusal —
+/// and tell the model it had started a child that was never admitted.
+///
+/// Structured rather than a bare string: a caller has to be able to *branch* on
+/// which gate refused (a capacity refusal is worth retrying later, a depth
+/// refusal never is), and recovering that from prose means substring-matching
+/// the very message the model reads. [`fmt::Display`] is the single source of
+/// the human-readable sentence, so a caller that only wants to print one still
+/// gets exactly what the coordinator would have said.
+///
+/// Deliberately NOT `#[non_exhaustive]`: a fourth admission gate must break
+/// every out-of-crate `match` at compile time. Silently routing a new refusal
+/// into a catch-all arm is the failure mode this whole type exists to end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpawnRefusal {
+    /// A child under this id is already pending, active, or completed.
+    DuplicateChildId { child_id: String },
+    /// The child's *resolved* generation (see `Coordinator::handle_spawn`, which
+    /// derives it from a live spawner and lets a declaration only raise it) is
+    /// deeper than the coordinator admits.
+    SpawnDepthExceeded { depth: u32, max: u32 },
+    /// `pending + active` is already at the runaway backstop.
+    ChildCapacityReached { max: usize },
+    /// The actor was torn down while this command was still queued in its
+    /// mailbox, so it was never decided on its merits. Nothing ran; a retry
+    /// against a live coordinator may well be admitted.
+    ///
+    /// This is a refusal rather than a dropped sender on purpose: an unanswered
+    /// admission channel leaves the caller waiting out its own timeout for an
+    /// answer that can never come.
+    CoordinatorShuttingDown,
+}
+
+impl fmt::Display for SpawnRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateChildId { child_id } => {
+                write!(f, "child id '{child_id}' already exists")
+            }
+            Self::SpawnDepthExceeded { depth, max } => write!(
+                f,
+                "spawn depth limit reached ({depth}/{max}): this child would be generation \
+                 {depth}, deeper than the coordinator admits. Nothing was started."
+            ),
+            Self::ChildCapacityReached { max } => write!(
+                f,
+                "too many children in flight (limit {max}). Wait for some to finish or cancel \
+                 one before starting more. Nothing was started."
+            ),
+            Self::CoordinatorShuttingDown => f.write_str(
+                "the coordinator shut down before deciding on this spawn. Nothing was started.",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SpawnRefusal {}
+
+/// The coordinator's answer to "may this child run at all?".
+///
+/// Sent once, at the moment the actor decides, and never later — it does not
+/// wait for the child. A named enum rather than `Result<(), SpawnRefusal>`
+/// because this is not a fallible operation reported to its caller: both arms
+/// are ordinary, expected answers, `?` on it would be wrong, and `Admitted` is
+/// where a future "…and here is what you were admitted as" payload belongs
+/// without rewriting every match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpawnAdmission {
+    Admitted,
+    Refused(SpawnRefusal),
+}
+
 /// Spawn command envelope owned by the coordinator mailbox.
+///
+/// Two reply channels, because admission and outcome are different events with
+/// different timing, different arity, and different meaning:
+///
+/// - [`admission_tx`](Self::admission_tx) — **one** answer, immediately, at the
+///   moment the actor decides whether this child may run at all.
+/// - [`result_tx`](Self::result_tx) — the caller's **outcome stream** for a
+///   child that was admitted and did run.
+///
+/// A caller may keep only the first (a detached spawn: it needs to know it was
+/// admitted, not when the child ends) but never only the second, because a
+/// refused spawn never produces one.
 pub struct SpawnCommand {
     pub request: Box<ChildRequest>,
+    /// The coordinator's admission decision, answered exactly once,
+    /// synchronously with the decision itself and before the child could have
+    /// been handed to the runner.
+    ///
+    /// ## What a dropped sender means to the caller
+    ///
+    /// A `RecvError` here reads as **"not admitted / unknown"**, and never as
+    /// "started". The actor resolves this channel on every path it controls —
+    /// refusal, acceptance, and a shutdown drop that catches commands still
+    /// queued in the mailbox (`Coordinator::drop`) — so a `RecvError` means the
+    /// command reached no actor at all or died with one. Reading it as
+    /// "started" re-creates, from the other direction, exactly the phantom
+    /// child that splitting this channel exists to end.
+    pub admission_tx: oneshot::Sender<SpawnAdmission>,
+    /// The admitted child's outcome stream: at most an interim handoff, then
+    /// the terminal result.
+    ///
+    /// NOT terminal-only. A foreground child whose budget elapses first gets an
+    /// interim `ChildResult { backgrounded: true, .. }` here — the child is
+    /// still running (`state::background_at_deadline`) — and its real ending
+    /// arrives later through a query or a buffered completion. Callers branch
+    /// on `backgrounded`. That handoff stays on this channel: it only exists
+    /// when a `foreground_deadline` is set, which an explicitly
+    /// `run_in_background` spawn never has, so it is not an admission event and
+    /// moving it would change foreground behaviour.
+    ///
+    /// Only an *admitted* child ever answers here; on a refusal this sender is
+    /// dropped untouched, because there is no run to report.
     pub result_tx: oneshot::Sender<ChildResult>,
 }
 
@@ -121,7 +241,10 @@ impl SpawnCommand {
     /// Build and send a reply while the plain request remains borrowable.
     ///
     /// For channel adapters and deterministic test harnesses; production
-    /// lifecycle replies belong to the coordinator.
+    /// lifecycle replies belong to the coordinator. Producing a terminal
+    /// result means the child was admitted, so this answers the admission
+    /// channel first — a caller that awaits admission before the result (every
+    /// one of them, since a refusal has no result) must not be left hanging.
     ///
     /// # Errors
     ///
@@ -131,6 +254,7 @@ impl SpawnCommand {
         build: impl FnOnce(&ChildRequest) -> ChildResult,
     ) -> Result<(), ChildResult> {
         let result = build(&self.request);
+        let _ = self.admission_tx.send(SpawnAdmission::Admitted);
         self.result_tx.send(result)
     }
 }

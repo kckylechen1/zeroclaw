@@ -13,7 +13,7 @@
 use super::*;
 use crate::cancel::CancelToken;
 use crate::outcome::ChildOutcome;
-use crate::types::{ChildStatus, CoordinatorCommand};
+use crate::types::{ChildStatus, CoordinatorCommand, SpawnAdmission, SpawnRefusal};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -61,6 +61,10 @@ async fn channel_backend_spawn_success() {
         assert_eq!(command.request.child_id, "test-id");
         assert_eq!(command.request.prompt, "do something");
         command
+            .admission_tx
+            .send(SpawnAdmission::Admitted)
+            .expect("the caller awaits admission before the result");
+        command
             .result_tx
             .send(ChildResult {
                 outcome: ChildOutcome::Completed,
@@ -101,6 +105,13 @@ async fn channel_backend_spawn_result_dropped() {
 
     let handle = tokio::spawn(async move {
         let command = recv_command!(rx, Spawn);
+        // Admitted first: this test is about losing the *outcome* of a child
+        // that was allowed to run, which is a different failure from never
+        // being decided on (`channel_backend_spawn_admission_dropped`).
+        command
+            .admission_tx
+            .send(SpawnAdmission::Admitted)
+            .expect("the caller awaits admission before the result");
         drop(command.result_tx);
     });
 
@@ -108,6 +119,76 @@ async fn channel_backend_spawn_result_dropped() {
     assert_eq!(err, CoordinatorError::ResultChannelDropped);
     assert!(
         err.to_string().contains("result channel dropped"),
+        "error: {err}"
+    );
+
+    handle.await.unwrap();
+}
+
+/// A refusal answers the admission channel and never the result channel, so a
+/// caller must learn *why* nothing ran without ever touching `result_tx`.
+/// The `timeout` is the guard the previous seat learned to need: if `spawn`
+/// ever went back to awaiting the result for a refused child, this would hang
+/// the binary rather than go red.
+#[tokio::test]
+async fn channel_backend_spawn_refusal_arrives_without_a_child_result() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<CoordinatorCommand>();
+    let backend = ChannelBackend::new(tx);
+
+    let handle = tokio::spawn(async move {
+        let command = recv_command!(rx, Spawn);
+        command
+            .admission_tx
+            .send(SpawnAdmission::Refused(SpawnRefusal::ChildCapacityReached {
+                max: 4,
+            }))
+            .expect("the caller awaits admission");
+        // Deliberately dropped, unanswered: there is no run to report.
+        drop(command.result_tx);
+    });
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        backend.spawn(request("refused-test")),
+    )
+    .await
+    .expect("a refusal must answer immediately, without waiting on a child")
+    .unwrap_err();
+    assert_eq!(
+        err,
+        CoordinatorError::Refused(SpawnRefusal::ChildCapacityReached { max: 4 }),
+        "a refusal must keep its structure, not collapse into a lost-reply error"
+    );
+    assert!(
+        err.to_string().contains("too many children in flight"),
+        "error: {err}"
+    );
+
+    handle.await.unwrap();
+}
+
+/// An admission channel dropped without an answer is "not admitted / unknown",
+/// and must not be reported as a lost child result — no child ever ran.
+#[tokio::test]
+async fn channel_backend_spawn_admission_dropped() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<CoordinatorCommand>();
+    let backend = ChannelBackend::new(tx);
+
+    let handle = tokio::spawn(async move {
+        let command = recv_command!(rx, Spawn);
+        drop(command);
+    });
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        backend.spawn(request("undecided-test")),
+    )
+    .await
+    .expect("a dropped admission channel must resolve, not hang")
+    .unwrap_err();
+    assert_eq!(err, CoordinatorError::AdmissionChannelDropped);
+    assert!(
+        err.to_string().contains("never decided"),
         "error: {err}"
     );
 

@@ -14,7 +14,8 @@ use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::schema::Config;
 use zeroclaw_coordinator::{
-    CancelToken, ChildOverrides, ChildRequest, CommandSender, CoordinatorCommand, SpawnCommand,
+    CancelToken, ChildOverrides, ChildRequest, CommandSender, CoordinatorCommand, SpawnAdmission,
+    SpawnCommand, spawn_admission_timeout,
 };
 use zeroclaw_log::scope;
 
@@ -185,28 +186,30 @@ impl SpawnSubagentTool {
             cancel_token: CancelToken::new(),
         };
 
+        let (admission_tx, admission_rx) = tokio::sync::oneshot::channel();
         let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
-        // `_result_rx` is deliberately never awaited: this ticket's own
-        // "does NOT poll, await, or fetch results for background children"
-        // is one reason, and the protocol gives a second, independent one —
-        // `coordinator.rs::finish_child` only ever answers this oneshot with
-        // the child's *terminal* `ChildResult` (`let sent =
-        // respond_to.send(output.result.clone())...`), sent whenever the
-        // child actually finishes. There is no separate "accepted, here is
-        // an interim handle" reply for an explicit `run_in_background: true`
-        // spawn: that interim `backgrounded: true` reply exists only on the
-        // *foreground-budget-elapsed* path
-        // (`state.rs::background_at_deadline`), which requires
-        // `foreground_deadline` to be `Some`, and `handle_spawn` never sets
-        // that when `run_in_background` is true. Awaiting `_result_rx` here
-        // would block this call until the child's real ending — exactly the
-        // synchronous behaviour "background" is supposed to skip. Dropping
-        // it is harmless: `finish_child`'s own delivered-bookkeeping
-        // (`if !handle_only { foreground_delivered = sent; ... }`) never
-        // consults whether anyone received that send while `handle_only` is
-        // true, which it is here from the moment this spawns.
+        // `_result_rx` is deliberately never awaited, and that reasoning is
+        // unchanged: `coordinator.rs::finish_child` only ever answers this
+        // oneshot with the child's *terminal* `ChildResult` (`let sent =
+        // respond_to.send(output.result.clone())...`), sent whenever the child
+        // actually finishes, so awaiting it would block this call until the
+        // child's real ending — exactly the synchronous behaviour "background"
+        // is supposed to skip. Dropping it stays harmless: `finish_child`'s
+        // own delivered-bookkeeping (`if !handle_only { foreground_delivered =
+        // sent; ... }`) never consults whether anyone received that send while
+        // `handle_only` is true, which it is here from the moment this spawns.
+        //
+        // What that reasoning did NOT cover, and why `admission_rx` below is
+        // kept and awaited: a *refusal* also travelled down that same terminal
+        // channel, so dropping the receiver dropped the refusal too — the
+        // coordinator correctly declined to start a child and this tool told
+        // the model "started detached" anyway. Admission is now its own event
+        // (`SpawnAdmission`), answered inside the coordinator's own command arm
+        // the moment it decides, so awaiting it costs a scheduler round-trip
+        // and never waits for a child.
         if let Err(error) = commands.0.send(CoordinatorCommand::Spawn(SpawnCommand {
             request: Box::new(request),
+            admission_tx,
             result_tx,
         })) {
             return Ok(ToolResult {
@@ -217,6 +220,52 @@ impl SpawnSubagentTool {
                      accepting commands (channel closed): {error}"
                 )),
             });
+        }
+
+        // Bounded on purpose. An unbounded await here would hang the whole
+        // tool call behind a wedged actor; the timeout can only elapse if the
+        // coordinator never reached its decision, which is why the refusal
+        // below is worded as "unknown", not "not started".
+        match tokio::time::timeout(spawn_admission_timeout(), admission_rx).await {
+            Ok(Ok(SpawnAdmission::Admitted)) => {}
+            Ok(Ok(SpawnAdmission::Refused(refusal))) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "spawn_subagent: the coordinator refused to start this background \
+                         subagent — {refusal} No child was started (child_id={child_id} was \
+                         never admitted)."
+                    )),
+                });
+            }
+            // Sender dropped without an answer. Per `SpawnCommand::admission_tx`'s
+            // contract this reads as "not admitted / unknown" and never as
+            // "started" — the coordinator refuses even the spawns it finds
+            // queued at shutdown, so no live actor ever saw this one.
+            Ok(Err(_)) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "spawn_subagent: the coordinator dropped this background spawn without \
+                         deciding it (child_id={child_id}); it was not admitted and nothing is \
+                         known to be running."
+                    )),
+                });
+            }
+            Err(_) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "spawn_subagent: the coordinator did not answer this background spawn \
+                         within {timeout:?} (child_id={child_id}); it may or may not have been \
+                         admitted — query that id before retrying.",
+                        timeout = spawn_admission_timeout()
+                    )),
+                });
+            }
         }
 
         Ok(ToolResult {
@@ -1003,6 +1052,7 @@ mod tests {
         use crate::control_plane::task_registry::{TaskRegistry, TaskStatus};
         use std::sync::Mutex as StdMutex;
         use std::time::Duration;
+        use zeroclaw_coordinator::SpawnRefusal;
 
         /// `COMMAND_SENDER_TEST_HOOK` is a single process-global slot: two of
         /// these tests installing it concurrently would clobber each other's
@@ -1256,6 +1306,304 @@ mod tests {
                 without.error.is_some(),
                 "explicit background=false must behave like the field's absence"
             );
+        }
+
+        // ── Admission refusals reach the model instead of "started detached" ──
+        //
+        // These are the regression tests for the bug this split exists to fix:
+        // the detached path used to drop its only reply receiver, so a spawn the
+        // coordinator *refused* still returned "subagent started detached,
+        // child_id=…" and the model was told it had a child that never existed.
+        //
+        // The refusal is scripted rather than provoked out of a live actor
+        // because two of the three gates are unreachable from this call site
+        // today: the tool mints a fresh uuid per call (so it can never collide)
+        // and a detached spawn from a top-level turn resolves to depth 0 (so it
+        // can never exceed the depth cap). They become reachable through
+        // `delegate.rs`, which carries a real depth and caller-chosen ids —
+        // which is exactly why the caller must handle every kind now rather
+        // than only the one it can currently trip. That a real coordinator
+        // emits these three on the admission channel is proved separately, in
+        // `zeroclaw-coordinator`'s own tests; `refusal_from_a_live_coordinator_*`
+        // below joins the two halves end to end over the reachable gate.
+
+        /// A stand-in for the coordinator actor that answers every `Spawn` with
+        /// one scripted admission answer, over the production `CommandSender`
+        /// and the production command types.
+        ///
+        /// It drops `result_tx` unanswered, exactly as the real actor does on a
+        /// refusal — so a caller that went back to waiting on the outcome
+        /// channel would hang here, which is what the per-test timeouts below
+        /// convert into a red test instead of a wedged binary.
+        struct ScriptedCoordinator {
+            _serialize: std::sync::MutexGuard<'static, ()>,
+            responder: Option<tokio::task::JoinHandle<()>>,
+        }
+
+        impl Drop for ScriptedCoordinator {
+            fn drop(&mut self) {
+                *COMMAND_SENDER_TEST_HOOK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+                if let Some(responder) = self.responder.take() {
+                    responder.abort();
+                }
+            }
+        }
+
+        fn refusing_coordinator(refusal: SpawnRefusal) -> ScriptedCoordinator {
+            let serialize = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(CommandSender(tx));
+            let responder = zeroclaw_spawn::spawn!(async move {
+                while let Some(command) = rx.recv().await {
+                    if let CoordinatorCommand::Spawn(spawn) = command {
+                        let _ = spawn
+                            .admission_tx
+                            .send(SpawnAdmission::Refused(refusal.clone()));
+                    }
+                }
+            });
+            ScriptedCoordinator {
+                _serialize: serialize,
+                responder: Some(responder),
+            }
+        }
+
+        /// Run one detached spawn against whatever coordinator is installed and
+        /// return the tool's own answer.
+        ///
+        /// The timeout is not decoration. An admission answer is immediate by
+        /// construction, so anything that blocks here means the caller went
+        /// back to awaiting the child — and an accepted background child only
+        /// replies when it actually finishes, which for a held child is never.
+        /// Without this bound that regression wedges the test binary until the
+        /// harness kills it, instead of reddening one test.
+        async fn detached_spawn(tool: &SpawnSubagentTool) -> ToolResult {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                tool.execute(json!({ "prompt": "do the detached thing", "background": true })),
+            )
+            .await
+            .expect("a background spawn must answer without waiting for the child")
+            .expect("execute returns Ok with a structured result")
+        }
+
+        /// Every refusal must look the same to the model: a structured failure
+        /// whose reason is readable, and NOT a success claiming a detached child.
+        fn assert_refused(result: &ToolResult, expected_reason: &str) {
+            assert!(
+                !result.success,
+                "a refused spawn must not report success, got: {result:?}"
+            );
+            assert!(
+                !result.output.as_str().contains("started detached"),
+                "a refused spawn must never claim it started a child, got: {:?}",
+                result.output.as_str()
+            );
+            let err = result.error.as_deref().unwrap_or_default();
+            assert!(
+                err.contains(expected_reason),
+                "the refusal must reach the model with a readable reason containing \
+                 {expected_reason:?}, got: {err:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn background_spawn_refused_for_duplicate_child_id_is_a_structured_failure() {
+            let _coordinator = refusing_coordinator(SpawnRefusal::DuplicateChildId {
+                child_id: "already-live".into(),
+            });
+            let alias = "bg-refused-duplicate";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            assert_refused(&detached_spawn(&tool).await, "already exists");
+        }
+
+        #[tokio::test]
+        async fn background_spawn_refused_for_spawn_depth_is_a_structured_failure() {
+            let _coordinator = refusing_coordinator(SpawnRefusal::SpawnDepthExceeded {
+                depth: 4,
+                max: 3,
+            });
+            let alias = "bg-refused-depth";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            assert_refused(
+                &detached_spawn(&tool).await,
+                "spawn depth limit reached (4/3)",
+            );
+        }
+
+        #[tokio::test]
+        async fn background_spawn_refused_for_child_capacity_is_a_structured_failure() {
+            let _coordinator =
+                refusing_coordinator(SpawnRefusal::ChildCapacityReached { max: 128 });
+            let alias = "bg-refused-capacity";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            assert_refused(
+                &detached_spawn(&tool).await,
+                "too many children in flight (limit 128)",
+            );
+        }
+
+        /// A coordinator that takes the command and dies without deciding is
+        /// "not admitted / unknown" — never "started". This is the inverted
+        /// form of the same bug: reading a dropped admission sender as success
+        /// re-creates the phantom child from the other direction.
+        #[tokio::test]
+        async fn background_spawn_with_an_undecided_admission_is_not_reported_as_started() {
+            let serialize = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(CommandSender(tx));
+            let responder = zeroclaw_spawn::spawn!(async move {
+                // Take the command and drop it, deciding nothing.
+                let _ = rx.recv().await;
+            });
+            let alias = "bg-undecided";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let result = detached_spawn(&tool).await;
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            responder.abort();
+            drop(serialize);
+
+            assert!(!result.success, "an undecided spawn must not report success");
+            assert!(
+                !result.output.as_str().contains("started detached"),
+                "an undecided spawn must never claim it started a child"
+            );
+            let err = result.error.as_deref().unwrap_or_default();
+            assert!(
+                err.contains("not admitted"),
+                "the failure must say it was not admitted, got: {err:?}"
+            );
+        }
+
+        // ── End to end over a live coordinator ───────────────────────────────
+
+        struct NeverControl;
+
+        impl zeroclaw_coordinator::ChildControl for NeverControl {
+            type ProgressFuture = std::future::Ready<zeroclaw_coordinator::ChildProgress>;
+
+            fn progress(&self) -> Self::ProgressFuture {
+                std::future::ready(zeroclaw_coordinator::ChildProgress::default())
+            }
+
+            fn cancel(&self) {}
+        }
+
+        /// A runner whose children never promote and never finish, so the
+        /// in-flight population the concurrency gate counts is whatever the
+        /// test put there — no model provider, no timing race. Same shape and
+        /// same reason as `control_plane::coordinator_host`'s own `HangingRunner`.
+        struct HangingRunner;
+
+        impl zeroclaw_coordinator::ChildRunner for HangingRunner {
+            type Control = NeverControl;
+            type CompletionData = ();
+            type RunFuture = std::pin::Pin<
+                Box<std::future::Pending<zeroclaw_coordinator::ChildRunOutput<()>>>,
+            >;
+            type ValidateFuture = std::future::Ready<zeroclaw_coordinator::ValidateTypeOutcome>;
+            type DescribeFuture = std::future::Ready<zeroclaw_coordinator::DescribeOutcome>;
+
+            fn run(
+                &self,
+                _request: zeroclaw_coordinator::ChildRunRequest<Self::Control>,
+            ) -> Self::RunFuture {
+                Box::pin(std::future::pending())
+            }
+
+            fn validate_type(
+                &self,
+                _agent_type: String,
+                _parent_session_id: String,
+            ) -> Self::ValidateFuture {
+                std::future::ready(zeroclaw_coordinator::ValidateTypeOutcome::Ok)
+            }
+
+            fn describe_type(
+                &self,
+                _agent_type: String,
+                _harness_agent_type: Option<String>,
+                _parent_session_id: String,
+            ) -> Self::DescribeFuture {
+                std::future::ready(zeroclaw_coordinator::DescribeOutcome::Unavailable)
+            }
+
+            fn on_completed(
+                &self,
+                _completion: zeroclaw_coordinator::ChildCompletion<Self::CompletionData>,
+            ) {
+            }
+        }
+
+        /// The whole wire, with nothing scripted: a real `Coordinator` decides,
+        /// refuses on its own concurrency gate, and the refusal comes out of
+        /// this tool as a structured failure naming the cap.
+        ///
+        /// The first spawn is the control — it proves the same tool against the
+        /// same actor does say "started detached" when it is actually admitted,
+        /// so the second result is about the refusal and not about the harness.
+        #[tokio::test]
+        async fn refusal_from_a_live_coordinator_reaches_the_model_for_the_reachable_gate() {
+            let serialize = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+            let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+            let coordinator = zeroclaw_coordinator::Coordinator::new(
+                command_rx,
+                HangingRunner,
+                zeroclaw_coordinator::CoordinatorConfig {
+                    max_concurrent_children: 1,
+                    ..zeroclaw_coordinator::CoordinatorConfig::default()
+                },
+            );
+            let actor = zeroclaw_spawn::spawn!(coordinator.run());
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(CommandSender(command_tx));
+
+            let alias = "bg-live-capacity";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+
+            let admitted = detached_spawn(&tool).await;
+            let refused = detached_spawn(&tool).await;
+
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            actor.abort();
+            drop(serialize);
+
+            assert!(
+                admitted.success && admitted.output.as_str().contains("started detached"),
+                "the first spawn fills the cap and must be admitted: {admitted:?}"
+            );
+            assert_refused(&refused, "too many children in flight (limit 1)");
         }
 
         #[tokio::test]

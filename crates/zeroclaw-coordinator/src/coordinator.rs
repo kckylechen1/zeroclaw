@@ -41,8 +41,8 @@ use crate::state::{
 };
 use crate::types::{
     CancelOutcome, CancelTarget, ChildRequest, ChildResult, CoordinatorCommand, DescribeOutcome,
-    OutstandingReply, RegistryCounts, ResumeLookup, ResumeSource, SpawnedChildRef,
-    ValidateTypeOutcome,
+    OutstandingReply, RegistryCounts, ResumeLookup, ResumeSource, SpawnAdmission, SpawnRefusal,
+    SpawnedChildRef, ValidateTypeOutcome,
 };
 
 use crate::state::{
@@ -408,58 +408,47 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
         // which is what the next generation's lookup above reads.
         request.overrides.spawn_depth = Some(depth);
         let id = request.child_id.clone();
-        if self.pending.contains_key(&id)
+        // Admission gates. Every refusal answers the caller's *admission*
+        // channel and drops `result_tx` untouched: nothing ran, so there is no
+        // terminal result to report, and a refusal shaped like a failed
+        // `ChildResult` is indistinguishable from a child that started and
+        // failed. There is no unwinding here (the actor is single-writer; a
+        // panic takes every other child with it) and no admitting-then-killing
+        // either, which would bill the caller for a run that was never allowed.
+        let refusal = if self.pending.contains_key(&id)
             || self.active.contains_key(&id)
             || self.completed.contains_key(&id)
         {
-            let _ = command.result_tx.send(ChildResult {
-                outcome: ChildOutcome::Failed,
-                detail: Some(format!("child id '{id}' already exists")),
+            Some(SpawnRefusal::DuplicateChildId {
                 child_id: id.clone(),
-                child_session_id: id,
-                ..Default::default()
-            });
-            return;
-        }
-        // Admission gates. Both refuse the way the duplicate-id check above
-        // refuses — a `Failed` result carrying the reason down the caller's own
-        // reply channel — because that is the only channel a spawn caller has:
-        // there is no unwinding here (the actor is single-writer; a panic takes
-        // every other child with it) and no admitting-then-killing either,
-        // which would bill the caller for a run that was never allowed.
-        if crate::state::exceeds_spawn_depth(depth, self.config.max_spawn_depth) {
-            let _ = command.result_tx.send(ChildResult {
-                outcome: ChildOutcome::Failed,
-                detail: Some(format!(
-                    "spawn depth limit reached ({depth}/{max}): this child would be generation \
-                     {depth}, deeper than the coordinator admits. Nothing was started.",
-                    max = self.config.max_spawn_depth
-                )),
-                child_id: id.clone(),
-                child_session_id: id,
-                ..Default::default()
-            });
-            return;
-        }
-        // In-flight is `pending + active`, the same population the actor
-        // already reports as its running count.
-        if crate::state::at_child_capacity(
+            })
+        } else if crate::state::exceeds_spawn_depth(depth, self.config.max_spawn_depth) {
+            Some(SpawnRefusal::SpawnDepthExceeded {
+                depth,
+                max: self.config.max_spawn_depth,
+            })
+        } else if crate::state::at_child_capacity(
+            // In-flight is `pending + active`, the same population the actor
+            // already reports as its running count.
             self.pending.len() + self.active.len(),
             self.config.max_concurrent_children,
         ) {
-            let _ = command.result_tx.send(ChildResult {
-                outcome: ChildOutcome::Failed,
-                detail: Some(format!(
-                    "too many children in flight (limit {max}). Wait for some to finish or \
-                     cancel one before starting more. Nothing was started.",
-                    max = self.config.max_concurrent_children
-                )),
-                child_id: id.clone(),
-                child_session_id: id,
-                ..Default::default()
-            });
+            Some(SpawnRefusal::ChildCapacityReached {
+                max: self.config.max_concurrent_children,
+            })
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            let _ = command.admission_tx.send(SpawnAdmission::Refused(refusal));
             return;
         }
+        // Admitted, and said so *here* — inside the same synchronous command
+        // arm, before the run future below can be polled even once. That
+        // ordering is the whole point of a separate channel: "you were
+        // admitted" reaches the caller strictly before any terminal result
+        // could, so a detached caller can await it without waiting for a child.
+        let _ = command.admission_tx.send(SpawnAdmission::Admitted);
         let cancellation = request.cancel_token.clone();
         let handle_only = request.run_in_background;
         let foreground_deadline = (!request.run_in_background && !request.await_to_completion)
@@ -891,6 +880,32 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
             .running_count_changed(self.pending.len() + self.active.len());
     }
 
+    /// Answer the admission channel of every spawn still sitting undecided in
+    /// the mailbox at Drop.
+    ///
+    /// Once a command has been dispatched, `handle_spawn` resolves its
+    /// admission on every path it can take, and a child that got as far as
+    /// `pending`/`active` was admitted long before Drop — so the only spawns
+    /// that can still be owed an answer are the ones the actor never read.
+    /// That is reachable in production: shutdown aborts the actor task
+    /// (`control_plane::coordinator_host::CoordinatorHost::actor`) while
+    /// senders are still live, and anything queued behind the abort dies here.
+    ///
+    /// Dropping those senders silently would leave every such caller waiting
+    /// out its own admission timeout for an answer that can never arrive —
+    /// the lost-refusal bug inverted, and worse, because it costs wall-clock
+    /// time as well as truth. Refusing them is both faster and more honest:
+    /// nothing ran, and a retry against a live coordinator may be admitted.
+    fn refuse_queued_spawns(&mut self) {
+        while let Ok(command) = self.commands.try_recv() {
+            if let CoordinatorCommand::Spawn(spawn) = command {
+                let _ = spawn
+                    .admission_tx
+                    .send(SpawnAdmission::Refused(SpawnRefusal::CoordinatorShuttingDown));
+            }
+        }
+    }
+
     fn cancel_all_children(&self) {
         for child in self.active.values() {
             child.cancellation.cancel();
@@ -975,6 +990,7 @@ fn belongs_to_session(request: &ChildRequest, parent_session_id: Option<&str>) -
 /// `Running` forever (see [`Self::record_abandoned_children`]).
 impl<R: ChildRunner, P: ChildPersistence> Drop for Coordinator<R, P> {
     fn drop(&mut self) {
+        self.refuse_queued_spawns();
         self.cancel_all_children();
         self.record_abandoned_children();
     }

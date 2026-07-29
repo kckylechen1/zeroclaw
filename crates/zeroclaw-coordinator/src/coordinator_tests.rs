@@ -14,7 +14,7 @@
 // ../NOTICE.
 
 use super::*;
-use crate::backend::ChannelBackend;
+use crate::backend::{ChannelBackend, CoordinatorError};
 use crate::cancel::CancelToken;
 use crate::outcome::ChildOutcome;
 use crate::persistence::PersistenceError;
@@ -23,7 +23,7 @@ use crate::state::{
 };
 use crate::types::{
     CancelOutcome, ChildCompletionSummary, ChildStatus, CompletionsCommand, ListActiveCommand,
-    LoopUnitActiveCommand, OutstandingCommand, OutstandingReply, RegistryCounts,
+    LoopUnitActiveCommand, OutstandingCommand, OutstandingReply, RegistryCounts, SpawnCommand,
 };
 use std::sync::Mutex;
 use tokio::sync::oneshot;
@@ -762,17 +762,18 @@ async fn duplicate_child_id_is_rejected_without_replacing_live_child() {
     });
     tokio::task::yield_now().await;
 
-    let duplicate = harness
-        .backend
-        .spawn(request("duplicate", false))
-        .await
-        .expect("duplicate rejection is a lifecycle result");
-    assert_eq!(duplicate.outcome, ChildOutcome::Failed);
+    // A duplicate id is an *admission* refusal, not a failed child: nothing
+    // ran under that id a second time, so there is no outcome to report.
+    let duplicate = refused_spawn(&harness.backend, request("duplicate", false)).await;
+    assert_eq!(
+        duplicate,
+        SpawnRefusal::DuplicateChildId {
+            child_id: "duplicate".to_owned()
+        }
+    );
     assert!(
-        duplicate
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("already exists"))
+        duplicate.to_string().contains("already exists"),
+        "the printed reason must still name the collision, got: {duplicate}"
     );
 
     let running = harness
@@ -1754,13 +1755,132 @@ async fn erroring_persistence_during_drop_does_not_panic() {
 /// ending, which is to say never, for a test that has not released the
 /// runner. Without the bound a regression in either gate hangs the test
 /// binary rather than failing it.
-async fn refused_spawn(backend: &ChannelBackend, request: ChildRequest) -> ChildResult {
-    tokio::time::timeout(std::time::Duration::from_secs(5), backend.spawn(request))
+/// Drive a spawn that must be refused, and hand back the structured reason.
+///
+/// The timeout is load-bearing: a refusal is answered synchronously with the
+/// decision, so anything that blocks here means the request was admitted after
+/// all — and without the bound that regression would wedge the test binary
+/// instead of reddening it.
+async fn refused_spawn(backend: &ChannelBackend, request: ChildRequest) -> SpawnRefusal {
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), backend.spawn(request))
         .await
         .expect(
             "a refused spawn must answer immediately; blocking means the request was admitted",
         )
-        .expect("the refusal must arrive as a result, not a channel error")
+        .expect_err("a refusal must not arrive as a child result — no child ran");
+    match error {
+        CoordinatorError::Refused(refusal) => refusal,
+        other => panic!("expected a structured refusal, got: {other:?}"),
+    }
+}
+
+/// The ordering guarantee that gives the admission channel its whole reason to
+/// exist, pinned so no refactor can quietly lose it: on the *accepted* path the
+/// admission answer arrives while the child is still running, strictly before
+/// anything comes down the outcome channel.
+///
+/// Written against observable channel state rather than against how
+/// `handle_spawn` happens to be laid out today, so moving the send around
+/// inside the actor keeps this test meaningful — only actually deferring
+/// admission until the child settles can redden it.
+#[tokio::test]
+async fn admission_answers_while_the_child_is_still_running() {
+    // `wait_before_start: true` parks the admitted child in `pending`, so
+    // "still running" is a state the test controls rather than races.
+    let harness = harness(true, std::time::Duration::from_secs(60));
+    let (admission_tx, admission_rx) = oneshot::channel();
+    let (result_tx, mut result_rx) = oneshot::channel();
+    harness
+        .backend
+        .sender()
+        .send(CoordinatorCommand::Spawn(SpawnCommand {
+            request: Box::new(request("ordered", false)),
+            admission_tx,
+            result_tx,
+        }))
+        .expect("the actor owns the receiver");
+
+    // Bounded: an admission that never arrives is a regression, and an
+    // unbounded await here would wedge the binary instead of reporting it.
+    let admission = tokio::time::timeout(std::time::Duration::from_secs(5), admission_rx)
+        .await
+        .expect("admission must not wait for the child to finish")
+        .expect("the actor answers admission on every path");
+    assert_eq!(admission, SpawnAdmission::Admitted);
+    assert!(
+        result_rx.try_recv().is_err(),
+        "admission must arrive BEFORE any outcome — the child has not even started"
+    );
+
+    let _ = harness.start.send(());
+    let _ = harness.finish.send(());
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), result_rx)
+        .await
+        .expect("the admitted child must still deliver its outcome")
+        .expect("an admitted child answers its outcome channel");
+    assert!(
+        result.is_success(),
+        "the outcome channel still carries the real ending, got: {result:?}"
+    );
+    harness.actor.abort();
+}
+
+/// A spawn still sitting in the mailbox when the actor is torn down is
+/// *refused*, not silently dropped.
+///
+/// An unanswered admission channel is the lost-refusal bug inverted: the caller
+/// waits out its own timeout for an answer that can never come. The coordinator
+/// is never polled here, so the command is provably still queued when `Drop`
+/// runs.
+#[tokio::test]
+async fn spawns_still_queued_at_teardown_are_refused_rather_than_left_unanswered() {
+    let (command_tx, command_rx) = mpsc::unbounded_channel();
+    let (start, _start_rx) = tokio::sync::broadcast::channel(4);
+    let (finish, _finish_rx) = tokio::sync::broadcast::channel(4);
+    let (promote_gate, _gate_rx) = tokio::sync::broadcast::channel(4);
+    let (promote_reached, _reached_rx) = mpsc::unbounded_channel();
+    let (promote_acks, _acks_rx) = mpsc::unbounded_channel();
+    let (completions, _completions_rx) = mpsc::unbounded_channel();
+    let (requests, _requests_rx) = mpsc::unbounded_channel();
+    let (started, _started_rx) = mpsc::unbounded_channel();
+    let coordinator = Coordinator::new(
+        command_rx,
+        TestRunner {
+            options: RunnerOptions::default(),
+            start,
+            finish,
+            promote_gate,
+            promote_reached,
+            promote_acks,
+            completions,
+            requests,
+            started,
+        },
+        CoordinatorConfig::default(),
+    );
+
+    let (admission_tx, admission_rx) = oneshot::channel();
+    let (result_tx, _result_rx) = oneshot::channel();
+    command_tx
+        .send(CoordinatorCommand::Spawn(SpawnCommand {
+            request: Box::new(request("never-read", true)),
+            admission_tx,
+            result_tx,
+        }))
+        .expect("the coordinator owns the receiver");
+
+    // `coordinator.run()` was never awaited, so this command has never been
+    // dispatched — it dies in the mailbox with the actor.
+    drop(coordinator);
+
+    let admission = tokio::time::timeout(std::time::Duration::from_secs(5), admission_rx)
+        .await
+        .expect("a torn-down actor must resolve queued admissions, not leave them hanging")
+        .expect("teardown answers rather than drops the sender");
+    assert_eq!(
+        admission,
+        SpawnAdmission::Refused(SpawnRefusal::CoordinatorShuttingDown)
+    );
 }
 
 #[test]
@@ -1812,15 +1932,16 @@ async fn declared_spawn_depth_is_admitted_at_the_limit_and_refused_one_deeper() 
     let mut too_deep = request("too-deep", true);
     too_deep.overrides.spawn_depth = Some(3);
     let refused = refused_spawn(&harness.backend, too_deep).await;
-    assert!(
-        !refused.is_success(),
-        "a spawn past the depth limit must not report success"
+    assert_eq!(
+        refused,
+        SpawnRefusal::SpawnDepthExceeded { depth: 3, max: 2 },
+        "the refusal must carry the depth and the limit as data, not prose"
     );
-    assert_eq!(refused.child_id, "too-deep");
-    let detail = refused.detail.expect("a refusal must say why");
     assert!(
-        detail.contains("spawn depth limit reached (3/2)"),
-        "the refusal must name the depth and the limit, got: {detail}"
+        refused
+            .to_string()
+            .contains("spawn depth limit reached (3/2)"),
+        "the printed reason must name the depth and the limit, got: {refused}"
     );
     assert!(
         harness.requests.try_recv().is_err(),
@@ -1876,14 +1997,11 @@ async fn spawn_depth_descends_from_a_live_spawner_and_a_declaration_cannot_under
     grandchild.parent_session_id = "child".to_owned();
     grandchild.overrides.spawn_depth = Some(0);
     let refused = refused_spawn(&harness.backend, grandchild).await;
-    assert!(
-        !refused.is_success(),
-        "declaring depth 0 must not buy a deeper generation admission"
-    );
-    let detail = refused.detail.expect("a refusal must say why");
-    assert!(
-        detail.contains("spawn depth limit reached (2/1)"),
-        "the refusal must report the derived depth, not the declared one, got: {detail}"
+    assert_eq!(
+        refused,
+        SpawnRefusal::SpawnDepthExceeded { depth: 2, max: 1 },
+        "declaring depth 0 must not buy a deeper generation admission, and the refusal must \
+         report the derived depth, not the declared one"
     );
     assert!(
         harness.requests.try_recv().is_err(),
@@ -1923,15 +2041,16 @@ async fn concurrency_backstop_fills_the_cap_then_refuses_structurally() {
 
     // The one past it is refused, with a reason, and never runs.
     let refused = refused_spawn(&harness.backend, request("third", true)).await;
-    assert!(
-        !refused.is_success(),
-        "a spawn past the concurrency cap must not report success"
+    assert_eq!(
+        refused,
+        SpawnRefusal::ChildCapacityReached { max: 2 },
+        "a spawn past the concurrency cap must be refused, carrying the cap"
     );
-    assert_eq!(refused.child_id, "third");
-    let detail = refused.detail.expect("a refusal must say why");
     assert!(
-        detail.contains("too many children in flight (limit 2)"),
-        "the refusal must name the limit, got: {detail}"
+        refused
+            .to_string()
+            .contains("too many children in flight (limit 2)"),
+        "the printed reason must name the limit, got: {refused}"
     );
     assert!(
         harness.requests.try_recv().is_err(),

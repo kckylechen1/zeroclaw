@@ -84,7 +84,8 @@ mod tests {
     use zeroclaw_coordinator::{
         CancelToken, ChildCompletion, ChildControl, ChildOutcome, ChildOverrides, ChildProgress,
         ChildRequest, ChildRunOutput, ChildRunRequest, ChildRunner, Coordinator,
-        CoordinatorCommand, CoordinatorConfig, DescribeOutcome, SpawnCommand, ValidateTypeOutcome,
+        CoordinatorCommand, CoordinatorConfig, DescribeOutcome, SpawnAdmission, SpawnCommand,
+        ValidateTypeOutcome,
     };
 
     use super::*;
@@ -136,6 +137,7 @@ mod tests {
         );
         handle.commands = Some(host.commands);
 
+        let (admission_tx, admission_rx) = oneshot::channel();
         let (result_tx, result_rx) = oneshot::channel();
         handle
             .commands
@@ -144,10 +146,21 @@ mod tests {
             .0
             .send(CoordinatorCommand::Spawn(SpawnCommand {
                 request: Box::new(request("kid-1", "no-such-agent")),
+                admission_tx,
                 result_tx,
             }))
             .expect("the actor owns the receiver");
 
+        // An unconfigured agent type is a *runner* validation failure, not an
+        // admission gate: the coordinator admits the child and the runner then
+        // refuses it. Pinning that here keeps the two apart — if this ever
+        // flipped to a refusal, the result assertion below would be about a
+        // child that never ran.
+        assert_eq!(
+            admission_rx.await,
+            Ok(SpawnAdmission::Admitted),
+            "an unknown agent type must be admitted and then fail in the runner"
+        );
         let result = result_rx.await.expect("the actor replies to every spawn");
         assert_eq!(
             result.outcome,
@@ -250,10 +263,12 @@ mod tests {
         );
         let actor = zeroclaw_spawn::spawn!(coordinator.run());
 
+        let (admission_tx, admission_rx) = oneshot::channel();
         let (result_tx, _result_rx) = oneshot::channel();
         command_tx
             .send(CoordinatorCommand::Spawn(SpawnCommand {
                 request: Box::new(request("mid-flight", "explore")),
+                admission_tx,
                 result_tx,
             }))
             .expect("the actor owns the receiver");
@@ -263,6 +278,12 @@ mod tests {
         // anything `HangingRunner` controls, so the row is written the first
         // time the actor task is polled after the send.
         tokio::task::yield_now().await;
+        assert_eq!(
+            admission_rx.await,
+            Ok(SpawnAdmission::Admitted),
+            "this child must be admitted — the mid-flight teardown below is only \
+             meaningful for a child that was actually accepted and started"
+        );
 
         let running = handle
             .sqlite_store

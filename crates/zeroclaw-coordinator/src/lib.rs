@@ -52,8 +52,9 @@ mod state;
 mod types;
 
 pub use backend::{
-    ChannelBackend, CoordinatorError, VALIDATE_TYPE_TIMEOUT, VALIDATE_TYPE_TIMEOUT_ENV_VAR,
-    env_duration_or, validate_type_timeout,
+    ChannelBackend, CoordinatorError, SPAWN_ADMISSION_TIMEOUT, SPAWN_ADMISSION_TIMEOUT_ENV_VAR,
+    VALIDATE_TYPE_TIMEOUT, VALIDATE_TYPE_TIMEOUT_ENV_VAR, env_duration_or, spawn_admission_timeout,
+    validate_type_timeout,
 };
 pub use cancel::CancelToken;
 pub use coordinator::Coordinator;
@@ -71,6 +72,6 @@ pub use types::{
     ChildTypeSummary, CommandSender, CompletionsCommand, CoordinatorCommand, DescribeOutcome,
     DescribeTypeCommand, InspectCommand, ListActiveCommand, ListRunningCommand,
     LoopUnitActiveCommand, OutstandingCommand, OutstandingReply, QueryCommand, RegistryCounts,
-    RegistryCountsCommand, ResumeLookup, ResumeSource, SpawnCommand, SpawnedChildRef,
-    SpawnedRefsCommand, ValidateTypeCommand, ValidateTypeOutcome,
+    RegistryCountsCommand, ResumeLookup, ResumeSource, SpawnAdmission, SpawnCommand, SpawnRefusal,
+    SpawnedChildRef, SpawnedRefsCommand, ValidateTypeCommand, ValidateTypeOutcome,
 };

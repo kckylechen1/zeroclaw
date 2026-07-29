@@ -29,20 +29,35 @@ use tokio::sync::{mpsc, oneshot};
 use crate::types::{
     CancelCommand, CancelOutcome, CancelTarget, ChildInspection, ChildRequest, ChildResult,
     ChildSnapshot, CoordinatorCommand, DescribeOutcome, DescribeTypeCommand, InspectCommand,
-    ListRunningCommand, QueryCommand, RegistryCounts, RegistryCountsCommand, SpawnCommand,
-    SpawnedChildRef, SpawnedRefsCommand, ValidateTypeCommand, ValidateTypeOutcome,
+    ListRunningCommand, QueryCommand, RegistryCounts, RegistryCountsCommand, SpawnAdmission,
+    SpawnCommand, SpawnRefusal, SpawnedChildRef, SpawnedRefsCommand, ValidateTypeCommand,
+    ValidateTypeOutcome,
 };
 
-/// Why a spawn produced no result at all.
+/// Why a spawn produced no child result at all.
 ///
-/// Distinct from a child that ran and failed: this is the coordinator itself
-/// being unreachable or losing the reply, which no child outcome can express.
+/// Distinct from a child that ran and failed: every variant here means *no
+/// child ever ran*, which no [`ChildResult`] outcome can honestly express —
+/// [`Self::Refused`] because the coordinator declined to admit it, the others
+/// because the actor was unreachable or lost the reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatorError {
     /// The coordinator's command channel closed — the actor is gone.
     ChannelClosed,
-    /// The command was accepted but the reply channel was dropped before an
-    /// answer arrived.
+    /// The coordinator refused to admit the child. Nothing was started.
+    Refused(SpawnRefusal),
+    /// The command was sent but the admission channel was dropped before an
+    /// answer arrived: no actor ever decided it.
+    ///
+    /// Reads as **"not admitted / unknown", never as "started"** — see
+    /// [`SpawnCommand::admission_tx`]'s own doc for why that direction is the
+    /// only safe one. The coordinator answers admission on every path it
+    /// controls, including a shutdown drop that refuses commands still queued
+    /// in its mailbox, so reaching this variant means the command met no live
+    /// actor at all.
+    AdmissionChannelDropped,
+    /// The child was admitted, but the terminal reply channel was dropped
+    /// before an answer arrived.
     ResultChannelDropped,
 }
 
@@ -52,6 +67,11 @@ impl std::fmt::Display for CoordinatorError {
             Self::ChannelClosed => {
                 f.write_str("coordinator channel closed — cannot spawn child")
             }
+            Self::Refused(refusal) => write!(f, "spawn refused: {refusal}"),
+            Self::AdmissionChannelDropped => f.write_str(
+                "spawn admission channel dropped — the coordinator never decided whether this \
+                 child may run",
+            ),
             Self::ResultChannelDropped => {
                 f.write_str("child result channel dropped — the child may have crashed")
             }
@@ -117,27 +137,40 @@ impl ChannelBackend {
     /// task around it and drops the receiver, which the coordinator reads as
     /// "nobody is waiting inline".
     ///
+    /// Admission is awaited first and separately. That await is bounded by the
+    /// actor's own decision, not by the child: the coordinator answers it
+    /// inside the same command arm that decides. A refusal therefore returns
+    /// here immediately, as [`CoordinatorError::Refused`] carrying the
+    /// structured reason — never as a `ChildResult`, because no child ran.
+    ///
     /// # Errors
     ///
-    /// [`CoordinatorError`] when the actor is unreachable or the reply was
-    /// lost. A child that merely failed returns `Ok` with a failed outcome.
+    /// [`CoordinatorError`] when the child was refused, the actor is
+    /// unreachable, or a reply was lost. A child that ran and merely failed
+    /// returns `Ok` with a failed outcome.
     pub async fn spawn(&self, mut request: ChildRequest) -> Result<ChildResult, CoordinatorError> {
         if let Some(parent_session_id) = self.parent_session_id.as_deref() {
             request.parent_session_id = parent_session_id.to_owned();
         }
         let child_id = request.child_id.clone();
+        let (admission_tx, admission_rx) = oneshot::channel();
         let (respond_to, response_rx) = oneshot::channel();
         let send_result = self
             .tx
             .send(CoordinatorCommand::Spawn(SpawnCommand {
                 request: Box::new(request),
+                admission_tx,
                 result_tx: respond_to,
             }))
             .map_err(|_| CoordinatorError::ChannelClosed);
         let result = match send_result {
-            Ok(()) => response_rx
-                .await
-                .map_err(|_| CoordinatorError::ResultChannelDropped),
+            Ok(()) => match admission_rx.await {
+                Ok(SpawnAdmission::Admitted) => response_rx
+                    .await
+                    .map_err(|_| CoordinatorError::ResultChannelDropped),
+                Ok(SpawnAdmission::Refused(refusal)) => Err(CoordinatorError::Refused(refusal)),
+                Err(_) => Err(CoordinatorError::AdmissionChannelDropped),
+            },
             Err(error) => Err(error),
         };
         if let Err(ref error) = result {
@@ -386,6 +419,24 @@ impl ChannelBackend {
             Ok(Err(_)) | Err(_) => DescribeOutcome::Unavailable,
         }
     }
+}
+
+/// Default bound on how long a caller waits for a spawn's admission answer.
+///
+/// For callers that await admission but NOT the child — a detached spawn. The
+/// coordinator answers admission inside the command arm that decides, so any
+/// wait longer than this means the actor is wedged, not that a child is slow.
+/// [`ChannelBackend::spawn`] deliberately does not use it: a foreground caller
+/// is already committed to waiting for the child itself.
+pub const SPAWN_ADMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Env-var override for [`SPAWN_ADMISSION_TIMEOUT`] (positive milliseconds).
+pub const SPAWN_ADMISSION_TIMEOUT_ENV_VAR: &str = "ZEROCLAW_SPAWN_ADMISSION_TIMEOUT_MS";
+
+/// Admission timeout, honouring the env-var override.
+#[must_use]
+pub fn spawn_admission_timeout() -> std::time::Duration {
+    env_duration_or(SPAWN_ADMISSION_TIMEOUT_ENV_VAR, SPAWN_ADMISSION_TIMEOUT)
 }
 
 /// Default `validate_type` / `describe_agent_type` timeout.

@@ -24,8 +24,8 @@ use zeroclaw_config::card::{AgentCard, CardGrants, GrantClass, ToolGrant};
 use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
 use zeroclaw_coordinator::{
     CancelToken, ChildOutcome, ChildOverrides, ChildRequest, ChildResult, ChildRunner,
-    Coordinator, CoordinatorCommand, CoordinatorConfig, DescribeOutcome, SpawnCommand,
-    ValidateTypeOutcome,
+    Coordinator, CoordinatorCommand, CoordinatorConfig, DescribeOutcome, SpawnAdmission,
+    SpawnCommand, ValidateTypeOutcome,
 };
 
 use super::{NativeChildRunner, TurnEnding, child_context, race_cancellation};
@@ -135,16 +135,24 @@ async fn spawn_through_coordinator(config: Config, request: ChildRequest) -> Chi
         NativeChildRunner::new(Arc::new(config)),
         CoordinatorConfig::default(),
     );
+    let (admission_tx, admission_rx) = oneshot::channel();
     let (result_tx, result_rx) = oneshot::channel();
     command_tx
         .send(CoordinatorCommand::Spawn(SpawnCommand {
             request: Box::new(request),
+            admission_tx,
             result_tx,
         }))
         .expect("the coordinator owns the receiver");
     drop(command_tx);
 
     coordinator.run().await;
+    assert_eq!(
+        admission_rx.await,
+        Ok(SpawnAdmission::Admitted),
+        "these cases all reach the runner, so admission must be granted — a refusal here \
+         would mean the child never ran and the result below is not about this request"
+    );
     result_rx
         .await
         .expect("the coordinator replies to every spawn caller")
