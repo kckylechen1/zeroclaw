@@ -120,9 +120,9 @@ use zeroclaw_providers::{self, ChatMessage, ModelProvider, ProviderDispatch};
 use zeroclaw_runtime::agent::claim_announcements_for_scoped_turn;
 use zeroclaw_runtime::agent::loop_::{
     LoopKnobs, ResolvedAgentExecution, ResolvedIo, ResolvedModelAccess, ResolvedRuntimeKnobs,
-    ToolLoop, append_pinned_mcp_section, apply_text_tool_prompt_policy,
+    ToolLoop, TurnOutcome, append_pinned_mcp_section, apply_text_tool_prompt_policy,
     build_tool_instructions_for_names, is_model_switch_requested, run_tool_call_loop,
-    scope_session_key, scope_thread_id, scrub_credentials,
+    scope_session_key, scope_thread_id, scrub_credentials, settle_announcement_guards,
 };
 use zeroclaw_runtime::approval::ApprovalManager;
 use zeroclaw_runtime::observability::traits::{ObserverEvent, ObserverMetric};
@@ -5311,6 +5311,22 @@ async fn process_channel_message_body(
         Cancelled,
     }
 
+    /// This turn shape's answer to the one question that decides whether its
+    /// claimed announcements stay delivered (`TurnOutcome`, `agent/loop_.rs`).
+    ///
+    /// Only the fully nested `Completed(Ok(Ok(_)))` counts, and each layer it
+    /// rejects is a case where the model may never have seen the block:
+    /// `Cancelled` (the select fired before or during the call),
+    /// `Completed(Err(_))` (the whole tool loop timed out), and
+    /// `Completed(Ok(Err(_)))` (it failed — including failing before the
+    /// provider call). Flattening this to "is it ok" would keep announcements
+    /// nobody read flagged delivered-to-nobody.
+    impl TurnOutcome for LlmExecutionResult {
+        fn turn_succeeded(&self) -> bool {
+            matches!(self, LlmExecutionResult::Completed(Ok(Ok(_))))
+        }
+    }
+
     let scale_cap = ctx
         .pacing
         .message_timeout_scale_max
@@ -5413,12 +5429,12 @@ async fn process_channel_message_body(
     // scope keeps them apart, so two workers for the same conversation can
     // reach this line concurrently. SQLite's single claiming statement keeps
     // that safe — no row is read twice — but one batch can arrive split across
-    // two turns. Second, the disarm below means the model read the block, not
-    // that the user received anything: an outbound send can still fail
-    // afterwards. That is deliberate. The assistant's reply is persisted to
-    // this conversation's history either way, so the agent keeps what it was
-    // told; handing the rows back on a send failure would re-announce a
-    // completion it has already acted on.
+    // two turns. Second, settling below on a succeeded turn means the model
+    // read the block, not that the user received anything: an outbound send can
+    // still fail afterwards. That is deliberate. The assistant's reply is
+    // persisted to this conversation's history either way, so the agent keeps
+    // what it was told; handing the rows back on a send failure would
+    // re-announce a completion it has already acted on.
     let (announcements, mut announcement_guard) =
         claim_announcements_for_scoped_turn(&history_key).await;
     if !prepend_context_to_last_user_turn(&mut history, &announcements) {
@@ -5650,24 +5666,13 @@ async fn process_channel_message_body(
     })
     .await;
 
-    // Success point for this turn's claimed announcements: the tool loop
-    // returns `Ok(Ok(_))` only after the provider was called with the history
-    // holding the block, so the model has read it — the same criterion the
-    // runtime's claim sites disarm on (`agent/loop_.rs:2536` for the CLI turn,
-    // `agent/agent.rs:2497` for the `Agent` pipeline).
-    //
-    // Every other arm deliberately leaves the guard armed, and each is a case
-    // where the model may never have seen these messages: `Cancelled` (the
-    // select fired before or during the call), `Completed(Err(_))` (the whole
-    // tool loop timed out), and `Completed(Ok(Err(_)))` (it failed — including
-    // failing before the provider call). A model-switch retry does not reach
-    // here at all: it `continue`s the loop with the same history, and the
-    // announcements have still not been read.
-    if matches!(&llm_result, LlmExecutionResult::Completed(Ok(Ok(_))))
-        && let Some(guard) = announcement_guard.as_mut()
-    {
-        guard.disarm();
-    }
+    // Settle this turn's claimed announcements against how the turn ended. The
+    // criterion is `LlmExecutionResult`'s own `TurnOutcome` impl above — the
+    // same question the runtime's claim sites answer with `Result::is_ok`,
+    // asked once here rather than restated at this line. A model-switch retry
+    // does not reach here at all: it `continue`s the loop with the same
+    // history, and the announcements have still not been read.
+    let llm_result = settle_announcement_guards(announcement_guard, llm_result);
 
     // Attribute the closing event to the final route and attach aggregate
     // usage. Explicit completion records the normal duration; the guard's
@@ -27683,7 +27688,7 @@ Done."#;
     }
 
     /// The wiring that makes a channel turn hear its finished children — claim,
-    /// splice, disarm — has no unit-testable seam: `process_channel_message_body`
+    /// splice, settle — has no unit-testable seam: `process_channel_message_body`
     /// takes a live orchestrator context (providers, registries, channel handles,
     /// approval manager) that no test here constructs. The splice helper above is
     /// covered behaviourally; the three call sites that use it are pinned by
@@ -27693,9 +27698,11 @@ Done."#;
     /// Discriminating line: each `assert!` below. Delete the claim and fork #22 is
     /// back — every Detached completion silent on every channel, with the whole
     /// suite still green, which is exactly how it went unnoticed the first time.
-    /// Delete the splice and the rows are claimed but never read. Widen the disarm
-    /// arm past `Completed(Ok(Ok(_)))` and a turn that never reached its provider
-    /// keeps announcements flagged delivered-to-nobody.
+    /// Delete the splice and the rows are claimed but never read. Widen this turn
+    /// shape's `TurnOutcome` answer past `Completed(Ok(Ok(_)))` and a turn that
+    /// never reached its provider keeps announcements flagged delivered-to-nobody.
+    /// Drop the `settle` call and the guard never hears how the turn ended, so
+    /// every announced completion comes back for a second airing.
     #[test]
     fn the_channel_turn_claims_splices_and_disarms_its_background_announcements() {
         const SRC: &str = include_str!(concat!(
@@ -27709,8 +27716,9 @@ Done."#;
         for needle in [
             "claim_announcements_for_scoped_turn(&history_key).await",
             "prepend_context_to_last_user_turn(&mut history, &announcements)",
-            "if matches!(&llm_result, LlmExecutionResult::Completed(Ok(Ok(_))))",
-            "guard.disarm();",
+            "impl TurnOutcome for LlmExecutionResult",
+            "matches!(self, LlmExecutionResult::Completed(Ok(Ok(_))))",
+            "settle_announcement_guards(announcement_guard, llm_result)",
         ] {
             assert!(
                 production.contains(needle),

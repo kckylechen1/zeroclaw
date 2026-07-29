@@ -679,9 +679,11 @@ pub(crate) async fn claim_announcements_for_turn(
 /// The caller is asserting ownership of `session_key` by calling this at all
 /// (the `should_claim` gate [`claim_announcements_for_turn`] carries for `run`'s
 /// nested case has no analogue here: an outer turn shape is never nested inside
-/// another turn). It must hold the returned guard until the provider has been
-/// called with the spliced text, then [`UnclaimOnDrop::disarm`] it; on any
-/// earlier exit the guard drops armed and the announcements go back.
+/// another turn). It must hold the returned guard until its turn has ended,
+/// then settle it against that turn's outcome
+/// ([`settle_announcement_guards`], or [`UnclaimOnDrop::settle`] for a single
+/// guard); on any earlier exit the guard drops armed and the announcements go
+/// back.
 pub async fn claim_announcements_for_scoped_turn(
     session_key: &str,
 ) -> (String, Option<UnclaimOnDrop>) {
@@ -701,8 +703,9 @@ pub(crate) struct ClaimedAnnouncements {
 
 impl ClaimedAnnouncements {
     /// Split into the context block and its guard. The caller must keep the
-    /// guard alive until the turn has succeeded, then [`UnclaimOnDrop::disarm`]
-    /// it; dropping it earlier hands the announcements back to the store.
+    /// guard alive until the turn has ended, then settle it against that
+    /// turn's outcome ([`settle_announcement_guards`]); dropping it earlier
+    /// hands the announcements back to the store.
     pub(crate) fn into_parts(self) -> (String, UnclaimOnDrop) {
         (self.context, self.guard)
     }
@@ -724,9 +727,11 @@ impl ClaimedAnnouncements {
 /// key claims them again. A parent shown a completion twice can reconcile it; a
 /// parent never shown it cannot.
 ///
-/// **The criterion is a turn that succeeded, not a provider that was called.**
-/// External review read the disarm sites as claiming the latter and found the
-/// gap in it: a turn can reach its provider and still fail afterwards —
+/// **The criterion is a turn that succeeded, not a provider that was called**,
+/// and it is spelled exactly once, in [`TurnOutcome`]; this guard is settled
+/// through [`UnclaimOnDrop::settle`] and never told what to do site by site.
+/// External review read the old per-site disarms as claiming the latter and
+/// found the gap in it: a turn can reach its provider and still fail after —
 /// streaming the generated text, preparing or executing tool calls,
 /// cancellation mid-batch — and every one of those drops this guard armed
 /// even though the model demonstrably read the block. Announcing again there
@@ -766,6 +771,46 @@ pub struct UnclaimOnDrop {
     armed: bool,
 }
 
+/// Did this turn succeed? The one criterion that decides whether the
+/// announcements a turn claimed stay marked delivered.
+///
+/// [`UnclaimOnDrop`] hands its rows back unless the turn that claimed them
+/// succeeded, and "succeeded" is spelled differently by different turn shapes:
+/// the runtime's turns end in a `Result`, while the channel orchestrator ends
+/// in a three-level `LlmExecutionResult` whose nesting separates cancellation
+/// from timeout from tool-loop failure. Those are different *answers*; the
+/// question is one, and it lives here. A site cannot invent a criterion of its
+/// own without implementing this trait for its own outcome type, in the open,
+/// next to the other implementations.
+///
+/// That is the point. The criterion used to be hand-written at every disarm
+/// site, and with no single place being *the* criterion, [`UnclaimOnDrop`]'s
+/// own documentation drifted a whole version away from what those sites did —
+/// it described the rule as "the provider was reached" while every site
+/// implemented "the turn returned success" — and nothing could notice.
+pub trait TurnOutcome {
+    /// `true` when the turn succeeded, so the announcements it claimed stay
+    /// delivered; `false` hands them back to the store for a later turn.
+    fn turn_succeeded(&self) -> bool;
+}
+
+/// A turn that returns `Ok` succeeded; every error hands its announcements
+/// back. Every claim site in this crate ends in a `Result`, so this is the
+/// implementation they all settle through.
+impl<T, E> TurnOutcome for Result<T, E> {
+    fn turn_succeeded(&self) -> bool {
+        self.is_ok()
+    }
+}
+
+/// Asking by reference asks the same question: [`settle_announcement_guards`]
+/// settles several guards against one shared outcome it does not own.
+impl<T: TurnOutcome + ?Sized> TurnOutcome for &T {
+    fn turn_succeeded(&self) -> bool {
+        (**self).turn_succeeded()
+    }
+}
+
 impl UnclaimOnDrop {
     fn armed(
         store: Arc<dyn crate::control_plane::TaskRegistry>,
@@ -780,10 +825,47 @@ impl UnclaimOnDrop {
         }
     }
 
-    /// The turn got these announcements to the model. Keep them delivered.
-    pub fn disarm(&mut self) {
-        self.armed = false;
+    /// Settle this claim against how the turn ended, and give the outcome back.
+    ///
+    /// Success keeps the ids `delivered = 1`; anything else lets this guard
+    /// drop still armed, so `Drop` returns them to the store. The judgement is
+    /// [`TurnOutcome::turn_succeeded`]'s, never the call site's.
+    ///
+    /// The guard is consumed, because a turn settles exactly once — at the
+    /// point where it knows how it ended. A retry (a mid-turn model switch)
+    /// must *not* settle: it loops with the same history, which the model has
+    /// still not read. So a site with a retry loop yields its outcome out of
+    /// the loop and settles once outside it, rather than settling per attempt.
+    ///
+    /// The outcome is returned rather than borrowed so that settling is an
+    /// expression the call site can `return`, leaving no path that produces a
+    /// success without passing this guard.
+    pub fn settle<T: TurnOutcome>(mut self, outcome: T) -> T {
+        if outcome.turn_succeeded() {
+            self.armed = false;
+        }
+        outcome
     }
+}
+
+/// Settle every guard a turn claimed against that turn's one outcome, and give
+/// the outcome back.
+///
+/// A streamed turn can claim more than once — the opening user message plus
+/// each mid-turn steering message — and those guards stand or fall together:
+/// one provider call either read all of them or none, and keeping one while
+/// returning another would either repeat a completion or lose it. Taking
+/// anything that yields guards means the single-claim sites
+/// (`Option<UnclaimOnDrop>`) and the many-claim site (`Vec<UnclaimOnDrop>`)
+/// settle through this one function instead of through two.
+pub fn settle_announcement_guards<T: TurnOutcome>(
+    guards: impl IntoIterator<Item = UnclaimOnDrop>,
+    outcome: T,
+) -> T {
+    for guard in guards {
+        guard.settle(&outcome);
+    }
+    outcome
 }
 
 impl Drop for UnclaimOnDrop {
@@ -2452,13 +2534,14 @@ pub async fn run(
             // conversation history and the model can refer back to it.
             // Only when this run owns the key: see `owns_session_key`.
             //
-            // The guard lives until the tool loop returns `Ok` below. Until
-            // then the block is only in a local `history` vec, and this turn
-            // can still die before the provider is called (`agent/turn/mod.rs`
-            // lines 528/535/566/584 all `?` ahead of the call at :628) — in
-            // which case the announcements go back to the store rather than
-            // being lost with the turn.
-            let (announcements, mut announcement_guard) =
+            // The guard lives until the retry loop below has produced this
+            // turn's outcome, and is settled against it there. Until then the
+            // block is only in a local `history` vec, and this turn can still
+            // die before the provider is called (`agent/turn/mod.rs` lines
+            // 528/535/566/584 all `?` ahead of the call at :628) — in which
+            // case the announcements go back to the store rather than being
+            // lost with the turn.
+            let (announcements, announcement_guard) =
                 claim_announcements_for_turn(owns_session_key).await;
             let context = format!("{hw_context}{announcements}");
             let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
@@ -2482,9 +2565,11 @@ pub async fn run(
                 &mcp_tool_names,
             );
 
-            #[allow(unused_assignments)]
-            let mut response = String::new();
-            loop {
+            // The retry loop yields this turn's outcome instead of settling
+            // inside itself: a model-switch retry `continue`s with the same
+            // history, which the model has still not read, so it must not
+            // settle — and the guard is settled exactly once below.
+            let turn_result: Result<String> = loop {
                 if let Some(sys_msg) = history.first_mut()
                     && sys_msg.role == "system"
                 {
@@ -2591,14 +2676,8 @@ pub async fn run(
                         // Success point for this turn: the tool loop only
                         // returns `Ok` after the provider call, so the model
                         // has read the history containing the announcement
-                        // block. A model-switch retry deliberately does not
-                        // disarm — it loops with the same history and the
-                        // block has still not been read.
-                        if let Some(guard) = announcement_guard.as_mut() {
-                            guard.disarm();
-                        }
-                        response = resp;
-                        break;
+                        // block.
+                        break Ok(resp);
                     }
                     Err(e) => {
                         if let Some((new_model_provider, new_model)) = is_model_switch_requested(&e)
@@ -2653,10 +2732,16 @@ pub async fn run(
 
                             continue;
                         }
-                        return Err(e);
+                        break Err(e);
                     }
                 }
-            }
+            };
+
+            // Settle this turn's claim, once, against the outcome the retry
+            // loop produced. `Err` propagates exactly as the in-loop `return`
+            // did, with the guard dropping armed and the announcements going
+            // back to the store.
+            let response = settle_announcement_guards(announcement_guard, turn_result)?;
 
             // After successful multi-step execution, attempt autonomous skill creation.
             if config.skills.skill_creation.enabled {
@@ -2998,10 +3083,10 @@ pub async fn run(
                 // One claim per interactive turn (this is the per-turn body;
                 // the prompt rebuilds below only touch the system message),
                 // and only when this run owns the key: see `owns_session_key`.
-                // The guard is disarmed where this turn's tool loop returns
-                // `Ok`; a turn that dies before the provider call hands its
-                // announcements back for the next prompt at the `>` prompt.
-                let (announcements, mut announcement_guard) =
+                // The guard is settled against the outcome the retry loop
+                // below yields; a turn that dies before the provider call
+                // hands its announcements back for the next `>` prompt.
+                let (announcements, announcement_guard) =
                     claim_announcements_for_turn(owns_session_key).await;
                 let context = format!("{hw_context}{announcements}");
                 let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
@@ -3053,7 +3138,13 @@ pub async fn run(
                     }
                 });
 
-                let response = loop {
+                // The loop yields this turn's outcome rather than settling
+                // inside itself: a model-switch or context-trim retry
+                // `continue`s with the same history, which the model has still
+                // not read. `Err` carries the text a failed turn still prints
+                // (empty on every failure path here), so the printing below is
+                // unchanged by which arm produced it.
+                let turn_outcome: Result<String, String> = loop {
                     if let Some(sys_msg) = history.first_mut()
                         && sys_msg.role == "system"
                     {
@@ -3164,19 +3255,17 @@ pub async fn run(
                             // Success point: the tool loop returns `Ok` only
                             // after the provider call, so the model has read
                             // this turn's history.
-                            if let Some(guard) = announcement_guard.as_mut() {
-                                guard.disarm();
-                            }
-                            break resp;
+                            break Ok(resp);
                         }
                         Err(e) => {
                             if is_tool_loop_cancelled(&e) {
                                 eprintln!("\n\x1b[2m(cancelled)\x1b[0m");
-                                // Deliberately still armed: a Ctrl+C can land
-                                // before the provider call as easily as after,
-                                // and re-announcing to the next prompt is the
-                                // recoverable side of that ambiguity.
-                                break String::new();
+                                // Deliberately settled as a failure: a Ctrl+C
+                                // can land before the provider call as easily
+                                // as after, and re-announcing to the next
+                                // prompt is the recoverable side of that
+                                // ambiguity.
+                                break Err(String::new());
                             }
                             if let Some((new_model_provider, new_model)) =
                                 is_model_switch_requested(&e)
@@ -3339,15 +3428,19 @@ pub async fn run(
                                             context_token_budget,
                                         )
                                     );
-                                    break String::new();
+                                    break Err(String::new());
                                 }
                             }
 
                             eprintln!("\nError: {e}\n");
-                            break String::new();
+                            break Err(String::new());
                         }
                     }
                 };
+
+                // Settle this turn's claim, once, outside the retry loop.
+                let response = settle_announcement_guards(announcement_guard, turn_outcome)
+                    .unwrap_or_else(|failed_turn_output| failed_turn_output);
 
                 // Clean up: stop the Ctrl+C listener and flush streaming events.
                 ctrlc_handle.abort();
@@ -3938,10 +4031,10 @@ pub async fn process_message(
         // needs no ownership gate of the kind `run()` carries. With no key in
         // scope the claim is a no-op and the turn is unchanged.
         //
-        // The guard is disarmed once the turn below returns `Ok`; every
+        // The guard is settled against the turn's own outcome below; every
         // fallible step between here and the provider call would otherwise
         // consume these announcements without the model reading them.
-        let (announcements, mut announcement_guard) = claim_announcements_for_turn(true).await;
+        let (announcements, announcement_guard) = claim_announcements_for_turn(true).await;
         let context = format!("{hw_context}{announcements}");
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
         let enriched = if context.is_empty() {
@@ -4027,12 +4120,7 @@ pub async fn process_message(
         // Success point for this entry point: the turn returns `Ok` only after
         // the provider call, so the announcements have been read. On `Err` the
         // guard drops still armed and returns them to the store.
-        if turn_result.is_ok()
-            && let Some(guard) = announcement_guard.as_mut()
-        {
-            guard.disarm();
-        }
-        turn_result
+        settle_announcement_guards(announcement_guard, turn_result)
     };
     __zc_body
         .instrument(__zc_scope_span)
@@ -16923,8 +17011,9 @@ Pin 13: LED
         /// `turn_streamed_injects_claimed_children_once_under_the_ambient_key`).
         ///
         /// Discriminating line: `assert!(fixture.is_delivered("kid").await)` —
-        /// make `disarm` a no-op and the row is handed back despite having been
-        /// read, and the parent hears the same completion twice.
+        /// make settling on a successful outcome a no-op and the row is handed
+        /// back despite having been read, and the parent hears the same
+        /// completion twice.
         #[tokio::test]
         async fn a_disarmed_guard_leaves_its_announcements_delivered() {
             let fixture = Fixture::install();
@@ -16933,12 +17022,12 @@ Pin 13: LED
             assert_eq!(claimed.len(), 1);
 
             {
-                let mut guard = crate::agent::loop_::UnclaimOnDrop::armed(
+                let guard = crate::agent::loop_::UnclaimOnDrop::armed(
                     fixture.store_handle(),
                     vec!["kid".to_string()],
                     "some-key".to_string(),
                 );
-                guard.disarm();
+                let _ = guard.settle(Ok::<(), ()>(()));
             }
             // Give any (incorrectly) spawned unclaim the same chance to land
             // that the failure-path test gives the real one.
@@ -16989,13 +17078,13 @@ Pin 13: LED
                 fixture.is_delivered("kid").await,
                 "the claim commits `delivered` before returning, same as every other claimant"
             );
-            let mut guard =
+            let guard =
                 guard.expect("a claim that consumed rows must yield an armed guard to hand back");
-            // The channel turn disarms only once its whole turn has succeeded
-            // (not merely once its provider was called — see `UnclaimOnDrop`);
-            // this test stands in for that so the row is not returned under
-            // the later assertions.
-            guard.disarm();
+            // The channel turn keeps these only once its whole turn has
+            // succeeded (not merely once its provider was called — see
+            // `UnclaimOnDrop`); this test settles on a successful outcome so
+            // the row is not returned under the later assertions.
+            let _ = guard.settle(Ok::<(), ()>(()));
         }
 
         /// The same entry point claims nothing when the key has no finished

@@ -272,18 +272,6 @@ async fn forward_history_trim_notice(
     }
 }
 
-/// Keep every announcement this turn claimed marked delivered.
-///
-/// Called only at a success exit. A streamed turn can claim more than once —
-/// the opening user message plus each mid-turn steering message — so the
-/// guards are disarmed as a set; missing one would hand a completion the model
-/// has already read back to the store, and the next turn would repeat it.
-fn disarm_announcement_guards(guards: &mut [crate::agent::loop_::UnclaimOnDrop]) {
-    for guard in guards {
-        guard.disarm();
-    }
-}
-
 pub struct Agent {
     model_provider: Box<dyn ModelProvider>,
     tools: Vec<Box<dyn Tool>>,
@@ -1068,11 +1056,13 @@ impl Agent {
     /// Build this turn's user message and put it in history.
     ///
     /// Returns the claim guard for any background announcements spliced into
-    /// that message. The caller **must** hold it until the turn has reached the
-    /// provider and disarm it there; dropping it earlier returns the
-    /// announcements to the store, which is exactly what should happen when the
-    /// turn dies on one of the fallible steps between here and the provider
-    /// call (`agent/turn/mod.rs` lines 528/535/566/584 versus :628).
+    /// that message. The caller **must** hold it until the turn has ended and
+    /// settle it against that turn's outcome
+    /// ([`crate::agent::loop_::settle_announcement_guards`]); dropping it
+    /// earlier returns the announcements to the store, which is exactly what
+    /// should happen when the turn dies on one of the fallible steps between
+    /// here and the provider call (`agent/turn/mod.rs` lines 528/535/566/584
+    /// versus :628).
     ///
     /// Called once per user message, which includes each mid-turn steering
     /// message: see the steering call site for why a second claim inside one
@@ -2277,8 +2267,8 @@ impl Agent {
         // Same claim-once-per-turn contract as
         // `append_streamed_user_message_to_history`; `turn` builds its user
         // message inline instead of going through that helper, so it holds its
-        // own guard and disarms it at this function's success exits.
-        let (announcements, mut announcement_guard) =
+        // own guard and settles it at this function's success exits.
+        let (announcements, announcement_guard) =
             crate::agent::loop_::claim_announcements_for_turn(true).await;
         let enriched =
             format!("{announcements}[CURRENT DATE & TIME: {date_str}]\n\n{user_message}");
@@ -2332,10 +2322,10 @@ impl Agent {
                 // Cache hit: no provider call, but the block is durably in
                 // `self.history` for the next turn. See the same exit in
                 // `turn_streamed_with_steering_state`.
-                if let Some(guard) = announcement_guard.as_mut() {
-                    guard.disarm();
-                }
-                return Ok(cached);
+                return crate::agent::loop_::settle_announcement_guards(
+                    announcement_guard,
+                    Ok(cached),
+                );
             }
             self.observer.record_event(&ObserverEvent::CacheMiss {
                 cache_type: "response".into(),
@@ -2495,11 +2485,9 @@ impl Agent {
         let _ = self.trim_history(Some(&turn_id));
 
         // Success point: the tool loop returned, so the provider was called
-        // with the history containing the announcement block.
-        if let Some(guard) = announcement_guard.as_mut() {
-            guard.disarm();
-        }
-        Ok(response)
+        // with the history containing the announcement block. Every other exit
+        // above leaves the guard to drop armed.
+        crate::agent::loop_::settle_announcement_guards(announcement_guard, Ok(response))
     }
 
     pub async fn turn_streamed(
@@ -2604,8 +2592,9 @@ impl Agent {
         );
         // One guard per user message claimed into this turn: the opening one
         // here, plus one for each mid-turn steering message drained below.
-        // They are disarmed together at every success exit; any other exit
-        // drops them armed and the announcements go back to the store.
+        // They are settled together against this turn's one outcome at every
+        // success exit; any other exit drops them armed and the announcements
+        // go back to the store.
         let mut announcement_guards: Vec<crate::agent::loop_::UnclaimOnDrop> = Vec::new();
         announcement_guards.extend(
             self.append_streamed_user_message_to_history(user_message, &mut new_msgs, &turn_id)
@@ -2671,11 +2660,13 @@ impl Agent {
                 // but the announcement block is in `self.history`, which this
                 // pipeline carries into the next turn — so the news is not
                 // lost, and returning it to the store would show it twice.
-                disarm_announcement_guards(&mut announcement_guards);
-                return Ok(StreamedTurnSuccess {
-                    response: committed_response,
-                    new_messages: new_msgs,
-                });
+                return crate::agent::loop_::settle_announcement_guards(
+                    announcement_guards,
+                    Ok(StreamedTurnSuccess {
+                        response: committed_response,
+                        new_messages: new_msgs,
+                    }),
+                );
             }
             self.observer.record_event(&ObserverEvent::CacheMiss {
                 cache_type: "response".into(),
@@ -2939,12 +2930,15 @@ impl Agent {
                     // Success point: the round loop returned, which means the
                     // provider was called and the model read every user
                     // message this turn appended — the opening one and each
-                    // steering message.
-                    disarm_announcement_guards(&mut announcement_guards);
-                    return Ok(StreamedTurnSuccess {
-                        response: committed_response,
-                        new_messages: new_msgs,
-                    });
+                    // steering message. A steering continuation `continue`s
+                    // above without settling, so this runs once per turn.
+                    return crate::agent::loop_::settle_announcement_guards(
+                        announcement_guards,
+                        Ok(StreamedTurnSuccess {
+                            response: committed_response,
+                            new_messages: new_msgs,
+                        }),
+                    );
                 }
                 Err(error) => {
                     // Model switch requested mid-turn: the unified loop
