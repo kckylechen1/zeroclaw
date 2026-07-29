@@ -443,9 +443,22 @@ ci-all = [
     "webauthn", "memory-postgres",
 ]
 
+# Tuned for a 1200+ dependency tree where target directories, not compile time,
+# are the binding constraint. `incremental` is deliberately not set here: cargo
+# already defaults it to true for dev, so stating it again only reads like a
+# decision, and the machines that need it off set `build.incremental` in their
+# own cargo config — which overrides this table either way.
 [profile.dev]
-incremental = true
-opt-level = 0
+opt-level = 1                 # own code: mild opt, still fast to compile
+debug = "line-tables-only"    # keep panic backtraces (file:line), drop the bulk of
+                              # debuginfo — the main disk hog on a 1200+ dep tree
+
+# Third-party deps: optimized once and content-hash cached by sccache, so dev
+# runtime is fast; debug=false drops their debuginfo entirely (you never step
+# into deps), which is the real cut to the runaway target size.
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
 
 [profile.release]
 opt-level = "z"      # Optimize for size
