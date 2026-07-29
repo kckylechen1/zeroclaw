@@ -1174,6 +1174,125 @@ fn prepend_context_to_last_user_turn(history: &mut [ChatMessage], block: &str) -
     }
 }
 
+/// How a channel turn ended. Three levels because this turn shape separates
+/// cancellation from timeout from tool-loop failure, and the three answer the
+/// announcement question differently.
+///
+/// Module scope rather than a local inside `process_channel_message_body`
+/// (where it used to live) because
+/// [`run_channel_turn_with_background_announcements`] returns it and the tests
+/// that pin the bracket's settle behaviour have to construct it — a
+/// function-local type is reachable from neither.
+enum LlmExecutionResult {
+    Completed(Result<Result<String, anyhow::Error>, tokio::time::error::Elapsed>),
+    Cancelled,
+}
+
+/// This turn shape's answer to the one question that decides whether its
+/// claimed announcements stay delivered (`TurnOutcome`, `agent/loop_.rs`).
+///
+/// Only the fully nested `Completed(Ok(Ok(_)))` counts, and each layer it
+/// rejects is a case where the model may never have seen the block:
+/// `Cancelled` (the select fired before or during the call),
+/// `Completed(Err(_))` (the whole tool loop timed out), and
+/// `Completed(Ok(Err(_)))` (it failed — including failing before the
+/// provider call). Flattening this to "is it ok" would keep announcements
+/// nobody read flagged delivered-to-nobody.
+impl TurnOutcome for LlmExecutionResult {
+    fn turn_succeeded(&self) -> bool {
+        matches!(self, LlmExecutionResult::Completed(Ok(Ok(_))))
+    }
+}
+
+/// What [`run_channel_turn_with_background_announcements`] needs of a claim
+/// guard: settle it exactly once, against this turn's outcome, and let it drop
+/// still armed on every path that does not.
+///
+/// The bracket is generic over this rather than over `UnclaimOnDrop` for one
+/// reason: `UnclaimOnDrop` can only be minted by a real claim, and a real claim
+/// in this crate's tests yields nothing. `claim_announcements_for_scoped_turn`
+/// resolves its store through `control_plane()`
+/// (`zeroclaw-runtime/src/control_plane/global.rs`), a `OnceLock` only the
+/// daemon boots, and the bypass hook for it (`CHILD_ANNOUNCEMENT_STORE_TEST_HOOK`,
+/// `agent/loop_.rs`) is `#[cfg(test)]`-private to `zeroclaw-runtime`, so it does
+/// not exist when that crate is compiled as this one's dependency. A test here
+/// can therefore only ever observe an empty claim and no guard. Abstracting the
+/// guard is what lets a stub claim hand the bracket something whose settling is
+/// observable.
+trait ChannelAnnouncementGuard {
+    /// Settle against how the turn ended. The judgement is
+    /// [`TurnOutcome::turn_succeeded`]'s, never this call's.
+    fn settle_against(self, outcome: &LlmExecutionResult);
+}
+
+/// The production guard settles through the runtime's own function, so the
+/// criterion stays the one spelled in `agent/loop_.rs` and is not restated here.
+impl ChannelAnnouncementGuard for zeroclaw_runtime::agent::UnclaimOnDrop {
+    fn settle_against(self, outcome: &LlmExecutionResult) {
+        settle_announcement_guards(Some(self), outcome);
+    }
+}
+
+/// The channel turn's background-announcement bracket: claim under the
+/// conversation's history key, splice the block above the user message, run the
+/// turn, settle the claim against how it ended.
+///
+/// This exists as a seam, not as decomposition.
+/// `process_channel_message_body` needs a whole live orchestrator context
+/// (providers, registries, channel handles, approval manager) that no test
+/// constructs, so with the wiring inline the only thing that could pin it was a
+/// test that read this file's own source text for literals — which cannot catch
+/// a wrong key, a wrong history shape, or a splice that permanently returns
+/// `false`. Taking the turn's execution body as a parameter moves all three
+/// under behavioural test: production passes its model-switch retry loop
+/// unchanged, a test passes a stub that returns a constructed
+/// [`LlmExecutionResult`] and inspects, from inside the stub, exactly the
+/// `history` the model would have been given.
+///
+/// **`history` is `&mut` and reaches the body only after the splice.** That
+/// ordering is the contract — the body is handed the same vector the splice
+/// wrote into, so there is no shape in which the model reads a history the
+/// splice did not touch.
+///
+/// **A failed splice disarms before the body runs.** Nothing was put in front
+/// of the model, so the rows go back to the store and a later turn announces
+/// them again. This is reachable, not theoretical: a cache whose tail is a
+/// `tool` message — an interrupted tool-calling turn, persisted before its
+/// assistant reply — makes `normalize_cached_channel_turns` merge this turn's
+/// user content *into* that tool message, so the last role is `tool` and both
+/// this splice and the turn-context preamble no-op. It costs one turn, not the
+/// announcement.
+///
+/// **Settling happens once, outside the body.** A model-switch retry loops with
+/// the same history, which the model has still not read, so a body that retries
+/// internally settles nothing per attempt; it yields one outcome and that is
+/// what the claim is judged by.
+async fn run_channel_turn_with_background_announcements<Guard, Claim, Body>(
+    history_key: &str,
+    history: &mut Vec<ChatMessage>,
+    claim: Claim,
+    turn_body: Body,
+) -> LlmExecutionResult
+where
+    Guard: ChannelAnnouncementGuard,
+    Claim: AsyncFnOnce(&str) -> (String, Option<Guard>),
+    Body: AsyncFnOnce(&mut Vec<ChatMessage>) -> LlmExecutionResult,
+{
+    let (announcements, mut guard) = claim(history_key).await;
+    if !prepend_context_to_last_user_turn(history, &announcements) {
+        // Nothing was spliced, so the model will never read these. Drop the
+        // guard armed right here, before the turn even starts.
+        guard = None;
+    }
+
+    let outcome = turn_body(history).await;
+
+    if let Some(guard) = guard {
+        guard.settle_against(&outcome);
+    }
+    outcome
+}
+
 fn timestamp_channel_user_content(content: &str) -> String {
     let now = chrono::Local::now();
     format!("[{}] {}", now.format("%Y-%m-%d %H:%M:%S %Z"), content)
@@ -5306,27 +5425,6 @@ async fn process_channel_message_body(
         }))
     };
 
-    enum LlmExecutionResult {
-        Completed(Result<Result<String, anyhow::Error>, tokio::time::error::Elapsed>),
-        Cancelled,
-    }
-
-    /// This turn shape's answer to the one question that decides whether its
-    /// claimed announcements stay delivered (`TurnOutcome`, `agent/loop_.rs`).
-    ///
-    /// Only the fully nested `Completed(Ok(Ok(_)))` counts, and each layer it
-    /// rejects is a case where the model may never have seen the block:
-    /// `Cancelled` (the select fired before or during the call),
-    /// `Completed(Err(_))` (the whole tool loop timed out), and
-    /// `Completed(Ok(Err(_)))` (it failed — including failing before the
-    /// provider call). Flattening this to "is it ok" would keep announcements
-    /// nobody read flagged delivered-to-nobody.
-    impl TurnOutcome for LlmExecutionResult {
-        fn turn_succeeded(&self) -> bool {
-            matches!(self, LlmExecutionResult::Completed(Ok(Ok(_))))
-        }
-    }
-
     let scale_cap = ctx
         .pacing
         .message_timeout_scale_max
@@ -5435,244 +5533,238 @@ async fn process_channel_message_body(
     // persisted to this conversation's history either way, so the agent keeps
     // what it was told; handing the rows back on a send failure would
     // re-announce a completion it has already acted on.
-    let (announcements, mut announcement_guard) =
-        claim_announcements_for_scoped_turn(&history_key).await;
-    if !prepend_context_to_last_user_turn(&mut history, &announcements) {
-        // Nothing was spliced (no user turn to hang it on), so the model will
-        // never read these. Drop the guard armed right here: the rows go back
-        // to the store and a later turn announces them again.
-        //
-        // This is reachable, not theoretical. A cache whose tail is a `tool`
-        // message — an interrupted tool-calling turn, persisted before its
-        // assistant reply — makes `normalize_cached_channel_turns` merge this
-        // turn's user content *into* that tool message, so the last role here
-        // is `tool` and both this splice and the turn-context preamble above
-        // no-op. It costs one turn, not the announcement: the rows go back,
-        // the completed turn persists an assistant message, and the next turn
-        // normalizes to a user tail again.
-        announcement_guard = None;
-    }
-
-    let (llm_result, fallback_info) = scope_provider_fallback(async {
-        let llm_result = loop {
-            let thread_scope_id = msg
-                .interruption_scope_id
-                .clone()
-                .or_else(|| msg.thread_ts.clone())
-                .or_else(|| Some(msg.id.clone()));
-            let excluded_tools: &[String] =
-                if msg.channel == "cli" || ctx.autonomy_level == AutonomyLevel::Full {
-                    &[]
-                } else {
-                    ctx.non_cli_excluded_tools.as_ref()
-                };
-            let tool_loop = run_tool_call_loop(ToolLoop {
-                exec: ResolvedAgentExecution::resolve(
-                    ResolvedModelAccess {
-                        model_provider: active_model_provider.as_ref(),
-                        provider_name: route.model_provider.as_str(),
-                        model: route.model.as_str(),
-                        temperature: thinking.effective_temperature,
-                    },
-                    ResolvedIo {
-                        tools_registry: ctx.tools_registry.as_ref(),
-                        observer: notify_observer.as_ref() as &dyn Observer,
-                        silent: true,
-                        approval: Some(&*ctx.approval_manager),
-                        multimodal_config: &ctx.multimodal,
-                        // Full config for the vision route to resolve the
-                        // configured `vision_model_provider`'s alias options - the
-                        // same canonical `prompt_config` snapshot this path already
-                        // uses for provider construction.
-                        config: Some(ctx.prompt_config.as_ref()),
-                        hooks: ctx.hooks.as_deref(),
-                        activated_tools: ctx.activated_tools.as_ref(),
-                        model_switch_callback: None,
-                        receipt_generator: ctx.receipt_generator.as_ref(),
-                    },
-                    ResolvedRuntimeKnobs {
-                        max_tool_iterations: ctx.max_tool_iterations,
-                        excluded_tools,
-                        dedup_exempt_tools: ctx.tool_call_dedup_exempt.as_ref(),
-                        pacing: &ctx.pacing,
-                        strict_tool_parsing: ctx.agent_cfg.resolved.strict_tool_parsing,
-                        parallel_tools: ctx.agent_cfg.resolved.parallel_tools,
-                        max_tool_result_chars: ctx.max_tool_result_chars,
-                        context_token_budget: ctx.context_token_budget,
-                        knobs: &loop_knobs,
-                    },
-                ),
-                history: &mut history,
-                channel_name: msg.channel.as_str(),
-                channel_reply_target: Some(msg.reply_target.as_str()),
-                cancellation_token: Some(cancellation_token.clone()),
-                on_delta: delta_tx.clone(),
-                shared_budget: None,
-                channel: target_channel.as_deref(),
-                // Collector is meaningful only when the generator is active.
-                // Pass None when receipts are disabled so the call site
-                // reflects that coupling explicitly.
-                collected_receipts: ctx
-                    .receipt_generator
-                    .as_ref()
-                    .map(|_| tool_receipts_collector.as_ref()),
-                event_tx: None,
-                steering: None,
-                new_messages_out: None,
-                image_cache: None,
-                // Channel-orchestrator dispatch; source/transport/trust stay
-                // placeholders, not yet stamped at the edge.
-                memory: Some(zeroclaw_runtime::agent::memory_inject::TurnMemory {
-                    handle: ctx.memory.as_ref(),
-                    query: msg.content.clone(),
-                    sessions: memory_sessions.clone(),
-                    suppress: false,
-                    // The relevance floor stays the context's resolved copy;
-                    // the rerank stage settings thread from the live config.
-                    cfg: zeroclaw_runtime::agent::memory_inject::MemoryInjectConfig {
-                        min_relevance_score: ctx.min_relevance_score,
-                        ..zeroclaw_runtime::agent::memory_inject::MemoryInjectConfig::from_memory_config(
-                            &ctx.prompt_config.memory,
-                            zeroclaw_runtime::agent::memory_inject::DEFAULT_RECALL_LIMIT,
-                        )
-                    },
-                }),
-                ingress: zeroclaw_api::ingress::IngressContext::channel(),
-                agent_alias: Some(ctx.agent_alias.as_str()),
-                parent_agent_alias: None,
-                turn_id: &turn_id,
-                // Live channel-daemon SOP path: re-assemble a nested step's
-                // agent when it delegates to a different agent, so the step runs
-                // with that agent's own gated tools/policy/MCP scope rather than
-                // this turn's.
-                sop_reassembly: Some(zeroclaw_runtime::agent::loop_::SopStepReassembly {
-                    config: ctx.prompt_config.as_ref(),
-                }),
-            });
-            // Scope this turn's routing handle so concurrent same-agent turns,
-            // which share one SendViaTool, never read each other's routes.
-            let tool_loop =
-                tools::TURN_ROUTING.scope(Some(std::sync::Arc::clone(&turn_routing)), tool_loop);
-            let tool_loop = zeroclaw_api::NATIVE_THINKING_OVERRIDE
-                .scope(thinking.params.native_thinking, tool_loop);
-            let tool_loop = zeroclaw_runtime::agent::tool_receipts::TOOL_LOOP_RECEIPT_CONTEXT
-                .scope(receipt_scope.clone(), tool_loop);
-            let tool_loop = zeroclaw_runtime::agent::loop_::TOOL_LOOP_COST_TRACKING_CONTEXT
-                .scope(cost_tracking_context.clone(), tool_loop);
-            let tool_loop = scope_session_key(Some(history_key.clone()), tool_loop);
-            let tool_loop = scope_thread_id(thread_scope_id, tool_loop);
-            let timed_tool_loop =
-                tokio::time::timeout(Duration::from_secs(timeout_budget_secs), tool_loop);
-
-            let loop_result = tokio::select! {
-                () = cancellation_token.cancelled() => LlmExecutionResult::Cancelled,
-                result = timed_tool_loop => LlmExecutionResult::Completed(result),
-            };
-
-            if let LlmExecutionResult::Completed(Ok(Err(ref e))) = loop_result
-                && let Some((new_model_provider, new_model)) = is_model_switch_requested(e)
-            {
-                ::zeroclaw_log::record!(
-                    INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                    &format!(
-                        "Model switch requested, switching from {} {} to {} {}",
-                        route.model_provider, route.model, new_model_provider, new_model
-                    )
-                );
-
-                let resolved_model_provider = match resolve_provider_ref_for_runtime_switch(
-                    runtime_defaults.config.as_ref(),
-                    &new_model_provider,
-                ) {
-                    Ok(provider_ref) => provider_ref,
-                    Err(err) => {
-                        ::zeroclaw_log::record!(
-                            ERROR,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Fail
+    //
+    // The claim, the splice and the settle live in
+    // `run_channel_turn_with_background_announcements`; this turn's execution
+    // body — the model-switch retry loop below, unchanged — is what gets handed
+    // to it. That is the only seam through which those three can be asserted
+    // without a live orchestrator context, and the disarm-on-failed-splice case
+    // that used to be spelled here now lives there with its reasoning.
+    let mut fallback_info = None;
+    let llm_result = run_channel_turn_with_background_announcements(
+        &history_key,
+        &mut history,
+        async |key| claim_announcements_for_scoped_turn(key).await,
+        async |history| scope_provider_fallback(async {
+            let llm_result = loop {
+                let thread_scope_id = msg
+                    .interruption_scope_id
+                    .clone()
+                    .or_else(|| msg.thread_ts.clone())
+                    .or_else(|| Some(msg.id.clone()));
+                let excluded_tools: &[String] =
+                    if msg.channel == "cli" || ctx.autonomy_level == AutonomyLevel::Full {
+                        &[]
+                    } else {
+                        ctx.non_cli_excluded_tools.as_ref()
+                    };
+                let tool_loop = run_tool_call_loop(ToolLoop {
+                    exec: ResolvedAgentExecution::resolve(
+                        ResolvedModelAccess {
+                            model_provider: active_model_provider.as_ref(),
+                            provider_name: route.model_provider.as_str(),
+                            model: route.model.as_str(),
+                            temperature: thinking.effective_temperature,
+                        },
+                        ResolvedIo {
+                            tools_registry: ctx.tools_registry.as_ref(),
+                            observer: notify_observer.as_ref() as &dyn Observer,
+                            silent: true,
+                            approval: Some(&*ctx.approval_manager),
+                            multimodal_config: &ctx.multimodal,
+                            // Full config for the vision route to resolve the
+                            // configured `vision_model_provider`'s alias options - the
+                            // same canonical `prompt_config` snapshot this path already
+                            // uses for provider construction.
+                            config: Some(ctx.prompt_config.as_ref()),
+                            hooks: ctx.hooks.as_deref(),
+                            activated_tools: ctx.activated_tools.as_ref(),
+                            model_switch_callback: None,
+                            receipt_generator: ctx.receipt_generator.as_ref(),
+                        },
+                        ResolvedRuntimeKnobs {
+                            max_tool_iterations: ctx.max_tool_iterations,
+                            excluded_tools,
+                            dedup_exempt_tools: ctx.tool_call_dedup_exempt.as_ref(),
+                            pacing: &ctx.pacing,
+                            strict_tool_parsing: ctx.agent_cfg.resolved.strict_tool_parsing,
+                            parallel_tools: ctx.agent_cfg.resolved.parallel_tools,
+                            max_tool_result_chars: ctx.max_tool_result_chars,
+                            context_token_budget: ctx.context_token_budget,
+                            knobs: &loop_knobs,
+                        },
+                    ),
+                    // Reborrow, not move: `history` is the bracket's `&mut` and the
+                    // model-switch loop may take another lap with the same vector.
+                    history: &mut *history,
+                    channel_name: msg.channel.as_str(),
+                    channel_reply_target: Some(msg.reply_target.as_str()),
+                    cancellation_token: Some(cancellation_token.clone()),
+                    on_delta: delta_tx.clone(),
+                    shared_budget: None,
+                    channel: target_channel.as_deref(),
+                    // Collector is meaningful only when the generator is active.
+                    // Pass None when receipts are disabled so the call site
+                    // reflects that coupling explicitly.
+                    collected_receipts: ctx
+                        .receipt_generator
+                        .as_ref()
+                        .map(|_| tool_receipts_collector.as_ref()),
+                    event_tx: None,
+                    steering: None,
+                    new_messages_out: None,
+                    image_cache: None,
+                    // Channel-orchestrator dispatch; source/transport/trust stay
+                    // placeholders, not yet stamped at the edge.
+                    memory: Some(zeroclaw_runtime::agent::memory_inject::TurnMemory {
+                        handle: ctx.memory.as_ref(),
+                        query: msg.content.clone(),
+                        sessions: memory_sessions.clone(),
+                        suppress: false,
+                        // The relevance floor stays the context's resolved copy;
+                        // the rerank stage settings thread from the live config.
+                        cfg: zeroclaw_runtime::agent::memory_inject::MemoryInjectConfig {
+                            min_relevance_score: ctx.min_relevance_score,
+                            ..zeroclaw_runtime::agent::memory_inject::MemoryInjectConfig::from_memory_config(
+                                &ctx.prompt_config.memory,
+                                zeroclaw_runtime::agent::memory_inject::DEFAULT_RECALL_LIMIT,
                             )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"err": err.to_string()})),
-                            "Failed to resolve model_provider after model switch"
-                        );
-                        break loop_result;
-                    }
+                        },
+                    }),
+                    ingress: zeroclaw_api::ingress::IngressContext::channel(),
+                    agent_alias: Some(ctx.agent_alias.as_str()),
+                    parent_agent_alias: None,
+                    turn_id: &turn_id,
+                    // Live channel-daemon SOP path: re-assemble a nested step's
+                    // agent when it delegates to a different agent, so the step runs
+                    // with that agent's own gated tools/policy/MCP scope rather than
+                    // this turn's.
+                    sop_reassembly: Some(zeroclaw_runtime::agent::loop_::SopStepReassembly {
+                        config: ctx.prompt_config.as_ref(),
+                    }),
+                });
+                // Scope this turn's routing handle so concurrent same-agent turns,
+                // which share one SendViaTool, never read each other's routes.
+                let tool_loop =
+                    tools::TURN_ROUTING.scope(Some(std::sync::Arc::clone(&turn_routing)), tool_loop);
+                let tool_loop = zeroclaw_api::NATIVE_THINKING_OVERRIDE
+                    .scope(thinking.params.native_thinking, tool_loop);
+                let tool_loop = zeroclaw_runtime::agent::tool_receipts::TOOL_LOOP_RECEIPT_CONTEXT
+                    .scope(receipt_scope.clone(), tool_loop);
+                let tool_loop = zeroclaw_runtime::agent::loop_::TOOL_LOOP_COST_TRACKING_CONTEXT
+                    .scope(cost_tracking_context.clone(), tool_loop);
+                let tool_loop = scope_session_key(Some(history_key.clone()), tool_loop);
+                let tool_loop = scope_thread_id(thread_scope_id, tool_loop);
+                let timed_tool_loop =
+                    tokio::time::timeout(Duration::from_secs(timeout_budget_secs), tool_loop);
+
+                let loop_result = tokio::select! {
+                    () = cancellation_token.cancelled() => LlmExecutionResult::Cancelled,
+                    result = timed_tool_loop => LlmExecutionResult::Completed(result),
                 };
 
-                let resolved_api_key = ctx
-                    .model_routes
-                    .iter()
-                    .find(|r| {
-                        r.model_provider.eq_ignore_ascii_case(&new_model_provider)
-                            && (r.model.eq_ignore_ascii_case(&new_model)
-                                || r.hint.eq_ignore_ascii_case(&new_model))
-                    })
-                    .and_then(|r| r.api_key.clone());
-
-                match get_or_create_provider(
-                    ctx.as_ref(),
-                    &resolved_model_provider,
-                    resolved_api_key.as_deref(),
-                    &runtime_defaults,
-                )
-                .await
+                if let LlmExecutionResult::Completed(Ok(Err(ref e))) = loop_result
+                    && let Some((new_model_provider, new_model)) = is_model_switch_requested(e)
                 {
-                    Ok(new_prov) => {
-                        // Commit state only after the provider was built
-                        // successfully, so a failure leaves the turn on the
-                        // original provider/model pair instead of a
-                        // half-switched state.
-                        active_model_provider = new_prov;
-                        route.model_provider = resolved_model_provider;
-                        route.model = new_model;
-                        route.api_key = resolved_api_key;
-                        // Persist the route override so subsequent messages
-                        // from this sender continue using the switched model.
-                        set_route_selection(
-                            ctx.as_ref(),
-                            &history_key,
-                            ChannelRouteSelection {
-                                model_provider: route.model_provider.clone(),
-                                model: route.model.clone(),
-                                api_key: route.api_key.clone(),
-                            },
-                            &runtime_defaults,
-                        );
+                    ::zeroclaw_log::record!(
+                        INFO,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+                        &format!(
+                            "Model switch requested, switching from {} {} to {} {}",
+                            route.model_provider, route.model, new_model_provider, new_model
+                        )
+                    );
 
-                        continue;
-                    }
-                    Err(err) => {
-                        ::zeroclaw_log::record!(
-                            ERROR,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Fail
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"err": err.to_string()})),
-                            "Failed to create model_provider after model switch"
-                        );
-                        // Fall through with the original error
+                    let resolved_model_provider = match resolve_provider_ref_for_runtime_switch(
+                        runtime_defaults.config.as_ref(),
+                        &new_model_provider,
+                    ) {
+                        Ok(provider_ref) => provider_ref,
+                        Err(err) => {
+                            ::zeroclaw_log::record!(
+                                ERROR,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Fail
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                .with_attrs(::serde_json::json!({"err": err.to_string()})),
+                                "Failed to resolve model_provider after model switch"
+                            );
+                            break loop_result;
+                        }
+                    };
+
+                    let resolved_api_key = ctx
+                        .model_routes
+                        .iter()
+                        .find(|r| {
+                            r.model_provider.eq_ignore_ascii_case(&new_model_provider)
+                                && (r.model.eq_ignore_ascii_case(&new_model)
+                                    || r.hint.eq_ignore_ascii_case(&new_model))
+                        })
+                        .and_then(|r| r.api_key.clone());
+
+                    match get_or_create_provider(
+                        ctx.as_ref(),
+                        &resolved_model_provider,
+                        resolved_api_key.as_deref(),
+                        &runtime_defaults,
+                    )
+                    .await
+                    {
+                        Ok(new_prov) => {
+                            // Commit state only after the provider was built
+                            // successfully, so a failure leaves the turn on the
+                            // original provider/model pair instead of a
+                            // half-switched state.
+                            active_model_provider = new_prov;
+                            route.model_provider = resolved_model_provider;
+                            route.model = new_model;
+                            route.api_key = resolved_api_key;
+                            // Persist the route override so subsequent messages
+                            // from this sender continue using the switched model.
+                            set_route_selection(
+                                ctx.as_ref(),
+                                &history_key,
+                                ChannelRouteSelection {
+                                    model_provider: route.model_provider.clone(),
+                                    model: route.model.clone(),
+                                    api_key: route.api_key.clone(),
+                                },
+                                &runtime_defaults,
+                            );
+
+                            continue;
+                        }
+                        Err(err) => {
+                            ::zeroclaw_log::record!(
+                                ERROR,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Fail
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                .with_attrs(::serde_json::json!({"err": err.to_string()})),
+                                "Failed to create model_provider after model switch"
+                            );
+                            // Fall through with the original error
+                        }
                     }
                 }
-            }
 
-            break loop_result;
-        };
-        let fb = take_last_provider_fallback();
-        (llm_result, fb)
-    })
+                break loop_result;
+            };
+            // Read inside the provider-fallback scope, where it is visible, and
+            // handed out through the binding above rather than as part of the
+            // body's outcome: the bracket settles against the turn's outcome, and a
+            // fallback record is not part of that question.
+            fallback_info = take_last_provider_fallback();
+            llm_result
+        })
+        .await,
+    )
     .await;
-
-    // Settle this turn's claimed announcements against how the turn ended. The
-    // criterion is `LlmExecutionResult`'s own `TurnOutcome` impl above — the
-    // same question the runtime's claim sites answer with `Result::is_ok`,
-    // asked once here rather than restated at this line. A model-switch retry
-    // does not reach here at all: it `continue`s the loop with the same
-    // history, and the announcements have still not been read.
-    let llm_result = settle_announcement_guards(announcement_guard, llm_result);
 
     // Attribute the closing event to the final route and attach aggregate
     // usage. Explicit completion records the normal duration; the guard's
@@ -27687,45 +27779,353 @@ Done."#;
         assert_eq!(history[0].content, "[2026-07-29 10:00:00 UTC] hi");
     }
 
-    /// The wiring that makes a channel turn hear its finished children — claim,
-    /// splice, settle — has no unit-testable seam: `process_channel_message_body`
-    /// takes a live orchestrator context (providers, registries, channel handles,
-    /// approval manager) that no test here constructs. The splice helper above is
-    /// covered behaviourally; the three call sites that use it are pinned by
-    /// reading this file's own production text, the way the control plane pins its
-    /// SQL status filters.
+    // ─── the announcement bracket (fork #22, issue #25) ────────
+
+    /// What the bracket did with a claim guard.
     ///
-    /// Discriminating line: each `assert!` below. Delete the claim and fork #22 is
-    /// back — every Detached completion silent on every channel, with the whole
-    /// suite still green, which is exactly how it went unnoticed the first time.
-    /// Delete the splice and the rows are claimed but never read. Widen this turn
-    /// shape's `TurnOutcome` answer past `Completed(Ok(Ok(_)))` and a turn that
-    /// never reached its provider keeps announcements flagged delivered-to-nobody.
-    /// Drop the `settle` call and the guard never hears how the turn ended, so
-    /// every announced completion comes back for a second airing.
+    /// Recorded rather than re-implemented: a fake that re-derived
+    /// `UnclaimOnDrop`'s own arm/disarm rule would be a test proving its own
+    /// copy of the rule. What is this crate's business is *which* of the two
+    /// things the bracket does to the guard, and with what verdict.
+    #[derive(Debug, PartialEq, Eq)]
+    enum GuardEvent {
+        /// `settle_against` ran, carrying the turn's own verdict.
+        Settled { turn_succeeded: bool },
+        /// The bracket let the guard go without settling it — which is how
+        /// `UnclaimOnDrop` hands its rows back to the store.
+        DroppedUnsettled,
+    }
+
+    struct RecordingGuard {
+        log: Arc<Mutex<Vec<GuardEvent>>>,
+        settled: bool,
+    }
+
+    impl ChannelAnnouncementGuard for RecordingGuard {
+        fn settle_against(mut self, outcome: &LlmExecutionResult) {
+            self.settled = true;
+            self.log
+                .lock()
+                .expect("guard log lock should not be poisoned")
+                .push(GuardEvent::Settled {
+                    turn_succeeded: outcome.turn_succeeded(),
+                });
+        }
+    }
+
+    impl Drop for RecordingGuard {
+        fn drop(&mut self) {
+            if !self.settled {
+                self.log
+                    .lock()
+                    .expect("guard log lock should not be poisoned")
+                    .push(GuardEvent::DroppedUnsettled);
+            }
+        }
+    }
+
+    /// Everything one run of the bracket did that a caller could observe.
+    struct BracketRun {
+        /// Every key the bracket claimed under, in order.
+        claimed_keys: Vec<String>,
+        /// The history the turn body was handed — literally what the model
+        /// would have been given, snapshotted from inside the body.
+        body_history: Vec<ChatMessage>,
+        /// What became of the guard.
+        guard_events: Vec<GuardEvent>,
+    }
+
+    /// Run the bracket with both of its production dependencies stubbed: a
+    /// claim that yields `block` under whatever key it is asked for, and a turn
+    /// body that returns `body_outcome` without touching a provider.
+    ///
+    /// The real claim cannot be used here — see
+    /// [`ChannelAnnouncementGuard`]'s note on `control_plane()` — so the stub
+    /// is what makes claim, splice and settle observable at all.
+    async fn run_announcement_bracket(
+        history_key: &str,
+        history: &mut Vec<ChatMessage>,
+        block: &str,
+        body_outcome: LlmExecutionResult,
+    ) -> BracketRun {
+        let claimed_keys = Arc::new(Mutex::new(Vec::new()));
+        let guard_events = Arc::new(Mutex::new(Vec::new()));
+        let body_history = Arc::new(Mutex::new(Vec::new()));
+
+        {
+            let claimed_keys = Arc::clone(&claimed_keys);
+            let guard_events = Arc::clone(&guard_events);
+            let body_history = Arc::clone(&body_history);
+            let block = block.to_string();
+            run_channel_turn_with_background_announcements(
+                history_key,
+                history,
+                async move |key: &str| {
+                    claimed_keys
+                        .lock()
+                        .expect("claim log lock should not be poisoned")
+                        .push(key.to_string());
+                    (
+                        block,
+                        Some(RecordingGuard {
+                            log: guard_events,
+                            settled: false,
+                        }),
+                    )
+                },
+                async move |history: &mut Vec<ChatMessage>| {
+                    *body_history
+                        .lock()
+                        .expect("body history lock should not be poisoned") = history.clone();
+                    body_outcome
+                },
+            )
+            .await;
+        }
+
+        BracketRun {
+            claimed_keys: claimed_keys
+                .lock()
+                .expect("claim log lock should not be poisoned")
+                .clone(),
+            body_history: body_history
+                .lock()
+                .expect("body history lock should not be poisoned")
+                .clone(),
+            guard_events: std::mem::take(
+                &mut *guard_events
+                    .lock()
+                    .expect("guard log lock should not be poisoned"),
+            ),
+        }
+    }
+
+    fn turn_that_succeeded() -> LlmExecutionResult {
+        LlmExecutionResult::Completed(Ok(Ok("the reply".to_string())))
+    }
+
+    /// A real `tokio::time::error::Elapsed`; the type has no public
+    /// constructor, so the only way to get one is to let a timeout fire.
+    async fn timed_out() -> tokio::time::error::Elapsed {
+        tokio::time::timeout(Duration::from_millis(1), std::future::pending::<()>())
+            .await
+            .expect_err("a pending future must time out")
+    }
+
+    fn user_tail_history() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::system("sys"),
+            ChatMessage::assistant("earlier reply"),
+            ChatMessage::user("[2026-07-29 10:00:00 UTC] what happened?"),
+        ]
+    }
+
+    const ANNOUNCEMENT_BLOCK: &str = "## Background tasks finished\n- kid: done\n\n";
+
+    /// The one thing the old source-literal guard could not express: the block
+    /// is in the history *the turn body is handed*, above the user's text, and
+    /// nothing else about that history moved.
+    ///
+    /// Discriminating line: the `assert_eq!` on `last.content`. Take the splice
+    /// out of the bracket, or take the claim out, and the body sees the bare
+    /// user turn — fork #22, every Detached completion silent on every channel.
+    #[tokio::test]
+    async fn announcement_bracket_puts_the_block_above_the_user_turn_the_body_sees() {
+        let mut history = user_tail_history();
+
+        let run = run_announcement_bracket(
+            "telegram:chat-7",
+            &mut history,
+            ANNOUNCEMENT_BLOCK,
+            turn_that_succeeded(),
+        )
+        .await;
+
+        let last = run
+            .body_history
+            .last()
+            .expect("the turn body must be handed a history");
+        assert_eq!(last.role, "user", "the block hangs on the user turn");
+        assert_eq!(
+            last.content,
+            "## Background tasks finished\n- kid: done\n\n[2026-07-29 10:00:00 UTC] what happened?",
+            "the block must be a prefix of the user turn, not a footer under it"
+        );
+        assert_eq!(
+            run.body_history.len(),
+            3,
+            "the splice must not add a message"
+        );
+        assert_eq!(
+            run.body_history[1].content, "earlier reply",
+            "no other turn may be rewritten"
+        );
+    }
+
+    /// The claim goes under this conversation's history key, not some other
+    /// scope's.
+    ///
+    /// Discriminating line: `assert_eq!` on `claimed_keys`. Claim under the
+    /// wrong key and this turn either consumes another conversation's news or
+    /// never sees its own — the failure the source-literal guard was blind to,
+    /// because a wrong key is still a call.
+    #[tokio::test]
+    async fn announcement_bracket_claims_under_the_conversation_history_key() {
+        let mut history = user_tail_history();
+
+        let run = run_announcement_bracket(
+            "telegram:chat-7",
+            &mut history,
+            ANNOUNCEMENT_BLOCK,
+            turn_that_succeeded(),
+        )
+        .await;
+
+        assert_eq!(
+            run.claimed_keys,
+            vec!["telegram:chat-7".to_string()],
+            "exactly one claim, under the turn's own history key"
+        );
+    }
+
+    /// A turn that succeeded keeps its announcements delivered: the guard is
+    /// settled, with `true`, so the rows never come back for a second airing.
+    ///
+    /// Discriminating line: `GuardEvent::Settled { turn_succeeded: true }`.
+    /// Settle as if every turn failed and every announced completion is
+    /// announced again next turn.
+    #[tokio::test]
+    async fn announcement_bracket_keeps_the_claim_delivered_when_the_turn_succeeds() {
+        let mut history = user_tail_history();
+
+        let run = run_announcement_bracket(
+            "telegram:chat-7",
+            &mut history,
+            ANNOUNCEMENT_BLOCK,
+            turn_that_succeeded(),
+        )
+        .await;
+
+        assert_eq!(
+            run.guard_events,
+            vec![GuardEvent::Settled {
+                turn_succeeded: true
+            }],
+            "a succeeded turn settles its claim once, as a success"
+        );
+    }
+
+    /// Every failure shape hands the announcements back, so the next turn can
+    /// claim them again. All three levels of `LlmExecutionResult` are failures
+    /// here, and each is a case where the model may never have read the block.
+    ///
+    /// Discriminating line: `turn_succeeded: false` for each shape. Settle as
+    /// if every turn succeeded — or flatten the criterion to "is it ok" — and a
+    /// completion is flagged delivered to a model that never saw it, which
+    /// nothing later looks at again.
+    #[tokio::test]
+    async fn announcement_bracket_hands_the_claim_back_on_every_failure_shape() {
+        for (label, outcome) in [
+            ("cancelled", LlmExecutionResult::Cancelled),
+            (
+                "timed out",
+                LlmExecutionResult::Completed(Err(timed_out().await)),
+            ),
+            (
+                "tool loop failed",
+                LlmExecutionResult::Completed(Ok(Err(anyhow::Error::msg("tool loop blew up")))),
+            ),
+        ] {
+            let mut history = user_tail_history();
+
+            let run = run_announcement_bracket(
+                "telegram:chat-7",
+                &mut history,
+                ANNOUNCEMENT_BLOCK,
+                outcome,
+            )
+            .await;
+
+            assert_eq!(
+                run.guard_events,
+                vec![GuardEvent::Settled {
+                    turn_succeeded: false
+                }],
+                "a turn that {label} must hand its announcements back"
+            );
+        }
+    }
+
+    /// The known-reachable one: the cached history's tail is a `tool` message,
+    /// so the splice has no user turn to hang the block on. The claim is handed
+    /// back — and it is handed back *before* the turn runs, because nothing was
+    /// put in front of the model to keep.
+    ///
+    /// Discriminating line: `GuardEvent::DroppedUnsettled` together with the
+    /// `assert!` that the body's history is untouched. Settle this path as a
+    /// success (or as any settle at all) and the rows stay flagged delivered to
+    /// nobody, with no later turn ever looking at them again.
+    #[tokio::test]
+    async fn announcement_bracket_hands_the_claim_back_when_the_splice_finds_no_user_turn() {
+        let mut history = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("[2026-07-29 10:00:00 UTC] run the thing"),
+            ChatMessage::tool("tool output from an interrupted turn"),
+        ];
+
+        let run = run_announcement_bracket(
+            "telegram:chat-7",
+            &mut history,
+            ANNOUNCEMENT_BLOCK,
+            turn_that_succeeded(),
+        )
+        .await;
+
+        assert_eq!(
+            run.guard_events,
+            vec![GuardEvent::DroppedUnsettled],
+            "an unspliceable block must never be reported delivered"
+        );
+        assert!(
+            run.body_history
+                .iter()
+                .all(|m| !m.content.contains("Background tasks finished")),
+            "the block reached the model after all: {:?}",
+            run.body_history
+        );
+    }
+
+    /// The one thing behavioural tests above cannot reach: that the production
+    /// turn actually goes *through* the bracket. `process_channel_message_body`
+    /// still takes a live orchestrator context no test constructs, so this is
+    /// pinned by reading this file's own production text — the way the control
+    /// plane pins its SQL status filters.
+    ///
+    /// This is deliberately one needle, not the five it used to be. Claim,
+    /// splice, settle and the success criterion are now covered behaviourally;
+    /// keeping literals for those as well would only mean a suite that goes red
+    /// during ordinary refactors, which teaches people to ignore it.
+    ///
+    /// Discriminating line: the `assert!`. Inline the retry loop back at the
+    /// call site and the wiring is gone with the whole suite still green, which
+    /// is exactly how fork #22 went unnoticed the first time.
     #[test]
-    fn the_channel_turn_claims_splices_and_disarms_its_background_announcements() {
+    fn the_channel_turn_runs_inside_the_background_announcement_bracket() {
         const SRC: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/src/orchestrator/mod.rs"
         ));
-        // Production text only: this test necessarily contains the same literals
+        // Production text only: this test necessarily contains the same literal
         // it searches for, and would otherwise satisfy itself.
         let production = SRC.split("\nmod tests {").next().unwrap_or(SRC);
 
-        for needle in [
-            "claim_announcements_for_scoped_turn(&history_key).await",
-            "prepend_context_to_last_user_turn(&mut history, &announcements)",
-            "impl TurnOutcome for LlmExecutionResult",
-            "matches!(self, LlmExecutionResult::Completed(Ok(Ok(_))))",
-            "settle_announcement_guards(announcement_guard, llm_result)",
-        ] {
-            assert!(
-                production.contains(needle),
-                "the channel turn's background-announcement wiring lost `{needle}`; \
-                 a Detached child that finishes now announces to nobody (fork #22)"
-            );
-        }
+        let needle = "let llm_result = run_channel_turn_with_background_announcements(";
+        assert!(
+            production.contains(needle),
+            "the channel turn no longer runs inside the announcement bracket \
+             (lost `{needle}`); a Detached child that finishes now announces to \
+             nobody (fork #22)"
+        );
     }
 
     // ─── endpreamble tests ─────────────────────────────────────
