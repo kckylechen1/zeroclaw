@@ -30,6 +30,8 @@ use tokio::task::JoinHandle;
 use zeroclaw_config::schema::Config;
 use zeroclaw_coordinator::{CommandSender, Coordinator, CoordinatorConfig};
 
+use zeroclaw_coordinator::{ChildControl, ChildRunner};
+
 use super::subagent_persistence::SubagentPersistence;
 use super::task_store_sqlite::SqliteTaskStore;
 use crate::subagent_host::NativeChildRunner;
@@ -62,11 +64,57 @@ pub struct CoordinatorHost {
 /// doc for the ordering requirement.
 #[must_use]
 pub fn start(config: Arc<Config>, sqlite_store: Arc<SqliteTaskStore>, boot_id: String) -> CoordinatorHost {
+    let runner = NativeChildRunner::new(Arc::clone(&config));
+    start_with_runner(&config, runner, sqlite_store, boot_id)
+}
+
+/// Translate the operator's configuration into the actor's policy.
+///
+/// The one place `[subagents]` becomes `CoordinatorConfig`. Kept as a named
+/// function so "which knob reaches the actor, and which is still a compiled-in
+/// default" is answerable by reading nine lines rather than by auditing a
+/// struct literal buried in a boot path: every field NOT named here is, by
+/// construction, not configurable yet.
+fn coordinator_config(config: &Config) -> CoordinatorConfig {
+    CoordinatorConfig {
+        // Daemon-wide, because this actor is one per process — see
+        // `zeroclaw_config::subagents` for why there is no per-agent form.
+        max_concurrent_children: config.subagents.max_concurrent_children,
+        // Not configurable (yet). Spelled as an explicit fallback rather than
+        // `..Default::default()` so adding a knob to `[subagents]` means
+        // replacing a line here, and forgetting to do so is visible.
+        ..CoordinatorConfig::default()
+    }
+}
+
+/// [`start`], parameterised over the runner.
+///
+/// `start` is this function with `NativeChildRunner` supplied; everything
+/// downstream of "which runner" — the config translation above, the
+/// persistence seam, the actor spawn — is shared, so a test that swaps the
+/// runner still exercises the production wiring rather than a copy of it.
+/// `NativeChildRunner` cannot be made to hold a child in flight without a live
+/// model provider (see the note above the Drop-sweep test below), and holding
+/// children in flight is the only way to observe an admission gate at all.
+fn start_with_runner<R>(
+    config: &Config,
+    runner: R,
+    sqlite_store: Arc<SqliteTaskStore>,
+    boot_id: String,
+) -> CoordinatorHost
+where
+    R: ChildRunner + Send + 'static,
+    R::Control: Send,
+    R::CompletionData: Send,
+    R::RunFuture: Send,
+    R::ValidateFuture: Send,
+    R::DescribeFuture: Send,
+    <R::Control as ChildControl>::ProgressFuture: Send,
+{
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let persistence = SubagentPersistence::new(sqlite_store, boot_id);
-    let runner = NativeChildRunner::new(config);
     let coordinator =
-        Coordinator::with_persistence(command_rx, runner, CoordinatorConfig::default(), persistence);
+        Coordinator::with_persistence(command_rx, runner, coordinator_config(config), persistence);
     let actor = zeroclaw_spawn::spawn!(coordinator.run());
     CoordinatorHost {
         commands: CommandSender(command_tx),
@@ -83,9 +131,8 @@ mod tests {
     use zeroclaw_config::schema::Config;
     use zeroclaw_coordinator::{
         CancelToken, ChildCompletion, ChildControl, ChildOutcome, ChildOverrides, ChildProgress,
-        ChildRequest, ChildRunOutput, ChildRunRequest, ChildRunner, Coordinator,
-        CoordinatorCommand, CoordinatorConfig, DescribeOutcome, SpawnAdmission, SpawnCommand,
-        ValidateTypeOutcome,
+        ChildRequest, ChildRunOutput, ChildRunRequest, ChildRunner, CoordinatorCommand,
+        DescribeOutcome, SpawnAdmission, SpawnCommand, ValidateTypeOutcome,
     };
 
     use super::*;
@@ -252,16 +299,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let handle = ControlPlaneHandle::start(dir.path()).await.unwrap();
 
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let persistence =
-            SubagentPersistence::new(Arc::clone(&handle.sqlite_store), handle.boot_id.clone());
-        let coordinator = Coordinator::with_persistence(
-            command_rx,
+        // Built through `start_with_runner` — the same function `start` calls —
+        // so this exercises production wiring with only the runner swapped,
+        // rather than a hand-rolled copy that can drift away from it.
+        let host = start_with_runner(
+            &Config::default(),
             HangingRunner,
-            CoordinatorConfig::default(),
-            persistence,
+            Arc::clone(&handle.sqlite_store),
+            handle.boot_id.clone(),
         );
-        let actor = zeroclaw_spawn::spawn!(coordinator.run());
+        let actor = host.actor;
+        let command_tx = host.commands.0;
 
         let (admission_tx, admission_rx) = oneshot::channel();
         let (result_tx, _result_rx) = oneshot::channel();
@@ -320,5 +368,143 @@ mod tests {
             !lost.delivered,
             "nobody in-process ever received this result — delivered must be false"
         );
+    }
+
+    // ── The configured cap is the cap in force ──────────────────────────
+    //
+    // These two are the point of `[subagents] max_concurrent_children`. A key
+    // that parses, validates and serialises while the code it names reads a
+    // compiled-in constant is indistinguishable from a working key right up
+    // until an operator relies on it, so both tests observe the limit the way
+    // a caller does — by being refused — rather than by reading the field
+    // back out of a struct.
+    //
+    // `HangingRunner` is what makes that observable: its children never leave
+    // `pending`, so the in-flight population is exactly the number of spawns
+    // admitted so far, with no timing race.
+
+    /// Send one spawn and wait for the actor's admission decision.
+    ///
+    /// Timeout-bounded on purpose: an admitted background child answers its
+    /// *result* channel only when it really finishes, and `HangingRunner`'s
+    /// children never do. An unbounded await on the wrong channel would wedge
+    /// the test binary instead of failing it. `result_rx` is handed back so
+    /// the caller can keep it alive for as long as the child is meant to
+    /// count against the cap.
+    async fn admit(
+        commands: &mpsc::UnboundedSender<CoordinatorCommand>,
+        child_id: &str,
+    ) -> (SpawnAdmission, oneshot::Receiver<zeroclaw_coordinator::ChildResult>) {
+        let (admission_tx, admission_rx) = oneshot::channel();
+        let (result_tx, result_rx) = oneshot::channel();
+        commands
+            .send(CoordinatorCommand::Spawn(SpawnCommand {
+                request: Box::new(request(child_id, "explore")),
+                admission_tx,
+                result_tx,
+            }))
+            .expect("the actor owns the receiver");
+        let admission = tokio::time::timeout(std::time::Duration::from_secs(5), admission_rx)
+            .await
+            .unwrap_or_else(|_| panic!("the actor must decide on '{child_id}' promptly"))
+            .expect("every spawn is answered on the admission channel");
+        (admission, result_rx)
+    }
+
+    /// Set `[subagents] max_concurrent_children = 2` and prove **2** is the
+    /// number the booted actor enforces — not `CoordinatorConfig`'s
+    /// compiled-in default, which is 6 and would admit both of the spawns
+    /// this test requires to be refused.
+    ///
+    /// Two chosen deliberately: it is below the default from either direction,
+    /// so neither "the wiring was skipped" nor "the default happens to match"
+    /// can pass this.
+    #[tokio::test]
+    async fn configured_concurrency_cap_is_the_one_the_booted_actor_enforces() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = ControlPlaneHandle::start(dir.path()).await.unwrap();
+        let mut config = Config::default();
+        config.subagents.max_concurrent_children = 2;
+
+        let host = start_with_runner(
+            &config,
+            HangingRunner,
+            Arc::clone(&handle.sqlite_store),
+            handle.boot_id.clone(),
+        );
+
+        let (first, _first_rx) = admit(&host.commands.0, "kid-1").await;
+        assert_eq!(first, SpawnAdmission::Admitted);
+        // The request that brings the registry to exactly the cap is still
+        // admitted: the gate refuses the one *past* the limit, not the one
+        // that reaches it.
+        let (second, _second_rx) = admit(&host.commands.0, "kid-2").await;
+        assert_eq!(
+            second,
+            SpawnAdmission::Admitted,
+            "the spawn that fills the last slot must be admitted"
+        );
+
+        let (third, _third_rx) = admit(&host.commands.0, "kid-3").await;
+        assert_eq!(
+            third,
+            SpawnAdmission::Refused(zeroclaw_coordinator::SpawnRefusal::ChildCapacityReached {
+                in_flight: 2,
+                max: 2,
+            }),
+            "the configured limit of 2 must be the one enforced — an admission here means \
+             the boot path is reading a constant and `[subagents]` is an inert key"
+        );
+
+        host.actor.abort();
+        let _ = host.actor.await;
+    }
+
+    /// With no `[subagents]` section configured at all, the booted actor caps
+    /// at **6**: six admitted, the seventh refused.
+    ///
+    /// 6 is an operating limit. The 128 it replaced was
+    /// `DelegateTool::MAX_CONCURRENT_BACKGROUND_DELEGATIONS`, a runaway
+    /// backstop meaning "if we are here, something is broken", copied into the
+    /// slot where a limit belongs — under it, this test's seventh child (and
+    /// its hundred-and-twenty-first) would be admitted.
+    #[tokio::test]
+    async fn absent_subagent_config_boots_the_actor_at_six() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = ControlPlaneHandle::start(dir.path()).await.unwrap();
+        // Nothing sets `subagents`: this is the config an operator who never
+        // heard of the section gets.
+        let config = Config::default();
+
+        let host = start_with_runner(
+            &config,
+            HangingRunner,
+            Arc::clone(&handle.sqlite_store),
+            handle.boot_id.clone(),
+        );
+
+        let mut held = Vec::new();
+        for n in 1..=6 {
+            let (admission, result_rx) = admit(&host.commands.0, &format!("kid-{n}")).await;
+            assert_eq!(
+                admission,
+                SpawnAdmission::Admitted,
+                "child {n} of 6 must be admitted under the default cap"
+            );
+            held.push(result_rx);
+        }
+
+        let (seventh, _seventh_rx) = admit(&host.commands.0, "kid-7").await;
+        assert_eq!(
+            seventh,
+            SpawnAdmission::Refused(zeroclaw_coordinator::SpawnRefusal::ChildCapacityReached {
+                in_flight: 6,
+                max: 6,
+            }),
+            "the default must be 6, and the refusal must name what is running as well as the limit"
+        );
+
+        host.actor.abort();
+        let _ = host.actor.await;
     }
 }

@@ -1906,6 +1906,52 @@ fn child_capacity_predicate_admits_the_request_that_fills_the_cap() {
     assert!(!crate::state::at_child_capacity(9_999, 0));
 }
 
+/// The sentence a model reads must say how many are running *now* as well as
+/// what the limit is. With the daemon default at 6 rather than delegate's 128
+/// backstop, this refusal stops being a symptom of a broken deployment and
+/// becomes an ordinary "the queue is full" — and a model that cannot tell
+/// those apart will either give up on a working tool or retry a hopeless one.
+///
+/// The two numbers are deliberately different here. At the live gate they are
+/// equal by construction, which is exactly what would hide a `Display` that
+/// prints the limit twice and calls one of them the running count.
+#[test]
+fn child_capacity_refusal_reason_names_the_in_flight_count_and_the_limit() {
+    let reason = SpawnRefusal::ChildCapacityReached {
+        in_flight: 5,
+        max: 6,
+    }
+    .to_string();
+    assert!(
+        reason.contains("5 running"),
+        "the reason must state how many children are in flight, got: {reason}"
+    );
+    assert!(
+        reason.contains("limit 6"),
+        "the reason must state the configured limit, got: {reason}"
+    );
+    assert!(
+        reason.contains("Nothing was started"),
+        "a refusal must still say that nothing ran, got: {reason}"
+    );
+}
+
+/// The compiled-in default is an operating limit, not the runaway backstop it
+/// was copied from. Hosts that build the actor without reading a config file
+/// land here, so this number has to agree with
+/// `zeroclaw_config::subagents::DEFAULT_MAX_CONCURRENT_CHILDREN` — the two
+/// literals are paired by hand because this crate is a leaf and does not
+/// depend on the config crate.
+#[test]
+fn default_child_capacity_is_six_not_the_delegate_backstop() {
+    assert_eq!(
+        CoordinatorConfig::default().max_concurrent_children,
+        6,
+        "128 is `DelegateTool::MAX_CONCURRENT_BACKGROUND_DELEGATIONS`, a backstop meaning \
+         'something is broken' — it is not an operating limit and must not be this default"
+    );
+}
+
 #[tokio::test]
 async fn declared_spawn_depth_is_admitted_at_the_limit_and_refused_one_deeper() {
     let mut harness = harness_with_config(
@@ -2043,14 +2089,18 @@ async fn concurrency_backstop_fills_the_cap_then_refuses_structurally() {
     let refused = refused_spawn(&harness.backend, request("third", true)).await;
     assert_eq!(
         refused,
-        SpawnRefusal::ChildCapacityReached { max: 2 },
-        "a spawn past the concurrency cap must be refused, carrying the cap"
+        SpawnRefusal::ChildCapacityReached {
+            in_flight: 2,
+            max: 2
+        },
+        "a spawn past the concurrency cap must be refused, carrying both the cap and \
+         how many children were actually in flight when it was refused"
     );
     assert!(
         refused
             .to_string()
-            .contains("too many children in flight (limit 2)"),
-        "the printed reason must name the limit, got: {refused}"
+            .contains("too many children in flight (2 running, limit 2)"),
+        "the printed reason must name the in-flight count and the limit, got: {refused}"
     );
     assert!(
         harness.requests.try_recv().is_err(),

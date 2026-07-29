@@ -140,6 +140,7 @@ async fn channel_backend_spawn_refusal_arrives_without_a_child_result() {
         command
             .admission_tx
             .send(SpawnAdmission::Refused(SpawnRefusal::ChildCapacityReached {
+                in_flight: 4,
                 max: 4,
             }))
             .expect("the caller awaits admission");
@@ -156,7 +157,10 @@ async fn channel_backend_spawn_refusal_arrives_without_a_child_result() {
     .unwrap_err();
     assert_eq!(
         err,
-        CoordinatorError::Refused(SpawnRefusal::ChildCapacityReached { max: 4 }),
+        CoordinatorError::Refused(SpawnRefusal::ChildCapacityReached {
+            in_flight: 4,
+            max: 4
+        }),
         "a refusal must keep its structure, not collapse into a lost-reply error"
     );
     assert!(

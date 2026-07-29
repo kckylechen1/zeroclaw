@@ -1445,8 +1445,10 @@ mod tests {
 
         #[tokio::test]
         async fn background_spawn_refused_for_child_capacity_is_a_structured_failure() {
-            let _coordinator =
-                refusing_coordinator(SpawnRefusal::ChildCapacityReached { max: 128 });
+            let _coordinator = refusing_coordinator(SpawnRefusal::ChildCapacityReached {
+                in_flight: 6,
+                max: 6,
+            });
             let alias = "bg-refused-capacity";
             let tool = SpawnSubagentTool::new(
                 Arc::new(config_with_agent(alias)),
@@ -1455,7 +1457,7 @@ mod tests {
             );
             assert_refused(
                 &detached_spawn(&tool).await,
-                "too many children in flight (limit 128)",
+                "too many children in flight (6 running, limit 6)",
             );
         }
 
@@ -1603,7 +1605,7 @@ mod tests {
                 admitted.success && admitted.output.as_str().contains("started detached"),
                 "the first spawn fills the cap and must be admitted: {admitted:?}"
             );
-            assert_refused(&refused, "too many children in flight (limit 1)");
+            assert_refused(&refused, "too many children in flight (1 running, limit 1)");
         }
 
         #[tokio::test]

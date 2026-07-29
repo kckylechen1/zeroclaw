@@ -124,8 +124,29 @@ pub enum SpawnRefusal {
     /// derives it from a live spawner and lets a declaration only raise it) is
     /// deeper than the coordinator admits.
     SpawnDepthExceeded { depth: u32, max: u32 },
-    /// `pending + active` is already at the runaway backstop.
-    ChildCapacityReached { max: usize },
+    /// `pending + active` is already at the concurrency limit.
+    ///
+    /// `in_flight` is that population at the moment of the refusal, carried
+    /// alongside `max` because the two together are what make this refusal
+    /// legible: "6 of 6 are running" is a queue that will drain, while the
+    /// limit alone reads like a capability that is broken. A caller — or a
+    /// model — deciding whether to retry needs the difference, and once the
+    /// default is a working limit rather than a runaway backstop, this
+    /// refusal is an ordinary daily event rather than a bug report.
+    ///
+    /// At today's single capacity gate the two are necessarily equal — the
+    /// gate fires at `in_flight >= max` and nothing admits past it — so this
+    /// field is not carrying information the limit lacks. It is carrying
+    /// *measurement*: the count is read from the live registry at the moment
+    /// of refusal rather than restated from the limit, so the sentence stays
+    /// true rather than merely lucky if a later gate refuses below the cap.
+    /// A number that is really the same number typed twice is the failure
+    /// mode this crate keeps finding; this one is not that.
+    ///
+    /// It is also captured rather than recomputed by the reader: by the time a
+    /// refusal is read the actor has moved on, and a count taken then is a
+    /// different number than the one the gate decided on.
+    ChildCapacityReached { in_flight: usize, max: usize },
     /// The actor was torn down while this command was still queued in its
     /// mailbox, so it was never decided on its merits. Nothing ran; a retry
     /// against a live coordinator may well be admitted.
@@ -147,10 +168,11 @@ impl fmt::Display for SpawnRefusal {
                 "spawn depth limit reached ({depth}/{max}): this child would be generation \
                  {depth}, deeper than the coordinator admits. Nothing was started."
             ),
-            Self::ChildCapacityReached { max } => write!(
+            Self::ChildCapacityReached { in_flight, max } => write!(
                 f,
-                "too many children in flight (limit {max}). Wait for some to finish or cancel \
-                 one before starting more. Nothing was started."
+                "too many children in flight ({in_flight} running, limit {max}). This is a full \
+                 queue, not a broken tool: wait for one to finish, or cancel one, then try again. \
+                 Nothing was started."
             ),
             Self::CoordinatorShuttingDown => f.write_str(
                 "the coordinator shut down before deciding on this spawn. Nothing was started.",

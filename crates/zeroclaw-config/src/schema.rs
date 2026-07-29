@@ -449,6 +449,14 @@ pub struct Config {
     #[group = "Multi-agent"]
     pub delegate: DelegateToolConfig,
 
+    /// Daemon-wide subagent limits (`[subagents]`). Governs the single
+    /// coordinator actor this process boots, so it is a whole-process limit,
+    /// not a per-agent one. See `crate::subagents::SubagentsConfig`.
+    #[serde(default)]
+    #[nested]
+    #[group = "Multi-agent"]
+    pub subagents: crate::subagents::SubagentsConfig,
+
     /// Aliased agents in this install. Each entry under `[agents.<alias>]`
     /// is one user-facing agent with its own identity, channels, model
     /// provider, risk profile, workspace, and memory scope.
@@ -17668,6 +17676,7 @@ impl Default for Config {
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             delegate: DelegateToolConfig::default(),
+            subagents: crate::subagents::SubagentsConfig::default(),
             agents: HashMap::new(),
             risk_profiles: HashMap::new(),
             runtime_profiles: HashMap::new(),
@@ -25147,6 +25156,7 @@ auto_save = true
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             delegate: DelegateToolConfig::default(),
+            subagents: crate::subagents::SubagentsConfig::default(),
             agents: HashMap::new(),
             runtime_profiles: HashMap::new(),
             personas: HashMap::new(),
@@ -26020,6 +26030,7 @@ default_temperature = 0.7
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
             delegate: DelegateToolConfig::default(),
+            subagents: crate::subagents::SubagentsConfig::default(),
             agents: HashMap::new(),
             risk_profiles: HashMap::new(),
             runtime_profiles: HashMap::new(),

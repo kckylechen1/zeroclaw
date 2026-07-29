@@ -195,16 +195,34 @@ pub struct CoordinatorConfig {
     /// `DelegateTool::at_background_capacity`'s "`cap == 0` disables the
     /// backstop".
     pub max_spawn_depth: u32,
-    /// Runaway backstop: how many children may be pending or active at once.
+    /// Operating limit: how many children may be pending or active at once,
+    /// across this whole process. One actor per daemon owns this count, so
+    /// this is a machine-wide number, not a per-agent one.
     ///
-    /// Inherited verbatim from
-    /// `DelegateTool::MAX_CONCURRENT_BACKGROUND_DELEGATIONS = 128`
-    /// (`zeroclaw-runtime/src/tools/delegate.rs`), whose rationale applies
-    /// unchanged here: each child is a full agent loop, so an unbounded
-    /// spawner — a runaway loop or a model that keeps calling the tool — must
-    /// hit a wall somewhere. Normal use stays well under it.
+    /// Each child is a full agent turn — its own model calls, its own shell
+    /// and tool access, its own spend — so the number is a statement about
+    /// what one machine should be running at a time, not merely about when to
+    /// panic.
     ///
-    /// `0` disables the backstop, same convention as
+    /// **Why the default is 6 and not 128.** It was 128, inherited verbatim
+    /// from `DelegateTool::MAX_CONCURRENT_BACKGROUND_DELEGATIONS`
+    /// (`zeroclaw-runtime/src/tools/delegate.rs`). That constant is a runaway
+    /// *backstop*: reaching it means something is broken, and it was never a
+    /// claim that 128 simultaneous agent turns are reasonable. Copying it into
+    /// the slot where an operating limit belongs left this actor effectively
+    /// uncapped. Delegation keeps its own 128 backstop — that is a different
+    /// gate on a different path, and it is not this number.
+    ///
+    /// Operators set this through `[subagents] max_concurrent_children`
+    /// (`zeroclaw-config/src/subagents.rs`), which
+    /// `control_plane::coordinator_host::start` reads at boot. This default
+    /// applies only to hosts that build the actor without consulting a config
+    /// file, and is paired by hand with
+    /// `zeroclaw_config::subagents::DEFAULT_MAX_CONCURRENT_CHILDREN` — this
+    /// crate is a leaf and does not depend on the config crate, so the two
+    /// literals cannot be one constant. Change one, change the other.
+    ///
+    /// `0` disables the limit, same convention as
     /// `DelegateTool::at_background_capacity`.
     pub max_concurrent_children: usize,
 }
@@ -216,7 +234,7 @@ impl Default for CoordinatorConfig {
             buffer_completions: false,
             buffered_completion_output_cap: None,
             max_spawn_depth: 3,
-            max_concurrent_children: 128,
+            max_concurrent_children: 6,
         }
     }
 }

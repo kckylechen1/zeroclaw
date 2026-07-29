@@ -415,6 +415,12 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
         // failed. There is no unwinding here (the actor is single-writer; a
         // panic takes every other child with it) and no admitting-then-killing
         // either, which would bill the caller for a run that was never allowed.
+        //
+        // In-flight is `pending + active`, the same population the actor
+        // already reports as its running count. Bound once, before the gate,
+        // because the refusal carries the same number the gate decided on —
+        // recomputing it inside the arm would invite the two to drift.
+        let in_flight = self.pending.len() + self.active.len();
         let refusal = if self.pending.contains_key(&id)
             || self.active.contains_key(&id)
             || self.completed.contains_key(&id)
@@ -428,12 +434,11 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
                 max: self.config.max_spawn_depth,
             })
         } else if crate::state::at_child_capacity(
-            // In-flight is `pending + active`, the same population the actor
-            // already reports as its running count.
-            self.pending.len() + self.active.len(),
+            in_flight,
             self.config.max_concurrent_children,
         ) {
             Some(SpawnRefusal::ChildCapacityReached {
+                in_flight,
                 max: self.config.max_concurrent_children,
             })
         } else {
