@@ -1,13 +1,21 @@
 //! Interactive approval workflow for supervised mode.
-//!
 //! Provides a pre-execution hook that prompts the user before tool calls,
 //! with session-scoped "Always" allowlists and audit logging.
+//!
+//! Both of those are process-local: the allow-list is keyed on a tool *name*
+//! and the audit log is a `Vec`. See [`store`] for the durable half — grants
+//! bound to one run, tool, and argument set, and a trail that survives a
+//! restart.
+
+pub mod store;
 
 use crate::security::AutonomyLevel;
 use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::io::BufReader;
 use std::io::{self, BufRead, Write};
 use zeroclaw_config::schema::RiskProfileConfig;
 
@@ -80,20 +88,6 @@ pub enum ApprovalRequirement {
 
 // ── ApprovalManager ──────────────────────────────────────────────
 
-/// Manages the approval workflow for tool calls.
-///
-/// - Checks config-level `auto_approve` / `always_ask` lists
-/// - Maintains a session-scoped "always" allowlist
-/// - Records an audit trail of all decisions
-///
-/// Two modes:
-/// - **Interactive** (CLI): tools needing approval trigger a stdin prompt.
-/// - **Non-interactive** (channels): tools needing approval are auto-denied
-///   because there is no interactive operator to approve them. `auto_approve`
-///   policy is still enforced, and `always_ask` / supervised-default tools are
-///   denied rather than silently allowed.
-/// - **Non-interactive back-channel** (ACP/WS): tools needing approval are sent
-///   through a client approval channel instead of trusting tool arguments.
 pub struct ApprovalManager {
     /// Tools that never need approval (from config).
     auto_approve: HashSet<String>,
@@ -109,8 +103,13 @@ pub struct ApprovalManager {
     non_interactive_shell_requires_approval: bool,
     /// Session-scoped allowlist built from "Always" responses.
     session_allowlist: Mutex<HashSet<String>>,
-    /// Audit trail of approval decisions.
+    /// Audit trail of approval decisions. Process-local: a restart erases it.
     audit_log: Mutex<Vec<ApprovalLogEntry>>,
+    /// Durable half. When present, every gate outcome is also appended to a
+    /// trail that survives a restart, and approvals mint a one-shot grant
+    /// bound to the exact call. Absent in tests and for callers that have no
+    /// data directory, in which case behaviour is unchanged.
+    store: Option<std::sync::Arc<store::ApprovalStore>>,
 }
 
 impl ApprovalManager {
@@ -124,14 +123,10 @@ impl ApprovalManager {
             non_interactive_shell_requires_approval: false,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            store: None,
         }
     }
 
-    /// Create a non-interactive approval manager for channel-driven runs.
-    ///
-    /// Enforces the same `auto_approve` / `always_ask` / supervised policies
-    /// as the CLI manager, but tools that would require interactive approval
-    /// are auto-denied instead of prompting (since there is no operator).
     pub fn for_non_interactive(risk_profile: &RiskProfileConfig) -> Self {
         Self {
             auto_approve: risk_profile.auto_approve.iter().cloned().collect(),
@@ -141,15 +136,10 @@ impl ApprovalManager {
             non_interactive_shell_requires_approval: false,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            store: None,
         }
     }
 
-    /// Create a non-interactive manager for direct agents with a human
-    /// approval back-channel, such as ACP and the web dashboard WebSocket.
-    /// Reads from the same per-agent risk profile as
-    /// [`Self::for_non_interactive`]; the only difference is that shell
-    /// invocations route through the operator-driven backchannel rather
-    /// than auto-denying.
     pub fn for_non_interactive_backchannel(risk_profile: &RiskProfileConfig) -> Self {
         Self {
             auto_approve: risk_profile.auto_approve.iter().cloned().collect(),
@@ -159,6 +149,30 @@ impl ApprovalManager {
             non_interactive_shell_requires_approval: true,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
+            store: None,
+        }
+    }
+
+    /// Derive a manager for a different agent's risk profile while preserving
+    /// THIS manager's interactivity mode. Used when a delegated execution (an
+    /// SOP step naming a different agent) must run under the delegate agent's
+    /// own approval policy without losing an operator approval route the
+    /// current surface provides: an interactive parent stays interactive, a
+    /// back-channel parent keeps routing shell approvals through the client
+    /// channel, and a plain non-interactive parent stays auto-deny. Policy
+    /// sets (`auto_approve` / `always_ask` / autonomy level) come entirely
+    /// from `risk_profile`; the session allowlist and audit trail start
+    /// fresh — "Always" grants to one agent never transfer to another.
+    pub fn derive_for_risk_profile(&self, risk_profile: &RiskProfileConfig) -> Self {
+        Self {
+            auto_approve: risk_profile.auto_approve.iter().cloned().collect(),
+            always_ask: risk_profile.always_ask.iter().cloned().collect(),
+            autonomy_level: risk_profile.level,
+            non_interactive: self.non_interactive,
+            non_interactive_shell_requires_approval: self.non_interactive_shell_requires_approval,
+            session_allowlist: Mutex::new(HashSet::new()),
+            audit_log: Mutex::new(Vec::new()),
+            store: None,
         }
     }
 
@@ -169,16 +183,22 @@ impl ApprovalManager {
     }
 
     /// Check whether a tool call requires interactive approval.
-    ///
     /// Returns `true` if the call needs a prompt, `false` if it can proceed.
     pub fn needs_approval(&self, tool_name: &str) -> bool {
         self.approval_requirement(tool_name) == ApprovalRequirement::Prompt
     }
 
     pub fn approval_requirement(&self, tool_name: &str) -> ApprovalRequirement {
-        // Full autonomy never prompts.
+        let always_ask = self.always_ask.contains("*") || self.always_ask.contains(tool_name);
+
+        // Full autonomy skips the default prompt, but an explicit operator
+        // always_ask rule remains authoritative.
         if self.autonomy_level == AutonomyLevel::Full {
-            return ApprovalRequirement::Approved;
+            return if always_ask {
+                ApprovalRequirement::Prompt
+            } else {
+                ApprovalRequirement::Approved
+            };
         }
 
         // ReadOnly blocks everything — handled elsewhere; no prompt needed.
@@ -186,16 +206,11 @@ impl ApprovalManager {
             return ApprovalRequirement::NotRequired;
         }
 
-        // always_ask overrides everything.
-        if self.always_ask.contains("*") || self.always_ask.contains(tool_name) {
+        // always_ask overrides every remaining approval shortcut.
+        if always_ask {
             return ApprovalRequirement::Prompt;
         }
 
-        // Channel-driven shell execution is still guarded by the shell tool's
-        // own command allowlist and risk policy. Skipping the outer approval
-        // gate here lets low-risk allowlisted commands (e.g. `ls`) work in
-        // non-interactive channels without silently allowing medium/high-risk
-        // commands.
         if self.non_interactive
             && tool_name == "shell"
             && !self.non_interactive_shell_requires_approval
@@ -256,17 +271,428 @@ impl ApprovalManager {
     }
 
     /// Prompt the user on the CLI and return their decision.
-    ///
     /// Only called for interactive (CLI) managers. Non-interactive managers
     /// auto-deny in the tool-call loop before reaching this point.
     pub fn prompt_cli(&self, request: &ApprovalRequest) -> ApprovalResponse {
         prompt_cli_interactive(request)
     }
+
+    // ── Durable half ────────────────────────────────────────────────
+
+    /// Attach a durable store. Without one this manager behaves exactly as
+    /// before, which is the point: the store is an addition, never a
+    /// precondition for the gate working.
+    #[must_use]
+    pub fn with_store(mut self, store: std::sync::Arc<store::ApprovalStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn has_store(&self) -> bool {
+        self.store.is_some()
+    }
+
+    /// Append one gate outcome to the durable trail.
+    ///
+    /// A store write failure is logged and swallowed. Refusing the tool call
+    /// because an audit row could not be written would convert a bookkeeping
+    /// fault into an outage; the loud log is the alarm.
+    pub fn record_audit(
+        &self,
+        run_id: &str,
+        agent: Option<&str>,
+        tool_name: &str,
+        args: &serde_json::Value,
+        decision: store::AuditDecision,
+        approver: Option<&str>,
+        channel: Option<&str>,
+    ) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let summary = summarize_args(args);
+        if let Err(err) = store.record(
+            Some(run_id),
+            agent,
+            tool_name,
+            args,
+            &summary,
+            decision,
+            approver,
+            channel,
+        ) {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "tool": tool_name,
+                        "decision": decision.as_str(),
+                        "error": format!("{err}"),
+                    })),
+                "approval audit write failed — this decision is not on the durable trail"
+            );
+        }
+    }
+
+    /// Mint a one-shot grant for exactly this call. Returns the grant id when
+    /// a store is attached.
+    pub fn grant_one_shot(
+        &self,
+        run_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+        approver: &str,
+        channel: &str,
+    ) -> Option<String> {
+        let store = self.store.as_ref()?;
+        match store.grant(
+            run_id,
+            tool_name,
+            args,
+            approver,
+            channel,
+            chrono::Duration::seconds(store::DEFAULT_GRANT_TTL_SECS),
+        ) {
+            Ok(grant) => Some(grant.approval_id),
+            Err(err) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "tool": tool_name,
+                            "error": format!("{err}"),
+                        })),
+                    "could not persist approval grant"
+                );
+                None
+            }
+        }
+    }
+
+    /// Consume the grant covering this exact call.
+    ///
+    /// `Ok(())` when there is no store — a caller without durable approvals
+    /// must not start failing closed on a feature it never enabled. With a
+    /// store, an approval covers one execution of one argument set.
+    pub fn redeem_one_shot(
+        &self,
+        run_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<(), store::RedeemFailure> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        match store.redeem(run_id, tool_name, args) {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(failure)) => Err(failure),
+            Err(err) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "tool": tool_name,
+                            "error": format!("{err}"),
+                        })),
+                    "approval grant lookup failed — treating as no grant"
+                );
+                Err(store::RedeemFailure::NoGrant)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod approval_precedence_tests {
+    use super::{ApprovalManager, ApprovalRequirement, ApprovalResponse, AutonomyLevel};
+    use parking_lot::Mutex;
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    fn manager(
+        autonomy_level: AutonomyLevel,
+        always_ask: &[&str],
+        auto_approve: &[&str],
+    ) -> ApprovalManager {
+        ApprovalManager {
+            auto_approve: auto_approve
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect(),
+            always_ask: always_ask.iter().map(|tool| (*tool).to_string()).collect(),
+            autonomy_level,
+            non_interactive: false,
+            non_interactive_shell_requires_approval: false,
+            session_allowlist: Mutex::new(HashSet::new()),
+            audit_log: Mutex::new(Vec::new()),
+            store: None,
+        }
+    }
+
+    #[test]
+    fn full_autonomy_prompts_for_exact_always_ask_tool() {
+        let manager = manager(AutonomyLevel::Full, &["shell"], &[]);
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::Prompt
+        );
+        assert!(manager.needs_approval("shell"));
+    }
+
+    #[test]
+    fn full_autonomy_prompts_for_wildcard_always_ask() {
+        let manager = manager(AutonomyLevel::Full, &["*"], &[]);
+
+        for tool_name in ["shell", "file_write", "http_request"] {
+            assert_eq!(
+                manager.approval_requirement(tool_name),
+                ApprovalRequirement::Prompt,
+                "wildcard always_ask must cover {tool_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_autonomy_approves_tool_not_covered_by_always_ask() {
+        let manager = manager(AutonomyLevel::Full, &["shell"], &[]);
+
+        assert_eq!(
+            manager.approval_requirement("file_read"),
+            ApprovalRequirement::Approved
+        );
+    }
+
+    #[test]
+    fn full_autonomy_always_ask_overrides_auto_approve_and_session_allowlist() {
+        let manager = manager(AutonomyLevel::Full, &["shell"], &["shell"]);
+        manager.record_decision(
+            "shell",
+            &json!({"command": "pwd"}),
+            &ApprovalResponse::Always,
+            "test",
+        );
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::Prompt
+        );
+    }
+
+    #[test]
+    fn read_only_behavior_is_unchanged_when_always_ask_matches() {
+        let manager = manager(AutonomyLevel::ReadOnly, &["*"], &[]);
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::NotRequired
+        );
+        assert!(!manager.needs_approval("shell"));
+    }
+
+    // ── The unattended path ──────────────────────────────────────────
+    //
+    // A cron `JobType::Agent` run and a channel-driven turn both execute
+    // with nobody watching. On that path `ApprovalManager::for_non_interactive`
+    // sets `non_interactive_shell_requires_approval: false`, which drops
+    // `shell` to `NotRequired` — no approval at all. These tests pin the two
+    // things that keep a scheduled trading agent from reaching a shell at
+    // 03:00: `always_ask` outranking that bypass, and outranking Full
+    // autonomy above it.
+
+    fn unattended(
+        autonomy_level: AutonomyLevel,
+        always_ask: &[&str],
+        auto_approve: &[&str],
+    ) -> ApprovalManager {
+        ApprovalManager {
+            auto_approve: auto_approve
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect(),
+            always_ask: always_ask.iter().map(|tool| (*tool).to_string()).collect(),
+            autonomy_level,
+            non_interactive: true,
+            // Exactly what `for_non_interactive` builds.
+            non_interactive_shell_requires_approval: false,
+            session_allowlist: Mutex::new(HashSet::new()),
+            audit_log: Mutex::new(Vec::new()),
+            store: None,
+        }
+    }
+
+    /// Without `always_ask`, the unattended path really does hand out `shell`
+    /// with no approval. This is the hazard the next test closes — asserting
+    /// it here keeps the pair honest: if upstream ever fixes this default,
+    /// this test fails and tells us the backstop is no longer load-bearing.
+    #[test]
+    fn unattended_shell_is_ungated_without_always_ask() {
+        let manager = unattended(AutonomyLevel::Supervised, &[], &[]);
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::NotRequired,
+            "documents the hazard: non_interactive drops shell to NotRequired"
+        );
+    }
+
+    /// The backstop. `always_ask` is consulted before the non-interactive
+    /// shell bypass, so a profile that lists `shell` still forces approval —
+    /// which, with no operator present, is a denial rather than a free shell.
+    #[test]
+    fn unattended_always_ask_outranks_the_non_interactive_shell_bypass() {
+        let manager = unattended(AutonomyLevel::Supervised, &["shell"], &[]);
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::Prompt,
+            "always_ask must be checked before the non_interactive bypass"
+        );
+    }
+
+    /// Both hazards at once: a profile mis-set to Full autonomy running
+    /// unattended. Upstream returns `Approved` here before ever looking at
+    /// `always_ask`; this fork looks first.
+    #[test]
+    fn unattended_full_autonomy_still_honors_always_ask() {
+        let manager = unattended(AutonomyLevel::Full, &["shell", "file_write"], &[]);
+
+        for tool_name in ["shell", "file_write"] {
+            assert_eq!(
+                manager.approval_requirement(tool_name),
+                ApprovalRequirement::Prompt,
+                "{tool_name} must still require approval under Full + unattended"
+            );
+        }
+    }
+
+    // ── The durable half, as the gate uses it ────────────────────────
+
+    fn with_store(manager: ApprovalManager, dir: &std::path::Path) -> ApprovalManager {
+        let store = super::store::ApprovalStore::open(dir, "boot-1").expect("store opens");
+        manager.with_store(std::sync::Arc::new(store))
+    }
+
+    /// A manager with no store must behave exactly as before. The durable
+    /// half is an addition; a caller that never enabled it must not start
+    /// failing closed on it.
+    #[test]
+    fn without_a_store_redemption_is_a_no_op() {
+        let manager = manager(AutonomyLevel::Supervised, &["shell"], &[]);
+        assert!(!manager.has_store());
+        assert!(
+            manager
+                .redeem_one_shot("run-1", "shell", &json!({"command": "ls"}))
+                .is_ok(),
+            "no store must mean no new refusals"
+        );
+    }
+
+    /// The gate's grant-then-redeem round trip: it succeeds for the call that
+    /// was approved.
+    #[test]
+    fn a_grant_redeems_for_the_call_it_was_issued_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = with_store(
+            manager(AutonomyLevel::Supervised, &["shell"], &[]),
+            dir.path(),
+        );
+        let args = json!({"command": "ls"});
+
+        manager.grant_one_shot("run-1", "shell", &args, "owner", "cli");
+        assert!(manager.redeem_one_shot("run-1", "shell", &args).is_ok());
+    }
+
+    /// The point of the round trip. If the arguments change between the
+    /// approval and the execution, the approval does not cover the call —
+    /// an approved `ls` must not become an approved `rm -rf /`.
+    #[test]
+    fn a_grant_does_not_redeem_for_mutated_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = with_store(
+            manager(AutonomyLevel::Supervised, &["shell"], &[]),
+            dir.path(),
+        );
+
+        manager.grant_one_shot("run-1", "shell", &json!({"command": "ls"}), "owner", "cli");
+
+        assert_eq!(
+            manager.redeem_one_shot("run-1", "shell", &json!({"command": "rm -rf /"})),
+            Err(super::store::RedeemFailure::NoGrant),
+            "an approval must not carry over to different arguments"
+        );
+    }
+
+    /// One approval, one execution. A second identical call in the same run
+    /// needs its own approval rather than riding the first.
+    #[test]
+    fn a_grant_does_not_cover_a_repeat_of_the_same_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = with_store(
+            manager(AutonomyLevel::Supervised, &["shell"], &[]),
+            dir.path(),
+        );
+        let args = json!({"command": "ls"});
+
+        manager.grant_one_shot("run-1", "shell", &args, "owner", "cli");
+        assert!(manager.redeem_one_shot("run-1", "shell", &args).is_ok());
+        assert_eq!(
+            manager.redeem_one_shot("run-1", "shell", &args),
+            Err(super::store::RedeemFailure::AlreadyConsumed)
+        );
+    }
+
+    /// An unattended auto-approval reaches the durable trail even though no
+    /// human ever saw it. This is the row that answers "who approved the
+    /// 03:00 call" with "nobody, and here is the proof".
+    #[test]
+    fn an_unattended_decision_reaches_the_durable_trail() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = with_store(unattended(AutonomyLevel::Full, &[], &[]), dir.path());
+
+        manager.record_audit(
+            "run-1",
+            Some("trader"),
+            "shell",
+            &json!({"command": "ls"}),
+            super::store::AuditDecision::NotRequired,
+            None,
+            Some("cron"),
+        );
+
+        let store = super::store::ApprovalStore::open(dir.path(), "boot-2").unwrap();
+        let rows = store.audit_for_run("run-1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].2, "not_required");
+    }
+
+    /// A prior "Always" answer must not survive into an unattended run for a
+    /// tool the profile marks `always_ask`.
+    #[test]
+    fn unattended_session_allowlist_cannot_unlock_an_always_ask_tool() {
+        let manager = unattended(AutonomyLevel::Full, &["shell"], &["shell"]);
+        manager.record_decision(
+            "shell",
+            &json!({"command": "rm -rf /"}),
+            &ApprovalResponse::Always,
+            "test",
+        );
+
+        assert_eq!(
+            manager.approval_requirement("shell"),
+            ApprovalRequirement::Prompt
+        );
+    }
 }
 
 // ── CLI prompt ───────────────────────────────────────────────────
 
-/// Display the approval prompt and read user input from stdin.
+/// Display the approval prompt and read user input from the controlling
+/// terminal when available, falling back to stdin otherwise.
 fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
     let summary = summarize_args(&request.arguments);
     eprintln!();
@@ -275,12 +701,14 @@ fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
     eprint!("   [Y]es / [N]o / [A]lways for {}: ", request.tool_name);
     let _ = io::stderr().flush();
 
-    let stdin = io::stdin();
-    let mut line = String::new();
-    if stdin.lock().read_line(&mut line).is_err() {
+    let Ok(line) = read_cli_approval_line() else {
         return ApprovalResponse::No;
-    }
+    };
 
+    parse_cli_approval_response(&line)
+}
+
+fn parse_cli_approval_response(line: &str) -> ApprovalResponse {
     match line.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => ApprovalResponse::Yes,
         "a" | "always" => ApprovalResponse::Always,
@@ -288,14 +716,46 @@ fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
     }
 }
 
-/// Produce a short human-readable summary of tool arguments. Argument keys
-/// whose names suggest a credential get their value replaced with
-/// `[redacted]` before truncation, so summaries that cross security
-/// boundaries (e.g. the gateway WebSocket `approval_request` frame) cannot
-/// leak secret-bearing fields. Operators MUST treat the summary as
-/// best-effort: a tool that names its credential field something other than
-/// the patterns below still surfaces. The tool author's typed config and
-/// `#[secret]` annotations are the long-term truth source.
+#[cfg(unix)]
+fn read_cli_approval_line() -> io::Result<String> {
+    read_cli_approval_line_with(
+        || std::fs::File::open("/dev/tty").map(BufReader::new),
+        read_stdin_approval_line,
+    )
+}
+
+#[cfg(unix)]
+fn read_cli_approval_line_with<Tty, OpenTty, ReadStdin>(
+    open_tty: OpenTty,
+    read_stdin: ReadStdin,
+) -> io::Result<String>
+where
+    Tty: BufRead,
+    OpenTty: FnOnce() -> io::Result<Tty>,
+    ReadStdin: FnOnce() -> io::Result<String>,
+{
+    match open_tty() {
+        Ok(tty) => read_approval_line_from(tty),
+        Err(_) => read_stdin(),
+    }
+}
+
+#[cfg(not(unix))]
+fn read_cli_approval_line() -> io::Result<String> {
+    read_stdin_approval_line()
+}
+
+fn read_stdin_approval_line() -> io::Result<String> {
+    let stdin = io::stdin();
+    read_approval_line_from(stdin.lock())
+}
+
+fn read_approval_line_from<R: BufRead>(mut reader: R) -> io::Result<String> {
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    Ok(line)
+}
+
 pub fn summarize_args(args: &serde_json::Value) -> String {
     match args {
         serde_json::Value::Object(map) => {
@@ -418,6 +878,85 @@ mod tests {
         }
     }
 
+    // ── CLI prompt input ────────────────────────────────────
+
+    #[test]
+    fn cli_approval_parser_accepts_yes_and_always() {
+        assert_eq!(parse_cli_approval_response("y\n"), ApprovalResponse::Yes);
+        assert_eq!(parse_cli_approval_response("YES\n"), ApprovalResponse::Yes);
+        assert_eq!(
+            parse_cli_approval_response(" always \n"),
+            ApprovalResponse::Always
+        );
+        assert_eq!(
+            parse_cli_approval_response("A\r\n"),
+            ApprovalResponse::Always
+        );
+    }
+
+    #[test]
+    fn cli_approval_parser_denies_empty_eof_and_unknown_input() {
+        assert_eq!(parse_cli_approval_response(""), ApprovalResponse::No);
+        assert_eq!(parse_cli_approval_response("\n"), ApprovalResponse::No);
+        assert_eq!(parse_cli_approval_response("maybe\n"), ApprovalResponse::No);
+        assert_eq!(parse_cli_approval_response("[Y]\n"), ApprovalResponse::No);
+    }
+
+    #[test]
+    fn approval_line_reader_preserves_existing_stdin_eof_semantics() {
+        let line = read_approval_line_from(std::io::Cursor::new("yes\n")).unwrap();
+        assert_eq!(line, "yes\n");
+
+        let eof = read_approval_line_from(std::io::Cursor::new(Vec::<u8>::new())).unwrap();
+        assert_eq!(eof, "");
+        assert_eq!(parse_cli_approval_response(&eof), ApprovalResponse::No);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_approval_reader_prefers_tty_over_stdin_eof() {
+        let line =
+            read_cli_approval_line_with(|| Ok(std::io::Cursor::new("yes\n")), || Ok(String::new()))
+                .unwrap();
+
+        assert_eq!(line, "yes\n");
+        assert_eq!(parse_cli_approval_response(&line), ApprovalResponse::Yes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_approval_reader_falls_back_to_stdin_when_tty_unavailable() {
+        let line = read_cli_approval_line_with(
+            || -> io::Result<std::io::Cursor<&'static str>> {
+                Err(io::Error::new(io::ErrorKind::NotFound, "no tty"))
+            },
+            || Ok("always\n".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(line, "always\n");
+        assert_eq!(parse_cli_approval_response(&line), ApprovalResponse::Always);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_approval_reader_tty_read_error_fails_without_stdin_fallback() {
+        struct FailingReader;
+
+        impl std::io::Read for FailingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "tty read"))
+            }
+        }
+
+        let result = read_cli_approval_line_with(
+            || Ok(std::io::BufReader::new(FailingReader)),
+            || panic!("stdin fallback should not run after tty read errors"),
+        );
+
+        assert!(result.is_err());
+    }
+
     // ── needs_approval ───────────────────────────────────────
 
     #[test]
@@ -441,7 +980,8 @@ mod tests {
     }
 
     #[test]
-    fn full_autonomy_never_prompts() {
+    fn full_autonomy_never_prompts_without_always_ask() {
+        // full_config() has empty always_ask; Full auto-approves those tools.
         let mgr = ApprovalManager::from_risk_profile(&full_config());
         assert!(!mgr.needs_approval("shell"));
         assert!(!mgr.needs_approval("file_write"));
@@ -648,9 +1188,9 @@ mod tests {
     }
 
     #[test]
-    fn non_interactive_full_autonomy_never_needs_approval() {
+    fn non_interactive_full_autonomy_never_needs_approval_without_always_ask() {
         let mgr = ApprovalManager::for_non_interactive(&full_config());
-        // Full autonomy means no approval needed, even in non-interactive mode.
+        // Empty always_ask: Full means no approval needed, even non-interactive.
         assert!(!mgr.needs_approval("shell"));
         assert!(!mgr.needs_approval("file_write"));
         assert!(!mgr.needs_approval("anything"));
@@ -726,7 +1266,7 @@ mod tests {
         assert_eq!(parsed.tool_name, "shell");
     }
 
-    // ── Regression: #4247 default approved tools in channels ──
+    // ──default approved tools in channels ──
 
     #[test]
     fn non_interactive_allows_default_auto_approve_tools() {

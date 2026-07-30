@@ -5,14 +5,10 @@ use super::context::TurnCtx;
 use super::events::StreamDelta;
 use super::redact::scrub_credentials;
 use crate::agent::tool_execution::ToolExecutionOutcome;
+use crate::approval::store::AuditDecision;
 use crate::approval::{ApprovalRequest, ApprovalRequirement, ApprovalResponse};
 use std::time::Duration;
 
-/// Outcome of [`gate_tool_approval`] for one tool call.
-///
-/// `Deny`/`Replace` carry the synthesized [`ToolExecutionOutcome`] the caller
-/// records into its `ordered_results` slot before skipping execution;
-/// `Proceed::approved` feeds `set_runtime_approved_arg`.
 pub(crate) enum ApprovalGateOutcome {
     Proceed { approved: bool },
     Deny(ToolExecutionOutcome),
@@ -33,6 +29,27 @@ pub(crate) async fn gate_tool_approval(
         .approval
         .map(|mgr| mgr.approval_requirement(tool_name))
         .unwrap_or(ApprovalRequirement::NotRequired);
+
+    // Outcomes that never reach a human still belong on the durable trail:
+    // "nobody was asked, at 03:00" is the row an investigation needs most.
+    if let Some(mgr) = ctx.approval
+        && approval_requirement != ApprovalRequirement::Prompt
+    {
+        let decision = match approval_requirement {
+            ApprovalRequirement::Approved => AuditDecision::AutoApproved,
+            _ => AuditDecision::NotRequired,
+        };
+        mgr.record_audit(
+            ctx.turn_id,
+            ctx.agent_alias,
+            tool_name,
+            tool_args,
+            decision,
+            None,
+            Some(ctx.channel_name),
+        );
+    }
+
     if let Some(mgr) = ctx.approval
         && approval_requirement == ApprovalRequirement::Prompt
     {
@@ -45,25 +62,26 @@ pub(crate) async fn gate_tool_approval(
         // Non-interactive (channels): try the channel's inline
         // approval (e.g. Telegram inline keyboard) before falling
         // back to auto-deny.
-        let decision = if mgr.is_non_interactive() {
-            let channel_decision = if let Some(ch) = ctx.channel {
+        let (decision, decided_by) = if mgr.is_non_interactive() {
+            let attributed = if let Some(ch) = ctx.channel {
                 let ch_request = zeroclaw_api::channel::ChannelApprovalRequest {
                     tool_name: request.tool_name.clone(),
                     arguments_summary: crate::approval::summarize_args(&request.arguments),
                     raw_arguments: Some(request.arguments.clone()),
                 };
                 let recipient = ctx.channel_reply_target.unwrap_or_default();
-                match ch.request_approval(recipient, &ch_request).await {
-                    Ok(Some(r)) => Some(r),
+                match ch.request_approval_attributed(recipient, &ch_request).await {
+                    Ok(Some(a)) => Some(a),
                     Ok(None) => None,
                     Err(e) => {
                         ::zeroclaw_log::record!(
                             WARN,
                             ::zeroclaw_log::Event::new(
                                 module_path!(),
-                                ::zeroclaw_log::Action::Note
+                                ::zeroclaw_log::Action::Fail
                             )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_category(::zeroclaw_log::EventCategory::Tool)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
                             .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
                             "Channel approval request failed"
                         );
@@ -73,7 +91,11 @@ pub(crate) async fn gate_tool_approval(
             } else {
                 None
             };
-            match channel_decision {
+            // The deciding back-channel (when a fan-out bridge answered) rides
+            // back on the response itself, so attribution can't be cross-wired
+            // by a concurrent approval on the same channel instance.
+            let decided_by = attributed.as_ref().and_then(|a| a.decided_by.clone());
+            let decision = match attributed.map(|a| a.response) {
                 Some(zeroclaw_api::channel::ChannelApprovalResponse::Approve) => {
                     ApprovalResponse::Yes
                 }
@@ -86,28 +108,39 @@ pub(crate) async fn gate_tool_approval(
                 }) => ApprovalResponse::ReplaceWith(replacement),
                 // Channel doesn't support approval — auto-deny.
                 None => ApprovalResponse::No,
-            }
+            };
+            (decision, decided_by)
         } else {
-            mgr.prompt_cli(&request)
+            (mgr.prompt_cli(&request), None)
         };
 
-        // The approval audit records which surface decided. On the streaming
-        // path `ctx.channel` is the approval bridge fanning out to several
-        // registered back-channels, and `ctx.channel_name` is the loop's
-        // static "cli"; prefer the back-channel that actually answered so a
-        // WS/ACP approval is attributed to WS/ACP, not "cli". Single channels
-        // and the CLI prompt path report `None` and keep `channel_name`.
-        let decision_channel = ctx
-            .channel
-            .and_then(|ch| ch.last_decision_channel())
-            .unwrap_or_else(|| ctx.channel_name.to_string());
+        let decision_channel = decided_by.unwrap_or_else(|| ctx.channel_name.to_string());
         mgr.record_decision(tool_name, tool_args, &decision, &decision_channel);
+
+        // The durable counterpart of `record_decision`, which only writes to
+        // an in-memory Vec. A denial is evidence too, so it lands here before
+        // the early return below.
+        let audited = match &decision {
+            ApprovalResponse::Yes | ApprovalResponse::Always => AuditDecision::Granted,
+            ApprovalResponse::No => AuditDecision::Denied,
+            ApprovalResponse::ReplaceWith(_) => AuditDecision::Denied,
+        };
+        mgr.record_audit(
+            ctx.turn_id,
+            ctx.agent_alias,
+            tool_name,
+            tool_args,
+            audited,
+            Some(&decision_channel),
+            Some(ctx.channel_name),
+        );
 
         if decision == ApprovalResponse::No {
             let denied = "Denied by user.".to_string();
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_category(::zeroclaw_log::EventCategory::Tool)
                     .with_outcome(::zeroclaw_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({
                         "model": ctx.model,
@@ -133,6 +166,7 @@ pub(crate) async fn gate_tool_approval(
                 error_reason: Some(denied),
                 duration: Duration::ZERO,
                 receipt: None,
+                output_data: None,
             });
         }
 
@@ -147,7 +181,8 @@ pub(crate) async fn gate_tool_approval(
             }
             ::zeroclaw_log::record!(
                 INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Approve)
+                    .with_category(::zeroclaw_log::EventCategory::Tool)
                     .with_outcome(::zeroclaw_log::EventOutcome::Success)
                     .with_attrs(::serde_json::json!({
                         "model": ctx.model,
@@ -166,10 +201,62 @@ pub(crate) async fn gate_tool_approval(
                 error_reason: None,
                 duration: Duration::ZERO,
                 receipt: None,
+                output_data: None,
             });
         }
 
         if matches!(decision, ApprovalResponse::Yes | ApprovalResponse::Always) {
+            // Mint a grant bound to this run, this tool, and this exact
+            // argument set, then consume it right here. The round trip is the
+            // check: it proves the call about to execute is the call that was
+            // shown to the approver. Without it, "approved" is a boolean that
+            // has already forgotten what it was approving.
+            mgr.grant_one_shot(
+                ctx.turn_id,
+                tool_name,
+                tool_args,
+                &decision_channel,
+                ctx.channel_name,
+            );
+
+            if let Err(failure) = mgr.redeem_one_shot(ctx.turn_id, tool_name, tool_args) {
+                let reason = format!(
+                    "Approval could not be redeemed for this call ({failure:?}); refusing to \
+                     execute on an approval that does not match it."
+                );
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_category(::zeroclaw_log::EventCategory::Tool)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "model": ctx.model,
+                            "iteration": iteration + 1,
+                            "tool": tool_name,
+                            "failure": format!("{failure:?}"),
+                            "trace_id": ctx.turn_id,
+                        })),
+                    "approval_grant_not_redeemable"
+                );
+                mgr.record_audit(
+                    ctx.turn_id,
+                    ctx.agent_alias,
+                    tool_name,
+                    tool_args,
+                    AuditDecision::Blocked,
+                    Some(&decision_channel),
+                    Some(ctx.channel_name),
+                );
+                return ApprovalGateOutcome::Deny(ToolExecutionOutcome {
+                    output: reason.clone(),
+                    success: false,
+                    error_reason: Some(reason),
+                    duration: Duration::ZERO,
+                    receipt: None,
+                    output_data: None,
+                });
+            }
+
             approval_requirement = ApprovalRequirement::Approved;
         }
     }

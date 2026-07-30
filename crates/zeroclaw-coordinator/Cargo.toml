@@ -1,0 +1,43 @@
+[package]
+name = "zeroclaw-coordinator"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# NOT `license.workspace = true`. The workspace is "MIT OR Apache-2.0"; this
+# crate contains code derived from grok-build (Apache-2.0), which cannot be
+# offered under the MIT arm. Inheriting the workspace license would silently
+# relicense that code. See LICENSE and NOTICE in this directory.
+license = "Apache-2.0"
+
+description = "Single-writer subagent lifecycle coordinator. Derived from grok-build (Apache-2.0)."
+
+[dependencies]
+# Taken deliberately, in the wiring phase, not by accident: `zeroclaw-api`
+# supplies `AnnouncedOutcome`, which `ChildOutcome` converts into one-for-one,
+# and `zeroclaw-log` is this workspace's logging vocabulary. Adding plain
+# `tracing` instead would have been a second vocabulary for one meaning — the
+# same thing the outcome enum exists to avoid.
+zeroclaw-api.workspace = true
+zeroclaw-log.workspace = true
+
+# Versions are spelled out per-crate here, matching every other crate in this
+# workspace — the root `[workspace.dependencies]` table carries only the
+# zeroclaw-* path deps, not third-party ones.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+tokio = { version = "1.50", default-features = false, features = [
+  "sync",
+  "time",
+  "rt",
+  "macros",
+] }
+tokio-util = { version = "0.7", default-features = false }
+# For `Event::with_attrs`, so log events carry structured fields rather than
+# values interpolated into a message string. Already in the tree transitively
+# via zeroclaw-log; declared here because reaching through that crate's
+# `__private` re-export is explicitly forbidden by its own doc.
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "test-util", "time", "sync"] }

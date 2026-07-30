@@ -1,12 +1,6 @@
-//! Typed slash-command option model (contract tier): the option shapes that
-//! flow from a skill's `[[skill.slash_options]]` manifest declaration into the
-//! Discord application-command registration body. Pure data plus the trivial
-//! serialization to Discord's option JSON — no IO, no runtime types. Imported
-//! by `types` (the command spec carries a `Vec<OptionSpec>`) and by `slash`
-//! (which maps skill declarations into these and builds the registration body);
-//! imports no sibling impl module, so the contract layer stays acyclic.
-
 use serde_json::{Map, Value, json};
+
+pub(crate) const DISCORD_MAX_STATIC_CHOICES: usize = 25;
 
 /// A Discord application-command option type this channel supports. The wire
 /// integer is Discord's `ApplicationCommandOptionType`. (Sub-commands/groups —
@@ -24,6 +18,23 @@ pub enum OptKind {
 }
 
 impl OptKind {
+    /// The Discord wire projection of a canonical [`SlashOptionKind`]. Exhaustive
+    /// so a new canonical variant forces a wire mapping here rather than silently
+    /// dropping.
+    pub fn from_kind(kind: zeroclaw_runtime::skills::SlashOptionKind) -> Self {
+        use zeroclaw_runtime::skills::SlashOptionKind as K;
+        match kind {
+            K::String => Self::String,
+            K::Integer => Self::Integer,
+            K::Number => Self::Number,
+            K::Boolean => Self::Boolean,
+            K::User => Self::User,
+            K::Channel => Self::Channel,
+            K::Role => Self::Role,
+            K::Mentionable => Self::Mentionable,
+        }
+    }
+
     /// Parse a skill-manifest `type` string. Unknown values return `None` (the
     /// channel drops the option with a WARN rather than registering a bad type).
     pub fn from_manifest(kind: &str) -> Option<Self> {
@@ -74,6 +85,10 @@ pub struct Choice {
 pub struct OptionSpec {
     pub name: String,
     pub description: String,
+    /// Discord-locale-keyed translations of `description` (from the skill
+    /// manifest, filtered to supported locale codes). Empty → no
+    /// `description_localizations` key is registered for this option.
+    pub description_localizations: std::collections::BTreeMap<String, String>,
     pub kind: OptKind,
     pub required: bool,
     pub choices: Vec<Choice>,
@@ -84,16 +99,48 @@ pub struct OptionSpec {
 }
 
 impl OptionSpec {
+    pub(crate) fn serves_autocomplete(&self) -> bool {
+        self.kind.is_scalar() && self.choices.len() > DISCORD_MAX_STATIC_CHOICES
+    }
+
+    pub(crate) fn matching_choices(&self, partial: &str) -> Vec<(String, String)> {
+        if !self.serves_autocomplete() {
+            return Vec::new();
+        }
+        let needle = partial.trim().to_ascii_lowercase();
+        self.choices
+            .iter()
+            .filter(|c| {
+                needle.is_empty()
+                    || c.name.to_ascii_lowercase().contains(&needle)
+                    || c.value.to_ascii_lowercase().contains(&needle)
+            })
+            .take(DISCORD_MAX_STATIC_CHOICES)
+            .map(|c| (c.name.clone(), c.value.clone()))
+            .collect()
+    }
+
     /// Serialize to a Discord application-command option object. Choices and
     /// bounds are emitted only for the kinds Discord accepts them on.
     pub fn to_registration_json(&self) -> Value {
         let mut obj = Map::new();
         obj.insert("name".to_string(), json!(self.name));
         obj.insert("description".to_string(), json!(self.description));
+        if !self.description_localizations.is_empty() {
+            obj.insert(
+                "description_localizations".to_string(),
+                json!(self.description_localizations),
+            );
+        }
         obj.insert("type".to_string(), json!(self.kind.wire_type()));
         obj.insert("required".to_string(), json!(self.required));
 
-        if self.kind.is_scalar() && !self.choices.is_empty() {
+        if self.serves_autocomplete() {
+            // Over Discord's static-choice cap: flag autocomplete and serve the
+            // choices through the type-4 arm. Discord rejects a static `choices`
+            // array alongside `autocomplete: true`, so it is intentionally omitted.
+            obj.insert("autocomplete".to_string(), json!(true));
+        } else if self.kind.is_scalar() && !self.choices.is_empty() {
             let choices: Vec<Value> = self
                 .choices
                 .iter()
@@ -148,15 +195,6 @@ fn number_value(v: f64, kind: OptKind) -> Value {
     }
 }
 
-/// Extract the values a user submitted for a slash command's options out of an
-/// INTERACTION_CREATE payload's `data.options[]`, as `(name, display)` pairs in
-/// the order Discord sent them. The value is stringified by JSON kind (string
-/// as-is; number/bool to text) for folding into the synthesized agent prompt.
-/// This generalises the single-`input` extractor for typed commands.
-///
-/// Limitation: user/channel/role/mentionable options yield the raw snowflake id
-/// (Discord puts the resolved entity in `data.resolved`, which is not consulted
-/// here) — resolving ids to display names/mentions is a follow-on.
 pub fn extract_submitted_options(data: &Value) -> Vec<(String, String)> {
     data.get("data")
         .and_then(|d| d.get("options"))
@@ -171,6 +209,22 @@ pub fn extract_submitted_options(data: &Value) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+pub(crate) fn extract_focused_option(data: &Value) -> Option<(String, String, String)> {
+    let d = data.get("data")?;
+    let command = d.get("name")?.as_str()?.to_string();
+    let focused = d
+        .get("options")
+        .and_then(|o| o.as_array())?
+        .iter()
+        .find(|o| o.get("focused").and_then(Value::as_bool).unwrap_or(false))?;
+    let option_name = focused.get("name")?.as_str()?.to_string();
+    let partial = focused
+        .get("value")
+        .map(stringify_value)
+        .unwrap_or_default();
+    Some((command, option_name, partial))
 }
 
 fn stringify_value(v: &Value) -> String {
@@ -190,6 +244,7 @@ mod tests {
         OptionSpec {
             name: name.to_string(),
             description: format!("{name} option"),
+            description_localizations: Default::default(),
             kind,
             required,
             choices: Vec::new(),
@@ -305,5 +360,151 @@ mod tests {
     fn extract_submitted_is_empty_when_no_options() {
         assert!(extract_submitted_options(&json!({ "data": { "name": "x" } })).is_empty());
         assert!(extract_submitted_options(&json!({})).is_empty());
+    }
+
+    fn opt_with_choices(name: &str, kind: OptKind, n: usize) -> OptionSpec {
+        let mut o = opt(name, kind, false);
+        o.choices = (0..n)
+            .map(|i| Choice {
+                name: format!("choice-{i:02}"),
+                value: format!("v{i:02}"),
+            })
+            .collect();
+        o
+    }
+
+    #[test]
+    fn serves_autocomplete_only_for_scalars_over_the_static_cap() {
+        // ≤ 25 stays static (Discord renders it natively).
+        assert!(
+            !opt_with_choices("a", OptKind::String, DISCORD_MAX_STATIC_CHOICES)
+                .serves_autocomplete()
+        );
+        // > 25 must be autocomplete (a static list that big would 400).
+        assert!(
+            opt_with_choices("a", OptKind::String, DISCORD_MAX_STATIC_CHOICES + 1)
+                .serves_autocomplete()
+        );
+        assert!(opt_with_choices("a", OptKind::Integer, 30).serves_autocomplete());
+        // Non-scalar kinds never carry choices / autocomplete.
+        assert!(!opt_with_choices("a", OptKind::User, 30).serves_autocomplete());
+        // No choices → nothing to serve.
+        assert!(!opt("a", OptKind::String, false).serves_autocomplete());
+    }
+
+    #[test]
+    fn registration_flags_autocomplete_and_omits_static_choices_over_cap() {
+        let big = opt_with_choices("sort", OptKind::String, 40);
+        let j = big.to_registration_json();
+        assert_eq!(j["autocomplete"], json!(true));
+        assert!(
+            j.get("choices").is_none(),
+            "static choices omitted when autocomplete"
+        );
+
+        // A small list keeps the static `choices` array and no autocomplete flag.
+        let small = opt_with_choices("sort", OptKind::String, 5);
+        let j = small.to_registration_json();
+        assert!(j.get("autocomplete").is_none());
+        assert_eq!(j["choices"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn matching_choices_filters_by_partial_substring_case_insensitively() {
+        let o = opt_with_choices("sort", OptKind::String, 40);
+        // "choice-07" matches name; "v07" matches value — substring, any case.
+        let m = o.matching_choices("CHOICE-07");
+        assert_eq!(m, vec![("choice-07".to_string(), "v07".to_string())]);
+        let m = o.matching_choices("v07");
+        assert_eq!(m, vec![("choice-07".to_string(), "v07".to_string())]);
+    }
+
+    #[test]
+    fn matching_choices_caps_at_25_and_empty_partial_returns_first_cap() {
+        let o = opt_with_choices("sort", OptKind::String, 40);
+        let m = o.matching_choices("");
+        assert_eq!(
+            m.len(),
+            DISCORD_MAX_STATIC_CHOICES,
+            "empty partial → first cap"
+        );
+        // "choice-" matches all 40 but the answer is capped to 25.
+        let m = o.matching_choices("choice-");
+        assert_eq!(m.len(), DISCORD_MAX_STATIC_CHOICES);
+    }
+
+    #[test]
+    fn matching_choices_is_empty_for_no_match_and_for_non_autocomplete_options() {
+        let big = opt_with_choices("sort", OptKind::String, 40);
+        assert!(
+            big.matching_choices("zzz-nope").is_empty(),
+            "no substring match → empty"
+        );
+        // A small static list is not served via autocomplete at all.
+        let small = opt_with_choices("sort", OptKind::String, 5);
+        assert!(small.matching_choices("choice").is_empty());
+        // No choices.
+        assert!(
+            opt("q", OptKind::String, false)
+                .matching_choices("a")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn extract_focused_option_reads_command_option_and_partial() {
+        let payload = json!({
+            "type": 4,
+            "data": {
+                "name": "search",
+                "options": [
+                    { "name": "scope", "type": 3, "value": "repo" },
+                    { "name": "query", "type": 3, "value": "rus", "focused": true }
+                ]
+            }
+        });
+        assert_eq!(
+            extract_focused_option(&payload),
+            Some(("search".to_string(), "query".to_string(), "rus".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_focused_option_handles_numeric_partial_and_none() {
+        // A focused integer option carries a numeric value → stringified.
+        let numeric = json!({
+            "data": { "name": "c", "options": [ { "name": "limit", "type": 4, "value": 12, "focused": true } ] }
+        });
+        assert_eq!(
+            extract_focused_option(&numeric),
+            Some(("c".to_string(), "limit".to_string(), "12".to_string()))
+        );
+        // No option marked focused → None.
+        let unfocused = json!({
+            "data": { "name": "c", "options": [ { "name": "limit", "type": 4, "value": 12 } ] }
+        });
+        assert!(extract_focused_option(&unfocused).is_none());
+        // Missing command name → None.
+        assert!(extract_focused_option(&json!({ "data": {} })).is_none());
+    }
+
+    #[test]
+    fn from_kind_projects_every_canonical_variant_to_matching_wire_type() {
+        use zeroclaw_runtime::skills::SlashOptionKind as K;
+        for kind in K::ALL {
+            let projected = OptKind::from_kind(kind);
+            assert_eq!(
+                OptKind::from_manifest(kind.manifest_name()),
+                Some(projected),
+                "manifest token {:?} must parse back to the projected wire kind",
+                kind.manifest_name(),
+            );
+            assert_eq!(
+                projected.is_scalar(),
+                kind.supports_choices(),
+                "choice capability disagreement for {:?}",
+                kind.manifest_name(),
+            );
+        }
     }
 }

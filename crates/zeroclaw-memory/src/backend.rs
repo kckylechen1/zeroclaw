@@ -6,6 +6,8 @@ pub enum MemoryBackendKind {
     Qdrant,
     Markdown,
     None,
+    #[cfg(feature = "tachi")]
+    Tachi,
     Unknown,
 }
 
@@ -74,6 +76,16 @@ const NONE_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
     optional_dependency: false,
 };
 
+#[cfg(feature = "tachi")]
+const TACHI_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
+    key: "tachi",
+    label: "Tachi / memcore — hybrid FTS+vector recall with tier lifecycle",
+    auto_save_default: true,
+    uses_sqlite_hygiene: false,
+    sqlite_based: false,
+    optional_dependency: true,
+};
+
 const CUSTOM_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
     key: "custom",
     label: "Custom backend — extension point",
@@ -107,6 +119,8 @@ pub fn classify_memory_backend(backend: &str) -> MemoryBackendKind {
         "qdrant" => MemoryBackendKind::Qdrant,
         "markdown" => MemoryBackendKind::Markdown,
         "none" => MemoryBackendKind::None,
+        #[cfg(feature = "tachi")]
+        "tachi" => MemoryBackendKind::Tachi,
         _ => MemoryBackendKind::Unknown,
     }
 }
@@ -119,6 +133,8 @@ pub fn memory_backend_profile(backend: &str) -> MemoryBackendProfile {
         MemoryBackendKind::Qdrant => QDRANT_PROFILE,
         MemoryBackendKind::Markdown => MARKDOWN_PROFILE,
         MemoryBackendKind::None => NONE_PROFILE,
+        #[cfg(feature = "tachi")]
+        MemoryBackendKind::Tachi => TACHI_PROFILE,
         MemoryBackendKind::Unknown => CUSTOM_PROFILE,
     }
 }
@@ -181,5 +197,38 @@ mod tests {
         assert_eq!(profile.key, "custom");
         assert!(profile.auto_save_default);
         assert!(!profile.uses_sqlite_hygiene);
+    }
+
+    #[test]
+    fn classify_recognizes_qdrant_even_though_it_is_not_selectable() {
+        // Qdrant is a known backend kind but is omitted from the onboarding
+        // list, so it was missing from the classify coverage above.
+        assert_eq!(classify_memory_backend("qdrant"), MemoryBackendKind::Qdrant);
+        assert!(
+            !selectable_memory_backends()
+                .iter()
+                .any(|b| b.key == "qdrant"),
+            "qdrant is configurable but not an onboarding option"
+        );
+    }
+
+    #[test]
+    fn each_known_backend_profile_carries_a_matching_key() {
+        for name in ["sqlite", "lucid", "postgres", "qdrant", "markdown", "none"] {
+            assert_eq!(
+                memory_backend_profile(name).key,
+                name,
+                "profile for {name} should carry a matching key"
+            );
+        }
+    }
+
+    #[test]
+    fn default_backend_key_is_sqlite_and_listed_first() {
+        assert_eq!(default_memory_backend_key(), "sqlite");
+        assert_eq!(
+            selectable_memory_backends()[0].key,
+            default_memory_backend_key()
+        );
     }
 }

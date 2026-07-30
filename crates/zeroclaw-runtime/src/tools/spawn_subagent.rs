@@ -2,8 +2,6 @@
 //! parent's identity, security policy, and memory allowlist, runs a
 //! focused prompt, and returns the response. Cron's `JobType::Agent`
 //! dispatch is the other SubAgent spawn site; both funnel through
-//! [`crate::subagent::SubAgentSpawn`] so permission inheritance,
-//! tracing-span shape, and audit attribution stay uniform.
 
 use crate::agent::loop_::AgentRunOverrides;
 use crate::security::SecurityPolicy;
@@ -13,27 +11,53 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::Arc;
-use zeroclaw_api::tool::{Tool, ToolResult};
+use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::schema::Config;
+use zeroclaw_coordinator::{
+    CancelToken, ChildOverrides, ChildRequest, CommandSender, CoordinatorCommand, SpawnAdmission,
+    SpawnCommand, spawn_admission_timeout,
+};
 use zeroclaw_log::scope;
+
+/// Test seam for [`coordinator_commands`]: a per-test `CommandSender`, so a
+/// background-spawn test can drive a real, locally-booted coordinator
+/// (`control_plane::coordinator_host::start` against a throwaway
+/// `ControlPlaneHandle`, the same way that module's own tests do) without
+/// going through `control_plane::global`'s process-wide `OnceLock` — which
+/// cannot be uninstalled between tests and would leak into every other test
+/// in this binary (see that module's doc, and
+/// `agent::loop_::CHILD_ANNOUNCEMENT_STORE_TEST_HOOK` for the same pattern
+/// used for the same reason).
+#[cfg(test)]
+static COMMAND_SENDER_TEST_HOOK: std::sync::Mutex<Option<CommandSender>> =
+    std::sync::Mutex::new(None);
+
+/// Where the background path gets the live coordinator's command channel.
+///
+/// Production always reads the process-global control-plane
+/// (`crate::control_plane::control_plane()`); tests may inject a per-test
+/// sender through [`COMMAND_SENDER_TEST_HOOK`] instead. `None` either way
+/// means "no coordinator is running in this process" — the caller's job is
+/// to refuse a background spawn on that, not to guess.
+fn coordinator_commands() -> Option<CommandSender> {
+    #[cfg(test)]
+    {
+        if let Some(hooked) = COMMAND_SENDER_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return Some(hooked);
+        }
+    }
+    crate::control_plane::control_plane().and_then(|cp| cp.commands.clone())
+}
 
 /// Spawn an ephemeral SubAgent that inherits the parent agent's
 /// identity and runs a focused prompt under the same alias.
 pub struct SpawnSubagentTool {
     config: Arc<Config>,
     parent_alias: String,
-    /// The caller's live policy (the same `Arc` the agent loop and the
-    /// other acting tools share). Each launch attempt consumes one slot
-    /// from its action budget via `enforce_tool_operation(Act, ..)`,
-    /// mirroring `DelegateTool`, so the dedup exemption for re-entrant
-    /// agent tools cannot turn one model turn into unbounded child
-    /// agent starts.
-    ///
-    /// Also carries session-scoped policy fields — most importantly
-    /// `workspace_dir`, which IDE/ACP clients pin to the session cwd —
-    /// into the SubAgent context via `SubAgentSpawn::for_agent_with_policy`,
-    /// so child file/shell tools jail to the same boundary as the
-    /// parent rather than the per-agent install dir (issue #7263).
     security: Arc<SecurityPolicy>,
     /// `true` when this tool is registered inside a run that is itself
     /// a SubAgent. Triggers a depth-1 cap refusal in `execute` before
@@ -68,6 +92,194 @@ impl SpawnSubagentTool {
         self.is_subagent_caller = is_subagent_caller;
         self
     }
+
+    /// The detached path: hand the child to the coordinator and return
+    /// immediately, instead of driving `agent::run` in-turn.
+    ///
+    /// Every gate (depth-1 cap, card/risk-profile self-check, prompt
+    /// validation, the rate-limit budget) has already run in `execute`
+    /// before this is called — see the call site's comment.
+    async fn execute_background(&self, prompt: String) -> Result<ToolResult> {
+        let Some(commands) = coordinator_commands() else {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(
+                    "spawn_subagent: background=true requires a coordinator, and none is \
+                     running in this process (no daemon control-plane, or a control-plane \
+                     started without one — see `ControlPlaneHandle::commands`). Retry without \
+                     `background`, or run this under the daemon."
+                        .into(),
+                ),
+            });
+        };
+
+        let child_id = uuid::Uuid::new_v4().to_string();
+
+        // Identity convention (decided): `parent_alias` is this tool's own
+        // parent alias — a detached child is still this agent, not a
+        // different agent type (matches the synchronous path above, which
+        // spawns via `SubAgentSpawn::for_agent_with_policy(&self.config,
+        // &self.parent_alias, ...)`).
+        //
+        // `parent_session_id` MUST match the fallback `agent::run` adopts
+        // for an unscoped turn byte-for-byte
+        // (`agent::loop_::synthetic_session_key_for_run`,
+        // `format!("agent:{agent_alias}")`, `crates/zeroclaw-runtime/src/agent/loop_.rs`):
+        // that is the key `agent::loop_::claim_child_announcements_context`
+        // claims under at the start of the parent's *next* turn, and
+        // `SubagentPersistence::record_spawn`
+        // (`control_plane/subagent_persistence.rs`) files this row's
+        // `parent_id` under exactly what we put here. The fallback is the
+        // SAME function `run()` uses to establish its synthetic key — one
+        // copy, not two spellings that could drift; drift here does not
+        // fail loudly, it files the child under a name no turn ever asks
+        // about and the parent waits forever.
+        let parent_session_id = crate::agent::loop_::current_session_key().unwrap_or_else(|| {
+            crate::agent::loop_::synthetic_session_key_for_run(&self.parent_alias)
+        });
+
+        const MAX_DESCRIPTION_CHARS: usize = 200;
+        let description = if prompt.chars().count() > MAX_DESCRIPTION_CHARS {
+            let truncated: String = prompt.chars().take(MAX_DESCRIPTION_CHARS).collect();
+            format!("spawn_subagent (background): {truncated}…")
+        } else {
+            format!("spawn_subagent (background): {prompt}")
+        };
+
+        let request = ChildRequest {
+            child_id: child_id.clone(),
+            prompt,
+            description,
+            // Inherits the parent's own identity — same reasoning as
+            // `parent_session_id` above: this is the parent agent running
+            // unattended, not a different configured agent type.
+            agent_type: self.parent_alias.clone(),
+            parent_session_id,
+            parent_alias: self.parent_alias.clone(),
+            // `spawn_subagent.rs`'s synchronous path has no concept of "the
+            // control-plane task id of the turn currently running me" either
+            // (see the `parent_id: None` comment a few lines below in the
+            // synchronous body) — same gap, same answer.
+            parent_prompt_id: None,
+            resume_from: None,
+            cwd: None,
+            overrides: ChildOverrides::default(),
+            // Detached: `coordinator.rs::handle_spawn` sets
+            // `handle_only = request.run_in_background`, so this child never
+            // gets a foreground budget and its spawning turn never blocks on
+            // it — the defining line for what "Detached" means on this
+            // protocol.
+            run_in_background: true,
+            // The announce chain (`agent::loop_::claim_child_announcements_context`)
+            // is how the parent ever learns this child's outcome; suppressing
+            // completion surfacing here would make a detached child's ending
+            // unreachable by design.
+            surface_completion: true,
+            // Moot once `run_in_background` is true: `coordinator.rs::handle_spawn`
+            // only sets a `foreground_deadline` when
+            // `!request.run_in_background && !request.await_to_completion`,
+            // so this flag has no effect here. `false` for clarity.
+            await_to_completion: false,
+            fork_context: false,
+            cancel_token: CancelToken::new(),
+        };
+
+        let (admission_tx, admission_rx) = tokio::sync::oneshot::channel();
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        // `_result_rx` is deliberately never awaited, and that reasoning is
+        // unchanged: `coordinator.rs::finish_child` only ever answers this
+        // oneshot with the child's *terminal* `ChildResult` (`let sent =
+        // respond_to.send(output.result.clone())...`), sent whenever the child
+        // actually finishes, so awaiting it would block this call until the
+        // child's real ending — exactly the synchronous behaviour "background"
+        // is supposed to skip. Dropping it stays harmless: `finish_child`'s
+        // own delivered-bookkeeping (`if !handle_only { foreground_delivered =
+        // sent; ... }`) never consults whether anyone received that send while
+        // `handle_only` is true, which it is here from the moment this spawns.
+        //
+        // What that reasoning did NOT cover, and why `admission_rx` below is
+        // kept and awaited: a *refusal* also travelled down that same terminal
+        // channel, so dropping the receiver dropped the refusal too — the
+        // coordinator correctly declined to start a child and this tool told
+        // the model "started detached" anyway. Admission is now its own event
+        // (`SpawnAdmission`), answered inside the coordinator's own command arm
+        // the moment it decides, so awaiting it costs a scheduler round-trip
+        // and never waits for a child.
+        if let Err(error) = commands.0.send(CoordinatorCommand::Spawn(SpawnCommand {
+            request: Box::new(request),
+            admission_tx,
+            result_tx,
+        })) {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!(
+                    "spawn_subagent: background spawn failed — the coordinator actor is not \
+                     accepting commands (channel closed): {error}"
+                )),
+            });
+        }
+
+        // Bounded on purpose. An unbounded await here would hang the whole
+        // tool call behind a wedged actor; the timeout can only elapse if the
+        // coordinator never reached its decision, which is why the refusal
+        // below is worded as "unknown", not "not started".
+        match tokio::time::timeout(spawn_admission_timeout(), admission_rx).await {
+            Ok(Ok(SpawnAdmission::Admitted)) => {}
+            Ok(Ok(SpawnAdmission::Refused(refusal))) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "spawn_subagent: the coordinator refused to start this background \
+                         subagent — {refusal} No child was started (child_id={child_id} was \
+                         never admitted)."
+                    )),
+                });
+            }
+            // Sender dropped without an answer. Per `SpawnCommand::admission_tx`'s
+            // contract this reads as "not admitted / unknown" and never as
+            // "started" — the coordinator refuses even the spawns it finds
+            // queued at shutdown, so no live actor ever saw this one.
+            Ok(Err(_)) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "spawn_subagent: the coordinator dropped this background spawn without \
+                         deciding it (child_id={child_id}); it was not admitted and nothing is \
+                         known to be running."
+                    )),
+                });
+            }
+            Err(_) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "spawn_subagent: the coordinator did not answer this background spawn \
+                         within {timeout:?} (child_id={child_id}); it may or may not have been \
+                         admitted — query that id before retrying.",
+                        timeout = spawn_admission_timeout()
+                    )),
+                });
+            }
+        }
+
+        Ok(ToolResult {
+            success: true,
+            // `child_id=<id>` is a stable, parseable token (see this
+            // module's own tests) — everything after it is prose for the
+            // model, not for a caller trying to extract the id.
+            output: format!(
+                "subagent started detached (background), child_id={child_id}. It is running \
+                 unattended; its outcome will be announced in a future turn, not returned here."
+            )
+            .into(),
+            error: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -93,6 +305,10 @@ impl Tool for SpawnSubagentTool {
                 "prompt": {
                     "type": "string",
                     "description": "The task or question for the SubAgent. Be specific and self-contained — the SubAgent does not see this conversation's history."
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run the SubAgent detached instead of waiting for it in this turn. Requires a running coordinator (the daemon); returns immediately with the child's id, and its outcome is announced into a future turn rather than returned here. Defaults to false (wait for the SubAgent's response, as before)."
                 }
             },
             "required": ["prompt"]
@@ -107,7 +323,7 @@ impl Tool for SpawnSubagentTool {
         if self.is_subagent_caller {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(
                     "spawn_subagent: a subagent may not spawn its own subagents (depth-1 cap)"
                         .into(),
@@ -115,23 +331,64 @@ impl Tool for SpawnSubagentTool {
             });
         }
 
-        // Risk-profile tool gate: a non-empty allowed_tools list that omits
-        // `spawn_subagent`, or an excluded_tools list that names it, must
-        // refuse pre-spawn. The agent-loop
-        // dispatch filter (apply_policy_tool_filter) already drops the
-        // tool from the registry when the policy excludes it, but this
-        // tool also runs from cron and other registry construction
-        // sites that don't currently apply the filter; refuse here so
-        // the gate is honored everywhere the tool is reachable.
-        let risk_profile = self.config.risk_profile_for_agent(&self.parent_alias);
-        if let Some(rp) = risk_profile {
-            let excluded = rp.excluded_tools.iter().any(|t| t == "spawn_subagent");
-            let allowed_when_listed = rp.allowed_tools.is_empty()
-                || rp.allowed_tools.iter().any(|t| t == "spawn_subagent");
+        // The "allowed" half asks a different question depending on whether
+        // a card governs this agent: for a carded agent, the registry's
+        // `allowed_tools` came from `card.grants` (`SecurityPolicy::for_agent`,
+        // `zeroclaw-config/src/policy.rs`), NOT from the named profile's own
+        // `allowed_tools` — so consulting the profile's list here would gate
+        // on a list the registry never used, and a card granting
+        // `spawn_subagent` whose profile's `allowed_tools` omits it would be
+        // admitted by the registry and then refuse itself here, blaming a
+        // risk_profile that was never consulted. The "excluded" half is not
+        // card-aware in either case: the named profile's `excluded_tools`
+        // subtracts from a card's grants too (`AgentCard::risk_profile`'s
+        // doc — deny wins), so it must still gate a carded agent.
+        if let Some(card) = self.config.card_for_agent(&self.parent_alias) {
+            let card_alias = self
+                .config
+                .agents
+                .get(&self.parent_alias)
+                // Trimmed to match how `card_for_agent` resolved it — a padded
+                // alias in config must not print differently in the refusal
+                // than the name that actually gated the branch (codex review
+                // of ba37d54bd, finding 3c).
+                .map(|a| a.card.as_str().trim())
+                .unwrap_or_default();
+            let card_grants_it = card.grants.tools.iter().any(|g| g.tool == Self::NAME);
+            let profile_excludes_it = self
+                .config
+                .risk_profile_for_agent(&self.parent_alias)
+                .is_some_and(|rp| rp.excluded_tools.iter().any(|t| t == Self::NAME));
+            if !card_grants_it {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "spawn_subagent: refused — card '{card_alias}' governing agent '{}' does not grant spawn_subagent",
+                        self.parent_alias
+                    )),
+                });
+            }
+            if profile_excludes_it {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "spawn_subagent: refused — agent '{}' risk_profile excludes spawn_subagent (deny wins over card '{card_alias}'s grant)",
+                        self.parent_alias
+                    )),
+                });
+            }
+        } else if let Some(rp) = self.config.risk_profile_for_agent(&self.parent_alias) {
+            let excluded = rp.excluded_tools.iter().any(|t| t == Self::NAME);
+            let allowed_when_listed = match &rp.allowed_tools {
+                None => true,
+                Some(tools) => tools.iter().any(|t| t == Self::NAME),
+            };
             if excluded || !allowed_when_listed {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some(format!(
                         "spawn_subagent: refused — agent '{}' risk_profile does not list spawn_subagent in allowed_tools",
                         self.parent_alias
@@ -154,30 +411,50 @@ impl Tool for SpawnSubagentTool {
             None => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some("Missing or empty 'prompt' parameter".into()),
                 });
             }
         };
 
-        // Launch-side budget gate: every spawn attempt past validation
-        // consumes one slot from the caller's shared action budget,
-        // mirroring DelegateTool (which validates target + depth, then
-        // calls enforce_tool_operation before spawning). The re-entrant
-        // dedup exemption means identical calls are not collapsed
-        // per-turn, so without this gate a single model turn could
-        // request unbounded child launches; with it, fan-out is bounded
-        // by `max_actions_per_hour` at launch time, not merely by work
-        // performed downstream.
+        // Additive, optional, default false: absent (or explicitly `false`)
+        // takes the synchronous path below byte-identically. A present but
+        // non-bool value is rejected here rather than coerced, matching the
+        // uniform "structured argument-validation failure" shape `prompt`
+        // above already established.
+        let background = match args.get("background") {
+            None => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(_) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(
+                        "spawn_subagent: 'background' must be a boolean when present".into(),
+                    ),
+                });
+            }
+        };
+
         if let Err(error) = self
             .security
             .enforce_tool_operation(ToolOperation::Act, Self::NAME)
         {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(error),
             });
+        }
+
+        // Every gate above (depth-1 cap, card/risk-profile self-check,
+        // prompt validation, the rate-limit budget) has already run and
+        // already applies identically to a detached spawn — a background
+        // request is not a way around any of them. Everything below this
+        // point is the synchronous in-turn path; the detached path forks off
+        // here instead.
+        if background {
+            return self.execute_background(prompt).await;
         }
 
         let subagent_ctx = match SubAgentSpawn::for_agent_with_policy(
@@ -191,7 +468,7 @@ impl Tool for SpawnSubagentTool {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: ToolOutput::default(),
                     error: Some(format!("subagent spawn failed: {e:#}")),
                 });
             }
@@ -205,17 +482,69 @@ impl Tool for SpawnSubagentTool {
             .and_then(|e| e.temperature);
         let session_path = std::path::PathBuf::from(format!("subagent-{run_id}"));
 
-        // Pass the validated SubAgent context as run-time overrides so
-        // the subset-confirmed policy reaches the agent loop instead
-        // of being silently re-derived from config. `is_subagent: true`
-        // marks the child run so its own SpawnSubagentTool is
-        // registered with the depth-cap refusal armed.
         let run_overrides = AgentRunOverrides {
             security: Some(subagent_ctx.policy.clone()),
             memory: None,
             is_subagent: true,
+            // Sub-turn origin already skips memory injection; explicit for
+            // the same future-proofing reason as `is_subagent` above.
+            suppress_memory_inject: true,
+            // Subagents keep a live memory backend and the memory tools; only
+            // the injected context preamble is suppressed above.
+            memory_free: false,
+            // Subagent runs are short-lived; no cross-turn reuse contract,
+            // so the per-call `connect_all` path inside `agent::run` is
+            // the correct choice. The daemon heartbeat worker is the
+            // only `mcp_registry` supplier.
+            mcp_registry: None,
         };
         let parent_alias = subagent_ctx.parent_alias.clone();
+
+        let cp_task_id = run_id.clone();
+        if let Some(cp) = crate::control_plane::control_plane() {
+            let _ = cp
+                .store
+                .create(crate::control_plane::TaskRecord {
+                    id: cp_task_id.clone(),
+                    kind: crate::control_plane::TaskKind::Subagent,
+                    agent: self.parent_alias.clone(),
+                    status: crate::control_plane::TaskStatus::Running,
+                    owner_pid: std::process::id(),
+                    owner_boot_id: cp.boot_id.clone(),
+                    heartbeat_at: None,
+                    depth: u32::from(self.is_subagent_caller),
+                    // Same gap as `delegate.rs`'s background-delegation
+                    // producer: `SpawnSubagentTool` is constructed once per
+                    // registry build (`all_tools_with_runtime` in
+                    // `crates/zeroclaw-runtime/src/tools/mod.rs`) with no
+                    // concept of "the control-plane task id of the turn
+                    // currently running me". `is_subagent_caller` already
+                    // rules out a subagent spawning a subagent (the depth-1
+                    // cap refuses before this point), so every `execute()`
+                    // that reaches here belongs to a non-subagent turn — but
+                    // that turn can itself be a tracked task (e.g. a
+                    // background/parallel delegate's own sub-turn, which
+                    // *does* carry this shared tool instance into a Bounded
+                    // target's registry — `execute_agentic_with_admission`
+                    // only filters the "delegate" tool name, not
+                    // "spawn_subagent"). Because the tool instance is shared
+                    // across calls, a struct field cannot disambiguate which
+                    // task is calling; only ambient per-call context (e.g. a
+                    // task-local threaded through the tool-call loop, the way
+                    // `TOOL_LOOP_SESSION_KEY` already is) could. `None` is
+                    // correct for a genuinely top-level spawn and the best
+                    // available answer otherwise — see the dispatch report.
+                    parent_id: None,
+                    originator_route: None,
+                    delivered: false,
+                    idem_key: None,
+                    principal_id: None,
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    finished_at: None,
+                })
+                .await;
+        }
+
         let run_result = Box::pin(scope!(
             agent_alias: parent_alias,
             session_key: run_id,
@@ -231,24 +560,45 @@ impl Tool for SpawnSubagentTool {
                 false,
                 Some(session_path),
                 None,
+                zeroclaw_api::ingress::TurnOrigin::SubTurn,
                 run_overrides,
             )
         ))
         .await;
 
+        // EPIC-A supervision: mirror the subagent's terminal state into the control-plane.
+        if let Some(cp) = crate::control_plane::control_plane() {
+            let (status, output, error) = match &run_result {
+                Ok(resp) => (
+                    crate::control_plane::TaskStatus::Completed,
+                    Some(resp.clone()),
+                    None,
+                ),
+                Err(e) => (
+                    crate::control_plane::TaskStatus::Failed,
+                    None,
+                    Some(format!("subagent run failed: {e}")),
+                ),
+            };
+            let _ = cp
+                .store
+                .update_status(&cp_task_id, status, output, error)
+                .await;
+        }
+
         match run_result {
             Ok(response) => Ok(ToolResult {
                 success: true,
                 output: if response.trim().is_empty() {
-                    "subagent completed without output".to_string()
+                    "subagent completed without output".to_string().into()
                 } else {
-                    response
+                    response.into()
                 },
                 error: None,
             }),
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: ToolOutput::default(),
                 error: Some(format!("subagent run failed: {e}")),
             }),
         }
@@ -378,7 +728,7 @@ mod tests {
         config.risk_profiles.insert(
             "default".to_string(),
             RiskProfileConfig {
-                allowed_tools,
+                allowed_tools: Some(allowed_tools),
                 ..RiskProfileConfig::default()
             },
         );
@@ -415,6 +765,141 @@ mod tests {
         );
     }
 
+    // ── card-aware gate: a carded parent's self-check consults the card's
+    // grants, not the profile's own allowed_tools ──
+
+    /// Builds a `Config` with one `[risk_profiles.<profile_alias>]` entry and
+    /// one `[cards.<card_alias>]` entry naming it, wired to a single agent
+    /// defined solely by `card = <card_alias>` (no `risk_profile` set,
+    /// matching what `Config::validate()` requires for a carded agent).
+    fn carded_config_with_agent(
+        alias: &str,
+        card_alias: &str,
+        card_grants_spawn_subagent: bool,
+        profile: RiskProfileConfig,
+    ) -> Config {
+        use zeroclaw_config::card::{AgentCard, CardGrants, GrantClass, ToolGrant};
+
+        let mut config = Config::default();
+        config
+            .risk_profiles
+            .insert("carded_profile".to_string(), profile);
+        config.cards.insert(
+            card_alias.to_string(),
+            AgentCard {
+                risk_profile: "carded_profile".into(),
+                grants: CardGrants {
+                    tools: if card_grants_spawn_subagent {
+                        vec![ToolGrant::new(
+                            SpawnSubagentTool::NAME,
+                            GrantClass::LocalAct,
+                        )]
+                    } else {
+                        vec![]
+                    },
+                    ..CardGrants::default()
+                },
+                ..AgentCard::default()
+            },
+        );
+        config.agents.insert(
+            alias.to_string(),
+            AliasedAgentConfig {
+                card: card_alias.into(),
+                // risk_profile deliberately left empty — validation forbids
+                // setting both card and risk_profile on the same agent.
+                ..AliasedAgentConfig::default()
+            },
+        );
+        config
+    }
+
+    #[tokio::test]
+    async fn carded_parent_not_refused_when_profiles_allowed_tools_omits_it_but_card_grants_it() {
+        // This is the registry/tool disagreement case the fix targets: the
+        // registry's allowed_tools came from the card's grants (`for_agent`),
+        // not from the profile's own `allowed_tools` — so a profile that
+        // omits "spawn_subagent" from a non-empty `allowed_tools` must not
+        // make the self-check refuse a tool the card actually granted.
+        let config = carded_config_with_agent(
+            "alpha",
+            "trader_card",
+            true,
+            RiskProfileConfig {
+                allowed_tools: Some(vec!["shell".into()]),
+                ..RiskProfileConfig::default()
+            },
+        );
+        let tool = SpawnSubagentTool::new(
+            Arc::new(config),
+            "alpha",
+            Arc::new(SecurityPolicy::default()),
+        );
+        let result = tool
+            .execute(json!({ "prompt": "hello" }))
+            .await
+            .expect("execute returns Ok");
+        let err = result.error.as_deref().unwrap_or_default();
+        assert!(
+            !err.contains("does not grant spawn_subagent")
+                && !err.contains("does not list spawn_subagent"),
+            "a card-granted spawn_subagent must not be refused by the self-check \
+             merely because the profile's own allowed_tools omits it, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn carded_parent_refused_when_card_does_not_grant_it_and_message_names_the_card() {
+        let config =
+            carded_config_with_agent("alpha", "trader_card", false, RiskProfileConfig::default());
+        let tool = SpawnSubagentTool::new(
+            Arc::new(config),
+            "alpha",
+            Arc::new(SecurityPolicy::default()),
+        );
+        let result = tool
+            .execute(json!({ "prompt": "hello" }))
+            .await
+            .expect("execute returns Ok with structured failure");
+        assert!(!result.success);
+        let err = result.error.as_deref().unwrap_or_default();
+        assert!(
+            err.contains("trader_card") && err.contains("does not grant spawn_subagent"),
+            "refusal must name the card that governs this agent, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn carded_parent_refused_when_profile_excludes_it_even_though_card_grants_it() {
+        // Deny wins: the named profile's own excluded_tools subtracts from
+        // the card's grants regardless (documented ruling carried over from
+        // the fail-closed fix this self-check must not undo).
+        let config = carded_config_with_agent(
+            "alpha",
+            "trader_card",
+            true,
+            RiskProfileConfig {
+                excluded_tools: vec![SpawnSubagentTool::NAME.to_string()],
+                ..RiskProfileConfig::default()
+            },
+        );
+        let tool = SpawnSubagentTool::new(
+            Arc::new(config),
+            "alpha",
+            Arc::new(SecurityPolicy::default()),
+        );
+        let result = tool
+            .execute(json!({ "prompt": "hello" }))
+            .await
+            .expect("execute returns Ok with structured failure");
+        assert!(!result.success);
+        let err = result.error.as_deref().unwrap_or_default();
+        assert!(
+            err.contains("excludes spawn_subagent"),
+            "a profile exclusion must still refuse a carded agent, got: {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn admits_when_risk_profile_lists_spawn_subagent() {
         // When the parent's risk_profile.allowed_tools explicitly lists
@@ -443,11 +928,6 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_spawns_blocked_once_action_budget_is_exhausted() {
-        // The dedup exemption lets identical spawn_subagent calls all
-        // reach execute(); the launch-side budget gate must be what
-        // bounds them. With a budget of 2, the 3rd validated launch
-        // attempt is refused before any spawn work, regardless of
-        // whether the spawns themselves succeed.
         let security = Arc::new(SecurityPolicy {
             max_actions_per_hour: 2,
             ..SecurityPolicy::default()
@@ -528,15 +1008,6 @@ mod tests {
         );
     }
 
-    // ── Cron path stays depth-0: AgentRunOverrides::default() ──
-    //
-    // The cron `JobType::Agent` site constructs `AgentRunOverrides`
-    // without explicit `is_subagent`, so a `false` Default is the
-    // load-bearing invariant. A future refactor flipping the default
-    // would silently turn every cron-launched agent into a depth-1
-    // subagent and break recursive-spawn guarantees from the other
-    // direction. Pin the default explicitly.
-
     #[test]
     fn agent_run_overrides_default_is_top_level() {
         use crate::agent::loop_::AgentRunOverrides;
@@ -546,16 +1017,6 @@ mod tests {
             "AgentRunOverrides::default().is_subagent must be false so cron paths inherit a top-level shape"
         );
     }
-
-    // ── Tool : Attributable contract ──────────────────────────
-    //
-    // Every Tool impl carries a structured role + alias the same way
-    // channels do, so log emissions, audit traces, and ops banners can
-    // tag tool activity with the same `<kind>.<alias>` composite shape
-    // they use for the rest of the runtime. The trait supertrait is
-    // the load-bearing piece: a `&dyn Tool` must coerce to a
-    // `&dyn Attributable` automatically. Without `Tool: Attributable`
-    // the line below does not compile.
 
     #[test]
     fn spawn_subagent_dyn_tool_implements_attributable() {
@@ -575,5 +1036,598 @@ mod tests {
             !Attributable::alias(tool.as_ref()).is_empty(),
             "Attributable::alias on a Tool must be non-empty so composite keys never produce `.<bare>`"
         );
+    }
+
+    // ── `background: true` — the detached path ──
+
+    mod background {
+        use super::*;
+        use crate::control_plane::boot::ControlPlaneHandle;
+        use crate::control_plane::coordinator_host;
+        use crate::control_plane::task_registry::{TaskRegistry, TaskStatus};
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+        use zeroclaw_coordinator::SpawnRefusal;
+
+        /// `COMMAND_SENDER_TEST_HOOK` is a single process-global slot: two of
+        /// these tests installing it concurrently would clobber each other's
+        /// sender. Same shape as `agent::loop_`'s own `SERIALIZE` guard
+        /// around its process-global test hooks, for the same reason.
+        static SERIALIZE: StdMutex<()> = StdMutex::new(());
+
+        /// A live coordinator actor wired the same way
+        /// `coordinator_host.rs`'s own tests boot one — a real
+        /// `ControlPlaneHandle` over a tempdir-backed `SqliteTaskStore`, a
+        /// real `Coordinator::with_persistence`, a real `NativeChildRunner`
+        /// — with its `CommandSender` installed into
+        /// [`COMMAND_SENDER_TEST_HOOK`] so [`coordinator_commands`] finds it
+        /// without touching the process-wide `OnceLock`.
+        struct BootedCoordinator {
+            _serialize: std::sync::MutexGuard<'static, ()>,
+            _dir: tempfile::TempDir,
+            handle: ControlPlaneHandle,
+            actor: Option<tokio::task::JoinHandle<()>>,
+        }
+
+        impl Drop for BootedCoordinator {
+            fn drop(&mut self) {
+                *COMMAND_SENDER_TEST_HOOK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+                if let Some(actor) = self.actor.take() {
+                    actor.abort();
+                }
+            }
+        }
+
+        async fn boot(config: Config) -> BootedCoordinator {
+            let serialize = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().expect("tempdir");
+            let handle = ControlPlaneHandle::start(dir.path())
+                .await
+                .expect("start control plane");
+            let host = coordinator_host::start(
+                Arc::new(config),
+                Arc::clone(&handle.sqlite_store),
+                handle.boot_id.clone(),
+            );
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(host.commands);
+            BootedCoordinator {
+                _serialize: serialize,
+                _dir: dir,
+                handle,
+                actor: Some(host.actor),
+            }
+        }
+
+        /// Pull the `child_id=<id>` token out of the tool's own success
+        /// message (see `execute_background`'s doc on that format).
+        fn extract_child_id(output: &str) -> &str {
+            let after = output
+                .split("child_id=")
+                .nth(1)
+                .expect("success output must carry child_id=");
+            after
+                .split(|c: char| c == ',' || c == '.' || c.is_whitespace())
+                .next()
+                .expect("child_id token must not be empty")
+        }
+
+        async fn wait_for_terminal(
+            store: &crate::control_plane::SqliteTaskStore,
+            id: &str,
+            timeout: Duration,
+        ) -> crate::control_plane::TaskRecord {
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                if let Some(rec) = store.get(id).await.expect("store read") {
+                    if rec.status.is_terminal() {
+                        return rec;
+                    }
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "child {id} never reached a terminal status within {timeout:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        /// Discriminating line: `assert!(result.success, ...)` returning
+        /// before the child's own turn can possibly have finished (there is
+        /// no live model provider in this harness — the turn fails fast, but
+        /// the tool call itself must not have waited for that). A
+        /// synchronous implementation that awaits the child would still make
+        /// this assertion pass (the child fails fast) but would fail the
+        /// row-exists-immediately-after-yield_now check below, which is the
+        /// real discriminator between "returned immediately" and "awaited
+        /// the child".
+        #[tokio::test]
+        async fn background_spawn_returns_immediately_with_a_child_id_and_row() {
+            let alias = "bg-alpha";
+            let config = config_with_agent(alias);
+            let fixture = boot(config.clone()).await;
+
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let result = tool
+                .execute(json!({ "prompt": "do the background thing", "background": true }))
+                .await
+                .expect("execute returns Ok");
+            assert!(
+                result.success,
+                "background spawn must report success immediately: {:?}",
+                result.error
+            );
+            let child_id = extract_child_id(result.output.as_str()).to_string();
+
+            // Let the actor's task get polled once — `handle_spawn` inserts
+            // into `pending` and calls `record_spawn` synchronously within
+            // the same command-branch arm, so one yield is enough (same
+            // reasoning as `coordinator_host.rs`'s own
+            // `drop_after_abort_marks_a_mid_flight_child_lost_in_the_real_store`).
+            tokio::task::yield_now().await;
+
+            let row = fixture
+                .handle
+                .sqlite_store
+                .get(&child_id)
+                .await
+                .expect("store read")
+                .expect("record_spawn must have written the row");
+            assert_eq!(
+                row.parent_id.as_deref(),
+                Some(format!("agent:{alias}").as_str()),
+                "parent_id must be the same key agent::run's fallback claims under"
+            );
+            assert_eq!(row.agent, alias, "agent column carries the parent alias");
+
+            // The runner has no live model provider, so the child's own turn
+            // fails fast — it still must land terminal, not linger Running
+            // forever, and it must carry a detail (not silently "succeed").
+            let finished = wait_for_terminal(
+                &fixture.handle.sqlite_store,
+                &child_id,
+                Duration::from_secs(10),
+            )
+            .await;
+            assert_eq!(
+                finished.status,
+                TaskStatus::Failed,
+                "no live model provider in this harness — the child must fail, not succeed"
+            );
+        }
+
+        /// Discriminating line: `assert!(err.contains("no coordinator") ||
+        /// err.contains("coordinator"))` together with `!result.success` —
+        /// a silent fallback to the synchronous path would instead try to
+        /// run the child in-turn (and fail for an unrelated reason, or
+        /// succeed), never naming "no coordinator" at all.
+        #[tokio::test]
+        async fn background_true_with_no_coordinator_is_a_structured_failure() {
+            // The negative test needs `SERIALIZE` more than the positive ones
+            // do: they install a sender into the process-global hook and only
+            // race each other, while this one asserts the hook is *empty* and
+            // races every single one of them. Without this guard it passes
+            // alone, passes most full runs, and goes red exactly when the
+            // scheduler happens to overlap it with a `BootedCoordinator` —
+            // a test that lies at random about a path the whole Detached mode
+            // depends on.
+            let _serialize = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+            let alias = "bg-no-coordinator";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let result = tool
+                .execute(json!({ "prompt": "hello", "background": true }))
+                .await
+                .expect("execute returns Ok with structured failure");
+            assert!(!result.success);
+            let err = result.error.as_deref().unwrap_or_default();
+            assert!(
+                err.contains("coordinator"),
+                "refusal must name the missing coordinator, got: {err:?}"
+            );
+        }
+
+        /// Discriminating line: `assert_eq!(row.parent_id.as_deref(), Some(...))`
+        /// — a hand-rolled fallback that drifts from `agent::run`'s
+        /// (`agent::loop_::synthetic_session_key_for_run`) would still spawn
+        /// successfully but file the row under a key the waker never claims,
+        /// silently orphaning every detached child's announcement.
+        #[tokio::test]
+        async fn parent_key_fallback_is_agent_colon_alias_with_no_ambient_session_key() {
+            let alias = "bg-fallback-alias";
+            let config = config_with_agent(alias);
+            let fixture = boot(config.clone()).await;
+
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let result = tool
+                .execute(json!({ "prompt": "hello", "background": true }))
+                .await
+                .expect("execute returns Ok");
+            assert!(result.success, "unexpected failure: {:?}", result.error);
+            let child_id = extract_child_id(result.output.as_str()).to_string();
+
+            tokio::task::yield_now().await;
+            let row = fixture
+                .handle
+                .sqlite_store
+                .get(&child_id)
+                .await
+                .expect("store read")
+                .expect("row must exist");
+            assert_eq!(
+                row.parent_id.as_deref(),
+                Some(format!("agent:{alias}").as_str())
+            );
+        }
+
+        /// Absent/`false` `background` must take the byte-identical
+        /// synchronous path — every pre-existing test above this module
+        /// already pins that behaviour by never setting `background` at
+        /// all; this test only pins that an *explicit* `false` is the same
+        /// as absent.
+        #[tokio::test]
+        async fn explicit_background_false_matches_the_default_synchronous_path() {
+            let alias = "alpha";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let with_false = tool
+                .execute(json!({ "prompt": "hello", "background": false }))
+                .await
+                .expect("execute returns Ok");
+            let without = tool
+                .execute(json!({ "prompt": "hello" }))
+                .await
+                .expect("execute returns Ok");
+            assert_eq!(
+                with_false.success, without.success,
+                "explicit background=false must behave like the field's absence"
+            );
+            assert_eq!(
+                with_false.error.is_some(),
+                without.error.is_some(),
+                "explicit background=false must behave like the field's absence"
+            );
+        }
+
+        // ── Admission refusals reach the model instead of "started detached" ──
+        //
+        // These are the regression tests for the bug this split exists to fix:
+        // the detached path used to drop its only reply receiver, so a spawn the
+        // coordinator *refused* still returned "subagent started detached,
+        // child_id=…" and the model was told it had a child that never existed.
+        //
+        // The refusal is scripted rather than provoked out of a live actor
+        // because two of the three gates are unreachable from this call site
+        // today: the tool mints a fresh uuid per call (so it can never collide)
+        // and a detached spawn from a top-level turn resolves to depth 0 (so it
+        // can never exceed the depth cap). They become reachable through
+        // `delegate.rs`, which carries a real depth and caller-chosen ids —
+        // which is exactly why the caller must handle every kind now rather
+        // than only the one it can currently trip. That a real coordinator
+        // emits these three on the admission channel is proved separately, in
+        // `zeroclaw-coordinator`'s own tests; `refusal_from_a_live_coordinator_*`
+        // below joins the two halves end to end over the reachable gate.
+
+        /// A stand-in for the coordinator actor that answers every `Spawn` with
+        /// one scripted admission answer, over the production `CommandSender`
+        /// and the production command types.
+        ///
+        /// It drops `result_tx` unanswered, exactly as the real actor does on a
+        /// refusal — so a caller that went back to waiting on the outcome
+        /// channel would hang here, which is what the per-test timeouts below
+        /// convert into a red test instead of a wedged binary.
+        struct ScriptedCoordinator {
+            _serialize: std::sync::MutexGuard<'static, ()>,
+            responder: Option<tokio::task::JoinHandle<()>>,
+        }
+
+        impl Drop for ScriptedCoordinator {
+            fn drop(&mut self) {
+                *COMMAND_SENDER_TEST_HOOK
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+                if let Some(responder) = self.responder.take() {
+                    responder.abort();
+                }
+            }
+        }
+
+        fn refusing_coordinator(refusal: SpawnRefusal) -> ScriptedCoordinator {
+            let serialize = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(CommandSender(tx));
+            let responder = zeroclaw_spawn::spawn!(async move {
+                while let Some(command) = rx.recv().await {
+                    if let CoordinatorCommand::Spawn(spawn) = command {
+                        let _ = spawn
+                            .admission_tx
+                            .send(SpawnAdmission::Refused(refusal.clone()));
+                    }
+                }
+            });
+            ScriptedCoordinator {
+                _serialize: serialize,
+                responder: Some(responder),
+            }
+        }
+
+        /// Run one detached spawn against whatever coordinator is installed and
+        /// return the tool's own answer.
+        ///
+        /// The timeout is not decoration. An admission answer is immediate by
+        /// construction, so anything that blocks here means the caller went
+        /// back to awaiting the child — and an accepted background child only
+        /// replies when it actually finishes, which for a held child is never.
+        /// Without this bound that regression wedges the test binary until the
+        /// harness kills it, instead of reddening one test.
+        async fn detached_spawn(tool: &SpawnSubagentTool) -> ToolResult {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                tool.execute(json!({ "prompt": "do the detached thing", "background": true })),
+            )
+            .await
+            .expect("a background spawn must answer without waiting for the child")
+            .expect("execute returns Ok with a structured result")
+        }
+
+        /// Every refusal must look the same to the model: a structured failure
+        /// whose reason is readable, and NOT a success claiming a detached child.
+        fn assert_refused(result: &ToolResult, expected_reason: &str) {
+            assert!(
+                !result.success,
+                "a refused spawn must not report success, got: {result:?}"
+            );
+            assert!(
+                !result.output.as_str().contains("started detached"),
+                "a refused spawn must never claim it started a child, got: {:?}",
+                result.output.as_str()
+            );
+            let err = result.error.as_deref().unwrap_or_default();
+            assert!(
+                err.contains(expected_reason),
+                "the refusal must reach the model with a readable reason containing \
+                 {expected_reason:?}, got: {err:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn background_spawn_refused_for_duplicate_child_id_is_a_structured_failure() {
+            let _coordinator = refusing_coordinator(SpawnRefusal::DuplicateChildId {
+                child_id: "already-live".into(),
+            });
+            let alias = "bg-refused-duplicate";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            assert_refused(&detached_spawn(&tool).await, "already exists");
+        }
+
+        #[tokio::test]
+        async fn background_spawn_refused_for_spawn_depth_is_a_structured_failure() {
+            let _coordinator =
+                refusing_coordinator(SpawnRefusal::SpawnDepthExceeded { depth: 4, max: 3 });
+            let alias = "bg-refused-depth";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            assert_refused(
+                &detached_spawn(&tool).await,
+                "spawn depth limit reached (4/3)",
+            );
+        }
+
+        #[tokio::test]
+        async fn background_spawn_refused_for_child_capacity_is_a_structured_failure() {
+            let _coordinator = refusing_coordinator(SpawnRefusal::ChildCapacityReached {
+                in_flight: 6,
+                max: 6,
+            });
+            let alias = "bg-refused-capacity";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            assert_refused(
+                &detached_spawn(&tool).await,
+                "too many children in flight (6 running, limit 6)",
+            );
+        }
+
+        /// A coordinator that takes the command and dies without deciding is
+        /// "not admitted / unknown" — never "started". This is the inverted
+        /// form of the same bug: reading a dropped admission sender as success
+        /// re-creates the phantom child from the other direction.
+        #[tokio::test]
+        async fn background_spawn_with_an_undecided_admission_is_not_reported_as_started() {
+            let serialize = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(CommandSender(tx));
+            let responder = zeroclaw_spawn::spawn!(async move {
+                // Take the command and drop it, deciding nothing.
+                let _ = rx.recv().await;
+            });
+            let alias = "bg-undecided";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let result = detached_spawn(&tool).await;
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            responder.abort();
+            drop(serialize);
+
+            assert!(
+                !result.success,
+                "an undecided spawn must not report success"
+            );
+            assert!(
+                !result.output.as_str().contains("started detached"),
+                "an undecided spawn must never claim it started a child"
+            );
+            let err = result.error.as_deref().unwrap_or_default();
+            assert!(
+                err.contains("not admitted"),
+                "the failure must say it was not admitted, got: {err:?}"
+            );
+        }
+
+        // ── End to end over a live coordinator ───────────────────────────────
+
+        struct NeverControl;
+
+        impl zeroclaw_coordinator::ChildControl for NeverControl {
+            type ProgressFuture = std::future::Ready<zeroclaw_coordinator::ChildProgress>;
+
+            fn progress(&self) -> Self::ProgressFuture {
+                std::future::ready(zeroclaw_coordinator::ChildProgress::default())
+            }
+
+            fn cancel(&self) {}
+        }
+
+        /// A runner whose children never promote and never finish, so the
+        /// in-flight population the concurrency gate counts is whatever the
+        /// test put there — no model provider, no timing race. Same shape and
+        /// same reason as `control_plane::coordinator_host`'s own `HangingRunner`.
+        struct HangingRunner;
+
+        impl zeroclaw_coordinator::ChildRunner for HangingRunner {
+            type Control = NeverControl;
+            type CompletionData = ();
+            type RunFuture =
+                std::pin::Pin<Box<std::future::Pending<zeroclaw_coordinator::ChildRunOutput<()>>>>;
+            type ValidateFuture = std::future::Ready<zeroclaw_coordinator::ValidateTypeOutcome>;
+            type DescribeFuture = std::future::Ready<zeroclaw_coordinator::DescribeOutcome>;
+
+            fn run(
+                &self,
+                _request: zeroclaw_coordinator::ChildRunRequest<Self::Control>,
+            ) -> Self::RunFuture {
+                Box::pin(std::future::pending())
+            }
+
+            fn validate_type(
+                &self,
+                _agent_type: String,
+                _parent_session_id: String,
+            ) -> Self::ValidateFuture {
+                std::future::ready(zeroclaw_coordinator::ValidateTypeOutcome::Ok)
+            }
+
+            fn describe_type(
+                &self,
+                _agent_type: String,
+                _harness_agent_type: Option<String>,
+                _parent_session_id: String,
+            ) -> Self::DescribeFuture {
+                std::future::ready(zeroclaw_coordinator::DescribeOutcome::Unavailable)
+            }
+
+            fn on_completed(
+                &self,
+                _completion: zeroclaw_coordinator::ChildCompletion<Self::CompletionData>,
+            ) {
+            }
+        }
+
+        /// The whole wire, with nothing scripted: a real `Coordinator` decides,
+        /// refuses on its own concurrency gate, and the refusal comes out of
+        /// this tool as a structured failure naming the cap.
+        ///
+        /// The first spawn is the control — it proves the same tool against the
+        /// same actor does say "started detached" when it is actually admitted,
+        /// so the second result is about the refusal and not about the harness.
+        #[tokio::test]
+        async fn refusal_from_a_live_coordinator_reaches_the_model_for_the_reachable_gate() {
+            let serialize = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
+            let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
+            let coordinator = zeroclaw_coordinator::Coordinator::new(
+                command_rx,
+                HangingRunner,
+                zeroclaw_coordinator::CoordinatorConfig {
+                    max_concurrent_children: 1,
+                    ..zeroclaw_coordinator::CoordinatorConfig::default()
+                },
+            );
+            let actor = zeroclaw_spawn::spawn!(coordinator.run());
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(CommandSender(command_tx));
+
+            let alias = "bg-live-capacity";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+
+            let admitted = detached_spawn(&tool).await;
+            let refused = detached_spawn(&tool).await;
+
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            actor.abort();
+            drop(serialize);
+
+            assert!(
+                admitted.success && admitted.output.as_str().contains("started detached"),
+                "the first spawn fills the cap and must be admitted: {admitted:?}"
+            );
+            assert_refused(&refused, "too many children in flight (1 running, limit 1)");
+        }
+
+        #[tokio::test]
+        async fn background_non_bool_is_a_structured_validation_failure() {
+            let alias = "alpha";
+            let tool = SpawnSubagentTool::new(
+                Arc::new(config_with_agent(alias)),
+                alias,
+                Arc::new(SecurityPolicy::default()),
+            );
+            let result = tool
+                .execute(json!({ "prompt": "hello", "background": "yes" }))
+                .await
+                .expect("execute returns Ok with structured failure");
+            assert!(!result.success);
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("background"),
+                "expected a background-validation error, got: {:?}",
+                result.error
+            );
+        }
     }
 }

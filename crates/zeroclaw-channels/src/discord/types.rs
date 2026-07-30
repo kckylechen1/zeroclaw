@@ -2,50 +2,23 @@
 //! boundaries. Zero business logic beyond trivial serialisation/parsing of the
 //! types themselves — implementation modules (`rest`, `interaction`, `slash`,
 //! `markers`, `chunk`) and the `mod.rs` wiring depend on these; nothing here
-//! depends on them.
 
 use std::sync::Arc;
 
+use super::components::DiscordActionRow;
+use super::embed::DiscordEmbed;
 use super::slash_options::OptionSpec;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Outbound message envelope
-//
-// The single payload the channel-message REST builders collapse onto. The
-// builders already route through `text()`/`to_rest_json()` (EPIC A Phase 2), so
-// the struct and its methods are live; `to_rest_json` is byte-identical to the
-// historical `json!({ "content": content })` (proven by the tests below and by
-// the existing wiremock send tests) because only `content` is populated today.
-// EPIC C fills `embeds`, EPIC B fills `components`/`flags` — until then those
-// three fields stay unread, so the `#[allow(dead_code)]` is scoped to just them.
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct DiscordOutgoing {
     pub(crate) content: Option<String>,
-    // Unread until EPIC C/B wire these into `to_rest_json`; the allow is on the
-    // placeholder fields only, leaving the struct itself under dead-code analysis.
-    #[allow(dead_code)]
     pub(crate) embeds: Vec<DiscordEmbed>,
-    #[allow(dead_code)]
     pub(crate) components: Vec<DiscordActionRow>,
-    #[allow(dead_code)]
     pub(crate) flags: DiscordMessageFlags,
 }
 
-/// Placeholder — filled by EPIC C (rich content / embeds).
-#[allow(dead_code)]
-#[derive(Debug, Default, Clone)]
-pub(crate) struct DiscordEmbed;
-
-/// Placeholder — filled by EPIC B (components).
-#[allow(dead_code)]
-#[derive(Debug, Default, Clone)]
-pub(crate) struct DiscordActionRow;
-
-/// Message flags (e.g. ephemeral); zero by default and omitted from the payload
-/// when zero. Filled by EPIC B.
-#[allow(dead_code)]
+/// Message flags (e.g. ephemeral, components-v2). Zero by default and omitted
+/// from the payload when zero.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct DiscordMessageFlags(pub(crate) u64);
 
@@ -56,6 +29,20 @@ impl DiscordOutgoing {
     pub(crate) fn text(content: impl Into<String>) -> Self {
         Self {
             content: Some(content.into()),
+            ..Default::default()
+        }
+    }
+
+    /// A payload carrying text plus one or more component action rows — the
+    /// shape the buttoned approval prompt sends. Rows are capped to Discord's
+    /// per-message limit at serialization time via `to_rest_json`.
+    pub(crate) fn with_components(
+        content: impl Into<String>,
+        components: Vec<DiscordActionRow>,
+    ) -> Self {
+        Self {
+            content: Some(content.into()),
+            components,
             ..Default::default()
         }
     }
@@ -71,7 +58,32 @@ impl DiscordOutgoing {
                 serde_json::Value::String(content.clone()),
             );
         }
-        // EPIC B/C add `embeds`/`components`/`flags` here; empty → omitted.
+        if !self.embeds.is_empty() {
+            let embeds: Vec<serde_json::Value> =
+                self.embeds.iter().map(DiscordEmbed::to_api).collect();
+            obj.insert("embeds".to_string(), serde_json::Value::Array(embeds));
+        }
+        // Components: emit each action row that renders to a non-empty object; an
+        // empty `components` vec omits the key (preserving the content-only
+        // byte-identity invariant).
+        let components: Vec<serde_json::Value> = self
+            .components
+            .iter()
+            .filter_map(DiscordActionRow::to_api)
+            .collect();
+        if !components.is_empty() {
+            obj.insert(
+                "components".to_string(),
+                serde_json::Value::Array(components),
+            );
+        }
+        // Flags: omitted when zero, so a default payload stays byte-identical.
+        if self.flags.0 != 0 {
+            obj.insert(
+                "flags".to_string(),
+                serde_json::Value::Number(self.flags.0.into()),
+            );
+        }
         serde_json::Value::Object(obj)
     }
 
@@ -85,28 +97,25 @@ impl DiscordOutgoing {
 // Slash-command specs (produced by `slash`, consumed by the orchestrator)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A slash command derived from an installed skill. `slug` is the Discord
-/// command name; `skill_name` is the skill's manifest name (sanitized of
-/// quotes and newlines at spec-build time, since it is interpolated into
-/// the synthesized agent prompt); `description` is truncated to Discord's
-/// 100-char limit; `options` are the typed command options (empty → the legacy
-/// single free-text `input`).
-///
-/// `Eq` is not derived: [`OptionSpec`] carries `f64` numeric bounds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiscordSlashCommandSpec {
     pub skill_name: String,
     pub slug: String,
     pub description: String,
+    /// Discord-locale-keyed translations of `description` (from the skill
+    /// manifest, already filtered to Discord-supported locale codes). Empty for
+    /// unlocalized commands → no `description_localizations` key is registered.
+    pub description_localizations: std::collections::BTreeMap<String, String>,
     pub options: Vec<OptionSpec>,
 }
 
-/// Resolves the current skill-derived command set from canonical state at
-/// READY/interaction time. No cache (see AGENTS.md "ABSOLUTE RULE — SINGLE
-/// SOURCE OF TRUTH") — skills install/uninstall at runtime. The loader does
-/// blocking file IO, so callers must run it via `spawn_blocking`, never on
-/// the gateway listen loop.
 pub type DiscordSlashCommandResolver = Arc<dyn Fn() -> Vec<DiscordSlashCommandSpec> + Send + Sync>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlashScope {
+    Global,
+    Guild,
+}
 
 /// Outcome of a slash-command reconcile pass.
 #[derive(Debug)]
@@ -153,11 +162,6 @@ impl std::error::Error for DiscordListenerFatalError {}
 /// via the interaction followup webhook rather than a normal channel message.
 pub(crate) const DISCORD_INTERACTION_PREFIX: &str = "interaction:";
 
-/// Build the sentinel reply target carrying only the interaction id. The
-/// bearer token deliberately never enters the reply target: reply targets
-/// flow into logs, session keys (and thus on-disk filenames), and memory
-/// rows — `send()` resolves the credentials from the channel-local
-/// `pending_interactions` store instead.
 pub(crate) fn discord_interaction_reply_target(interaction_id: &str) -> String {
     format!("{DISCORD_INTERACTION_PREFIX}{interaction_id}")
 }
@@ -178,7 +182,6 @@ pub(crate) fn parse_discord_interaction_target(target: &str) -> Option<&str> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Discord's maximum message length for regular messages.
-///
 /// Discord rejects longer payloads with `50035 Invalid Form Body`.
 pub(crate) const DISCORD_MAX_MESSAGE_LENGTH: usize = 2000;
 
@@ -210,6 +213,37 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(out.to_rest_json(), serde_json::json!({ "content": "" }));
+    }
+
+    #[test]
+    fn populated_embeds_serialize_through_the_chokepoint() {
+        let out = DiscordOutgoing {
+            content: Some("see below".to_string()),
+            embeds: vec![DiscordEmbed {
+                title: Some("Report".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            out.to_rest_json(),
+            serde_json::json!({
+                "content": "see below",
+                "embeds": [{ "title": "Report" }]
+            })
+        );
+    }
+
+    #[test]
+    fn empty_embeds_vec_omits_the_key_preserving_byte_identity() {
+        // An explicitly-empty embeds vec must not grow an `"embeds"` key, or the
+        // EPIC A content-only byte-identity invariant breaks.
+        let out = DiscordOutgoing {
+            content: Some("hi".to_string()),
+            embeds: Vec::new(),
+            ..Default::default()
+        };
+        assert_eq!(out.to_rest_json(), serde_json::json!({ "content": "hi" }));
     }
 
     #[test]

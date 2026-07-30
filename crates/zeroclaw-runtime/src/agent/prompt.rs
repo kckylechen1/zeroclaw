@@ -11,12 +11,6 @@ use zeroclaw_config::schema::IdentityConfig;
 
 pub struct PromptContext<'a> {
     pub workspace_dir: &'a Path,
-    /// Per-agent persona workspace (where SOUL.md / IDENTITY.md / USER.md /
-    /// AGENTS.md live). Separate from `workspace_dir`, which is the security
-    /// sandbox root and can be overridden per session by an IDE-supplied cwd.
-    /// Channel-driven runs typically pass the same path for both; gateway and
-    /// ACP sessions pass the agent's own dir here while letting `workspace_dir`
-    /// follow the session cwd.
     pub agent_workspace_dir: &'a Path,
     pub model_name: &'a str,
     pub tools: &'a [Box<dyn Tool>],
@@ -30,7 +24,7 @@ pub struct PromptContext<'a> {
     /// Pre-rendered security policy summary for inclusion in the Safety
     /// prompt section.  When present, the LLM sees the concrete constraints
     /// (allowed commands, forbidden paths, autonomy level) so it can plan
-    /// tool calls without trial-and-error.  See issue #2404.
+    /// tool calls without trial-and-error.  See
     pub security_summary: Option<String>,
     /// Autonomy level from config. Controls whether the safety section
     /// includes "ask before acting" instructions. Full autonomy omits them
@@ -49,12 +43,29 @@ pub struct SystemPromptBuilder {
 }
 
 impl SystemPromptBuilder {
-    pub fn with_defaults() -> Self {
+    /// `persona_section` is the pre-rendered `## Voice` section
+    /// ([`zeroclaw_config::persona::PersonaKnobs::to_prompt_section`]), resolved
+    /// once by the caller (there is no persona field on [`PromptContext`] —
+    /// threading it through the builder avoids changing that struct's shape,
+    /// which has construction sites outside this pipeline). `None` — no
+    /// persona configured, direct or via card, or every dial at `medium` —
+    /// renders nothing and reproduces the prompt byte-for-byte as it was
+    /// before persona wiring existed.
+    ///
+    /// Placement: after every behavioural-constraint section this pipeline
+    /// has (here, just [`ToolHonestySection`] — there is no anti-narration
+    /// equivalent in this builder) and before the tool listing
+    /// ([`ToolsSection`]), mirroring the ordering rule in
+    /// `agent::system_prompt::build_system_prompt_with_persona`: a persona
+    /// dial must never be able to soften a hard behavioural constraint, and
+    /// voice should render before tools are listed.
+    pub fn with_defaults(persona_section: Option<String>) -> Self {
         Self {
             sections: vec![
                 Box::new(DateTimeSection),
                 Box::new(IdentitySection),
                 Box::new(ToolHonestySection),
+                Box::new(VoiceSection(persona_section)),
                 Box::new(ToolsSection),
                 Box::new(SafetySection),
                 Box::new(SkillsSection),
@@ -86,6 +97,12 @@ impl SystemPromptBuilder {
 
 pub struct IdentitySection;
 pub struct ToolHonestySection;
+/// Pre-rendered `## Voice` persona section, captured at builder-construction
+/// time. Carries the already-rendered text rather than reading it off
+/// [`PromptContext`] so that adding persona support did not require adding a
+/// field to `PromptContext` — which has a construction site outside this
+/// module (`tools::delegate`) that this change must not force edits onto.
+pub struct VoiceSection(pub Option<String>);
 pub struct ToolsSection;
 pub struct SafetySection;
 pub struct SkillsSection;
@@ -144,6 +161,16 @@ impl PromptSection for ToolHonestySection {
              - When unsure whether a tool call succeeded, ask the user rather than guessing."
                 .into(),
         )
+    }
+}
+
+impl PromptSection for VoiceSection {
+    fn name(&self) -> &str {
+        "voice"
+    }
+
+    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
+        Ok(self.0.clone().unwrap_or_default())
     }
 }
 
@@ -407,7 +434,9 @@ mod tests {
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
         };
-        let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        let prompt = SystemPromptBuilder::with_defaults(None)
+            .build(&ctx)
+            .unwrap();
         assert!(prompt.contains("## Tools"));
         assert!(prompt.contains("test_tool"));
         assert!(prompt.contains("instr"));
@@ -430,7 +459,9 @@ mod tests {
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
         };
-        let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        let prompt = SystemPromptBuilder::with_defaults(None)
+            .build(&ctx)
+            .unwrap();
         assert!(!prompt.contains("## Tools"));
         assert!(!prompt.contains("test_tool"));
         assert!(prompt.contains("## Safety"));
@@ -454,7 +485,9 @@ mod tests {
             autonomy_level: AutonomyLevel::Supervised,
         };
 
-        let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        let prompt = SystemPromptBuilder::with_defaults(None)
+            .build(&ctx)
+            .unwrap();
 
         assert!(!prompt.contains("## Tools"));
         assert!(!prompt.contains("## CRITICAL: Tool Honesty"));
@@ -471,6 +504,7 @@ mod tests {
         let skills = vec![crate::skills::Skill {
             name: "deploy".into(),
             description: "Release safely".into(),
+            description_localizations: Default::default(),
             version: "1.0.0".into(),
             author: None,
             tags: vec![],
@@ -519,6 +553,7 @@ mod tests {
         let skills = vec![crate::skills::Skill {
             name: "deploy".into(),
             description: "Release safely".into(),
+            description_localizations: Default::default(),
             version: "1.0.0".into(),
             author: None,
             tags: vec![],
@@ -600,6 +635,7 @@ mod tests {
         let skills = vec![crate::skills::Skill {
             name: "code<review>&".into(),
             description: "Review \"unsafe\" and 'risky' bits".into(),
+            description_localizations: Default::default(),
             version: "1.0.0".into(),
             author: None,
             tags: vec![],
@@ -632,7 +668,9 @@ mod tests {
             autonomy_level: AutonomyLevel::Supervised,
         };
 
-        let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
+        let prompt = SystemPromptBuilder::with_defaults(None)
+            .build(&ctx)
+            .unwrap();
 
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("<name>code&lt;review&gt;&amp;</name>"));
@@ -780,5 +818,86 @@ mod tests {
             output.contains("bypass oversight"),
             "supervised should include 'bypass oversight' instructions"
         );
+    }
+
+    fn persona_test_ctx<'a>(tools: &'a [Box<dyn Tool>]) -> PromptContext<'a> {
+        PromptContext {
+            workspace_dir: Path::new("/tmp"),
+            agent_workspace_dir: Path::new("/tmp"),
+            model_name: "test-model",
+            tools,
+            skills: &[],
+            skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            sends_native_tool_specs: false,
+
+            security_summary: None,
+            autonomy_level: AutonomyLevel::Supervised,
+        }
+    }
+
+    /// `## Voice` must land after `ToolHonestySection` (the only
+    /// behavioural-constraint section this pipeline has — there is no
+    /// anti-narration equivalent here) and before `ToolsSection`, mirroring
+    /// the ordering rule `agent::system_prompt::build_system_prompt_with_persona`
+    /// applies to its own pipeline.
+    #[test]
+    fn voice_section_lands_after_tool_honesty_and_before_tools() {
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(TestTool)];
+        let ctx = persona_test_ctx(&tools);
+        let prompt = SystemPromptBuilder::with_defaults(Some("## Voice\n\n- Be terse.\n".into()))
+            .build(&ctx)
+            .unwrap();
+
+        let honesty_pos = prompt
+            .find("## CRITICAL: Tool Honesty")
+            .expect("tool honesty block present");
+        let voice_pos = prompt.find("## Voice").expect("Voice section present");
+        let tools_pos = prompt.find("## Tools").expect("Tools section present");
+
+        assert!(
+            honesty_pos < voice_pos,
+            "Voice must come after the tool-honesty block"
+        );
+        assert!(
+            voice_pos < tools_pos,
+            "Voice must come before the tools list"
+        );
+    }
+
+    /// Regression guard: a persona-less builder must produce byte-identical
+    /// output to the pre-persona section list (`DateTime, Identity,
+    /// ToolHonesty, Tools, Safety, Skills, Workspace, Runtime, ChannelMedia`
+    /// — the exact order `with_defaults` used before `VoiceSection` existed).
+    /// `VoiceSection(None)` must contribute exactly zero bytes.
+    #[test]
+    fn no_persona_is_byte_identical_to_the_pre_voice_section_list() {
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(TestTool)];
+        let ctx = persona_test_ctx(&tools);
+
+        let with_voice_section_but_no_persona = SystemPromptBuilder::with_defaults(None)
+            .build(&ctx)
+            .unwrap();
+
+        let without_voice_section_at_all = SystemPromptBuilder::default()
+            .add_section(Box::new(DateTimeSection))
+            .add_section(Box::new(IdentitySection))
+            .add_section(Box::new(ToolHonestySection))
+            .add_section(Box::new(ToolsSection))
+            .add_section(Box::new(SafetySection))
+            .add_section(Box::new(SkillsSection))
+            .add_section(Box::new(WorkspaceSection))
+            .add_section(Box::new(RuntimeSection))
+            .add_section(Box::new(ChannelMediaSection))
+            .build(&ctx)
+            .unwrap();
+
+        assert_eq!(
+            with_voice_section_but_no_persona, without_voice_section_at_all,
+            "VoiceSection(None) must render nothing — output must match the \
+             pre-persona section list exactly"
+        );
+        assert!(!with_voice_section_but_no_persona.contains("## Voice"));
     }
 }

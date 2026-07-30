@@ -1,25 +1,29 @@
 #[allow(clippy::module_inception)]
 pub mod agent;
+pub(crate) mod approval_bridge;
 pub mod classifier;
 pub mod context_analyzer;
-pub mod context_compressor;
 pub mod cost;
 pub mod dispatcher;
 pub mod eval;
 pub mod history;
 pub mod history_pruner;
+pub mod history_trim;
 pub mod loop_;
 pub mod loop_detector;
-pub mod memory_loader;
+pub mod memory_inject;
 pub mod memory_strategy;
 pub mod personality;
 pub mod personality_templates;
+pub mod pricing_catalog;
 pub mod prompt;
 pub mod system_prompt;
 pub mod thinking;
 pub mod tool_execution;
 pub mod tool_receipts;
 pub(crate) mod turn;
+
+pub use turn::context::TurnMeta;
 
 pub(crate) fn is_runtime_approved_arg_tool(tool_name: &str) -> bool {
     matches!(
@@ -60,5 +64,12 @@ mod tests;
 
 #[allow(unused_imports)]
 pub use agent::{Agent, AgentBuilder, TurnEvent};
+/// The background-child waker's out-of-crate surface: the claim entry point for
+/// outer turn shapes that scope the session key around the tool loop rather than
+/// around turn assembly, plus the guard that hands the claim back when such a
+/// turn never reaches its provider. Today's only consumer is the channel
+/// orchestrator (`zeroclaw-channels`).
+#[allow(unused_imports)]
+pub use loop_::{UnclaimOnDrop, claim_announcements_for_scoped_turn};
 #[allow(unused_imports)]
 pub use loop_::{process_message, run};

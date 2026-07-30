@@ -1,0 +1,303 @@
+//! The durable task/run registry contract — EPIC A's stable seam.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    /// Background delegation task.
+    Delegate,
+    /// Subagent task spawned under the runtime.
+    Subagent,
+    /// Goal-mode task. Goal-specific state lives in the goal extension table;
+    /// lifecycle and route ownership still live on [`TaskRecord`].
+    Goal,
+    /// Peer inbox task.
+    PeerInbox,
+    // EPIC E: RemoteTurn
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    /// Task is currently eligible to execute or already executing.
+    Running,
+    /// Task is intentionally stopped but resumable.
+    Paused,
+    /// Task finished successfully.
+    Completed,
+    /// Task ended with an error.
+    Failed,
+    /// Task was intentionally cancelled.
+    Cancelled,
+    /// Written by the reaper/recovery sweep from OUTSIDE the task body — the state
+    /// today's enum literally cannot represent (task-lifecycle-supervision gap).
+    Lost,
+    /// Heartbeat exceeded its grace window / the task passed `max_runtime`.
+    TimedOut,
+}
+
+impl TaskStatus {
+    /// Every status a task can no longer transition out of.
+    ///
+    /// Single-sourced on purpose: `is_terminal`, `announced_outcome`, and the
+    /// terminal-status SQL filter in `task_store_sqlite` all used to keep their
+    /// own hand-written copy of this set, plus serde's on-disk spelling made a
+    /// fourth. Adding a terminal variant to the enum and forgetting one of
+    /// those copies was a silent way to drop announcements — now there is one
+    /// list, and the other three are derived from it (or, for the SQL filter,
+    /// tested against it; see `task_store_sqlite::tests`).
+    pub const TERMINAL: [TaskStatus; 5] = [
+        TaskStatus::Completed,
+        TaskStatus::Failed,
+        TaskStatus::Cancelled,
+        TaskStatus::Lost,
+        TaskStatus::TimedOut,
+    ];
+
+    /// A task is terminal once it can no longer transition. The reaper only
+    /// reconciles non-terminal records.
+    pub fn is_terminal(self) -> bool {
+        Self::TERMINAL.contains(&self)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRecord {
+    /// Stable task id. Producers validate it at registration boundaries.
+    pub id: String,
+    /// Durable task domain type.
+    pub kind: TaskKind,
+    /// Agent alias that owns and executes this task.
+    pub agent: String,
+    /// Canonical lifecycle state for the task.
+    pub status: TaskStatus,
+    /// OS pid of the daemon that created the task; paired with `owner_boot_id` so a
+    /// recycled pid on a later boot is not mistaken for the live owner.
+    #[serde(default)]
+    pub owner_pid: u32,
+    /// Daemon run-id; survives PID reuse and distinguishes a prior-boot orphan from
+    /// a live same-boot task.
+    #[serde(default)]
+    pub owner_boot_id: String,
+    /// Optional owner heartbeat timestamp in RFC3339 form.
+    /// Only tasks that actively heartbeat may be timed out by heartbeat age; an
+    /// absent heartbeat is not a derived runtime duration.
+    #[serde(default)]
+    pub heartbeat_at: Option<String>,
+    /// Monotonic persisted recursion depth for delegation/subagent governors.
+    #[serde(default)]
+    pub depth: u32,
+    /// Parent task id for synchronous child work, when one exists.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// Trusted route/reply target that originated the task.
+    /// Goal admission and visibility checks use this canonical route instead of
+    /// trusting model-supplied task selectors.
+    #[serde(default)]
+    pub originator_route: Option<String>,
+    /// Whether user-visible completion delivery has been confirmed.
+    #[serde(default)]
+    pub delivered: bool,
+    /// Optional idempotency key for completion/delivery operations.
+    #[serde(default)]
+    pub idem_key: Option<String>,
+    #[serde(default)]
+    pub principal_id: Option<String>,
+    /// Task registration/start timestamp in RFC3339 form.
+    pub started_at: String,
+    /// Terminal transition timestamp in RFC3339 form.
+    #[serde(default)]
+    pub finished_at: Option<String>,
+}
+
+/// THE stable seam. One trait, backed once by SQLite. The ACP session store and the
+/// delegate/subagent/peer producers all converge here (CROSS-CUTTING epic-A D1).
+#[async_trait::async_trait]
+pub trait TaskRegistry: Send + Sync {
+    /// Register a new unit of work. Idempotent on `rec.id`.
+    async fn create(&self, rec: TaskRecord) -> anyhow::Result<()>;
+    /// Stamp a liveness beat for `id` from the heart-beating owner.
+    async fn heartbeat(&self, id: &str, owner_boot_id: &str) -> anyhow::Result<()>;
+    /// Transition `id` to `status`, optionally recording terminal output/error.
+    async fn update_status(
+        &self,
+        id: &str,
+        status: TaskStatus,
+        output: Option<String>,
+        error: Option<String>,
+    ) -> anyhow::Result<()>;
+    async fn claim_owner(
+        &self,
+        id: &str,
+        owner_pid: u32,
+        owner_boot_id: &str,
+    ) -> anyhow::Result<()>;
+    async fn get(&self, id: &str) -> anyhow::Result<Option<TaskRecord>>;
+    async fn list_running(&self) -> anyhow::Result<Vec<TaskRecord>>;
+    async fn list_by_agent(&self, agent: &str) -> anyhow::Result<Vec<TaskRecord>>;
+    /// Reaper/recovery seam: mark a record terminal-loss ONLY when this process is
+    /// authoritative for it. Returns `false` (no write) when another live daemon
+    /// owns it. See [`crate::control_plane::authority::is_authoritative`].
+    async fn reconcile_lost(&self, id: &str, now_boot_id: &str) -> anyhow::Result<bool>;
+
+    /// Atomically transition `id` straight to a terminal `status`, recording
+    /// `output`/`error` and the `delivered` flag in the same write.
+    ///
+    /// This exists because "finish the task" and "flag it delivered" used to
+    /// be two separate writes (`update_status` then a second call). Between
+    /// those two writes the row is terminal-but-undelivered — exactly the
+    /// shape [`claim_undelivered_children`] selects on — so a concurrent
+    /// claim could land in that window, announce the completion, and then
+    /// the second write would stamp `delivered` over a result already
+    /// handed to a waiting caller (or worse, race it). A single UPDATE that
+    /// moves the row from non-terminal straight to (terminal status,
+    /// output, error, delivered) leaves no window in which the row is
+    /// claimable-but-mislabelled.
+    ///
+    /// Rejects a non-terminal `status` (use `update_status` for those).
+    /// Returns `Ok(false)` — no write performed — when `id` does not exist
+    /// or is already terminal; a terminal task is never silently
+    /// re-finished, matching `update_status`'s existing "NOT IN terminal"
+    /// guard.
+    async fn finish_task(
+        &self,
+        id: &str,
+        status: TaskStatus,
+        output: Option<&str>,
+        error: Option<&str>,
+        delivered: bool,
+    ) -> anyhow::Result<bool>;
+
+    /// Claim finished-but-unannounced children of `parent_id`, marking them
+    /// delivered in the same statement that returns them.
+    ///
+    /// The claim and the flag move together on purpose. A background task's
+    /// result is announced back into its parent's conversation, and announcing
+    /// the same completion twice would have the parent act on it twice — which
+    /// for a tool call means doing it twice. Reading first and flagging after
+    /// leaves a window where a second waker sees the same row.
+    ///
+    /// Every terminal status is claimable, not just success: a child that
+    /// failed, timed out, was cancelled or was lost to a restart is news the
+    /// parent needs. Silence is the one outcome that must never be reported.
+    /// Claim finished-but-unannounced children of `parent_id` as
+    /// announcements, ready for the parent's next turn.
+    ///
+    /// Returns announcements rather than [`TaskRecord`]s because the record
+    /// type does not carry a task's output or error — those live in the store
+    /// and are dropped on the way into a `TaskRecord`. Announcing without them
+    /// would tell a parent that something finished while withholding what it
+    /// produced, which is the one thing the parent actually needs.
+    async fn claim_undelivered_children(
+        &self,
+        parent_id: &str,
+    ) -> anyhow::Result<Vec<zeroclaw_api::announce::Announcement>>;
+
+    /// Put claimed children back: clear `delivered` for exactly `ids`, so a
+    /// claim that never reached the model can be claimed again.
+    ///
+    /// [`Self::claim_undelivered_children`] commits `delivered = 1` before its
+    /// caller has done anything with the announcements, which is what makes a
+    /// completion arrive exactly once. The cost is that everything between the
+    /// claim and the model actually reading the text is a window in which the
+    /// announcement can be destroyed: the claiming turn can still fail — on
+    /// tool-spec construction, vision routing, message preparation, the tool
+    /// budget — before any provider call happens. Those rows are then flagged
+    /// delivered while no one has seen them, and nothing will ever look at
+    /// them again. This method is how a caller that failed in that window
+    /// hands the news back, trading exactly-once for at-least-once on the
+    /// failure path, which is the correct trade: a parent shown a completion
+    /// twice can reconcile, a parent never shown it cannot.
+    ///
+    /// Idempotent, and returns the number of rows actually changed — a second
+    /// call for the same ids changes nothing and reports `0`, because the
+    /// UPDATE matches only rows that are currently `delivered = 1`. An empty
+    /// `ids` is a no-op returning `0`.
+    ///
+    /// Deliberately **not** filtered on terminal status. Every id handed here
+    /// came out of a claim, and the claim's own WHERE clause admits terminal
+    /// rows only, so the filter would be dead weight that reads as if it were
+    /// guarding something. Ids that do not exist, or are already
+    /// `delivered = 0`, simply match nothing.
+    async fn unclaim_children(&self, ids: &[String]) -> anyhow::Result<usize>;
+}
+
+/// Map a terminal task status onto the announced outcome. `None` for a task
+/// still in flight — an unfinished task is not news.
+#[must_use]
+pub fn announced_outcome(status: TaskStatus) -> Option<zeroclaw_api::announce::AnnouncedOutcome> {
+    use zeroclaw_api::announce::AnnouncedOutcome;
+    Some(match status {
+        TaskStatus::Completed => AnnouncedOutcome::Completed,
+        TaskStatus::Failed => AnnouncedOutcome::Failed,
+        TaskStatus::Cancelled => AnnouncedOutcome::Cancelled,
+        TaskStatus::TimedOut => AnnouncedOutcome::TimedOut,
+        TaskStatus::Lost => AnnouncedOutcome::Lost,
+        TaskStatus::Running | TaskStatus::Paused => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_status_values_still_parse() {
+        // Backward-compat: pre-EPIC-A on-disk values must deserialize unchanged.
+        for (json, want) in [
+            ("\"running\"", TaskStatus::Running),
+            ("\"paused\"", TaskStatus::Paused),
+            ("\"completed\"", TaskStatus::Completed),
+            ("\"failed\"", TaskStatus::Failed),
+            ("\"cancelled\"", TaskStatus::Cancelled),
+        ] {
+            let got: TaskStatus = serde_json::from_str(json).unwrap();
+            assert_eq!(got, want, "legacy status {json} must parse");
+        }
+    }
+
+    #[test]
+    fn goal_kind_roundtrips_snake_case() {
+        let s = serde_json::to_string(&TaskKind::Goal).unwrap();
+        assert_eq!(s, "\"goal\"");
+        let back: TaskKind = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, TaskKind::Goal);
+    }
+
+    #[test]
+    fn new_loss_states_roundtrip_snake_case() {
+        for st in [TaskStatus::Lost, TaskStatus::TimedOut] {
+            let s = serde_json::to_string(&st).unwrap();
+            assert!(s == "\"lost\"" || s == "\"timed_out\"", "got {s}");
+            let back: TaskStatus = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, st);
+            assert!(st.is_terminal());
+        }
+    }
+
+    #[test]
+    fn paused_status_is_non_terminal() {
+        assert!(!TaskStatus::Paused.is_terminal());
+    }
+
+    #[test]
+    fn record_loads_without_new_fields() {
+        // An old payload carrying only the original columns must deserialize, with
+        // the EPIC-A/B/C/D fields defaulting.
+        let legacy = r#"{
+            "id": "11111111-1111-1111-1111-111111111111",
+            "kind": "delegate",
+            "agent": "main",
+            "status": "running",
+            "started_at": "2026-06-18T00:00:00Z"
+        }"#;
+        let rec: TaskRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(rec.depth, 0);
+        assert_eq!(rec.owner_pid, 0);
+        assert!(!rec.delivered);
+        assert!(rec.parent_id.is_none());
+        assert!(rec.originator_route.is_none());
+        assert!(rec.principal_id.is_none()); // EPIC-D attribution not yet stamped; absent
+    }
+}

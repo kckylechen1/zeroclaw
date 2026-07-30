@@ -1,0 +1,21 @@
+zeroclaw-coordinator
+
+This crate contains source code derived from grok-build:
+
+    https://github.com/xai-org/grok-build
+    revision 1adcd1f477870e4a97bacbd6be78c8a3bfbac46d
+    crates/codegen/xai-grok-tools/src/implementations/grok_build/task/
+
+    Copyright 2023-2026 SpaceXAI
+    Licensed under the Apache License, Version 2.0
+
+The derived files carry per-file notices stating that they were changed.
+Modifications by ZeroClaw Labs.
+
+The upstream repository ships no NOTICE file of its own; the copyright line
+above is taken from the upstream LICENSE, which is reproduced verbatim in
+this directory.
+
+The rest of the ZeroClaw workspace is offered under "MIT OR Apache-2.0".
+This crate is Apache-2.0 only, because the Apache-2.0 code it derives from
+cannot be redistributed under the MIT arm.

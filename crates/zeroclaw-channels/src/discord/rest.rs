@@ -10,16 +10,34 @@ use reqwest::multipart::{Form, Part};
 
 use super::types::DiscordOutgoing;
 
-/// POST a plain-text message and return the new message's ID. Callers
-/// that don't need the ID (e.g. non-first chunks) can discard it.
+/// POST a content-only plain-text message and return the new message's ID.
+/// A thin adapter over [`send_discord_message_payload`] for the many callers
+/// (non-first chunks, streaming replies, approvals) that send no embeds.
 pub(crate) async fn send_discord_message_json(
     client: &reqwest::Client,
     bot_token: &str,
     recipient: &str,
     content: &str,
 ) -> anyhow::Result<String> {
+    send_discord_message_payload(
+        client,
+        bot_token,
+        recipient,
+        &DiscordOutgoing::text(content),
+    )
+    .await
+}
+
+/// POST a full message envelope (content plus any embeds) and return the new
+/// message's ID. Callers that don't need the ID can discard it.
+pub(crate) async fn send_discord_message_payload(
+    client: &reqwest::Client,
+    bot_token: &str,
+    recipient: &str,
+    payload: &DiscordOutgoing,
+) -> anyhow::Result<String> {
     let url = format!("https://discord.com/api/v10/channels/{recipient}/messages");
-    let body = DiscordOutgoing::text(content).to_rest_json();
+    let body = payload.to_rest_json();
 
     let resp = client
         .post(&url)
@@ -40,21 +58,46 @@ pub(crate) async fn send_discord_message_json(
     extract_message_id(resp).await
 }
 
-/// POST a message with file attachments via multipart, returning the new
-/// message's ID. Callers that don't need the ID can discard it.
-pub(crate) async fn send_discord_message_with_files(
+pub(crate) async fn send_discord_outgoing(
     client: &reqwest::Client,
     bot_token: &str,
     recipient: &str,
-    content: &str,
+    outgoing: &DiscordOutgoing,
+) -> anyhow::Result<String> {
+    let url = format!("https://discord.com/api/v10/channels/{recipient}/messages");
+    let body = outgoing.to_rest_json();
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bot {bot_token}"))
+        .json(&body)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<failed to read response body: {e}>"));
+        anyhow::bail!("Discord send message failed ({status}): {err}");
+    }
+
+    extract_message_id(resp).await
+}
+
+/// POST a full message envelope with file attachments via multipart,
+/// returning the new message's ID. Callers that don't need the ID can discard it.
+pub(crate) async fn send_discord_message_payload_with_files(
+    client: &reqwest::Client,
+    bot_token: &str,
+    recipient: &str,
+    payload: &DiscordOutgoing,
     files: &[PathBuf],
 ) -> anyhow::Result<String> {
     let url = format!("https://discord.com/api/v10/channels/{recipient}/messages");
 
-    let mut form = Form::new().text(
-        "payload_json",
-        DiscordOutgoing::text(content).payload_json(),
-    );
+    let mut form = Form::new().text("payload_json", payload.payload_json());
 
     for (idx, path) in files.iter().enumerate() {
         let bytes = tokio::fs::read(path).await.map_err(|error| {
@@ -121,10 +164,8 @@ async fn extract_message_id(resp: reqwest::Response) -> anyhow::Result<String> {
         })
 }
 
-/// Edit an existing Discord message via PATCH.
-///
-/// Returns `Ok(())` on success. On HTTP 429 (rate limited), logs at debug
-/// level and returns `Ok(())` since skipping a mid-stream edit is harmless.
+/// Edit an existing Discord message with content only. A thin adapter over
+/// [`edit_discord_message_payload`].
 pub(crate) async fn edit_discord_message(
     client: &reqwest::Client,
     bot_token: &str,
@@ -132,8 +173,25 @@ pub(crate) async fn edit_discord_message(
     message_id: &str,
     content: &str,
 ) -> anyhow::Result<()> {
+    edit_discord_message_payload(
+        client,
+        bot_token,
+        channel_id,
+        message_id,
+        &DiscordOutgoing::text(content),
+    )
+    .await
+}
+
+pub(crate) async fn edit_discord_message_payload(
+    client: &reqwest::Client,
+    bot_token: &str,
+    channel_id: &str,
+    message_id: &str,
+    payload: &DiscordOutgoing,
+) -> anyhow::Result<()> {
     let url = format!("https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}");
-    let body = DiscordOutgoing::text(content).to_rest_json();
+    let body = payload.to_rest_json();
 
     let resp = client
         .patch(&url)
@@ -164,7 +222,6 @@ pub(crate) async fn edit_discord_message(
 }
 
 /// Delete a Discord message.
-///
 /// Returns `Ok(())` on success. On HTTP 429 (rate limited), logs at debug
 /// level and returns `Ok(())` since a stale message is cosmetic only.
 pub(crate) async fn delete_discord_message(
@@ -202,11 +259,6 @@ pub(crate) async fn delete_discord_message(
     Ok(())
 }
 
-/// URL-encode a Unicode emoji for use in Discord reaction API paths.
-///
-/// Discord's reaction endpoints accept raw Unicode emoji in the URL path,
-/// but they must be percent-encoded per RFC 3986. Custom guild emojis use
-/// the `name:id` format and are passed through unencoded.
 pub(crate) fn encode_emoji_for_discord(emoji: &str) -> String {
     if emoji.contains(':') {
         return emoji.to_string();
