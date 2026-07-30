@@ -434,7 +434,9 @@ mod tests {
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
         };
-        let prompt = SystemPromptBuilder::with_defaults(None).build(&ctx).unwrap();
+        let prompt = SystemPromptBuilder::with_defaults(None)
+            .build(&ctx)
+            .unwrap();
         assert!(prompt.contains("## Tools"));
         assert!(prompt.contains("test_tool"));
         assert!(prompt.contains("instr"));
@@ -457,7 +459,9 @@ mod tests {
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
         };
-        let prompt = SystemPromptBuilder::with_defaults(None).build(&ctx).unwrap();
+        let prompt = SystemPromptBuilder::with_defaults(None)
+            .build(&ctx)
+            .unwrap();
         assert!(!prompt.contains("## Tools"));
         assert!(!prompt.contains("test_tool"));
         assert!(prompt.contains("## Safety"));
@@ -481,7 +485,9 @@ mod tests {
             autonomy_level: AutonomyLevel::Supervised,
         };
 
-        let prompt = SystemPromptBuilder::with_defaults(None).build(&ctx).unwrap();
+        let prompt = SystemPromptBuilder::with_defaults(None)
+            .build(&ctx)
+            .unwrap();
 
         assert!(!prompt.contains("## Tools"));
         assert!(!prompt.contains("## CRITICAL: Tool Honesty"));
@@ -662,7 +668,9 @@ mod tests {
             autonomy_level: AutonomyLevel::Supervised,
         };
 
-        let prompt = SystemPromptBuilder::with_defaults(None).build(&ctx).unwrap();
+        let prompt = SystemPromptBuilder::with_defaults(None)
+            .build(&ctx)
+            .unwrap();
 
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("<name>code&lt;review&gt;&amp;</name>"));
@@ -852,7 +860,10 @@ mod tests {
             honesty_pos < voice_pos,
             "Voice must come after the tool-honesty block"
         );
-        assert!(voice_pos < tools_pos, "Voice must come before the tools list");
+        assert!(
+            voice_pos < tools_pos,
+            "Voice must come before the tools list"
+        );
     }
 
     /// Regression guard: a persona-less builder must produce byte-identical

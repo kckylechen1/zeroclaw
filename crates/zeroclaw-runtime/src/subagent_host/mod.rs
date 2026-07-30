@@ -488,9 +488,7 @@ impl ChildRunner for NativeChildRunner {
             let duration_ms = elapsed_ms(started_at);
 
             let (outcome, text, detail) = match ending {
-                TurnEnding::Finished(Ok(response)) => {
-                    (ChildOutcome::Completed, response, None)
-                }
+                TurnEnding::Finished(Ok(response)) => (ChildOutcome::Completed, response, None),
                 TurnEnding::Finished(Err(error)) => (
                     ChildOutcome::Failed,
                     String::new(),
@@ -545,7 +543,11 @@ impl ChildRunner for NativeChildRunner {
     ///   fine, and it is not `Unknown` either — the enum has no variant for
     ///   it, so this method stays out of policy resolution entirely and
     ///   [`Self::run`] reports that failure with the resolver's own message.
-    fn validate_type(&self, agent_type: String, _parent_session_id: String) -> Self::ValidateFuture {
+    fn validate_type(
+        &self,
+        agent_type: String,
+        _parent_session_id: String,
+    ) -> Self::ValidateFuture {
         ready(
             match NativeChildRunner::resolve_agent_type(&self.config, &agent_type) {
                 Ok(()) => ValidateTypeOutcome::Ok,

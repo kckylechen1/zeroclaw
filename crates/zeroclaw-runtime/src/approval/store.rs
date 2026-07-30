@@ -84,7 +84,13 @@ fn canonicalize(value: &serde_json::Value) -> String {
             keys.sort();
             let inner: Vec<String> = keys
                 .into_iter()
-                .map(|k| format!("{}:{}", serde_json::to_string(k).unwrap_or_default(), canonicalize(&map[k])))
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_default(),
+                        canonicalize(&map[k])
+                    )
+                })
                 .collect();
             format!("{{{}}}", inner.join(","))
         }
@@ -167,8 +173,8 @@ impl ApprovalStore {
     pub fn open(data_dir: &Path, boot_id: impl Into<String>) -> Result<Self> {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("creating approval store dir {}", data_dir.display()))?;
-        let conn = Connection::open(data_dir.join("approvals.db"))
-            .context("opening approvals.db")?;
+        let conn =
+            Connection::open(data_dir.join("approvals.db")).context("opening approvals.db")?;
         conn.execute_batch(SCHEMA)
             .context("applying approval store schema")?;
         Ok(Self {
@@ -393,7 +399,10 @@ mod tests {
             .unwrap();
 
         assert!(
-            store.redeem("run-1", "portfolio_buy", &args).unwrap().is_ok(),
+            store
+                .redeem("run-1", "portfolio_buy", &args)
+                .unwrap()
+                .is_ok(),
             "first redemption must succeed"
         );
         assert_eq!(
@@ -408,7 +417,14 @@ mod tests {
         let store = ApprovalStore::open_in_memory("boot-1").unwrap();
         let approved = json!({"symbol": "600519", "qty": 100});
         store
-            .grant("run-1", "portfolio_buy", &approved, "owner", "wechat", ttl())
+            .grant(
+                "run-1",
+                "portfolio_buy",
+                &approved,
+                "owner",
+                "wechat",
+                ttl(),
+            )
             .unwrap();
 
         let bigger = json!({"symbol": "600519", "qty": 100_000});

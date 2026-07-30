@@ -36,8 +36,8 @@ use crate::state::{
     ActiveChild, BlockingWaiter, BufferedCompletion, ChildRecord, ChildRunFuture, CompletedChild,
     InternalEvent, ListRequest, MAX_PENDING_COMPLETIONS, PendingChild, ProgressFuture,
     ProgressTarget, ReplyFuture, active_summary, background_at_deadline, background_if_caller_gone,
-    cap_completion_output, completed_snapshot, completion_summary, evict_completed, panicked_result,
-    sleep_until,
+    cap_completion_output, completed_snapshot, completion_summary, evict_completed,
+    panicked_result, sleep_until,
 };
 use crate::types::{
     CancelOutcome, CancelTarget, ChildRequest, ChildResult, CoordinatorCommand, DescribeOutcome,
@@ -284,7 +284,11 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
                 });
             }
             CoordinatorCommand::Inspect(request) => {
-                self.handle_inspect(request.child_id, request.parent_session_id, request.respond_to);
+                self.handle_inspect(
+                    request.child_id,
+                    request.parent_session_id,
+                    request.respond_to,
+                );
             }
             CoordinatorCommand::SpawnedRefs(request) => {
                 let mut refs: Vec<_> = self
@@ -433,10 +437,7 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
                 depth,
                 max: self.config.max_spawn_depth,
             })
-        } else if crate::state::at_child_capacity(
-            in_flight,
-            self.config.max_concurrent_children,
-        ) {
+        } else if crate::state::at_child_capacity(in_flight, self.config.max_concurrent_children) {
             Some(SpawnRefusal::ChildCapacityReached {
                 in_flight,
                 max: self.config.max_concurrent_children,
@@ -700,7 +701,10 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
         // separate delivered write. Persistence is an observer, not a gate —
         // a write failure is logged loudly and the actor carries on.
         let delivered = disposition.foreground_delivered || disposition.waiter_delivered;
-        if let Err(error) = self.persistence.record_finish(id, &output.result, delivered) {
+        if let Err(error) = self
+            .persistence
+            .record_finish(id, &output.result, delivered)
+        {
             ::zeroclaw_log::record!(
                 ERROR,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -904,9 +908,9 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
     fn refuse_queued_spawns(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
             if let CoordinatorCommand::Spawn(spawn) = command {
-                let _ = spawn
-                    .admission_tx
-                    .send(SpawnAdmission::Refused(SpawnRefusal::CoordinatorShuttingDown));
+                let _ = spawn.admission_tx.send(SpawnAdmission::Refused(
+                    SpawnRefusal::CoordinatorShuttingDown,
+                ));
             }
         }
     }
@@ -958,8 +962,7 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
             let result = ChildResult {
                 outcome: ChildOutcome::Lost,
                 detail: Some(
-                    "coordinator dropped while the child was still pending or active"
-                        .to_owned(),
+                    "coordinator dropped while the child was still pending or active".to_owned(),
                 ),
                 child_id: id.clone(),
                 child_session_id,

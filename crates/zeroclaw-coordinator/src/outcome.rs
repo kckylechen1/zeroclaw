@@ -161,7 +161,10 @@ mod tests {
             ChildOutcome::TimedOut,
             ChildOutcome::Lost,
         ] {
-            assert!(!outcome.is_success(), "{outcome:?} must not read as success");
+            assert!(
+                !outcome.is_success(),
+                "{outcome:?} must not read as success"
+            );
         }
     }
 

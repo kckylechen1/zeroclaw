@@ -35666,7 +35666,8 @@ allowed_users = []
     #[tokio::test]
     async fn config_validate_accepts_an_agent_defined_solely_by_a_card() {
         let cfg: Config = toml::from_str(&card_config(r#"card = "analyst""#, "")).unwrap();
-        cfg.validate().expect("a card alone is a complete definition");
+        cfg.validate()
+            .expect("a card alone is a complete definition");
     }
 
     #[tokio::test]
@@ -35738,7 +35739,8 @@ allowed_users = []
         .unwrap();
         let msg = format!(
             "{:#}",
-            cfg.validate().expect_err("card plus risk_profile is ambiguous")
+            cfg.validate()
+                .expect_err("card plus risk_profile is ambiguous")
         );
         assert!(
             msg.contains("risk_profile") && msg.contains("card"),
@@ -37553,10 +37555,7 @@ model_provider = \"ollama.default\"
     /// it private) remain the real fix if evasion ever becomes a concern.
     #[test]
     async fn no_new_raw_risk_profile_reads_outside_the_resolver_and_validation() {
-        const SRC: &str = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/schema.rs"
-        ));
+        const SRC: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/schema.rs"));
         let production_src = SRC.split("mod tests").next().unwrap_or(SRC);
 
         // Functions that legitimately read `agent.risk_profile` (or, for the

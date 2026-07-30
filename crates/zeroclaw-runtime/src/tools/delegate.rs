@@ -7024,8 +7024,8 @@ mod tests {
     /// `target_profile` with `always_ask` entries.
     fn config_with_always_ask_delegate_via_card(mode: DelegateExecutionMode) -> Arc<Config> {
         use zeroclaw_config::autonomy::{DelegationMode, DelegationPolicy};
-        use zeroclaw_config::schema::{RiskProfileConfig, RuntimeProfileConfig};
         use zeroclaw_config::card::AgentCard;
+        use zeroclaw_config::schema::{RiskProfileConfig, RuntimeProfileConfig};
 
         let root = std::env::temp_dir().join(format!(
             "zeroclaw-delegate-always-ask-card-{}",
@@ -7614,7 +7614,10 @@ mod tests {
                 delegation_policy: DelegationPolicy {
                     mode: DelegationMode::Allow,
                 },
-                allowed_tools: Some(vec!["echo_tool".to_string(), DelegateTool::NAME.to_string()]),
+                allowed_tools: Some(vec![
+                    "echo_tool".to_string(),
+                    DelegateTool::NAME.to_string(),
+                ]),
                 ..RiskProfileConfig::default()
             },
         );

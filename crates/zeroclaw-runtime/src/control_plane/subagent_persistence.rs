@@ -154,7 +154,9 @@ impl ChildPersistence for SubagentPersistence {
 mod tests {
     use std::sync::Arc;
 
-    use zeroclaw_coordinator::{CancelToken, ChildOutcome, ChildOverrides, ChildRequest, ChildResult};
+    use zeroclaw_coordinator::{
+        CancelToken, ChildOutcome, ChildOverrides, ChildRequest, ChildResult,
+    };
 
     use super::*;
     use crate::control_plane::task_registry::TaskRegistry;
@@ -194,11 +196,16 @@ mod tests {
     #[tokio::test]
     async fn spawn_write_sets_parent_id_and_is_invisible_to_claim_while_running() {
         let (mut persistence, store) = harness();
-        persistence.record_spawn(&request("kid", "mum")).expect("spawn write");
+        persistence
+            .record_spawn(&request("kid", "mum"))
+            .expect("spawn write");
 
         let rec = store.get("kid").await.unwrap().expect("row must exist");
         assert_eq!(rec.parent_id.as_deref(), Some("mum"));
-        assert_eq!(rec.agent, "parent-alias", "agent column carries the alias, not the session id");
+        assert_eq!(
+            rec.agent, "parent-alias",
+            "agent column carries the alias, not the session id"
+        );
         assert_eq!(rec.status, TaskStatus::Running);
         assert_eq!(rec.kind, TaskKind::Subagent);
 
@@ -215,7 +222,9 @@ mod tests {
     #[tokio::test]
     async fn finish_delivered_false_is_claimed_exactly_once_with_output_and_error_intact() {
         let (mut persistence, store) = harness();
-        persistence.record_spawn(&request("kid", "mum")).expect("spawn write");
+        persistence
+            .record_spawn(&request("kid", "mum"))
+            .expect("spawn write");
 
         let result = ChildResult {
             outcome: ChildOutcome::Failed,
@@ -247,7 +256,9 @@ mod tests {
     #[tokio::test]
     async fn finish_delivered_true_is_never_claimed() {
         let (mut persistence, store) = harness();
-        persistence.record_spawn(&request("kid", "mum")).expect("spawn write");
+        persistence
+            .record_spawn(&request("kid", "mum"))
+            .expect("spawn write");
 
         let result = ChildResult {
             outcome: ChildOutcome::Completed,
@@ -286,7 +297,9 @@ mod tests {
         ] {
             let (mut persistence, store) = harness();
             let child_id = format!("kid-{outcome:?}");
-            persistence.record_spawn(&request(&child_id, "mum")).expect("spawn write");
+            persistence
+                .record_spawn(&request(&child_id, "mum"))
+                .expect("spawn write");
 
             let status = child_outcome_to_task_status(outcome);
             assert!(

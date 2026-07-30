@@ -1858,16 +1858,24 @@ pub fn skills_to_tools_with_context_and_runtime(
                     )));
                 }
                 "builtin" => {
-                    if let Some(t) =
-                        resolve_elevated_tool(&skill.name, tool, "builtin", unfiltered_registry, &security)
-                    {
+                    if let Some(t) = resolve_elevated_tool(
+                        &skill.name,
+                        tool,
+                        "builtin",
+                        unfiltered_registry,
+                        &security,
+                    ) {
                         tools.push(t);
                     }
                 }
                 "mcp" => {
-                    if let Some(t) =
-                        resolve_elevated_tool(&skill.name, tool, "MCP", unfiltered_registry, &security)
-                    {
+                    if let Some(t) = resolve_elevated_tool(
+                        &skill.name,
+                        tool,
+                        "MCP",
+                        unfiltered_registry,
+                        &security,
+                    ) {
                         tools.push(t);
                     }
                 }
@@ -4233,9 +4241,7 @@ mod prompt_callable_name_tests {
         }
     }
 
-    fn registry_with(
-        name: &'static str,
-    ) -> Vec<std::sync::Arc<dyn zeroclaw_api::tool::Tool>> {
+    fn registry_with(name: &'static str) -> Vec<std::sync::Arc<dyn zeroclaw_api::tool::Tool>> {
         vec![std::sync::Arc::new(FakeMcpTool(name))]
     }
 

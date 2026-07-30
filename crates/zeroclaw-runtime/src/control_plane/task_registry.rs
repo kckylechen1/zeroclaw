@@ -226,9 +226,7 @@ pub trait TaskRegistry: Send + Sync {
 /// Map a terminal task status onto the announced outcome. `None` for a task
 /// still in flight — an unfinished task is not news.
 #[must_use]
-pub fn announced_outcome(
-    status: TaskStatus,
-) -> Option<zeroclaw_api::announce::AnnouncedOutcome> {
+pub fn announced_outcome(status: TaskStatus) -> Option<zeroclaw_api::announce::AnnouncedOutcome> {
     use zeroclaw_api::announce::AnnouncedOutcome;
     Some(match status {
         TaskStatus::Completed => AnnouncedOutcome::Completed,

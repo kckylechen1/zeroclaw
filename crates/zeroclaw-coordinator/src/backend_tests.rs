@@ -139,10 +139,12 @@ async fn channel_backend_spawn_refusal_arrives_without_a_child_result() {
         let command = recv_command!(rx, Spawn);
         command
             .admission_tx
-            .send(SpawnAdmission::Refused(SpawnRefusal::ChildCapacityReached {
-                in_flight: 4,
-                max: 4,
-            }))
+            .send(SpawnAdmission::Refused(
+                SpawnRefusal::ChildCapacityReached {
+                    in_flight: 4,
+                    max: 4,
+                },
+            ))
             .expect("the caller awaits admission");
         // Deliberately dropped, unanswered: there is no run to report.
         drop(command.result_tx);
@@ -191,10 +193,7 @@ async fn channel_backend_spawn_admission_dropped() {
     .expect("a dropped admission channel must resolve, not hang")
     .unwrap_err();
     assert_eq!(err, CoordinatorError::AdmissionChannelDropped);
-    assert!(
-        err.to_string().contains("never decided"),
-        "error: {err}"
-    );
+    assert!(err.to_string().contains("never decided"), "error: {err}");
 
     handle.await.unwrap();
 }

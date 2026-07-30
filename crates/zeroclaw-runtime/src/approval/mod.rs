@@ -597,7 +597,10 @@ mod approval_precedence_tests {
     #[test]
     fn a_grant_redeems_for_the_call_it_was_issued_for() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = with_store(manager(AutonomyLevel::Supervised, &["shell"], &[]), dir.path());
+        let manager = with_store(
+            manager(AutonomyLevel::Supervised, &["shell"], &[]),
+            dir.path(),
+        );
         let args = json!({"command": "ls"});
 
         manager.grant_one_shot("run-1", "shell", &args, "owner", "cli");
@@ -610,7 +613,10 @@ mod approval_precedence_tests {
     #[test]
     fn a_grant_does_not_redeem_for_mutated_arguments() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = with_store(manager(AutonomyLevel::Supervised, &["shell"], &[]), dir.path());
+        let manager = with_store(
+            manager(AutonomyLevel::Supervised, &["shell"], &[]),
+            dir.path(),
+        );
 
         manager.grant_one_shot("run-1", "shell", &json!({"command": "ls"}), "owner", "cli");
 
@@ -626,7 +632,10 @@ mod approval_precedence_tests {
     #[test]
     fn a_grant_does_not_cover_a_repeat_of_the_same_call() {
         let dir = tempfile::tempdir().unwrap();
-        let manager = with_store(manager(AutonomyLevel::Supervised, &["shell"], &[]), dir.path());
+        let manager = with_store(
+            manager(AutonomyLevel::Supervised, &["shell"], &[]),
+            dir.path(),
+        );
         let args = json!({"command": "ls"});
 
         manager.grant_one_shot("run-1", "shell", &args, "owner", "cli");

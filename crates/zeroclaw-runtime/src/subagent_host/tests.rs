@@ -23,9 +23,9 @@ use tokio::sync::{mpsc, oneshot};
 use zeroclaw_config::card::{AgentCard, CardGrants, GrantClass, ToolGrant};
 use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
 use zeroclaw_coordinator::{
-    CancelToken, ChildOutcome, ChildOverrides, ChildRequest, ChildResult, ChildRunner,
-    Coordinator, CoordinatorCommand, CoordinatorConfig, DescribeOutcome, SpawnAdmission,
-    SpawnCommand, ValidateTypeOutcome,
+    CancelToken, ChildOutcome, ChildOverrides, ChildRequest, ChildResult, ChildRunner, Coordinator,
+    CoordinatorCommand, CoordinatorConfig, DescribeOutcome, SpawnAdmission, SpawnCommand,
+    ValidateTypeOutcome,
 };
 
 use super::{NativeChildRunner, TurnEnding, child_context, race_cancellation};
@@ -352,7 +352,10 @@ async fn run_refuses_an_unknown_agent_type_before_starting_a_turn() {
         detail.contains("ghost") && detail.contains("alpha"),
         "the refusal names the bad type and what was available, got: {detail:?}"
     );
-    assert_eq!(result.turns, 0, "no turn may be entered for an unknown type");
+    assert_eq!(
+        result.turns, 0,
+        "no turn may be entered for an unknown type"
+    );
 }
 
 /// A request carrying semantics this phase cannot honour is refused by name,

@@ -4429,7 +4429,10 @@ mod tests {
         let agent = build_agent_with_persona_from_config(&config, "default");
         let prompt = agent.build_system_prompt().unwrap();
 
-        assert!(prompt.contains("## Voice"), "carded persona must render a Voice section");
+        assert!(
+            prompt.contains("## Voice"),
+            "carded persona must render a Voice section"
+        );
         assert!(
             prompt.contains("Lead with the verdict"),
             "the card's `terse` persona's xhigh directness dial must be the text that renders"
@@ -9770,9 +9773,7 @@ mod tests {
         #[tokio::test]
         async fn turn_injects_claimed_children_under_the_ambient_key() {
             let fixture = AnnounceFixture::install();
-            fixture
-                .finished_child("rpc-kid", "rpc:conv-3", "42")
-                .await;
+            fixture.finished_child("rpc-kid", "rpc:conv-3", "42").await;
 
             let seen = Arc::new(Mutex::new(Vec::<String>::new()));
             let mut agent = capture_agent(Arc::clone(&seen), false);

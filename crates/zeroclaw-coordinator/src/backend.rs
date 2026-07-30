@@ -64,9 +64,7 @@ pub enum CoordinatorError {
 impl std::fmt::Display for CoordinatorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ChannelClosed => {
-                f.write_str("coordinator channel closed — cannot spawn child")
-            }
+            Self::ChannelClosed => f.write_str("coordinator channel closed — cannot spawn child"),
             Self::Refused(refusal) => write!(f, "spawn refused: {refusal}"),
             Self::AdmissionChannelDropped => f.write_str(
                 "spawn admission channel dropped — the coordinator never decided whether this \

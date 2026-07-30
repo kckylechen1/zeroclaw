@@ -135,10 +135,9 @@ impl SpawnSubagentTool {
         // copy, not two spellings that could drift; drift here does not
         // fail loudly, it files the child under a name no turn ever asks
         // about and the parent waits forever.
-        let parent_session_id = crate::agent::loop_::current_session_key()
-            .unwrap_or_else(|| {
-                crate::agent::loop_::synthetic_session_key_for_run(&self.parent_alias)
-            });
+        let parent_session_id = crate::agent::loop_::current_session_key().unwrap_or_else(|| {
+            crate::agent::loop_::synthetic_session_key_for_run(&self.parent_alias)
+        });
 
         const MAX_DESCRIPTION_CHARS: usize = 200;
         let description = if prompt.chars().count() > MAX_DESCRIPTION_CHARS {
@@ -851,12 +850,8 @@ mod tests {
 
     #[tokio::test]
     async fn carded_parent_refused_when_card_does_not_grant_it_and_message_names_the_card() {
-        let config = carded_config_with_agent(
-            "alpha",
-            "trader_card",
-            false,
-            RiskProfileConfig::default(),
-        );
+        let config =
+            carded_config_with_agent("alpha", "trader_card", false, RiskProfileConfig::default());
         let tool = SpawnSubagentTool::new(
             Arc::new(config),
             "alpha",
@@ -1273,7 +1268,10 @@ mod tests {
                 .await
                 .expect("store read")
                 .expect("row must exist");
-            assert_eq!(row.parent_id.as_deref(), Some(format!("agent:{alias}").as_str()));
+            assert_eq!(
+                row.parent_id.as_deref(),
+                Some(format!("agent:{alias}").as_str())
+            );
         }
 
         /// Absent/`false` `background` must take the byte-identical
@@ -1427,10 +1425,8 @@ mod tests {
 
         #[tokio::test]
         async fn background_spawn_refused_for_spawn_depth_is_a_structured_failure() {
-            let _coordinator = refusing_coordinator(SpawnRefusal::SpawnDepthExceeded {
-                depth: 4,
-                max: 3,
-            });
+            let _coordinator =
+                refusing_coordinator(SpawnRefusal::SpawnDepthExceeded { depth: 4, max: 3 });
             let alias = "bg-refused-depth";
             let tool = SpawnSubagentTool::new(
                 Arc::new(config_with_agent(alias)),
@@ -1489,7 +1485,10 @@ mod tests {
             responder.abort();
             drop(serialize);
 
-            assert!(!result.success, "an undecided spawn must not report success");
+            assert!(
+                !result.success,
+                "an undecided spawn must not report success"
+            );
             assert!(
                 !result.output.as_str().contains("started detached"),
                 "an undecided spawn must never claim it started a child"
@@ -1524,9 +1523,8 @@ mod tests {
         impl zeroclaw_coordinator::ChildRunner for HangingRunner {
             type Control = NeverControl;
             type CompletionData = ();
-            type RunFuture = std::pin::Pin<
-                Box<std::future::Pending<zeroclaw_coordinator::ChildRunOutput<()>>>,
-            >;
+            type RunFuture =
+                std::pin::Pin<Box<std::future::Pending<zeroclaw_coordinator::ChildRunOutput<()>>>>;
             type ValidateFuture = std::future::Ready<zeroclaw_coordinator::ValidateTypeOutcome>;
             type DescribeFuture = std::future::Ready<zeroclaw_coordinator::DescribeOutcome>;
 

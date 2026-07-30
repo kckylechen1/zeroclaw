@@ -155,7 +155,9 @@ impl CardGrants {
     /// Whether this card can act on other agents' work.
     #[must_use]
     pub fn grants_fleet_control(&self) -> bool {
-        self.tools.iter().any(|g| g.class == GrantClass::FleetControl)
+        self.tools
+            .iter()
+            .any(|g| g.class == GrantClass::FleetControl)
     }
 
     /// Reject a grant list that cannot mean what it says.
@@ -287,10 +289,7 @@ mod tests {
         assert_eq!(card.grants.max_class(), Some(GrantClass::FleetControl));
         assert!(card.grants.grants_fleet_control());
 
-        let read_only = card_with(vec![ToolGrant::new(
-            "memory_recall",
-            GrantClass::LocalRead,
-        )]);
+        let read_only = card_with(vec![ToolGrant::new("memory_recall", GrantClass::LocalRead)]);
         assert_eq!(read_only.grants.max_class(), Some(GrantClass::LocalRead));
         assert!(!read_only.grants.grants_fleet_control());
     }

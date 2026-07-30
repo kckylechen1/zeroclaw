@@ -192,9 +192,7 @@ fn explanation_density_line(level: PersonaLevel) -> &'static str {
         PersonaLevel::Low => "Give the answer with one line of justification at most.",
         PersonaLevel::Medium => "",
         PersonaLevel::High => "Show the reasoning that carries weight, and name what you checked.",
-        PersonaLevel::Xhigh => {
-            "Show the full derivation, including what you ruled out and why."
-        }
+        PersonaLevel::Xhigh => "Show the full derivation, including what you ruled out and why.",
     }
 }
 

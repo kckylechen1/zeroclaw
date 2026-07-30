@@ -63,7 +63,11 @@ pub struct CoordinatorHost {
 /// [`super::boot::ControlPlaneHandle`] already carries — see this module's
 /// doc for the ordering requirement.
 #[must_use]
-pub fn start(config: Arc<Config>, sqlite_store: Arc<SqliteTaskStore>, boot_id: String) -> CoordinatorHost {
+pub fn start(
+    config: Arc<Config>,
+    sqlite_store: Arc<SqliteTaskStore>,
+    boot_id: String,
+) -> CoordinatorHost {
     let runner = NativeChildRunner::new(Arc::clone(&config));
     start_with_runner(&config, runner, sqlite_store, boot_id)
 }
@@ -271,7 +275,11 @@ mod tests {
             Box::pin(std::future::pending())
         }
 
-        fn validate_type(&self, _agent_type: String, _parent_session_id: String) -> Self::ValidateFuture {
+        fn validate_type(
+            &self,
+            _agent_type: String,
+            _parent_session_id: String,
+        ) -> Self::ValidateFuture {
             ready(ValidateTypeOutcome::Ok)
         }
 
@@ -394,7 +402,10 @@ mod tests {
     async fn admit(
         commands: &mpsc::UnboundedSender<CoordinatorCommand>,
         child_id: &str,
-    ) -> (SpawnAdmission, oneshot::Receiver<zeroclaw_coordinator::ChildResult>) {
+    ) -> (
+        SpawnAdmission,
+        oneshot::Receiver<zeroclaw_coordinator::ChildResult>,
+    ) {
         let (admission_tx, admission_rx) = oneshot::channel();
         let (result_tx, result_rx) = oneshot::channel();
         commands

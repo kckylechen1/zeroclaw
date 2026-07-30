@@ -484,7 +484,9 @@ impl fmt::Debug for CancelCommand {
 pub enum CancelOutcome {
     Cancelled,
     /// Nothing to cancel: it had already ended, this way.
-    AlreadyFinished { outcome: ChildOutcome },
+    AlreadyFinished {
+        outcome: ChildOutcome,
+    },
     NotFound,
 }
 
@@ -694,9 +696,13 @@ pub enum ResumeLookup {
 pub enum ValidateTypeOutcome {
     Ok,
     /// The type does not resolve. `available` is sorted.
-    Unknown { available: Vec<String> },
+    Unknown {
+        available: Vec<String>,
+    },
     Disabled,
-    NotAllowed { allowed: Vec<String> },
+    NotAllowed {
+        allowed: Vec<String>,
+    },
     /// Could not be checked. Distinct from `Unknown`: the type may be fine.
     ValidationUnavailable,
 }
@@ -724,8 +730,12 @@ impl fmt::Debug for ValidateTypeCommand {
 #[non_exhaustive]
 pub enum DescribeOutcome {
     Ok(ChildTypeSummary),
-    Unknown { available: Vec<String> },
-    NotAllowed { allowed: Vec<String> },
+    Unknown {
+        available: Vec<String>,
+    },
+    NotAllowed {
+        allowed: Vec<String>,
+    },
     Disabled,
     /// Could not be obtained — treat as fail-open.
     Unavailable,

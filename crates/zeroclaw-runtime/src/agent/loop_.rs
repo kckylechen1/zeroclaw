@@ -601,10 +601,7 @@ pub(crate) async fn claim_child_announcements_context() -> Option<ClaimedAnnounc
     if announcements.is_empty() {
         return None;
     }
-    let ids: Vec<String> = announcements
-        .iter()
-        .map(|a| a.task_id.clone())
-        .collect();
+    let ids: Vec<String> = announcements.iter().map(|a| a.task_id.clone()).collect();
     // Rendering is infallible from here on: the batch is non-empty (checked
     // above) and `to_context_block` returns `None` only for an empty batch, so
     // there is deliberately no `?` — nor any other early exit — between the
@@ -1046,7 +1043,10 @@ pub(crate) mod announce_test_support {
             parent: &str,
         ) -> Vec<zeroclaw_api::announce::Announcement> {
             let store: &dyn TaskRegistry = self.store.as_ref();
-            store.claim_undelivered_children(parent).await.expect("claim")
+            store
+                .claim_undelivered_children(parent)
+                .await
+                .expect("claim")
         }
 
         /// The store as the guard takes it, for tests that drive
@@ -16886,10 +16886,7 @@ Pin 13: LED
 
         /// A config whose provider points at a closed port: the turn builds its
         /// full user message and only then fails, which is all these tests need.
-        fn config_for(
-            alias: &str,
-            data_dir: &std::path::Path,
-        ) -> zeroclaw_config::schema::Config {
+        fn config_for(alias: &str, data_dir: &std::path::Path) -> zeroclaw_config::schema::Config {
             use zeroclaw_config::schema::{
                 AliasedAgentConfig, ModelProviderConfig, OllamaModelProviderConfig,
                 RiskProfileConfig,
@@ -16969,7 +16966,11 @@ Pin 13: LED
 
             one_shot_turn(config_for(alias, dir.path()), alias, "first-turn-marker").await;
             let first = fixture.messages_containing("first-turn-marker");
-            assert_eq!(first.len(), 1, "expected exactly one captured turn: {first:?}");
+            assert_eq!(
+                first.len(),
+                1,
+                "expected exactly one captured turn: {first:?}"
+            );
             let first = &first[0];
             assert_eq!(
                 first.matches("## Background tasks finished").count(),
@@ -17375,7 +17376,11 @@ Pin 13: LED
             let dir = tempfile::tempdir().expect("tempdir");
             let alias = "announce-keyless-agent";
             fixture
-                .finished_child("orphan-kid", &format!("agent:{alias}"), "nobody asked for me")
+                .finished_child(
+                    "orphan-kid",
+                    &format!("agent:{alias}"),
+                    "nobody asked for me",
+                )
                 .await;
 
             let config = config_for(alias, dir.path());

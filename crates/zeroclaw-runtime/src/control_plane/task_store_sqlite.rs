@@ -539,7 +539,7 @@ impl TaskRegistry for SqliteTaskStore {
         &self,
         parent_id: &str,
     ) -> Result<Vec<zeroclaw_api::announce::Announcement>> {
-        use zeroclaw_api::announce::{Announcement, AnnouncedOutcome};
+        use zeroclaw_api::announce::{AnnouncedOutcome, Announcement};
 
         let conn = self.conn.lock();
         // One statement claims and returns. Splitting the read from the flag
@@ -853,7 +853,10 @@ mod tests {
             .unwrap();
 
         assert!(
-            s.claim_undelivered_children("mum").await.unwrap().is_empty(),
+            s.claim_undelivered_children("mum")
+                .await
+                .unwrap()
+                .is_empty(),
             "a child finished with delivered = true must not be claimable"
         );
     }
@@ -916,19 +919,10 @@ mod tests {
             .unwrap();
 
         let did = s
-            .finish_task(
-                "a",
-                TaskStatus::Failed,
-                Some("second"),
-                Some("oops"),
-                true,
-            )
+            .finish_task("a", TaskStatus::Failed, Some("second"), Some("oops"), true)
             .await
             .unwrap();
-        assert!(
-            !did,
-            "an already-terminal row must not be re-finished"
-        );
+        assert!(!did, "an already-terminal row must not be re-finished");
 
         let got = s.get("a").await.unwrap().unwrap();
         assert_eq!(got.status, TaskStatus::Completed, "first outcome sticks");
@@ -962,7 +956,10 @@ mod tests {
         let claimed = s.claim_undelivered_children("mum").await.unwrap();
         assert_eq!(claimed.len(), 1);
         assert!(
-            s.claim_undelivered_children("mum").await.unwrap().is_empty(),
+            s.claim_undelivered_children("mum")
+                .await
+                .unwrap()
+                .is_empty(),
             "the claim consumed it"
         );
 
@@ -1021,7 +1018,10 @@ mod tests {
             "the returned announcement is claimable again"
         );
         assert!(
-            s.claim_undelivered_children("dad").await.unwrap().is_empty(),
+            s.claim_undelivered_children("dad")
+                .await
+                .unwrap()
+                .is_empty(),
             "another parent's delivered announcement must stay delivered"
         );
     }
@@ -1038,7 +1038,10 @@ mod tests {
 
         assert_eq!(s.unclaim_children(&[]).await.unwrap(), 0);
         assert!(
-            s.claim_undelivered_children("mum").await.unwrap().is_empty(),
+            s.claim_undelivered_children("mum")
+                .await
+                .unwrap()
+                .is_empty(),
             "an empty unclaim must not return anything"
         );
     }
@@ -1137,8 +1140,7 @@ mod tests {
         ids.sort_unstable();
         assert_eq!(ids, vec!["broke", "done", "slow", "stopped", "vanished"]);
 
-        let mut outcomes: Vec<&str> =
-            claimed.iter().map(|r| r.outcome.as_str()).collect();
+        let mut outcomes: Vec<&str> = claimed.iter().map(|r| r.outcome.as_str()).collect();
         outcomes.sort_unstable();
         assert_eq!(
             outcomes,
@@ -1158,7 +1160,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(s.claim_undelivered_children("mum").await.unwrap().is_empty());
+        assert!(
+            s.claim_undelivered_children("mum")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// One parent's results must never surface in another parent's turn.
@@ -1192,7 +1199,12 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(s.claim_undelivered_children("mum").await.unwrap().len(), 10);
-        assert!(s.claim_undelivered_children("mum").await.unwrap().is_empty());
+        assert!(
+            s.claim_undelivered_children("mum")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A parentless task belongs to nobody's conversation and must never be
@@ -1204,7 +1216,12 @@ mod tests {
         orphan.status = TaskStatus::Completed;
         s.create(orphan).await.unwrap();
 
-        assert!(s.claim_undelivered_children("mum").await.unwrap().is_empty());
+        assert!(
+            s.claim_undelivered_children("mum")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(s.claim_undelivered_children("").await.unwrap().is_empty());
     }
 
@@ -1423,9 +1440,14 @@ mod tests {
         // the same completion twice would be a double-run, not a recovery.
         let conn = s.conn.lock();
         let bad_delivered: i64 = conn
-            .query_row("SELECT delivered FROM tasks WHERE id = 'bad'", [], |r| r.get(0))
+            .query_row("SELECT delivered FROM tasks WHERE id = 'bad'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(bad_delivered, 1, "the corrupt row was consumed by the claim");
+        assert_eq!(
+            bad_delivered, 1,
+            "the corrupt row was consumed by the claim"
+        );
         drop(conn);
 
         let second = s.claim_undelivered_children("mum").await.unwrap();
@@ -1479,7 +1501,9 @@ mod tests {
 
         let conn = s.conn.lock();
         let delivered: i64 = conn
-            .query_row("SELECT delivered FROM tasks WHERE id = 'kid'", [], |r| r.get(0))
+            .query_row("SELECT delivered FROM tasks WHERE id = 'kid'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(
             delivered, 1,

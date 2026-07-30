@@ -64,8 +64,6 @@ mod tests;
 
 #[allow(unused_imports)]
 pub use agent::{Agent, AgentBuilder, TurnEvent};
-#[allow(unused_imports)]
-pub use loop_::{process_message, run};
 /// The background-child waker's out-of-crate surface: the claim entry point for
 /// outer turn shapes that scope the session key around the tool loop rather than
 /// around turn assembly, plus the guard that hands the claim back when such a
@@ -73,3 +71,5 @@ pub use loop_::{process_message, run};
 /// orchestrator (`zeroclaw-channels`).
 #[allow(unused_imports)]
 pub use loop_::{UnclaimOnDrop, claim_announcements_for_scoped_turn};
+#[allow(unused_imports)]
+pub use loop_::{process_message, run};

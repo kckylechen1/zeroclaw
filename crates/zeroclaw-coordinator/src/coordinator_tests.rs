@@ -1127,7 +1127,11 @@ async fn discard_session_completions_drops_only_that_sessions_buffer() {
         })
         .expect("actor command channel open");
 
-    assert!(drain_completions(&harness.backend, "parent-a").await.is_empty());
+    assert!(
+        drain_completions(&harness.backend, "parent-a")
+            .await
+            .is_empty()
+    );
     // ...while parent-b's completion stays buffered for its own drain.
     let b = drain_completions(&harness.backend, "parent-b").await;
     assert_eq!(b.len(), 1);
@@ -1634,9 +1638,10 @@ async fn drop_with_pending_and_active_children_records_one_lost_finish_each() {
         .filter(|call| matches!(call, PersistenceCall::Finish { .. }))
         .collect();
     finishes.sort_by(|a, b| match (a, b) {
-        (PersistenceCall::Finish { child_id: x, .. }, PersistenceCall::Finish { child_id: y, .. }) => {
-            x.cmp(y)
-        }
+        (
+            PersistenceCall::Finish { child_id: x, .. },
+            PersistenceCall::Finish { child_id: y, .. },
+        ) => x.cmp(y),
         _ => unreachable!(),
     });
     assert_eq!(
@@ -1764,9 +1769,7 @@ async fn erroring_persistence_during_drop_does_not_panic() {
 async fn refused_spawn(backend: &ChannelBackend, request: ChildRequest) -> SpawnRefusal {
     let error = tokio::time::timeout(std::time::Duration::from_secs(5), backend.spawn(request))
         .await
-        .expect(
-            "a refused spawn must answer immediately; blocking means the request was admitted",
-        )
+        .expect("a refused spawn must answer immediately; blocking means the request was admitted")
         .expect_err("a refusal must not arrive as a child result — no child ran");
     match error {
         CoordinatorError::Refused(refusal) => refusal,

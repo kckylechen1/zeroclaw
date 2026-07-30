@@ -27706,8 +27706,10 @@ Done."#;
             ChatMessage::user("[2026-07-29 10:00:00 UTC] what happened?"),
         ];
 
-        let spliced =
-            prepend_context_to_last_user_turn(&mut history, "## Background tasks finished\nkid\n\n");
+        let spliced = prepend_context_to_last_user_turn(
+            &mut history,
+            "## Background tasks finished\nkid\n\n",
+        );
 
         assert!(spliced, "a user turn was present, so the block must land");
         assert_eq!(
