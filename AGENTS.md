@@ -105,9 +105,9 @@ ZeroClaw (this repo)
   └── WeChat iLink / WeCom gateway
   └── LLM agent loop
   └── MCP client → hapi-edge (Go)
-  │                   └── snapshot / batch_snapshot / history_klines / portfolio_*
-  └── MCP client → hapi memory-server (HTTP :6888)
-                      └── hapi_save / hapi_search / hapi_memory
+      ├─ trading facades: snapshot / batch_snapshot / history_klines / portfolio_*
+      └─ memory facades: typed actions only (Tool Authority Catalog §1/§10)
+         — NO direct connection to any memory backend (#2389 / #2432)
 ```
 
 ### Carried patches
@@ -137,22 +137,20 @@ is still ours simply stays.
 - **Approvals are memory-only.** No one-shot approval bound to a run + tool +
   args hash, and no durable audit trail that survives a restart.
 
-### Memory Contract (#634 option C)
+### Memory Contract (#634 option C; direct-leg mandate superseded by #2389 / #2432)
 
-The custom HyperMemory CRUD backend was protocol-mismatched with the live
-memory-server (wrong transport AND wrong tool API) and has been retired. Do NOT
-reintroduce a `hypermemory` memory backend.
+The custom HyperMemory CRUD backend was protocol-mismatched with the live memory backend (wrong transport AND wrong tool API) and has been retired. Do NOT reintroduce a `hypermemory` memory backend.
 
-- Consume the memory-server as a standard `[[mcp.servers]]` entry via the native MCP client.
-- MCP endpoint: `http://127.0.0.1:6888/mcp` (or `HAPI_MEMORY_MCP_URL`). ZeroClaw's memory MUST route through :6888 only — never through hapi-edge's HTTP serve on :8890. That serve path is currently disabled/crash-looping; note :8890 is still hapi-edge serve's default HTTP port (`HAPI_EDGE_PORT`) used elsewhere in Quant (Crimson UI proxy, local HTTP MCP surface), so this is a ZeroClaw-memory-dependency rule, not a claim that :8890 is globally dead.
-- Tools: `hapi_save`, `hapi_search`, `hapi_memory` (NOT `save_memory`/`list_memories` — those never existed server-side).
+**SUPERSEDED (#2389 / #2432):** ZeroClaw V1 is forbidden from connecting directly to any memory backend. All supported memory access goes through typed hapi-edge facade actions governed by the **Tool Authority Catalog** (`docs/Spec/TOOL_AUTHORITY_CATALOG.md` §1 / §10, in the Hyperion-Quant-SRC repo). The earlier mandate to register the local HTTP memory port as a `[[mcp.servers]]` entry is withdrawn; do not re-add it.
+
+- Tools: `hapi_save`, `hapi_search`, `hapi_memory` (exposed as typed facade actions through hapi-edge — NOT `save_memory`/`list_memories`, which never existed server-side).
 - Namespace: `hyperion` / project `hyperion` / domain `equity_trading`
 - Path prefix: `/trading/equity/...`
-- **Route through hapi-edge / hapi memory-server MCP only — never host tachi MCP directly, never write Tachi DBs directly**
+- **Route through hapi-edge facade actions only — never host tachi MCP directly, never write Tachi DBs directly, never connect to a memory backend directly.**
 
 ### Key Rules
 
-1. Memory → hapi memory-server MCP only, never `data/hapi.db` directly
+1. Memory → typed hapi-edge facade actions only (Tool Authority Catalog §1/§10); never connect to a memory backend directly, never touch `data/hapi.db` directly
 2. Trading tools → hapi-edge MCP only, never direct Longbridge/Tushare calls
 3. Real position writes require human OTP confirmation (Trading Harness P1)
 4. Timezone: `Asia/Shanghai`
