@@ -143,7 +143,7 @@ The custom HyperMemory CRUD backend was protocol-mismatched with the live memory
 
 **SUPERSEDED (#2389 / #2432):** ZeroClaw V1 is forbidden from connecting directly to any memory backend. All supported memory access goes through typed hapi-edge facade actions governed by the **Tool Authority Catalog** (`docs/Spec/TOOL_AUTHORITY_CATALOG.md` §1 / §10, in the Hyperion-Quant-SRC repo). The earlier mandate to register the local HTTP memory port as a `[[mcp.servers]]` entry is withdrawn; do not re-add it.
 
-- Tools: `hapi_save`, `hapi_search`, `hapi_memory` (exposed as typed facade actions through hapi-edge — NOT `save_memory`/`list_memories`, which never existed server-side).
+- Memory facade: `hapi_memory`. Allowed and denied actions are governed by the Tool Authority Catalog (§1/§10). ZeroClaw does not depend on backend endpoints or backend-native tool names — earlier references to `hapi_save` / `hapi_search` as independent tools were the old direct-connect contract and are withdrawn.
 - Namespace: `hyperion` / project `hyperion` / domain `equity_trading`
 - Path prefix: `/trading/equity/...`
 - **Route through hapi-edge facade actions only — never host tachi MCP directly, never write Tachi DBs directly, never connect to a memory backend directly.**
