@@ -396,11 +396,9 @@ fn write_one(state: &Arc<WorkerState>, value: &Value) -> Result<()> {
 /// Flush and the periodic sync cadence. Returns Ok(()) when the file
 /// does not exist yet (no writes have happened this run).
 fn sync_active_file(state: &Arc<WorkerState>) -> Result<()> {
-    let file = match open_active_file(state) {
-        Ok(f) => f,
-        Err(_) => return Ok(()),
-    };
-    file.sync_all().context("sync_all log file")?;
+    let file = open_active_file(state)?;
+    file.sync_all()
+        .with_context(|| format!("syncing log file {}", state.policy.path.display()))?;
     Ok(())
 }
 
@@ -441,18 +439,20 @@ pub fn flush_for_test() -> Result<()> {
     let Some(state) = current_state() else {
         return Ok(());
     };
-    if state.worker_dead.load(Ordering::Acquire) {
-        return Ok(());
-    }
     if !state.policy.storage.is_enabled() {
         return Ok(());
     }
-    let (ack_tx, ack_rx) = sync_channel(0);
-    if state.tx.send(WriterJob::Flush(ack_tx)).is_err() {
-        return Ok(());
+    if state.worker_dead.load(Ordering::Acquire) {
+        anyhow::bail!("log writer worker is not running");
     }
-    let _ = ack_rx.recv();
-    Ok(())
+    let (ack_tx, ack_rx) = sync_channel(0);
+    state
+        .tx
+        .send(WriterJob::Flush(ack_tx))
+        .map_err(|_| anyhow::Error::msg("log writer worker disconnected before flush request"))?;
+    ack_rx
+        .recv()
+        .context("log writer worker disconnected before reporting flush result")?
 }
 
 /// Resolved LLM-request-payload capture policy + the truncate cap, for the
