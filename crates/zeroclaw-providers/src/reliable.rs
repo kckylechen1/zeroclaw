@@ -5552,7 +5552,7 @@ mod tests {
         let model_provider = ReliableModelProvider::new("test", vec![], 0, 1)
             .with_api_keys(vec!["key-a".into(), "key-b".into()]);
 
-        let err = anyhow::anyhow!("429 Too Many Requests: rate limit exceeded");
+        let err = anyhow::Error::msg("429 Too Many Requests: rate limit exceeded");
         model_provider.cool_down_key("key-a".to_string(), &err);
 
         // Five draws, none of which may be the cooling key.
@@ -5568,7 +5568,7 @@ mod tests {
         let model_provider = ReliableModelProvider::new("test", vec![], 0, 1)
             .with_api_keys(vec!["key-a".into(), "key-b".into()]);
 
-        let err = anyhow::anyhow!("429 Too Many Requests: rate limit exceeded");
+        let err = anyhow::Error::msg("429 Too Many Requests: rate limit exceeded");
         model_provider.cool_down_key("key-a".to_string(), &err);
         model_provider.cool_down_key("key-b".to_string(), &err);
 
