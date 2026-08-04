@@ -137,8 +137,8 @@ gated behind `#[cfg(feature = "tachi")]`: `tachi`, `tachi_enrichment`,
 Costs nothing when the feature is off.
 
 This is the fork's own agent-memory backend, **distinct from the Hyperion
-trading memory path** (which routes through hapi memory-server MCP per the
-#634 option C contract). It is not a candidate for upstream contribution —
+trading memory path** (which routes through typed hapi-edge facade actions per
+the #634 option C contract). It is not a candidate for upstream contribution —
 it depends on a private crate (tachi).
 
 ### 7. HyperMemory custom CRUD backend — **retired (#634 option C)**
