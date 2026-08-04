@@ -131,7 +131,6 @@ use std::fmt::Write;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroclaw_api::channel::Channel;
@@ -2155,13 +2154,14 @@ pub async fn run(
                 &provider_runtime_options,
             )?;
 
-        observer.record_event(&ObserverEvent::AgentStart {
-            model_provider: provider_name.to_string(),
-            model: model_name.to_string(),
-            channel: Some(channel_name.to_string()),
-            agent_alias: Some(agent_alias.to_string()),
-            turn_id: Some(turn_id.clone()),
-        });
+        let mut turn_guard = crate::observability::AgentTurnGuard::start(
+            observer.as_ref(),
+            provider_name.to_string(),
+            model_name.to_string(),
+            Some(channel_name.to_string()),
+            Some(agent_alias.to_string()),
+            Some(turn_id.clone()),
+        );
 
         // ── Hardware RAG (datasheet retrieval when peripherals + datasheet_dir) ──
         let hardware_rag: Option<crate::rag::HardwareRag> = config
@@ -2382,8 +2382,6 @@ pub async fn run(
             crate::agent::cost::tool_loop_cost_tracking_context_for_agent(&config, agent_alias);
 
         // ── Execute ──────────────────────────────────────────────────
-        let start = Instant::now();
-
         let mut final_output = String::new();
 
         // Save the base system prompt before any thinking modifications so
@@ -2722,13 +2720,7 @@ pub async fn run(
                             provider_name = new_model_provider;
                             model_name = new_model;
 
-                            observer.record_event(&ObserverEvent::AgentStart {
-                                model_provider: provider_name.to_string(),
-                                model: model_name.to_string(),
-                                channel: Some(channel_name.to_string()),
-                                agent_alias: Some(agent_alias.to_string()),
-                                turn_id: Some(turn_id.clone()),
-                            });
+                            turn_guard.set_model_route(provider_name.clone(), model_name.clone());
 
                             continue;
                         }
@@ -3310,13 +3302,8 @@ pub async fn run(
                                 provider_name = new_model_provider;
                                 model_name = new_model;
 
-                                observer.record_event(&ObserverEvent::AgentStart {
-                                    model_provider: provider_name.to_string(),
-                                    model: model_name.to_string(),
-                                    channel: Some(channel_name.to_string()),
-                                    agent_alias: Some(agent_alias.to_string()),
-                                    turn_id: Some(turn_id.clone()),
-                                });
+                                turn_guard
+                                    .set_model_route(provider_name.clone(), model_name.clone());
 
                                 continue;
                             }
@@ -3516,7 +3503,6 @@ pub async fn run(
             }
         }
 
-        let duration = start.elapsed();
         let tokens_used = cost_tracking_context.as_ref().and_then(|ctx| {
             let usage = ctx.snapshot_turn_usage();
             (usage.input_tokens > 0 || usage.output_tokens > 0).then_some(
@@ -3526,16 +3512,9 @@ pub async fn run(
                 },
             )
         });
-        observer.record_event(&ObserverEvent::AgentEnd {
-            model_provider: provider_name.to_string(),
-            model: model_name.to_string(),
-            duration,
-            tokens_used,
-            cost_usd: None,
-            channel: Some(channel_name.to_string()),
-            agent_alias: Some(agent_alias.to_string()),
-            turn_id: Some(turn_id),
-        });
+        turn_guard.set_model_route(provider_name.clone(), model_name.clone());
+        turn_guard.set_usage(tokens_used, None);
+        turn_guard.finish();
 
         Ok(final_output)
     };
@@ -5594,6 +5573,185 @@ mod tests {
         ) -> anyhow::Result<Option<ChannelApprovalResponse>> {
             self.approval_requests.fetch_add(1, Ordering::SeqCst);
             Ok(Some(ChannelApprovalResponse::Approve))
+        }
+    }
+
+    /// A channel that always answers `Deny`, with a configurable provenance.
+    ///
+    /// This is the exact ambiguity the gate has to resolve: an operator tapping
+    /// "Deny" and a channel synthesizing a deny because nobody answered are
+    /// indistinguishable on the wire — both are `Some(Deny)` with no decider.
+    /// Only [`ApprovalSource`] separates them.
+    struct SourcedDenyChannel {
+        source: ::zeroclaw_api::channel::ApprovalSource,
+    }
+
+    impl ::zeroclaw_api::attribution::Attributable for SourcedDenyChannel {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Channel(
+                ::zeroclaw_api::attribution::ChannelKind::AcpChannel,
+            )
+        }
+
+        fn alias(&self) -> &str {
+            "sourced-deny-test"
+        }
+    }
+
+    #[async_trait]
+    impl Channel for SourcedDenyChannel {
+        fn name(&self) -> &str {
+            "sourced-deny-test"
+        }
+
+        async fn send(&self, _message: &SendMessage) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn listen(
+            &self,
+            _tx: tokio::sync::mpsc::Sender<ChannelMessage>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn request_approval_attributed(
+            &self,
+            _recipient: &str,
+            _request: &ChannelApprovalRequest,
+        ) -> anyhow::Result<Option<::zeroclaw_api::channel::AttributedApprovalResponse>> {
+            Ok(Some(
+                ::zeroclaw_api::channel::AttributedApprovalResponse::from_runtime(
+                    ChannelApprovalResponse::Deny,
+                    self.source,
+                ),
+            ))
+        }
+    }
+
+    /// Drive one denied tool call through the gate and return the
+    /// `[Tool results]` text the MODEL would see.
+    async fn tool_results_for_denying_channel(
+        source: ::zeroclaw_api::channel::ApprovalSource,
+    ) -> String {
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let write_call = r#"<tool_call>
+{"name":"file_write","arguments":{"path":"a.txt","content":"x"}}
+</tool_call>"#;
+        let model_provider = ScriptedModelProvider::from_text_responses(vec![write_call, "done"]);
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(
+            "file_write",
+            Arc::clone(&invocations),
+        ))];
+
+        let channel = SourcedDenyChannel { source };
+        let approval_mgr = ApprovalManager::for_non_interactive_backchannel(
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+        );
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("write a file"),
+        ];
+        let observer = NoopObserver;
+
+        let _ = run_tool_call_loop(ToolLoop {
+            parent_agent_alias: None,
+            sop_reassembly: None,
+            exec: ResolvedAgentExecution {
+                model_access: ResolvedModelAccess {
+                    model_provider: &model_provider,
+                    provider_name: "mock-provider",
+                    model: "mock-model",
+                    temperature: Some(0.0),
+                },
+                tools_registry: &tools_registry,
+                observer: &observer,
+                silent: true,
+                approval: Some(&approval_mgr),
+                multimodal_config: &zeroclaw_config::schema::MultimodalConfig::default(),
+                config: None,
+                max_tool_iterations: 4,
+                hooks: None,
+                excluded_tools: &[],
+                dedup_exempt_tools: &[],
+                activated_tools: None,
+                model_switch_callback: None,
+                pacing: &zeroclaw_config::schema::PacingConfig::default(),
+                strict_tool_parsing: false,
+                parallel_tools: false,
+                max_tool_result_chars: 0,
+                context_token_budget: 0,
+                receipt_generator: None,
+                knobs: &LoopKnobs::default(),
+            },
+            history: &mut history,
+            channel_name: "acp",
+            channel_reply_target: Some("operator"),
+            cancellation_token: None,
+            on_delta: None,
+            shared_budget: None,
+            channel: Some(&channel),
+            collected_receipts: None,
+            event_tx: None,
+            steering: None,
+            new_messages_out: None,
+            image_cache: None,
+            memory: None,
+            ingress: IngressContext::sub_turn(),
+            agent_alias: None,
+            turn_id: &turn_id,
+        })
+        .await;
+
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "a denied tool must not execute"
+        );
+
+        history
+            .iter()
+            .find(|msg| msg.role == "user" && msg.content.starts_with("[Tool results]"))
+            .expect("tool results message should be present")
+            .content
+            .clone()
+    }
+
+    /// The gate-level half of the contract: an OPERATOR's deny still reads as a
+    /// user decision. Without this the fix could "pass" by never saying
+    /// "Denied by user." at all, which would lose real information.
+    #[tokio::test]
+    async fn operator_sourced_deny_is_still_reported_as_a_user_denial() {
+        let content =
+            tool_results_for_denying_channel(::zeroclaw_api::channel::ApprovalSource::Operator)
+                .await;
+        assert!(
+            content.contains("Denied by user."),
+            "an operator's deny is a real user decision and must say so: {content}"
+        );
+    }
+
+    /// The other half: a channel-synthesized deny reaching the gate with
+    /// runtime provenance must NOT be reported as a user's decision, even
+    /// though it is byte-identical to one on the `ChannelApprovalResponse` wire.
+    #[tokio::test]
+    async fn runtime_sourced_deny_is_not_reported_as_a_user_denial() {
+        for source in [
+            ::zeroclaw_api::channel::ApprovalSource::TimedOut,
+            ::zeroclaw_api::channel::ApprovalSource::Unreachable,
+            ::zeroclaw_api::channel::ApprovalSource::Unavailable,
+        ] {
+            let content = tool_results_for_denying_channel(source).await;
+            assert!(
+                !content.contains("Denied by user."),
+                "{source:?} is a runtime denial, not a user's: {content}"
+            );
+            assert!(
+                content.contains("no operator decision was available"),
+                "{source:?} should state that no operator decided: {content}"
+            );
         }
     }
 
@@ -8241,6 +8399,122 @@ mod tests {
             .expect("tool results message should be present");
         assert!(tool_results.content.contains("hello"));
         assert!(!tool_results.content.contains("Denied by user."));
+    }
+
+    /// An auto-denial in a non-interactive run must not claim a user denied it.
+    ///
+    /// With no channel able to answer, the gate denies on the runtime's own authority. Reporting
+    /// that as "Denied by user." is false and actively misleading: it sends the model looking for
+    /// an operator decision that never happened, and hides the real remedy, which is the agent's
+    /// `auto_approve` policy.
+    #[tokio::test]
+    async fn run_tool_call_loop_reports_unanswerable_approval_without_blaming_the_user() {
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let write_call = r#"<tool_call>
+{"name":"file_write","arguments":{"path":"a.txt","content":"x"}}
+</tool_call>"#;
+        let model_provider = ScriptedModelProvider::from_text_responses(vec![write_call, "done"]);
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(
+            "file_write",
+            Arc::clone(&invocations),
+        ))];
+
+        let approval_mgr = ApprovalManager::for_non_interactive(
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+        );
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("write a file"),
+        ];
+        let observer = NoopObserver;
+
+        let _ = run_tool_call_loop(ToolLoop {
+            parent_agent_alias: None,
+            sop_reassembly: None,
+            exec: ResolvedAgentExecution {
+                model_access: ResolvedModelAccess {
+                    model_provider: &model_provider,
+                    provider_name: "mock-provider",
+                    model: "mock-model",
+                    temperature: Some(0.0),
+                },
+                tools_registry: &tools_registry,
+                observer: &observer,
+                silent: true,
+                approval: Some(&approval_mgr),
+                multimodal_config: &zeroclaw_config::schema::MultimodalConfig::default(),
+                config: None,
+                max_tool_iterations: 4,
+                hooks: None,
+                excluded_tools: &[],
+                dedup_exempt_tools: &[],
+                activated_tools: None,
+                model_switch_callback: None,
+                pacing: &zeroclaw_config::schema::PacingConfig::default(),
+                strict_tool_parsing: false,
+                parallel_tools: false,
+                max_tool_result_chars: 0,
+                context_token_budget: 0,
+                receipt_generator: None,
+                knobs: &LoopKnobs::default(),
+            },
+            history: &mut history,
+            channel_name: "telegram",
+            channel_reply_target: None,
+            cancellation_token: None,
+            on_delta: None,
+            shared_budget: None,
+            channel: None,
+            collected_receipts: None,
+            event_tx: None,
+            steering: None,
+            new_messages_out: None,
+            image_cache: None,
+            memory: None,
+            ingress: IngressContext::sub_turn(),
+            agent_alias: None,
+            turn_id: &turn_id,
+        })
+        .await;
+
+        let tool_results = history
+            .iter()
+            .find(|msg| msg.role == "user" && msg.content.starts_with("[Tool results]"))
+            .expect("tool results message should be present");
+        assert!(
+            !tool_results.content.contains("Denied by user."),
+            "an unanswerable approval must not be attributed to a user: {}",
+            tool_results.content
+        );
+        assert!(
+            tool_results.content.contains("requires approval")
+                && tool_results
+                    .content
+                    .contains("no operator decision was available"),
+            "the denial should state the outcome and that no operator decided: {}",
+            tool_results.content
+        );
+        // The model must not be told how to switch its own approval policy off.
+        // `auto_approve` bypasses operator approval for the named tool and
+        // `level = "full"` removes approval gates for every tool while dropping
+        // workspace-only confinement, so naming either here hands the model an
+        // argument for expanding its own privileges in response to an approval
+        // channel simply being unavailable. Operators get that guidance from the
+        // WARN record's `operator_hint` instead.
+        for leak in ["auto_approve", "level = \"full\"", "risk profile"] {
+            assert!(
+                !tool_results.content.contains(leak),
+                "model-visible denial must not prescribe a policy bypass ({leak}): {}",
+                tool_results.content
+            );
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "a denied tool must not execute"
+        );
     }
 
     #[tokio::test]
@@ -16668,6 +16942,416 @@ Let me check the result."#;
         // The bracket and the inner engine events must also agree on the
         // full (channel, agent_alias, turn_id) triple with the pre-minted id.
         assert_all_events_share_turn_id(&events, Some("test-agent"), Some("daemon"));
+    }
+
+    /// `run()` (the CLI/daemon direct-turn entry point) was the last
+    /// production site that open-coded its own `AgentStart`/`AgentEnd`
+    /// instead of going through `AgentTurnGuard` like every other entry
+    /// point (`agent_turn`, `Agent::turn`/`turn_streamed`, the
+    /// orchestrator's `process_channel_message`). Between the open-coded
+    /// events sat roughly a dozen exit paths (`?`, early `return`) where
+    /// `AgentStart` fired but `AgentEnd` never did, leaving observers
+    /// permanently unbalanced. `run()` builds its own observer and model
+    /// provider internally with no injection seam, so these tests drive it
+    /// end to end: a real `Config`, the real tool registry, and a local
+    /// HTTP server standing in for the model. Event capture leans on the
+    /// process-wide broadcast hook the gateway uses to fan events out to
+    /// `/api/events` (`observability::set_scoped_broadcast_hook`);
+    /// `observability::HOOK_TEST_LOCK` serializes against
+    /// `observability::mod`'s own hook tests so neither steals the other's
+    /// events off the single global hook slot.
+    // `config.providers.models.ollama.*` dispatches through the OpenAI-
+    // compatible wire (`OllamaModelProviderConfig::create_provider` builds an
+    // `OpenAiCompatibleModelProvider` labeled "Ollama"), so the scripted
+    // response is OpenAI's `choices[0].message.content` shape at
+    // `/v1/chat/completions`, not the native `/api/chat` shape.
+    async fn respond_with_done() -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({
+            "choices": [{"message": {"content": "done"}}]
+        }))
+    }
+
+    fn lifecycle_events_for_alias(events: &[ObserverEvent], alias: &str) -> (usize, usize) {
+        let starts = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    ObserverEvent::AgentStart { agent_alias, .. }
+                        if agent_alias.as_deref() == Some(alias)
+                )
+            })
+            .count();
+        let ends = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    ObserverEvent::AgentEnd { agent_alias, .. }
+                        if agent_alias.as_deref() == Some(alias)
+                )
+            })
+            .count();
+        (starts, ends)
+    }
+
+    /// A `Config::default()` rooted under a fresh temp dir instead of the
+    /// real `$HOME/.zeroclaw`. `Config::default()` points `data_dir` (the
+    /// sqlite memory db, `{data_dir}/memory/brain.db`) and `config_path`
+    /// (whose parent `install_root_dir()` backs `agent_workspace_dir`, i.e.
+    /// `{install_root}/agents/<alias>/workspace`) at the real home
+    /// directory, so a `run()`-driving test that doesn't override them
+    /// creates/writes real files on every dev and CI machine and, under the
+    /// crate's parallel test gate, has every such test contend on the same
+    /// `brain.db`. The returned `TempDir` must be kept alive for the
+    /// duration of the test — it deletes the directory on drop.
+    fn isolated_run_test_config() -> (tempfile::TempDir, Config) {
+        let tmp = tempdir().expect("temp dir for isolated run() test config should create");
+        let config = Config {
+            data_dir: tmp.path().join("data"),
+            config_path: tmp.path().join("config.toml"),
+            ..Config::default()
+        };
+        (tmp, config)
+    }
+
+    #[tokio::test]
+    async fn run_brackets_successful_turn_with_agent_start_and_agent_end() {
+        use axum::{Router, routing::post};
+        use tokio::net::TcpListener;
+        use zeroclaw_config::schema::{
+            AliasedAgentConfig, ModelProviderConfig, OllamaModelProviderConfig, RiskProfileConfig,
+        };
+
+        let _hook_lock = observability::HOOK_TEST_LOCK.lock().await;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let app = Router::new().route("/v1/chat/completions", post(respond_with_done));
+        let server = zeroclaw_spawn::spawn!(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let (_tmp, mut config) = isolated_run_test_config();
+        config.providers.models.ollama.insert(
+            "default".to_string(),
+            OllamaModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("run-lifecycle-success-model".to_string()),
+                    timeout_secs: Some(5),
+                    uri: Some(format!("http://{addr}")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        config.agents.insert(
+            "run-lifecycle-success-agent".to_string(),
+            AliasedAgentConfig {
+                model_provider: "ollama.default".into(),
+                risk_profile: "default".into(),
+                ..Default::default()
+            },
+        );
+        config
+            .risk_profiles
+            .insert("default".to_string(), RiskProfileConfig::default());
+
+        let capturing = Arc::new(CapturingObserver::default());
+        let observer: Arc<dyn Observer> = capturing.clone();
+        let hook_guard = observability::set_scoped_broadcast_hook(observer);
+
+        let result = super::run(
+            config,
+            "run-lifecycle-success-agent",
+            Some("hello".to_string()),
+            None,
+            None,
+            None,
+            Vec::new(),
+            false,
+            None,
+            None,
+            TurnOrigin::SubTurn,
+            super::AgentRunOverrides::default(),
+        )
+        .await;
+
+        drop(hook_guard);
+        server.abort();
+
+        let output = result.expect("run() should complete the scripted turn");
+        assert_eq!(output, "done");
+
+        let events = capturing.events.lock();
+        let (starts, ends) = lifecycle_events_for_alias(&events, "run-lifecycle-success-agent");
+        assert_eq!(starts, 1, "exactly one AgentStart, got {events:?}");
+        assert_eq!(ends, 1, "exactly one AgentEnd, got {events:?}");
+        assert!(
+            matches!(events.first(), Some(ObserverEvent::AgentStart { .. })),
+            "first event must be AgentStart, got {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(ObserverEvent::AgentEnd { .. })),
+            "last event must be AgentEnd, got {events:?}"
+        );
+    }
+
+    /// The core regression this fix addresses: before it, a model-call
+    /// failure inside `run()` propagated out through `?` while the
+    /// open-coded `AgentStart` had already fired, so `AgentEnd` never did.
+    /// With `AgentTurnGuard` in place, `Drop` closes the bracket on this
+    /// early-return path too.
+    #[tokio::test]
+    async fn run_still_closes_the_bracket_when_the_model_call_fails() {
+        use zeroclaw_config::schema::{
+            AliasedAgentConfig, ModelProviderConfig, OllamaModelProviderConfig, RiskProfileConfig,
+        };
+
+        let _hook_lock = observability::HOOK_TEST_LOCK.lock().await;
+
+        // Bind an ephemeral port and immediately drop the listener: any
+        // connection attempt against it fails fast and deterministically
+        // (connection refused) without depending on a hardcoded "probably
+        // unused" port number.
+        let addr = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("test listener should bind");
+            listener.local_addr().expect("listener should have address")
+        };
+
+        let (_tmp, mut config) = isolated_run_test_config();
+        config.providers.models.ollama.insert(
+            "default".to_string(),
+            OllamaModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("run-lifecycle-error-model".to_string()),
+                    timeout_secs: Some(5),
+                    uri: Some(format!("http://{addr}")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        config.agents.insert(
+            "run-lifecycle-error-agent".to_string(),
+            AliasedAgentConfig {
+                model_provider: "ollama.default".into(),
+                risk_profile: "default".into(),
+                ..Default::default()
+            },
+        );
+        config
+            .risk_profiles
+            .insert("default".to_string(), RiskProfileConfig::default());
+
+        let capturing = Arc::new(CapturingObserver::default());
+        let observer: Arc<dyn Observer> = capturing.clone();
+        let hook_guard = observability::set_scoped_broadcast_hook(observer);
+
+        let result = super::run(
+            config,
+            "run-lifecycle-error-agent",
+            Some("hello".to_string()),
+            None,
+            None,
+            None,
+            Vec::new(),
+            false,
+            None,
+            None,
+            TurnOrigin::SubTurn,
+            super::AgentRunOverrides::default(),
+        )
+        .await;
+
+        drop(hook_guard);
+
+        assert!(
+            result.is_err(),
+            "run() should surface the model provider's connection failure, got {result:?}"
+        );
+
+        let events = capturing.events.lock();
+        let (starts, ends) = lifecycle_events_for_alias(&events, "run-lifecycle-error-agent");
+        assert_eq!(
+            starts, 1,
+            "exactly one AgentStart even on the error path, got {events:?}"
+        );
+        assert_eq!(
+            ends, 1,
+            "AgentEnd must still fire via Drop on the early-return error path \
+             (the regression this fix closes), got {events:?}"
+        );
+        assert!(
+            matches!(events.first(), Some(ObserverEvent::AgentStart { .. })),
+            "first event must be AgentStart, got {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(ObserverEvent::AgentEnd { .. })),
+            "last event must be AgentEnd even on the error path, got {events:?}"
+        );
+    }
+
+    /// An in-loop model switch (the real `model_switch` tool, driven exactly
+    /// as production traffic would) must still close the bracket with
+    /// exactly one balanced pair, attributed to the switched-TO route — the
+    /// second open-coded `AgentStart` this fix replaced with
+    /// `turn_guard.set_model_route(..)` would have shown up here as two
+    /// `AgentStart`s for one `AgentEnd`.
+    #[tokio::test]
+    async fn run_model_switch_emits_single_balanced_pair_for_the_switched_route() {
+        use axum::{Json, Router, extract::State, routing::post};
+        use tokio::net::TcpListener;
+        use zeroclaw_config::schema::{
+            AliasedAgentConfig, ModelProviderConfig, OllamaModelProviderConfig, RiskProfileConfig,
+        };
+
+        let _hook_lock = observability::HOOK_TEST_LOCK.lock().await;
+
+        // First response: a native tool call requesting a switch to
+        // `ollama.switched`. Second response (only reachable once the
+        // switched-to provider is actually in use): plain "done".
+        type CallCount = Arc<std::sync::atomic::AtomicUsize>;
+
+        async fn respond_switch_then_done(
+            State(calls): State<CallCount>,
+        ) -> Json<serde_json::Value> {
+            let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                Json(serde_json::json!({
+                    "choices": [{
+                        "message": {
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "call-switch-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "model_switch",
+                                    "arguments": "{\"action\":\"set\",\"model_provider\":\"ollama.switched\",\"model\":\"switched-model\"}"
+                                }
+                            }]
+                        }
+                    }]
+                }))
+            } else {
+                Json(serde_json::json!({
+                    "choices": [{"message": {"content": "done"}}]
+                }))
+            }
+        }
+
+        let calls: CallCount = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let app = Router::new()
+            .route("/v1/chat/completions", post(respond_switch_then_done))
+            .with_state(calls);
+        let server = zeroclaw_spawn::spawn!(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let (_tmp, mut config) = isolated_run_test_config();
+        for alias in ["default", "switched"] {
+            config.providers.models.ollama.insert(
+                alias.to_string(),
+                OllamaModelProviderConfig {
+                    base: ModelProviderConfig {
+                        model: Some(format!("run-lifecycle-switch-{alias}-model")),
+                        timeout_secs: Some(5),
+                        uri: Some(format!("http://{addr}")),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+        }
+        config.agents.insert(
+            "run-lifecycle-switch-agent".to_string(),
+            AliasedAgentConfig {
+                model_provider: "ollama.default".into(),
+                risk_profile: "default".into(),
+                ..Default::default()
+            },
+        );
+        config
+            .risk_profiles
+            .insert("default".to_string(), RiskProfileConfig::default());
+
+        let capturing = Arc::new(CapturingObserver::default());
+        let observer: Arc<dyn Observer> = capturing.clone();
+        let hook_guard = observability::set_scoped_broadcast_hook(observer);
+
+        let result = super::run(
+            config,
+            "run-lifecycle-switch-agent",
+            Some("please switch models".to_string()),
+            None,
+            None,
+            None,
+            Vec::new(),
+            false,
+            None,
+            None,
+            TurnOrigin::SubTurn,
+            super::AgentRunOverrides::default(),
+        )
+        .await;
+
+        drop(hook_guard);
+        server.abort();
+
+        let output = result.expect("run() should complete after the model switch");
+        assert_eq!(output, "done");
+
+        let events = capturing.events.lock();
+        let (starts, ends) = lifecycle_events_for_alias(&events, "run-lifecycle-switch-agent");
+        assert_eq!(
+            starts, 1,
+            "a model switch must not open a second bracket, got {events:?}"
+        );
+        assert_eq!(
+            ends, 1,
+            "a model switch must still close with exactly one AgentEnd, got {events:?}"
+        );
+        assert!(
+            matches!(events.first(), Some(ObserverEvent::AgentStart { .. })),
+            "first event must be AgentStart, got {events:?}"
+        );
+        assert!(
+            matches!(events.last(), Some(ObserverEvent::AgentEnd { .. })),
+            "last event must be AgentEnd, got {events:?}"
+        );
+
+        let end_route = events
+            .iter()
+            .find_map(|e| match e {
+                ObserverEvent::AgentEnd {
+                    agent_alias,
+                    model_provider,
+                    model,
+                    ..
+                } if agent_alias.as_deref() == Some("run-lifecycle-switch-agent") => {
+                    Some((model_provider.clone(), model.clone()))
+                }
+                _ => None,
+            })
+            .expect("AgentEnd for the switch agent should be present");
+        assert_eq!(
+            end_route,
+            ("ollama.switched".to_string(), "switched-model".to_string()),
+            "AgentEnd must be attributed to the switched-TO route (set_model_route), \
+             not the original one, got {events:?}"
+        );
     }
 
     /// `build_hardware_context` must forward the caller's TurnMeta onto the
