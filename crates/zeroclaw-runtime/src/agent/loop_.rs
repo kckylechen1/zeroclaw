@@ -17570,6 +17570,7 @@ Pin 13: LED
 
         /// A config whose provider points at a closed port: the turn builds its
         /// full user message and only then fails, which is all these tests need.
+        #[allow(clippy::field_reassign_with_default)] // Config has ~100 fields; partial override via Default
         fn config_for(alias: &str, data_dir: &std::path::Path) -> zeroclaw_config::schema::Config {
             use zeroclaw_config::schema::{
                 AliasedAgentConfig, ModelProviderConfig, OllamaModelProviderConfig,

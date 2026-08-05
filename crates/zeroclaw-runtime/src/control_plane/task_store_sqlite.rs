@@ -1391,6 +1391,7 @@ mod tests {
     /// degrade branch that guards against this filter and the parser ever
     /// drifting apart again.)
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // conn is dropped before .await; clippy false positive
     async fn a_corrupt_row_does_not_sink_its_siblings() {
         let s = SqliteTaskStore::new_in_memory().unwrap();
         s.create(child_of("good1", "mum", TaskStatus::Completed))

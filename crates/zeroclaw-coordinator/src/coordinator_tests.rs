@@ -13,6 +13,11 @@
 // persistence backend that errors on every call. See ../LICENSE and
 // ../NOTICE.
 
+// Tests use bare `tokio::spawn` to drive coordinator actors — the fork's
+// `disallowed_methods`/`disallowed_macros` lints target production code,
+// not test harnesses.
+#![allow(clippy::disallowed_methods, clippy::disallowed_macros)]
+
 use super::*;
 use crate::backend::{ChannelBackend, CoordinatorError};
 use crate::cancel::CancelToken;

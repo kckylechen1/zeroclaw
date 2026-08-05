@@ -1041,6 +1041,11 @@ mod tests {
     // ── `background: true` — the detached path ──
 
     mod background {
+        // The `SERIALIZE` guard intentionally holds a `std::sync::Mutex` across
+        // `.await` — it is a test-serialization lock, not a production lock. Each
+        // test holds it for its entire body to prevent concurrent coordinator
+        // installations from racing the process-global `COMMAND_SENDER_TEST_HOOK`.
+        #![allow(clippy::await_holding_lock, clippy::collapsible_if)]
         use super::*;
         use crate::control_plane::boot::ControlPlaneHandle;
         use crate::control_plane::coordinator_host;

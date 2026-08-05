@@ -1599,6 +1599,7 @@ fn default_param_for_tool(tool: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::question_mark)] // multi-branch if-else chain, ? does not apply
 fn parse_glm_shortened_body(body: &str) -> Option<ParsedToolCall> {
     let body = body.trim();
     if body.is_empty() {

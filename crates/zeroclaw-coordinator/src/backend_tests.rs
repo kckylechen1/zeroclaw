@@ -10,6 +10,11 @@
 // dropped because this crate has no logging dependency (the outcome half of
 // that test is kept). See ../LICENSE and ../NOTICE.
 
+// Tests use bare `tokio::spawn` to drive backend actors — the fork's
+// `disallowed_methods`/`disallowed_macros` lints target production code,
+// not test harnesses.
+#![allow(clippy::disallowed_methods, clippy::disallowed_macros)]
+
 use super::*;
 use crate::cancel::CancelToken;
 use crate::outcome::ChildOutcome;

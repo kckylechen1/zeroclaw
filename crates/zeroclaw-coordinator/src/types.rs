@@ -271,6 +271,7 @@ impl SpawnCommand {
     /// # Errors
     ///
     /// Returns the built result when the spawn caller is gone.
+    #[allow(clippy::result_large_err)] // ChildResult is a public API type; Err only on dropped channel
     pub fn respond_with(
         self,
         build: impl FnOnce(&ChildRequest) -> ChildResult,
