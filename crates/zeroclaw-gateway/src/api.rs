@@ -302,6 +302,19 @@ pub async fn handle_api_status(
     // the upgrade button, and which restart command to show afterwards.
     let restart = crate::version::detect_restart();
 
+    // Node discovery surface is feature-gated; keep the status payload shape
+    // stable by emitting empty collections when the `nodes` feature is off.
+    #[cfg(feature = "nodes")]
+    let node_status = serde_json::json!({
+        "connected": state.node_registry.node_ids(),
+        "mdns_peers": state.mdns_peer_registry.snapshots(),
+    });
+    #[cfg(not(feature = "nodes"))]
+    let node_status = serde_json::json!({
+        "connected": Vec::<String>::new(),
+        "mdns_peers": Vec::<serde_json::Value>::new(),
+    });
+
     let body = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "model_provider": model_provider,
@@ -314,10 +327,7 @@ pub async fn handle_api_status(
         "memory_backend": memory_backend,
         "paired": state.pairing.is_paired(),
         "channels": channels,
-        "nodes": {
-            "connected": state.node_registry.node_ids(),
-            "mdns_peers": state.mdns_peer_registry.snapshots(),
-        },
+        "nodes": node_status,
         "health": health,
         "agent_alias": agent_alias,
         "process": process,
@@ -2045,7 +2055,9 @@ pub(crate) use tests::test_state;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::{AppState, GatewayRateLimiter, IdempotencyStore, nodes};
+    #[cfg(feature = "nodes")]
+    use crate::nodes;
+    use crate::{AppState, GatewayRateLimiter, IdempotencyStore};
     use async_trait::async_trait;
     use axum::response::IntoResponse;
     use http_body_util::BodyExt;
@@ -2053,7 +2065,9 @@ pub(crate) mod tests {
     #[cfg(feature = "channel-linq")]
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(feature = "nodes")]
+    use std::time::Instant;
     use zeroclaw_infra::session_backend::SessionBackend;
     use zeroclaw_infra::session_store::SessionStore;
     use zeroclaw_memory::{Memory, MemoryCategory, MemoryEntry};
@@ -2256,7 +2270,9 @@ pub(crate) mod tests {
             event_tx: tokio::sync::broadcast::channel(16).0,
             event_buffer: Arc::new(crate::sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             session_backend: None,
             session_queue: Arc::new(crate::session_queue::SessionActorQueue::new(8, 30, 600)),
@@ -2297,6 +2313,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "nodes")]
     async fn api_status_includes_connected_nodes_and_mdns_peers() {
         let state = test_state(zeroclaw_config::schema::Config::default());
         let (invoke_tx, _invoke_rx) = tokio::sync::mpsc::channel(1);
