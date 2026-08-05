@@ -3961,6 +3961,10 @@ mod tests {
     struct MultimodalCaptureProvider {
         seen_user_messages: Arc<Mutex<Vec<String>>>,
         streamed: bool,
+        /// When true, `chat` and `stream_chat` return `Err` after capturing
+        /// the user message. Used by #25 tests to verify the settle path
+        /// hands announcements back on provider failure.
+        fail_chat: bool,
     }
 
     #[async_trait]
@@ -3984,6 +3988,9 @@ mod tests {
             if let Some(message) = request.messages.iter().rfind(|msg| msg.role == "user") {
                 self.seen_user_messages.lock().push(message.content.clone());
             }
+            if self.fail_chat {
+                return Err(anyhow::Error::msg("synthetic provider failure (#25)"));
+            }
             Ok(zeroclaw_providers::ChatResponse {
                 text: Some("done".into()),
                 tool_calls: vec![],
@@ -4006,6 +4013,15 @@ mod tests {
 
             if let Some(message) = request.messages.iter().rfind(|msg| msg.role == "user") {
                 self.seen_user_messages.lock().push(message.content.clone());
+            }
+
+            if self.fail_chat {
+                return stream::iter(vec![Err(
+                    zeroclaw_providers::traits::StreamError::ModelProvider(
+                        "synthetic stream failure (#25)".into(),
+                    ),
+                )])
+                .boxed();
             }
 
             if self.streamed {
@@ -6414,6 +6430,7 @@ mod tests {
         let provider = Box::new(MultimodalCaptureProvider {
             seen_user_messages: seen_user_messages.clone(),
             streamed: false,
+            fail_chat: false,
         });
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -6467,6 +6484,7 @@ mod tests {
         let provider = Box::new(MultimodalCaptureProvider {
             seen_user_messages: seen_user_messages.clone(),
             streamed: true,
+            fail_chat: false,
         });
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -9747,9 +9765,18 @@ mod tests {
         use crate::agent::loop_::scope_session_key;
 
         fn capture_agent(seen: Arc<Mutex<Vec<String>>>, streamed: bool) -> Agent {
+            capture_agent_with(seen, streamed, false)
+        }
+
+        fn capture_agent_with(
+            seen: Arc<Mutex<Vec<String>>>,
+            streamed: bool,
+            fail_chat: bool,
+        ) -> Agent {
             let provider = Box::new(MultimodalCaptureProvider {
                 seen_user_messages: seen,
                 streamed,
+                fail_chat,
             });
             let memory_cfg = zeroclaw_config::schema::MemoryConfig {
                 backend: "none".into(),
@@ -9958,6 +9985,131 @@ mod tests {
             assert!(
                 !msg.contains("## Background tasks finished"),
                 "nothing to announce without a control plane: {msg}"
+            );
+        }
+
+        // ── #25: settle exit coverage for failure paths ──
+
+        /// A non-streamed `turn` that fails at the provider after claiming its
+        /// child must return the announcement to the store (#25 exit D2 failure).
+        ///
+        /// Discriminating line: `assert!(returned)` — never call settle on the
+        /// failure path and the row stays `delivered=1` with nobody having read
+        /// it, permanently losing the completion.
+        #[tokio::test]
+        async fn turn_failure_returns_announcements_to_store() {
+            let fixture = AnnounceFixture::install();
+            fixture
+                .finished_child("fail-kid", "fail:session", "will not be read")
+                .await;
+
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let mut agent = capture_agent_with(Arc::clone(&seen), false, true);
+
+            scope_session_key(Some("fail:session".to_string()), async {
+                let _ = agent.turn("question that fails").await;
+            })
+            .await;
+
+            // The provider saw the enriched message — claim happened.
+            let captured = seen.lock().clone();
+            assert!(
+                captured
+                    .iter()
+                    .any(|msg| msg.contains("[completed] fail-kid")),
+                "the child must have been spliced before the failure: {captured:?}"
+            );
+
+            // The provider failed, so the guard must hand the child back.
+            let returned = fixture.wait_until_returned("fail-kid").await;
+            assert!(
+                returned,
+                "a turn that fails at the provider must return its claimed announcements"
+            );
+        }
+
+        /// A streamed `turn_streamed` that fails at the provider after claiming
+        /// its child must return the announcement to the store (#25 exit E2
+        /// failure).
+        ///
+        /// Discriminating line: `assert!(returned)` — a streamed turn that
+        /// never settles on failure loses the completion silently.
+        #[tokio::test]
+        async fn turn_streamed_failure_returns_announcements_to_store() {
+            let fixture = AnnounceFixture::install();
+            fixture
+                .finished_child("stream-fail-kid", "stream:fail", "lost in transit")
+                .await;
+
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let mut agent = capture_agent_with(Arc::clone(&seen), true, true);
+
+            scope_session_key(Some("stream:fail".to_string()), async {
+                let (tx, _rx) = tokio::sync::mpsc::channel::<TurnEvent>(16);
+                let _ = agent
+                    .turn_streamed("streamed question that fails", tx, None)
+                    .await;
+            })
+            .await;
+
+            // Claim happened before the stream errored.
+            let captured = seen.lock().clone();
+            assert!(
+                captured
+                    .iter()
+                    .any(|msg| msg.contains("[completed] stream-fail-kid")),
+                "the child must have been spliced before the stream failure: {captured:?}"
+            );
+
+            let returned = fixture.wait_until_returned("stream-fail-kid").await;
+            assert!(
+                returned,
+                "a streamed turn that fails must return its claimed announcements"
+            );
+        }
+
+        /// After a successful non-streamed `turn`, the announcement must stay
+        /// delivered — proving the success-side settle fired (#25 exit D2
+        /// success).
+        ///
+        /// Discriminating line: `assert!(fixture.is_delivered(...))` — make
+        /// settle on success a no-op and the row returns to the store despite
+        /// having been read, so the parent hears it twice.
+        #[tokio::test]
+        async fn turn_success_keeps_announcements_delivered() {
+            let fixture = AnnounceFixture::install();
+            fixture
+                .finished_child("ok-kid", "ok:session", "read by the model")
+                .await;
+
+            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+            let mut agent = capture_agent_with(Arc::clone(&seen), false, false);
+
+            scope_session_key(Some("ok:session".to_string()), async {
+                agent
+                    .turn("question that succeeds")
+                    .await
+                    .expect("turn should succeed");
+            })
+            .await;
+
+            // The model saw the child.
+            let captured = seen.lock().clone();
+            assert!(
+                captured
+                    .iter()
+                    .any(|msg| msg.contains("[completed] ok-kid")),
+                "the child must have been spliced: {captured:?}"
+            );
+
+            // The turn succeeded, so the guard was disarmed — row stays delivered.
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            assert!(
+                fixture.is_delivered("ok-kid").await,
+                "a successful non-streamed turn must keep its announcements delivered"
             );
         }
     }
