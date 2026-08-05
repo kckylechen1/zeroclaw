@@ -18088,5 +18088,51 @@ Pin 13: LED
             let left = fixture.claim(&format!("agent:{alias}")).await;
             assert_eq!(left.len(), 1, "the announcement must still be claimable");
         }
+
+        /// `process_message` that claims its child then fails at the provider
+        /// must return the announcement (#25 exit C failure).
+        ///
+        /// Discriminating line: `assert!(returned)` — skip settle on the
+        /// failure path in `process_message` and the row stays delivered=1
+        /// with nobody having read it.
+        #[tokio::test]
+        async fn process_message_failure_returns_announcements() {
+            let fixture = Fixture::install();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let alias = "announce-pm-fail-agent";
+            fixture
+                .finished_child("pm-kid", "pm:fail-key", "should come back")
+                .await;
+
+            let config = config_for(alias, dir.path());
+            let _ = crate::agent::loop_::scope_session_key(
+                Some("pm:fail-key".to_string()),
+                crate::agent::loop_::process_message(
+                    config,
+                    alias,
+                    "pm-fail-marker",
+                    Some("session"),
+                    TurnOrigin::SubTurn,
+                ),
+            )
+            .await;
+
+            // The child was spliced (claim happened).
+            let seen = fixture.messages_containing("pm-fail-marker");
+            assert_eq!(seen.len(), 1, "expected one captured turn: {seen:?}");
+            assert!(
+                seen[0].contains("[completed] pm-kid"),
+                "the child must have been spliced: {}",
+                seen[0]
+            );
+
+            // The provider is a closed port — the turn fails, so the
+            // announcement must come back.
+            let returned = fixture.wait_until_returned("pm-kid").await;
+            assert!(
+                returned,
+                "process_message must return claimed announcements on failure"
+            );
+        }
     }
 }
