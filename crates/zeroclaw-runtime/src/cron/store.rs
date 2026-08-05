@@ -634,6 +634,8 @@ pub fn record_run(
             status,
             bounded_output.as_deref(),
             duration_ms,
+            None,
+            None,
         )?;
 
         tx.commit()
@@ -651,6 +653,8 @@ pub(crate) fn persist_manual_run_result(
     status: &str,
     output: Option<&str>,
     duration_ms: i64,
+    execution_status: Option<&str>,
+    delivery_status: Option<&str>,
 ) -> Result<()> {
     let bounded_output = output.map(truncate_cron_output);
 
@@ -666,6 +670,8 @@ pub(crate) fn persist_manual_run_result(
             status,
             bounded_output.as_deref(),
             duration_ms,
+            execution_status,
+            delivery_status,
         )?;
 
         apply_last_run_state(
@@ -692,6 +698,8 @@ pub(crate) fn persist_run_result(
     status: &str,
     output: Option<&str>,
     duration_ms: i64,
+    execution_status: Option<&str>,
+    delivery_status: Option<&str>,
     action: RunCompletionAction,
 ) -> Result<()> {
     let bounded_output = output.map(truncate_cron_output);
@@ -708,6 +716,8 @@ pub(crate) fn persist_run_result(
             status,
             bounded_output.as_deref(),
             duration_ms,
+            execution_status,
+            delivery_status,
         )?;
 
         apply_run_completion_state(
@@ -748,10 +758,12 @@ fn insert_run_and_prune(
     status: &str,
     output: Option<&str>,
     duration_ms: i64,
+    execution_status: Option<&str>,
+    delivery_status: Option<&str>,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO cron_runs (job_id, started_at, finished_at, status, output, duration_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO cron_runs (job_id, started_at, finished_at, status, output, duration_ms, execution_status, delivery_status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             job_id,
             started_at.to_rfc3339(),
@@ -759,6 +771,8 @@ fn insert_run_and_prune(
             status,
             output,
             duration_ms,
+            execution_status,
+            delivery_status,
         ],
     )
     .context("Failed to insert cron run")?;
@@ -820,7 +834,8 @@ pub fn list_runs(config: &Config, job_id: &str, limit: usize) -> Result<Vec<Cron
     let Some(runs) = with_read_connection(config, |conn| {
         let lim = i64::try_from(limit.max(1)).context("Run history limit overflow")?;
         let mut stmt = conn.prepare(
-            "SELECT id, job_id, started_at, finished_at, status, output, duration_ms
+            "SELECT id, job_id, started_at, finished_at, status, output, duration_ms,
+                    execution_status, delivery_status
              FROM cron_runs
              WHERE job_id = ?1
              ORDER BY started_at DESC, id DESC
@@ -838,6 +853,8 @@ pub fn list_runs(config: &Config, job_id: &str, limit: usize) -> Result<Vec<Cron
                 status: row.get(4)?,
                 output: row.get(5)?,
                 duration_ms: row.get(6)?,
+                execution_status: row.get(7)?,
+                delivery_status: row.get(8)?,
             })
         })?;
 
@@ -1279,6 +1296,33 @@ fn add_column_if_missing(conn: &Connection, name: &str, sql_type: &str) -> Resul
     }
 }
 
+/// Like [`add_column_if_missing`] but for the `cron_runs` table (#64).
+fn add_run_column_if_missing(conn: &Connection, name: &str, sql_type: &str) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(cron_runs)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let col_name: String = row.get(1)?;
+        if col_name == name {
+            return Ok(());
+        }
+    }
+    drop(rows);
+    drop(stmt);
+
+    match conn.execute(
+        &format!("ALTER TABLE cron_runs ADD COLUMN {name} {sql_type}"),
+        [],
+    ) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_err, Some(ref msg)))
+            if msg.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("Failed to add cron_runs.{name}")),
+    }
+}
+
 fn cron_db_path(config: &Config) -> std::path::PathBuf {
     config.data_dir.join("cron").join("jobs.db")
 }
@@ -1474,6 +1518,12 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
     // runs longer than the poll interval cannot be launched again while still in
     // flight (see `claim_job`/`release_job` and
     add_column_if_missing(conn, "locked_at", "TEXT")?;
+
+    // Component-level outcome decomposition (#64). Legacy cron_runs rows
+    // written before these columns existed carry NULL — readers map NULL
+    // to None (reported as "legacy/unknown") rather than guessing.
+    add_run_column_if_missing(conn, "execution_status", "TEXT")?;
+    add_run_column_if_missing(conn, "delivery_status", "TEXT")?;
 
     Ok(())
 }

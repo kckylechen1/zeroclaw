@@ -122,76 +122,117 @@ pub struct ManualCronRunResult {
 }
 
 pub struct CronDeliveryOutcome {
+    /// Compatibility projection: true iff execution succeeded.
     pub success: bool,
+    /// Compatibility projection: `"ok"`, `"degraded"`, or `"error"`.
     pub status: String,
     pub output: String,
+    /// Component truth: did execution succeed?
+    pub execution_success: bool,
+    /// Component truth: delivery outcome string.
+    pub delivery_status: &'static str,
 }
 
 pub async fn deliver_and_classify_run_result(
     config: &Config,
     job: &CronJob,
-    mut success: bool,
+    execution_success: bool,
     mut output: String,
     context: CronDeliveryContext,
 ) -> CronDeliveryOutcome {
-    let mut status = if success { "ok" } else { "error" }.to_string();
+    let delivery_result = deliver_if_configured(config, job, &output).await;
 
-    if let Err(e) = deliver_if_configured(config, job, &output).await {
-        // Cron add-time accepts dangling delivery refs (the job's channel
-        // may not be provisioned yet); the loudly-logged warn here is
-        // the scheduler-side half of that contract. Manual trigger paths
-        // share this classifier so status history cannot drift again.
-        let channel = job.delivery.channel.as_deref().unwrap_or("");
-        let target = job.delivery.to.as_deref().unwrap_or("");
-        let delivery_error = e.to_string();
+    let (delivery_status, delivery_error) = match &delivery_result {
+        Ok(()) => ("succeeded", None),
+        Err(e) => ("failed", Some(e.to_string())),
+    };
 
-        if job.delivery.best_effort {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({
-                        "job_id": job.id,
-                        "agent_alias": job.agent_alias,
-                        "channel": channel,
-                        "target": target,
-                        "error": delivery_error
-                    })),
-                context.failure_message(true)
-            );
-            if success {
-                status = "degraded".to_string();
+    // Delivery mode=none and NO_REPLY sentinel are already handled inside
+    // `deliver_if_configured` returning Ok(()), but we need to distinguish
+    // "not requested" and "suppressed" for the component truth.
+    let delivery_status = if delivery_result.is_ok() {
+        if job.delivery.mode.eq_ignore_ascii_case("announce") {
+            // The announce path returned Ok — either delivered or suppressed
+            // by NO_REPLY sentinel. We can't tell from here which, but both
+            // are non-failure states. Use "succeeded" as the umbrella; the
+            // sentinel log is already emitted inside deliver_if_configured.
+            //
+            // For the purpose of component truth, both "not_requested" and
+            // "suppressed" collapse into the non-failure bucket. If we need
+            // finer granularity later, deliver_if_configured can return an
+            // enum.
+            if announce_delivery_decision(&output).should_deliver() {
+                "succeeded"
+            } else {
+                "suppressed"
             }
         } else {
-            success = false;
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({
-                        "job_id": job.id,
-                        "agent_alias": job.agent_alias,
-                        "channel": channel,
-                        "target": target,
-                        "error": delivery_error
-                    })),
-                context.failure_message(false)
-            );
-            status = "error".to_string();
+            "not_requested"
         }
+    } else {
+        delivery_status
+    };
+
+    // Log delivery failures (the loudly-logged warn is the scheduler-side
+    // half of the dangling-ref contract from cron add-time).
+    if let Some(ref delivery_error) = delivery_error {
+        let channel = job.delivery.channel.as_deref().unwrap_or("");
+        let target = job.delivery.to.as_deref().unwrap_or("");
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({
+                    "job_id": job.id,
+                    "agent_alias": job.agent_alias,
+                    "channel": channel,
+                    "target": target,
+                    "error": delivery_error
+                })),
+            context.failure_message(job.delivery.best_effort)
+        );
 
         if output.trim().is_empty() {
             output = format!("delivery failed: {delivery_error}");
         } else {
             output.push_str("\n\ndelivery failed: ");
-            output.push_str(&delivery_error);
+            output.push_str(delivery_error);
         }
     }
 
+    // Compatibility projection — execution truth is never rewritten by
+    // delivery outcome. A delivery failure on a successful execution may
+    // surface as "degraded" (best_effort) or "error" (strict), but the
+    // stored execution_success and delivery_status carry the component truth.
+    let status = match (execution_success, delivery_status) {
+        (true, "succeeded" | "not_requested" | "suppressed") => "ok",
+        (true, "failed") => {
+            if job.delivery.best_effort {
+                "degraded"
+            } else {
+                // Strict delivery failure: the caller-facing result fails,
+                // but execution_success in the outcome remains true so the
+                // stored/persisted record preserves execution truth.
+                "error"
+            }
+        }
+        (true, _) => "ok", // unknown delivery states don't downgrade execution
+        (false, _) => "error",
+    };
+
+    // Compatibility projection: strict delivery failure (best_effort=false)
+    // surfaces as overall failure to callers, but execution_success and
+    // delivery_status carry the component truth separately. For best_effort
+    // delivery, a delivery failure does not negate execution success.
+    let overall_success =
+        execution_success && (delivery_status != "failed" || job.delivery.best_effort);
+
     CronDeliveryOutcome {
-        success,
-        status,
+        success: overall_success,
+        status: status.to_string(),
         output,
+        execution_success,
+        delivery_status,
     }
 }
 
@@ -215,6 +256,12 @@ pub async fn run_manual_job(
         &outcome.status,
         Some(&outcome.output),
         duration_ms,
+        Some(if outcome.execution_success {
+            "success"
+        } else {
+            "failed"
+        }),
+        Some(outcome.delivery_status),
     ) {
         ::zeroclaw_log::record!(
             WARN,
@@ -230,6 +277,8 @@ pub async fn run_manual_job(
             "type": "cron_result",
             "job_id": job.id,
             "success": outcome.success,
+            "execution_success": outcome.execution_success,
+            "delivery_status": outcome.delivery_status,
             "output": &outcome.output,
             "manual": true,
             "timestamp": finished_at.to_rfc3339(),
@@ -646,7 +695,9 @@ async fn process_due_jobs(
     }))
     .buffer_unordered(max_concurrent);
 
-    while let Some((job_id, success, output)) = in_flight.next().await {
+    while let Some((job_id, success, output, execution_success, delivery_status)) =
+        in_flight.next().await
+    {
         if !success {
             ::zeroclaw_log::record!(
                 WARN,
@@ -662,6 +713,8 @@ async fn process_due_jobs(
                 "type": "cron_result",
                 "job_id": job_id,
                 "success": success,
+                "execution_success": execution_success,
+                "delivery_status": delivery_status,
                 "output": output,
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             }));
@@ -675,7 +728,7 @@ async fn execute_and_persist_job(
     agent_alias: &str,
     job: &CronJob,
     component: &str,
-) -> (String, bool, String) {
+) -> (String, bool, String, bool, &'static str) {
     crate::health::mark_component_ok(component);
     warn_if_high_frequency_agent_job(job);
 
@@ -685,7 +738,7 @@ async fn execute_and_persist_job(
         .instrument(span)
         .await;
     let finished_at = Utc::now();
-    let success = Box::pin(persist_job_result(
+    let run_outcome = Box::pin(persist_job_result(
         config,
         job,
         success,
@@ -709,7 +762,13 @@ async fn execute_and_persist_job(
         );
     }
 
-    (job.id.clone(), success, output)
+    (
+        job.id.clone(),
+        run_outcome.projected_success,
+        run_outcome.output,
+        run_outcome.execution_success,
+        run_outcome.delivery_status,
+    )
 }
 
 async fn run_agent_job(
@@ -846,6 +905,19 @@ async fn run_agent_job(
     }
 }
 
+/// Return value of [`persist_job_result`] — carries both the compatibility
+/// projection and the component truth so the scheduled-path SSE broadcast
+/// can include execution/delivery status (#64).
+struct PersistedRunOutcome {
+    /// Compatibility projection (surfaces delivery failure to callers when strict).
+    projected_success: bool,
+    output: String,
+    /// Component truth: did execution succeed?
+    execution_success: bool,
+    /// Component truth: delivery outcome.
+    delivery_status: &'static str,
+}
+
 async fn persist_job_result(
     config: &Config,
     job: &CronJob,
@@ -853,7 +925,7 @@ async fn persist_job_result(
     output: &str,
     started_at: DateTime<Utc>,
     finished_at: DateTime<Utc>,
-) -> bool {
+) -> PersistedRunOutcome {
     let duration_ms = (finished_at - started_at).num_milliseconds();
     let outcome = deliver_and_classify_run_result(
         config,
@@ -864,7 +936,7 @@ async fn persist_job_result(
     )
     .await;
 
-    let action = if is_one_shot_auto_delete(job) && outcome.success {
+    let action = if is_one_shot_auto_delete(job) && outcome.execution_success {
         RunCompletionAction::Delete
     } else if matches!(job.schedule, Schedule::At { .. }) {
         RunCompletionAction::Disable
@@ -873,6 +945,11 @@ async fn persist_job_result(
     };
 
     let job_state_at = Utc::now();
+    let exec_status_str = if outcome.execution_success {
+        "success"
+    } else {
+        "failed"
+    };
     if let Err(e) = persist_run_result(
         config,
         job,
@@ -882,6 +959,8 @@ async fn persist_job_result(
         &outcome.status,
         Some(&outcome.output),
         duration_ms,
+        Some(exec_status_str),
+        Some(outcome.delivery_status),
         action,
     ) {
         ::zeroclaw_log::record!(
@@ -935,7 +1014,12 @@ async fn persist_job_result(
         }
     }
 
-    outcome.success
+    PersistedRunOutcome {
+        projected_success: outcome.success,
+        output: outcome.output,
+        execution_success: outcome.execution_success,
+        delivery_status: outcome.delivery_status,
+    }
 }
 
 fn is_one_shot_auto_delete(job: &CronJob) -> bool {
@@ -1857,7 +1941,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         let runs = cron::list_runs(&config, &job.id, 10).unwrap();
@@ -1875,7 +1961,9 @@ mod tests {
         let finished = started + ChronoDuration::milliseconds(10);
 
         crate::cron::store::reset_write_connection_count_for_tests(&config);
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
 
         assert!(success);
         assert_eq!(
@@ -1897,7 +1985,9 @@ mod tests {
             let finished = started + ChronoDuration::milliseconds(10);
             let output = format!("run-{idx}");
 
-            let success = persist_job_result(&config, &job, true, &output, started, finished).await;
+            let success = persist_job_result(&config, &job, true, &output, started, finished)
+                .await
+                .projected_success;
             assert!(success);
         }
 
@@ -1933,7 +2023,9 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
 
         assert!(success);
         assert!(cron::list_runs(&config, &job.id, 10).unwrap().is_empty());
@@ -1967,7 +2059,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
         let lookup = cron::get_job(&config, &job.id);
         assert!(lookup.is_err());
@@ -1995,7 +2089,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, false, "boom", started, finished).await;
+        let success = persist_job_result(&config, &job, false, "boom", started, finished)
+            .await
+            .projected_success;
         assert!(!success);
         let updated = cron::get_job(&config, &job.id).unwrap();
         assert!(!updated.enabled);
@@ -2025,7 +2121,9 @@ mod tests {
         let finished = started + ChronoDuration::milliseconds(10);
 
         crate::cron::store::reset_write_connection_count_for_tests(&config);
-        let success = persist_job_result(&config, &job, false, "boom", started, finished).await;
+        let success = persist_job_result(&config, &job, false, "boom", started, finished)
+            .await
+            .projected_success;
 
         assert!(!success);
         assert_eq!(
@@ -2071,7 +2169,9 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         let runs = cron::list_runs(&config, &job.id, 10).unwrap();
@@ -2107,7 +2207,9 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         let updated = cron::get_job(&config, &job.id).unwrap();
@@ -2127,7 +2229,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
         let lookup = cron::get_job(&config, &job.id);
         assert!(lookup.is_err());
@@ -2143,7 +2247,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, false, "boom", started, finished).await;
+        let success = persist_job_result(&config, &job, false, "boom", started, finished)
+            .await
+            .projected_success;
         assert!(!success);
         let updated = cron::get_job(&config, &job.id).unwrap();
         assert!(!updated.enabled);
@@ -2182,7 +2288,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         let updated = cron::get_job(&config, &job.id).unwrap();
@@ -2210,7 +2318,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         let updated = cron::get_job(&config, &job.id).unwrap();
@@ -2280,7 +2390,9 @@ mod tests {
 
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         // After reschedule_after_run, At schedule jobs should be disabled
@@ -2606,5 +2718,225 @@ mod tests {
 
         process_due_jobs(&config, vec![job], &component, &event_tx).await;
         // If we got here without panic, the test passes.
+    }
+
+    // ── #64: execution/delivery truth-separation tests ──
+
+    fn delivery_job(channel: Option<&str>, best_effort: bool) -> CronJob {
+        let mut job = test_job("echo ok");
+        job.delivery = DeliveryConfig {
+            mode: "announce".to_string(),
+            channel: channel.map(str::to_string),
+            to: Some("chat-id".to_string()),
+            thread_id: None,
+            best_effort,
+        };
+        job
+    }
+
+    #[tokio::test]
+    async fn classify_execution_success_delivery_success() {
+        register_recording_delivery_fn();
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let job = delivery_job(Some(COUNT_CHANNEL), true);
+
+        let outcome = deliver_and_classify_run_result(
+            &config,
+            &job,
+            true,
+            "all good".to_string(),
+            CronDeliveryContext::Scheduled,
+        )
+        .await;
+
+        assert!(outcome.execution_success, "execution must remain success");
+        assert_eq!(outcome.delivery_status, "succeeded");
+        assert_eq!(outcome.status, "ok");
+        assert!(outcome.success, "compatibility success should be true");
+    }
+
+    #[tokio::test]
+    async fn classify_execution_success_delivery_not_requested() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let mut job = test_job("echo ok");
+        job.delivery = DeliveryConfig {
+            mode: "none".to_string(),
+            ..Default::default()
+        };
+
+        let outcome = deliver_and_classify_run_result(
+            &config,
+            &job,
+            true,
+            "all good".to_string(),
+            CronDeliveryContext::Scheduled,
+        )
+        .await;
+
+        assert!(outcome.execution_success);
+        assert_eq!(outcome.delivery_status, "not_requested");
+        assert_eq!(outcome.status, "ok");
+        assert!(outcome.success);
+    }
+
+    #[tokio::test]
+    async fn classify_execution_success_delivery_suppressed_no_reply() {
+        register_recording_delivery_fn();
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let job = delivery_job(Some(COUNT_CHANNEL), true);
+
+        let outcome = deliver_and_classify_run_result(
+            &config,
+            &job,
+            true,
+            "NO_REPLY".to_string(),
+            CronDeliveryContext::Scheduled,
+        )
+        .await;
+
+        assert!(outcome.execution_success);
+        assert_eq!(outcome.delivery_status, "suppressed");
+        assert_eq!(outcome.status, "ok");
+        assert!(outcome.success);
+    }
+
+    #[tokio::test]
+    async fn classify_execution_success_delivery_fails_best_effort() {
+        register_recording_delivery_fn();
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let job = delivery_job(Some("fail-delivery"), true);
+
+        let outcome = deliver_and_classify_run_result(
+            &config,
+            &job,
+            true,
+            "executed ok".to_string(),
+            CronDeliveryContext::Scheduled,
+        )
+        .await;
+
+        // Critical invariant: execution truth is NOT rewritten by delivery failure.
+        assert!(outcome.execution_success, "execution must remain success");
+        assert_eq!(outcome.delivery_status, "failed");
+        // Best-effort: compatibility success stays true, status is degraded.
+        assert!(
+            outcome.success,
+            "best_effort delivery failure should not negate success"
+        );
+        assert_eq!(outcome.status, "degraded");
+        assert!(outcome.output.contains("delivery failed"));
+    }
+
+    #[tokio::test]
+    async fn classify_execution_success_delivery_fails_strict() {
+        register_recording_delivery_fn();
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let job = delivery_job(Some("fail-delivery"), false);
+
+        let outcome = deliver_and_classify_run_result(
+            &config,
+            &job,
+            true,
+            "executed ok".to_string(),
+            CronDeliveryContext::Scheduled,
+        )
+        .await;
+
+        // Critical invariant: execution truth is NOT rewritten by delivery failure.
+        assert!(outcome.execution_success, "execution must remain success");
+        assert_eq!(outcome.delivery_status, "failed");
+        // Strict: compatibility projection fails (policy-level), but component
+        // truth in the outcome still shows execution succeeded.
+        assert!(
+            !outcome.success,
+            "strict delivery failure should project failure"
+        );
+        assert_eq!(outcome.status, "error");
+    }
+
+    #[tokio::test]
+    async fn classify_execution_failure_and_delivery_failure_both_visible() {
+        register_recording_delivery_fn();
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let job = delivery_job(Some("fail-delivery"), false);
+
+        let outcome = deliver_and_classify_run_result(
+            &config,
+            &job,
+            false,
+            "executed with error".to_string(),
+            CronDeliveryContext::Scheduled,
+        )
+        .await;
+
+        // Both failures remain separately visible — delivery error does not
+        // replace execution error.
+        assert!(
+            !outcome.execution_success,
+            "execution failure must be visible"
+        );
+        assert_eq!(outcome.delivery_status, "failed");
+        assert!(!outcome.success);
+        assert_eq!(outcome.status, "error");
+        // Both errors should be in the output.
+        assert!(outcome.output.contains("executed with error"));
+        assert!(outcome.output.contains("delivery failed"));
+    }
+
+    #[tokio::test]
+    async fn persisted_run_carries_component_truth_after_delivery_failure() {
+        register_recording_delivery_fn();
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let job = cron::add_agent_job(
+            &config,
+            TEST_AGENT,
+            Some("delivery-truth-test".into()),
+            crate::cron::Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "deliver this",
+            SessionTarget::Isolated,
+            None,
+            Some(DeliveryConfig {
+                mode: "announce".into(),
+                channel: Some("fail-delivery".into()),
+                to: Some("chat-id".into()),
+                thread_id: None,
+                best_effort: true,
+            }),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        let started = Utc::now();
+        let finished = started + ChronoDuration::milliseconds(10);
+
+        let _ = persist_job_result(&config, &job, true, "executed ok", started, finished).await;
+
+        let runs = cron::list_runs(&config, &job.id, 10).unwrap();
+        assert_eq!(runs.len(), 1);
+
+        // The stored run must show execution succeeded even though delivery failed.
+        assert_eq!(
+            runs[0].execution_status.as_deref(),
+            Some("success"),
+            "persisted execution_status must be success"
+        );
+        assert_eq!(
+            runs[0].delivery_status.as_deref(),
+            Some("failed"),
+            "persisted delivery_status must be failed"
+        );
+        // Compatibility status is degraded.
+        assert_eq!(runs[0].status, "degraded");
     }
 }

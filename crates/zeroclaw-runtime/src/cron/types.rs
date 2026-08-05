@@ -175,6 +175,14 @@ pub struct CronRun {
     pub status: String,
     pub output: Option<String>,
     pub duration_ms: Option<i64>,
+    /// Component-level execution outcome (`"success"`, `"failed"`, `"legacy"`).
+    /// Legacy rows written before #64 decompose status carry `None` here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_status: Option<String>,
+    /// Component-level delivery outcome (`"not_requested"`, `"suppressed"`,
+    /// `"succeeded"`, `"failed"`, `"legacy"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
