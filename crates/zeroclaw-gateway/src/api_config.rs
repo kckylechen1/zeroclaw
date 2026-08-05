@@ -2554,7 +2554,9 @@ fn build_etag_for(body: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GatewayRateLimiter, IdempotencyStore, nodes};
+    #[cfg(feature = "nodes")]
+    use crate::nodes;
+    use crate::{GatewayRateLimiter, IdempotencyStore};
     use async_trait::async_trait;
     use axum::http::StatusCode;
     use http_body_util::BodyExt;
@@ -2655,7 +2657,9 @@ mod tests {
             event_buffer: Arc::new(crate::sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,

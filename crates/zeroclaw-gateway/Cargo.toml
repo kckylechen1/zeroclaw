@@ -89,6 +89,11 @@ wiremock = "0.6"
 
 [features]
 default = ["schema-export", "a2a"]
+# Node discovery surface (`/ws/nodes` WebSocket registry + LAN mDNS peer
+# hints + the node tool). Default-off; enable with `--features nodes`.
+# The `[nodes]` / `[nodes.mdns]` config types stay unconditional in
+# zeroclaw-config (schema.rs is a hot upstream file — not worth the churn).
+nodes = []
 # A2A (Agent2Agent) discovery surface: well-known catalog card + per-alias
 # agent cards. Default-on; the runtime surface stays default-closed via
 # [a2a.server] enabled = false. Pure-serde cards on the existing axum stack,
@@ -113,3 +118,7 @@ gateway-voice-duplex = []
 # and saves a bit of build time. Mirrors zeroclaw-config's `schema-export`.
 schema-export = ["zeroclaw-config/schema-export", "zeroclaw-runtime/schema-export", "dep:schemars"]
 embedded-web = ["dep:include_dir"]
+
+[[test]]
+name = "nodes_mdns"
+required-features = ["nodes"]

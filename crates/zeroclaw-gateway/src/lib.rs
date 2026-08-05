@@ -32,7 +32,9 @@ pub mod api_webauthn;
 pub mod api_webhook;
 pub mod auth_rate_limit;
 pub mod canvas;
+#[cfg(feature = "nodes")]
 pub mod node_tool;
+#[cfg(feature = "nodes")]
 pub mod nodes;
 pub mod openapi;
 pub mod security_headers;
@@ -533,9 +535,11 @@ pub struct AppState {
     /// — reload then degrades to a 503 with a clear message.
     pub reload_tx: Option<tokio::sync::watch::Sender<bool>>,
     /// Registry of dynamically connected nodes
+    #[cfg(feature = "nodes")]
     pub node_registry: Arc<nodes::NodeRegistry>,
     /// LAN-local peer hints discovered by multicast. These are informational
     /// only; they never authorize or connect a peer.
+    #[cfg(feature = "nodes")]
     pub mdns_peer_registry: nodes::mdns::MdnsPeerRegistry,
     /// Path prefix for reverse-proxy deployments (empty string = no prefix)
     pub path_prefix: String,
@@ -1431,6 +1435,7 @@ pub async fn run_gateway(
     }
     println!("  GET  {pfx}/api/*     — REST API (bearer token required)");
     println!("  GET  {pfx}/ws/chat   — WebSocket agent chat");
+    #[cfg(feature = "nodes")]
     if config.nodes.enabled {
         println!("  GET  {pfx}/ws/nodes  — WebSocket node discovery");
     }
@@ -1468,10 +1473,14 @@ pub async fn run_gateway(
     let mut shutdown_rx = shutdown_tx.subscribe();
 
     // Node registry for dynamic node discovery
+    #[cfg(feature = "nodes")]
     let node_registry = Arc::new(nodes::NodeRegistry::new(config.nodes.max_nodes));
+    #[cfg(feature = "nodes")]
     let mdns_config_state = Arc::clone(&config_state);
+    #[cfg(feature = "nodes")]
     let mdns_peer_registry =
         nodes::mdns::MdnsPeerRegistry::new(move || mdns_config_state.read().nodes.mdns.max_peers);
+    #[cfg(feature = "nodes")]
     let mdns_task = if config.nodes.mdns.enabled
         && nodes::mdns::is_advertisable_gateway_addr(&actual_addr)
     {
@@ -1582,7 +1591,9 @@ pub async fn run_gateway(
         event_buffer,
         shutdown_tx,
         reload_tx,
+        #[cfg(feature = "nodes")]
         node_registry,
+        #[cfg(feature = "nodes")]
         mdns_peer_registry,
         session_backend,
         session_queue: Arc::new(session_queue::SessionActorQueue::new(8, 30, 600)),
@@ -1954,9 +1965,11 @@ pub async fn run_gateway(
         // ── WebSocket SOP runs feed ──
         .route("/ws/sops/runs", get(ws_sop_runs::handle_ws_sop_runs))
         // ── WebSocket canvas updates ──
-        .route("/ws/canvas/{id}", get(canvas::handle_ws_canvas))
-        // ── WebSocket node discovery ──
-        .route("/ws/nodes", get(nodes::handle_ws_nodes))
+        .route("/ws/canvas/{id}", get(canvas::handle_ws_canvas));
+    // ── WebSocket node discovery (nodes feature) ──
+    #[cfg(feature = "nodes")]
+    let inner = inner.route("/ws/nodes", get(nodes::handle_ws_nodes));
+    let inner = inner
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))
         // ── SPA fallback: non-API GET requests serve index.html ──
@@ -2112,6 +2125,7 @@ pub async fn run_gateway(
         .await?;
     }
 
+    #[cfg(feature = "nodes")]
     if let Some(task) = mdns_task {
         let mut task = task;
         tokio::select! {
@@ -4465,7 +4479,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -5095,7 +5111,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -5184,7 +5202,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -5860,7 +5880,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -5967,7 +5989,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -6089,7 +6113,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -6191,7 +6217,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -6312,7 +6340,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -6399,7 +6429,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -6491,7 +6523,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -6590,7 +6624,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -6685,7 +6721,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -6832,7 +6870,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -7657,7 +7697,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -7745,7 +7787,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
@@ -7907,7 +7951,9 @@ mod tests {
             event_buffer: Arc::new(sse::EventBuffer::new(16)),
             shutdown_tx: tokio::sync::watch::channel(false).0,
             reload_tx: None,
+            #[cfg(feature = "nodes")]
             node_registry: Arc::new(nodes::NodeRegistry::new(16)),
+            #[cfg(feature = "nodes")]
             mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
             path_prefix: String::new(),
             web_dist_dir: None,
