@@ -627,7 +627,10 @@ pub struct Config {
     #[serde(default)]
     pub locale: Option<String>,
 
-    /// Verifiable Intent (VI) credential verification and issuance (`[verifiable_intent]`).
+    /// Verifiable Intent (VI) credential issuance and constraint checking
+    /// (`[verifiable_intent]`). No credential chain verifier exists yet, so the
+    /// `vi_verify` tool is not registered for the model and this section does not
+    /// currently enable verification of anything.
     #[serde(default)]
     #[nested]
     #[group = "Agent"]
@@ -5211,18 +5214,30 @@ impl Default for McpConfig {
     }
 }
 
-/// Verifiable Intent (VI) credential verification and issuance (`[verifiable_intent]` section).
+/// Verifiable Intent (VI) credential issuance and constraint checking
+/// (`[verifiable_intent]` section).
+///
+/// ZeroClaw implements issuance, crypto, types and constraint checking, but not
+/// a credential chain verifier. Until one exists the `vi_verify` tool is
+/// withheld from the model-visible registry, so neither key below enables
+/// verification of a credential. The library paths are unaffected.
 #[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "verifiable_intent"]
 pub struct VerifiableIntentConfig {
-    /// Enable VI credential verification on commerce tool calls (default: false).
+    /// Opt in to the VI section (default: false).
+    ///
+    /// While the tool is withheld this does not enable credential verification
+    /// on commerce tool calls. It currently causes a warning naming that gap,
+    /// emitted once per config application: at process startup, and again when
+    /// a daemon reload re-reads config from disk.
     #[serde(default)]
     pub enabled: bool,
 
-    /// Strictness mode for constraint evaluation: "strict" (fail-closed on unknown
-    /// constraint types) or "permissive" (skip unknown types with a warning).
-    /// Default: "strict".
+    /// Intended strictness mode for constraint evaluation.
+    ///
+    /// Accepts `"strict"` or `"permissive"`, and defaults to `"strict"`. No
+    /// production code reads it while the tool is withheld.
     #[serde(default = "default_vi_strictness")]
     pub strictness: String,
 }
