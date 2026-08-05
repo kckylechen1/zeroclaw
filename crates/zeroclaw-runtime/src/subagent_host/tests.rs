@@ -36,6 +36,7 @@ use super::{NativeChildRunner, TurnEnding, child_context, race_cancellation};
 /// `SecurityPolicy::for_agent` creates the agent workspace eagerly
 /// (`zeroclaw-config/src/policy.rs:2225`) and the memory backend writes under
 /// `data_dir`.
+#[allow(clippy::field_reassign_with_default)] // Config has ~100 fields; partial override via Default is cleaner
 fn base_config(root: &Path) -> Config {
     let mut config = Config::default();
     config.data_dir = root.join("data");
