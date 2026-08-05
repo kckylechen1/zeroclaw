@@ -695,7 +695,9 @@ async fn process_due_jobs(
     }))
     .buffer_unordered(max_concurrent);
 
-    while let Some((job_id, success, output)) = in_flight.next().await {
+    while let Some((job_id, success, output, execution_success, delivery_status)) =
+        in_flight.next().await
+    {
         if !success {
             ::zeroclaw_log::record!(
                 WARN,
@@ -711,6 +713,8 @@ async fn process_due_jobs(
                 "type": "cron_result",
                 "job_id": job_id,
                 "success": success,
+                "execution_success": execution_success,
+                "delivery_status": delivery_status,
                 "output": output,
                 "timestamp": chrono::Utc::now().to_rfc3339(),
             }));
@@ -724,7 +728,7 @@ async fn execute_and_persist_job(
     agent_alias: &str,
     job: &CronJob,
     component: &str,
-) -> (String, bool, String) {
+) -> (String, bool, String, bool, &'static str) {
     crate::health::mark_component_ok(component);
     warn_if_high_frequency_agent_job(job);
 
@@ -734,7 +738,7 @@ async fn execute_and_persist_job(
         .instrument(span)
         .await;
     let finished_at = Utc::now();
-    let success = Box::pin(persist_job_result(
+    let run_outcome = Box::pin(persist_job_result(
         config,
         job,
         success,
@@ -758,7 +762,13 @@ async fn execute_and_persist_job(
         );
     }
 
-    (job.id.clone(), success, output)
+    (
+        job.id.clone(),
+        run_outcome.projected_success,
+        run_outcome.output,
+        run_outcome.execution_success,
+        run_outcome.delivery_status,
+    )
 }
 
 async fn run_agent_job(
@@ -895,6 +905,19 @@ async fn run_agent_job(
     }
 }
 
+/// Return value of [`persist_job_result`] — carries both the compatibility
+/// projection and the component truth so the scheduled-path SSE broadcast
+/// can include execution/delivery status (#64).
+struct PersistedRunOutcome {
+    /// Compatibility projection (surfaces delivery failure to callers when strict).
+    projected_success: bool,
+    output: String,
+    /// Component truth: did execution succeed?
+    execution_success: bool,
+    /// Component truth: delivery outcome.
+    delivery_status: &'static str,
+}
+
 async fn persist_job_result(
     config: &Config,
     job: &CronJob,
@@ -902,7 +925,7 @@ async fn persist_job_result(
     output: &str,
     started_at: DateTime<Utc>,
     finished_at: DateTime<Utc>,
-) -> bool {
+) -> PersistedRunOutcome {
     let duration_ms = (finished_at - started_at).num_milliseconds();
     let outcome = deliver_and_classify_run_result(
         config,
@@ -991,7 +1014,12 @@ async fn persist_job_result(
         }
     }
 
-    outcome.success
+    PersistedRunOutcome {
+        projected_success: outcome.success,
+        output: outcome.output,
+        execution_success: outcome.execution_success,
+        delivery_status: outcome.delivery_status,
+    }
 }
 
 fn is_one_shot_auto_delete(job: &CronJob) -> bool {
@@ -1913,7 +1941,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         let runs = cron::list_runs(&config, &job.id, 10).unwrap();
@@ -1931,7 +1961,9 @@ mod tests {
         let finished = started + ChronoDuration::milliseconds(10);
 
         crate::cron::store::reset_write_connection_count_for_tests(&config);
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
 
         assert!(success);
         assert_eq!(
@@ -1953,7 +1985,9 @@ mod tests {
             let finished = started + ChronoDuration::milliseconds(10);
             let output = format!("run-{idx}");
 
-            let success = persist_job_result(&config, &job, true, &output, started, finished).await;
+            let success = persist_job_result(&config, &job, true, &output, started, finished)
+                .await
+                .projected_success;
             assert!(success);
         }
 
@@ -1989,7 +2023,9 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
 
         assert!(success);
         assert!(cron::list_runs(&config, &job.id, 10).unwrap().is_empty());
@@ -2023,7 +2059,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
         let lookup = cron::get_job(&config, &job.id);
         assert!(lookup.is_err());
@@ -2051,7 +2089,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, false, "boom", started, finished).await;
+        let success = persist_job_result(&config, &job, false, "boom", started, finished)
+            .await
+            .projected_success;
         assert!(!success);
         let updated = cron::get_job(&config, &job.id).unwrap();
         assert!(!updated.enabled);
@@ -2081,7 +2121,9 @@ mod tests {
         let finished = started + ChronoDuration::milliseconds(10);
 
         crate::cron::store::reset_write_connection_count_for_tests(&config);
-        let success = persist_job_result(&config, &job, false, "boom", started, finished).await;
+        let success = persist_job_result(&config, &job, false, "boom", started, finished)
+            .await
+            .projected_success;
 
         assert!(!success);
         assert_eq!(
@@ -2127,7 +2169,9 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         let runs = cron::list_runs(&config, &job.id, 10).unwrap();
@@ -2163,7 +2207,9 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         let updated = cron::get_job(&config, &job.id).unwrap();
@@ -2183,7 +2229,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
         let lookup = cron::get_job(&config, &job.id);
         assert!(lookup.is_err());
@@ -2199,7 +2247,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, false, "boom", started, finished).await;
+        let success = persist_job_result(&config, &job, false, "boom", started, finished)
+            .await
+            .projected_success;
         assert!(!success);
         let updated = cron::get_job(&config, &job.id).unwrap();
         assert!(!updated.enabled);
@@ -2238,7 +2288,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         let updated = cron::get_job(&config, &job.id).unwrap();
@@ -2266,7 +2318,9 @@ mod tests {
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
 
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         let updated = cron::get_job(&config, &job.id).unwrap();
@@ -2336,7 +2390,9 @@ mod tests {
 
         let started = Utc::now();
         let finished = started + ChronoDuration::milliseconds(10);
-        let success = persist_job_result(&config, &job, true, "ok", started, finished).await;
+        let success = persist_job_result(&config, &job, true, "ok", started, finished)
+            .await
+            .projected_success;
         assert!(success);
 
         // After reschedule_after_run, At schedule jobs should be disabled
