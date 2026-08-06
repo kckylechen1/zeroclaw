@@ -32,7 +32,7 @@ use zeroclaw_config::schema::SopConfig;
 
 mod admission;
 
-/// Central SOP orchestrator: loads SOPs, matches triggers, manages run lifecycle. loads SOPs, matches triggers, manages run lifecycle.
+/// Central SOP orchestrator: loads SOPs, matches triggers, manages run lifecycle.
 pub struct SopEngine {
     sops: Vec<Sop>,
     active_runs: HashMap<String, SopRun>,
