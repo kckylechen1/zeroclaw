@@ -70,13 +70,12 @@ pub use super::channel_factories::{
 pub(crate) use super::channel_factories::{live_channel_registry, seed_channel_handles};
 
 // Prompt / export helpers moved to `super::prompt_helpers`.
-#[cfg(test)]
-pub(crate) use super::prompt_helpers::tools_to_openai_format;
-pub(crate) use super::prompt_helpers::{
-    autosave_memory_key, build_hardware_context, build_system_prompt_for_turn,
-    capture_llm_messages, scrub_for_export,
-};
 pub use super::prompt_helpers::{make_query_summary, native_tool_specs_present_for_turn};
+pub(crate) use super::prompt_helpers::{
+    autosave_memory_key, build_hardware_context, build_system_prompt_for_turn, capture_llm_messages,
+};
+#[cfg(test)]
+pub(crate) use super::prompt_helpers::{scrub_for_export, tools_to_openai_format};
 
 pub use super::text_tool_prompt::{
     apply_text_tool_prompt_policy, build_tool_instructions, build_tool_instructions_for_names,
