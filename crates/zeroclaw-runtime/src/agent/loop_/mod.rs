@@ -27,7 +27,6 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::{LazyLock, Mutex};
 use tokio_util::sync::CancellationToken;
-use zeroclaw_api::channel::Channel;
 use zeroclaw_api::ingress::{IngressContext, TurnOrigin};
 use zeroclaw_config::schema::Config;
 use zeroclaw_memory::{self, Memory, MemoryCategory};
@@ -36,6 +35,7 @@ use zeroclaw_providers::ChatRequest;
 use zeroclaw_providers::{self, ChatMessage, ModelProvider};
 
 mod agent_turn;
+mod run_overrides;
 
 // Cost tracking moved to `super::cost`.
 pub use super::cost::{
@@ -309,7 +309,15 @@ pub use super::tool_execution::{ToolExecutionOutcome, should_execute_tools_in_pa
 #[cfg(test)]
 pub(crate) use self::agent_turn::AGENT_TURN_SOP_REASSEMBLY_TEST_HOOK;
 pub use self::agent_turn::agent_turn;
+
+// Run overrides / resolve helpers moved to `run_overrides`.
 pub(crate) use self::agent_turn::agent_turn_with_sop_reassembly;
+pub use self::run_overrides::AgentRunOverrides;
+#[cfg(test)]
+pub(crate) use self::run_overrides::RESOLVED_AGENT_FOR_TURN_TEST_HOOK;
+pub(crate) use self::run_overrides::{
+    agent_provider_composite, api_key_and_uri_for_provider, resolved_agent_for_turn,
+};
 
 // ── Agent Tool-Call Loop ──────────────────────────────────────────────────
 // The turn engine lives in `super::turn` — `run_tool_call_loop` plus one
@@ -329,80 +337,6 @@ pub use super::turn::{
     drain_steering_messages, is_model_switch_requested, is_tool_loop_cancelled, run_tool_call_loop,
     scrub_credentials,
 };
-
-#[derive(Default)]
-pub struct AgentRunOverrides {
-    pub security: Option<Arc<SecurityPolicy>>,
-    pub memory: Option<Arc<dyn Memory>>,
-    pub is_subagent: bool,
-    /// Spawn-site opt-out of the engine's memory-context injection (e.g. a
-    /// cron job configured with `uses_memory = false`). Default `false`.
-    pub suppress_memory_inject: bool,
-    pub memory_free: bool,
-    /// Pre-built MCP registry supplied by the caller. The daemon heartbeat
-    /// worker constructs this once at worker start and shares it across
-    /// every tick so that stdio MCP children live for the daemon's
-    /// lifetime rather than being orphaned and re-spawned per
-    /// `agent::run` call. When `Some`, the loop MUST use this
-    /// `Arc<McpRegistry>` and MUST NOT call `McpRegistry::connect_all`
-    /// itself. `None` preserves the legacy per-call connect path
-    /// (CLI / one-shot), which is correct for callers that have no
-    /// cross-turn reuse contract.
-    pub mcp_registry: Option<Arc<crate::tools::McpRegistry>>,
-}
-
-fn agent_provider_composite(
-    config: &zeroclaw_config::schema::Config,
-    agent_alias: &str,
-) -> Option<String> {
-    config
-        .resolved_model_provider_for_agent(agent_alias)
-        .map(|(ty, alias, _)| format!("{ty}.{alias}"))
-}
-
-/// Return the owned agent config direct-turn setup needs, with runtime-profile
-/// values baked into `resolved`.
-fn resolved_agent_for_turn(
-    config: &zeroclaw_config::schema::Config,
-    agent_alias: &str,
-) -> Result<zeroclaw_config::schema::AliasedAgentConfig> {
-    let agent = config
-        .resolved_agent_config(agent_alias)
-        .with_context(|| format!("agents.{agent_alias} is not configured"))?;
-    #[cfg(test)]
-    if let Some(hook) = RESOLVED_AGENT_FOR_TURN_TEST_HOOK
-        .lock()
-        .expect("resolved-agent test hook lock should not be poisoned")
-        .as_ref()
-        .cloned()
-    {
-        hook(agent_alias, agent.resolved.max_tool_iterations);
-    }
-    Ok(agent)
-}
-
-#[cfg(test)]
-type ResolvedAgentForTurnTestHook = Arc<dyn Fn(&str, usize) + Send + Sync>;
-
-#[cfg(test)]
-static RESOLVED_AGENT_FOR_TURN_TEST_HOOK: LazyLock<Mutex<Option<ResolvedAgentForTurnTestHook>>> =
-    LazyLock::new(|| Mutex::new(None));
-
-fn api_key_and_uri_for_provider(
-    config: &zeroclaw_config::schema::Config,
-    provider_name: &str,
-    fallback: Option<&zeroclaw_config::schema::ModelProviderConfig>,
-) -> (Option<String>, Option<String>) {
-    if let Some((fam, al)) = provider_name.split_once('.')
-        && let Some(entry) = config.providers.models.find(fam, al)
-    {
-        return (entry.api_key.clone(), entry.uri.clone());
-    }
-    (
-        fallback.and_then(|e| e.api_key.clone()),
-        fallback.and_then(|e| e.uri.clone()),
-    )
-}
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run(
