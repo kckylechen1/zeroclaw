@@ -4,7 +4,7 @@
 //! registry hand-lists a source. Add a variant and the compiler forces its arm
 //! here (matching) and the derive supplies its fields.
 
-use super::engine::{
+use super::triggers::{
     amqp_routing_key_matches, calendar_trigger_matches, channel_trigger_topic_matches,
     filesystem_event_listed, filesystem_path_matches, mqtt_topic_matches,
 };
