@@ -21,6 +21,7 @@ mod acp;
 mod app;
 mod attachment;
 mod chat;
+mod chat_render_overlay;
 mod client;
 mod clipboard;
 mod color_depth;
