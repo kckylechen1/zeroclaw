@@ -5,8 +5,8 @@
 use anyhow::Result;
 use std::fmt::Write as _;
 
-use crate::config::Config;
 use crate::SopCommands;
+use crate::config::Config;
 
 #[allow(unused_variables)]
 fn t(key: &str, fallback: &str) -> String {
@@ -33,7 +33,11 @@ fn ta(key: &str, args: &[(&str, &str)], fallback: &str) -> String {
 }
 
 /// Resolve gateway host and port from CLI args or config.
-pub fn resolve_gateway_addr(config: &Config, port: Option<u16>, host: Option<String>) -> (u16, String) {
+pub fn resolve_gateway_addr(
+    config: &Config,
+    port: Option<u16>,
+    host: Option<String>,
+) -> (u16, String) {
     let port = port.unwrap_or(config.gateway.port);
     let host = host.unwrap_or_else(|| config.gateway.host.clone());
     (port, host)
@@ -373,7 +377,12 @@ pub async fn fetch_paircode(
 }
 
 #[cfg(feature = "agent-runtime")]
-pub fn gateway_admin_url(host: &str, port: u16, path_prefix: Option<&str>, admin_path: &str) -> String {
+pub fn gateway_admin_url(
+    host: &str,
+    port: u16,
+    path_prefix: Option<&str>,
+    admin_path: &str,
+) -> String {
     let prefix = path_prefix.unwrap_or("");
     format!("http://{host}:{port}{prefix}{admin_path}")
 }
@@ -502,4 +511,3 @@ fn indent_paircode_lines(lines: Vec<String>) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-

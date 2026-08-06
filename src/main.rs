@@ -394,12 +394,12 @@ mod verifiable_intent;
 
 use config::Config;
 
-use gateway_helpers::{
-    log_gateway_start, resolve_gateway_addr, shutdown_gateway, sop_admin_dispatch,
-};
 #[cfg(feature = "agent-runtime")]
 use gateway_helpers::{
-    fetch_paircode, gateway_admin_url, paircode_no_code_message, PaircodeAction, PaircodeResult,
+    PaircodeAction, PaircodeResult, fetch_paircode, gateway_admin_url, paircode_no_code_message,
+};
+use gateway_helpers::{
+    log_gateway_start, resolve_gateway_addr, shutdown_gateway, sop_admin_dispatch,
 };
 
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
