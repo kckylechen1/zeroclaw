@@ -1,6 +1,6 @@
 use crate::agent::dispatcher::ToolDispatcher;
 #[cfg(test)]
-use crate::agent::dispatcher::{NativeToolDispatcher, XmlToolDispatcher};
+use crate::agent::dispatcher::NativeToolDispatcher;
 use crate::agent::eval::AutoClassifyExt;
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
 use crate::approval::ApprovalManager;
