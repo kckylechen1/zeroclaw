@@ -273,8 +273,6 @@ impl SopEngine {
         }
     }
 
-    /// Start a new SOP run. Returns the first action to take.
-    /// Deterministic SOPs are automatically routed to `start_deterministic_run`.
     /// Enforce the SOP's admission policy at a start entrypoint. `Admit` proceeds;
     /// any other outcome declines the start with a descriptive error so a trigger is
     /// never run past its policy. dispatch pre-consults `evaluate_admission` and only
