@@ -21,6 +21,7 @@ pub mod prompt;
 mod routed_approval;
 mod session_model_provider;
 pub mod system_prompt;
+pub mod text_tool_prompt;
 pub mod thinking;
 pub mod tool_execution;
 pub mod tool_filter;
