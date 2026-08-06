@@ -70,12 +70,12 @@ pub use super::channel_factories::{
 pub(crate) use super::channel_factories::{live_channel_registry, seed_channel_handles};
 
 // Prompt / export helpers moved to `super::prompt_helpers`.
-pub use super::prompt_helpers::{make_query_summary, native_tool_specs_present_for_turn};
+#[cfg(test)]
+pub(crate) use super::prompt_helpers::tools_to_openai_format;
 pub(crate) use super::prompt_helpers::{
     autosave_memory_key, build_hardware_context, build_system_prompt_for_turn, capture_llm_messages,
 };
-#[cfg(test)]
-pub(crate) use super::prompt_helpers::{scrub_for_export, tools_to_openai_format};
+pub use super::prompt_helpers::{make_query_summary, native_tool_specs_present_for_turn};
 
 pub use super::text_tool_prompt::{
     apply_text_tool_prompt_policy, build_tool_instructions, build_tool_instructions_for_names,
@@ -14773,7 +14773,7 @@ Let me check the result."#;
         // System split out and routed through the composed scrubber.
         assert_eq!(
             snap.system_instructions.as_deref(),
-            Some(super::scrub_for_export(sys_raw).as_str())
+            Some(crate::agent::prompt_helpers::scrub_for_export(sys_raw).as_str())
         );
         assert_ne!(snap.system_instructions.as_deref(), Some(sys_raw)); // proves scrubbing ran
 
@@ -14781,7 +14781,10 @@ Let me check the result."#;
         assert_eq!(snap.input.len(), 2);
         assert!(snap.input.iter().all(|m| m.role != "system"));
         assert_eq!(snap.input[0].role, "user");
-        assert_eq!(snap.input[0].content, super::scrub_for_export(user_raw));
+        assert_eq!(
+            snap.input[0].content,
+            crate::agent::prompt_helpers::scrub_for_export(user_raw)
+        );
         assert_ne!(snap.input[0].content, user_raw); // proves the bare-prefix scrubber fired
 
         // output text + scrubbed tool-call arguments.
@@ -14790,7 +14793,9 @@ Let me check the result."#;
         assert_eq!(snap.output_tool_calls[0].name, "shell");
         assert_eq!(
             snap.output_tool_calls[0].arguments_json,
-            super::scrub_for_export(r#"{"cmd":"echo api_key=ANOTHERSECRET99"}"#)
+            crate::agent::prompt_helpers::scrub_for_export(
+                r#"{"cmd":"echo api_key=ANOTHERSECRET99"}"#
+            )
         );
         assert!(
             !snap.output_tool_calls[0]
