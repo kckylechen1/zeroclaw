@@ -16,11 +16,7 @@ fn format_tokens(n: u64) -> String {
 use crate::agent::TurnMeta;
 use crate::observability::{self, Observer, ObserverEvent};
 use crate::platform;
-<<<<<<< HEAD
-use crate::security::{AutonomyLevel, SecurityPolicy};
-=======
 use crate::security::SecurityPolicy;
->>>>>>> 80ba0be2b (refactor(agent): extract process_message from loop_)
 use crate::tools;
 #[cfg(test)]
 use crate::tools::Tool;
