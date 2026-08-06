@@ -15,14 +15,18 @@ use super::store::{
     ClaimToken, InMemoryRunStore, PersistedRun, ProposalRecord, ProposalStatus, RetentionPolicy,
     SopEventRecord, SopRunStore, StoreError,
 };
+use super::time::cooldown_elapsed;
 use super::types::{
-    DeterministicRunState, DeterministicSavings, FilesystemEventKind, Sop, SopAdmission,
-    SopAdmissionPolicy, SopEvent, SopExecutionMode, SopPriority, SopRun, SopRunAction,
-    SopRunStatus, SopRunSummary, SopStep, SopStepKind, SopStepResult, SopStepStatus, SopTrigger,
-    SopTriggerSource,
+    DeterministicRunState, DeterministicSavings, Sop, SopAdmission, SopAdmissionPolicy, SopEvent,
+    SopExecutionMode, SopPriority, SopRun, SopRunAction, SopRunStatus, SopRunSummary, SopStep,
+    SopStepKind, SopStepResult, SopStepStatus, SopTrigger, SopTriggerSource,
 };
-use crate::calendar::{CALENDAR_NO_SHOW_TOPIC, CalendarNoShowEvent};
 use crate::security::{ContentSafety, new_marker_id};
+
+// Stable path for callers that historically imported timestamps from
+// `sop::engine::now_iso8601`. Prefer `sop::time` / `sop::now_iso8601` for new
+// code. Trigger matchers live in `sop::triggers` (used by `trigger_source`).
+pub use super::time::now_iso8601;
 use serde_json::Value;
 use zeroclaw_config::schema::SopConfig;
 
@@ -5308,141 +5312,10 @@ fn trigger_matches(trigger: &SopTrigger, event: &SopEvent) -> bool {
     trigger.source() == event.source && trigger.behavior().matches(event)
 }
 
-/// Match a channel trigger against an event topic. Two producer forms are
-/// accepted through the shared [`ChannelSopTopic`] grammar: the plain
-/// `channel` / `channel/alias` form used by agent-loop message triggers, and
-/// the forge form `channel.alias:event_type`. Channel type compares
-/// case-insensitively; an aliased trigger requires an exact alias, an
-/// alias-less trigger matches any instance. No topic fails closed. The
-/// `event_type` (forge form) is left for an authored `condition` to match.
-pub(crate) fn channel_trigger_topic_matches(
-    channel: &str,
-    alias: Option<&str>,
-    topic: Option<&str>,
-) -> bool {
-    let Some(topic) = topic else {
-        return false;
-    };
-    let (topic_channel, topic_alias, _event_type) =
-        zeroclaw_api::channel::ChannelSopTopic::parse(topic);
-    if !topic_channel.eq_ignore_ascii_case(channel) {
-        return false;
-    }
-    match alias {
-        Some(a) => topic_alias.is_some_and(|ta| ta == a),
-        None => true,
-    }
-}
-
-pub(crate) fn calendar_trigger_matches(
-    calendar_source: &str,
-    calendar_ids: &[String],
-    event: &SopEvent,
-) -> bool {
-    if event.topic.as_deref() != Some(CALENDAR_NO_SHOW_TOPIC) {
-        return false;
-    }
-
-    let Some(payload) = event.payload.as_deref() else {
-        return false;
-    };
-    let Ok(payload) = serde_json::from_str::<CalendarNoShowEvent>(payload) else {
-        return false;
-    };
-
-    if payload.calendar_source != calendar_source {
-        return false;
-    }
-
-    if calendar_ids.is_empty() {
-        return true;
-    }
-
-    calendar_ids.iter().any(|id| id == &payload.calendar_id)
-}
-
-/// Simple MQTT topic matching with `+` (single-level) and `#` (multi-level) wildcards.
-pub(crate) fn mqtt_topic_matches(pattern: &str, topic: &str) -> bool {
-    let pat_parts: Vec<&str> = pattern.split('/').collect();
-    let top_parts: Vec<&str> = topic.split('/').collect();
-
-    let mut pi = 0;
-    let mut ti = 0;
-
-    while pi < pat_parts.len() && ti < top_parts.len() {
-        match pat_parts[pi] {
-            "#" => return true, // multi-level wildcard matches everything remaining
-            "+" => {
-                // single-level wildcard matches one segment
-                pi += 1;
-                ti += 1;
-            }
-            seg => {
-                if seg != top_parts[ti] {
-                    return false;
-                }
-                pi += 1;
-                ti += 1;
-            }
-        }
-    }
-
-    // Both must be fully consumed (unless pattern ended with #)
-    pi == pat_parts.len() && ti == top_parts.len()
-}
-
-/// AMQP topic-exchange routing-key matching. Keys are `.`-delimited words;
-/// `*` matches exactly one word and `#` matches zero or more words. A `#` that
-/// can absorb zero segments is what distinguishes this from MQTT matching.
-pub(crate) fn amqp_routing_key_matches(pattern: &str, key: &str) -> bool {
-    let pat: Vec<&str> = pattern.split('.').collect();
-    let words: Vec<&str> = key.split('.').collect();
-    amqp_match_from(&pat, &words)
-}
-
-fn amqp_match_from(pat: &[&str], words: &[&str]) -> bool {
-    match pat.first() {
-        None => words.is_empty(),
-        Some(&"#") => (0..=words.len()).any(|skip| amqp_match_from(&pat[1..], &words[skip..])),
-        Some(&"*") => !words.is_empty() && amqp_match_from(&pat[1..], &words[1..]),
-        Some(seg) => {
-            !words.is_empty() && *seg == words[0] && amqp_match_from(&pat[1..], &words[1..])
-        }
-    }
-}
-
-/// Glob match a filesystem trigger `pattern` against a normalized `path`,
-/// supporting `*` (single segment) and `**` (recursive) wildcards via the
-/// `glob` crate. A bare directory pattern also matches paths nested beneath it.
-pub(crate) fn filesystem_path_matches(pattern: &str, path: &str) -> bool {
-    if let Ok(compiled) = glob::Pattern::new(pattern)
-        && compiled.matches(path)
-    {
-        return true;
-    }
-    let prefix = pattern.trim_end_matches('/');
-    path == prefix || path.starts_with(&format!("{prefix}/"))
-}
-
-/// Whether the payload's `event` field names one of the trigger's listed kinds.
-pub(crate) fn filesystem_event_listed(
-    events: &[FilesystemEventKind],
-    payload: Option<&str>,
-) -> bool {
-    let Some(payload) = payload else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
-        return false;
-    };
-    let Some(kind) = value.get("event").and_then(|e| e.as_str()) else {
-        return false;
-    };
-    events.iter().any(|e| e.to_string() == kind)
-}
+// Trigger topic/path matchers live in `super::triggers` and are re-exported
+// above for stable `sop::engine::*` import paths.
 
 // ── Execution mode resolution ───────────────────────────────────
-
 fn execution_mode_needs_approval(mode: SopExecutionMode, sop: &Sop, step: &SopStep) -> bool {
     match mode {
         // Deterministic mode is handled via start_deterministic_run;
@@ -5658,40 +5531,7 @@ fn jsonish_value(raw: &str) -> Value {
 }
 
 // ── Utilities ───────────────────────────────────────────────────
-
-pub fn now_iso8601() -> String {
-    // Use chrono if available, otherwise fallback to SystemTime
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    // Simple UTC timestamp without chrono dependency
-    let secs = now.as_secs();
-    let days = secs / 86400;
-    let time_secs = secs % 86400;
-    let hours = time_secs / 3600;
-    let minutes = (time_secs % 3600) / 60;
-    let seconds = time_secs % 60;
-
-    // Days since epoch to Y-M-D (simplified — good enough for run IDs)
-    let (year, month, day) = days_to_ymd(days);
-    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
-}
-
-/// Convert days since Unix epoch to (year, month, day).
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    // Algorithm from https://howardhinnant.github.io/date_algorithms.html
-    days += 719_468;
-    let era = days / 146_097;
-    let doe = days - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
-}
+// Timestamp helpers live in `super::time` (`now_iso8601` re-exported above).
 
 /// A1: whether a run in `active_runs` currently occupies an execution slot (holds
 /// a store CAS claim). A run parked at a HITL approval / deterministic checkpoint
@@ -5705,53 +5545,12 @@ fn holds_exec_claim(status: SopRunStatus) -> bool {
     )
 }
 
-/// Check if enough time has elapsed since a timestamp string.
-fn cooldown_elapsed(completed_at: &str, cooldown_secs: u64) -> bool {
-    // Parse the ISO-8601 timestamp we generate
-    let completed = parse_iso8601_secs(completed_at);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    match completed {
-        Some(ts) => now.saturating_sub(ts) >= cooldown_secs,
-        None => true, // Can't parse timestamp; allow start
-    }
-}
-
-/// Minimal ISO-8601 parser returning seconds since epoch.
-fn parse_iso8601_secs(input: &str) -> Option<u64> {
-    // Expected format: YYYY-MM-DDTHH:MM:SSZ
-    let input = input.trim_end_matches('Z');
-    let parts: Vec<&str> = input.split('T').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let date_parts: Vec<u64> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
-    let time_parts: Vec<u64> = parts[1].split(':').filter_map(|p| p.parse().ok()).collect();
-    if date_parts.len() != 3 || time_parts.len() != 3 {
-        return None;
-    }
-    let (year, month, day) = (date_parts[0], date_parts[1], date_parts[2]);
-    let (hour, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
-
-    // Reverse of days_to_ymd: compute days since epoch
-    let year_adj = if month <= 2 { year - 1 } else { year };
-    let month_adj = if month > 2 { month - 3 } else { month + 9 };
-    let era = year_adj / 400;
-    let yoe = year_adj - era * 400;
-    let doy = (153 * month_adj + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-
-    Some(days * 86400 + hour * 3600 + min * 60 + sec)
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::store::ProposalKind;
+    use super::super::time::parse_iso8601_secs;
     use super::*;
+    use crate::calendar::CALENDAR_NO_SHOW_TOPIC;
     use crate::sop::approval::{ApprovalDecision, ApprovalPrincipal, ResolveOutcome};
     use crate::sop::step_contract::StepFailure;
     use crate::sop::types::{SopExecutionMode, StepSchema};
@@ -6021,20 +5820,6 @@ mod tests {
     }
 
     #[test]
-    fn amqp_routing_key_exact_star_hash() {
-        assert!(amqp_routing_key_matches("a.b.c", "a.b.c"));
-        assert!(!amqp_routing_key_matches("a.b.c", "a.b"));
-        assert!(amqp_routing_key_matches("a.*.c", "a.b.c"));
-        assert!(!amqp_routing_key_matches("a.*.c", "a.b.b.c"));
-        assert!(amqp_routing_key_matches("a.#", "a.b.c.d"));
-        assert!(amqp_routing_key_matches("a.#", "a"));
-        assert!(amqp_routing_key_matches("#", ""));
-        assert!(amqp_routing_key_matches("a.#.d", "a.d"));
-        assert!(amqp_routing_key_matches("a.#.d", "a.b.c.d"));
-        assert!(!amqp_routing_key_matches("a.#.d", "a.b.c"));
-    }
-
-    #[test]
     fn match_amqp_trigger_wildcard() {
         let sop = Sop {
             triggers: vec![SopTrigger::Amqp {
@@ -6116,19 +5901,6 @@ mod tests {
                 .len(),
             1
         );
-    }
-
-    #[test]
-    fn mqtt_topic_matching_edge_cases() {
-        assert!(mqtt_topic_matches("a/b/c", "a/b/c"));
-        assert!(!mqtt_topic_matches("a/b/c", "a/b/d"));
-        assert!(!mqtt_topic_matches("a/b/c", "a/b"));
-        assert!(!mqtt_topic_matches("a/b", "a/b/c"));
-        assert!(mqtt_topic_matches("+/+/+", "a/b/c"));
-        assert!(!mqtt_topic_matches("+/+", "a/b/c"));
-        assert!(mqtt_topic_matches("#", "a/b/c"));
-        assert!(mqtt_topic_matches("a/#", "a/b/c"));
-        assert!(!mqtt_topic_matches("b/#", "a/b/c"));
     }
 
     // ── Calendar trigger matching ─────────────────────
