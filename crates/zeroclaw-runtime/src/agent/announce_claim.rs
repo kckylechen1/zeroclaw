@@ -3,7 +3,9 @@
 //! Extracted from `loop_.rs` so the claim/unclaim RAII contract and ambient
 //! session-key helpers are not interleaved with interactive turn assembly.
 
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::{LazyLock, Mutex};
 
 // Re-export from zeroclaw-types for backwards compatibility.
 pub use zeroclaw_api::TOOL_LOOP_SESSION_KEY;
