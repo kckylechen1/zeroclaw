@@ -5312,8 +5312,8 @@ fn trigger_matches(trigger: &SopTrigger, event: &SopEvent) -> bool {
     trigger.source() == event.source && trigger.behavior().matches(event)
 }
 
-// Trigger topic/path matchers live in `super::triggers` and are re-exported
-// above for stable `sop::engine::*` import paths.
+// Trigger topic/path matchers live in `super::triggers` (crate-private);
+// `trigger_source` imports them directly.
 
 // ── Execution mode resolution ───────────────────────────────────
 fn execution_mode_needs_approval(mode: SopExecutionMode, sop: &Sop, step: &SopStep) -> bool {

@@ -19,7 +19,7 @@ pub mod store;
 pub mod time;
 pub mod trigger_registry;
 pub mod trigger_source;
-pub mod triggers;
+pub(crate) mod triggers;
 pub mod types;
 pub mod wire;
 
