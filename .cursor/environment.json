@@ -1,0 +1,8 @@
+{
+  "name": "zeroclaw",
+  "install": "bash .cursor/install.sh",
+  "agentCanUpdateSnapshot": true,
+  "repositoryDependencies": [
+    "github.com/kckylechen1/tachi"
+  ]
+}
