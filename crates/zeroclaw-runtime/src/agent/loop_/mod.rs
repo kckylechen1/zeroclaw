@@ -23,7 +23,9 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::{LazyLock, Mutex};
 use tokio_util::sync::CancellationToken;
 use zeroclaw_api::channel::Channel;
 use zeroclaw_api::ingress::{IngressContext, TurnOrigin};
@@ -53,9 +55,10 @@ pub use super::tool_filter::{
     register_eager_mcp_tool_if_allowed,
 };
 pub(crate) use super::tool_filter::{
-    compute_excluded_mcp_tools, glob_match, mcp_allowed_tool_count,
-    preactivate_always_filter_groups,
+    compute_excluded_mcp_tools, mcp_allowed_tool_count, preactivate_always_filter_groups,
 };
+#[cfg(test)]
+pub(crate) use super::tool_filter::glob_match;
 
 // Text-protocol tool prompt helpers moved to `super::text_tool_prompt`.
 pub(crate) use super::text_tool_prompt::retain_registered_tool_descriptions;
