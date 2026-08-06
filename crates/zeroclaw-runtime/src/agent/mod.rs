@@ -2,6 +2,7 @@
 pub mod agent;
 pub mod announce_claim;
 pub(crate) mod approval_bridge;
+pub mod capped_line;
 pub mod classifier;
 pub mod context_analyzer;
 pub mod cost;
