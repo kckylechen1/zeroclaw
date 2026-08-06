@@ -20,6 +20,7 @@ pub mod personality;
 pub mod personality_templates;
 pub mod pricing_catalog;
 pub mod prompt;
+pub mod prompt_helpers;
 pub mod system_prompt;
 pub mod text_tool_prompt;
 pub mod thinking;
