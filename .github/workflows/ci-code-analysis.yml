@@ -16,7 +16,9 @@ name: Code Analysis
 
 on:
   pull_request:
-    branches: [master]
+    # Same reason as ci.yml: stacked PRs base on a parent branch, not master,
+    # so a [master] filter silently skips Semgrep on them entirely.
+    branches: ['**']
   push:
     branches: [master]
   schedule:
