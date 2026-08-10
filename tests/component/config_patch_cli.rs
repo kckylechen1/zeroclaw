@@ -93,7 +93,9 @@ fn test_state(config: Config) -> AppState {
         event_buffer: Arc::new(gateway::sse::EventBuffer::new(16)),
         shutdown_tx: tokio::sync::watch::channel(false).0,
         reload_tx: None,
+        #[cfg(feature = "nodes")]
         node_registry: Arc::new(gateway::nodes::NodeRegistry::new(16)),
+        #[cfg(feature = "nodes")]
         mdns_peer_registry: gateway::nodes::mdns::MdnsPeerRegistry::default(),
         path_prefix: String::new(),
         web_dist_dir: None,
