@@ -49,6 +49,8 @@ pub use super::history::{
 };
 
 // Tool / MCP filter admission moved to `super::tool_filter`.
+#[cfg(test)]
+pub(crate) use super::tool_filter::glob_match;
 pub use super::tool_filter::{
     append_pinned_mcp_section, apply_policy_tool_filter, eager_mcp_tool_allowed,
     filter_by_allowed_tools, filter_tool_specs_for_turn, mcp_tool_access_policy,
@@ -57,8 +59,6 @@ pub use super::tool_filter::{
 pub(crate) use super::tool_filter::{
     compute_excluded_mcp_tools, mcp_allowed_tool_count, preactivate_always_filter_groups,
 };
-#[cfg(test)]
-pub(crate) use super::tool_filter::glob_match;
 
 // Text-protocol tool prompt helpers moved to `super::text_tool_prompt`.
 pub(crate) use super::text_tool_prompt::retain_registered_tool_descriptions;
