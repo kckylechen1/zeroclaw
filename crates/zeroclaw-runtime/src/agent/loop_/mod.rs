@@ -17,8 +17,10 @@ use crate::agent::TurnMeta;
 use crate::observability::{self, Observer, ObserverEvent};
 use crate::platform;
 use crate::security::{AutonomyLevel, SecurityPolicy};
+use crate::tools;
+#[cfg(test)]
+use crate::tools::Tool;
 use crate::tools::scoped;
-use crate::tools::{self, Tool};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::io::Write as _;
@@ -27,7 +29,6 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::{LazyLock, Mutex};
 use tokio_util::sync::CancellationToken;
-use zeroclaw_api::channel::Channel;
 use zeroclaw_api::ingress::{IngressContext, TurnOrigin};
 use zeroclaw_config::schema::Config;
 use zeroclaw_memory::{self, Memory, MemoryCategory};
