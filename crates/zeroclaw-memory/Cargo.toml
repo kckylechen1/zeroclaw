@@ -36,8 +36,8 @@ tachi = ["dep:memcore"]
 # stale rows; that accessor is `#[cfg(any(feature = "admin", test))]` in
 # memcore, so tests pull the admin surface. Feature unification only applies
 # to test builds; the shipped library stays on the portable (no-admin) shape.
-# Store profile selection is runtime state (#1585), not feature-driven, so
-# this does not change what the tests exercise.
+# Store profile selection is runtime state, not feature-driven, so this does
+# not change what the tests exercise.
 memcore = { version = "1.9.2", git = "https://github.com/kckylechen1/memcore.git", rev = "b75a3693d697c375f15d6e4019e7ffd381a9f29b" }
 filetime = "0.2"
 tempfile = "3.26"

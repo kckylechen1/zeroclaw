@@ -11873,8 +11873,9 @@ pub struct RiskProfileConfig {
     /// `allowed_tools` (cron job `allowed_tools`, narrowed delegate
     /// invocations, etc.). Per-run lists are still strict explicit-list
     /// intersections, so a job that narrows `allowed_tools = ["cron_add"]`
-    /// will not see runtime-discovered MCP tools unless it names them.
-    /// See PR #7547 review for the rationale.
+    /// will not see runtime-discovered MCP tools unless it names them: a
+    /// narrowed list is an explicit statement of intent, and silently
+    /// widening it would defeat the narrowing.
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
     /// Tools excluded from non-CLI channels under this profile.
