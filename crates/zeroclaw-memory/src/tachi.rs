@@ -567,6 +567,8 @@ impl TachiMemory {
                 scope: scope_c,
                 archived: false,
                 access_count,
+                scored_count: 0,
+                last_use_at: None,
                 last_access,
                 revision,
                 vector: embedding_c,
