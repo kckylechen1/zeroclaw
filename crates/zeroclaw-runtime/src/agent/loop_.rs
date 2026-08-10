@@ -161,8 +161,7 @@ pub use super::tool_filter::{
     register_eager_mcp_tool_if_allowed,
 };
 pub(crate) use super::tool_filter::{
-    compute_excluded_mcp_tools, glob_match, mcp_allowed_tool_count,
-    preactivate_always_filter_groups,
+    compute_excluded_mcp_tools, mcp_allowed_tool_count, preactivate_always_filter_groups,
 };
 
 /// Minimum user-message length (in chars) for auto-save to memory.
@@ -3885,6 +3884,7 @@ pub async fn process_message(
 
 #[cfg(test)]
 mod tests {
+    use super::super::tool_filter::glob_match;
     use super::{
         apply_text_tool_prompt_policy, estimate_history_tokens, load_interactive_session_history,
         make_query_summary, maybe_inject_channel_delivery_defaults,
