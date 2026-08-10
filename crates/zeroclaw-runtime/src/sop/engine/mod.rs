@@ -16,13 +16,13 @@ use super::store::{
     SopEventRecord, SopRunStore, StoreError,
 };
 use super::time::cooldown_elapsed;
-use super::types::{
-    DeterministicRunState, DeterministicSavings, Sop, SopEvent, SopExecutionMode, SopPriority,
-    SopRun, SopRunAction, SopRunStatus, SopRunSummary, SopStep, SopStepKind, SopStepResult,
-    SopStepStatus, SopTrigger, SopTriggerSource,
-};
 #[cfg(test)]
-use super::types::{SopAdmission, SopAdmissionPolicy};
+use super::types::{DeterministicRunState, SopAdmission, SopAdmissionPolicy};
+use super::types::{
+    DeterministicSavings, Sop, SopEvent, SopExecutionMode, SopPriority, SopRun, SopRunAction,
+    SopRunStatus, SopRunSummary, SopStep, SopStepKind, SopStepResult, SopStepStatus, SopTrigger,
+    SopTriggerSource,
+};
 use crate::security::{ContentSafety, new_marker_id};
 
 // Stable path for callers that historically imported timestamps from
