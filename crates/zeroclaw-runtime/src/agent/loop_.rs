@@ -13,110 +13,6 @@ fn format_tokens(n: u64) -> String {
     out.chars().rev().collect()
 }
 
-/// CLI channel factory, injected by the binary. Returns a `Box<dyn Channel>` for interactive mode.
-pub static CLI_CHANNEL_FN: std::sync::OnceLock<
-    Box<dyn Fn() -> Box<dyn zeroclaw_api::channel::Channel> + Send + Sync>,
-> = std::sync::OnceLock::new();
-
-/// Register the CLI channel factory. Called once at startup by the binary.
-pub fn register_cli_channel_fn(
-    f: Box<dyn Fn() -> Box<dyn zeroclaw_api::channel::Channel> + Send + Sync>,
-) {
-    let _ = CLI_CHANNEL_FN.set(f);
-}
-
-/// Peripheral tools factory type — takes owned config so the returned future is 'static.
-pub type PeripheralToolsFn = Box<
-    dyn Fn(
-            zeroclaw_config::schema::PeripheralsConfig,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = anyhow::Result<Vec<Box<dyn Tool>>>> + Send>,
-        > + Send
-        + Sync,
->;
-
-/// Peripheral tools factory, injected by the binary when hardware feature is on.
-static PERIPHERAL_TOOLS_FN: std::sync::OnceLock<PeripheralToolsFn> = std::sync::OnceLock::new();
-
-/// Register the peripheral tools factory. Called once at startup by the binary.
-pub fn register_peripheral_tools_fn(f: PeripheralToolsFn) {
-    let _ = PERIPHERAL_TOOLS_FN.set(f);
-}
-
-/// Public helper for other crates (e.g. channels orchestrator) to load
-/// peripheral tools through the registered factory. Returns empty vec
-/// when nothing is registered (hardware feature off or not yet wired).
-pub async fn load_peripheral_tools(
-    config: zeroclaw_config::schema::PeripheralsConfig,
-) -> Vec<Box<dyn Tool>> {
-    if let Some(f) = PERIPHERAL_TOOLS_FN.get() {
-        f(config).await.unwrap_or_default()
-    } else {
-        Vec::new()
-    }
-}
-
-/// Channel map factory type — builds `channel_key → Arc<dyn Channel>` map.
-/// Injected by the binary so `zeroclaw-runtime` doesn't depend on
-/// `zeroclaw-channels`.
-type ChannelMapFn = Box<
-    dyn Fn()
-            -> std::collections::HashMap<String, std::sync::Arc<dyn zeroclaw_api::channel::Channel>>
-        + Send
-        + Sync,
->;
-
-/// Channel map factory, injected by the binary.
-static CHANNEL_MAP_FN: std::sync::OnceLock<ChannelMapFn> = std::sync::OnceLock::new();
-
-/// Register the channel map factory. Called once at startup by the binary.
-pub fn register_channel_map_fn(f: ChannelMapFn) {
-    let _ = CHANNEL_MAP_FN.set(f);
-}
-
-pub(crate) fn seed_channel_handles(
-    ask_user_handle: &Option<tools::PerToolChannelHandle>,
-    channel_room_handle: &Option<tools::PerToolChannelHandle>,
-    reaction_handle: &tools::PerToolChannelHandle,
-    poll_handle: &Option<tools::PerToolChannelHandle>,
-    escalate_handle: &Option<tools::PerToolChannelHandle>,
-) -> usize {
-    let Some(factory) = CHANNEL_MAP_FN.get() else {
-        return 0;
-    };
-    let map = factory();
-    if map.is_empty() {
-        return 0;
-    }
-
-    let handles = [
-        ask_user_handle.as_ref(),
-        channel_room_handle.as_ref(),
-        Some(reaction_handle),
-        poll_handle.as_ref(),
-        escalate_handle.as_ref(),
-    ];
-
-    let mut count = 0;
-    for (name, ch) in &map {
-        for handle in handles.iter().flatten() {
-            handle
-                .write()
-                .insert(name.clone(), std::sync::Arc::clone(ch));
-        }
-        count += 1;
-    }
-    count
-}
-
-pub(crate) fn live_channel_registry() -> Option<tools::PerToolChannelHandle> {
-    let factory = CHANNEL_MAP_FN.get()?;
-    let map = factory();
-    if map.is_empty() {
-        return None;
-    }
-    Some(Arc::new(parking_lot::RwLock::new(map)))
-}
 use crate::agent::TurnMeta;
 use crate::observability::{self, Observer, ObserverEvent};
 use crate::platform;
@@ -169,6 +65,13 @@ pub(crate) use super::text_tool_prompt::retain_registered_tool_descriptions;
 
 // Bounded interactive line IO moved to `super::capped_line`.
 pub(crate) use super::capped_line::{CappedLine, MAX_INTERACTIVE_INPUT_BYTES, read_capped_line};
+
+// Channel / peripheral factories moved to `super::channel_factories`.
+pub use super::channel_factories::{
+    CLI_CHANNEL_FN, PeripheralToolsFn, load_peripheral_tools, register_channel_map_fn,
+    register_cli_channel_fn, register_peripheral_tools_fn,
+};
+pub(crate) use super::channel_factories::{live_channel_registry, seed_channel_handles};
 pub use super::text_tool_prompt::{
     apply_text_tool_prompt_policy, build_tool_instructions, build_tool_instructions_for_names,
 };
