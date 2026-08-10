@@ -515,3 +515,9 @@ path = "tests/test_architecture.rs"
 [[bench]]
 name = "agent_benchmarks"
 harness = false
+
+# memcore's SQLite security floor (>= 3.50.3, CVE-2025-7709) vs matrix-sdk's
+# rusqlite ^0.37 pin: see vendor/libsqlite3-sys/VENDOR.md. Temporary until
+# matrix-sdk or upstream moves to rusqlite 0.38+.
+[patch.crates-io]
+libsqlite3-sys = { path = "vendor/libsqlite3-sys" }

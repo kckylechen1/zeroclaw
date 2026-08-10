@@ -25,13 +25,20 @@ sha2 = "0.10"
 tokio = { version = "1.50", default-features = false, features = ["fs", "io-util", "macros", "process", "sync", "time"] }
 uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4"], optional = true }
-memcore = { git = "https://github.com/kckylechen1/tachi.git", rev = "7ae2c0a0", default-features = false, optional = true }
+memcore = { git = "https://github.com/kckylechen1/memcore.git", rev = "b75a3693d697c375f15d6e4019e7ffd381a9f29b", default-features = false, optional = true }
 
 [features]
 memory-postgres = ["dep:postgres", "zeroclaw-config/memory-postgres"]
 tachi = ["dep:memcore"]
 
 [dev-dependencies]
+# Tests need `MemoryStore::connection()` to backdate created_at when staging
+# stale rows; that accessor is `#[cfg(any(feature = "admin", test))]` in
+# memcore, so tests pull the admin surface. Feature unification only applies
+# to test builds; the shipped library stays on the portable (no-admin) shape.
+# Store profile selection is runtime state (#1585), not feature-driven, so
+# this does not change what the tests exercise.
+memcore = { git = "https://github.com/kckylechen1/memcore.git", rev = "b75a3693d697c375f15d6e4019e7ffd381a9f29b" }
 filetime = "0.2"
 tempfile = "3.26"
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros"] }
