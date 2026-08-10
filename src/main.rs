@@ -397,10 +397,9 @@ use config::Config;
 #[cfg(feature = "agent-runtime")]
 use gateway_helpers::{
     PaircodeAction, PaircodeResult, fetch_paircode, gateway_admin_url, paircode_no_code_message,
+    shutdown_gateway,
 };
-use gateway_helpers::{
-    log_gateway_start, resolve_gateway_addr, shutdown_gateway, sop_admin_dispatch,
-};
+use gateway_helpers::{log_gateway_start, resolve_gateway_addr, sop_admin_dispatch};
 
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
 pub use zeroclaw::{
