@@ -11,6 +11,11 @@ pub(crate) use channel_system_prompt::{
     build_channel_system_prompt_for_message_with_signal, build_channel_turn_context_preamble,
     compose_outgoing_user_turn_with_context,
 };
+
+mod reply_intent;
+#[cfg(test)]
+pub(crate) use reply_intent::NoReplyKind;
+pub(crate) use reply_intent::{AssistantChannelOutcome, parse_reply_intent};
 // Test suites under `orchestrator::tests` pull these through `use super::*`.
 #[cfg(test)]
 pub(crate) use channel_system_prompt::{
@@ -2944,53 +2949,6 @@ fn extract_tool_context_summary(history: &[ChatMessage], start_index: usize) -> 
     format!("[Used tools: {}]", tool_names.join(", "))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NoReplyKind {
-    /// "Got it, no action needed" — informational, social, or
-    /// non-addressed messages. Reaction: 👍.
-    Informational,
-    /// "I will not do this" — safety / policy refusals (prompt injection,
-    /// blocked tool, disallowed request). Reaction: 🚫.
-    Refused,
-    /// "I tried but couldn't fulfil" — external failures, missing
-    /// resources, timeouts where the assistant gave up. Reaction: ⚠️.
-    Failed,
-}
-
-impl NoReplyKind {
-    fn emoji(self) -> &'static str {
-        match self {
-            NoReplyKind::Informational => "👍",
-            NoReplyKind::Refused => "🚫",
-            NoReplyKind::Failed => "⚠️",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AssistantChannelOutcome {
-    Reply(String),
-    NoReply {
-        kind: NoReplyKind,
-        reason: Option<String>,
-    },
-}
-
-impl AssistantChannelOutcome {
-    fn history_marker(&self) -> String {
-        match self {
-            Self::Reply(text) => text.clone(),
-            Self::NoReply {
-                reason: Some(reason),
-                ..
-            } if !reason.trim().is_empty() => {
-                format!("[No reply sent: {}]", reason.trim())
-            }
-            Self::NoReply { .. } => "[No reply sent]".to_string(),
-        }
-    }
-}
-
 async fn classify_channel_reply_intent(
     model_provider: &dyn ModelProvider,
     system_prompt: &str,
@@ -3040,44 +2998,6 @@ async fn classify_channel_reply_intent(
         .chat_with_system(Some(system_prompt), &convo, model, temperature)
         .await?;
     Ok(parse_reply_intent(&response))
-}
-
-/// Parse the classifier's raw output into an `AssistantChannelOutcome`. Pure
-/// helper extracted so the LLM-call wrapper has no parsing logic and the
-/// kinded `NO_REPLY[...]` forms can be unit-tested without a model_provider.
-fn parse_reply_intent(response: &str) -> AssistantChannelOutcome {
-    let trimmed = response.trim();
-    if trimmed.is_empty() {
-        return AssistantChannelOutcome::NoReply {
-            kind: NoReplyKind::Informational,
-            reason: None,
-        };
-    }
-    if trimmed.eq_ignore_ascii_case("REPLY") {
-        return AssistantChannelOutcome::Reply(String::new());
-    }
-
-    for (tag, kind) in &[
-        ("NO_REPLY[INFO]:", NoReplyKind::Informational),
-        ("NO_REPLY[REFUSE]:", NoReplyKind::Refused),
-        ("NO_REPLY[FAIL]:", NoReplyKind::Failed),
-    ] {
-        if let Some(reason) = trimmed.strip_prefix(tag) {
-            return outcome_for_no_reply(reason.trim(), *kind);
-        }
-    }
-
-    if let Some(reason) = trimmed.strip_prefix("NO_REPLY:") {
-        return outcome_for_no_reply(reason.trim(), NoReplyKind::Informational);
-    }
-    if trimmed.eq_ignore_ascii_case("NO_REPLY") {
-        return AssistantChannelOutcome::NoReply {
-            kind: NoReplyKind::Informational,
-            reason: None,
-        };
-    }
-
-    AssistantChannelOutcome::Reply(String::new())
 }
 
 async fn resolve_classifier_route(
@@ -3166,33 +3086,6 @@ async fn resolve_classifier_route(
     );
 
     Some((provider, model, temperature))
-}
-
-fn outcome_for_no_reply(reason: &str, kind: NoReplyKind) -> AssistantChannelOutcome {
-    if matches!(kind, NoReplyKind::Informational) && looks_like_meta_instruction_echo(reason) {
-        return AssistantChannelOutcome::Reply(String::new());
-    }
-    AssistantChannelOutcome::NoReply {
-        kind,
-        reason: (!reason.is_empty()).then(|| reason.to_string()),
-    }
-}
-
-fn looks_like_meta_instruction_echo(reason: &str) -> bool {
-    if reason.is_empty() {
-        return false;
-    }
-    let lower = reason.to_ascii_lowercase();
-    const MARKERS: &[&str] = &[
-        "classification task",
-        "only classify",
-        "must not answer",
-        "not answering the user",
-        "do not answer the user",
-        "do not reply to the user",
-        "classifier instruction",
-    ];
-    MARKERS.iter().any(|m| lower.contains(m))
 }
 
 /// Strip `<think>...</think>` blocks from streaming draft text so reasoning
