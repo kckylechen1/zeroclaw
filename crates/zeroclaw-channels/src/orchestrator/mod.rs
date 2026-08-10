@@ -13,9 +13,9 @@ pub(crate) use channel_system_prompt::{
 };
 
 mod reply_intent;
-pub(crate) use reply_intent::{AssistantChannelOutcome, parse_reply_intent};
 #[cfg(test)]
 pub(crate) use reply_intent::NoReplyKind;
+pub(crate) use reply_intent::{AssistantChannelOutcome, parse_reply_intent};
 // Test suites under `orchestrator::tests` pull these through `use super::*`.
 #[cfg(test)]
 pub(crate) use channel_system_prompt::{
