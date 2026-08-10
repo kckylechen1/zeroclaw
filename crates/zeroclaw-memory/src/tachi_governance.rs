@@ -43,8 +43,19 @@ pub fn run_tachi_governance(store: &mut MemoryStore) -> anyhow::Result<TachiGove
     report.near_dup_archived = near.0;
     report.near_dup_survivors_updated = near.1;
 
+    // memcore >= 1.9.1 gates batch promotion on the recall regime: under the
+    // new provenance-recency default it is a deliberate no-op (promotion moved
+    // to an inline gate on the recall path). This governance pass IS zeroclaw's
+    // batch promotion surface — its contract (one diversely-recalled raw row
+    // gets consolidated per sweep, asserted by the tests below) predates that
+    // regime, so run it under the legacy regime explicitly rather than
+    // silently losing promotion.
+    let legacy_recall = memcore::RecallConfig {
+        use_provenance_recency: false,
+        ..memcore::RecallConfig::default()
+    };
     report.promoted = store
-        .promote_diversely_recalled_raw_memories()
+        .promote_diversely_recalled_raw_memories(&legacy_recall)
         .map_err(|e| anyhow::Error::msg(format!("tachi governance: promote failed: {e}")))?;
 
     report.stale_archived = store
@@ -288,6 +299,8 @@ mod tests {
             scope: "general".into(),
             archived: false,
             access_count: 0,
+            scored_count: 0,
+            last_use_at: None,
             last_access: None,
             revision: 1,
             vector: None,
@@ -460,6 +473,8 @@ mod tests {
                 scope: "general".into(),
                 archived: false,
                 access_count: 0,
+                scored_count: 0,
+                last_use_at: None,
                 last_access: None,
                 revision: 1,
                 vector: None,
