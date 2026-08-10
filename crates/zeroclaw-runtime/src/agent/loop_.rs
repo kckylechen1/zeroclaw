@@ -23,7 +23,9 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::{LazyLock, Mutex};
 use tokio_util::sync::CancellationToken;
 use zeroclaw_api::channel::Channel;
 use zeroclaw_api::ingress::{IngressContext, TurnOrigin};
