@@ -1,0 +1,41 @@
+{
+  "legs": {
+    "runtime": [
+      "zeroclaw-runtime"
+    ],
+    "channels": [
+      "zeroclaw-channels",
+      "zeroclaw-gateway"
+    ],
+    "app": [
+      "zeroclawlabs",
+      "zerocode",
+      "zeroclaw-config",
+      "zeroclaw-tools"
+    ],
+    "tail": [
+      "aardvark-sys",
+      "fill-translations",
+      "xtask",
+      "zeroclaw-api",
+      "zeroclaw-channel-plugin-fixture",
+      "zeroclaw-commands",
+      "zeroclaw-coordinator",
+      "zeroclaw-eval",
+      "zeroclaw-hardware",
+      "zeroclaw-infra",
+      "zeroclaw-log",
+      "zeroclaw-macros",
+      "zeroclaw-memory",
+      "zeroclaw-plugins",
+      "zeroclaw-providers",
+      "zeroclaw-robot-kit",
+      "zeroclaw-sop-graph",
+      "zeroclaw-spawn",
+      "zeroclaw-tool-call-parser"
+    ]
+  },
+  "excluded": [
+    "zeroclaw-desktop"
+  ]
+}
