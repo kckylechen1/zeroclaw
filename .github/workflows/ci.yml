@@ -2,7 +2,12 @@ name: Quality Gate
 
 on:
   pull_request:
-    branches: [master]
+    # A stacked PR's base points at its parent cursor/* branch, not master.
+    # Filtering on [master] meant those PRs never triggered the gate at all —
+    # 24 of 30 open refactor PRs had only the two base-filter-free workflows
+    # (path labeler, PR title) ever report. Match every base so the gate is
+    # what decides, not the branch topology.
+    branches: ['**']
   push:
     branches: [master]
   # Merge queue: GitHub builds a temporary `gh-readonly-queue/master/…` branch
