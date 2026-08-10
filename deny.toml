@@ -193,6 +193,18 @@ name = "webpki-roots"
 version = "=0.26.11"
 
 [[bans.skip]]
+name = "windows-sys"
+version = "=0.59.0"
+
+[[bans.skip]]
+name = "windows-sys"
+version = "=0.60.2"
+
+[[bans.skip]]
+name = "windows_i686_gnullvm"
+version = "=0.52.6"
+
+[[bans.skip]]
 name = "windows_aarch64_gnullvm"
 version = "=0.48.5"
 
