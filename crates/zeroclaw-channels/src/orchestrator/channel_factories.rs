@@ -11,6 +11,9 @@ use zeroclaw_api::channel::Channel;
 use zeroclaw_config::schema::Config;
 use zeroclaw_runtime::tools;
 
+#[cfg(feature = "channel-wecom-ws")]
+use crate::wecom_ws::WeComWsRuntimePolicy;
+
 #[cfg(feature = "channel-amqp")]
 use super::AmqpChannel;
 #[cfg(feature = "channel-bluesky")]
@@ -45,8 +48,6 @@ use super::MattermostChannel;
 use super::MochatChannel;
 #[cfg(feature = "channel-nextcloud")]
 use super::NextcloudTalkChannel;
-#[cfg(feature = "channel-nostr")]
-use super::NostrChannel;
 #[cfg(feature = "channel-notion")]
 use super::NotionChannel;
 #[cfg(feature = "channel-qq")]

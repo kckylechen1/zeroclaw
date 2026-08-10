@@ -46,7 +46,7 @@ pub(crate) use runtime_commands::{
 };
 
 mod channel_factories;
-#[cfg(all(test, feature = "channel-matrix"))]
+#[cfg(feature = "channel-matrix")]
 pub(crate) use channel_factories::matrix_state_dir;
 pub(crate) use channel_factories::{
     ActiveChannelAliases, ConfiguredChannel, collect_configured_channels, composite_channel_key,
