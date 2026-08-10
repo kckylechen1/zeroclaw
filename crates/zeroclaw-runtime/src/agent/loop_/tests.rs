@@ -12669,23 +12669,17 @@ async fn agent_turn_brackets_turn_with_agent_start_and_agent_end() {
     assert_eq!(result, "done");
 
     let events = capturing.events.lock();
-    let starts = events
-        .iter()
-        .filter(|e| matches!(e, ObserverEvent::AgentStart { .. }))
-        .count();
-    let ends = events
-        .iter()
-        .filter(|e| matches!(e, ObserverEvent::AgentEnd { .. }))
-        .count();
-    assert_eq!(starts, 1, "exactly one AgentStart, got {events:?}");
-    assert_eq!(ends, 1, "exactly one AgentEnd, got {events:?}");
+    let scoped = events_for_alias(&events, "test-agent");
+    let (starts, ends) = lifecycle_events_for_alias(&events, "test-agent");
+    assert_eq!(starts, 1, "exactly one AgentStart, got {scoped:?}");
+    assert_eq!(ends, 1, "exactly one AgentEnd, got {scoped:?}");
     assert!(
-        matches!(events.first(), Some(ObserverEvent::AgentStart { .. })),
-        "first event must be AgentStart, got {events:?}"
+        matches!(scoped.first(), Some(ObserverEvent::AgentStart { .. })),
+        "first event must be AgentStart, got {scoped:?}"
     );
     assert!(
-        matches!(events.last(), Some(ObserverEvent::AgentEnd { .. })),
-        "last event must be AgentEnd, got {events:?}"
+        matches!(scoped.last(), Some(ObserverEvent::AgentEnd { .. })),
+        "last event must be AgentEnd, got {scoped:?}"
     );
 
     // The brackets and the inner engine events they wrap must agree on
@@ -12780,6 +12774,25 @@ async fn respond_with_done() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({
         "choices": [{"message": {"content": "done"}}]
     }))
+}
+
+/// The observer registry is process-global, so a concurrently running test's
+/// events interleave into this stream. Every positional assertion (first,
+/// last, ordering) must be made on the calling test's own agent-scoped
+/// sub-stream, never on the raw global stream.
+fn events_for_alias<'a>(events: &'a [ObserverEvent], alias: &str) -> Vec<&'a ObserverEvent> {
+    events
+        .iter()
+        .filter(|e| match e {
+            ObserverEvent::AgentStart { agent_alias, .. }
+            | ObserverEvent::AgentEnd { agent_alias, .. }
+            | ObserverEvent::LlmRequest { agent_alias, .. }
+            | ObserverEvent::LlmResponse { agent_alias, .. } => {
+                agent_alias.as_deref() == Some(alias)
+            }
+            _ => false,
+        })
+        .collect()
 }
 
 fn lifecycle_events_for_alias(events: &[ObserverEvent], alias: &str) -> (usize, usize) {
@@ -12900,15 +12913,16 @@ async fn run_brackets_successful_turn_with_agent_start_and_agent_end() {
 
     let events = capturing.events.lock();
     let (starts, ends) = lifecycle_events_for_alias(&events, "run-lifecycle-success-agent");
-    assert_eq!(starts, 1, "exactly one AgentStart, got {events:?}");
-    assert_eq!(ends, 1, "exactly one AgentEnd, got {events:?}");
+    let scoped = events_for_alias(&events, "run-lifecycle-success-agent");
+    assert_eq!(starts, 1, "exactly one AgentStart, got {scoped:?}");
+    assert_eq!(ends, 1, "exactly one AgentEnd, got {scoped:?}");
     assert!(
-        matches!(events.first(), Some(ObserverEvent::AgentStart { .. })),
-        "first event must be AgentStart, got {events:?}"
+        matches!(scoped.first(), Some(ObserverEvent::AgentStart { .. })),
+        "first event must be AgentStart, got {scoped:?}"
     );
     assert!(
-        matches!(events.last(), Some(ObserverEvent::AgentEnd { .. })),
-        "last event must be AgentEnd, got {events:?}"
+        matches!(scoped.last(), Some(ObserverEvent::AgentEnd { .. })),
+        "last event must be AgentEnd, got {scoped:?}"
     );
 }
 
@@ -12999,13 +13013,14 @@ async fn run_still_closes_the_bracket_when_the_model_call_fails() {
         "AgentEnd must still fire via Drop on the early-return error path \
          (the regression this fix closes), got {events:?}"
     );
+    let scoped = events_for_alias(&events, "run-lifecycle-error-agent");
     assert!(
-        matches!(events.first(), Some(ObserverEvent::AgentStart { .. })),
-        "first event must be AgentStart, got {events:?}"
+        matches!(scoped.first(), Some(ObserverEvent::AgentStart { .. })),
+        "first event must be AgentStart, got {scoped:?}"
     );
     assert!(
-        matches!(events.last(), Some(ObserverEvent::AgentEnd { .. })),
-        "last event must be AgentEnd even on the error path, got {events:?}"
+        matches!(scoped.last(), Some(ObserverEvent::AgentEnd { .. })),
+        "last event must be AgentEnd even on the error path, got {scoped:?}"
     );
 }
 
@@ -13132,13 +13147,14 @@ async fn run_model_switch_emits_single_balanced_pair_for_the_switched_route() {
         ends, 1,
         "a model switch must still close with exactly one AgentEnd, got {events:?}"
     );
+    let scoped = events_for_alias(&events, "run-lifecycle-switch-agent");
     assert!(
-        matches!(events.first(), Some(ObserverEvent::AgentStart { .. })),
-        "first event must be AgentStart, got {events:?}"
+        matches!(scoped.first(), Some(ObserverEvent::AgentStart { .. })),
+        "first event must be AgentStart, got {scoped:?}"
     );
     assert!(
-        matches!(events.last(), Some(ObserverEvent::AgentEnd { .. })),
-        "last event must be AgentEnd, got {events:?}"
+        matches!(scoped.last(), Some(ObserverEvent::AgentEnd { .. })),
+        "last event must be AgentEnd, got {scoped:?}"
     );
 
     let end_route = events
