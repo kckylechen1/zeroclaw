@@ -14,7 +14,7 @@ repo = "library/node"
 image_ref = "node"
 discover = true
 tag = "24-bookworm-slim"
-digest = "sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d"
+digest = "sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03"
 
 [[image]]
 zone = "base-arg-rust-slim"
@@ -41,7 +41,7 @@ registry = "dockerhub"
 repo = "library/debian"
 image_ref = "debian"
 tag = "trixie-slim"
-digest = "sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd"
+digest = "sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258"
 
 [[image]]
 zone = "base-arg-distroless"
