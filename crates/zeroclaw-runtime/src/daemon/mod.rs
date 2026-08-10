@@ -1000,6 +1000,20 @@ impl HeartbeatMcpRegistryTestHookGuard {
             serial_lock: Some(serial_lock),
         }
     }
+
+    /// Serialize a real-path test (one that wants NO hook, e.g. a real
+    /// stdio connect) against hook-installing tests. Takes the same lock
+    /// the hook guard takes, installs nothing; Drop's hook-clear is a
+    /// no-op by construction. Held as a struct field so the guard can
+    /// live across the test's await points.
+    fn serialize_real_path() -> Self {
+        let serial_lock = HEARTBEAT_MCP_REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self {
+            serial_lock: Some(serial_lock),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3388,9 +3402,7 @@ mod tests {
     async fn heartbeat_mcp_registry_reuses_one_stdio_child_across_ticks() {
         // Real-path test: no hook wanted, but the hook global is consulted
         // first — serialize against hook-installing tests (see the guard doc).
-        let _serial = HEARTBEAT_MCP_REGISTRY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _serial = HeartbeatMcpRegistryTestHookGuard::serialize_real_path();
         use std::sync::Arc;
         use zeroclaw_config::schema::{AliasedAgentConfig, McpBundleConfig, McpServerConfig};
 
@@ -4046,9 +4058,7 @@ mod tests {
     async fn connect_heartbeat_mcp_registry_returns_none_when_all_healthy() {
         // Real-path test: no hook wanted, but the hook global is consulted
         // first — serialize against hook-installing tests (see the guard doc).
-        let _serial = HEARTBEAT_MCP_REGISTRY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _serial = HeartbeatMcpRegistryTestHookGuard::serialize_real_path();
         use zeroclaw_config::schema::{AliasedAgentConfig, McpBundleConfig};
 
         let a_handle = make_test_server_handle("server-a");
@@ -4311,13 +4321,10 @@ mod tests {
 
         // This test wants the REAL stdio connect path, i.e. *no* hook —
         // but `connect_heartbeat_mcp_registry` consults the process-global
-        // test hook first. Hold the same serialising lock the hook guard
-        // uses so a concurrently running hook test can neither hand us its
-        // hook (we would connect to a phantom registry) nor observe our
-        // calls in its construction counter.
-        let _serial = HEARTBEAT_MCP_REGISTRY_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // test hook first. Serialize against hook-installing tests so one
+        // can neither hand us its hook (we would connect to a phantom
+        // registry) nor observe our calls in its construction counter.
+        let _serial = HeartbeatMcpRegistryTestHookGuard::serialize_real_path();
 
         let tmp = TempDir::new().unwrap();
 
