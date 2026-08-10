@@ -496,16 +496,22 @@ jobs:
 
   # ── Post-format tests ─────────────────────────────────────────────────────
 
+  # The workspace is tested as four matrix legs so no single job carries the
+  # whole compile. The single source of truth for which package belongs to
+  # which leg is dev/ci/test-partition.json; the guard step fails the job the
+  # moment a workspace member is missing from (or duplicated in) that file.
   test:
-    name: Test
+    name: Test (${{ matrix.leg }})
     needs: [fmt]
     runs-on: ubuntu-latest
-    # 60, not 30: a cold-cache workspace test build takes ~31 minutes on the
-    # public 4-core runner, and a timed-out job never reaches the post step
-    # that saves the rust-cache — so a 30-minute cap locks the job into a
-    # permanent cold-start timeout loop (it has never once completed here).
-    # After the first warm cache lands, real runtime drops well under the cap.
-    timeout-minutes: 60
+    # 45 per leg. A leg is roughly a quarter of the old serial lane, whose
+    # cold run measured ~35 minutes; a timed-out job also skips the
+    # rust-cache save step, so the cap must clear a cold leg with room.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [runtime, channels, app, tail]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -517,7 +523,12 @@ jobs:
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
+          # Per-leg cache so each leg only carries its own build graph.
+          shared-key: test-${{ matrix.leg }}
+      - name: Verify test partition covers the workspace
+        run: ./scripts/ci/test_partition_guard.sh
       - name: Check firmware protocol crate
+        if: matrix.leg == 'tail'
         run: ./scripts/ci/firmware_protocol_gate.sh
       - name: Ensure web/dist placeholder exists
         run: mkdir -p web/dist && touch web/dist/.gitkeep
@@ -526,11 +537,23 @@ jobs:
       - name: Install cargo-nextest
         run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
       - name: Run tests
-        run: cargo nextest run --locked --workspace --exclude zeroclaw-desktop
         env:
+          LEG: ${{ matrix.leg }}
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        run: |
+          PKGS="$(jq -r --arg leg "$LEG" '.legs[$leg] // [] | map("-p " + .) | join(" ")' dev/ci/test-partition.json)"
+          if [ -z "$PKGS" ]; then
+            echo "::error::No packages defined for test leg '$LEG' in dev/ci/test-partition.json"
+            exit 1
+          fi
+          echo "==> leg $LEG: cargo nextest run --locked $PKGS"
+          cargo nextest run --locked $PKGS
+      # The parallelism regression gate covers zeroclaw-runtime and
+      # zeroclaw-channels; the channels leg already builds both crates, so it
+      # runs there once instead of once per leg.
       - name: Repeat parallel runtime tests
+        if: matrix.leg == 'channels'
         run: ./scripts/ci/parallel_runtime_test_gate.sh
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
