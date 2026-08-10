@@ -11,9 +11,11 @@ use super::metrics::SopMetricsCollector;
 use super::route::{self, NextStep, RouteCtx};
 use super::rundata::RunData;
 use super::schema;
+#[cfg(test)]
+use super::store::PersistedRun;
 use super::store::{
-    ClaimToken, InMemoryRunStore, PersistedRun, ProposalRecord, ProposalStatus, RetentionPolicy,
-    SopEventRecord, SopRunStore, StoreError,
+    ClaimToken, InMemoryRunStore, ProposalRecord, ProposalStatus, RetentionPolicy, SopEventRecord,
+    SopRunStore, StoreError,
 };
 use super::time::cooldown_elapsed;
 #[cfg(test)]
