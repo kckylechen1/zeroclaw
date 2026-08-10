@@ -46,13 +46,13 @@ pub(crate) use runtime_commands::{
 };
 
 mod channel_factories;
-pub use channel_factories::{build_channel_map, register_channels_for_tools};
-pub(crate) use channel_factories::{
-    composite_channel_key, collect_configured_channels, configured_channel_map,
-    ConfiguredChannel, ActiveChannelAliases,
-};
 #[cfg(all(test, feature = "channel-matrix"))]
 pub(crate) use channel_factories::matrix_state_dir;
+pub(crate) use channel_factories::{
+    ActiveChannelAliases, ConfiguredChannel, collect_configured_channels, composite_channel_key,
+    configured_channel_map,
+};
+pub use channel_factories::{build_channel_map, register_channels_for_tools};
 
 // Channel types imported directly from source crates (no shim files)
 #[cfg(feature = "channel-amqp")]
@@ -6431,7 +6431,6 @@ fn classify_health_result(
     }
 }
 
-
 fn find_channel_for_message<'a>(
     channels: &'a HashMap<String, Arc<dyn Channel>>,
     msg: &zeroclaw_api::channel::ChannelMessage,
@@ -6517,7 +6516,6 @@ fn channel_ref_matches_message_channel(channel_ref: &str, message_channel: &str)
             .split_once('.')
             .is_some_and(|(channel_type, _)| channel_type == message_base)
 }
-
 
 fn no_real_time_channels_message() -> &'static str {
     "No real-time channels configured. Run `zeroclaw quickstart` to set one up."

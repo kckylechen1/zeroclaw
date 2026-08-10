@@ -37,6 +37,8 @@ use super::LarkChannel;
 use super::LineChannel;
 #[cfg(feature = "channel-linq")]
 use super::LinqChannel;
+#[cfg(feature = "channel-matrix")]
+use super::MatrixChannel;
 #[cfg(feature = "channel-mattermost")]
 use super::MattermostChannel;
 #[cfg(feature = "channel-mochat")]
@@ -55,6 +57,8 @@ use super::RedditChannel;
 use super::SignalChannel;
 #[cfg(feature = "channel-slack")]
 use super::SlackChannel;
+#[cfg(feature = "channel-telegram")]
+use super::TelegramChannel;
 #[cfg(feature = "channel-twitch")]
 use super::TwitchChannel;
 #[cfg(feature = "channel-twitter")]
@@ -65,20 +69,16 @@ use super::VoiceCallChannel;
 use super::VoiceWakeChannel;
 #[cfg(feature = "channel-wati")]
 use super::WatiChannel;
-#[cfg(feature = "channel-webhook")]
-use super::WebhookChannel;
 #[cfg(feature = "channel-wechat")]
 use super::WeChatChannel;
 #[cfg(feature = "channel-wecom")]
 use super::WeComChannel;
 #[cfg(feature = "channel-wecom-ws")]
 use super::WeComWsChannel;
+#[cfg(feature = "channel-webhook")]
+use super::WebhookChannel;
 #[cfg(feature = "channel-whatsapp-cloud")]
 use super::WhatsAppChannel;
-#[cfg(feature = "channel-matrix")]
-use super::MatrixChannel;
-#[cfg(feature = "channel-telegram")]
-use super::TelegramChannel;
 #[cfg(feature = "whatsapp-web")]
 use super::WhatsAppWebChannel;
 
