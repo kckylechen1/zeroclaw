@@ -314,10 +314,10 @@ impl Method {
     }
 }
 
-type RpcResult = Result<Value, JsonRpcError>;
+pub(crate) type RpcResult = Result<Value, JsonRpcError>;
 type BoxRpcFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = RpcResult> + Send + 'a>>;
 
-fn rpc_err(code: i32, msg: impl Into<String>) -> JsonRpcError {
+pub(crate) fn rpc_err(code: i32, msg: impl Into<String>) -> JsonRpcError {
     JsonRpcError {
         code,
         message: msg.into(),
@@ -325,7 +325,7 @@ fn rpc_err(code: i32, msg: impl Into<String>) -> JsonRpcError {
     }
 }
 
-fn not_yet_implemented(method: Method) -> RpcResult {
+pub(crate) fn not_yet_implemented(method: Method) -> RpcResult {
     Err(rpc_err(
         INTERNAL_ERROR,
         format!("{}: not yet implemented", method.wire_name()),
@@ -478,7 +478,7 @@ fn session_should_initialize_mcp(chat_mode: &crate::rpc::types::ChatMode) -> boo
 
 /// Per-connection dispatcher. Shared state lives in [`RpcContext`].
 pub struct RpcDispatcher {
-    ctx: Arc<RpcContext>,
+    pub(crate) ctx: Arc<RpcContext>,
     rpc: Arc<RpcOutbound>,
     authenticated: bool,
     /// TUI session UID assigned during `initialize`. Used for registry
@@ -2558,119 +2558,6 @@ impl RpcDispatcher {
         })
     }
 
-    // ── Cron handlers ────────────────────────────────────────────
-
-    async fn handle_cron_list(&self) -> RpcResult {
-        let config = self.ctx.config.read().clone();
-        let jobs = crate::cron::list_jobs(&config)
-            .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cron list failed: {e}")))?;
-        to_result(CronListResult { jobs })
-    }
-
-    async fn handle_cron_get(&self, params: &Value) -> RpcResult {
-        let req: CronIdParams = parse_params(params)?;
-        let config = self.ctx.config.read().clone();
-        let job = crate::cron::get_job(&config, &req.id)
-            .map_err(|e| rpc_err(INVALID_PARAMS, format!("Cron job not found: {e}")))?;
-        to_result(job)
-    }
-
-    async fn handle_cron_add(&self, params: &Value) -> RpcResult {
-        let req: CronAddParams = parse_params(params)?;
-        let config = self.ctx.config.read().clone();
-        let schedule = Schedule::Cron {
-            expr: req.schedule,
-            tz: req.tz,
-        };
-        let job = crate::cron::add_shell_job_with_approval(
-            &config,
-            &req.agent,
-            req.name,
-            schedule,
-            req.command.as_deref().unwrap_or(""),
-            req.delivery,
-            true, // RPC calls are pre-approved
-        )
-        .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cron add failed: {e}")))?;
-        to_result(job)
-    }
-
-    async fn handle_cron_patch(&self, params: &Value) -> RpcResult {
-        let req: CronPatchParams = parse_params(params)?;
-        let config = self.ctx.config.read().clone();
-        let patch = CronJobPatch {
-            schedule: req.schedule.map(|s| Schedule::Cron {
-                expr: s,
-                tz: if req.clear_tz == Some(true) {
-                    None
-                } else {
-                    req.tz
-                },
-            }),
-            command: req.command,
-            prompt: req.prompt,
-            name: req.name,
-            ..Default::default()
-        };
-        let job = crate::cron::update_job(&config, &req.id, patch)
-            .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cron patch failed: {e}")))?;
-        to_result(job)
-    }
-
-    async fn handle_cron_delete(&self, params: &Value) -> RpcResult {
-        let req: CronIdParams = parse_params(params)?;
-        let config = self.ctx.config.read().clone();
-        crate::cron::remove_job(&config, &req.id)
-            .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cron delete failed: {e}")))?;
-        to_result(CronDeleteResult {
-            id: req.id,
-            deleted: true,
-        })
-    }
-
-    async fn handle_cron_runs(&self, params: &Value) -> RpcResult {
-        let req: CronRunsParams = parse_params(params)?;
-        let config = self.ctx.config.read().clone();
-        let limit = req.limit.unwrap_or(20) as usize;
-        let runs = crate::cron::list_runs(&config, &req.id, limit)
-            .map_err(|e| rpc_err(INTERNAL_ERROR, format!("Cron runs failed: {e}")))?;
-        to_result(CronRunsResult { runs })
-    }
-
-    async fn handle_cron_trigger(&self, params: &Value) -> RpcResult {
-        let req: CronIdParams = parse_params(params)?;
-        let config = self.ctx.config.read().clone();
-        let job = crate::cron::get_job(&config, &req.id)
-            .map_err(|e| rpc_err(INVALID_PARAMS, format!("Cron job not found: {e}")))?;
-        let event_tx = self.ctx.event_tx.clone();
-        let result = crate::cron::scheduler::run_manual_job(
-            &config,
-            &job,
-            crate::cron::scheduler::CronDeliveryContext::RpcManual,
-            &event_tx,
-        )
-        .await;
-        to_result(CronTriggerResult {
-            id: result.job_id,
-            success: result.success,
-            status: result.status,
-            output: result.output,
-            duration_ms: result.duration_ms,
-            started_at: result.started_at.to_rfc3339(),
-            finished_at: result.finished_at.to_rfc3339(),
-        })
-    }
-
-    async fn handle_cron_settings(&self, params: &Value) -> RpcResult {
-        let config = self.ctx.config.read().clone();
-        // If a "patch" field is present, this is a write; otherwise read.
-        if params.get("patch").is_some() {
-            not_yet_implemented(Method::CronSettings)
-        } else {
-            Ok(serde_json::to_value(&config.scheduler).unwrap_or(Value::Null))
-        }
-    }
-
     // ── Config handlers ──────────────────────────────────────────
 
     fn handle_config_get(&self, params: &Value) -> RpcResult {
@@ -4571,7 +4458,7 @@ impl RpcDispatcher {
 
 // ── Helpers ──────────────────────────────────────────────────────
 
-fn parse_params<T: DeserializeOwned>(params: &Value) -> Result<T, JsonRpcError> {
+pub(crate) fn parse_params<T: DeserializeOwned>(params: &Value) -> Result<T, JsonRpcError> {
     serde_json::from_value(params.clone()).map_err(|e| rpc_err(INVALID_PARAMS, e.to_string()))
 }
 
@@ -4593,7 +4480,7 @@ fn validate_session_configure_overrides(overrides: &SessionOverrides) -> Result<
     Ok(())
 }
 
-fn to_result<T: Serialize>(val: T) -> RpcResult {
+pub(crate) fn to_result<T: Serialize>(val: T) -> RpcResult {
     serde_json::to_value(val).map_err(|e| rpc_err(INTERNAL_ERROR, e.to_string()))
 }
 

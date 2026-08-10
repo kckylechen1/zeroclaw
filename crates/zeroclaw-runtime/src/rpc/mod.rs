@@ -3,6 +3,7 @@
 pub mod approval_channel;
 pub mod attachments;
 pub mod context;
+pub mod cron_handlers;
 pub mod dispatch;
 pub mod fs;
 pub mod git;
