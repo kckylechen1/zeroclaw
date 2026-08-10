@@ -18,6 +18,7 @@ pub mod personality_templates;
 pub mod pricing_catalog;
 pub mod prompt;
 mod routed_approval;
+mod session_model_provider;
 pub mod system_prompt;
 pub mod thinking;
 pub mod tool_execution;
