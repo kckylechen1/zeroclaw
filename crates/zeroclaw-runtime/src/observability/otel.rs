@@ -1,5 +1,5 @@
 use super::traits::{LlmMessageSnapshot, Observer, ObserverEvent, ObserverMetric};
-use crate::agent::loop_::scrub_for_export;
+use crate::agent::prompt_helpers::scrub_for_export;
 use crate::observability::otel_config::OtelContentConfig;
 use crate::util::{truncate_field, truncate_json_leaves};
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
