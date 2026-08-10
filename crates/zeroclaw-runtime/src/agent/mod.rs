@@ -1,5 +1,6 @@
 #[allow(clippy::module_inception)]
 pub mod agent;
+pub mod announce_claim;
 pub(crate) mod approval_bridge;
 pub mod classifier;
 pub mod context_analyzer;
@@ -20,6 +21,7 @@ pub mod prompt;
 mod routed_approval;
 mod session_model_provider;
 pub mod system_prompt;
+pub mod text_tool_prompt;
 pub mod thinking;
 pub mod tool_execution;
 pub mod tool_filter;
