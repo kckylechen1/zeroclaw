@@ -231,14 +231,14 @@ fn discard_until_newline<R: std::io::BufRead>(reader: &mut R) -> std::io::Result
 // Session scope + announcement claims moved to `super::announce_claim`.
 #[cfg(test)]
 pub(crate) use super::announce_claim::CHILD_ANNOUNCEMENT_STORE_TEST_HOOK;
-pub(crate) use super::announce_claim::{
-    claim_announcements_for_turn, current_session_key, session_key_is_scoped,
-    synthetic_session_key_for_run,
-};
 pub use super::announce_claim::{
     TOOL_LOOP_SESSION_KEY, TOOL_LOOP_THREAD_ID, TurnOutcome, UnclaimOnDrop,
     claim_announcements_for_scoped_turn, scope_session_key, scope_thread_id,
     settle_announcement_guards,
+};
+pub(crate) use super::announce_claim::{
+    claim_announcements_for_turn, current_session_key, session_key_is_scoped,
+    synthetic_session_key_for_run,
 };
 
 // Re-export tool call parsing from the standalone parser crate.
