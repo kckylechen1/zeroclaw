@@ -980,12 +980,16 @@ impl HeartbeatMcpRegistryTestHookGuard {
         // Hold the serial lock before mutating the hook global so a
         // concurrent test cannot observe a torn state (hook swapped
         // halfway, or reset between this test's set and use).
+        // Poison here only means an earlier test panicked while serialized.
+        // The guard's Drop runs during that unwind and clears the hook, so
+        // the protected state is already clean — recover instead of turning
+        // one genuine failure into a cascade of phantom ones.
         let serial_lock = HEARTBEAT_MCP_REGISTRY_TEST_LOCK
             .lock()
-            .expect("heartbeat MCP registry test serial lock should not be poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut guard = HEARTBEAT_MCP_REGISTRY_TEST_HOOK
             .lock()
-            .expect("heartbeat MCP registry test hook lock should not be poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = Some(hook);
         // Drop the hook global mutex immediately — the serial lock
         // is what prevents another test from racing with us now, and
@@ -1002,10 +1006,12 @@ impl HeartbeatMcpRegistryTestHookGuard {
 impl Drop for HeartbeatMcpRegistryTestHookGuard {
     fn drop(&mut self) {
         // Clear the hook first (still under the serial lock taken by
-        // `install`) so the next test sees a clean slate.
-        if let Ok(mut guard) = HEARTBEAT_MCP_REGISTRY_TEST_HOOK.lock() {
-            *guard = None;
-        }
+        // `install`) so the next test sees a clean slate. Recover from
+        // poison — skipping the clear would leak a stale hook into the
+        // next test, which is strictly worse than any poison state.
+        *HEARTBEAT_MCP_REGISTRY_TEST_HOOK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         // Releasing the serial lock last allows the next waiting
         // test to proceed only after our hook is gone.
         drop(self.serial_lock.take());
@@ -1036,7 +1042,7 @@ pub(crate) fn set_heartbeat_mcp_registry_test_hook(
 fn current_heartbeat_mcp_registry_test_hook() -> Option<HeartbeatMcpRegistryTestHook> {
     let guard = HEARTBEAT_MCP_REGISTRY_TEST_HOOK
         .lock()
-        .expect("heartbeat MCP registry test hook lock should not be poisoned");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard.as_ref().cloned()
 }
 
@@ -3380,6 +3386,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "spawns a real stdio MCP server via npx @modelcontextprotocol/server-filesystem; needs node/npx on PATH so it does not run in normal CI. Run: cargo test -p zeroclaw-runtime --lib heartbeat_mcp_registry_reuses_one_stdio_child_across_ticks -- --ignored"]
     async fn heartbeat_mcp_registry_reuses_one_stdio_child_across_ticks() {
+        // Real-path test: no hook wanted, but the hook global is consulted
+        // first — serialize against hook-installing tests (see the guard doc).
+        let _serial = HEARTBEAT_MCP_REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use std::sync::Arc;
         use zeroclaw_config::schema::{AliasedAgentConfig, McpBundleConfig, McpServerConfig};
 
@@ -4033,6 +4044,11 @@ mod tests {
     /// filtered set was empty and the function short-circuited).
     #[tokio::test]
     async fn connect_heartbeat_mcp_registry_returns_none_when_all_healthy() {
+        // Real-path test: no hook wanted, but the hook global is consulted
+        // first — serialize against hook-installing tests (see the guard doc).
+        let _serial = HEARTBEAT_MCP_REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use zeroclaw_config::schema::{AliasedAgentConfig, McpBundleConfig};
 
         let a_handle = make_test_server_handle("server-a");
@@ -4292,6 +4308,16 @@ mod tests {
     async fn heartbeat_worker_reconnects_after_stdio_child_exits() {
         use std::os::unix::fs::PermissionsExt;
         use zeroclaw_config::schema::{AliasedAgentConfig, McpBundleConfig, McpServerConfig};
+
+        // This test wants the REAL stdio connect path, i.e. *no* hook —
+        // but `connect_heartbeat_mcp_registry` consults the process-global
+        // test hook first. Hold the same serialising lock the hook guard
+        // uses so a concurrently running hook test can neither hand us its
+        // hook (we would connect to a phantom registry) nor observe our
+        // calls in its construction counter.
+        let _serial = HEARTBEAT_MCP_REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let tmp = TempDir::new().unwrap();
 
