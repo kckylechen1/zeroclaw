@@ -22,6 +22,7 @@ mod session_model_provider;
 pub mod system_prompt;
 pub mod thinking;
 pub mod tool_execution;
+pub mod tool_filter;
 pub mod tool_receipts;
 pub(crate) mod turn;
 
