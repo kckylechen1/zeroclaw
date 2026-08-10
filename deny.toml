@@ -193,6 +193,18 @@ name = "webpki-roots"
 version = "=0.26.11"
 
 [[bans.skip]]
+name = "windows-sys"
+version = "=0.59.0"
+
+[[bans.skip]]
+name = "windows-sys"
+version = "=0.60.2"
+
+[[bans.skip]]
+name = "windows_i686_gnullvm"
+version = "=0.52.6"
+
+[[bans.skip]]
 name = "windows_aarch64_gnullvm"
 version = "=0.48.5"
 
@@ -280,4 +292,6 @@ version = "=0.51.0"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# memcore rides the public read-only mirror (generated from the private
+# source monorepo); pinned by rev in zeroclaw-memory. See that Cargo.toml.
+allow-git = ["https://github.com/kckylechen1/memcore"]
