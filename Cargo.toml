@@ -362,6 +362,12 @@ channel-wecom-ws = ["zeroclaw-channels/channel-wecom-ws"]
 channel-clawdtalk = ["zeroclaw-channels/channel-clawdtalk"]
 channel-webhook = ["zeroclaw-channels/channel-webhook"]
 channel-acp-server = ["zeroclaw-channels/channel-acp-server", "zeroclaw-gateway?/channel-acp-server"]
+
+# Node discovery surface (gateway `/ws/nodes` registry + LAN mDNS peer hints).
+# Default-off, mirroring `zeroclaw-gateway`'s own `nodes` feature. The root
+# package needs this forward so targets that construct `gateway::AppState`
+# (e.g. the `component` test) can cfg-gate the node-only fields.
+nodes = ["zeroclaw-gateway?/nodes"]
 channel-whatsapp-cloud = ["zeroclaw-channels/channel-whatsapp-cloud", "zeroclaw-gateway?/channel-whatsapp-cloud"]
 channel-voice-call = ["zeroclaw-channels/channel-voice-call"]
 channel-line = ["zeroclaw-channels/channel-line"]
