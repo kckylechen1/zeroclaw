@@ -1,6 +1,6 @@
-use crate::agent::dispatcher::ToolDispatcher;
 #[cfg(test)]
 use crate::agent::dispatcher::NativeToolDispatcher;
+use crate::agent::dispatcher::ToolDispatcher;
 use crate::agent::eval::AutoClassifyExt;
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
 use crate::approval::ApprovalManager;
@@ -2970,7 +2970,6 @@ mod safety_net;
 #[cfg(test)]
 #[path = "parity.rs"]
 mod parity;
-
 
 #[cfg(test)]
 #[path = "agent_inline_tests.rs"]
