@@ -4,8 +4,8 @@ use crate::cron::store::{
 };
 use crate::cron::{
     CronJob, DeliveryConfig, JobType, Schedule, SessionTarget, all_overdue_jobs, claim_job,
-    clear_stale_locks, due_jobs, next_run_for_schedule, release_job, skip_missed_run,
-    sync_declarative_jobs,
+    clear_stale_locks, due_jobs, next_run_for_schedule, reclaim_stale_locks, release_job,
+    skip_missed_run, sync_declarative_jobs,
 };
 use crate::security::SecurityPolicy;
 use anyhow::Result;
@@ -22,6 +22,17 @@ use zeroclaw_log::Instrument;
 
 const MIN_POLL_SECONDS: u64 = 5;
 const SHELL_JOB_TIMEOUT_SECS: u64 = 120;
+/// Cron-scoped wall-clock cap for agent jobs. A hung `agent::run` (e.g. an
+/// MCP tool that never returns) is bounded by this deadline so it cannot
+/// occupy a `max_concurrent` slot indefinitely. This is intentionally a
+/// cron-local constant — NOT the delegate `agentic_timeout_secs` — because
+/// the cron scheduler owns its own run lifecycle independent of delegate
+/// spawn policy.
+const CRON_AGENT_JOB_TIMEOUT_SECS: u64 = 30 * 60;
+/// TTL for reclaiming `locked_at` during the poll loop. Matches the agent
+/// job budget so a crash mid-run (without process exit) cannot wedge the
+/// scheduler until the next boot-time `clear_stale_locks`.
+const STALE_LOCK_TTL_SECS: u64 = CRON_AGENT_JOB_TIMEOUT_SECS;
 const SCHEDULER_COMPONENT: &str = "scheduler";
 const CRON_AGENT_DEFAULT_EXCLUDED_TOOLS: &[&str] = &[
     "cron_add",
@@ -391,6 +402,33 @@ pub async fn run(
             _ = interval.tick() => {
                 // Keep scheduler liveness fresh even when there are no due jobs.
                 crate::health::mark_component_ok(SCHEDULER_COMPONENT);
+
+                // TTL reclaim: unlock jobs whose in-flight lock exceeded the
+                // stale TTL so hung/crashed runs do not block max_concurrent
+                // until the next process restart.
+                match reclaim_stale_locks(
+                    &config,
+                    Utc::now(),
+                    Duration::from_secs(STALE_LOCK_TTL_SECS),
+                ) {
+                    Ok(0) => {}
+                    Ok(cleared) => ::zeroclaw_log::record!(
+                        INFO,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({
+                                "cleared": cleared,
+                                "ttl_secs": STALE_LOCK_TTL_SECS
+                            })),
+                        "Reclaimed TTL-expired cron in-flight locks"
+                    ),
+                    Err(e) => ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                        "Failed to reclaim TTL-expired cron in-flight locks"
+                    ),
+                }
 
                 let jobs = match due_jobs(&config, Utc::now()) {
                     Ok(jobs) => jobs,
@@ -850,7 +888,7 @@ async fn run_agent_job(
     };
     let run_result = match job.session_target {
         SessionTarget::Main | SessionTarget::Isolated => {
-            Box::pin(
+            let run_fut = Box::pin(
                 crate::agent::run(
                     cron_config,
                     agent_alias,
@@ -868,8 +906,19 @@ async fn run_agent_job(
                     run_overrides,
                 )
                 .instrument(subagent_span),
-            )
-            .await
+            );
+            // Cron-scoped wall-clock bound: a hung `agent::run` (e.g. an MCP
+            // tool that never returns) is converted into a timed-out error so
+            // the claim is released and the slot returns to `max_concurrent`.
+            // The TTL reclaim in the poll loop is the safety net if this
+            // future is dropped before the timeout fires.
+            match time::timeout(Duration::from_secs(CRON_AGENT_JOB_TIMEOUT_SECS), run_fut).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(anyhow::Error::msg(format!(
+                    "agent cron job timed out after {}s",
+                    CRON_AGENT_JOB_TIMEOUT_SECS
+                ))),
+            }
         }
     };
 

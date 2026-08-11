@@ -599,14 +599,52 @@ pub fn release_job(config: &Config, job_id: &str) -> Result<()> {
 }
 
 pub fn clear_stale_locks(config: &Config) -> Result<usize> {
-    let cleared = with_read_connection(config, |conn| {
-        conn.execute(
-            "UPDATE cron_jobs SET locked_at = NULL WHERE locked_at IS NOT NULL",
-            [],
-        )
-        .context("Failed to clear stale cron job locks")
+    clear_stale_locks_before(config, None)
+}
+
+/// Clear in-flight cron locks.
+///
+/// When `older_than` is `None`, every lock is cleared (startup recovery after
+/// process death). When `Some(cutoff)`, only locks with `locked_at < cutoff`
+/// are reclaimed — used by the poll loop for TTL-based recovery so a hung
+/// agent job cannot hold a `max_concurrent` slot until the next daemon
+/// restart.
+pub fn clear_stale_locks_before(
+    config: &Config,
+    older_than: Option<DateTime<Utc>>,
+) -> Result<usize> {
+    let cleared = with_read_connection(config, |conn| match older_than {
+        None => conn
+            .execute(
+                "UPDATE cron_jobs SET locked_at = NULL WHERE locked_at IS NOT NULL",
+                [],
+            )
+            .context("Failed to clear stale cron job locks"),
+        Some(cutoff) => conn
+            .execute(
+                "UPDATE cron_jobs SET locked_at = NULL \
+                     WHERE locked_at IS NOT NULL AND locked_at < ?1",
+                params![cutoff.to_rfc3339()],
+            )
+            .context("Failed to reclaim TTL-expired cron job locks"),
     })?;
     Ok(cleared.unwrap_or(0))
+}
+
+/// Reclaim locks whose `locked_at` is older than `now - ttl`.
+///
+/// This is the poll-loop counterpart to boot-time [`clear_stale_locks`]: a
+/// hung or leaked claim is freed once it exceeds the agent job wall-clock
+/// budget, so the next poll can re-queue the job instead of wedging it out
+/// of `due_jobs` until process restart.
+pub fn reclaim_stale_locks(
+    config: &Config,
+    now: DateTime<Utc>,
+    ttl: std::time::Duration,
+) -> Result<usize> {
+    let ttl = chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(1800));
+    let cutoff = now - ttl;
+    clear_stale_locks_before(config, Some(cutoff))
 }
 
 pub fn record_run(
@@ -1730,6 +1768,69 @@ mod tests {
             !cron_db(&config).exists(),
             "clear_stale_locks must not create the cron DB on an empty workspace"
         );
+    }
+
+    #[test]
+    fn reclaim_stale_locks_only_clears_locks_older_than_ttl() {
+        // A hung or crashed run leaves `locked_at` behind. The poll-loop
+        // reclaim must free only locks past the TTL window and leave live
+        // (in-flight) locks untouched.
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let fresh = add_job(&config, "test-agent", "*/5 * * * *", "echo fresh").unwrap();
+        let stale = add_job(&config, "test-agent", "*/5 * * * *", "echo stale").unwrap();
+        force_due(&config, &fresh.id);
+        force_due(&config, &stale.id);
+
+        let now = Utc::now();
+        // The stale lock was taken an hour ago, the fresh one just now.
+        let stale_locked_at = now - chrono::Duration::seconds(3600);
+        assert!(claim_job(&config, &stale.id, stale_locked_at).unwrap());
+        assert!(claim_job(&config, &fresh.id, now).unwrap());
+        // Both are locked → neither is due.
+        assert!(due_jobs(&config, now).unwrap().is_empty());
+
+        // Reclaim with a 30-minute TTL: only the hour-old lock is touched.
+        assert_eq!(
+            reclaim_stale_locks(&config, now, std::time::Duration::from_secs(30 * 60)).unwrap(),
+            1,
+            "only the TTL-expired lock is reclaimed"
+        );
+
+        // The stale job is due again; the fresh one is still locked.
+        let due = due_jobs(&config, now).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, stale.id);
+    }
+
+    #[test]
+    fn reclaim_stale_locks_makes_expired_lease_runnable_again() {
+        // Red test: an expired lease must be reclaimable by another run.
+        // After reclaim, due_jobs selects the job again and a fresh claim
+        // succeeds.
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let job = add_job(&config, "test-agent", "*/5 * * * *", "echo ok").unwrap();
+        force_due(&config, &job.id);
+
+        let now = Utc::now();
+        // Simulate a run that claimed the lock 2 hours ago and then hung.
+        let hung_locked_at = now - chrono::Duration::seconds(2 * 3600);
+        assert!(claim_job(&config, &job.id, hung_locked_at).unwrap());
+        assert!(due_jobs(&config, now).unwrap().is_empty());
+
+        // Poll-loop reclaim frees the expired lease.
+        assert_eq!(
+            reclaim_stale_locks(&config, now, std::time::Duration::from_secs(30 * 60)).unwrap(),
+            1
+        );
+
+        // A new run can now claim and release the job normally.
+        assert!(
+            claim_job(&config, &job.id, now).unwrap(),
+            "after reclaim a fresh claim must succeed"
+        );
+        release_job(&config, &job.id).unwrap();
     }
 
     #[test]
