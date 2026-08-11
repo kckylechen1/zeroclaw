@@ -1839,11 +1839,11 @@ if [ "${{1:-}}" = "store" ]; then
   printf 'store-start:%s\n' "${{2:-}}" >> "{}"
   case "${{2:-}}" in
     fast_store:*)
-      sleep 0.1
+      sleep 0.2
       printf 'fast-store-complete\n' >> "{}"
       ;;
     slow_store:*)
-      sleep 1.2
+      sleep 3
       printf 'slow-store-complete\n' >> "{}"
       ;;
   esac
@@ -1851,7 +1851,7 @@ if [ "${{1:-}}" = "store" ]; then
 fi
 if [ "${{1:-}}" = "context" ]; then
   printf 'context-start\n' >> "{}"
-  sleep 1.0
+  sleep 2
   printf 'context-complete\n' >> "{}"
   cat <<'EOF'
 <lucid-context>
@@ -1892,6 +1892,7 @@ exit 1
     #[cfg(unix)]
     #[tokio::test]
     async fn parsed_lucid_alias_drives_factory_binary_and_distinct_timeouts() {
+        let _guard = lucid::lock_lucid_spawn().await;
         let tmp = TempDir::new().unwrap();
         let selected_log = tmp.path().join("selected.log");
         let decoy_log = tmp.path().join("decoy.log");
@@ -1906,8 +1907,8 @@ backend = "lucid.selected"
 
 [storage.lucid.selected]
 binary_path = "{selected_cmd}"
-recall_timeout_ms = 200
-store_timeout_ms = 500
+recall_timeout_ms = 800
+store_timeout_ms = 1500
 
 [storage.lucid.decoy]
 binary_path = "{decoy_cmd}"
@@ -1942,7 +1943,7 @@ store_timeout_ms = 900
             .unwrap();
         let entries = memory.recall("factory", 5, None, None, None).await.unwrap();
 
-        tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(3_100)).await;
         let selected_calls = fs::read_to_string(&selected_log).unwrap_or_default();
         assert!(selected_calls.contains("store-start:fast_store:"));
         assert!(selected_calls.contains("fast-store-complete"));
@@ -1966,6 +1967,7 @@ store_timeout_ms = 900
     #[cfg(unix)]
     #[tokio::test]
     async fn migration_factory_uses_selected_lucid_alias() {
+        let _guard = lucid::lock_lucid_spawn().await;
         let tmp = TempDir::new().unwrap();
         let selected_log = tmp.path().join("selected-migration.log");
         let decoy_log = tmp.path().join("decoy-migration.log");
@@ -1980,8 +1982,8 @@ backend = "lucid.selected"
 
 [storage.lucid.selected]
 binary_path = "{selected_cmd}"
-recall_timeout_ms = 200
-store_timeout_ms = 500
+recall_timeout_ms = 800
+store_timeout_ms = 1500
 
 [storage.lucid.decoy]
 binary_path = "{decoy_cmd}"

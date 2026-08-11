@@ -604,6 +604,29 @@ impl Memory for LucidMemory {
     }
 }
 
+/// Process-global serial lock for tests that spawn real child processes
+/// through `run_lucid_command_raw`.
+///
+/// Under thread-parallel `cargo test` the per-test current-thread tokio
+/// runtime shares the host's signal-delivery and pipe-ready notifications
+/// across concurrent spawns; the 200–500ms deadlines these tests assert are
+/// blown when the reactor falls behind. nextest's process-per-test isolation
+/// masks this on Linux CI, but macOS plain `cargo test -j4` reproduces 3–5
+/// failures per run. Serializing the family follows the same pattern used
+/// for the heartbeat registry tests: every participant that touches the
+/// process-global resource participates in the lock.
+#[cfg(test)]
+static LUCID_SPAWN_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Acquire the process-global serial lock for a lucid spawn test. The
+/// returned guard is held across the test body (binding it to `_` is enough)
+/// so the spawn, reap, and marker assertions all run while every other
+/// spawn test waits.
+#[cfg(test)]
+pub(crate) async fn lock_lucid_spawn() -> tokio::sync::MutexGuard<'static, ()> {
+    LUCID_SPAWN_TEST_LOCK.lock().await
+}
+
 #[cfg(test)]
 mod platform_tests {
     use super::*;
@@ -767,7 +790,7 @@ exit 1
             r#"#!/bin/sh
 set -eu
 printf '%s\n' "$$" > "{}"
-sleep 1
+sleep 5
 printf 'completed\n' > "{}"
 "#,
             pid_path.display(),
@@ -921,6 +944,7 @@ exit 1
 
     #[tokio::test]
     async fn store_handles_lucid_cold_start_delay_with_default_timeout() {
+        let _guard = lock_lucid_spawn().await;
         let tmp = TempDir::new().unwrap();
         let marker_path = tmp.path().join("store-completed.marker");
         let delayed_cmd = write_delayed_store_lucid_script(tmp.path(), &marker_path);
@@ -946,15 +970,20 @@ exit 1
 
     #[tokio::test]
     async fn timeout_terminates_and_reaps_lucid_child() {
+        let _guard = lock_lucid_spawn().await;
         let tmp = TempDir::new().unwrap();
         let pid_path = tmp.path().join("child.pid");
         let marker_path = tmp.path().join("completed.marker");
         let cmd = write_timeout_lucid_script(tmp.path(), &pid_path, &marker_path);
 
-        let error = LucidMemory::run_lucid_command_raw(&cmd, &[], Duration::from_millis(200))
+        // 1500ms gives the child shell time to write its pid even on a slow
+        // macOS host where forking a shell out of a TCC-protected cwd adds
+        // hundreds of milliseconds; the script's own sleep is 5s, so the
+        // deadline still fires well before completion.
+        let error = LucidMemory::run_lucid_command_raw(&cmd, &[], Duration::from_millis(1_500))
             .await
             .expect_err("delayed command must time out");
-        assert!(error.to_string().contains("timed out after 200ms"));
+        assert!(error.to_string().contains("timed out after 1500ms"));
 
         let pid = fs::read_to_string(&pid_path)
             .expect("fake command must record its PID before the deadline")
@@ -972,7 +1001,7 @@ exit 1
             "timed-out Lucid child PID {pid} still exists"
         );
 
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        tokio::time::sleep(Duration::from_millis(5_100)).await;
         assert!(
             !marker_path.exists(),
             "timed-out Lucid child continued running and wrote its late marker"
@@ -981,6 +1010,7 @@ exit 1
 
     #[tokio::test]
     async fn with_overrides_none_matches_new_defaults() {
+        let _guard = lock_lucid_spawn().await;
         let tmp = TempDir::new().unwrap();
         let delayed_cmd = write_delayed_lucid_script(tmp.path());
         let sqlite = SqliteMemory::new("test", tmp.path()).unwrap();
