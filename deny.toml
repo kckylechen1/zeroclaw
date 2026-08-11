@@ -62,6 +62,10 @@ ignore = [
     # (Tauri) was removed in PR #8544.
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; transitive macro helper; tracking #8519" },
     { id = "RUSTSEC-2024-0388", reason = "derivative unmaintained; transitive derive helper; tracking #8519" },
+    # lru -- unsound LruCache::pop panic-safety (RUSTSEC-2026-0253); patched >=0.18.2.
+    # Direct deps and ratatui-core upgraded to 0.18.2; remaining 0.16.4 pinned by
+    # nostr-sdk 0.44 (nostr-database / nostr-relay-pool) behind channel-nostr.
+    { id = "RUSTSEC-2026-0253", reason = "lru unsound LruCache::pop panic-safety; direct+ratatui upgraded to >=0.18.2; remaining 0.16.4 pinned transitively by nostr-sdk 0.44; upstream fix pending" },
 ]
 
 [licenses]
