@@ -5823,4 +5823,60 @@ mod tests {
             "every key cooling must read as 'no rotation', never as a silent reuse",
         );
     }
+
+    /// Invariant: the credential that actually returned 429 is the one
+    /// cooled. After the first rotation installs key-a, a second 429 on
+    /// key-a must park key-a only; key-b must remain eligible for the retry.
+    /// This is the end-to-end path (`chat_with_system` → 429 →
+    /// `rotate_and_apply_key` → cool), not just the `cool_down_key` unit the
+    /// two tests above exercise.
+    #[tokio::test]
+    async fn rate_limit_cools_only_the_key_that_was_429ed() {
+        // Initial credential is key-original (not in the rotation pool).
+        // Fail twice so the chat sees: key-original 429s → rotate to key-a →
+        // key-a 429s → rotate to key-b → key-b succeeds. key-a earned a 429;
+        // key-b did not. Only key-a must be in key_cooldowns.
+        // Construction-time key-original's 429 intentionally stays out of the
+        // cooldown table (it is not in the api_keys rotation ring); the
+        // exclusive set assertion below also locks that design choice.
+        let mock = Arc::new(KeyRotationMock::new("key-original", 2, true));
+        let model_provider = ReliableModelProvider::new(
+            "test",
+            vec![("primary".into(), Box::new(Arc::clone(&mock)))],
+            3,
+            1,
+        )
+        .with_api_keys(vec!["key-a".into(), "key-b".into()]);
+
+        let result = model_provider
+            .chat_with_system(None, "hello", "test-model", Some(0.0))
+            .await
+            .unwrap();
+        assert_eq!(result, "ok");
+
+        assert_eq!(
+            mock.keys_seen(),
+            vec![
+                Some("key-original".to_string()),
+                Some("key-a".to_string()),
+                Some("key-b".to_string()),
+            ],
+            "each retry must carry the next rotated key",
+        );
+
+        // key-a earned a 429 on attempt 2; key-b never 429ed. The cooldown
+        // map must contain exactly key-a — not key-b, and not construction-time
+        // key-original (outside the api_keys ring).
+        let cooldowns = model_provider
+            .key_cooldowns
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let cooled: std::collections::BTreeSet<String> = cooldowns.keys().cloned().collect();
+        assert_eq!(
+            cooled,
+            std::iter::once("key-a".to_string()).collect(),
+            "exactly key-a must be cooling; got {cooled:?}"
+        );
+    }
 }

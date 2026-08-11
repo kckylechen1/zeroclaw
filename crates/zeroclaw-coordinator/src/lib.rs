@@ -46,6 +46,7 @@
 mod backend;
 mod cancel;
 mod coordinator;
+mod driver;
 mod outcome;
 mod persistence;
 mod state;
@@ -58,6 +59,10 @@ pub use backend::{
 };
 pub use cancel::CancelToken;
 pub use coordinator::Coordinator;
+pub use driver::{
+    AgentDriver, AgentRunHandle, AgentRunRequest, AgentRunSnapshot, AgentRunStatus, DriverError,
+    HarnessCapabilities, HarnessCard, HarnessId, HarnessKind, ResumeRequest,
+};
 pub use outcome::ChildOutcome;
 pub use persistence::{ChildPersistence, NoopPersistence, PersistenceError};
 pub use state::{
