@@ -5836,6 +5836,9 @@ mod tests {
         // Fail twice so the chat sees: key-original 429s → rotate to key-a →
         // key-a 429s → rotate to key-b → key-b succeeds. key-a earned a 429;
         // key-b did not. Only key-a must be in key_cooldowns.
+        // Construction-time key-original's 429 intentionally stays out of the
+        // cooldown table (it is not in the api_keys rotation ring); the
+        // exclusive set assertion below also locks that design choice.
         let mock = Arc::new(KeyRotationMock::new("key-original", 2, true));
         let model_provider = ReliableModelProvider::new(
             "test",
@@ -5862,19 +5865,18 @@ mod tests {
         );
 
         // key-a earned a 429 on attempt 2; key-b never 429ed. The cooldown
-        // map must reflect exactly that.
+        // map must contain exactly key-a — not key-b, and not construction-time
+        // key-original (outside the api_keys ring).
         let cooldowns = model_provider
             .key_cooldowns
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
-        assert!(
-            cooldowns.contains_key("key-a"),
-            "the 429ed key-a must be parked in key_cooldowns: {cooldowns:?}"
-        );
-        assert!(
-            !cooldowns.contains_key("key-b"),
-            "the healthy key-b must not be cooled: {cooldowns:?}"
+        let cooled: std::collections::BTreeSet<String> = cooldowns.keys().cloned().collect();
+        assert_eq!(
+            cooled,
+            std::iter::once("key-a".to_string()).collect(),
+            "exactly key-a must be cooling; got {cooled:?}"
         );
     }
 }
