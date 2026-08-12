@@ -431,12 +431,20 @@ pub enum ChildStatus {
         error_count: u32,
     },
     /// Ended. `outcome` says how.
+    ///
+    /// Token fields are the terminal projection of [`ChildResult`]'s usage
+    /// (`tokens_used` / `output_tokens_used` / `total_tokens_used`). They
+    /// must be copied from the completed result — not zeroed — so inspect
+    /// and query see the same accounting the runner produced.
     Finished {
         outcome: ChildOutcome,
         output: String,
         detail: Option<String>,
         tool_calls: u32,
         turns: u32,
+        tokens_used: u64,
+        output_tokens_used: u64,
+        total_tokens_used: u64,
         worktree_path: Option<String>,
     },
 }
@@ -839,6 +847,9 @@ mod tests {
             detail: None,
             tool_calls: 1,
             turns: 1,
+            tokens_used: 0,
+            output_tokens_used: 0,
+            total_tokens_used: 0,
             worktree_path: None,
         }
     }
