@@ -3492,7 +3492,9 @@ mod tests {
     /// fails (the backends would otherwise succeed or error without the
     /// specific allowlist rejection).
     #[tokio::test]
-    #[cfg(unix)]
+    // APFS rejects non-UTF-8 path components (errno 92), so this fixture cannot
+    // be constructed on macOS; keep the regression on Linux/other Unix FS.
+    #[cfg(all(unix, not(target_os = "macos")))]
     async fn execute_action_rejects_non_utf8_canonical_target_before_backend_dispatch() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
@@ -3552,7 +3554,7 @@ mod tests {
     /// canonical destination is rejected locally — before the sidecar round
     /// trip — and is never forwarded.
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     async fn computer_use_rejects_non_utf8_canonical_target_before_sidecar() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
