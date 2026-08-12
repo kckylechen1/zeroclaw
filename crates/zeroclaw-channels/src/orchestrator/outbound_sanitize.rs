@@ -180,6 +180,10 @@ pub(crate) fn strip_tool_call_tags(message: &str) -> String {
 
     result.trim().to_string()
 }
+
+/// Remove `<tool_result …>…</tool_result>` blocks (and a leading `[Tool results]`
+/// header, if present) from a conversation-history entry so that stale tool
+/// output is never presented to the LLM without the corresponding `<tool_call>`.
 pub(crate) fn strip_tool_result_content(text: &str) -> String {
     static TOOL_RESULT_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"(?s)<tool_result[^>]*>.*?</tool_result>")
