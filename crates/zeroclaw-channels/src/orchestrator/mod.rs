@@ -25,6 +25,8 @@ pub(crate) use channel_system_prompt::{
 
 mod outbound_sanitize;
 #[cfg(test)]
+pub(crate) use outbound_sanitize::strip_think_tags_inline;
+#[cfg(test)]
 pub(crate) use outbound_sanitize::{
     EMPTY_CHANNEL_REPLY_FALLBACK, OutboundContentFormat, channel_outbound_protected_spans,
     sanitize_channel_response, sanitize_channel_response_with_leak_detection,
@@ -36,8 +38,6 @@ pub(crate) use outbound_sanitize::{
     sanitize_streaming_draft_text, strip_tool_call_tags, strip_tool_result_content,
     strip_tool_summary_prefix,
 };
-#[cfg(test)]
-pub(crate) use outbound_sanitize::strip_think_tags_inline;
 
 mod runtime_commands;
 pub(crate) use runtime_commands::{
