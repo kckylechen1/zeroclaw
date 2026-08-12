@@ -2024,6 +2024,12 @@ impl RpcDispatcher {
     async fn handle_session_configure(&self, params: &Value) -> RpcResult {
         let req: SessionConfigureParams = parse_params(params)?;
         validate_session_configure_overrides(&req.overrides)?;
+        let _model_provider_update = self
+            .ctx
+            .sessions
+            .lock_model_provider_update(&req.session_id)
+            .await
+            .ok_or_else(|| rpc_err(SESSION_NOT_FOUND, "Session not found"))?;
 
         let merged = self
             .ctx
@@ -2712,20 +2718,20 @@ impl RpcDispatcher {
     fn schedule_live_sessions_refresh_for_agent(&self, agent_alias: String) {
         let ctx = Arc::clone(&self.ctx);
         zeroclaw_spawn::spawn!(async move {
-            let provider_ref = {
-                let config = ctx.config.read();
-                config
-                    .agent(&agent_alias)
-                    .map(|agent| agent.model_provider.to_string())
-            };
-            let Some(provider_ref) = provider_ref else {
-                return;
-            };
-            Self::refresh_live_sessions_matching(ctx, &provider_ref, |session_agent, overrides| {
-                agent_scoped_refresh_selects(&agent_alias, session_agent, overrides)
-            })
-            .await;
+            Self::refresh_live_sessions_for_agent(ctx, &agent_alias).await;
         });
+    }
+
+    async fn refresh_live_sessions_for_agent(ctx: Arc<RpcContext>, agent_alias: &str) {
+        Self::refresh_live_sessions_matching(ctx, |config, session_agent, overrides| {
+            if !agent_scoped_refresh_selects(agent_alias, session_agent, overrides) {
+                return None;
+            }
+            config
+                .agent(agent_alias)
+                .map(|agent| agent.model_provider.to_string())
+        })
+        .await;
     }
 
     async fn refresh_live_sessions_for_model_provider(
@@ -2733,45 +2739,44 @@ impl RpcDispatcher {
         model_provider_ref: &str,
     ) {
         let target_ref = model_provider_ref.to_string();
-        Self::refresh_live_sessions_matching(ctx, model_provider_ref, move |_agent, overrides| {
-            provider_scoped_refresh_selects(&target_ref, overrides)
+        Self::refresh_live_sessions_matching(ctx, move |config, session_agent, overrides| {
+            if !provider_scoped_refresh_selects(&target_ref, overrides) {
+                return None;
+            }
+            let effective_ref = overrides.model_provider.as_deref().or_else(|| {
+                config
+                    .agent(session_agent)
+                    .map(|agent| agent.model_provider.as_str())
+            });
+            (effective_ref == Some(target_ref.as_str())).then(|| target_ref.clone())
         })
         .await;
     }
 
-    async fn refresh_live_sessions_matching<F>(
-        ctx: Arc<RpcContext>,
-        model_provider_ref: &str,
-        select: F,
-    ) where
-        F: Fn(&str, &SessionOverrides) -> bool,
+    async fn refresh_live_sessions_matching<F>(ctx: Arc<RpcContext>, resolve_provider_ref: F)
+    where
+        F: Fn(&Config, &str, &SessionOverrides) -> Option<String>,
     {
         let session_ids = ctx.sessions.list_ids().await;
         for session_id in session_ids {
+            let Some(_model_provider_update) =
+                ctx.sessions.lock_model_provider_update(&session_id).await
+            else {
+                continue;
+            };
             let Some(agent_alias) = ctx.sessions.get_agent_alias(&session_id).await else {
                 continue;
             };
             let Some(overrides) = ctx.sessions.get_overrides(&session_id).await else {
                 continue;
             };
-            if !select(&agent_alias, &overrides) {
-                continue;
-            }
-            let resolves_provider = {
-                let config = ctx.config.read();
-                let effective_ref = overrides.model_provider.as_deref().or_else(|| {
-                    config
-                        .agent(&agent_alias)
-                        .map(|agent| agent.model_provider.as_str())
-                });
-                effective_ref == Some(model_provider_ref)
-            };
-            if !resolves_provider {
-                continue;
-            }
-
             let (model_provider, model_provider_name, model_name, tool_dispatcher, temperature) = {
                 let config = ctx.config.read();
+                let Some(model_provider_ref) =
+                    resolve_provider_ref(&config, &agent_alias, &overrides)
+                else {
+                    continue;
+                };
                 let provider_temperature = model_provider_ref.split_once('.').and_then(
                     |(provider_type, provider_alias)| {
                         config
@@ -2800,7 +2805,7 @@ impl RpcDispatcher {
                 };
                 match crate::agent::agent::build_session_model_provider(
                     &config,
-                    model_provider_ref,
+                    &model_provider_ref,
                     overrides.model.as_deref(),
                 ) {
                     Ok((model_provider, model_provider_name, model_name)) => {

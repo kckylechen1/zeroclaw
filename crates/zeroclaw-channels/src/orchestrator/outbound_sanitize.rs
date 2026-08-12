@@ -12,6 +12,42 @@ use url::Url;
 
 use zeroclaw_runtime::tools::Tool;
 
+/// Every XML-ish element name that opens a tool-CALL envelope, longest first so
+/// a prefix scan reads `<tool_call …>` as itself rather than as the shorter
+/// `<tool …>`.
+///
+/// Canonical for the channel boundary. [`strip_tool_call_tags`] builds its
+/// complete `<name>` / `</name>` pairs from this list and
+/// [`truncate_at_unclosed_scratchpad_open`] derives its partial-prefix
+/// inventory from it, so a dialect added here cannot be stripped from a
+/// delivered message but left visible in a draft frame.
+const TOOL_CALL_TAG_NAMES: [&str; 7] = [
+    "function_calls",
+    "function_call",
+    "tool_call",
+    "tool-call",
+    "toolcall",
+    "invoke",
+    "tool",
+];
+
+/// The result envelope's element name. Kept apart from the call names because
+/// the two are stripped under different conditions: the call pass is skipped
+/// for an answer that is genuine `<tool_call>` documentation, while results are
+/// stripped unconditionally.
+const TOOL_RESULT_TAG_NAME: &str = "tool_result";
+
+/// Every protocol element name, call and result alike, longest first.
+fn tool_protocol_tag_names() -> impl Iterator<Item = &'static str> {
+    // `tool_result` sorts before the bare `tool` for the same longest-first
+    // reason the call list is ordered.
+    TOOL_CALL_TAG_NAMES
+        .into_iter()
+        .take(TOOL_CALL_TAG_NAMES.len() - 1)
+        .chain(std::iter::once(TOOL_RESULT_TAG_NAME))
+        .chain(std::iter::once("tool"))
+}
+
 pub(crate) fn strip_tool_call_tags(message: &str) -> String {
     const TOOL_CALL_OPEN_TAGS: [&str; 7] = [
         "<function_calls>",
@@ -235,6 +271,232 @@ pub(crate) fn strip_think_tags_inline(s: &str) -> String {
         }
     }
     result.trim().to_string()
+}
+
+/// Drop the tail from the first scratchpad envelope that has opened but not
+/// closed.
+///
+/// Streaming needs this and final delivery does not: the final response is a
+/// complete turn, whereas a draft is rendered from whatever tokens have
+/// arrived, and the closing tag can be hundreds of tokens away. Showing the
+/// open envelope in the meantime is precisely the leak this guards against.
+/// Nothing is lost — the next delta re-renders from the full accumulation.
+///
+/// A *closed* block is stepped over rather than cut at. On the paths that
+/// strip closed blocks first there is nothing left to step over, so this costs
+/// nothing there; it is what makes the function safe to run on the branch that
+/// deliberately preserves a complete `<tool_call>` example, where cutting at
+/// the first opener would delete the very thing the branch exists to keep.
+fn truncate_at_unclosed_scratchpad_open(s: &str) -> String {
+    let mut cut = s.len();
+    let mut from = 0;
+    while let Some(offset) = s[from..].find('<') {
+        let open_at = from + offset;
+        let Some(name) = protocol_tag_name_at(&s[open_at..]) else {
+            // Not a protocol opener: step past this `<` and keep scanning, so
+            // ordinary markup or prose does not end the search early.
+            from = open_at + 1;
+            continue;
+        };
+        let closer = format!("</{name}>");
+        match s[open_at..].find(&closer) {
+            // Complete block: resume after it, so a later opener is still
+            // evaluated on its own merits.
+            Some(close_at) => from = open_at + close_at + closer.len(),
+            // Nothing closes this one, so it is still mid-emission.
+            None => {
+                cut = open_at;
+                break;
+            }
+        }
+    }
+
+    let head = &s[..cut];
+    // The opening tag is itself delivered in fragments, so the tail can be a
+    // strict prefix of an opener ("…\n<tool_res") that matches no complete name
+    // yet. Cutting only on the complete literal renders that fragment to the
+    // user for one frame — the leak this function exists to prevent. The
+    // fragment is restored by the next delta if it turns out to be prose.
+    let partial = head
+        .rfind('<')
+        .filter(|&pos| is_partial_protocol_tag_open(&head[pos..]))
+        .unwrap_or(head.len());
+    head[..partial].trim_end().to_string()
+}
+
+/// The protocol element name opening at the start of `rest`, if any.
+///
+/// Longest match wins, so `<tool_call>` is never read as the shorter `<tool>`
+/// and mistakenly hunted for a `</tool>` that will never arrive. The name must
+/// be followed by a character that actually terminates an element name, so
+/// prose like `<toolkit>` is not mistaken for protocol.
+fn protocol_tag_name_at(rest: &str) -> Option<&'static str> {
+    tool_protocol_tag_names().find(|name| {
+        let Some(after) = rest.get(1..1 + name.len()) else {
+            return false;
+        };
+        if !after.eq_ignore_ascii_case(name) {
+            return false;
+        }
+        rest[1 + name.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c == '>' || c == '/' || c.is_whitespace())
+    })
+}
+
+/// Whether `rest` is a still-incomplete opener — a strict prefix of some
+/// protocol element name, with nothing after it yet to say otherwise.
+fn is_partial_protocol_tag_open(rest: &str) -> bool {
+    let Some(typed) = rest.strip_prefix('<') else {
+        return false;
+    };
+    tool_protocol_tag_names().any(|name| {
+        name.len() >= typed.len()
+            && name
+                .get(..typed.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(typed))
+    })
+}
+
+/// Sanitize a streaming draft partial before it is shown to the user.
+///
+/// Draft text is model output mid-flight, so it can carry scratchpad that the
+/// delivered response never keeps: reasoning traces, and — because native
+/// tool-call providers interleave narration with protocol — raw
+/// `<tool_call>` / `<tool_result>` envelopes. Final replies are cleaned by
+/// [`sanitize_channel_response_for_format_with_leak_detection`], but drafts
+/// never reach it: `update_draft` posts straight to the channel transport, so
+/// a leaked envelope stays on screen until the final edit replaces it, and
+/// remains visible indefinitely if the turn fails first.
+///
+/// This is the assistant-output boundary for partial text, and it keeps the
+/// final sanitizer's preservation contract rather than a looser one: an
+/// answer that *is* documentation for `<tool_call>` keeps its tags here
+/// exactly as it keeps them through final delivery, while `<tool_result>`
+/// envelopes and reasoning go in both places. Placing the filter here rather
+/// than in a channel transport is deliberate — transports also carry
+/// attachment captions, announcements, and operator text, none of which are
+/// assistant scratchpad.
+pub(crate) fn sanitize_streaming_draft_text(s: &str, known_tool_names: &HashSet<String>) -> String {
+    let cleaned = strip_think_tags_inline(s);
+
+    // Same classifier the delivered message is judged by, for the same reason:
+    // XML tags are only one of the shapes protocol arrives in. A provider with
+    // `strict_tool_parsing` enabled forwards deltas without passing them
+    // through the runtime's `StreamTextGuard`, so a bare or fenced protocol
+    // JSON body reaches this boundary exactly as the model emitted it. The
+    // classifier is partial-aware where it matters — an envelope whose JSON has
+    // not finished arriving fails to parse and is caught as malformed — and it
+    // exempts genuine protocol documentation, so an answer *about* tool calls
+    // is not blanked.
+    //
+    // Blanking a frame is the safe direction: an accumulation that momentarily
+    // classifies as protocol and later resolves to prose is re-rendered whole
+    // by the next delta, whereas a leaked envelope stays on screen until the
+    // final edit, or forever if the turn fails first.
+    if should_suppress_top_level_tool_protocol_response(cleaned.trim(), known_tool_names) {
+        return String::new();
+    }
+
+    // Mirror the final sanitizer's guards exactly rather than inventing a
+    // looser draft contract: there, the tool-CALL pass is skipped for genuine
+    // protocol examples while the tool-RESULT pass runs unconditionally.
+    // Preserving more here than final delivery preserves would put content on
+    // screen that the delivered message then strips — a leak window in the
+    // one direction this fix exists to close.
+    let cleaned = if starts_with_visible_tool_call_tag_example(&cleaned) {
+        // Preserving the example does not license showing a half-emitted
+        // result envelope: `strip_tool_result_content` removes the closed
+        // ones, and truncation removes an opener that has no closer yet.
+        // Skipping truncation here would leave a raw partial payload on
+        // screen, which is the same leak this function exists to close.
+        strip_tool_result_content(&cleaned)
+    } else {
+        let cleaned = strip_tool_call_tags(&cleaned);
+        strip_tool_result_content(&cleaned)
+    };
+
+    // Embedded protocol, as opposed to a whole-response envelope: narration
+    // followed by a fenced or bare JSON payload. Both passes only act on
+    // complete blocks, which is why the truncations below still have work to do.
+    let cleaned = strip_fenced_tool_protocol_artifacts(&cleaned, known_tool_names);
+    let cleaned = strip_isolated_tool_json_artifacts(&cleaned, known_tool_names);
+
+    let cleaned = truncate_at_unclosed_protocol_fence(&cleaned, known_tool_names);
+    let cleaned = truncate_at_incomplete_protocol_json(&cleaned);
+    truncate_at_unclosed_scratchpad_open(&cleaned)
+}
+
+/// Drop the tail from a JSON value that has started, already reads as tool
+/// protocol, and has not finished arriving.
+///
+/// This is the JSON counterpart to [`truncate_at_unclosed_scratchpad_open`],
+/// and it exists for the same reason: the completed-payload passes cannot
+/// classify a value they cannot parse, so without it the first frames of a
+/// protocol envelope render verbatim — `{"tool_call_id":"call_1",` on screen
+/// while the rest is still coming.
+///
+/// Complete values are stepped over rather than cut at, so narration followed
+/// by finished JSON is judged by the completed-payload passes as before. Only
+/// the unfinished tail is held back, and only when the parser recognizes it as
+/// protocol, so an ordinary JSON answer still streams as it arrives.
+fn truncate_at_incomplete_protocol_json(s: &str) -> String {
+    let mut from = 0;
+    while let Some(rel) = s[from..].find(['{', '[']) {
+        let at = from + rel;
+        let tail = &s[at..];
+        let mut stream = serde_json::Deserializer::from_str(tail).into_iter::<serde_json::Value>();
+        match stream.next() {
+            Some(Ok(_)) if stream.byte_offset() > 0 => from = at + stream.byte_offset(),
+            // Nothing completes from here, so this is the unfinished tail and
+            // everything after it belongs to the same value.
+            _ => {
+                return if zeroclaw_tool_call_parser::looks_like_incomplete_tool_protocol_json(tail)
+                {
+                    s[..at].trim_end().to_string()
+                } else {
+                    s.to_string()
+                };
+            }
+        }
+    }
+    s.to_string()
+}
+
+/// Drop the tail from a fenced block that has opened, already reads as tool
+/// protocol, and has not closed yet.
+///
+/// The completed-block passes cannot help here: a fence is only recognized once
+/// its closing ``` arrives, which for a protocol payload can be the rest of the
+/// turn. Waiting renders the payload meanwhile.
+///
+/// The cut is conditional on the partial body *already* classifying as
+/// protocol, so an ordinary fenced code block still streams line by line as the
+/// user expects; only a block that has shown its protocol shape is held back.
+fn truncate_at_unclosed_protocol_fence(s: &str, known_tool_names: &HashSet<String>) -> String {
+    let mut cursor = 0usize;
+    while let Some(rel_open) = s[cursor..].find("```") {
+        let open_start = cursor + rel_open;
+        let after_ticks = open_start + 3;
+        let Some(line_end_rel) = s[after_ticks..].find('\n') else {
+            // The language tag itself is still arriving; nothing to judge yet.
+            return s.to_string();
+        };
+        let body_start = after_ticks + line_end_rel + 1;
+        match s[body_start..].find("```") {
+            Some(close_rel) => cursor = body_start + close_rel + 3,
+            None => {
+                let body = s[body_start..].trim();
+                return if should_suppress_top_level_tool_protocol_response(body, known_tool_names) {
+                    s[..open_start].trim_end().to_string()
+                } else {
+                    s.to_string()
+                };
+            }
+        }
+    }
+    s.to_string()
 }
 
 fn starts_with_visible_tool_call_tag_example(response: &str) -> bool {
@@ -988,4 +1250,52 @@ pub(crate) fn strip_isolated_tool_json_artifacts(
         result = result.replace("\n\n\n", "\n\n");
     }
     result.trim().to_string()
+}
+
+#[cfg(test)]
+mod streaming_draft_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn no_tools() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    #[test]
+    fn streaming_draft_strips_tool_result_envelopes() {
+        assert_eq!(
+            sanitize_streaming_draft_text(
+                "Before.\n<tool_result name=\"shell\">{\"ok\":true}</tool_result>\nAfter.",
+                &no_tools()
+            ),
+            "Before.\n\nAfter."
+        );
+        assert_eq!(
+            sanitize_streaming_draft_text(
+                "Result summary:\n<tool_result>\n{\"status\": \"ok\",",
+                &no_tools()
+            ),
+            "Result summary:"
+        );
+    }
+
+    #[test]
+    fn streaming_draft_preserves_tool_protocol_example() {
+        let example = "<tool_call>{\"name\":\"shell\",\"arguments\":{\"command\":\"ls\"}}</tool_call>\nThis is an example, not an invocation.";
+        assert_eq!(sanitize_streaming_draft_text(example, &no_tools()), example);
+    }
+
+    #[test]
+    fn streaming_draft_leaves_clean_text_untouched() {
+        let text = "A normal reply.\nWith two lines.\n\n  indented continuation";
+        assert_eq!(sanitize_streaming_draft_text(text, &no_tools()), text);
+        let prose = "Use the `tool_result` field.";
+        assert_eq!(sanitize_streaming_draft_text(prose, &no_tools()), prose);
+    }
+
+    #[test]
+    fn streaming_draft_does_not_treat_thinking_tag_as_scratchpad() {
+        let text = "<thinking-cap>worn</thinking-cap> Answer.";
+        assert_eq!(sanitize_streaming_draft_text(text, &no_tools()), text);
+    }
 }

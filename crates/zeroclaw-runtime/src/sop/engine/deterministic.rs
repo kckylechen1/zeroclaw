@@ -1048,9 +1048,7 @@ impl SopEngine {
         let mut last_completed_step = 0;
         for result in &run.step_results {
             if result.status == SopStepStatus::Completed {
-                // Try to parse output as JSON, fall back to string value.
-                let value = serde_json::from_str(&result.output)
-                    .unwrap_or_else(|_| serde_json::Value::String(result.output.clone()));
+                let value = step_result_value(result);
                 step_outputs.insert(result.step_number, value);
                 last_completed_step = result.step_number;
             }
