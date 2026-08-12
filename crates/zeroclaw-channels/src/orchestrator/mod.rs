@@ -25,6 +25,8 @@ pub(crate) use channel_system_prompt::{
 
 mod outbound_sanitize;
 #[cfg(test)]
+pub(crate) use outbound_sanitize::strip_think_tags_inline;
+#[cfg(test)]
 pub(crate) use outbound_sanitize::{
     EMPTY_CHANNEL_REPLY_FALLBACK, OutboundContentFormat, channel_outbound_protected_spans,
     sanitize_channel_response, sanitize_channel_response_with_leak_detection,
@@ -33,7 +35,7 @@ pub(crate) use outbound_sanitize::{
 pub(crate) use outbound_sanitize::{
     ensure_nonempty_channel_reply, outbound_content_format_for_channel,
     redact_channel_outbound_leaks, sanitize_channel_response_for_format_with_leak_detection,
-    strip_think_tags_inline, strip_tool_call_tags, strip_tool_result_content,
+    sanitize_streaming_draft_text, strip_tool_call_tags, strip_tool_result_content,
     strip_tool_summary_prefix,
 };
 
@@ -2573,6 +2575,128 @@ fn spawn_scoped_typing_task(
     })
 }
 
+struct ScopedTypingTask {
+    cancellation_token: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+struct ScopedTypingController {
+    channel: Arc<dyn Channel>,
+    recipient: String,
+    task: tokio::sync::Mutex<Option<ScopedTypingTask>>,
+}
+
+impl ScopedTypingController {
+    fn new(channel: Arc<dyn Channel>, recipient: String) -> Self {
+        Self {
+            channel,
+            recipient,
+            task: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn resume(&self) {
+        let mut task = self.task.lock().await;
+        if task.is_some() {
+            return;
+        }
+
+        let cancellation_token = CancellationToken::new();
+        let handle = spawn_scoped_typing_task(
+            Arc::clone(&self.channel),
+            self.recipient.clone(),
+            cancellation_token.clone(),
+        );
+        *task = Some(ScopedTypingTask {
+            cancellation_token,
+            handle,
+        });
+    }
+
+    async fn pause(&self) {
+        let task = self.task.lock().await.take();
+        if let Some(task) = task {
+            task.cancellation_token.cancel();
+            log_worker_join_result(task.handle.await);
+        }
+    }
+}
+
+struct ApprovalTypingChannel {
+    inner: Arc<dyn Channel>,
+    typing: Arc<ScopedTypingController>,
+}
+
+impl ApprovalTypingChannel {
+    fn new(inner: Arc<dyn Channel>, typing: Arc<ScopedTypingController>) -> Self {
+        Self { inner, typing }
+    }
+}
+
+impl ::zeroclaw_api::attribution::Attributable for ApprovalTypingChannel {
+    fn role(&self) -> ::zeroclaw_api::attribution::Role {
+        self.inner.role()
+    }
+
+    fn alias(&self) -> &str {
+        self.inner.alias()
+    }
+}
+
+// `ToolLoop::channel` is consumed only by the approval gate. Approval-gated
+// calls are forced sequential by `should_execute_tools_in_parallel`, so this
+// deliberately narrow wrapper forwards the required Channel methods plus the
+// approval boundary instead of acting as a general channel facade.
+#[async_trait::async_trait]
+impl Channel for ApprovalTypingChannel {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
+        self.inner.send(message).await
+    }
+
+    async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+        self.inner.listen(tx).await
+    }
+
+    async fn request_approval(
+        &self,
+        recipient: &str,
+        request: &zeroclaw_api::channel::ChannelApprovalRequest,
+    ) -> anyhow::Result<Option<zeroclaw_api::channel::ChannelApprovalResponse>> {
+        Ok(self
+            .request_approval_attributed(recipient, request)
+            .await?
+            .map(|response| response.response))
+    }
+
+    async fn request_approval_attributed(
+        &self,
+        recipient: &str,
+        request: &zeroclaw_api::channel::ChannelApprovalRequest,
+    ) -> anyhow::Result<Option<zeroclaw_api::channel::AttributedApprovalResponse>> {
+        self.typing.pause().await;
+        let response = self
+            .inner
+            .request_approval_attributed(recipient, request)
+            .await;
+        if response.as_ref().is_ok_and(|response| {
+            response.as_ref().is_some_and(|response| {
+                matches!(
+                    response.response,
+                    zeroclaw_api::channel::ChannelApprovalResponse::Approve
+                        | zeroclaw_api::channel::ChannelApprovalResponse::AlwaysApprove
+                )
+            })
+        }) {
+            self.typing.resume().await;
+        }
+        response
+    }
+}
+
 async fn process_channel_message(
     ctx: Arc<ChannelRuntimeContext>,
     msg: zeroclaw_api::channel::ChannelMessage,
@@ -3409,13 +3533,20 @@ async fn process_channel_message_body(
             let channel = Arc::clone(channel_ref);
             let reply_target = msg.reply_target.clone();
             let draft_id = draft_id_ref.to_string();
+            // Same registry the final sanitizer reads, resolved once per turn
+            // rather than per delta.
+            let known_tool_names: HashSet<String> = ctx
+                .tools_registry
+                .iter()
+                .map(|tool| tool.name().to_ascii_lowercase())
+                .collect();
             Some(zeroclaw_spawn::spawn!(async move {
                 use zeroclaw_runtime::agent::loop_::StreamDelta;
                 let mut accumulated = String::new();
                 while let Some(event) = rx.recv().await {
                     match event {
                         StreamDelta::Status(text) => {
-                            let visible = strip_think_tags_inline(&text);
+                            let visible = sanitize_streaming_draft_text(&text, &known_tool_names);
                             if let Err(e) = channel
                                 .update_draft_progress(&reply_target, &draft_id, &visible)
                                 .await
@@ -3433,7 +3564,8 @@ async fn process_channel_message_body(
                         }
                         StreamDelta::Text(text) => {
                             accumulated.push_str(&text);
-                            let visible = strip_think_tags_inline(&accumulated);
+                            let visible =
+                                sanitize_streaming_draft_text(&accumulated, &known_tool_names);
                             if let Err(e) = channel
                                 .update_draft(&reply_target, &draft_id, &visible)
                                 .await
@@ -3464,19 +3596,28 @@ async fn process_channel_message_body(
     let is_partial_draft = target_channel
         .as_ref()
         .is_some_and(|ch| ch.supports_draft_updates() && !ch.supports_multi_message_streaming());
-    let typing_cancellation = if is_partial_draft {
+    let typing_controller = if is_partial_draft {
         None
     } else {
-        target_channel.as_ref().map(|_| CancellationToken::new())
+        target_channel.as_ref().map(|channel| {
+            Arc::new(ScopedTypingController::new(
+                Arc::clone(channel),
+                msg.reply_target.clone(),
+            ))
+        })
     };
-    let typing_task = match (target_channel.as_ref(), typing_cancellation.as_ref()) {
-        (Some(channel), Some(token)) => Some(spawn_scoped_typing_task(
-            Arc::clone(channel),
-            msg.reply_target.clone(),
-            token.clone(),
-        )),
-        _ => None,
-    };
+    if let Some(typing) = typing_controller.as_ref() {
+        typing.resume().await;
+    }
+    let approval_channel: Option<Arc<dyn Channel>> =
+        match (target_channel.as_ref(), typing_controller.as_ref()) {
+            (Some(channel), Some(typing)) => Some(Arc::new(ApprovalTypingChannel::new(
+                Arc::clone(channel),
+                Arc::clone(typing),
+            ))),
+            (Some(channel), None) => Some(Arc::clone(channel)),
+            (None, _) => None,
+        };
 
     // Wrap observer to forward tool events as live thread messages
     // Bounded so a slow downstream channel cannot grow this queue
@@ -3696,7 +3837,7 @@ async fn process_channel_message_body(
                     cancellation_token: Some(cancellation_token.clone()),
                     on_delta: delta_tx.clone(),
                     shared_budget: None,
-                    channel: target_channel.as_deref(),
+                    channel: approval_channel.as_deref(),
                     // Collector is meaningful only when the generator is active.
                     // Pass None when receipts are disabled so the call site
                     // reflects that coupling explicitly.
@@ -3914,11 +4055,8 @@ async fn process_channel_message_body(
         "LLM call completed"
     );
 
-    if let Some(token) = typing_cancellation.as_ref() {
-        token.cancel();
-    }
-    if let Some(handle) = typing_task {
-        log_worker_join_result(handle.await);
+    if let Some(typing) = typing_controller.as_ref() {
+        typing.pause().await;
     }
 
     let reaction_done_emoji = match &llm_result {
