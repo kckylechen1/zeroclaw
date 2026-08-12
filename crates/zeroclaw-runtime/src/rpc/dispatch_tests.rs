@@ -4127,7 +4127,6 @@ async fn model_provider_update_converges_on_latest_agent_config() {
     );
 }
 
-
 #[tokio::test]
 async fn existing_session_uses_reloaded_structured_history_cap() {
     let tmp = tempfile::TempDir::new().unwrap();

@@ -1129,8 +1129,14 @@ fn prose_trigger_with_json_example_stays_raw_for_first_input_retry_and_replay() 
     ));
 
     let run = &engine.active_runs()[&run_id];
-    assert_eq!(retry_input_value(run, 1), serde_json::Value::String(payload.into()));
-    assert_eq!(replay_input_for_step(run, 1), serde_json::Value::String(payload.into()));
+    assert_eq!(
+        retry_input_value(run, 1),
+        serde_json::Value::String(payload.into())
+    );
+    assert_eq!(
+        replay_input_for_step(run, 1),
+        serde_json::Value::String(payload.into())
+    );
 }
 
 #[test]

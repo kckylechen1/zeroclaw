@@ -741,7 +741,7 @@ mod tests {
         assert!(result.error.is_none());
     }
 
-        #[tokio::test]
+    #[tokio::test]
     async fn shell_reports_invalid_docker_workspace_root() {
         let workspace = tempfile::tempdir().expect("workspace tempdir should be created");
         let missing_root = workspace.path().join("missing-root");
@@ -770,7 +770,7 @@ mod tests {
         assert!(error.contains(missing_root_text.as_str()));
     }
 
-#[tokio::test]
+    #[tokio::test]
     async fn shell_blocks_disallowed_command() {
         let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
         let result = tool

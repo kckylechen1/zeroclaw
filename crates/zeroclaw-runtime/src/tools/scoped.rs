@@ -608,7 +608,6 @@ mod tests {
         }
     }
 
-
     struct CountingTool {
         name: &'static str,
         calls: Arc<AtomicUsize>,

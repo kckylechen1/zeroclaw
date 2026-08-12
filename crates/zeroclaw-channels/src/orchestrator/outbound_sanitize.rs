@@ -499,7 +499,6 @@ fn truncate_at_unclosed_protocol_fence(s: &str, known_tool_names: &HashSet<Strin
     s.to_string()
 }
 
-
 fn starts_with_visible_tool_call_tag_example(response: &str) -> bool {
     let lower = response.trim_start().to_ascii_lowercase();
     let starts_with_tool_tag = lower.starts_with("<tool_call")
@@ -1252,7 +1251,6 @@ pub(crate) fn strip_isolated_tool_json_artifacts(
     }
     result.trim().to_string()
 }
-
 
 #[cfg(test)]
 mod streaming_draft_tests {

@@ -34,8 +34,7 @@ pub(crate) use outbound_sanitize::{
     ensure_nonempty_channel_reply, outbound_content_format_for_channel,
     redact_channel_outbound_leaks, sanitize_channel_response_for_format_with_leak_detection,
     sanitize_streaming_draft_text, strip_think_tags_inline, strip_tool_call_tags,
-    strip_tool_result_content,
-    strip_tool_summary_prefix,
+    strip_tool_result_content, strip_tool_summary_prefix,
 };
 
 mod runtime_commands;
@@ -2696,7 +2695,6 @@ impl Channel for ApprovalTypingChannel {
     }
 }
 
-
 async fn process_channel_message(
     ctx: Arc<ChannelRuntimeContext>,
     msg: zeroclaw_api::channel::ChannelMessage,
@@ -3546,8 +3544,7 @@ async fn process_channel_message_body(
                 while let Some(event) = rx.recv().await {
                     match event {
                         StreamDelta::Status(text) => {
-                            let visible =
-                                sanitize_streaming_draft_text(&text, &known_tool_names);
+                            let visible = sanitize_streaming_draft_text(&text, &known_tool_names);
                             if let Err(e) = channel
                                 .update_draft_progress(&reply_target, &draft_id, &visible)
                                 .await
@@ -3565,10 +3562,8 @@ async fn process_channel_message_body(
                         }
                         StreamDelta::Text(text) => {
                             accumulated.push_str(&text);
-                            let visible = sanitize_streaming_draft_text(
-                                &accumulated,
-                                &known_tool_names,
-                            );
+                            let visible =
+                                sanitize_streaming_draft_text(&accumulated, &known_tool_names);
                             if let Err(e) = channel
                                 .update_draft(&reply_target, &draft_id, &visible)
                                 .await
