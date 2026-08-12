@@ -14,6 +14,10 @@ use serde_json::json;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{Duration, Instant, timeout, timeout_at};
 
+use crate::mcp_era::{
+    DiscoverNegotiateError, MCP_MODERN_PROTOCOL_VERSION, PeerEra, PeerProtocol, VersionQuality,
+    is_recognized_modern_error, versions_from_unsupported_error,
+};
 use crate::mcp_prompt::{McpGetPromptResult, McpPromptsListResult};
 use crate::mcp_protocol::{JsonRpcRequest, MCP_PROTOCOL_VERSION, McpToolDef, McpToolsListResult};
 use crate::mcp_resource::{McpResourceContents, McpResourcesListResult};
@@ -37,14 +41,137 @@ const MAX_TOOL_TIMEOUT_SECS: u64 = 600;
 /// been written. Outcome-unknown requests are never replayed.
 const MAX_RECONNECT_ATTEMPTS: u32 = 2;
 
+/// JSON-RPC id reserved for the `server/discover` era probe so the legacy
+/// `initialize` id stays `1` (stdio fixtures and session traces).
+const DISCOVER_PROBE_REQUEST_ID: u64 = 0;
+
+/// Bound for the era probe. Legacy servers may ignore unknown methods; the
+/// spec says to fall back after a reasonable timeout rather than hang.
+const DISCOVER_PROBE_TIMEOUT_SECS: u64 = 5;
+
+/// Outcome of the `server/discover` backward-compatibility probe.
+enum ProbeOutcome {
+    /// Peer answered as a modern server. Stage 1 still runs `initialize`.
+    Modern,
+    /// Probe unanswered or not a recognized modern error: legacy peer.
+    Legacy,
+    /// Modern peer listed no revision this client knows.
+    Incompatible(DiscoverNegotiateError),
+}
+
+struct OpenedSession {
+    capabilities: McpServerCapabilities,
+    peer: PeerProtocol,
+}
+
+fn log_version_quality(server_name: &str, peer: &PeerProtocol) {
+    let era = match peer.era {
+        PeerEra::Legacy => "legacy",
+        PeerEra::Modern => "modern",
+    };
+    match peer.quality {
+        VersionQuality::Known => {}
+        VersionQuality::Malformed => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_attrs(::serde_json::json!({
+                        "mcp_server": server_name,
+                        "raw_protocol_version": &peer.advertised,
+                        "resolved_version": &peer.version,
+                        "era": era,
+                    })),
+                "mcp_client: malformed MCP protocolVersion; falling back to oldest known revision"
+            );
+        }
+        VersionQuality::UnknownRevision => {
+            ::zeroclaw_log::record!(
+                INFO,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_attrs(::serde_json::json!({
+                        "mcp_server": server_name,
+                        "advertised_version": &peer.advertised,
+                        "resolved_version": &peer.version,
+                        "era": era,
+                    })),
+                "mcp_client: unknown MCP protocol version; using nearest known revision"
+            );
+        }
+    }
+}
+
+fn supported_versions_from_discover_result(result: &serde_json::Value) -> Option<Vec<String>> {
+    result
+        .get("supportedVersions")
+        .and_then(|value| value.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .filter(|versions| !versions.is_empty())
+}
+
+fn classify_discover_response(resp: crate::mcp_protocol::JsonRpcResponse) -> ProbeOutcome {
+    if let Some(error) = resp.error {
+        if is_recognized_modern_error(error.code) {
+            let supported = versions_from_unsupported_error(&error);
+            return match PeerProtocol::from_discover_supported(&supported) {
+                Ok(_) => ProbeOutcome::Modern,
+                Err(err) => ProbeOutcome::Incompatible(err),
+            };
+        }
+        return ProbeOutcome::Legacy;
+    }
+    let Some(result) = resp.result.as_ref() else {
+        return ProbeOutcome::Legacy;
+    };
+    let Some(supported) = supported_versions_from_discover_result(result) else {
+        return ProbeOutcome::Legacy;
+    };
+    match PeerProtocol::from_discover_supported(&supported) {
+        Ok(_) => ProbeOutcome::Modern,
+        Err(err) => ProbeOutcome::Incompatible(err),
+    }
+}
+
+/// Probe `server/discover` once. Any timeout, transport error, or
+/// non-modern JSON-RPC error means the peer is legacy.
+async fn probe_peer_era(transport: &dyn SharedMcpTransportConn, epoch: u64) -> ProbeOutcome {
+    let discover_req = JsonRpcRequest::new(
+        DISCOVER_PROBE_REQUEST_ID,
+        "server/discover",
+        json!({
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MCP_MODERN_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientInfo": {
+                    "name": "zeroclaw",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }
+        }),
+    );
+    let lifecycle = McpRequestLifecycle::uncoordinated(epoch);
+    match timeout(
+        Duration::from_secs(DISCOVER_PROBE_TIMEOUT_SECS),
+        transport.send_and_recv(&discover_req, &lifecycle),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => classify_discover_response(resp),
+        Ok(Err(_)) | Err(_) => ProbeOutcome::Legacy,
+    }
+}
+
 /// Perform the MCP `initialize` + `notifications/initialized` handshake on a
-/// transport. Shared by the initial [`McpServer::connect`] and the
+/// transport. Shared by [`McpServer::connect`] (every era in stage 1) and the
 /// reconnect-after-stale-session path in [`McpServer::call_tool`].
 async fn handshake(
     transport: &dyn SharedMcpTransportConn,
     server_name: &str,
     epoch: u64,
-) -> Result<McpServerCapabilities> {
+) -> Result<(McpServerCapabilities, PeerProtocol)> {
     let init_req = JsonRpcRequest::new(
         1,
         "initialize",
@@ -77,12 +204,19 @@ async fn handshake(
         );
     }
 
-    // Parse server-advertised capabilities from the initialize result.
+    // Parse server-advertised capabilities and protocol version from the
+    // initialize result. The version was previously sent and then ignored.
     let capabilities = init_resp
         .result
         .as_ref()
         .map(McpServerCapabilities::from_init_result)
         .unwrap_or_default();
+    let version_field = init_resp
+        .result
+        .as_ref()
+        .and_then(|result| result.get("protocolVersion"));
+    let peer = PeerProtocol::from_initialize_field(version_field);
+    log_version_quality(server_name, &peer);
 
     // Notify the server the client is initialized (notifications expect no
     // response). Best effort — ignore errors.
@@ -90,7 +224,26 @@ async fn handshake(
     let notif_lifecycle = McpRequestLifecycle::uncoordinated(epoch);
     let _ = transport.send_and_recv(&notif, &notif_lifecycle).await;
 
-    Ok(capabilities)
+    Ok((capabilities, peer))
+}
+
+/// Resolve [`PeerEra`] via `server/discover`, then always run the legacy
+/// initialize handshake. Stage 1 records era for later dispatch; it does
+/// not change the wire.
+async fn open_session(
+    transport: &dyn SharedMcpTransportConn,
+    server_name: &str,
+    epoch: u64,
+) -> Result<OpenedSession> {
+    let probe = probe_peer_era(transport, epoch).await;
+    if let ProbeOutcome::Incompatible(err) = probe {
+        bail!("MCP server `{server_name}` is incompatible: {err}");
+    }
+    let (capabilities, mut peer) = handshake(transport, server_name, epoch).await?;
+    if matches!(probe, ProbeOutcome::Modern) {
+        peer.era = PeerEra::Modern;
+    }
+    Ok(OpenedSession { capabilities, peer })
 }
 
 /// Server-advertised MCP capabilities parsed from the `initialize` result.
@@ -163,6 +316,7 @@ struct McpServerInner {
     next_id: AtomicU32,
     tools: Vec<McpToolDef>,
     capabilities: McpServerCapabilities,
+    peer: PeerProtocol,
 }
 
 // ── Recovery barrier ────────────────────────────────────────────────────────
@@ -329,8 +483,10 @@ impl McpServer {
         let serial_gate =
             (config.transport != McpTransport::Stdio).then(|| Arc::new(Mutex::new(())));
 
-        // Initialize handshake (initialize + initialized notification)
-        let capabilities = handshake(transport.as_ref(), &config.name, 0).await?;
+        // Era probe (`server/discover`) then the legacy initialize handshake
+        // for every era. Stage 1 records PeerEra; it does not change the wire.
+        let opened = open_session(transport.as_ref(), &config.name, 0).await?;
+        let capabilities = opened.capabilities;
 
         // Fetch available tools
         let id = 2u64;
@@ -375,11 +531,22 @@ impl McpServer {
             next_id: AtomicU32::new(3), // Start at 3 since we used 1 and 2
             tools: tool_list.tools,
             capabilities,
+            peer: opened.peer,
         };
 
         ::zeroclaw_log::record!(
             INFO,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
+                ::serde_json::json!({
+                    "mcp_server": &inner.config.name,
+                    "tool_count": tool_count,
+                    "protocol_version": &inner.peer.version,
+                    "era": match inner.peer.era {
+                        PeerEra::Legacy => "legacy",
+                        PeerEra::Modern => "modern",
+                    },
+                })
+            ),
             &format!(
                 "MCP server `{}` connected — {} tool(s) available",
                 inner.config.name, tool_count
@@ -408,6 +575,16 @@ impl McpServer {
     /// Server-advertised capabilities captured at handshake.
     pub async fn capabilities(&self) -> McpServerCapabilities {
         self.inner.lock().await.capabilities.clone()
+    }
+
+    /// Era resolved from the `server/discover` probe (or the legacy fallback).
+    pub async fn peer_era(&self) -> PeerEra {
+        self.inner.lock().await.peer.era
+    }
+
+    /// Protocol version this client will speak to the peer.
+    pub async fn peer_protocol_version(&self) -> String {
+        self.inner.lock().await.peer.version.clone()
     }
 
     /// Health-check the underlying transport without sending a real request.
@@ -580,8 +757,14 @@ impl McpServer {
             };
         }
 
+        let era = self.inner.lock().await.peer.era;
         let refreshed = match handshake(self.transport.as_ref(), &server_name, *epoch).await {
-            Ok(capabilities) => capabilities,
+            Ok((capabilities, mut peer)) => {
+                // Stage 1: every era still speaks the initialize wire.
+                peer.era = era;
+                self.inner.lock().await.peer = peer;
+                capabilities
+            }
             Err(handshake_error) => {
                 // A failed re-handshake leaves the connection without a live
                 // MCP session; poison the barrier so later tool calls fail
@@ -974,6 +1157,7 @@ impl McpRegistry {
                 next_id: AtomicU32::new(0),
                 tools: Vec::new(),
                 capabilities: McpServerCapabilities::default(),
+                peer: PeerProtocol::legacy_default(),
             };
             McpServer {
                 inner: Arc::new(Mutex::new(inner)),
@@ -1127,6 +1311,7 @@ impl McpRegistry {
             next_id: AtomicU32::new(0),
             tools: Vec::new(),
             capabilities: McpServerCapabilities::default(),
+            peer: PeerProtocol::legacy_default(),
         };
         McpServer {
             inner: std::sync::Arc::new(Mutex::new(inner)),
@@ -1737,6 +1922,7 @@ mod tests {
             next_id: AtomicU32::new(3),
             tools: vec![],
             capabilities: McpServerCapabilities::default(),
+            peer: PeerProtocol::legacy_default(),
         };
         McpServer {
             inner: Arc::new(Mutex::new(inner)),
@@ -2223,6 +2409,7 @@ mod tests {
             next_id: AtomicU32::new(3),
             tools: vec![],
             capabilities: McpServerCapabilities::default(),
+            peer: PeerProtocol::legacy_default(),
         };
         McpServer {
             inner: Arc::new(Mutex::new(inner)),
@@ -2250,6 +2437,7 @@ mod tests {
             next_id: AtomicU32::new(3),
             tools: vec![],
             capabilities,
+            peer: PeerProtocol::legacy_default(),
         };
         McpServer {
             inner: Arc::new(Mutex::new(inner)),
@@ -2439,6 +2627,9 @@ mod tests {
 echo "$$" > "$1"
 while IFS= read -r line; do
   case "$line" in
+    *'"method":"server/discover"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"Method not found"}}'
+      ;;
     *'"method":"initialize"'*)
       printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"echo-mcp","version":"0.1.0"}}}'
       ;;
@@ -2506,6 +2697,9 @@ first_id=
 while IFS= read -r line; do
   id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
+    *'"method":"server/discover"'*)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}"
+      ;;
     *'"method":"initialize"'*)
       printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"multiplex\",\"version\":\"1\"}}}"
       ;;
@@ -2579,6 +2773,9 @@ generation=$(wc -l < "$3" | tr -d ' ')
 while IFS= read -r line; do
   id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
+    *'"method":"server/discover"'*)
+      printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}"
+      ;;
     *'"method":"initialize"'*)
       printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"cancel\",\"version\":\"1\"}}}"
       ;;
@@ -2820,6 +3017,342 @@ done
         let caps = McpServerCapabilities::from_init_result(&init);
         assert!(!caps.supports_resources());
         assert!(!caps.supports_prompts());
+    }
+
+    // ── Dual-era adapter (issue #26) ──────────────────────────────────────
+
+    async fn mount_tools_list_empty(server: &wiremock::MockServer) {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/list"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]}
+            })))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_echo_tool_call(server: &wiremock::MockServer) {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = serde_json::from_slice::<serde_json::Value>(&request.body)
+                    .expect("JSON-RPC request")
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {"ok": true}
+                }))
+            })
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn connect_legacy_server_reads_initialize_protocol_version() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "server/discover"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "error": {"code": -32601, "message": "Method not found"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}}
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "notifications/initialized"}),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        mount_tools_list_empty(&server).await;
+        mount_echo_tool_call(&server).await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("legacy connect");
+        assert_eq!(mcp.peer_era().await, PeerEra::Legacy);
+        assert_eq!(mcp.peer_protocol_version().await, "2024-11-05");
+        let result = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect("legacy tools/call");
+        assert_eq!(result, json!({"ok": true}));
+    }
+
+    #[tokio::test]
+    async fn connect_modern_server_still_runs_initialize() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "server/discover"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": {
+                    "resultType": "complete",
+                    "supportedVersions": ["2026-07-28"],
+                    "capabilities": {"tools": {}, "resources": {}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}, "resources": {}}
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "notifications/initialized"}),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_tools_list_empty(&server).await;
+        mount_echo_tool_call(&server).await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        assert_eq!(mcp.peer_era().await, PeerEra::Modern);
+        assert_eq!(mcp.peer_protocol_version().await, "2024-11-05");
+        assert!(mcp.capabilities().await.supports_resources());
+        let result = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect("modern tools/call");
+        assert_eq!(result, json!({"ok": true}));
+    }
+
+    #[tokio::test]
+    async fn connect_unknown_discover_version_is_incompatible() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "server/discover"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": {
+                    "supportedVersions": ["2027-01-01"]
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(500).set_body_string("initialize must not run"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let result = McpServer::connect(http_server_config(server.uri())).await;
+        let err = match result {
+            Ok(_) => panic!("no common version must fail"),
+            Err(err) => err,
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains("incompatible"), "got: {msg}");
+        assert!(msg.contains("no mutually supported"), "got: {msg}");
+        assert!(msg.contains("2027-01-01"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn connect_unsupported_protocol_version_error_is_modern() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "server/discover"})))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "error": {
+                    "code": -32022,
+                    "message": "Unsupported protocol version",
+                    "data": {"supported": ["2026-07-28"], "requested": "1900-01-01"}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}}
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "notifications/initialized"}),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        mount_tools_list_empty(&server).await;
+        mount_echo_tool_call(&server).await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern error connect");
+        assert_eq!(mcp.peer_era().await, PeerEra::Modern);
+        assert_eq!(mcp.peer_protocol_version().await, "2024-11-05");
+    }
+
+    #[tokio::test]
+    async fn connect_unknown_initialize_version_snaps_to_nearest_legacy() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2023-01-01",
+                    "capabilities": {"tools": {}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "notifications/initialized"}),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        mount_tools_list_empty(&server).await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("unknown legacy connect");
+        assert_eq!(mcp.peer_era().await, PeerEra::Legacy);
+        assert_eq!(mcp.peer_protocol_version().await, "2024-11-05");
+        let peer = mcp.inner.lock().await.peer.clone();
+        assert_eq!(peer.advertised, "2023-01-01");
+        assert_eq!(peer.quality, VersionQuality::UnknownRevision);
+    }
+
+    #[tokio::test]
+    async fn connect_malformed_initialize_version_falls_back_conservatively() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": 42,
+                    "capabilities": {"tools": {}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "notifications/initialized"}),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        mount_tools_list_empty(&server).await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("malformed initialize still connects");
+        assert_eq!(mcp.peer_era().await, PeerEra::Legacy);
+        assert_eq!(mcp.peer_protocol_version().await, "2024-11-05");
+        let peer = mcp.inner.lock().await.peer.clone();
+        assert_eq!(peer.advertised, "42");
+        assert_eq!(peer.quality, VersionQuality::Malformed);
+    }
+
+    #[tokio::test]
+    async fn connect_missing_initialize_version_is_malformed() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "capabilities": {"tools": {}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "notifications/initialized"}),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        mount_tools_list_empty(&server).await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("missing protocolVersion still connects");
+        let peer = mcp.inner.lock().await.peer.clone();
+        assert_eq!(peer.advertised, "<missing>");
+        assert_eq!(peer.quality, VersionQuality::Malformed);
+        assert_eq!(peer.version, "2024-11-05");
     }
 
     // ── Reconnect on stale session (streamable HTTP) ───────────────────────

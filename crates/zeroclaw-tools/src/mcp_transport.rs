@@ -984,6 +984,14 @@ fn finish_response(
     Ok(response)
 }
 
+/// HTTP 400 bodies that carry a recognized modern JSON-RPC error identify a
+/// modern MCP server. Surface them as JSON-RPC responses so the era probe
+/// can classify the peer instead of treating the status as a transport failure.
+fn modern_rpc_error_from_http_body(body: &str) -> Option<JsonRpcResponse> {
+    let rpc: JsonRpcResponse = serde_json::from_str(body.trim()).ok()?;
+    crate::mcp_era::take_recognized_modern_error(rpc)
+}
+
 #[async_trait::async_trait]
 impl SharedMcpTransportConn for HttpTransport {
     async fn send_and_recv(
@@ -1034,6 +1042,10 @@ impl SharedMcpTransportConn for HttpTransport {
                     status: status.as_u16(),
                 }
                 .into());
+            }
+            let body = resp.text().await.unwrap_or_default();
+            if let Some(rpc) = modern_rpc_error_from_http_body(&body) {
+                return finish_response(request, lifecycle, rpc);
             }
             lifecycle.mark_completed();
             bail!("MCP server returned HTTP {}", status);
@@ -2633,6 +2645,47 @@ mod tests {
         assert!(
             err.to_string().contains("MCP server returned HTTP 404"),
             "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_transport_400_modern_error_is_jsonrpc_response() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "error": {
+                    "code": -32022,
+                    "message": "Unsupported protocol version",
+                    "data": {"supported": ["2026-07-28"], "requested": "1900-01-01"}
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let config = McpServerConfig {
+            name: "test-http".into(),
+            transport: McpTransport::Http,
+            url: Some(server.uri()),
+            ..Default::default()
+        };
+        let transport = HttpTransport::new(&config).expect("build transport");
+        let req = JsonRpcRequest::new(0, "server/discover", serde_json::json!({}));
+        let lifecycle = McpRequestLifecycle::uncoordinated(0);
+        let resp = transport
+            .send_and_recv(&req, &lifecycle)
+            .await
+            .expect("modern 400 must surface as JSON-RPC");
+        let error = resp.error.expect("error payload");
+        assert_eq!(error.code, crate::mcp_era::UNSUPPORTED_PROTOCOL_VERSION);
+        assert!(
+            crate::mcp_era::is_recognized_modern_error(error.code),
+            "code {} should be a recognized modern error",
+            error.code
         );
     }
 
