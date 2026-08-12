@@ -2,6 +2,7 @@
 //! Protocol version: 2024-11-05
 //! Dual-era peer classification lives in [`crate::mcp_era`] — do not bump
 //! [`MCP_PROTOCOL_VERSION`] until the modern transport arm exists (issue #26).
+//! Stage 1 records the peer era and version; every era still speaks initialize.
 //! Adapted from ops-mcp-server/src/protocol.rs for client use.
 //! Both Serialize and Deserialize are derived — the client both sends (Serialize)
 

@@ -2,8 +2,9 @@
 //!
 //! Protocol version `2026-07-28` removed the `initialize` handshake. This
 //! module is the seam that must exist *before* [`MCP_PROTOCOL_VERSION`] can
-//! move: probe once per server, resolve a [`PeerEra`], and keep today's
-//! handshake as the [`PeerEra::Legacy`] arm.
+//! move: probe once per server, resolve a [`PeerEra`], and record the peer
+//! version. Stage 1 keeps today's initialize handshake as the wire for
+//! **every** era; modern request `_meta` / header behaviour is a follow-up.
 //!
 //! [`MCP_PROTOCOL_VERSION`]: crate::mcp_protocol::MCP_PROTOCOL_VERSION
 
@@ -20,6 +21,15 @@ pub const MCP_LEGACY_LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// Streamable HTTP introduction; still handshake-era.
 pub const MCP_LEGACY_STREAMABLE_PROTOCOL_VERSION: &str = "2025-03-26";
+
+/// Revisions this client can name. Stage 1 still speaks all of them over
+/// the legacy initialize wire; the modern constant is classification-only.
+pub const KNOWN_PROTOCOL_VERSIONS: &[&str] = &[
+    MCP_PROTOCOL_VERSION,
+    MCP_LEGACY_STREAMABLE_PROTOCOL_VERSION,
+    MCP_LEGACY_LATEST_PROTOCOL_VERSION,
+    MCP_MODERN_PROTOCOL_VERSION,
+];
 
 /// JSON-RPC server-error codes introduced in `2026-07-28` (spec range
 /// `-32020`..`-32099`). A response carrying one of these identifies a
@@ -38,7 +48,43 @@ pub enum PeerEra {
     Modern,
 }
 
-/// Resolved protocol this client will speak to one MCP server.
+/// How a recorded version relates to the revisions this client knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionQuality {
+    /// Peer named a revision in [`KNOWN_PROTOCOL_VERSIONS`].
+    Known,
+    /// Peer named a well-formed date this client has no arm for.
+    UnknownRevision,
+    /// `protocolVersion` was missing or not a string.
+    Malformed,
+}
+
+/// `server/discover` listed versions, but none match a revision we know.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoverNegotiateError {
+    Empty,
+    NoOverlap { advertised: Vec<String> },
+}
+
+impl std::fmt::Display for DiscoverNegotiateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => {
+                write!(
+                    f,
+                    "server/discover returned an empty supportedVersions list"
+                )
+            }
+            Self::NoOverlap { advertised } => write!(
+                f,
+                "no mutually supported MCP protocol version (peer advertised {advertised:?}; \
+                 known {KNOWN_PROTOCOL_VERSIONS:?})"
+            ),
+        }
+    }
+}
+
+/// Resolved protocol this client recorded for one MCP server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerProtocol {
     pub era: PeerEra,
@@ -46,21 +92,20 @@ pub struct PeerProtocol {
     /// revision when the peer advertised something we do not have an arm
     /// for).
     pub version: String,
-    /// Version the peer actually advertised, before snapping.
+    /// Version the peer actually advertised, before snapping. For a
+    /// malformed field this is the raw JSON (or `"<missing>"`).
     pub advertised: String,
-    /// `true` when [`advertised`](Self::advertised) was not a revision this
-    /// client has a dedicated arm for.
-    pub unknown: bool,
+    pub quality: VersionQuality,
 }
 
 impl PeerProtocol {
-    /// Default for test fixtures and omitted `initialize.protocolVersion`.
+    /// Default for test fixtures and a well-formed pin of our client version.
     pub fn legacy_default() -> Self {
         Self {
             era: PeerEra::Legacy,
             version: MCP_PROTOCOL_VERSION.to_string(),
             advertised: MCP_PROTOCOL_VERSION.to_string(),
-            unknown: false,
+            quality: VersionQuality::Known,
         }
     }
 
@@ -73,13 +118,13 @@ impl PeerProtocol {
                 era: PeerEra::Legacy,
                 version: advertised.to_string(),
                 advertised: advertised.to_string(),
-                unknown: false,
+                quality: VersionQuality::Known,
             },
             MCP_MODERN_PROTOCOL_VERSION => Self {
                 era: PeerEra::Modern,
                 version: advertised.to_string(),
                 advertised: advertised.to_string(),
-                unknown: false,
+                quality: VersionQuality::Known,
             },
             other => {
                 let (era, snapped) = nearest_known(other);
@@ -87,42 +132,57 @@ impl PeerProtocol {
                     era,
                     version: snapped.to_string(),
                     advertised: other.to_string(),
-                    unknown: true,
+                    quality: VersionQuality::UnknownRevision,
                 }
             }
         }
     }
 
-    /// A successful `server/discover` (or a recognized modern error) means
-    /// the peer is modern regardless of which dates it listed.
-    pub fn from_discover_supported(supported: &[String]) -> Option<Self> {
+    /// Negotiate from `supportedVersions`. Succeeds only when the peer
+    /// listed at least one revision in [`KNOWN_PROTOCOL_VERSIONS`].
+    pub fn from_discover_supported(supported: &[String]) -> Result<Self, DiscoverNegotiateError> {
         if supported.is_empty() {
-            return None;
+            return Err(DiscoverNegotiateError::Empty);
         }
-        let selected = if supported.iter().any(|v| v == MCP_MODERN_PROTOCOL_VERSION) {
-            MCP_MODERN_PROTOCOL_VERSION.to_string()
+        let overlap: Vec<&str> = KNOWN_PROTOCOL_VERSIONS
+            .iter()
+            .copied()
+            .filter(|known| supported.iter().any(|advertised| advertised == known))
+            .collect();
+        if overlap.is_empty() {
+            return Err(DiscoverNegotiateError::NoOverlap {
+                advertised: supported.to_vec(),
+            });
+        }
+        let selected = if overlap.contains(&MCP_MODERN_PROTOCOL_VERSION) {
+            MCP_MODERN_PROTOCOL_VERSION
         } else {
-            supported.iter().max().cloned().unwrap_or_default()
+            overlap.iter().max().copied().expect("overlap is non-empty")
         };
-        let mut peer = Self::classify(&selected);
+        let mut peer = Self::classify(selected);
         peer.era = PeerEra::Modern;
-        Some(peer)
+        Ok(peer)
     }
 
-    /// `initialize` result: era is already known to be legacy (the probe
-    /// fell back). Record and snap the advertised `protocolVersion`.
-    pub fn from_initialize_version(advertised: Option<&str>) -> Self {
-        let Some(advertised) = advertised else {
-            return Self::legacy_default();
-        };
-        let mut peer = Self::classify(advertised);
-        peer.era = PeerEra::Legacy;
-        if peer.version == MCP_MODERN_PROTOCOL_VERSION {
-            // Handshake path cannot speak the modern wire yet.
-            peer.version = MCP_LEGACY_LATEST_PROTOCOL_VERSION.to_string();
-            peer.unknown = true;
+    /// Parse `initialize.result.protocolVersion`. Missing or non-string
+    /// values are malformed (conservative fallback); a well-formed unknown
+    /// date is an unknown revision (snap to nearest known).
+    pub fn from_initialize_field(value: Option<&serde_json::Value>) -> Self {
+        match value {
+            None => Self {
+                era: PeerEra::Legacy,
+                version: MCP_PROTOCOL_VERSION.to_string(),
+                advertised: "<missing>".to_string(),
+                quality: VersionQuality::Malformed,
+            },
+            Some(serde_json::Value::String(advertised)) => Self::classify(advertised),
+            Some(other) => Self {
+                era: PeerEra::Legacy,
+                version: MCP_PROTOCOL_VERSION.to_string(),
+                advertised: other.to_string(),
+                quality: VersionQuality::Malformed,
+            },
         }
-        peer
     }
 }
 
@@ -185,7 +245,7 @@ mod tests {
             let peer = PeerProtocol::classify(version);
             assert_eq!(peer.era, PeerEra::Legacy);
             assert_eq!(peer.version, version);
-            assert!(!peer.unknown);
+            assert_eq!(peer.quality, VersionQuality::Known);
         }
     }
 
@@ -194,7 +254,7 @@ mod tests {
         let peer = PeerProtocol::classify(MCP_MODERN_PROTOCOL_VERSION);
         assert_eq!(peer.era, PeerEra::Modern);
         assert_eq!(peer.version, MCP_MODERN_PROTOCOL_VERSION);
-        assert!(!peer.unknown);
+        assert_eq!(peer.quality, VersionQuality::Known);
     }
 
     #[test]
@@ -203,7 +263,7 @@ mod tests {
         assert_eq!(peer.era, PeerEra::Modern);
         assert_eq!(peer.version, MCP_MODERN_PROTOCOL_VERSION);
         assert_eq!(peer.advertised, "2027-01-01");
-        assert!(peer.unknown);
+        assert_eq!(peer.quality, VersionQuality::UnknownRevision);
     }
 
     #[test]
@@ -211,7 +271,7 @@ mod tests {
         let peer = PeerProtocol::classify("2025-06-18");
         assert_eq!(peer.era, PeerEra::Legacy);
         assert_eq!(peer.version, MCP_LEGACY_STREAMABLE_PROTOCOL_VERSION);
-        assert!(peer.unknown);
+        assert_eq!(peer.quality, VersionQuality::UnknownRevision);
     }
 
     #[test]
@@ -219,7 +279,7 @@ mod tests {
         let peer = PeerProtocol::classify("2023-01-01");
         assert_eq!(peer.era, PeerEra::Legacy);
         assert_eq!(peer.version, MCP_PROTOCOL_VERSION);
-        assert!(peer.unknown);
+        assert_eq!(peer.quality, VersionQuality::UnknownRevision);
     }
 
     #[test]
@@ -228,38 +288,65 @@ mod tests {
             MCP_LEGACY_LATEST_PROTOCOL_VERSION.to_string(),
             MCP_MODERN_PROTOCOL_VERSION.to_string(),
         ])
-        .expect("non-empty");
+        .expect("overlap");
         assert_eq!(peer.era, PeerEra::Modern);
         assert_eq!(peer.version, MCP_MODERN_PROTOCOL_VERSION);
-        assert!(!peer.unknown);
+        assert_eq!(peer.quality, VersionQuality::Known);
     }
 
     #[test]
-    fn discover_empty_supported_is_none() {
-        assert!(PeerProtocol::from_discover_supported(&[]).is_none());
+    fn discover_empty_supported_is_error() {
+        assert_eq!(
+            PeerProtocol::from_discover_supported(&[]).unwrap_err(),
+            DiscoverNegotiateError::Empty
+        );
     }
 
     #[test]
-    fn discover_unknown_only_list_is_still_modern() {
-        let peer =
-            PeerProtocol::from_discover_supported(&["2027-06-01".into()]).expect("non-empty");
-        assert_eq!(peer.era, PeerEra::Modern);
-        assert_eq!(peer.version, MCP_MODERN_PROTOCOL_VERSION);
-        assert!(peer.unknown);
+    fn discover_unknown_only_list_is_incompatible() {
+        let err = PeerProtocol::from_discover_supported(&["2027-06-01".into()]).unwrap_err();
+        assert_eq!(
+            err,
+            DiscoverNegotiateError::NoOverlap {
+                advertised: vec!["2027-06-01".into()]
+            }
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("no mutually supported"), "got: {msg}");
+        assert!(msg.contains("2027-06-01"), "got: {msg}");
     }
 
     #[test]
-    fn initialize_omitted_version_defaults_to_client_pin() {
-        let peer = PeerProtocol::from_initialize_version(None);
-        assert_eq!(peer, PeerProtocol::legacy_default());
-    }
-
-    #[test]
-    fn initialize_modern_date_stays_legacy_era() {
-        let peer = PeerProtocol::from_initialize_version(Some(MCP_MODERN_PROTOCOL_VERSION));
+    fn initialize_missing_version_is_malformed() {
+        let peer = PeerProtocol::from_initialize_field(None);
         assert_eq!(peer.era, PeerEra::Legacy);
-        assert_eq!(peer.version, MCP_LEGACY_LATEST_PROTOCOL_VERSION);
-        assert!(peer.unknown);
+        assert_eq!(peer.version, MCP_PROTOCOL_VERSION);
+        assert_eq!(peer.advertised, "<missing>");
+        assert_eq!(peer.quality, VersionQuality::Malformed);
+    }
+
+    #[test]
+    fn initialize_non_string_version_is_malformed() {
+        let peer = PeerProtocol::from_initialize_field(Some(&json!(42)));
+        assert_eq!(peer.quality, VersionQuality::Malformed);
+        assert_eq!(peer.version, MCP_PROTOCOL_VERSION);
+        assert_eq!(peer.advertised, "42");
+    }
+
+    #[test]
+    fn initialize_unknown_revision_snaps_and_is_not_malformed() {
+        let peer = PeerProtocol::from_initialize_field(Some(&json!("2027-01-01")));
+        assert_eq!(peer.quality, VersionQuality::UnknownRevision);
+        assert_eq!(peer.version, MCP_MODERN_PROTOCOL_VERSION);
+        assert_eq!(peer.advertised, "2027-01-01");
+    }
+
+    #[test]
+    fn initialize_known_modern_date_classifies_modern() {
+        let peer = PeerProtocol::from_initialize_field(Some(&json!(MCP_MODERN_PROTOCOL_VERSION)));
+        assert_eq!(peer.era, PeerEra::Modern);
+        assert_eq!(peer.version, MCP_MODERN_PROTOCOL_VERSION);
+        assert_eq!(peer.quality, VersionQuality::Known);
     }
 
     #[test]
