@@ -745,6 +745,10 @@ mod tests {
 
     #[tokio::test]
     async fn skill_elevated_pipeline_keeps_the_same_agent_policy_ceiling() {
+        // Fork adaptation: our resolve_elevated_tool refuses targets outside the
+        // allow-list (stronger than upstream). Admit both the wrapper and the
+        // pipeline target; the regression is that the elevated wrapper still
+        // carries the pipeline's with_access_policy ceiling (shell denied).
         let calls = Arc::new(AtomicUsize::new(0));
         let skill = Skill {
             name: "ops".to_string(),
@@ -768,7 +772,10 @@ mod tests {
             location: None,
         };
         let security = Arc::new(SecurityPolicy {
-            allowed_tools: Some(vec!["ops__chain".to_string()]),
+            allowed_tools: Some(vec![
+                tools::PipelineTool::NAME.to_string(),
+                "ops__chain".to_string(),
+            ]),
             ..SecurityPolicy::default()
         });
         let assembled = assemble_pipeline(
@@ -778,12 +785,6 @@ mod tests {
             None,
         )
         .await;
-        assert!(
-            assembled
-                .registry
-                .iter()
-                .all(|tool| tool.name() != tools::PipelineTool::NAME)
-        );
         let elevated = assembled
             .registry
             .iter()
