@@ -2030,12 +2030,42 @@ struct FailingSendChannel {
     send_calls: AtomicUsize,
 }
 
+enum PendingApprovalOutcome {
+    Response(Option<zeroclaw_api::channel::AttributedApprovalResponse>),
+    Error,
+}
+
+struct PendingApprovalChannel {
+    outcome: PendingApprovalOutcome,
+    start_typing_calls: AtomicUsize,
+    stop_typing_calls: AtomicUsize,
+    approval_started: tokio::sync::Notify,
+    approval_release: tokio::sync::Notify,
+}
+
+impl PendingApprovalChannel {
+    fn new(outcome: PendingApprovalOutcome) -> Self {
+        Self {
+            outcome,
+            start_typing_calls: AtomicUsize::new(0),
+            stop_typing_calls: AtomicUsize::new(0),
+            approval_started: tokio::sync::Notify::new(),
+            approval_release: tokio::sync::Notify::new(),
+        }
+    }
+}
+
 struct DraftRecordingChannel {
     finalize_should_fail: bool,
     fallback_send_should_fail: bool,
     sent_messages: tokio::sync::Mutex<Vec<String>>,
     draft_messages: tokio::sync::Mutex<Vec<String>>,
     finalized_messages: tokio::sync::Mutex<Vec<String>>,
+    /// Text handed to `update_draft`, in order, so a test can assert on
+    /// what the transport actually received rather than on a sanitizer it
+    /// called itself. Progress text lands in `progress_messages`.
+    draft_updates: tokio::sync::Mutex<Vec<String>>,
+    progress_messages: tokio::sync::Mutex<Vec<String>>,
 }
 
 impl DraftRecordingChannel {
@@ -2046,6 +2076,8 @@ impl DraftRecordingChannel {
             sent_messages: tokio::sync::Mutex::new(Vec::new()),
             draft_messages: tokio::sync::Mutex::new(Vec::new()),
             finalized_messages: tokio::sync::Mutex::new(Vec::new()),
+            draft_updates: tokio::sync::Mutex::new(Vec::new()),
+            progress_messages: tokio::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -2215,6 +2247,18 @@ impl ::zeroclaw_api::attribution::Attributable for FailingSendChannel {
     }
 }
 
+impl ::zeroclaw_api::attribution::Attributable for PendingApprovalChannel {
+    fn role(&self) -> ::zeroclaw_api::attribution::Role {
+        ::zeroclaw_api::attribution::Role::Channel(
+            ::zeroclaw_api::attribution::ChannelKind::Webhook,
+        )
+    }
+
+    fn alias(&self) -> &str {
+        "approval-test"
+    }
+}
+
 impl ::zeroclaw_api::attribution::Attributable for DraftRecordingChannel {
     fn role(&self) -> ::zeroclaw_api::attribution::Role {
         ::zeroclaw_api::attribution::Role::Channel(
@@ -2246,6 +2290,47 @@ impl Channel for FailingSendChannel {
 }
 
 #[async_trait::async_trait]
+impl Channel for PendingApprovalChannel {
+    fn name(&self) -> &str {
+        "approval-test"
+    }
+
+    async fn send(&self, _message: &SendMessage) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn listen(
+        &self,
+        _tx: tokio::sync::mpsc::Sender<zeroclaw_api::channel::ChannelMessage>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn start_typing(&self, _recipient: &str) -> anyhow::Result<()> {
+        self.start_typing_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
+        self.stop_typing_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn request_approval_attributed(
+        &self,
+        _recipient: &str,
+        _request: &zeroclaw_api::channel::ChannelApprovalRequest,
+    ) -> anyhow::Result<Option<zeroclaw_api::channel::AttributedApprovalResponse>> {
+        self.approval_started.notify_one();
+        self.approval_release.notified().await;
+        match &self.outcome {
+            PendingApprovalOutcome::Response(response) => Ok(response.clone()),
+            PendingApprovalOutcome::Error => anyhow::bail!("synthetic approval failure"),
+        }
+    }
+}
+
+#[async_trait::async_trait]
 impl Channel for DraftRecordingChannel {
     fn name(&self) -> &str {
         "test-channel"
@@ -2271,6 +2356,26 @@ impl Channel for DraftRecordingChannel {
 
     fn supports_draft_updates(&self) -> bool {
         true
+    }
+
+    async fn update_draft(
+        &self,
+        _recipient: &str,
+        _message_id: &str,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        self.draft_updates.lock().await.push(text.to_string());
+        Ok(())
+    }
+
+    async fn update_draft_progress(
+        &self,
+        _recipient: &str,
+        _message_id: &str,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        self.progress_messages.lock().await.push(text.to_string());
+        Ok(())
     }
 
     async fn send_draft(&self, message: &SendMessage) -> anyhow::Result<Option<String>> {
@@ -3014,6 +3119,243 @@ async fn process_channel_message_skips_message_sent_hook_when_draft_fallback_sen
     assert!(channel_impl.finalized_messages.lock().await.is_empty());
     assert!(channel_impl.sent_messages.lock().await.is_empty());
     assert!(hook_events.lock().await.is_empty());
+}
+
+fn draft_updater_no_tools() -> HashSet<String> {
+    HashSet::new()
+}
+
+/// Production-boundary proof for draft sanitization. Drives
+/// [`run_draft_updater`], the code the streaming spawn actually runs, and
+/// asserts on the strings handed to `update_draft` and
+/// `update_draft_progress`. Unlike the per-frame tests above, this one
+/// fails if the sanitizer call is ever dropped from the wiring.
+#[tokio::test]
+async fn draft_updater_never_hands_scratchpad_to_the_transport() {
+    let channel_impl = Arc::new(DraftRecordingChannel::new(false, false));
+    let channel: Arc<dyn Channel> = channel_impl.clone();
+    // Queue every delta up front, then close the sender and drain inline.
+    // The capacity exceeds the number of deltas, so nothing blocks and the
+    // updater needs no concurrent task: it returns once the channel is
+    // closed and empty.
+    let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_runtime::agent::loop_::DraftEvent>(32);
+
+    use zeroclaw_runtime::agent::loop_::StreamDelta;
+    for delta in [
+        "Looking that up",
+        " now.\n<tool_res",
+        "ult name=\"price\">",
+        "{\"btc\": 64000}",
+        "</tool_result>\n",
+        "BTC is $64,000.",
+    ] {
+        tx.send(StreamDelta::Text(delta.to_string())).await.unwrap();
+    }
+    tx.send(StreamDelta::Status(
+        "<think>deciding</think>Working on it.".to_string(),
+    ))
+    .await
+    .unwrap();
+    drop(tx);
+
+    run_draft_updater(
+        channel,
+        "chat-1".to_string(),
+        "draft-1".to_string(),
+        draft_updater_no_tools(),
+        rx,
+    )
+    .await;
+
+    let drafts = channel_impl.draft_updates.lock().await;
+    assert!(!drafts.is_empty(), "the transport must have been called");
+    for (i, text) in drafts.iter().enumerate() {
+        assert!(
+            !text.contains("<tool_res") && !text.contains("btc"),
+            "draft update {i} carried scratchpad to the transport: {text:?}"
+        );
+    }
+    assert_eq!(
+        drafts.last().unwrap(),
+        "Looking that up now.\n\nBTC is $64,000."
+    );
+    drop(drafts);
+
+    let progress = channel_impl.progress_messages.lock().await;
+    assert_eq!(
+        progress.as_slice(),
+        ["Working on it.".to_string()],
+        "status text must reach the transport already stripped of reasoning"
+    );
+}
+
+/// Production-boundary regression for an alternate XML dialect arriving
+/// split across deltas. The complete-tag stripper has always known seven
+/// opening forms; the partial guard once knew two, so a frame ending in
+/// `<invo` or `<function_` reached the transport verbatim. Both inventories
+/// now come from one list, so every dialect is covered at both stages.
+#[tokio::test]
+async fn draft_updater_holds_back_split_alternate_protocol_prefixes() {
+    for (dialect, deltas) in [
+        (
+            "invoke",
+            [
+                "Checking that",
+                " now.\n<invo",
+                "ke>{\"name\":\"shell\",\"secret\":1}",
+                "</invoke>\nAll set.",
+            ],
+        ),
+        (
+            "function_call",
+            [
+                "Checking that",
+                " now.\n<function_",
+                "call>{\"name\":\"shell\",\"secret\":1}",
+                "</function_call>\nAll set.",
+            ],
+        ),
+        (
+            "tool-call",
+            [
+                "Checking that",
+                " now.\n<tool-",
+                "call>{\"name\":\"shell\",\"secret\":1}",
+                "</tool-call>\nAll set.",
+            ],
+        ),
+    ] {
+        let channel_impl = Arc::new(DraftRecordingChannel::new(false, false));
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_runtime::agent::loop_::DraftEvent>(32);
+        use zeroclaw_runtime::agent::loop_::StreamDelta;
+        for delta in deltas {
+            tx.send(StreamDelta::Text(delta.to_string())).await.unwrap();
+        }
+        drop(tx);
+
+        run_draft_updater(
+            channel,
+            "chat-1".to_string(),
+            "draft-1".to_string(),
+            draft_updater_no_tools(),
+            rx,
+        )
+        .await;
+
+        let drafts = channel_impl.draft_updates.lock().await;
+        assert!(
+            !drafts.is_empty(),
+            "{dialect}: the transport must be called"
+        );
+        for (i, text) in drafts.iter().enumerate() {
+            assert!(
+                !text.contains('<') && !text.contains("secret"),
+                "{dialect}: draft update {i} carried a protocol opener: {text:?}"
+            );
+        }
+        assert_eq!(
+            drafts.last().unwrap(),
+            "Checking that now.\n\nAll set.",
+            "{dialect}: the surrounding prose must survive"
+        );
+    }
+}
+
+/// Production-boundary regression for the strict-parsing path. With
+/// `strict_tool_parsing` enabled the runtime forwards deltas without the
+/// `StreamTextGuard`, so a protocol JSON body — bare or fenced, complete or
+/// still arriving — reaches this boundary exactly as emitted. The final
+/// sanitizer suppresses these through the parser's classifier; the draft
+/// boundary now asks the same classifier.
+#[tokio::test]
+async fn draft_updater_suppresses_strict_mode_protocol_json() {
+    let known: HashSet<String> = ["shell".to_string()].into_iter().collect();
+
+    for (label, deltas) in [
+        (
+            "bare malformed result",
+            vec![
+                "{\"tool_call_id\":\"call_1\",",
+                "\"content\":\"s3cret-output\"",
+            ],
+        ),
+        (
+            "fenced protocol payload",
+            vec![
+                "Here you go.\n```json\n",
+                "{\"tool_calls\":[{\"call_id\":\"c1\",\"name\":\"shell\",",
+                "\"arguments\":{\"command\":\"cat /etc/s3cret\"}}]",
+            ],
+        ),
+    ] {
+        let channel_impl = Arc::new(DraftRecordingChannel::new(false, false));
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_runtime::agent::loop_::DraftEvent>(32);
+        use zeroclaw_runtime::agent::loop_::StreamDelta;
+        for delta in &deltas {
+            tx.send(StreamDelta::Text((*delta).to_string()))
+                .await
+                .unwrap();
+        }
+        drop(tx);
+
+        run_draft_updater(
+            channel,
+            "chat-1".to_string(),
+            "draft-1".to_string(),
+            known.clone(),
+            rx,
+        )
+        .await;
+
+        let drafts = channel_impl.draft_updates.lock().await;
+        for (i, text) in drafts.iter().enumerate() {
+            assert!(
+                !text.contains("s3cret") && !text.contains("tool_call_id"),
+                "{label}: draft update {i} carried protocol JSON: {text:?}"
+            );
+        }
+    }
+}
+
+/// The counterweight to the two suppression tests above: a genuine answer
+/// *about* tool protocol, and an ordinary fenced code block, must still
+/// stream. Suppressing everything JSON-shaped would be an easy way to pass
+/// the leak tests and a bad way to answer a question.
+#[tokio::test]
+async fn draft_updater_still_streams_examples_and_ordinary_code_fences() {
+    let known: HashSet<String> = ["shell".to_string()].into_iter().collect();
+    let channel_impl = Arc::new(DraftRecordingChannel::new(false, false));
+    let channel: Arc<dyn Channel> = channel_impl.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_runtime::agent::loop_::DraftEvent>(32);
+
+    use zeroclaw_runtime::agent::loop_::StreamDelta;
+    for delta in [
+        "Here is how a config looks:\n```json\n",
+        "{\"retries\": 3,\n",
+        "\"timeout_ms\": 500}\n```\n",
+        "Adjust the values to taste.",
+    ] {
+        tx.send(StreamDelta::Text(delta.to_string())).await.unwrap();
+    }
+    drop(tx);
+
+    run_draft_updater(
+        channel,
+        "chat-1".to_string(),
+        "draft-1".to_string(),
+        known,
+        rx,
+    )
+    .await;
+
+    let drafts = channel_impl.draft_updates.lock().await;
+    let last = drafts.last().expect("the transport must have been called");
+    assert!(
+        last.contains("\"retries\": 3") && last.contains("Adjust the values to taste."),
+        "an ordinary JSON code fence must survive the draft path: {last:?}"
+    );
 }
 
 struct SlowModelProvider {
@@ -7743,6 +8085,122 @@ async fn process_channel_message_cancels_scoped_typing_task() {
     let stops = channel_impl.stop_typing_calls.load(Ordering::SeqCst);
     assert_eq!(starts, 1, "start_typing should be called once");
     assert_eq!(stops, 1, "stop_typing should be called once");
+}
+
+#[tokio::test]
+async fn approval_wait_pauses_typing_and_only_approval_resumes_it() {
+    use zeroclaw_api::channel::{
+        ApprovalSource, AttributedApprovalResponse, ChannelApprovalRequest, ChannelApprovalResponse,
+    };
+
+    let cases = [
+        (
+            PendingApprovalOutcome::Response(Some(AttributedApprovalResponse::operator(
+                ChannelApprovalResponse::Approve,
+            ))),
+            true,
+            false,
+        ),
+        (
+            PendingApprovalOutcome::Response(Some(AttributedApprovalResponse::operator(
+                ChannelApprovalResponse::AlwaysApprove,
+            ))),
+            true,
+            false,
+        ),
+        (
+            PendingApprovalOutcome::Response(Some(AttributedApprovalResponse::operator(
+                ChannelApprovalResponse::Deny,
+            ))),
+            false,
+            false,
+        ),
+        (
+            PendingApprovalOutcome::Response(Some(AttributedApprovalResponse::from_runtime(
+                ChannelApprovalResponse::Deny,
+                ApprovalSource::TimedOut,
+            ))),
+            false,
+            false,
+        ),
+        (PendingApprovalOutcome::Response(None), false, false),
+        (PendingApprovalOutcome::Error, false, true),
+    ];
+
+    for (outcome, should_resume, should_error) in cases {
+        let channel_impl = Arc::new(PendingApprovalChannel::new(outcome));
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+        let typing = Arc::new(ScopedTypingController::new(
+            Arc::clone(&channel),
+            "approval-chat".to_string(),
+        ));
+        typing.resume().await;
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while channel_impl.start_typing_calls.load(Ordering::SeqCst) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("initial typing should start");
+
+        let wrapped = Arc::new(ApprovalTypingChannel::new(
+            Arc::clone(&channel),
+            Arc::clone(&typing),
+        ));
+        let approval_task = zeroclaw_spawn::spawn!(async move {
+            wrapped
+                .request_approval_attributed(
+                    "approval-chat",
+                    &ChannelApprovalRequest {
+                        tool_name: "shell".to_string(),
+                        arguments_summary: "command".to_string(),
+                        raw_arguments: None,
+                    },
+                )
+                .await
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            channel_impl.approval_started.notified(),
+        )
+        .await
+        .expect("approval request should start");
+        assert_eq!(
+            channel_impl.stop_typing_calls.load(Ordering::SeqCst),
+            1,
+            "typing must stop before the approval wait begins"
+        );
+        assert_eq!(
+            channel_impl.start_typing_calls.load(Ordering::SeqCst),
+            1,
+            "typing must remain paused while approval is pending"
+        );
+
+        channel_impl.approval_release.notify_one();
+        let approval_result = approval_task.await.unwrap();
+        assert_eq!(approval_result.is_err(), should_error);
+
+        if should_resume {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while channel_impl.start_typing_calls.load(Ordering::SeqCst) < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("approved work should resume typing");
+        } else {
+            tokio::task::yield_now().await;
+            assert_eq!(
+                channel_impl.start_typing_calls.load(Ordering::SeqCst),
+                1,
+                "denied or timed-out work must not resume typing"
+            );
+        }
+
+        typing.pause().await;
+    }
 }
 
 #[tokio::test]

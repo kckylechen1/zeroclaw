@@ -1298,4 +1298,114 @@ mod streaming_draft_tests {
         let text = "<thinking-cap>worn</thinking-cap> Answer.";
         assert_eq!(sanitize_streaming_draft_text(text, &no_tools()), text);
     }
+
+    /// Parity guard: the draft path must not preserve MORE than final
+    /// delivery does. `strip_tool_result_content` is unguarded in the shared
+    /// sanitizer, so a `<tool_result>` envelope goes even inside an otherwise
+    /// preserved protocol example — otherwise the draft would display content
+    /// the delivered message strips moments later.
+    #[test]
+    fn streaming_draft_strips_tool_result_even_inside_a_preserved_example() {
+        let text = "<tool_call>{\"name\":\"shell\"}</tool_call>\nThis is an example, not an invocation.\n<tool_result>{\"secret\":1}</tool_result>";
+        let draft = sanitize_streaming_draft_text(text, &no_tools());
+        assert!(
+            !draft.contains("tool_result") && !draft.contains("secret"),
+            "tool_result must be stripped even in an example: {draft:?}"
+        );
+        assert!(
+            draft.contains("This is an example, not an invocation."),
+            "the example prose must survive: {draft:?}"
+        );
+
+        // Same input through the shared final sanitizer: the two boundaries
+        // must agree on what survives.
+        let final_text = sanitize_channel_response(text, &[]);
+        assert_eq!(
+            draft.contains("tool_result"),
+            final_text.contains("tool_result"),
+            "draft and final must agree on tool_result handling"
+        );
+    }
+
+    /// Composed regression over the streaming loop rather than a single
+    /// string: replay the accumulation `draft_updater` performs and assert no
+    /// intermediate frame ever renders a scratchpad envelope. A per-call test
+    /// alone would miss a leak that is only visible mid-stream, which is
+    /// exactly how the reported artifact reached the user.
+    #[test]
+    fn streaming_draft_never_renders_scratchpad_in_any_frame() {
+        let deltas = [
+            "Checking the price",
+            " now.\n<tool_res",
+            "ult name=\"price\">",
+            "{\"btc\": 64000}",
+            "</tool_result>\n",
+            "BTC is $64,000.",
+        ];
+        let mut accumulated = String::new();
+        let mut frames = Vec::new();
+        for delta in deltas {
+            accumulated.push_str(delta);
+            frames.push(sanitize_streaming_draft_text(&accumulated, &no_tools()));
+        }
+
+        for (i, frame) in frames.iter().enumerate() {
+            assert!(
+                !frame.contains("<tool_res") && !frame.contains("btc"),
+                "frame {i} leaked scratchpad: {frame:?}"
+            );
+        }
+        assert_eq!(
+            frames.last().unwrap(),
+            "Checking the price now.\n\nBTC is $64,000."
+        );
+    }
+
+    /// The preserved-example branch and a half-emitted result envelope in the
+    /// same stream. Preserving a complete `<tool_call>` documentation block
+    /// must not buy the model a window in which a partial `<tool_result>`
+    /// payload is visible, so this replays the accumulation frame by frame
+    /// rather than sanitizing the finished string: the leak exists only while
+    /// the closing tag has not arrived, which a single-string test cannot see.
+    #[test]
+    fn streaming_draft_preserved_example_never_shows_a_partial_result_tail() {
+        let deltas = [
+            "<tool_call>{\"name\":\"shell\"}",
+            "</tool_call>\nThis is an example, not an invocation.",
+            "\n<tool_result>{\"secret\":1",
+            "}</tool_result>\nDone.",
+        ];
+        let mut accumulated = String::new();
+        let mut frames = Vec::new();
+        for delta in deltas {
+            accumulated.push_str(delta);
+            frames.push(sanitize_streaming_draft_text(&accumulated, &no_tools()));
+        }
+
+        for (i, frame) in frames.iter().enumerate() {
+            assert!(
+                !frame.contains("secret") && !frame.contains("<tool_result"),
+                "frame {i} leaked a result envelope: {frame:?}"
+            );
+        }
+
+        // Once the example is complete it must stay visible, including across
+        // the frames where the result envelope is still arriving.
+        for (i, frame) in frames.iter().enumerate().skip(1) {
+            assert!(
+                frame.contains("This is an example, not an invocation."),
+                "frame {i} dropped the preserved example: {frame:?}"
+            );
+            assert!(
+                frame.contains("<tool_call>"),
+                "frame {i} dropped the preserved tool_call tags: {frame:?}"
+            );
+        }
+
+        assert!(
+            frames.last().unwrap().contains("Done."),
+            "the closing prose must survive: {:?}",
+            frames.last().unwrap()
+        );
+    }
 }

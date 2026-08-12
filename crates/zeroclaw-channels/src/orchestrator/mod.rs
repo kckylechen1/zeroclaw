@@ -2697,6 +2697,66 @@ impl Channel for ApprovalTypingChannel {
     }
 }
 
+/// Pump draft deltas to the channel transport, sanitizing every partial on the
+/// way out.
+///
+/// Extracted from the streaming spawn so the boundary can be exercised through
+/// the values actually handed to `update_draft` and `update_draft_progress`. A
+/// test that calls [`sanitize_streaming_draft_text`] directly proves only that
+/// the helper is correct, and would stay green if this wiring were removed;
+/// the leak this guards against is a transport call carrying raw text, so that
+/// is what the regression needs to observe.
+///
+/// Status deltas are sanitized per delta because they replace the progress
+/// line outright, whereas text deltas are accumulated first: the sanitizer
+/// needs the whole partial to tell a closed envelope from one still arriving.
+///
+/// `known_tool_names` comes from the same registry the final sanitizer reads,
+/// so both boundaries judge a protocol payload by the same tool inventory.
+async fn run_draft_updater(
+    channel: Arc<dyn Channel>,
+    reply_target: String,
+    draft_id: String,
+    known_tool_names: HashSet<String>,
+    mut rx: tokio::sync::mpsc::Receiver<zeroclaw_runtime::agent::loop_::DraftEvent>,
+) {
+    use zeroclaw_runtime::agent::loop_::StreamDelta;
+    let mut accumulated = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            StreamDelta::Status(text) => {
+                let visible = sanitize_streaming_draft_text(&text, &known_tool_names);
+                if let Err(e) = channel
+                    .update_draft_progress(&reply_target, &draft_id, &visible)
+                    .await
+                {
+                    ::zeroclaw_log::record!(
+                        DEBUG,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                        "Draft progress update failed"
+                    );
+                }
+            }
+            StreamDelta::Text(text) => {
+                accumulated.push_str(&text);
+                let visible = sanitize_streaming_draft_text(&accumulated, &known_tool_names);
+                if let Err(e) = channel
+                    .update_draft(&reply_target, &draft_id, &visible)
+                    .await
+                {
+                    ::zeroclaw_log::record!(
+                        DEBUG,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                        "Draft update failed"
+                    );
+                }
+            }
+        }
+    }
+}
+
 async fn process_channel_message(
     ctx: Arc<ChannelRuntimeContext>,
     msg: zeroclaw_api::channel::ChannelMessage,
@@ -3525,7 +3585,7 @@ async fn process_channel_message_body(
     // Spawn the appropriate handler for the delta channel.
     let draft_updater = if use_draft_streaming {
         // Partial: accumulate text and edit a single draft message.
-        if let (Some(mut rx), Some(draft_id_ref), Some(channel_ref)) = (
+        if let (Some(rx), Some(draft_id_ref), Some(channel_ref)) = (
             delta_rx,
             draft_message_id.as_deref(),
             target_channel.as_ref(),
@@ -3541,48 +3601,7 @@ async fn process_channel_message_body(
                 .map(|tool| tool.name().to_ascii_lowercase())
                 .collect();
             Some(zeroclaw_spawn::spawn!(async move {
-                use zeroclaw_runtime::agent::loop_::StreamDelta;
-                let mut accumulated = String::new();
-                while let Some(event) = rx.recv().await {
-                    match event {
-                        StreamDelta::Status(text) => {
-                            let visible = sanitize_streaming_draft_text(&text, &known_tool_names);
-                            if let Err(e) = channel
-                                .update_draft_progress(&reply_target, &draft_id, &visible)
-                                .await
-                            {
-                                ::zeroclaw_log::record!(
-                                    DEBUG,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                                    "Draft progress update failed"
-                                );
-                            }
-                        }
-                        StreamDelta::Text(text) => {
-                            accumulated.push_str(&text);
-                            let visible =
-                                sanitize_streaming_draft_text(&accumulated, &known_tool_names);
-                            if let Err(e) = channel
-                                .update_draft(&reply_target, &draft_id, &visible)
-                                .await
-                            {
-                                ::zeroclaw_log::record!(
-                                    DEBUG,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Note
-                                    )
-                                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                                    "Draft update failed"
-                                );
-                            }
-                        }
-                    }
-                }
+                run_draft_updater(channel, reply_target, draft_id, known_tool_names, rx).await;
             }))
         } else {
             None
