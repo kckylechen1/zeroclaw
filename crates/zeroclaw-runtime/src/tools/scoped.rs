@@ -1106,7 +1106,6 @@ mod tests {
                 connect_mcp: true,
                 connect_peripherals: false,
                 exclude_memory: false,
-                acp_delivery: false,
                 list_deferred_mcp_specs: false,
                 emit_assembly_logs: false,
                 mcp_registry: Some(Arc::clone(&registry)),
