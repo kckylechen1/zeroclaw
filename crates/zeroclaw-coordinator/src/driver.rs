@@ -2,21 +2,21 @@
 //!
 //! [`ChildRunner`] remains the coordinator's internal lifecycle seam — it is
 //! generic over associated types and drives one in-process run. This module
-//! adds the registry-facing surface: an object-safe [`AgentDriver`] trait that
-//! a future driver registry (`HashMap<HarnessId, Box<dyn AgentDriver>>`, or
-//! equivalently keyed by the string [`AgentDriver::id`] returns) dispatches
-//! on, plus the [`HarnessCard`] config entity that names which backend owns a
-//! given agent. [`HarnessKind`] is a classification only — multiple drivers
-//! (e.g. claude-code and codex) may share [`HarnessKind::Process`] and must
-//! not collide as registry keys.
+//! is the registry-facing surface: an object-safe [`AgentDriver`] trait that
+//! [`crate::DriverRegistry`] (`HashMap<HarnessId, Box<dyn AgentDriver>>`)
+//! dispatches on, plus the [`HarnessCard`] config entity that names which
+//! backend owns a given agent. [`HarnessKind`] is a classification only —
+//! multiple drivers (e.g. claude-code and codex) may share
+//! [`HarnessKind::Process`] and must not collide as registry keys.
 //!
-//! Nothing in this module is wired into the live coordinator yet. A later PR
-//! adapts `NativeChildRunner` to `impl AgentDriver` (translating
-//! [`AgentRunRequest`] into the coordinator's native [`ChildRequest`]); after
-//! that comes the registry, then `JoinMode`, then delegate convergence.
+//! [`crate::NativeAgentDriver`] adapts the coordinator's [`ChannelBackend`]
+//! (translating [`AgentRunRequest`] into the native [`ChildRequest`]). Live
+//! spawn callers (`ChannelBackend::spawn`, `spawn_subagent`) are not switched
+//! over yet; a later PR does that, then `JoinMode`, then delegate convergence.
 //!
 //! [`ChildRunner`]: crate::state::ChildRunner
 //! [`ChildRequest`]: crate::types::ChildRequest
+//! [`ChannelBackend`]: crate::backend::ChannelBackend
 
 use std::fmt;
 use std::path::PathBuf;
