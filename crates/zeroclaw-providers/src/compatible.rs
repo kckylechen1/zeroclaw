@@ -998,6 +998,12 @@ struct ApiChatRequest {
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    /// Extra fields merged at the top level of the serialized JSON body.
+    /// Mirrors `NativeChatRequest::extra_body` so config-driven extras
+    /// (`provider_extra`, `chat_template_kwargs`) reach the no-tools request
+    /// paths too, not just the native-tools path.
+    #[serde(flatten)]
+    extra_body: Option<serde_json::Value>,
 }
 
 /// OpenAI-compatible `stream_options.include_usage` toggle.
@@ -1128,30 +1134,6 @@ struct Choice {
     message: ResponseMessage,
 }
 
-/// Remove `<think>...</think>` blocks from model output.
-/// Some reasoning models (e.g. MiniMax) embed their chain-of-thought inline
-/// in the `content` field rather than a separate `reasoning_content` field.
-/// The resulting `<think>` tags must be stripped before returning to the user.
-fn strip_think_tags(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut rest = s;
-    loop {
-        if let Some(start) = rest.find("<think>") {
-            result.push_str(&rest[..start]);
-            if let Some(end) = rest[start..].find("</think>") {
-                rest = &rest[start + end + "</think>".len()..];
-            } else {
-                // Unclosed tag: drop the rest to avoid leaking partial reasoning.
-                break;
-            }
-        } else {
-            result.push_str(rest);
-            break;
-        }
-    }
-    result.trim().to_string()
-}
-
 /// OpenAI Chat Completions may return assistant `message.content` as a string,
 /// null, or an array of typed parts. Normalize it before storing the internal
 /// response shape so compatible gateways that preserve typed parts still work,
@@ -1233,19 +1215,32 @@ impl From<RawResponseMessage> for ResponseMessage {
 }
 
 impl ResponseMessage {
+    /// Extract text content from the `content` field only. Does NOT fall
+    /// back to `reasoning_content` — thinking/reasoning models (GLM-5.1,
+    /// DeepSeek, Qwen) return their thinking in `reasoning_content` which
+    /// must not leak into the user-visible response text. The
+    /// `reasoning_content` is preserved separately in
+    /// `ChatResponse.reasoning_content` for history round-tripping.
+    ///
+    /// Returns the `content` field as-is. Previously this stripped
+    /// `<think>...</think>` blocks that some reasoning models (e.g. MiniMax)
+    /// embedded inline in `content` instead of using a separate field, but
+    /// that unconditional rewrite silently mangled responses whose `content`
+    /// legitimately contained literal `<think>...</think>` markup (HTML, code
+    /// samples, quoted discussion of the tag itself, and unclosed tails).
+    /// Model providers that need inline think-block filtering should do it
+    /// downstream of this response shape, with full visibility into the
+    /// model's actual output.
     fn effective_content(&self) -> String {
         self.content
             .as_ref()
-            .map(|c| strip_think_tags(c))
+            .cloned()
             .filter(|c| !c.is_empty())
             .unwrap_or_default()
     }
 
     fn effective_content_optional(&self) -> Option<String> {
-        self.content
-            .as_ref()
-            .map(|c| strip_think_tags(c))
-            .filter(|c| !c.is_empty())
+        self.content.as_ref().cloned().filter(|c| !c.is_empty())
     }
 }
 
@@ -2203,6 +2198,7 @@ impl OpenAiCompatibleModelProvider {
         allow_user_image_parts: bool,
     ) -> Vec<NativeMessage> {
         let targets_mistral_tool_call_contract = self.targets_mistral_tool_call_contract();
+        let requires_string_tool_call_content = self.requires_string_tool_call_content();
         let mut used_tool_call_ids = std::collections::HashSet::new();
         let mut tool_call_id_map = std::collections::HashMap::new();
         let mut last_assistant_tool_call_ids: Vec<String> = Vec::new();
@@ -2252,7 +2248,11 @@ impl OpenAiCompatibleModelProvider {
                         tool_calls.iter().filter_map(|tc| tc.id.clone()).collect();
 
                     let content = crate::request_payload::non_empty_string_field(&value, "content")
-                        .map(MessageContent::Text);
+                        .map(MessageContent::Text)
+                        .or_else(|| {
+                            requires_string_tool_call_content
+                                .then(|| MessageContent::Text(String::new()))
+                        });
 
                     let (reasoning_content, reasoning) =
                         self.assistant_reasoning_pair_for_replay(&value);
@@ -2444,6 +2444,27 @@ impl OpenAiCompatibleModelProvider {
         }
 
         modified_messages
+    }
+
+    /// Whether this backend requires `content` to be a string on assistant
+    /// tool-call messages.
+    ///
+    /// OpenAI accepts the field absent or null there, and omitting it is the
+    /// default. Cloudflare Workers AI validates against a stricter schema and
+    /// rejects the whole request with HTTP 400 (`AiError: Bad input ...
+    /// required properties at '/messages/N' are 'role,content'`). The failure
+    /// is intermittent in practice: a model that emits text alongside its tool
+    /// call produces a non-empty content and succeeds, while the far more
+    /// common no-text tool call fails.
+    fn requires_string_tool_call_content(&self) -> bool {
+        reqwest::Url::parse(&self.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(|h| h.to_ascii_lowercase()))
+            .is_some_and(|host| {
+                host == "api.cloudflare.com"
+                    || host == "gateway.ai.cloudflare.com"
+                    || host.ends_with(".cloudflare.com")
+            })
     }
 
     fn targets_mistral_tool_call_contract(&self) -> bool {
@@ -2758,6 +2779,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
             tools: None,
             tool_choice: None,
             max_tokens: self.max_tokens,
+            extra_body: self.extra_body.clone(),
         };
 
         let url = self.chat_completions_url();
@@ -2847,6 +2869,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
             tools: None,
             tool_choice: None,
             max_tokens: self.max_tokens,
+            extra_body: self.extra_body.clone(),
         };
 
         let url = self.chat_completions_url();
@@ -3206,6 +3229,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
                     tools: None,
                     tool_choice: None,
                     max_tokens: provider.max_tokens,
+                    extra_body: provider.extra_body.clone(),
                 })
             };
 
@@ -3357,6 +3381,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
                 tools: None,
                 tool_choice: None,
                 max_tokens: provider.max_tokens,
+                extra_body: provider.extra_body.clone(),
             };
 
             let url = provider.chat_completions_url();
@@ -3475,6 +3500,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
                 tools: None,
                 tool_choice: None,
                 max_tokens: provider.max_tokens,
+                extra_body: provider.extra_body.clone(),
             };
 
             let url = provider.chat_completions_url();
@@ -4193,6 +4219,44 @@ mod tests {
     }
 
     #[test]
+    fn api_chat_request_flattens_extra_body_into_top_level() {
+        // Regression: the no-tools request struct (`chat_with_system`,
+        // `chat_with_history`, no-tools streaming) must also carry the
+        // config-driven `extra_body`, not just the native-tools path.
+        let req = ApiChatRequest {
+            model: "qwen".to_string(),
+            messages: vec![],
+            temperature: None,
+            stream: None,
+            stream_options: None,
+            reasoning_effort: None,
+            tool_stream: None,
+            tools: None,
+            tool_choice: None,
+            max_tokens: None,
+            extra_body: Some(serde_json::json!({
+                "top_p": 0.95,
+                "chat_template_kwargs": {"thinking": true, "reasoning_effort": "max"},
+            })),
+        };
+        let value: serde_json::Value = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            value.get("top_p").and_then(serde_json::Value::as_f64),
+            Some(0.95),
+            "provider_extra keys must serialize at the top level of a no-tools request"
+        );
+        assert_eq!(
+            value.pointer("/chat_template_kwargs/reasoning_effort"),
+            Some(&serde_json::json!("max")),
+            "chat_template_kwargs must be nested under its own top-level key in a no-tools request"
+        );
+        assert!(
+            value.get("extra_body").is_none(),
+            "extra_body key itself must not appear in serialized JSON"
+        );
+    }
+
+    #[test]
     fn normalize_model_ids_trims_filters_and_sorts() {
         let body = serde_json::from_value(serde_json::json!({
             "data": [
@@ -4228,6 +4292,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             max_tokens: None,
+            extra_body: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("llama-3.3-70b"));
@@ -5044,9 +5109,20 @@ mod tests {
     }
 
     #[test]
-    fn strip_think_tags_drops_unclosed_block_suffix() {
-        let input = "visible<think>hidden";
-        assert_eq!(strip_think_tags(input), "visible");
+    fn effective_content_preserves_literal_think_tags() {
+        // The deleted `strip_think_tags()` helper searched for the exact
+        // substring `<think>` / `</think>` and stripped those blocks
+        // unconditionally. This regression pins that literal `<think>` tags
+        // now round-trip byte-for-byte, including legitimate uses where the
+        // model legitimately discusses the tag (HTML sample, code quoting,
+        // meta-discussion).
+        let json = r#"{"choices":[{"message":{"content":"Here is the HTML: <think>internal note</think>"}}]}"#;
+        let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
+        let msg = &resp.choices[0].message;
+        assert_eq!(
+            msg.effective_content(),
+            "Here is the HTML: <think>internal note</think>"
+        );
     }
 
     #[test]
@@ -5484,6 +5560,7 @@ mod tests {
             tools: Some(tools),
             tool_choice: Some("auto".to_string()),
             max_tokens: None,
+            extra_body: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"tools\""));
@@ -5520,6 +5597,7 @@ mod tests {
             })]),
             tool_choice: Some("auto".to_string()),
             max_tokens: None,
+            extra_body: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -5555,6 +5633,7 @@ mod tests {
             })]),
             tool_choice: Some("auto".to_string()),
             max_tokens: None,
+            extra_body: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -5822,17 +5901,52 @@ mod tests {
     }
 
     #[test]
-    fn strip_think_tags_removes_multiple_blocks_with_surrounding_text() {
-        let input = "Answer A <think>hidden 1</think> and B <think>hidden 2</think> done";
-        let output = strip_think_tags(input);
-        assert_eq!(output, "Answer A  and B  done");
+    fn effective_content_preserves_unclosed_think_tag() {
+        // An unclosed literal `<think>` tag must NOT discard the rest of the
+        // response. The old `strip_think_tags()` helper saw no closing
+        // `</think>` and dropped the trailing tail, collapsing
+        // "Visible <think>hidden tail" to "Visible". The new path returns
+        // the input unchanged.
+        let json = r#"{"choices":[{"message":{"content":"Visible <think>hidden tail"}}]}"#;
+        let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
+        let msg = &resp.choices[0].message;
+        assert_eq!(msg.effective_content(), "Visible <think>hidden tail");
     }
 
     #[test]
-    fn strip_think_tags_drops_tail_for_unclosed_block() {
-        let input = "Visible<think>hidden tail";
-        let output = strip_think_tags(input);
-        assert_eq!(output, "Visible");
+    fn effective_content_preserves_multiple_think_blocks() {
+        // Multiple literal `<think>` blocks in `content` survive the removal
+        // intact. The old `strip_think_tags()` helper would have collapsed
+        // the visible text to "Answer A  and B  done" — the double spaces
+        // mark where `<think>hidden 1</think>` and `<think>hidden 2</think>`
+        // used to be — losing the inter-block separators and the tag
+        // delimiters themselves.
+        let json = r#"{"choices":[{"message":{"content":"Answer A <think>hidden 1</think> and B <think>hidden 2</think> done"}}]}"#;
+        let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
+        let msg = &resp.choices[0].message;
+        assert_eq!(
+            msg.effective_content(),
+            "Answer A <think>hidden 1</think> and B <think>hidden 2</think> done"
+        );
+    }
+    #[test]
+    fn effective_content_preserves_think_tags_with_reasoning_content() {
+        // When both `content` and `reasoning_content` are present,
+        // the literal `<think>` blocks in `content` survive intact while
+        // `reasoning_content` is preserved separately and is NOT leaked
+        // into the response text.
+        let json = r#"{"choices":[{"message":{"content":"Visible <think>hidden tail</think>","reasoning_content":"reasoning separately"}}]}"#;
+        let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
+        let msg = &resp.choices[0].message;
+        assert_eq!(
+            msg.effective_content(),
+            "Visible <think>hidden tail</think>"
+        );
+        assert!(!msg.effective_content().contains("reasoning separately"));
+        assert_eq!(
+            msg.reasoning_content.as_deref(),
+            Some("reasoning separately")
+        );
     }
 
     // ----------------------------------------------------------
@@ -5883,14 +5997,24 @@ mod tests {
 
     #[test]
     fn reasoning_content_preserved_when_content_only_think_tags() {
-        // When content only has <think> tags (stripped to empty),
-        // effective_content returns "" — reasoning_content is preserved
-        // separately, not leaked into the response text.
+        // The compatible provider no longer strips literal
+        // `<think>...</think>` blocks from `content`. Previously the
+        // `<think>secret</think>`-only content was collapsed to the empty
+        // string by `strip_think_tags()`, and `effective_content()` returned
+        // `""` so the visible-text field was effectively replaced by the
+        // model's chain-of-thought marker. Now the literal `<think>` tags
+        // round-trip into `effective_content()` byte-for-byte, and
+        // `reasoning_content` is still preserved separately and not leaked
+        // into the response text.
         let json = r#"{"choices":[{"message":{"content":"<think>secret</think>","reasoning_content":"Thinking text"}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(msg.effective_content(), "");
-        assert_eq!(msg.effective_content_optional(), None);
+        assert!(msg.effective_content().contains("secret"));
+        assert!(msg.effective_content().contains("<think>"));
+        assert_eq!(
+            msg.effective_content_optional().as_deref(),
+            Some("<think>secret</think>"),
+        );
         assert_eq!(msg.reasoning_content.as_deref(), Some("Thinking text"));
     }
 
@@ -6581,6 +6705,46 @@ mod tests {
     }
 
     #[test]
+    fn convert_messages_for_native_sends_string_tool_call_content_on_cloudflare() {
+        // Cloudflare Workers AI rejects an assistant tool-call message whose
+        // `content` is absent or null (HTTP 400, AiError 5006). Measured:
+        // content=null -> 400, content omitted -> 400, content="" -> 200.
+        // Every other backend keeps the omitting behaviour pinned by
+        // convert_messages_for_native_omits_empty_tool_call_content.
+        let history_json = serde_json::json!({
+            "content": "",
+            "tool_calls": [{
+                "id": "tc_1",
+                "name": "realms_proposal_firewall",
+                "arguments": "{}"
+            }]
+        });
+        let messages = vec![ChatMessage::assistant(history_json.to_string())];
+
+        let cloudflare = make_model_provider(
+            "workers_ai",
+            "https://api.cloudflare.com/client/v4/accounts/acct/ai/v1/chat/completions",
+            None,
+        );
+        let native = cloudflare.convert_messages_for_native(&messages, true);
+        let json = serde_json::to_value(&native[0]).unwrap();
+        assert_eq!(
+            json.get("content"),
+            Some(&serde_json::Value::String(String::new())),
+            "Cloudflare must receive content as a string, not an omitted field"
+        );
+
+        let other = make_model_provider("test", "https://example.com", None);
+        let native = other.convert_messages_for_native(&messages, true);
+        let json = serde_json::to_value(&native[0]).unwrap();
+        assert_eq!(
+            json.get("content"),
+            None,
+            "non-Cloudflare backends keep the existing omitting behaviour"
+        );
+    }
+
+    #[test]
     fn convert_messages_for_native_reasoning_content_serialized_only_when_present() {
         // Verify skip_serializing_if works: reasoning_content omitted from JSON when None
         let msg_without = NativeMessage {
@@ -7217,6 +7381,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             max_tokens: None,
+            extra_body: None,
         }
     }
 
