@@ -19,16 +19,13 @@ ignore = [
     # ── Informational only (no tracking issue required) ────────────────────
     "RUSTSEC-2024-0384",  # instant unmaintained; informational advisory; transitive dep
 
-    # ── First-light advisory debt (fork CI never ran audit before 2026-08-10;
-    # see kckylechen1/zeroclaw#28). nostr family fixed by lock bumps in the
-    # same PR. wasmtime is the one open item: ──
-    "RUSTSEC-2026-0222",  # wasmtime store/engine type-index mixup; 45.x series has NO patched release (fixes are 46.0.2+/47.0.3+); upstream crossed to 47.0.3 — that is a zeroclaw-plugins migration, tracked in the fork as the wasmtime-47 sync item under #28
-
     # ── audit.toml/deny.toml drift reconcile + wasmtime CVEs; tracking #8519 ──
     # cargo-audit reads the whole Cargo.lock, so it flags advisories cargo-deny
     # (graph-aware) tolerates. Reconcile and remediate per #8519.
     # RUSTSEC-2026-0149, -0182, -0188 cleared by wasmtime/wasmtime-wasi 43 -> 45.0.3
     # bump in crates/zeroclaw-plugins. Resolved by #8542.
+    # RUSTSEC-2026-0222 cleared by wasmtime stack 45.0.3 -> 47.0.3 bump
+    # (closes the first-light wasmtime-47 sync item under kckylechen1/zeroclaw#28).
     # GTK3 stack unmaintained via zeroclaw-desktop (tauri -> webkit2gtk); tracking #8519
     "RUSTSEC-2024-0411",  # gdkwayland-sys unmaintained gtk-rs GTK3 bindings; tracking #8519
     "RUSTSEC-2024-0412",  # gdk unmaintained gtk-rs GTK3 bindings; tracking #8519
