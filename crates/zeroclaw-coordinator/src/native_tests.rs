@@ -106,6 +106,9 @@ impl ChildRunner for TestRunner {
                     child_session_id: request.child_id.clone(),
                     tool_calls: 3,
                     turns: 2,
+                    tokens_used: FIXTURE_TOKENS_USED,
+                    output_tokens_used: FIXTURE_OUTPUT_TOKENS_USED,
+                    total_tokens_used: FIXTURE_TOTAL_TOKENS_USED,
                     ..Default::default()
                 },
             };
@@ -190,11 +193,18 @@ fn harness(wait_before_start: bool) -> Harness {
     }
 }
 
+/// Non-zero usage the test runner stamps on a completed `ChildResult`.
+/// Inspect after finish must report these exact numbers — not zeros.
+const FIXTURE_TOKENS_USED: u64 = 120;
+const FIXTURE_OUTPUT_TOKENS_USED: u64 = 45;
+const FIXTURE_TOTAL_TOKENS_USED: u64 = 165;
+
 fn run_request(id: &str) -> AgentRunRequest {
     AgentRunRequest {
         run_id: id.to_owned(),
         prompt: "do the work".to_owned(),
         agent: "explore".to_owned(),
+        parent_alias: "parent-alias".to_owned(),
         cwd: Some(std::path::PathBuf::from("/tmp/native-run")),
         resume_from: Some("prior-session".to_owned()),
     }
@@ -243,6 +253,10 @@ fn child_request_translation_copies_heterogeneous_fields_and_detaches() {
     assert_eq!(child.cwd.as_deref(), Some("/tmp/native-run"));
     assert_eq!(child.resume_from.as_deref(), Some("prior-session"));
     assert_eq!(child.parent_session_id, "parent-session");
+    assert_eq!(
+        child.parent_alias, "parent-alias",
+        "parent_alias is the owning agent of the parent session, not a blank default"
+    );
     assert!(
         child.run_in_background,
         "spawn returns a handle; the child must not take the foreground budget"
@@ -250,6 +264,17 @@ fn child_request_translation_copies_heterogeneous_fields_and_detaches() {
     assert!(!child.await_to_completion);
     assert!(child.surface_completion);
     assert!(!child.fork_context);
+}
+
+#[test]
+fn child_request_translation_preserves_empty_parent_alias() {
+    let mut request = run_request("run-empty-parent");
+    request.parent_alias.clear();
+    let child = child_request_from(request, Some("parent-session"));
+    assert!(
+        child.parent_alias.is_empty(),
+        "empty parent_alias must pass through; the adapter must not invent an owner"
+    );
 }
 
 #[test]
@@ -284,6 +309,9 @@ fn agent_run_status_maps_each_child_status_without_collapsing_outcomes() {
                 detail: None,
                 tool_calls: 0,
                 turns: 0,
+                tokens_used: 0,
+                output_tokens_used: 0,
+                total_tokens_used: 0,
                 worktree_path: None,
             }),
             AgentRunStatus::Finished(outcome),
@@ -312,6 +340,7 @@ async fn registry_dispatches_native_spawn_inspect_cancel_through_trait_object() 
     assert_eq!(translated.child_id, "life-1");
     assert_eq!(translated.prompt, "do the work");
     assert_eq!(translated.agent_type, "explore");
+    assert_eq!(translated.parent_alias, "parent-alias");
     assert!(translated.run_in_background);
 
     let pending = driver.inspect(&handle).await.unwrap();
@@ -355,6 +384,34 @@ async fn native_driver_inspect_after_completion_preserves_child_outcome() {
     let result = finished.result.expect("Completed run carries a result");
     assert_eq!(result.outcome, ChildOutcome::Completed);
     assert_eq!(&*result.output, "do the work");
+
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn native_driver_inspect_after_completion_preserves_child_result_usage() {
+    let mut harness = harness(false);
+    let driver: Box<dyn AgentDriver> = Box::new(NativeAgentDriver::new(harness.backend.clone()));
+
+    let handle = driver.spawn(run_request("usage-1")).await.unwrap();
+    assert_eq!(harness.started.recv().await.as_deref(), Some("usage-1"));
+    let _ = harness.finish.send(());
+
+    let finished = inspect_until_finished(driver.as_ref(), &handle).await;
+    assert_eq!(
+        finished.status,
+        AgentRunStatus::Finished(ChildOutcome::Completed)
+    );
+    let result = finished.result.expect("Completed run carries a result");
+    assert_eq!(result.tokens_used, FIXTURE_TOKENS_USED);
+    assert_eq!(result.output_tokens_used, FIXTURE_OUTPUT_TOKENS_USED);
+    assert_eq!(result.total_tokens_used, FIXTURE_TOTAL_TOKENS_USED);
+    assert_ne!(
+        result.tokens_used, 0,
+        "fixture must be non-zero so a zeroed snapshot cannot pass"
+    );
+    assert_ne!(result.output_tokens_used, 0);
+    assert_ne!(result.total_tokens_used, 0);
 
     harness.actor.abort();
 }

@@ -162,6 +162,17 @@ pub struct AgentRunRequest {
     pub prompt: String,
     /// Agent type or alias the harness should run as.
     pub agent: String,
+    /// Agent alias that owns the parent session — same contract as
+    /// [`ChildRequest::parent_alias`].
+    ///
+    /// This is what belongs in a persisted `TaskRecord.agent` and, downstream
+    /// of that, in `Announcement.agent`. It is **not** a role/agent-type
+    /// spelling like `"explore"`, and it is a different axis than
+    /// `parent_session_id` (session identity). Empty means the caller has no
+    /// parent alias to attribute — the adapter must not invent one.
+    ///
+    /// [`ChildRequest::parent_alias`]: crate::types::ChildRequest::parent_alias
+    pub parent_alias: String,
     /// Explicit working directory for the harness, when the caller sets one.
     pub cwd: Option<PathBuf>,
     /// Resume from a previously completed run or external session id.
@@ -462,6 +473,7 @@ mod tests {
             run_id: "test".into(),
             prompt: "hi".into(),
             agent: "explore".into(),
+            parent_alias: "parent-alias".into(),
             cwd: None,
             resume_from: None,
         };

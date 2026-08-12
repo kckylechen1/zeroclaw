@@ -71,6 +71,8 @@ impl NativeAgentDriver {
 /// Native-only fields get driver defaults: detached (`run_in_background`),
 /// completion still surfaced, no fork, no parent-turn binding. `parent_session_id`
 /// is copied from a session-bound backend when the caller supplies one.
+/// [`AgentRunRequest::parent_alias`] is passed through unchanged — it is the
+/// parent session's owning agent, not a native lifecycle knob.
 pub(crate) fn child_request_from(
     request: AgentRunRequest,
     parent_session_id: Option<&str>,
@@ -81,7 +83,7 @@ pub(crate) fn child_request_from(
         description: request.prompt,
         agent_type: request.agent,
         parent_session_id: parent_session_id.unwrap_or("").to_owned(),
-        parent_alias: String::new(),
+        parent_alias: request.parent_alias,
         parent_prompt_id: None,
         resume_from: request.resume_from,
         cwd: request.cwd.map(|path| path.to_string_lossy().into_owned()),
@@ -107,6 +109,13 @@ pub(crate) fn agent_run_status(status: &ChildStatus) -> AgentRunStatus {
     }
 }
 
+/// Rebuild a driver snapshot from an inspect reply.
+///
+/// Terminal usage comes from [`ChildStatus::Finished`], which
+/// `completed_snapshot` copies out of [`crate::state::CompletedChild::result`].
+/// The spawn `result_tx` receiver stays dropped: keeping it would duplicate
+/// the completed map, fight the detached-spawn contract, and leave
+/// `ChannelBackend::inspect` / query equally blind. ChildRunner is unchanged.
 fn snapshot_from_inspection(inspection: ChildInspection) -> AgentRunSnapshot {
     let status = agent_run_status(&inspection.snapshot.status);
     let result = match &inspection.snapshot.status {
@@ -116,6 +125,9 @@ fn snapshot_from_inspection(inspection: ChildInspection) -> AgentRunSnapshot {
             detail,
             tool_calls,
             turns,
+            tokens_used,
+            output_tokens_used,
+            total_tokens_used,
             worktree_path,
         } => Some(ChildResult {
             outcome: *outcome,
@@ -126,9 +138,9 @@ fn snapshot_from_inspection(inspection: ChildInspection) -> AgentRunSnapshot {
             tool_calls: *tool_calls,
             turns: *turns,
             duration_ms: inspection.snapshot.duration_ms,
-            tokens_used: 0,
-            output_tokens_used: 0,
-            total_tokens_used: 0,
+            tokens_used: *tokens_used,
+            output_tokens_used: *output_tokens_used,
+            total_tokens_used: *total_tokens_used,
             worktree_path: worktree_path.clone(),
             backgrounded: false,
         }),
