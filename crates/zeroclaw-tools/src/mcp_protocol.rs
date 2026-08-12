@@ -1,5 +1,7 @@
 //! MCP (Model Context Protocol) JSON-RPC 2.0 protocol types.
 //! Protocol version: 2024-11-05
+//! Dual-era peer classification lives in [`crate::mcp_era`] — do not bump
+//! [`MCP_PROTOCOL_VERSION`] until the modern transport arm exists (issue #26).
 //! Adapted from ops-mcp-server/src/protocol.rs for client use.
 //! Both Serialize and Deserialize are derived — the client both sends (Serialize)
 
