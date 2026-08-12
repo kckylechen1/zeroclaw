@@ -1035,6 +1035,105 @@ fn schema_output_failure_fails_run_before_next_step() {
 }
 
 #[test]
+fn wrapped_step_output_validates_and_pipes_as_declared_object() {
+    let mut sop = test_sop(
+        "schema-wrapped-output",
+        SopExecutionMode::Auto,
+        SopPriority::Normal,
+    );
+    sop.steps[0].schema = Some(StepSchema {
+        input: None,
+        output: Some(required_object_schema("ok")),
+    });
+    sop.steps[1].schema = Some(StepSchema {
+        input: Some(required_object_schema("ok")),
+        output: None,
+    });
+    let mut engine = engine_with_sops(vec![sop]);
+    let action = engine
+        .start_run("schema-wrapped-output", manual_event())
+        .unwrap();
+    let run_id = extract_run_id(&action).to_string();
+
+    let action = engine
+        .advance_step(
+            &run_id,
+            SopStepResult {
+                step_number: 1,
+                status: SopStepStatus::Completed,
+                output: "Result:\n```json\n{\"ok\":true}\n```\nDone.".into(),
+                started_at: now_iso8601(),
+                completed_at: Some(now_iso8601()),
+                effective_agent: None,
+                tool_calls: Vec::new(),
+            },
+        )
+        .unwrap();
+
+    assert!(
+        matches!(action, SopRunAction::ExecuteStep { ref step, .. } if step.number == 2),
+        "the recovered object must satisfy step 1 output and step 2 input schemas"
+    );
+    assert_eq!(
+        engine.active_runs()[&run_id].step_results[0].output,
+        r#"{"ok":true}"#,
+        "recovery is canonicalized once at the model-output boundary"
+    );
+}
+
+#[test]
+fn prose_trigger_with_json_example_stays_raw_for_first_input_retry_and_replay() {
+    let payload = "Review this example {\"ok\":true}, then follow the prose.";
+    let mut sop = test_sop(
+        "raw-trigger-json-example",
+        SopExecutionMode::Auto,
+        SopPriority::Normal,
+    );
+    sop.steps[0].on_failure = StepFailure::Retry { max: 1 };
+    let mut engine = engine_with_sops(vec![sop]);
+    let action = engine
+        .start_run(
+            "raw-trigger-json-example",
+            SopEvent {
+                source: SopTriggerSource::Manual,
+                topic: None,
+                payload: Some(payload.into()),
+                timestamp: now_iso8601(),
+            },
+        )
+        .unwrap();
+    let run_id = extract_run_id(&action).to_string();
+
+    assert_eq!(
+        step_input_value(&engine.active_runs()[&run_id], 1),
+        serde_json::Value::String(payload.into())
+    );
+
+    let action = engine
+        .advance_step(
+            &run_id,
+            SopStepResult {
+                step_number: 1,
+                status: SopStepStatus::Failed,
+                output: "try again".into(),
+                started_at: now_iso8601(),
+                completed_at: Some(now_iso8601()),
+                effective_agent: None,
+                tool_calls: Vec::new(),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        action,
+        SopRunAction::ExecuteStep { ref step, .. } if step.number == 1
+    ));
+
+    let run = &engine.active_runs()[&run_id];
+    assert_eq!(retry_input_value(run, 1), serde_json::Value::String(payload.into()));
+    assert_eq!(replay_input_for_step(run, 1), serde_json::Value::String(payload.into()));
+}
+
+#[test]
 fn schema_enforcement_disabled_allows_invalid_output() {
     let mut sop = test_sop("schema-off", SopExecutionMode::Auto, SopPriority::Normal);
     sop.steps[0].schema = Some(StepSchema {

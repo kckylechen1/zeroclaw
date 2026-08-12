@@ -661,7 +661,7 @@ impl SopEngine {
                     Some(step_result_value(&result)),
                 );
             }
-            let piped = step_result_value(&result);
+            let piped = declared_step_output_value(&current_step, &result.output);
             return self.advance_deterministic_step(
                 run_id,
                 piped,
@@ -671,7 +671,7 @@ impl SopEngine {
 
         let mut recorded = result.clone();
         if result.status == SopStepStatus::Completed {
-            let output = step_result_value(&result);
+            let output = declared_step_output_value(&current_step, &result.output);
             if let Err(reason) = self.validate_step_output(&current_step, &output) {
                 let full_reason = format!(
                     "Step {} output schema validation failed: {reason}",
@@ -688,6 +688,13 @@ impl SopEngine {
                 );
                 recorded.status = SopStepStatus::Failed;
                 recorded.output = full_reason;
+            } else if serde_json::from_str::<Value>(&result.output).is_err()
+                && output != Value::String(result.output.clone())
+            {
+                // Canonicalize a schema-validated recovery at the model-output
+                // boundary. Downstream piping, retry, replay, and persisted run
+                // data can then keep their exact JSON-or-string parser.
+                recorded.output = output.to_string();
             }
         }
 
@@ -3203,8 +3210,16 @@ pub(super) fn step_result_value(result: &SopStepResult) -> Value {
     jsonish_value(&result.output)
 }
 
-fn jsonish_value(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.into()))
+fn declared_step_output_value(step: &SopStep, raw: &str) -> Value {
+    let schema = step
+        .schema
+        .as_ref()
+        .and_then(|schema| schema.output.as_ref());
+    crate::sop::rundata::parse_step_output_value(raw, schema)
+}
+
+pub(super) fn jsonish_value(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
 
 // ── Utilities ───────────────────────────────────────────────────
