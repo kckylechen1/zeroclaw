@@ -33,7 +33,8 @@ pub(crate) use outbound_sanitize::{
 pub(crate) use outbound_sanitize::{
     ensure_nonempty_channel_reply, outbound_content_format_for_channel,
     redact_channel_outbound_leaks, sanitize_channel_response_for_format_with_leak_detection,
-    strip_think_tags_inline, strip_tool_call_tags, strip_tool_result_content,
+    sanitize_streaming_draft_text, strip_think_tags_inline, strip_tool_call_tags,
+    strip_tool_result_content,
     strip_tool_summary_prefix,
 };
 
@@ -2573,6 +2574,8 @@ fn spawn_scoped_typing_task(
     })
 }
 
+
+
 async fn process_channel_message(
     ctx: Arc<ChannelRuntimeContext>,
     msg: zeroclaw_api::channel::ChannelMessage,
@@ -3409,13 +3412,21 @@ async fn process_channel_message_body(
             let channel = Arc::clone(channel_ref);
             let reply_target = msg.reply_target.clone();
             let draft_id = draft_id_ref.to_string();
+            // Same registry the final sanitizer reads, resolved once per turn
+            // rather than per delta.
+            let known_tool_names: HashSet<String> = ctx
+                .tools_registry
+                .iter()
+                .map(|tool| tool.name().to_ascii_lowercase())
+                .collect();
             Some(zeroclaw_spawn::spawn!(async move {
                 use zeroclaw_runtime::agent::loop_::StreamDelta;
                 let mut accumulated = String::new();
                 while let Some(event) = rx.recv().await {
                     match event {
                         StreamDelta::Status(text) => {
-                            let visible = strip_think_tags_inline(&text);
+                            let visible =
+                                sanitize_streaming_draft_text(&text, &known_tool_names);
                             if let Err(e) = channel
                                 .update_draft_progress(&reply_target, &draft_id, &visible)
                                 .await
@@ -3433,7 +3444,10 @@ async fn process_channel_message_body(
                         }
                         StreamDelta::Text(text) => {
                             accumulated.push_str(&text);
-                            let visible = strip_think_tags_inline(&accumulated);
+                            let visible = sanitize_streaming_draft_text(
+                                &accumulated,
+                                &known_tool_names,
+                            );
                             if let Err(e) = channel
                                 .update_draft(&reply_target, &draft_id, &visible)
                                 .await
