@@ -411,6 +411,8 @@ impl SopEngine {
         }
     }
 
+    /// Start a new SOP run. Returns the first action to take.
+    /// Deterministic SOPs are automatically routed to `start_deterministic_run`.
     pub fn start_run(&mut self, sop_name: &str, event: SopEvent) -> Result<SopRunAction> {
         // A start is a two-phase operation: reserve the exec slot through the
         // authoritative store CAS (no side effect yet), then activate the reserved

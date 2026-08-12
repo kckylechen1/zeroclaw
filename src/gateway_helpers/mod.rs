@@ -8,27 +8,31 @@ use std::fmt::Write as _;
 use crate::SopCommands;
 use crate::config::Config;
 
+/// Resolve a `cli-*` Fluent key for CLI output. Routes through the runtime
+/// i18n catalogue under `agent-runtime` (default + CI/release); without that
+/// feature the runtime crate is absent, so the English `fallback` is used.
 #[allow(unused_variables)]
-fn t(key: &str, fallback: &str) -> String {
+pub(crate) fn t(key: &str, fallback: &str) -> String {
     #[cfg(feature = "agent-runtime")]
     {
         zeroclaw_runtime::i18n::get_required_cli_string(key)
     }
     #[cfg(not(feature = "agent-runtime"))]
     {
-        fallback.to_string()
+        fallback.to_string() // i18n-exempt: English fallback when Fluent (agent-runtime) is disabled
     }
 }
 
+/// `t` with `{$name}` arguments.
 #[allow(unused_variables)]
-fn ta(key: &str, args: &[(&str, &str)], fallback: &str) -> String {
+pub(crate) fn ta(key: &str, args: &[(&str, &str)], fallback: &str) -> String {
     #[cfg(feature = "agent-runtime")]
     {
         zeroclaw_runtime::i18n::get_required_cli_string_with_args(key, args)
     }
     #[cfg(not(feature = "agent-runtime"))]
     {
-        fallback.to_string()
+        fallback.to_string() // i18n-exempt: English fallback when Fluent (agent-runtime) is disabled
     }
 }
 

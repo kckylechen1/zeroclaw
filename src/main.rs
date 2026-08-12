@@ -111,34 +111,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zeroclaw_config::api_error::{ConfigApiCode, ConfigApiError};
 
-/// Resolve a `cli-*` Fluent key for CLI output. Routes through the runtime
-/// i18n catalogue under `agent-runtime` (default + CI/release); without that
-/// feature the runtime crate is absent, so the English `fallback` is used.
-#[allow(unused_variables)]
-fn t(key: &str, fallback: &str) -> String {
-    #[cfg(feature = "agent-runtime")]
-    {
-        zeroclaw_runtime::i18n::get_required_cli_string(key)
-    }
-    #[cfg(not(feature = "agent-runtime"))]
-    {
-        fallback.to_string() // i18n-exempt: English fallback when Fluent (agent-runtime) is disabled
-    }
-}
-
-/// `t` with `{$name}` arguments.
-#[allow(unused_variables)]
-fn ta(key: &str, args: &[(&str, &str)], fallback: &str) -> String {
-    #[cfg(feature = "agent-runtime")]
-    {
-        zeroclaw_runtime::i18n::get_required_cli_string_with_args(key, args)
-    }
-    #[cfg(not(feature = "agent-runtime"))]
-    {
-        fallback.to_string() // i18n-exempt: English fallback when Fluent (agent-runtime) is disabled
-    }
-}
-
 #[cfg(feature = "agent-runtime")]
 fn qta(key: &str, args: &[(&str, &str)]) -> String {
     zeroclaw_runtime::i18n::get_required_cli_string_with_args(key, args)
@@ -400,6 +372,7 @@ use gateway_helpers::{
     shutdown_gateway,
 };
 use gateway_helpers::{log_gateway_start, resolve_gateway_addr, sop_admin_dispatch};
+pub(crate) use gateway_helpers::{t, ta};
 
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
 pub use zeroclaw::{
