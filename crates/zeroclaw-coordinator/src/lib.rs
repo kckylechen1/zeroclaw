@@ -47,8 +47,10 @@ mod backend;
 mod cancel;
 mod coordinator;
 mod driver;
+mod native;
 mod outcome;
 mod persistence;
+mod registry;
 mod state;
 mod types;
 
@@ -63,8 +65,10 @@ pub use driver::{
     AgentDriver, AgentRunHandle, AgentRunRequest, AgentRunSnapshot, AgentRunStatus, DriverError,
     HarnessCapabilities, HarnessCard, HarnessId, HarnessKind, ResumeRequest,
 };
+pub use native::{NATIVE_HARNESS_ID, NativeAgentDriver};
 pub use outcome::ChildOutcome;
 pub use persistence::{ChildPersistence, NoopPersistence, PersistenceError};
+pub use registry::{DriverRegistry, RegistryError};
 pub use state::{
     ChildCompletion, ChildControl, ChildProgress, ChildReporter, ChildRunOutput, ChildRunRequest,
     ChildRunner, CompletionDisposition, CoordinatorConfig, LocalBoxFuture, MAX_COMPLETED_ENTRIES,

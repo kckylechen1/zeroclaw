@@ -124,6 +124,16 @@ impl ChannelBackend {
         self.parent_session_id.as_deref().map(str::to_owned)
     }
 
+    /// Session this backend is bound to, if any.
+    ///
+    /// [`crate::NativeAgentDriver`] copies this onto the native
+    /// [`crate::ChildRequest`] so inspect/cancel stay inside the same
+    /// containment boundary as [`Self::for_session`].
+    #[must_use]
+    pub fn bound_session(&self) -> Option<&str> {
+        self.parent_session_id.as_deref()
+    }
+
     #[must_use]
     pub fn sender(&self) -> mpsc::UnboundedSender<CoordinatorCommand> {
         self.tx.clone()

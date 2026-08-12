@@ -103,6 +103,16 @@ async fn channel_backend_spawn_closed_channel() {
     assert!(err.to_string().contains("channel closed"), "error: {err}");
 }
 
+#[test]
+fn unbound_backend_has_no_session_and_for_session_exposes_it() {
+    let (tx, _rx) = mpsc::unbounded_channel::<CoordinatorCommand>();
+    assert!(ChannelBackend::new(tx.clone()).bound_session().is_none());
+    assert_eq!(
+        ChannelBackend::for_session(tx, "parent-session").bound_session(),
+        Some("parent-session")
+    );
+}
+
 #[tokio::test]
 async fn channel_backend_spawn_result_dropped() {
     let (tx, mut rx) = mpsc::unbounded_channel::<CoordinatorCommand>();
