@@ -33,9 +33,11 @@ pub(crate) use outbound_sanitize::{
 pub(crate) use outbound_sanitize::{
     ensure_nonempty_channel_reply, outbound_content_format_for_channel,
     redact_channel_outbound_leaks, sanitize_channel_response_for_format_with_leak_detection,
-    sanitize_streaming_draft_text, strip_think_tags_inline, strip_tool_call_tags,
-    strip_tool_result_content, strip_tool_summary_prefix,
+    sanitize_streaming_draft_text, strip_tool_call_tags, strip_tool_result_content,
+    strip_tool_summary_prefix,
 };
+#[cfg(test)]
+pub(crate) use outbound_sanitize::strip_think_tags_inline;
 
 mod runtime_commands;
 pub(crate) use runtime_commands::{
