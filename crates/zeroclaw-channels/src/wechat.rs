@@ -2552,13 +2552,14 @@ impl Channel for WeChatChannel {
             // Commit the cursor only now that the whole batch has been
             // enqueued (or there was nothing to enqueue).
             //
-            // At-least-once is an explicit decision (same trade as upstream
-            // #9313): a crash in the window after enqueue and before this
-            // persist, or a persist failure here, can redeliver already-
-            // enqueued messages on restart. This repo has no generic inbound
-            // dedup. Prefer duplicate delivery over silent loss. Global inbound
-            // dedup and attachment disposition/staging are #33 follow-ups,
-            // not this PR.
+            // At-least-once is an explicit decision (the same trade the
+            // upstream cursor-after-enqueue port makes): a crash in the window
+            // after enqueue and before this persist, or a persist failure
+            // here, can redeliver already-enqueued messages on restart. This
+            // repo has no generic inbound dedup. Prefer duplicate delivery
+            // over silent loss. Global inbound dedup and attachment
+            // disposition/staging stay on the channel-ingress durability
+            // leaf as follow-ups, not this PR.
             //
             // Persist failure: log and continue. The in-memory cursor has
             // advanced so this process will not re-poll the batch; the next
