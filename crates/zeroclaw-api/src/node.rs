@@ -31,6 +31,8 @@ pub enum NodeErrorCode {
     /// In-band only. Unknown device, revoked device, and signature failure
     /// share this code so responses do not leak device existence.
     IdentityRejected,
+    /// Live advertisement named a capability outside the approved ceiling.
+    CapabilityWiden,
 }
 
 impl NodeErrorCode {
@@ -41,6 +43,7 @@ impl NodeErrorCode {
             Self::VersionMismatch => "version_mismatch",
             Self::LoopbackRequired => "loopback_required",
             Self::IdentityRejected => "identity_rejected",
+            Self::CapabilityWiden => "capability_widen",
         }
     }
 }
@@ -75,6 +78,10 @@ pub enum NodeToGateway {
         signature: String,
         identity_epoch: u64,
     },
+    Advertise {
+        caps: Vec<String>,
+        cap_revision: u64,
+    },
     Result {
         call_id: String,
         connection_id: String,
@@ -105,6 +112,10 @@ pub enum GatewayToNode {
     Challenge {
         nonce: String,
         expires_at: String,
+    },
+    Admitted {
+        caps: Vec<String>,
+        cap_revision: u64,
     },
     Invoke {
         call_id: String,
@@ -215,6 +226,22 @@ mod tests {
             &auth,
             r#"{"type":"auth","signature":"bb","identity_epoch":1}"#,
         );
+        let advertise = NodeToGateway::Advertise {
+            caps: vec!["system.notify".into()],
+            cap_revision: 1,
+        };
+        assert_literal(
+            &advertise,
+            r#"{"type":"advertise","caps":["system.notify"],"cap_revision":1}"#,
+        );
+        let admitted = GatewayToNode::Admitted {
+            caps: vec!["system.notify".into()],
+            cap_revision: 1,
+        };
+        assert_literal(
+            &admitted,
+            r#"{"type":"admitted","caps":["system.notify"],"cap_revision":1}"#,
+        );
     }
 
     #[test]
@@ -306,6 +333,7 @@ mod tests {
         assert_literal(&NodeErrorCode::VersionMismatch, r#""version_mismatch""#);
         assert_literal(&NodeErrorCode::LoopbackRequired, r#""loopback_required""#);
         assert_literal(&NodeErrorCode::IdentityRejected, r#""identity_rejected""#);
+        assert_literal(&NodeErrorCode::CapabilityWiden, r#""capability_widen""#);
         let frame = GatewayToNode::Error {
             code: NodeErrorCode::VersionMismatch,
             retryable: false,

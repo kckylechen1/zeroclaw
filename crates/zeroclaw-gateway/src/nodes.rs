@@ -18,6 +18,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -107,6 +108,7 @@ pub struct NodeConnection {
 struct LiveSocket {
     connection_id: String,
     device_id: Option<String>,
+    key_fingerprint: Option<String>,
     close_tx: tokio::sync::watch::Sender<bool>,
 }
 
@@ -231,16 +233,46 @@ impl NodeRegistry {
         self.nodes.read().is_empty()
     }
 
+    fn sweep_challenges(&self) {
+        self.pending_challenges
+            .write()
+            .retain(|_, challenge| !challenge.expired());
+    }
+
+    /// Reserve a pre-auth slot counted against `max_nodes`.
+    pub fn try_reserve(&self) -> Option<(NodeConnection, tokio::sync::watch::Receiver<bool>)> {
+        self.sweep_challenges();
+        let mut live = self.live.write();
+        if live.len() >= self.max_nodes {
+            return None;
+        }
+        let conn = self.mint_connection();
+        let (close_tx, close_rx) = tokio::sync::watch::channel(false);
+        live.insert(
+            conn.connection_id.clone(),
+            LiveSocket {
+                connection_id: conn.connection_id.clone(),
+                device_id: None,
+                key_fingerprint: None,
+                close_tx,
+            },
+        );
+        Some((conn, close_rx))
+    }
+
     pub fn begin_challenge(
         &self,
         conn: &NodeConnection,
         device_id: String,
         key_fingerprint: String,
     ) -> Result<PendingChallenge, crate::device_identity::IdentityError> {
+        self.sweep_challenges();
         let challenge = PendingChallenge::issue(device_id, key_fingerprint)?;
-        self.pending_challenges
-            .write()
-            .insert(conn.connection_id.clone(), challenge.clone());
+        let mut pending = self.pending_challenges.write();
+        if pending.len() >= self.max_nodes {
+            return Err(crate::device_identity::IdentityError::Capacity);
+        }
+        pending.insert(conn.connection_id.clone(), challenge.clone());
         Ok(challenge)
     }
 
@@ -248,21 +280,17 @@ impl NodeRegistry {
         self.pending_challenges.write().remove(connection_id)
     }
 
-    pub fn attach_socket(
-        &self,
-        conn: &NodeConnection,
-        device_id: Option<String>,
-    ) -> tokio::sync::watch::Receiver<bool> {
-        let (close_tx, close_rx) = tokio::sync::watch::channel(false);
-        self.live.write().insert(
-            conn.connection_id.clone(),
-            LiveSocket {
-                connection_id: conn.connection_id.clone(),
-                device_id,
-                close_tx,
-            },
-        );
-        close_rx
+    pub fn bind_identity(&self, connection_id: &str, device_id: String, key_fingerprint: String) {
+        if let Some(socket) = self.live.write().get_mut(connection_id) {
+            socket.device_id = Some(device_id);
+            socket.key_fingerprint = Some(key_fingerprint);
+        }
+    }
+
+    pub fn bound_identity(&self, connection_id: &str) -> Option<(String, String)> {
+        let live = self.live.read();
+        let socket = live.get(connection_id)?;
+        Some((socket.device_id.clone()?, socket.key_fingerprint.clone()?))
     }
 
     pub fn detach_socket(&self, connection_id: &str) {
@@ -271,8 +299,13 @@ impl NodeRegistry {
     }
 
     /// Revoke the identity and tear live sockets for that device.
-    pub fn revoke_device(&self, device_id: &str) -> Vec<String> {
-        self.identities.revoke(device_id);
+    pub fn revoke_device(
+        &self,
+        device_id: &str,
+    ) -> Result<Vec<String>, crate::device_identity::IdentityError> {
+        if !self.identities.revoke(device_id)? {
+            return Ok(Vec::new());
+        }
         let mut torn = Vec::new();
         let mut live = self.live.write();
         live.retain(|_, socket| {
@@ -284,12 +317,18 @@ impl NodeRegistry {
                 true
             }
         });
-        torn
+        Ok(torn)
     }
 
     #[must_use]
     pub fn live_connection_ids(&self) -> Vec<String> {
         self.live.read().keys().cloned().collect()
+    }
+
+    #[must_use]
+    pub fn pending_challenge_count(&self) -> usize {
+        self.sweep_challenges();
+        self.pending_challenges.read().len()
     }
 
     pub fn admit_advertised_caps(
@@ -436,19 +475,30 @@ fn closed_surface() -> NodeWsAdmission {
     }
 }
 
-/// HTTP admission for `/ws/nodes`: enabled → auth → v2 subprotocol.
+/// HTTP admission for `/ws/nodes`.
 ///
-/// Loopback is no longer an HTTP gate. Unverified identity stays
-/// loopback-only at Hello; a paired and verified identity may continue
-/// from a non-loopback peer. Disabled still returns the same 404 body.
+/// Loopback keeps the typed 404/503/401/400 surface. Remote peers without a
+/// valid bearer (or without v2) receive the same 404 bytes as `enabled=false`,
+/// so a scanner cannot distinguish a closed surface from an unpaired gateway.
+/// A remote client that presents a valid bearer and v2 is upgraded; identity
+/// is proven only in-band after Hello.
 fn admit_node_ws(
     nodes_config: &zeroclaw_config::schema::NodesConfig,
     pairing: &PairingGuard,
     headers: &HeaderMap,
     query_token: Option<&str>,
-    _peer: SocketAddr,
+    peer: SocketAddr,
     _listen: IpAddr,
 ) -> NodeWsAdmission {
+    if !peer_is_loopback(peer) {
+        if !nodes_config.enabled
+            || check_node_auth(nodes_config, pairing, headers, query_token).is_some()
+            || !client_offers_subprotocol(headers, WS_NODES_V2)
+        {
+            return closed_surface();
+        }
+        return NodeWsAdmission::Ok;
+    }
     if !nodes_config.enabled {
         return closed_surface();
     }
@@ -579,36 +629,86 @@ fn handshake_first_frame(text: &str, conn: &NodeConnection) -> NodeHandshakeOutc
     }
 }
 
+/// RFC 8032 test-vector public key. Used only so unknown/revoked devices
+/// still pay a full Ed25519 verify before the unified reject.
+const DUMMY_VERIFY_PUBLIC_KEY_HEX: &str =
+    "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+
 fn verify_node_auth(
     registry: &NodeRegistry,
     conn: &NodeConnection,
     signature: &str,
     identity_epoch: u64,
 ) -> Result<String, NodeErrorCode> {
-    let Some(challenge) = registry.take_challenge(&conn.connection_id) else {
-        return Err(NodeErrorCode::IdentityRejected);
-    };
-    if challenge.expired() {
-        return Err(NodeErrorCode::IdentityRejected);
-    }
-    let Some(identity) = registry
+    let challenge = registry.take_challenge(&conn.connection_id);
+    let challenge_ok = challenge.as_ref().is_some_and(|c| !c.expired());
+    let challenge = challenge.unwrap_or_else(|| PendingChallenge {
+        nonce: "00".repeat(32),
+        expires_at: Utc::now(),
+        device_id: "unknown".into(),
+        key_fingerprint: "unknown".into(),
+    });
+    let identity = registry
         .identities()
-        .active_identity(&challenge.device_id, &challenge.key_fingerprint)
-    else {
-        return Err(NodeErrorCode::IdentityRejected);
-    };
-    if identity.identity_epoch != identity_epoch {
-        return Err(NodeErrorCode::IdentityRejected);
-    }
+        .active_identity(&challenge.device_id, &challenge.key_fingerprint);
+    let epoch_ok = identity
+        .as_ref()
+        .is_some_and(|id| id.identity_epoch == identity_epoch);
+    let public_key = identity
+        .as_ref()
+        .map(|id| id.public_key.as_str())
+        .unwrap_or(DUMMY_VERIFY_PUBLIC_KEY_HEX);
     let message = auth_message(
         &challenge.nonce,
-        &identity.device_id,
-        &identity.key_fingerprint,
-        identity.identity_epoch,
+        &challenge.device_id,
+        &challenge.key_fingerprint,
+        identity_epoch,
     );
-    verify_auth_signature(&identity.public_key, &message, signature)
-        .map_err(|_| NodeErrorCode::IdentityRejected)?;
-    Ok(identity.device_id)
+    let verified = verify_auth_signature(public_key, &message, signature).is_ok();
+    match identity {
+        Some(identity) if challenge_ok && epoch_ok && verified => Ok(identity.device_id),
+        _ => Err(NodeErrorCode::IdentityRejected),
+    }
+}
+
+fn apply_advertise(
+    registry: &NodeRegistry,
+    conn: &NodeConnection,
+    caps: &[String],
+    cap_revision: u64,
+) -> GatewayToNode {
+    let Some((device_id, key_fingerprint)) = registry.bound_identity(&conn.connection_id) else {
+        return protocol_error_frame(NodeErrorCode::IdentityRejected);
+    };
+    match registry.admit_advertised_caps(&device_id, &key_fingerprint, caps) {
+        Ok(admitted) => GatewayToNode::Admitted {
+            caps: admitted,
+            cap_revision,
+        },
+        Err(crate::device_identity::IdentityError::WidenRefused) => {
+            protocol_error_frame(NodeErrorCode::CapabilityWiden)
+        }
+        Err(_) => protocol_error_frame(NodeErrorCode::IdentityRejected),
+    }
+}
+
+fn process_post_handshake_text(
+    registry: &NodeRegistry,
+    conn: &NodeConnection,
+    text: &str,
+) -> Option<GatewayToNode> {
+    if inbound_is_v1_register(text) {
+        return Some(protocol_error_frame(NodeErrorCode::ProtocolUnsupported));
+    }
+    let Ok(frame) = serde_json::from_str::<NodeToGateway>(text) else {
+        return None;
+    };
+    match frame {
+        NodeToGateway::Advertise { caps, cap_revision } => {
+            Some(apply_advertise(registry, conn, &caps, cap_revision))
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -690,7 +790,19 @@ impl Drop for LiveSocketGuard {
 
 async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>, peer: SocketAddr) {
     let (mut sender, mut receiver) = socket.split();
-    let conn = registry.mint_connection();
+    let Some((conn, mut close_rx)) = registry.try_reserve() else {
+        let _ = send_json(
+            &mut sender,
+            &protocol_error_frame(NodeErrorCode::IdentityRejected),
+        )
+        .await;
+        let _ = close_protocol(&mut sender, NodeErrorCode::IdentityRejected.as_str()).await;
+        return;
+    };
+    let _guard = LiveSocketGuard {
+        registry: registry.clone(),
+        connection_id: conn.connection_id.clone(),
+    };
 
     let first_text = match tokio::time::timeout(HELLO_DEADLINE, recv_hello_text(&mut receiver))
         .await
@@ -724,8 +836,7 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>, peer
         }
     };
 
-    let bound_device = if identity_required(peer, device_id.as_deref(), key_fingerprint.as_deref())
-    {
+    if identity_required(peer, device_id.as_deref(), key_fingerprint.as_deref()) {
         let Some(device_id) = device_id else {
             let code = if key_fingerprint.is_none() {
                 NodeErrorCode::LoopbackRequired
@@ -742,15 +853,16 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>, peer
             let _ = close_protocol(&mut sender, code.as_str()).await;
             return;
         };
-        let challenge = match registry.begin_challenge(&conn, device_id, key_fingerprint) {
-            Ok(challenge) => challenge,
-            Err(_) => {
-                let code = NodeErrorCode::IdentityRejected;
-                let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
-                let _ = close_protocol(&mut sender, code.as_str()).await;
-                return;
-            }
-        };
+        let challenge =
+            match registry.begin_challenge(&conn, device_id.clone(), key_fingerprint.clone()) {
+                Ok(challenge) => challenge,
+                Err(_) => {
+                    let code = NodeErrorCode::IdentityRejected;
+                    let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
+                    let _ = close_protocol(&mut sender, code.as_str()).await;
+                    return;
+                }
+            };
         let frame = GatewayToNode::Challenge {
             nonce: challenge.nonce.clone(),
             expires_at: challenge.expires_at.to_rfc3339(),
@@ -780,27 +892,21 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>, peer
             return;
         };
         match verify_node_auth(&registry, &conn, &signature, identity_epoch) {
-            Ok(device_id) => Some(device_id),
+            Ok(verified_id) => {
+                registry.bind_identity(&conn.connection_id, verified_id, key_fingerprint);
+            }
             Err(code) => {
                 let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
                 let _ = close_protocol(&mut sender, code.as_str()).await;
                 return;
             }
         }
-    } else {
-        None
-    };
+    }
 
     let ack = hello_ack(&conn, protocol_version);
     if send_json(&mut sender, &ack).await.is_err() {
         return;
     }
-
-    let mut close_rx = registry.attach_socket(&conn, bound_device);
-    let _guard = LiveSocketGuard {
-        registry: registry.clone(),
-        connection_id: conn.connection_id.clone(),
-    };
 
     loop {
         tokio::select! {
@@ -816,14 +922,23 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>, peer
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     Some(Ok(_)) => continue,
                 };
-                if inbound_is_v1_register(&text) {
-                    let _ = send_json(
-                        &mut sender,
-                        &protocol_error_frame(NodeErrorCode::ProtocolUnsupported),
-                    )
-                    .await;
-                    let _ = close_protocol(&mut sender, NodeErrorCode::ProtocolUnsupported.as_str()).await;
-                    return;
+                if let Some(frame) = process_post_handshake_text(&registry, &conn, &text) {
+                    let close_after = matches!(
+                        &frame,
+                        GatewayToNode::Error {
+                            code: NodeErrorCode::ProtocolUnsupported,
+                            ..
+                        }
+                    );
+                    let _ = send_json(&mut sender, &frame).await;
+                    if close_after {
+                        let _ = close_protocol(
+                            &mut sender,
+                            NodeErrorCode::ProtocolUnsupported.as_str(),
+                        )
+                        .await;
+                        return;
+                    }
                 }
             }
         }
@@ -1271,6 +1386,67 @@ mod tests {
                 loopback_listen(),
             ),
             NodeWsAdmission::Ok
+        );
+    }
+
+    #[test]
+    fn remote_http_matches_disabled_bytes_without_valid_bearer() {
+        let enabled = enabled_secret_cfg();
+        let disabled = NodesConfig {
+            enabled: false,
+            ..NodesConfig::default()
+        };
+        let mut good = bearer_headers("secret");
+        good.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
+        let mut bad = bearer_headers("wrong");
+        bad.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
+        let disabled_bytes = admission_http_bytes(&admit_node_ws(
+            &disabled,
+            &make_pairing(false),
+            &good,
+            None,
+            remote_peer(),
+            unspecified_listen(),
+        ));
+        assert_eq!(disabled_bytes, disabled_surface_http_bytes());
+        assert_eq!(
+            admission_http_bytes(&admit_node_ws(
+                &enabled,
+                &make_pairing(false),
+                &bad,
+                None,
+                remote_peer(),
+                unspecified_listen(),
+            )),
+            disabled_bytes
+        );
+        assert_eq!(
+            admission_http_bytes(&admit_node_ws(
+                &enabled,
+                &make_pairing(false),
+                &bearer_headers("secret"),
+                None,
+                remote_peer(),
+                unspecified_listen(),
+            )),
+            disabled_bytes
+        );
+        let unpaired = NodesConfig {
+            enabled: true,
+            auth_token: None,
+            ..NodesConfig::default()
+        };
+        assert_eq!(
+            admission_http_bytes(&admit_node_ws(
+                &unpaired,
+                &make_pairing(false),
+                &good,
+                None,
+                remote_peer(),
+                unspecified_listen(),
+            )),
+            disabled_bytes,
+            "enabled-unpaired remote HTTP must match disabled bytes"
         );
     }
 
@@ -1738,9 +1914,15 @@ mod tests {
     fn revoke_tears_live_socket_and_rejects_reconnect() {
         let registry = NodeRegistry::new(8);
         let (keys, identity) = enroll_test_device(&registry, vec!["system.notify".into()]);
-        let conn = registry.mint_connection();
-        let close_rx = registry.attach_socket(&conn, Some(identity.device_id.clone()));
-        let torn = registry.revoke_device(&identity.device_id);
+        let (conn, close_rx) = registry.try_reserve().expect("reserve");
+        registry.bind_identity(
+            &conn.connection_id,
+            identity.device_id.clone(),
+            identity.key_fingerprint.clone(),
+        );
+        let torn = registry
+            .revoke_device(&identity.device_id)
+            .expect("revoke persist");
         assert_eq!(torn, vec![conn.connection_id.clone()]);
         assert!(*close_rx.borrow());
         assert!(registry.live_connection_ids().is_empty());
@@ -1756,6 +1938,92 @@ mod tests {
         assert_eq!(
             verify_node_auth(&registry, &reconnect, &signature, identity.identity_epoch),
             Err(NodeErrorCode::IdentityRejected)
+        );
+    }
+
+    #[test]
+    fn failed_handshakes_do_not_grow_challenge_table() {
+        let registry = NodeRegistry::new(2);
+        let a = registry.mint_connection();
+        let b = registry.mint_connection();
+        let c = registry.mint_connection();
+        assert!(
+            registry
+                .begin_challenge(&a, "dev-a".into(), "fp-a".into())
+                .is_ok()
+        );
+        assert!(
+            registry
+                .begin_challenge(&b, "dev-b".into(), "fp-b".into())
+                .is_ok()
+        );
+        assert_eq!(
+            registry
+                .begin_challenge(&c, "dev-c".into(), "fp-c".into())
+                .unwrap_err(),
+            crate::device_identity::IdentityError::Capacity
+        );
+        assert_eq!(registry.pending_challenge_count(), 2);
+        registry.detach_socket(&a.connection_id);
+        registry.detach_socket(&b.connection_id);
+        assert_eq!(registry.pending_challenge_count(), 0);
+    }
+
+    #[test]
+    fn preauth_sockets_count_against_max_nodes() {
+        let registry = NodeRegistry::new(1);
+        let (conn, _rx) = registry.try_reserve().expect("first pre-auth slot");
+        assert!(
+            registry.try_reserve().is_none(),
+            "second pre-auth socket must hit the quota"
+        );
+        registry.detach_socket(&conn.connection_id);
+        assert!(registry.try_reserve().is_some());
+    }
+
+    #[test]
+    fn advertise_frame_admits_subset_and_refuses_widen() {
+        let registry = NodeRegistry::new(8);
+        let (_keys, identity) = enroll_test_device(&registry, vec!["system.notify".into()]);
+        let (conn, _rx) = registry.try_reserve().expect("reserve");
+        registry.bind_identity(
+            &conn.connection_id,
+            identity.device_id.clone(),
+            identity.key_fingerprint.clone(),
+        );
+        let admitted = process_post_handshake_text(
+            &registry,
+            &conn,
+            r#"{"type":"advertise","caps":["system.notify"],"cap_revision":1}"#,
+        )
+        .expect("advertise frame");
+        match admitted {
+            GatewayToNode::Admitted { caps, cap_revision } => {
+                assert_eq!(caps, ["system.notify"]);
+                assert_eq!(cap_revision, 1);
+            }
+            other => panic!("expected admitted, got {other:?}"),
+        }
+        let widen = process_post_handshake_text(
+            &registry,
+            &conn,
+            r#"{"type":"advertise","caps":["system.notify","camera.snap"],"cap_revision":2}"#,
+        )
+        .expect("widen frame");
+        match widen {
+            GatewayToNode::Error {
+                code: NodeErrorCode::CapabilityWiden,
+                ..
+            } => {}
+            other => panic!("expected capability_widen, got {other:?}"),
+        }
+        assert_eq!(
+            registry
+                .identities()
+                .active_identity(&identity.device_id, &identity.key_fingerprint)
+                .unwrap()
+                .capability_ceiling,
+            ["system.notify"]
         );
     }
 

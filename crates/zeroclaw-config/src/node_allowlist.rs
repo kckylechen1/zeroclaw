@@ -34,6 +34,34 @@ pub fn reject_device_wildcard(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// True when `name` is admitted by `pattern`.
+///
+/// Exact strings always match. `node:<device_id>:*` matches any capability
+/// on that device. Device wildcards never match — they are rejected at parse.
+#[must_use]
+pub fn tool_name_matches(pattern: &str, name: &str) -> bool {
+    if pattern == name {
+        return true;
+    }
+    let Some(pattern_rest) = pattern.strip_prefix("node:") else {
+        return false;
+    };
+    let Some(name_rest) = name.strip_prefix("node:") else {
+        return false;
+    };
+    let Some((pattern_device, pattern_cap)) = pattern_rest.split_once(':') else {
+        return false;
+    };
+    let Some((name_device, name_cap)) = name_rest.split_once(':') else {
+        return false;
+    };
+    pattern_device != "*"
+        && pattern_device == name_device
+        && pattern_cap == "*"
+        && !name_cap.is_empty()
+        && name_cap != "*"
+}
+
 /// Walk risk-profile allowlists and card grants for forbidden node globs.
 pub fn validate_config(config: &Config) -> Result<(), String> {
     for (alias, profile) in &config.risk_profiles {
@@ -95,5 +123,28 @@ mod tests {
     fn exact_node_tool_is_not_a_wildcard() {
         assert!(is_node_tool_name("node:phone-1:system.notify"));
         assert!(!is_node_tool_name("shell"));
+    }
+
+    #[test]
+    fn per_device_prefix_matches_child_caps_only() {
+        assert!(tool_name_matches(
+            "node:phone:camera.snap",
+            "node:phone:camera.snap"
+        ));
+        assert!(tool_name_matches("node:phone:*", "node:phone:camera.snap"));
+        assert!(tool_name_matches(
+            "node:phone:*",
+            "node:phone:system.notify"
+        ));
+        assert!(!tool_name_matches(
+            "node:phone:*",
+            "node:tablet:camera.snap"
+        ));
+        assert!(!tool_name_matches("node:phone:*", "shell"));
+        assert!(!tool_name_matches("node:*:*", "node:phone:camera.snap"));
+        assert!(!tool_name_matches(
+            "node:*:camera.snap",
+            "node:phone:camera.snap"
+        ));
     }
 }

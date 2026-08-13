@@ -12,6 +12,8 @@ pub mod api;
 pub mod api_browse;
 pub mod api_config;
 pub mod api_logs;
+#[cfg(feature = "nodes")]
+pub mod api_node_identity;
 pub mod api_pairing;
 pub mod api_personality;
 #[cfg(feature = "plugins-wasm")]
@@ -2004,9 +2006,22 @@ pub async fn run_gateway(
         .route("/ws/sops/runs", get(ws_sop_runs::handle_ws_sop_runs))
         // ── WebSocket canvas updates ──
         .route("/ws/canvas/{id}", get(canvas::handle_ws_canvas));
-    // ── WebSocket node discovery (nodes feature) ──
+    // ── WebSocket node discovery + cryptographic identity management ──
     #[cfg(feature = "nodes")]
-    let inner = inner.route("/ws/nodes", get(nodes::handle_ws_nodes));
+    let inner = inner
+        .route("/ws/nodes", get(nodes::handle_ws_nodes))
+        .route(
+            "/api/node-identities/pairing",
+            post(api_node_identity::issue_pairing),
+        )
+        .route(
+            "/api/node-identities",
+            post(api_node_identity::enroll_identity),
+        )
+        .route(
+            "/api/node-identities/{id}",
+            delete(api_node_identity::revoke_identity),
+        );
     let inner = inner
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))

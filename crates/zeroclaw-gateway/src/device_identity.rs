@@ -72,6 +72,8 @@ pub enum IdentityError {
     FingerprintConflict,
     WidenRefused,
     IdentityRejected,
+    PersistFailed,
+    Capacity,
 }
 
 impl std::fmt::Display for IdentityError {
@@ -83,6 +85,8 @@ impl std::fmt::Display for IdentityError {
             Self::FingerprintConflict => write!(f, "public key is already bound"),
             Self::WidenRefused => write!(f, "live advertisement exceeds the approved ceiling"),
             Self::IdentityRejected => write!(f, "identity rejected"),
+            Self::PersistFailed => write!(f, "identity persist failed"),
+            Self::Capacity => write!(f, "identity table at capacity"),
         }
     }
 }
@@ -283,6 +287,12 @@ impl DeviceIdentityStore {
         }
     }
 
+    /// Whether a row exists for `device_id`, including revoked rows.
+    #[must_use]
+    pub fn contains(&self, device_id: &str) -> bool {
+        self.inner.rows.lock().contains_key(device_id)
+    }
+
     /// Active (non-revoked) identity matching both id and fingerprint.
     /// Unknown, revoked, and fingerprint mismatch are indistinguishable.
     pub fn active_identity(
@@ -298,20 +308,26 @@ impl DeviceIdentityStore {
         Some(row.clone())
     }
 
-    pub fn revoke(&self, device_id: &str) -> bool {
+    pub fn revoke(&self, device_id: &str) -> Result<bool, IdentityError> {
         let revoked_at = Utc::now().to_rfc3339();
-        let mut rows = self.inner.rows.lock();
-        let Some(row) = rows.get_mut(device_id) else {
-            return false;
-        };
-        if row.revoked_at.is_some() {
-            return true;
+        {
+            let rows = self.inner.rows.lock();
+            let Some(row) = rows.get(device_id) else {
+                return Ok(false);
+            };
+            if row.revoked_at.is_some() {
+                return Ok(true);
+            }
         }
-        row.revoked_at = Some(revoked_at.clone());
         if let Some(path) = &self.inner.db_path {
-            let _ = persist_revoke(path, device_id, &revoked_at);
+            persist_revoke(path, device_id, &revoked_at)
+                .map_err(|_| IdentityError::PersistFailed)?;
         }
-        true
+        let mut rows = self.inner.rows.lock();
+        if let Some(row) = rows.get_mut(device_id) {
+            row.revoked_at = Some(revoked_at);
+        }
+        Ok(true)
     }
 
     fn persist_insert(&self, identity: &DeviceIdentityV1) -> Result<(), rusqlite::Error> {
@@ -474,11 +490,56 @@ mod tests {
                 .active_identity("missing", &identity.key_fingerprint)
                 .is_none()
         );
-        assert!(store.revoke(&identity.device_id));
+        assert_eq!(store.revoke(&identity.device_id), Ok(true));
         assert!(
             store
                 .active_identity(&identity.device_id, &identity.key_fingerprint)
                 .is_none()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn revoke_persist_failure_rolls_back_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceIdentityStore::open(dir.path()).unwrap();
+        let keys = DeviceKeyPair::generate().unwrap();
+        let code = store.issue_pairing_code().unwrap();
+        let identity = store
+            .enroll(&code, keys.public_key_hex(), vec!["system.notify".into()])
+            .unwrap();
+        let db = dir.path().join("device_identities.db");
+        use std::os::unix::fs::PermissionsExt;
+        for suffix in ["", "-wal", "-shm"] {
+            let path = dir.path().join(format!("device_identities.db{suffix}"));
+            if path.exists() {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+            }
+        }
+        assert_eq!(
+            store.revoke(&identity.device_id),
+            Err(IdentityError::PersistFailed)
+        );
+        assert!(
+            store
+                .active_identity(&identity.device_id, &identity.key_fingerprint)
+                .is_some(),
+            "memory must roll back when persist fails"
+        );
+        drop(store);
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let path = dir.path().join(format!("device_identities.db{suffix}"));
+            if path.exists() {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+        let reopened = DeviceIdentityStore::open(dir.path()).unwrap();
+        assert!(
+            reopened
+                .active_identity(&identity.device_id, &identity.key_fingerprint)
+                .is_some(),
+            "restart must keep the pre-revoke admitted row"
         );
     }
 

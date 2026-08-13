@@ -221,17 +221,18 @@ impl SecurityPolicy {
     /// `allowed_tools = None` is unrestricted; `Some(list)` is the
     /// allowlist. `excluded_tools` always subtracts.
     pub fn is_tool_allowed(&self, name: &str) -> bool {
-        let allowed = self
-            .allowed_tools
-            .as_ref()
-            .is_none_or(|list| list.iter().any(|t| t == name));
+        let allowed = self.allowed_tools.as_ref().is_none_or(|list| {
+            list.iter()
+                .any(|t| crate::node_allowlist::tool_name_matches(t, name))
+        });
         allowed && !self.is_tool_excluded(name)
     }
 
     pub fn is_tool_excluded(&self, name: &str) -> bool {
-        self.excluded_tools
-            .as_ref()
-            .is_some_and(|list| list.iter().any(|t| t == name))
+        self.excluded_tools.as_ref().is_some_and(|list| {
+            list.iter()
+                .any(|t| crate::node_allowlist::tool_name_matches(t, name))
+        })
     }
 }
 
@@ -2735,6 +2736,30 @@ mod tests {
         assert!(p.is_tool_allowed("memory_recall"));
         assert!(!p.is_tool_allowed("spawn_subagent"));
         assert!(!p.is_tool_allowed("file_write"));
+    }
+
+    #[test]
+    fn node_per_device_prefix_allow_and_deny() {
+        let allow = SecurityPolicy {
+            allowed_tools: Some(vec!["node:phone:*".into()]),
+            ..SecurityPolicy::default()
+        };
+        assert!(
+            allow.is_tool_allowed("node:phone:camera.snap"),
+            "allow node:phone:* must admit a concrete cap"
+        );
+        assert!(!allow.is_tool_allowed("node:tablet:camera.snap"));
+        let deny = SecurityPolicy {
+            allowed_tools: None,
+            excluded_tools: Some(vec!["node:phone:*".into()]),
+            ..SecurityPolicy::default()
+        };
+        assert!(
+            !deny.is_tool_allowed("node:phone:camera.snap"),
+            "deny node:phone:* must intercept a concrete cap"
+        );
+        assert!(deny.is_tool_allowed("node:tablet:camera.snap"));
+        assert!(deny.is_tool_allowed("shell"));
     }
 
     #[test]
