@@ -59,6 +59,7 @@ pub mod mcp_prompts_tool;
 pub mod mcp_protocol;
 pub mod mcp_resource;
 pub mod mcp_resources_tool;
+pub mod mcp_task;
 pub mod mcp_tool;
 pub mod mcp_transport;
 pub mod memory_export;

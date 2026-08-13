@@ -16,13 +16,16 @@ use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use crate::mcp_era::{
     DiscoverNegotiateError, MCP_MODERN_PROTOCOL_VERSION, McpInputRequiredError, McpResultKind,
-    PeerEra, PeerProtocol, ResultTypeError, VersionQuality, attach_request_meta,
-    cache_hints_from_result, classify_mcp_result, is_recognized_modern_error, local_cache_ttl,
-    versions_from_unsupported_error,
+    PeerEra, PeerProtocol, ResultTypeError, VersionQuality, attach_input_retry,
+    attach_request_meta, cache_hints_from_result, classify_mcp_result, is_recognized_modern_error,
+    local_cache_ttl, versions_from_unsupported_error,
 };
 use crate::mcp_prompt::{McpGetPromptResult, McpPromptsListResult};
 use crate::mcp_protocol::{JsonRpcRequest, MCP_PROTOCOL_VERSION, McpToolDef, McpToolsListResult};
 use crate::mcp_resource::{McpResourceContents, McpResourcesListResult};
+use crate::mcp_task::{
+    McpTaskPending, McpTaskStore, TaskContinuation, parse_continuation, require_responses_if_needed,
+};
 use crate::mcp_transport::{
     McpRecoveryGate, McpRequestLifecycle, McpTransportError, SharedMcpTransportConn,
     create_shared_transport,
@@ -376,8 +379,8 @@ fn check_result_is_error(result: &serde_json::Value, op: &str, server_name: &str
 }
 
 /// Consume a JSON-RPC `result` under [`PeerEra`]. Complete payloads pass
-/// through; `input_required` is a typed error (no tool-loop retry);
-/// malformed modern envelopes fail closed.
+/// through; `input_required` is a typed error used by list/connect paths
+/// that must not mint a handle; malformed modern envelopes fail closed.
 fn require_complete_result(
     era: PeerEra,
     method: &str,
@@ -489,6 +492,7 @@ struct McpServerInner {
     peer: PeerProtocol,
     list_caches: ListCaches,
     tools_ttl: ToolsTtl,
+    tasks: McpTaskStore,
 }
 
 // ── Recovery barrier ────────────────────────────────────────────────────────
@@ -726,6 +730,7 @@ impl McpServer {
             peer,
             list_caches: ListCaches::default(),
             tools_ttl,
+            tasks: McpTaskStore::new(),
         };
 
         ::zeroclaw_log::record!(
@@ -1143,13 +1148,20 @@ impl McpServer {
                 .min(MAX_TOOL_TIMEOUT_SECS)
         };
         let operation = format!("tool call `{tool_name}`");
+        if let Some(continuation) = parse_continuation(&arguments)? {
+            return self
+                .continue_pending_task(
+                    "tools/call",
+                    Some(tool_name),
+                    continuation,
+                    tool_timeout,
+                    &operation,
+                )
+                .await;
+        }
+        let params = json!({ "name": tool_name, "arguments": arguments });
         let resp = self
-            .dispatch_rpc(
-                "tools/call",
-                json!({ "name": tool_name, "arguments": arguments }),
-                tool_timeout,
-                &operation,
-            )
+            .dispatch_rpc("tools/call", params.clone(), tool_timeout, &operation)
             .await?;
 
         if let Some(err) = resp.error {
@@ -1162,11 +1174,13 @@ impl McpServer {
         // protocol errors) with HTTP 200 + `result.isError: true` and the detail
         // in `result.content[].text`, per the MCP spec. Surface it (scrubbed and
         // length-bounded) so the failure is visible to the model and the log.
-        let (server_name, era) = {
+        let server_name = {
             let inner = self.inner.lock().await;
-            (inner.config.name.clone(), inner.peer.era)
+            inner.config.name.clone()
         };
-        let result = require_complete_result(era, "tools/call", result)?;
+        let result = self
+            .finalize_classified_result("tools/call", params, result)
+            .await?;
         check_result_is_error(&result, tool_name, &server_name)?;
 
         Ok(result)
@@ -1190,19 +1204,98 @@ impl McpServer {
         };
         let operation = format!("`{rpc_method}`");
         let resp = self
-            .dispatch_rpc(rpc_method, params, tool_timeout, &operation)
+            .dispatch_rpc(rpc_method, params.clone(), tool_timeout, &operation)
             .await?;
 
         if let Some(err) = resp.error {
             bail!("MCP `{rpc_method}` error {}: {}", err.code, err.message);
         }
         let result = resp.result.unwrap_or(serde_json::Value::Null);
-        let (server_name, era) = {
+        let server_name = {
             let inner = self.inner.lock().await;
-            (inner.config.name.clone(), inner.peer.era)
+            inner.config.name.clone()
         };
-        let result = require_complete_result(era, rpc_method, result)?;
+        let result = self
+            .finalize_classified_result(rpc_method, params, result)
+            .await?;
         check_result_is_error(&result, rpc_method, &server_name)?;
+        Ok(result)
+    }
+
+    /// Classify a JSON-RPC `result`. Complete payloads pass through;
+    /// well-formed `input_required` mints an in-process handle; malformed
+    /// modern envelopes fail closed. Legacy never reaches `InputRequired`.
+    async fn finalize_classified_result(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        result: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let era = {
+            let inner = self.inner.lock().await;
+            inner.peer.era
+        };
+        match classify_mcp_result(era, method, &result) {
+            Ok(McpResultKind::Complete) => Ok(result),
+            Ok(McpResultKind::InputRequired(input_required)) => {
+                let pending: McpTaskPending = {
+                    let mut inner = self.inner.lock().await;
+                    inner.tasks.mint(method, params, input_required)?
+                };
+                Err(anyhow::Error::new(pending))
+            }
+            Err(err) => Err(anyhow::Error::msg(format!(
+                "MCP `{method}` resultType rejected: {err}"
+            ))),
+        }
+    }
+
+    /// Redeem a handle and retry the original request with MRTR fields.
+    async fn continue_pending_task(
+        &self,
+        expected_method: &str,
+        expected_binding: Option<&str>,
+        continuation: TaskContinuation,
+        timeout_secs: u64,
+        operation: &str,
+    ) -> Result<serde_json::Value> {
+        let redeemed = {
+            let mut inner = self.inner.lock().await;
+            inner
+                .tasks
+                .redeem(&continuation.handle, expected_method, expected_binding)?
+        };
+        require_responses_if_needed(&redeemed.input_required, &continuation.input_responses)?;
+        let original_params = redeemed.params.clone();
+        let retry_params = attach_input_retry(
+            original_params.clone(),
+            continuation.input_responses.as_ref(),
+            redeemed.input_required.request_state.as_deref(),
+        );
+        let resp = self
+            .dispatch_rpc(&redeemed.method, retry_params, timeout_secs, operation)
+            .await?;
+        if let Some(err) = resp.error {
+            bail!(
+                "MCP `{}` error {}: {}",
+                redeemed.method,
+                err.code,
+                err.message
+            );
+        }
+        let result = resp.result.unwrap_or(serde_json::Value::Null);
+        let server_name = {
+            let inner = self.inner.lock().await;
+            inner.config.name.clone()
+        };
+        let result = self
+            .finalize_classified_result(&redeemed.method, original_params, result)
+            .await?;
+        check_result_is_error(
+            &result,
+            expected_binding.unwrap_or(&redeemed.method),
+            &server_name,
+        )?;
         Ok(result)
     }
 
@@ -1434,6 +1527,7 @@ impl McpRegistry {
                 peer: PeerProtocol::legacy_default(),
                 list_caches: ListCaches::default(),
                 tools_ttl: ToolsTtl::Sticky,
+                tasks: McpTaskStore::new(),
             };
             McpServer {
                 inner: Arc::new(Mutex::new(inner)),
@@ -1590,6 +1684,7 @@ impl McpRegistry {
             peer: PeerProtocol::legacy_default(),
             list_caches: ListCaches::default(),
             tools_ttl: ToolsTtl::Sticky,
+            tasks: McpTaskStore::new(),
         };
         McpServer {
             inner: std::sync::Arc::new(Mutex::new(inner)),
@@ -2203,6 +2298,7 @@ mod tests {
             peer: PeerProtocol::legacy_default(),
             list_caches: ListCaches::default(),
             tools_ttl: ToolsTtl::Sticky,
+            tasks: McpTaskStore::new(),
         };
         McpServer {
             inner: Arc::new(Mutex::new(inner)),
@@ -2692,6 +2788,7 @@ mod tests {
             peer: PeerProtocol::legacy_default(),
             list_caches: ListCaches::default(),
             tools_ttl: ToolsTtl::Sticky,
+            tasks: McpTaskStore::new(),
         };
         McpServer {
             inner: Arc::new(Mutex::new(inner)),
@@ -2722,6 +2819,7 @@ mod tests {
             peer: PeerProtocol::legacy_default(),
             list_caches: ListCaches::default(),
             tools_ttl: ToolsTtl::Sticky,
+            tasks: McpTaskStore::new(),
         };
         McpServer {
             inner: Arc::new(Mutex::new(inner)),
@@ -4221,24 +4319,334 @@ done
             .call_tool("echo", json!({}))
             .await
             .expect_err("input_required is not a completed tool result");
-        let typed = err
-            .downcast_ref::<McpInputRequiredError>()
-            .expect("typed MRTR error");
-        assert_eq!(typed.method, "tools/call");
+        let pending = err
+            .downcast_ref::<McpTaskPending>()
+            .expect("minted task handle");
+        assert_eq!(pending.method, "tools/call");
+        assert!(
+            pending.handle.starts_with("mcp-task-"),
+            "handle {}",
+            pending.handle
+        );
         assert_eq!(
-            typed.input_required.request_state.as_deref(),
+            pending.input_required.request_state.as_deref(),
             Some("AEAD-protected blob")
         );
         assert!(
-            typed
+            pending
                 .input_required
                 .input_requests
                 .as_ref()
                 .is_some_and(|map| map.contains_key("github_login"))
         );
-        let msg = typed.to_string();
+        let msg = pending.to_string();
         assert!(msg.contains("input_required"), "got: {msg}");
-        assert!(msg.contains("not implemented"), "got: {msg}");
+        assert!(msg.contains(crate::mcp_task::TASK_HANDLE_ARG), "got: {msg}");
+        assert!(
+            !msg.contains("AEAD-protected blob"),
+            "requestState must not be model-visible: {msg}"
+        );
+        assert_eq!(mcp.inner.lock().await.tasks.len(), 1);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_input_required_continue_retries_original_with_answers() {
+        use crate::mcp_task::{INPUT_RESPONSES_FIELD, TASK_HANDLE_ARG};
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let body = request_json(request);
+                let id = body.get("id").cloned().expect("request id");
+                let params = body.get("params").cloned().unwrap_or(json!({}));
+                if params.get("inputResponses").is_some() {
+                    assert_eq!(params["name"], "echo");
+                    assert_eq!(params["arguments"], json!({"q": 1}));
+                    assert_eq!(params["requestState"], "AEAD-protected blob");
+                    assert_eq!(
+                        params["inputResponses"],
+                        json!({"github_login": {"action": "accept", "content": {"name": "octocat"}}})
+                    );
+                    assert!(
+                        params.get("_meta").is_some(),
+                        "modern retry must keep _meta"
+                    );
+                    assert!(
+                        params.get(TASK_HANDLE_ARG).is_none(),
+                        "client handle must not go on the wire"
+                    );
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {"resultType": "complete", "ok": true}
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "resultType": "input_required",
+                            "inputRequests": {
+                                "github_login": {
+                                    "method": "elicitation/create",
+                                    "params": {"mode": "form", "message": "name"}
+                                }
+                            },
+                            "requestState": "AEAD-protected blob"
+                        }
+                    }))
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool("echo", json!({"q": 1}))
+            .await
+            .expect_err("pending handle");
+        let handle = err
+            .downcast_ref::<McpTaskPending>()
+            .expect("pending")
+            .handle
+            .clone();
+        let result = mcp
+            .call_tool(
+                "echo",
+                json!({
+                    TASK_HANDLE_ARG: handle,
+                    INPUT_RESPONSES_FIELD: {
+                        "github_login": {"action": "accept", "content": {"name": "octocat"}}
+                    }
+                }),
+            )
+            .await
+            .expect("continue");
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(result["ok"], true);
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_unknown_task_handle_fails_closed_without_retry() {
+        use crate::mcp_task::TASK_HANDLE_ARG;
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(ResponseTemplate::new(500).set_body_string("must not retry"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool(
+                "echo",
+                json!({ TASK_HANDLE_ARG: "mcp-task-does-not-exist" }),
+            )
+            .await
+            .expect_err("unknown handle");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unknown"), "got: {msg}");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_expired_task_handle_fails_closed_without_retry() {
+        use crate::mcp_task::TASK_HANDLE_ARG;
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "input_required",
+                        "requestState": "blob"
+                    }
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        mcp.inner.lock().await.tasks =
+            McpTaskStore::with_limits(8, std::time::Duration::from_millis(1));
+        let err = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("pending handle");
+        let handle = err
+            .downcast_ref::<McpTaskPending>()
+            .expect("pending")
+            .handle
+            .clone();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let err = mcp
+            .call_tool("echo", json!({ TASK_HANDLE_ARG: handle }))
+            .await
+            .expect_err("expired handle");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("expired"), "got: {msg}");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_input_required_shaped_result_never_mints_a_handle() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "server/discover"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "error": {"code": -32601, "message": "Method not found"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "notifications/initialized"}),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        mount_tools_list_empty(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let body = request_json(request);
+                let params = body.get("params").cloned().unwrap_or(json!({}));
+                assert!(
+                    params.get("inputResponses").is_none(),
+                    "legacy retry must not grow MRTR fields"
+                );
+                assert!(
+                    params.get("_meta").is_none(),
+                    "legacy tools/call has no _meta"
+                );
+                let id = body.get("id").cloned().expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "ok": true,
+                        "resultType": "input_required",
+                        "requestState": "legacy-blob"
+                    }
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("legacy connect");
+        let result = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect("legacy treats omitted-era payload as complete");
+        assert_eq!(result["ok"], true);
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_oversized_request_state_is_length_bounded_and_not_minted() {
+        use crate::mcp_task::MAX_REQUEST_STATE_BYTES;
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let huge = "S".repeat(MAX_REQUEST_STATE_BYTES + 1);
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with({
+                let huge = huge.clone();
+                move |request: &wiremock::Request| {
+                    let id = request_json(request)
+                        .get("id")
+                        .cloned()
+                        .expect("request id");
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "resultType": "input_required",
+                            "requestState": huge
+                        }
+                    }))
+                }
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("oversized requestState fails closed");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("requestState"), "got: {msg}");
+        assert!(
+            !msg.contains(&huge),
+            "opaque blob must not leak into the error"
+        );
+        assert!(
+            err.downcast_ref::<McpTaskPending>().is_none(),
+            "oversized state must not mint a handle"
+        );
+        assert!(mcp.inner.lock().await.tasks.is_empty());
         server.verify().await;
     }
 
