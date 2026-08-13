@@ -10,6 +10,17 @@ cli-daemon-about = Start the long-running autonomous daemon
 cli-service-about = Manage OS service lifecycle (launchd/systemd user service)
 cli-doctor-about = Run diagnostics for daemon/scheduler/channel freshness
 cli-status-about = Show system status (full details)
+cli-status-long-about =
+    Show system status (full details).
+
+    When companion memory is enabled and companion-memory.db already exists,
+    this command opens that file with deny-migration and never creates a
+    missing store. Opening is not a strictly read-only inspect: SQLite takes
+    a WAL lock, and the probe still applies owner-only permissions (0600)
+    to the database file and any existing -wal/-shm sidecars.
+
+    --format exit-code exits 0 if the gateway /health probe succeeds, 1 otherwise
+    (for Docker HEALTHCHECK).
 cli-estop-about = Engage, inspect, and resume emergency-stop states
 cli-cron-about = Configure and manage scheduled tasks
 cli-models-about = Manage provider model catalogs
@@ -757,6 +768,9 @@ cli-status-runtime = ⚙️  Runtime:       {$v}
 cli-status-heartbeat = 💓 Heartbeat:      {$v}
 cli-status-heartbeat-every-minutes = every {$minutes}min
 cli-status-memory = 🧠 Memory:         {$backend} (auto-save: {$auto_save})
+cli-status-companion-outbox-not-configured = Companion outbox: not configured
+cli-status-companion-outbox-pending = Companion outbox: pending ({$pending} events)
+cli-status-companion-outbox-pending-oldest = Companion outbox: pending ({$pending} events, oldest {$age}s)
 cli-status-security-noprofile = Security ({$alias}): <no risk_profile>
 cli-status-security = Security ({$alias}):
 cli-status-workspace-only = {"  "}Workspace only:    {$v}

@@ -546,6 +546,77 @@ impl CaptureReceipt {
     }
 }
 
+/// Operator-visible companion outbox health. ZeroClaw-owned: never a memcore
+/// type, and never a remote-sync report.
+///
+/// V1 has no Tachi drain. The only configured state is
+/// [`CompanionOutboxStatus::Pending`]. A `synchronized` variant is
+/// intentionally absent so success cannot be named, deserialized, or logged.
+/// The frozen JSON literals are `not_configured` and `pending`; synonyms
+/// such as `accumulating` are rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompanionOutboxStatus {
+    /// No live store: feature off, `[companion_memory].enable` is false, or
+    /// the factory returned `None`.
+    NotConfigured,
+    /// A PortableKernel store is open. Pending events may be waiting. This is
+    /// the resting state for every configured V1 install.
+    Pending,
+}
+
+impl CompanionOutboxStatus {
+    /// Stable storage / JSON token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+            Self::Pending => "pending",
+        }
+    }
+}
+
+impl std::fmt::Display for CompanionOutboxStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Snapshot of local outbox debt. Counts and age are read-only facts about
+/// `pending` rows; they do not imply a consumer ran.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompanionOutboxHealth {
+    pub status: CompanionOutboxStatus,
+    /// Events still in `pending`. Zero when [`Self::status`] is
+    /// [`CompanionOutboxStatus::NotConfigured`].
+    pub pending_count: u64,
+    /// Age of the oldest `pending` event in seconds, if any exist.
+    pub oldest_pending_age_secs: Option<u64>,
+}
+
+impl CompanionOutboxHealth {
+    /// Closed store. No debt can be observed.
+    #[must_use]
+    pub fn not_configured() -> Self {
+        Self {
+            status: CompanionOutboxStatus::NotConfigured,
+            pending_count: 0,
+            oldest_pending_age_secs: None,
+        }
+    }
+
+    /// Open store. `pending_count == 0` is still pending: V1 cannot
+    /// represent a completed drain.
+    #[must_use]
+    pub fn pending(pending_count: u64, oldest_pending_age_secs: Option<u64>) -> Self {
+        Self {
+            status: CompanionOutboxStatus::Pending,
+            pending_count,
+            oldest_pending_age_secs,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,5 +920,56 @@ mod tests {
             ctx.with_partition(SourcePartition::PrivateDyad).partition(),
             SourcePartition::PrivateDyad
         );
+    }
+
+    #[test]
+    fn companion_outbox_status_has_no_synchronized_variant() {
+        // Exhaustive match: a third variant (including anything named
+        // synchronized) is a compile failure. V1 must not be able to name a
+        // completed remote drain. Frozen literals are pending / not_configured.
+        for status in [
+            CompanionOutboxStatus::NotConfigured,
+            CompanionOutboxStatus::Pending,
+        ] {
+            match status {
+                CompanionOutboxStatus::NotConfigured => {
+                    assert_eq!(status.as_str(), "not_configured");
+                }
+                CompanionOutboxStatus::Pending => {
+                    assert_eq!(status.as_str(), "pending");
+                }
+            }
+        }
+        assert_eq!(
+            serde_json::to_string(&CompanionOutboxStatus::NotConfigured).expect("ser"),
+            "\"not_configured\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CompanionOutboxStatus::Pending).expect("ser"),
+            "\"pending\""
+        );
+        assert_eq!(
+            serde_json::from_str::<CompanionOutboxStatus>("\"pending\"").expect("de"),
+            CompanionOutboxStatus::Pending
+        );
+        assert!(serde_json::from_str::<CompanionOutboxStatus>("\"synchronized\"").is_err());
+        assert!(serde_json::from_str::<CompanionOutboxStatus>("\"accumulating\"").is_err());
+    }
+
+    #[test]
+    fn companion_outbox_health_json_cannot_say_synchronized() {
+        let closed = CompanionOutboxHealth::not_configured();
+        assert_eq!(closed.status, CompanionOutboxStatus::NotConfigured);
+        assert_eq!(closed.pending_count, 0);
+        assert_eq!(closed.oldest_pending_age_secs, None);
+
+        let open = CompanionOutboxHealth::pending(3, Some(12));
+        let json = serde_json::to_string(&open).expect("ser");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(value["status"], "pending");
+        assert!(!json.contains("synchronized"), "{json}");
+        assert!(!json.contains("accumulating"), "{json}");
+        assert_eq!(open.pending_count, 3);
+        assert_eq!(open.oldest_pending_age_secs, Some(12));
     }
 }
