@@ -1,20 +1,34 @@
 //! WebSocket endpoint for dynamic node discovery and capability advertisement.
+//!
+//! `generation` is a process-local monotonic counter minted per socket
+//! (first connection is 1; a process restart resets it to 0). Tear-down of a
+//! live socket must key on `connection_id`. Later invocation-lifecycle work
+//! (#62) must not treat `generation` as a durable identity on its own.
 
 use super::AppState;
 use axum::{
+    Json,
     extract::{
-        Query, State, WebSocketUpgrade,
+        ConnectInfo, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{HeaderMap, header},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
+use zeroclaw_api::node::{
+    GatewayToNode, NodeErrorCode, NodeToGateway, WS_NODES_V2, is_v1_register_frame,
+    negotiate_v2_minor,
+};
 use zeroclaw_runtime::security::pairing::{PairingGuard, constant_time_eq};
 
 pub mod mdns;
@@ -22,8 +36,17 @@ pub mod mdns;
 /// Prefix used in `Sec-WebSocket-Protocol` to carry a bearer token.
 const BEARER_SUBPROTO_PREFIX: &str = "bearer.";
 
-/// The sub-protocol we support for node connections.
-const WS_NODE_PROTOCOL: &str = "zeroclaw.nodes.v1";
+const NODES_DISABLED_MSG: &str =
+    "Not Found — node discovery is disabled (set nodes.enabled=true to enable)";
+
+/// Hello must arrive within this window after the v2 upgrade.
+const HELLO_DEADLINE: Duration = Duration::from_secs(10);
+const HELLO_MAX_BYTES: usize = 64 * 1024;
+const MAX_PROTOCOL_VERSIONS: usize = 16;
+const MAX_IDENTITY_FIELD_BYTES: usize = 256;
+
+const NODES_V2_LOOPBACK_LISTEN_WARN: &str =
+    "nodes v2 requires a loopback listen address until device identity lands";
 
 /// A single capability advertised by a node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,19 +90,67 @@ pub struct NodeInvocationResult {
     pub error: Option<String>,
 }
 
+/// Per-socket identity minted at v2 HelloAck. Later slices tear down by this pair.
+///
+/// `generation` is not durable: it is monotonic only inside this process and
+/// resets on restart. Invocation lifecycle (#62) must not key teardown on
+/// `generation` alone; `connection_id` is the generation token that survives
+/// a counter wrap or a new process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeConnection {
+    pub connection_id: String,
+    pub generation: u64,
+}
+
 /// Registry of all connected nodes and their capabilities.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<String, NodeInfo>>>,
     max_nodes: usize,
+    next_generation: Arc<AtomicU64>,
+    /// Canonical listen IP from `TcpListener::local_addr` after bind.
+    listen_addr: IpAddr,
+}
+
+impl Default for NodeRegistry {
+    fn default() -> Self {
+        Self::new(0)
+    }
 }
 
 impl NodeRegistry {
     /// Create a new registry with the given capacity limit.
+    ///
+    /// Listen defaults to loopback so unit tests of the registry itself do not
+    /// trip the pre-#60 v2 surface gate.
     pub fn new(max_nodes: usize) -> Self {
         Self {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             max_nodes,
+            next_generation: Arc::new(AtomicU64::new(0)),
+            listen_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        }
+    }
+
+    /// Record the socket the gateway actually bound. Source of truth is
+    /// `listener.local_addr()`, not the pre-bind config host string.
+    #[must_use]
+    pub fn with_listen_addr(mut self, listen_addr: IpAddr) -> Self {
+        self.listen_addr = listen_addr;
+        self
+    }
+
+    #[must_use]
+    pub fn listen_addr(&self) -> IpAddr {
+        self.listen_addr
+    }
+
+    /// Allocate a connection id and monotonic generation for one socket.
+    pub fn mint_connection(&self) -> NodeConnection {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        NodeConnection {
+            connection_id: Uuid::new_v4().to_string(),
+            generation,
         }
     }
 
@@ -136,39 +207,6 @@ impl NodeRegistry {
     }
 }
 
-/// Messages received from a node.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum NodeMessage {
-    Register {
-        node_id: String,
-        capabilities: Vec<NodeCapability>,
-    },
-    Result {
-        call_id: String,
-        success: bool,
-        output: String,
-        #[serde(default)]
-        error: Option<String>,
-    },
-}
-
-/// Messages sent to a node.
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum GatewayMessage {
-    #[allow(dead_code)] // Wire-format ack; only the test constructs it today.
-    Registered {
-        node_id: String,
-        capabilities_count: usize,
-    },
-    Invoke {
-        call_id: String,
-        capability: String,
-        args: serde_json::Value,
-    },
-}
-
 /// Query parameters for the `/ws/nodes` endpoint.
 #[derive(Deserialize)]
 pub struct NodeWsQuery {
@@ -222,10 +260,7 @@ pub(crate) fn check_node_auth(
     query_token: Option<&str>,
 ) -> Option<(axum::http::StatusCode, &'static str)> {
     if !nodes_config.enabled {
-        return Some((
-            axum::http::StatusCode::NOT_FOUND,
-            "Not Found — node discovery is disabled (set nodes.enabled=true to enable)",
-        ));
+        return Some((axum::http::StatusCode::NOT_FOUND, NODES_DISABLED_MSG));
     }
     if let Some(ref expected_token) = nodes_config.auth_token {
         // Fail-closed: a whitespace-only / empty configured token must not
@@ -267,167 +302,311 @@ pub(crate) fn check_node_auth(
     None
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NodeWsAdmission {
+    Ok,
+    Legacy {
+        status: StatusCode,
+        body: &'static str,
+    },
+    Typed {
+        status: StatusCode,
+        code: NodeErrorCode,
+    },
+}
+
+#[derive(Serialize)]
+struct NodeProtocolReject {
+    code: NodeErrorCode,
+}
+
+fn client_offers_subprotocol(headers: &HeaderMap, protocol: &str) -> bool {
+    headers
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|protos| protos.split(',').any(|p| p.trim() == protocol))
+}
+
+fn peer_is_loopback(peer: SocketAddr) -> bool {
+    peer.ip().is_loopback()
+}
+
+fn listen_is_loopback(listen: IpAddr) -> bool {
+    listen.is_loopback()
+}
+
+fn closed_surface() -> NodeWsAdmission {
+    NodeWsAdmission::Legacy {
+        status: StatusCode::NOT_FOUND,
+        body: NODES_DISABLED_MSG,
+    }
+}
+
+/// WARN copy when nodes are enabled but the gateway did not bind loopback.
+#[must_use]
+pub(crate) fn nodes_v2_non_loopback_listen_warning(
+    enabled: bool,
+    listen: IpAddr,
+) -> Option<&'static str> {
+    if enabled && !listen_is_loopback(listen) {
+        Some(NODES_V2_LOOPBACK_LISTEN_WARN)
+    } else {
+        None
+    }
+}
+
+/// HTTP admission for `/ws/nodes`: enabled → dual loopback → auth → v2 subprotocol.
+///
+/// Pre-#60 temporary gate: `ConnectInfo` is the TCP peer, which is always
+/// 127.0.0.1 when a same-host reverse proxy (nginx/Caddy) terminates TLS and
+/// forwards to the gateway. Requiring both a loopback peer *and* a loopback
+/// listen address (not `0.0.0.0` / `::`) keeps bearer-only v2 off any
+/// interface a proxy could forward onto. A failed listen or peer check uses
+/// the same 404 body as `nodes.enabled=false` so a remote scanner cannot
+/// distinguish the two.
+fn admit_node_ws(
+    nodes_config: &zeroclaw_config::schema::NodesConfig,
+    pairing: &PairingGuard,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    peer: SocketAddr,
+    listen: IpAddr,
+) -> NodeWsAdmission {
+    if !nodes_config.enabled {
+        return closed_surface();
+    }
+    if !listen_is_loopback(listen) || !peer_is_loopback(peer) {
+        return closed_surface();
+    }
+    if let Some((status, body)) = check_node_auth(nodes_config, pairing, headers, query_token) {
+        return NodeWsAdmission::Legacy { status, body };
+    }
+    if !client_offers_subprotocol(headers, WS_NODES_V2) {
+        return NodeWsAdmission::Typed {
+            status: StatusCode::BAD_REQUEST,
+            code: NodeErrorCode::ProtocolUnsupported,
+        };
+    }
+    NodeWsAdmission::Ok
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum NodeHandshakeOutcome {
+    Ack(GatewayToNode),
+    Reject {
+        frame: GatewayToNode,
+        close_reason: &'static str,
+    },
+}
+
+fn protocol_error_frame(code: NodeErrorCode) -> GatewayToNode {
+    GatewayToNode::Error {
+        code,
+        retryable: false,
+        call_id: None,
+        detail: None,
+    }
+}
+
+fn handshake_reject(code: NodeErrorCode) -> NodeHandshakeOutcome {
+    NodeHandshakeOutcome::Reject {
+        frame: protocol_error_frame(code),
+        close_reason: code.as_str(),
+    }
+}
+
+fn identity_field_too_long(value: Option<&str>) -> bool {
+    value.is_some_and(|s| s.len() > MAX_IDENTITY_FIELD_BYTES)
+}
+
+/// First in-band frame after a v2 upgrade: Hello with overlapping minors, or reject.
+fn handshake_first_frame(text: &str, conn: &NodeConnection) -> NodeHandshakeOutcome {
+    if text.len() > HELLO_MAX_BYTES {
+        return handshake_reject(NodeErrorCode::ProtocolUnsupported);
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return handshake_reject(NodeErrorCode::ProtocolUnsupported);
+    };
+    if is_v1_register_frame(&value) {
+        return handshake_reject(NodeErrorCode::ProtocolUnsupported);
+    }
+    let Ok(frame) = serde_json::from_value::<NodeToGateway>(value) else {
+        return handshake_reject(NodeErrorCode::ProtocolUnsupported);
+    };
+    match frame {
+        NodeToGateway::Hello {
+            protocol_versions,
+            device_id,
+            key_fingerprint,
+        } => {
+            if protocol_versions.len() > MAX_PROTOCOL_VERSIONS
+                || identity_field_too_long(device_id.as_deref())
+                || identity_field_too_long(key_fingerprint.as_deref())
+            {
+                return handshake_reject(NodeErrorCode::ProtocolUnsupported);
+            }
+            match negotiate_v2_minor(&protocol_versions) {
+                Some(version) => NodeHandshakeOutcome::Ack(GatewayToNode::HelloAck {
+                    protocol_version: version.to_string(),
+                    connection_id: conn.connection_id.clone(),
+                    generation: conn.generation,
+                }),
+                None => handshake_reject(NodeErrorCode::VersionMismatch),
+            }
+        }
+        _ => handshake_reject(NodeErrorCode::ProtocolUnsupported),
+    }
+}
+
+#[derive(Debug)]
+enum FirstWsFrame {
+    Text(String),
+    Control,
+    Closed,
+    Reject,
+}
+
+fn classify_first_ws_frame(msg: Result<Message, axum::Error>) -> FirstWsFrame {
+    match msg {
+        Ok(Message::Text(text)) => FirstWsFrame::Text(text.to_string()),
+        Ok(Message::Ping(_) | Message::Pong(_)) => FirstWsFrame::Control,
+        Ok(Message::Close(_)) | Err(_) => FirstWsFrame::Closed,
+        Ok(Message::Binary(_)) => FirstWsFrame::Reject,
+    }
+}
+
+async fn recv_hello_text(
+    receiver: &mut futures_util::stream::SplitStream<WebSocket>,
+) -> Option<Result<String, ()>> {
+    loop {
+        match receiver.next().await {
+            None => return None,
+            Some(msg) => match classify_first_ws_frame(msg) {
+                FirstWsFrame::Text(text) => return Some(Ok(text)),
+                FirstWsFrame::Control => continue,
+                FirstWsFrame::Closed => return None,
+                FirstWsFrame::Reject => return Some(Err(())),
+            },
+        }
+    }
+}
+
+fn inbound_is_v1_register(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text).is_ok_and(|value| is_v1_register_frame(&value))
+}
+
 pub async fn handle_ws_nodes(
     State(state): State<AppState>,
     Query(params): Query<NodeWsQuery>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let nodes_config = state.config.read().nodes.clone();
-    if let Some((status, body)) = check_node_auth(
+    match admit_node_ws(
         &nodes_config,
         &state.pairing,
         &headers,
         params.token.as_deref(),
+        peer,
+        state.node_registry.listen_addr(),
     ) {
-        return (status, body).into_response();
+        NodeWsAdmission::Ok => {}
+        NodeWsAdmission::Legacy { status, body } => return (status, body).into_response(),
+        NodeWsAdmission::Typed { status, code } => {
+            return (status, Json(NodeProtocolReject { code })).into_response();
+        }
     }
 
-    // Echo sub-protocol if client requests it
-    let ws = if headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|protos| protos.split(',').any(|p| p.trim() == WS_NODE_PROTOCOL))
-    {
-        ws.protocols([WS_NODE_PROTOCOL])
-    } else {
-        ws
-    };
-
     let registry = state.node_registry.clone();
-    ws.on_upgrade(move |socket| handle_node_socket(socket, registry))
+    ws.protocols([WS_NODES_V2])
+        .on_upgrade(move |socket| handle_node_socket(socket, registry))
         .into_response()
 }
 
 async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>) {
     let (mut sender, mut receiver) = socket.split();
-    let mut registered_node_id: Option<String> = None;
+    let conn = registry.mint_connection();
 
-    // Channel for forwarding invocations to this node
-    let (invoke_tx, mut invoke_rx) = mpsc::channel::<NodeInvocation>(32);
+    let first_text = match tokio::time::timeout(HELLO_DEADLINE, recv_hello_text(&mut receiver))
+        .await
+    {
+        Ok(Some(Ok(text))) => text,
+        Ok(Some(Err(()))) | Err(_) => {
+            let _ = send_json(
+                &mut sender,
+                &protocol_error_frame(NodeErrorCode::ProtocolUnsupported),
+            )
+            .await;
+            let _ = close_protocol(&mut sender, NodeErrorCode::ProtocolUnsupported.as_str()).await;
+            return;
+        }
+        Ok(None) => return,
+    };
 
-    // Pending invocation responses keyed by call_id
-    let pending: Arc<RwLock<HashMap<String, oneshot::Sender<NodeInvocationResult>>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-
-    let pending_clone = Arc::clone(&pending);
-
-    // Task to forward invocations to the node via WebSocket
-    let send_task = zeroclaw_spawn::spawn!(async move {
-        while let Some(invocation) = invoke_rx.recv().await {
-            let msg = GatewayMessage::Invoke {
-                call_id: invocation.call_id.clone(),
-                capability: invocation.capability,
-                args: invocation.args,
-            };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                if sender.send(Message::Text(json.into())).await.is_err() {
-                    break;
-                }
-                pending_clone
-                    .write()
-                    .insert(invocation.call_id, invocation.response_tx);
+    match handshake_first_frame(&first_text, &conn) {
+        NodeHandshakeOutcome::Ack(ack) => {
+            if send_json(&mut sender, &ack).await.is_err() {
+                return;
             }
         }
-    });
-
-    // Process incoming messages from node
-    while let Some(msg) = receiver.next().await {
-        let text = match msg {
-            Ok(Message::Text(text)) => text,
-            Ok(Message::Close(_)) | Err(_) => break,
-            _ => continue,
-        };
-
-        let parsed: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        // Try to parse as NodeMessage
-        let node_msg: NodeMessage = match serde_json::from_value(parsed) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        match node_msg {
-            NodeMessage::Register {
-                node_id,
-                capabilities,
-            } => {
-                // Validate node_id
-                if node_id.is_empty() || node_id.len() > 128 {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "Node registration rejected: invalid node_id length"
-                    );
-                    continue;
-                }
-
-                let caps_count = capabilities.len();
-                let info = NodeInfo {
-                    node_id: node_id.clone(),
-                    capabilities,
-                    invoke_tx: invoke_tx.clone(),
-                };
-
-                if registry.register(info) {
-                    ::zeroclaw_log::record!(
-                        INFO,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_attrs(
-                                ::serde_json::json!({"node_id": node_id, "caps_count": caps_count})
-                            ),
-                        "Node registered: with capabilities"
-                    );
-                    registered_node_id = Some(node_id.clone());
-                } else {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({"node_id": node_id})),
-                        "Node registration rejected: registry at capacity for"
-                    );
-                }
-            }
-            NodeMessage::Result {
-                call_id,
-                success,
-                output,
-                error,
-            } => {
-                if let Some(tx) = pending.write().remove(&call_id) {
-                    let _ = tx.send(NodeInvocationResult {
-                        success,
-                        output,
-                        error,
-                    });
-                }
-            }
+        NodeHandshakeOutcome::Reject {
+            frame,
+            close_reason,
+        } => {
+            let _ = send_json(&mut sender, &frame).await;
+            let _ = close_protocol(&mut sender, close_reason).await;
+            return;
         }
     }
 
-    // Cleanup: unregister node on disconnect
-    if let Some(node_id) = registered_node_id {
-        registry.unregister(&node_id);
-        ::zeroclaw_log::record!(
-            INFO,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_attrs(::serde_json::json!({"node_id": node_id})),
-            "Node disconnected and unregistered"
-        );
+    loop {
+        let text = match receiver.next().await {
+            Some(Ok(Message::Text(text))) => text.to_string(),
+            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+            Some(Ok(_)) => continue,
+        };
+        if inbound_is_v1_register(&text) {
+            let _ = send_json(
+                &mut sender,
+                &protocol_error_frame(NodeErrorCode::ProtocolUnsupported),
+            )
+            .await;
+            let _ = close_protocol(&mut sender, NodeErrorCode::ProtocolUnsupported.as_str()).await;
+            return;
+        }
     }
+}
 
-    send_task.abort();
+async fn send_json<T: Serialize>(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    value: &T,
+) -> Result<(), ()> {
+    let json = serde_json::to_string(value).map_err(|_| ())?;
+    sender
+        .send(Message::Text(json.into()))
+        .await
+        .map_err(|_| ())
+}
+
+async fn close_protocol(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    reason: &'static str,
+) -> Result<(), ()> {
+    sender
+        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: 1002,
+            reason: axum::extract::ws::Utf8Bytes::from_static(reason),
+        })))
+        .await
+        .map_err(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, StatusCode};
+    use zeroclaw_api::node::{GrantProof, WS_NODES_V1};
     use zeroclaw_config::schema::NodesConfig;
     use zeroclaw_runtime::security::pairing::PairingGuard;
 
@@ -701,64 +880,631 @@ mod tests {
     }
 
     #[test]
-    fn node_message_register_deserialize() {
-        let json = r#"{"type":"register","node_id":"phone-1","capabilities":[{"name":"camera.snap","description":"Take a photo","parameters":{"type":"object","properties":{"resolution":{"type":"string"}}}}]}"#;
-        let msg: NodeMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            NodeMessage::Register {
-                node_id,
-                capabilities,
-            } => {
-                assert_eq!(node_id, "phone-1");
-                assert_eq!(capabilities.len(), 1);
-                assert_eq!(capabilities[0].name, "camera.snap");
+    fn nodes_v2_offer_handshake_succeeds() {
+        let conn = test_conn();
+        let outcome =
+            handshake_first_frame(r#"{"type":"hello","protocol_versions":["2.0"]}"#, &conn);
+        match outcome {
+            NodeHandshakeOutcome::Ack(GatewayToNode::HelloAck {
+                protocol_version,
+                connection_id,
+                generation,
+            }) => {
+                assert_eq!(protocol_version, "2.0");
+                assert_eq!(connection_id, "conn-test");
+                assert_eq!(generation, 7);
             }
-            NodeMessage::Result { .. } => panic!("Expected Register message"),
+            other => panic!("expected HelloAck, got {other:?}"),
         }
     }
 
     #[test]
-    fn node_message_result_deserialize() {
-        let json = r#"{"type":"result","call_id":"abc-123","success":true,"output":"photo taken"}"#;
-        let msg: NodeMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            NodeMessage::Result {
-                call_id,
-                success,
-                output,
-                error,
-            } => {
-                assert_eq!(call_id, "abc-123");
-                assert!(success);
-                assert_eq!(output, "photo taken");
-                assert!(error.is_none());
-            }
-            NodeMessage::Register { .. } => panic!("Expected Result message"),
+    fn nodes_v1_only_offer_is_typed_protocol_unsupported() {
+        let cfg = enabled_secret_cfg();
+        let mut headers = bearer_headers("secret");
+        headers.insert("sec-websocket-protocol", WS_NODES_V1.parse().unwrap());
+        match admit_node_ws(
+            &cfg,
+            &make_pairing(false),
+            &headers,
+            None,
+            loopback_peer(),
+            loopback_listen(),
+        ) {
+            NodeWsAdmission::Typed {
+                status,
+                code: NodeErrorCode::ProtocolUnsupported,
+            } => assert_eq!(status, StatusCode::BAD_REQUEST),
+            other => panic!("expected typed protocol_unsupported, got {other:?}"),
         }
     }
 
     #[test]
-    fn gateway_message_serialize() {
-        let msg = GatewayMessage::Registered {
-            node_id: "phone-1".to_string(),
-            capabilities_count: 3,
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"registered\""));
-        assert!(json.contains("\"node_id\":\"phone-1\""));
-        assert!(json.contains("\"capabilities_count\":3"));
+    fn nodes_missing_subprotocol_is_rejected_upgrade_hole_closed() {
+        let cfg = enabled_secret_cfg();
+        let headers = bearer_headers("secret");
+        match admit_node_ws(
+            &cfg,
+            &make_pairing(false),
+            &headers,
+            None,
+            loopback_peer(),
+            loopback_listen(),
+        ) {
+            NodeWsAdmission::Typed {
+                status,
+                code: NodeErrorCode::ProtocolUnsupported,
+            } => assert_eq!(status, StatusCode::BAD_REQUEST),
+            other => panic!("missing subprotocol must not upgrade, got {other:?}"),
+        }
     }
 
     #[test]
-    fn gateway_invoke_message_serialize() {
-        let msg = GatewayMessage::Invoke {
-            call_id: "call-1".to_string(),
-            capability: "camera.snap".to_string(),
-            args: serde_json::json!({"resolution": "1080p"}),
+    fn nodes_bearer_subprotocol_without_v2_is_rejected() {
+        let cfg = enabled_secret_cfg();
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-websocket-protocol", "bearer.secret".parse().unwrap());
+        match admit_node_ws(
+            &cfg,
+            &make_pairing(false),
+            &headers,
+            None,
+            loopback_peer(),
+            loopback_listen(),
+        ) {
+            NodeWsAdmission::Typed {
+                status,
+                code: NodeErrorCode::ProtocolUnsupported,
+            } => assert_eq!(status, StatusCode::BAD_REQUEST),
+            other => panic!("bearer-only subprotocol must not upgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nodes_v2_offer_with_bearer_token_is_admitted() {
+        let cfg = enabled_secret_cfg();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "sec-websocket-protocol",
+            format!("{WS_NODES_V2}, bearer.secret").parse().unwrap(),
+        );
+        assert_eq!(
+            admit_node_ws(
+                &cfg,
+                &make_pairing(false),
+                &headers,
+                None,
+                loopback_peer(),
+                loopback_listen(),
+            ),
+            NodeWsAdmission::Ok
+        );
+    }
+
+    #[test]
+    fn nodes_hello_minor_empty_intersection_closes_with_version_mismatch() {
+        let outcome = handshake_first_frame(
+            r#"{"type":"hello","protocol_versions":["2.1","v1"]}"#,
+            &test_conn(),
+        );
+        match outcome {
+            NodeHandshakeOutcome::Reject {
+                frame:
+                    GatewayToNode::Error {
+                        code: NodeErrorCode::VersionMismatch,
+                        retryable,
+                        ..
+                    },
+                close_reason,
+            } => {
+                assert!(!retryable);
+                assert_eq!(close_reason, "version_mismatch");
+            }
+            other => panic!("expected version_mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nodes_non_loopback_peer_matches_disabled_404_bytes() {
+        let cfg = enabled_secret_cfg();
+        let mut headers = bearer_headers("secret");
+        headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
+        let rejected = admit_node_ws(
+            &cfg,
+            &make_pairing(false),
+            &headers,
+            None,
+            remote_peer(),
+            loopback_listen(),
+        );
+        assert_eq!(
+            admission_http_bytes(&rejected),
+            disabled_surface_http_bytes()
+        );
+    }
+
+    #[test]
+    fn nodes_ipv6_loopback_is_admitted() {
+        let cfg = enabled_secret_cfg();
+        let mut headers = bearer_headers("secret");
+        headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
+        let peer = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 40000));
+        assert!(peer_is_loopback(peer));
+        assert_eq!(
+            admit_node_ws(
+                &cfg,
+                &make_pairing(false),
+                &headers,
+                None,
+                peer,
+                loopback_listen(),
+            ),
+            NodeWsAdmission::Ok
+        );
+    }
+
+    #[test]
+    fn nodes_v1_register_frame_is_typed_rejected() {
+        let json = r#"{"type":"register","node_id":"phone-1","capabilities":[{"name":"camera.snap","description":"Take a photo"}]}"#;
+        let outcome = handshake_first_frame(json, &test_conn());
+        match outcome {
+            NodeHandshakeOutcome::Reject {
+                frame:
+                    GatewayToNode::Error {
+                        code: NodeErrorCode::ProtocolUnsupported,
+                        retryable,
+                        ..
+                    },
+                close_reason,
+            } => {
+                assert!(!retryable);
+                assert_eq!(close_reason, "protocol_unsupported");
+            }
+            other => panic!("v1 Register must be rejected, got {other:?}"),
+        }
+        assert!(inbound_is_v1_register(json));
+    }
+
+    #[test]
+    fn nodes_disabled_still_404_before_loopback_gate() {
+        let cfg = NodesConfig {
+            enabled: false,
+            ..NodesConfig::default()
         };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"invoke\""));
-        assert!(json.contains("\"capability\":\"camera.snap\""));
+        match admit_node_ws(
+            &cfg,
+            &make_pairing(false),
+            &empty_headers(),
+            None,
+            remote_peer(),
+            loopback_listen(),
+        ) {
+            NodeWsAdmission::Legacy {
+                status: StatusCode::NOT_FOUND,
+                ..
+            } => {}
+            other => panic!("disabled nodes stay 404, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nodes_loopback_no_auth_still_503() {
+        let cfg = NodesConfig {
+            enabled: true,
+            auth_token: None,
+            ..NodesConfig::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
+        match admit_node_ws(
+            &cfg,
+            &make_pairing(false),
+            &headers,
+            None,
+            loopback_peer(),
+            loopback_listen(),
+        ) {
+            NodeWsAdmission::Legacy {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                ..
+            } => {}
+            other => panic!("no-auth posture must stay 503, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nodes_connection_id_and_generation_are_minted_per_socket() {
+        let registry = NodeRegistry::new(10);
+        let a = registry.mint_connection();
+        let b = registry.mint_connection();
+        assert_ne!(a.connection_id, b.connection_id);
+        assert_eq!(a.generation, 1);
+        assert_eq!(b.generation, 2);
+        let result = NodeToGateway::Result {
+            call_id: "call-1".into(),
+            connection_id: a.connection_id.clone(),
+            success: true,
+            output: "ok".into(),
+            error: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"type\":\"result\""));
+        assert!(json.contains(&format!("\"connection_id\":\"{}\"", a.connection_id)));
+    }
+
+    #[test]
+    fn nodes_v2_invoke_grant_proof_literals() {
+        let envelope = GatewayToNode::Invoke {
+            call_id: "call-1".into(),
+            connection_id: "conn-1".into(),
+            cap: "system.notify".into(),
+            cap_revision: 1,
+            args: serde_json::json!({}),
+            args_digest: "d".into(),
+            deadline: "2026-08-13T00:00:00Z".into(),
+            grant_proof: Some(GrantProof::Envelope {
+                grant: serde_json::json!({"action":"system.notify"}),
+                signature: "sig".into(),
+                key_id: "k1".into(),
+            }),
+        };
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["type"], "invoke");
+        assert_eq!(json["grant_proof"]["kind"], "envelope");
+        let handle = GrantProof::IntrospectHandle {
+            grant_id: "g1".into(),
+            nonce: "n1".into(),
+        };
+        let json = serde_json::to_value(&handle).unwrap();
+        assert_eq!(json["kind"], "introspect_handle");
+    }
+
+    fn enabled_secret_cfg() -> NodesConfig {
+        NodesConfig {
+            enabled: true,
+            auth_token: Some("secret".into()),
+            ..NodesConfig::default()
+        }
+    }
+
+    fn loopback_peer() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 40000))
+    }
+
+    fn remote_peer() -> SocketAddr {
+        SocketAddr::from(([203, 0, 113, 50], 40000))
+    }
+
+    fn loopback_listen() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    }
+
+    fn unspecified_listen() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    }
+
+    fn admission_http_bytes(admission: &NodeWsAdmission) -> (StatusCode, &'static str) {
+        match admission {
+            NodeWsAdmission::Legacy { status, body } => (*status, *body),
+            other => panic!("expected closed-surface HTTP body, got {other:?}"),
+        }
+    }
+
+    fn disabled_surface_http_bytes() -> (StatusCode, &'static str) {
+        (StatusCode::NOT_FOUND, NODES_DISABLED_MSG)
+    }
+
+    fn test_conn() -> NodeConnection {
+        NodeConnection {
+            connection_id: "conn-test".into(),
+            generation: 7,
+        }
+    }
+
+    #[test]
+    fn nodes_unspecified_listen_rejects_loopback_peer() {
+        let cfg = enabled_secret_cfg();
+        let mut headers = bearer_headers("secret");
+        headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
+        let rejected = admit_node_ws(
+            &cfg,
+            &make_pairing(false),
+            &headers,
+            None,
+            loopback_peer(),
+            unspecified_listen(),
+        );
+        assert_eq!(
+            admission_http_bytes(&rejected),
+            disabled_surface_http_bytes()
+        );
+    }
+
+    #[test]
+    fn nodes_loopback_listen_and_peer_are_admitted() {
+        let cfg = enabled_secret_cfg();
+        let mut headers = bearer_headers("secret");
+        headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
+        assert_eq!(
+            admit_node_ws(
+                &cfg,
+                &make_pairing(false),
+                &headers,
+                None,
+                loopback_peer(),
+                loopback_listen(),
+            ),
+            NodeWsAdmission::Ok
+        );
+    }
+
+    #[test]
+    fn nodes_closed_surface_http_bytes_match_disabled_and_loopback_gates() {
+        let disabled_cfg = NodesConfig {
+            enabled: false,
+            ..NodesConfig::default()
+        };
+        let enabled = enabled_secret_cfg();
+        let mut headers = bearer_headers("secret");
+        headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
+        let disabled = admit_node_ws(
+            &disabled_cfg,
+            &make_pairing(false),
+            &headers,
+            None,
+            loopback_peer(),
+            loopback_listen(),
+        );
+        let bad_listen = admit_node_ws(
+            &enabled,
+            &make_pairing(false),
+            &headers,
+            None,
+            loopback_peer(),
+            unspecified_listen(),
+        );
+        let bad_peer = admit_node_ws(
+            &enabled,
+            &make_pairing(false),
+            &headers,
+            None,
+            remote_peer(),
+            loopback_listen(),
+        );
+        let disabled_bytes = admission_http_bytes(&disabled);
+        assert_eq!(disabled_bytes, disabled_surface_http_bytes());
+        assert_eq!(admission_http_bytes(&bad_listen), disabled_bytes);
+        assert_eq!(admission_http_bytes(&bad_peer), disabled_bytes);
+    }
+
+    #[test]
+    fn nodes_v2_warns_only_when_enabled_on_non_loopback_listen() {
+        assert_eq!(
+            nodes_v2_non_loopback_listen_warning(true, unspecified_listen()),
+            Some(NODES_V2_LOOPBACK_LISTEN_WARN)
+        );
+        assert_eq!(
+            nodes_v2_non_loopback_listen_warning(true, loopback_listen()),
+            None
+        );
+        assert_eq!(
+            nodes_v2_non_loopback_listen_warning(false, unspecified_listen()),
+            None
+        );
+    }
+
+    #[test]
+    fn nodes_hello_rejects_oversize_message() {
+        let oversized = format!(
+            r#"{{"type":"hello","protocol_versions":["2.0"],"pad":"{}"}}"#,
+            "x".repeat(HELLO_MAX_BYTES)
+        );
+        assert!(oversized.len() > HELLO_MAX_BYTES);
+        match handshake_first_frame(&oversized, &test_conn()) {
+            NodeHandshakeOutcome::Reject {
+                frame:
+                    GatewayToNode::Error {
+                        code: NodeErrorCode::ProtocolUnsupported,
+                        ..
+                    },
+                ..
+            } => {}
+            other => panic!("oversize Hello must fail closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nodes_hello_rejects_too_many_protocol_versions() {
+        let versions: Vec<String> = (0..17).map(|i| format!("2.{i}")).collect();
+        let frame = NodeToGateway::Hello {
+            protocol_versions: versions,
+            device_id: None,
+            key_fingerprint: None,
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        match handshake_first_frame(&json, &test_conn()) {
+            NodeHandshakeOutcome::Reject {
+                frame:
+                    GatewayToNode::Error {
+                        code: NodeErrorCode::ProtocolUnsupported,
+                        ..
+                    },
+                ..
+            } => {}
+            other => panic!(">16 protocol_versions must fail closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nodes_hello_rejects_oversized_identity_fields() {
+        let too_long = "f".repeat(MAX_IDENTITY_FIELD_BYTES + 1);
+        let frame = NodeToGateway::Hello {
+            protocol_versions: vec!["2.0".into()],
+            device_id: Some(too_long.clone()),
+            key_fingerprint: None,
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        match handshake_first_frame(&json, &test_conn()) {
+            NodeHandshakeOutcome::Reject {
+                frame:
+                    GatewayToNode::Error {
+                        code: NodeErrorCode::ProtocolUnsupported,
+                        ..
+                    },
+                ..
+            } => {}
+            other => panic!("oversize device_id must fail closed, got {other:?}"),
+        }
+        let frame = NodeToGateway::Hello {
+            protocol_versions: vec!["2.0".into()],
+            device_id: None,
+            key_fingerprint: Some(too_long),
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        match handshake_first_frame(&json, &test_conn()) {
+            NodeHandshakeOutcome::Reject {
+                frame:
+                    GatewayToNode::Error {
+                        code: NodeErrorCode::ProtocolUnsupported,
+                        ..
+                    },
+                ..
+            } => {}
+            other => panic!("oversize key_fingerprint must fail closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nodes_first_frame_binary_is_rejected_ping_is_control() {
+        match classify_first_ws_frame(Ok(Message::Binary(vec![1, 2, 3].into()))) {
+            FirstWsFrame::Reject => {}
+            other => panic!("binary must reject, got {other:?}"),
+        }
+        match classify_first_ws_frame(Ok(Message::Ping(vec![].into()))) {
+            FirstWsFrame::Control => {}
+            other => panic!("ping must be control, got {other:?}"),
+        }
+        match classify_first_ws_frame(Ok(Message::Text(
+            r#"{"type":"hello","protocol_versions":["2.0"]}"#.into(),
+        ))) {
+            FirstWsFrame::Text(_) => {}
+            other => panic!("text must be accepted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nodes_hello_deadline_is_ten_seconds() {
+        assert_eq!(HELLO_DEADLINE, Duration::from_secs(10));
+    }
+
+    async fn spawn_nodes_chat_server(state: crate::AppState) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route("/ws/nodes", axum::routing::get(handle_ws_nodes))
+            .route("/ws/chat", axum::routing::get(crate::ws::handle_ws_chat))
+            .with_state(state);
+        zeroclaw_spawn::spawn!(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        addr
+    }
+
+    async fn http_upgrade(
+        addr: SocketAddr,
+        path: &str,
+        protocol: Option<&str>,
+        auth: Option<&str>,
+    ) -> (u16, String, String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = None;
+        for _ in 0..50 {
+            if let Ok(s) = tokio::net::TcpStream::connect(addr).await {
+                stream = Some(s);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut stream = stream.expect("test server accepted connections");
+        let mut req = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        );
+        if let Some(proto) = protocol {
+            req.push_str(&format!("Sec-WebSocket-Protocol: {proto}\r\n"));
+        }
+        if let Some(token) = auth {
+            req.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        req.push_str("\r\n");
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = stream.read(&mut buf).await.unwrap();
+        let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
+        let status = raw
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        (status, raw.to_ascii_lowercase(), raw)
+    }
+
+    fn nodes_integration_state() -> crate::AppState {
+        let mut config = zeroclaw_config::schema::Config::default();
+        config.nodes.enabled = true;
+        config.nodes.auth_token = Some("secret".into());
+        config.risk_profiles.insert(
+            "test-profile".to_string(),
+            zeroclaw_config::schema::RiskProfileConfig::default(),
+        );
+        config.providers.models.openrouter.insert(
+            "default".to_string(),
+            zeroclaw_config::schema::OpenRouterModelProviderConfig::default(),
+        );
+        config.agents.insert(
+            "test-agent".to_string(),
+            zeroclaw_config::schema::AliasedAgentConfig {
+                model_provider: "openrouter.default".into(),
+                risk_profile: "test-profile".into(),
+                ..Default::default()
+            },
+        );
+        crate::api::test_state(config)
+    }
+
+    #[tokio::test]
+    async fn nodes_v2_upgrade_missing_subprotocol_returns_400() {
+        let addr = spawn_nodes_chat_server(nodes_integration_state()).await;
+        let (status, _lower, body) = http_upgrade(addr, "/ws/nodes", None, Some("secret")).await;
+        assert_eq!(status, 400, "body={body}");
+        assert!(
+            body.contains("protocol_unsupported"),
+            "typed reject body={body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nodes_v2_upgrade_echoes_subprotocol_on_101() {
+        let addr = spawn_nodes_chat_server(nodes_integration_state()).await;
+        let (status, lower, body) =
+            http_upgrade(addr, "/ws/nodes", Some(WS_NODES_V2), Some("secret")).await;
+        assert_eq!(status, 101, "body={body}");
+        assert!(
+            lower.contains("sec-websocket-protocol: zeroclaw.nodes.v2"),
+            "response must echo v2 subprotocol: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_ws_upgrade_succeeds_without_subprotocol() {
+        let addr = spawn_nodes_chat_server(nodes_integration_state()).await;
+        let (status, _lower, body) =
+            http_upgrade(addr, "/ws/chat?agent=test-agent", None, None).await;
+        assert_eq!(status, 101, "chat must upgrade without subprotocol: {body}");
     }
 
     #[test]
