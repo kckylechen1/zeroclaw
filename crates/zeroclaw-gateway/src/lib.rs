@@ -12,6 +12,8 @@ pub mod api;
 pub mod api_browse;
 pub mod api_config;
 pub mod api_logs;
+#[cfg(feature = "nodes")]
+pub mod api_node_identity;
 pub mod api_pairing;
 pub mod api_personality;
 #[cfg(feature = "plugins-wasm")]
@@ -32,6 +34,8 @@ pub mod api_webauthn;
 pub mod api_webhook;
 pub mod auth_rate_limit;
 pub mod canvas;
+#[cfg(feature = "nodes")]
+pub mod device_identity;
 #[cfg(feature = "nodes")]
 pub mod node_tool;
 #[cfg(feature = "nodes")]
@@ -322,7 +326,7 @@ impl GatewayRateLimiter {
         }
     }
 
-    fn allow_pair(&self, key: &str) -> bool {
+    pub(crate) fn allow_pair(&self, key: &str) -> bool {
         self.pair.allow(key)
     }
 
@@ -410,7 +414,7 @@ fn forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
         .and_then(parse_client_ip)
 }
 
-fn client_key_from_request(
+pub(crate) fn client_key_from_request(
     peer_addr: Option<SocketAddr>,
     headers: &HeaderMap,
     trust_forwarded_headers: bool,
@@ -1492,20 +1496,26 @@ pub async fn run_gateway(
 
     // Node registry for dynamic node discovery
     #[cfg(feature = "nodes")]
-    let node_registry = Arc::new(
-        nodes::NodeRegistry::new(config.nodes.max_nodes).with_listen_addr(actual_addr.ip()),
-    );
-    #[cfg(feature = "nodes")]
-    if nodes::nodes_v2_non_loopback_listen_warning(config.nodes.enabled, actual_addr.ip()).is_some()
-    {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                .with_attrs(::serde_json::json!({"bind_addr": actual_addr.to_string()})),
-            "nodes v2 requires a loopback listen address until device identity lands"
-        );
-    }
+    let node_registry = Arc::new({
+        let mut registry = nodes::NodeRegistry::new(config.nodes.max_nodes);
+        match crate::device_identity::DeviceIdentityStore::open(
+            &config.data_dir,
+            config.nodes.max_nodes,
+        ) {
+            Ok(store) => registry = registry.with_identities(store),
+            Err(err) => {
+                ::zeroclaw_log::record!(
+                    ERROR,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"error": format!("{err}")})),
+                    "device identity store failed to open; refusing node identity service"
+                );
+                registry = registry.without_identities();
+            }
+        }
+        registry
+    });
     #[cfg(feature = "nodes")]
     let mdns_config_state = Arc::clone(&config_state);
     #[cfg(feature = "nodes")]
@@ -2000,7 +2010,20 @@ pub async fn run_gateway(
         .route("/ws/canvas/{id}", get(canvas::handle_ws_canvas));
     // ── WebSocket node discovery (nodes feature) ──
     #[cfg(feature = "nodes")]
-    let inner = inner.route("/ws/nodes", get(nodes::handle_ws_nodes));
+    let inner = inner
+        .route("/ws/nodes", get(nodes::handle_ws_nodes))
+        .route(
+            "/api/node-identities/pairing",
+            post(api_node_identity::issue_pairing),
+        )
+        .route(
+            "/api/node-identities",
+            post(api_node_identity::enroll_identity),
+        )
+        .route(
+            "/api/node-identities/{id}",
+            delete(api_node_identity::revoke_identity),
+        );
     let inner = inner
         // ── Static assets (web dashboard) ──
         .route("/_app/{*path}", get(static_files::handle_static))

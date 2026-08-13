@@ -13302,6 +13302,7 @@ dependencies = [
  "parking_lot",
  "rand 0.10.1",
  "rcgen",
+ "ring",
  "rusqlite",
  "rustls",
  "rustls-pemfile",

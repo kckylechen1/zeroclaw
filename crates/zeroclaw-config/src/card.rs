@@ -177,6 +177,7 @@ impl CardGrants {
                     "card grants {name:?} twice; a tool has exactly one class"
                 ));
             }
+            crate::node_allowlist::reject_device_wildcard(name)?;
         }
         Ok(())
     }
@@ -412,5 +413,15 @@ allowed_tools = ["shell"]
             err.to_string().contains("allowed_tools"),
             "the error must name the offending key: {err}"
         );
+    }
+
+    #[test]
+    fn card_grants_reject_node_device_wildcard() {
+        let grants = CardGrants {
+            tools: vec![ToolGrant::new("node:*:*", GrantClass::LocalAct)],
+            ..CardGrants::default()
+        };
+        let err = grants.validate().expect_err("device wildcard must fail");
+        assert!(err.contains("device wildcard"), "{err}");
     }
 }
