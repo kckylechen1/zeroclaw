@@ -1431,29 +1431,147 @@ fn cancel_unknown_run_fails() {
 }
 
 #[test]
-fn finish_unknown_run_returns_error_without_mutating_engine() {
+fn finish_unknown_run_returns_typed_not_found_without_mutating_engine() {
+    let store = std::sync::Arc::new(InMemoryRunStore::new());
     let mut engine = engine_with_sops(vec![test_sop(
         "s1",
         SopExecutionMode::Auto,
         SopPriority::Normal,
-    )]);
+    )])
+    .with_store(store.clone());
+
+    assert!(
+        store.load_run("nonexistent").unwrap().is_none(),
+        "precondition: neither memory nor store holds this id"
+    );
 
     let error = engine
         .finish_run("nonexistent", SopRunStatus::Failed, Some("failed".into()))
         .expect_err("finishing an unknown run must return an error");
 
     assert!(
-        error
-            .to_string()
-            .contains("Active run not found: nonexistent")
+        matches!(
+            err_as_finish_run(&error),
+            Some(FinishRunError::NotFound { run_id }) if run_id == "nonexistent"
+        ),
+        "missing id must be typed NotFound, not Display scrape: {error}"
     );
     assert!(engine.active_runs().is_empty());
     assert!(engine.finished_runs(None).is_empty());
+    assert!(
+        store.load_run("nonexistent").unwrap().is_none(),
+        "a miss must not insert a store row"
+    );
 
     let action = engine
         .start_run("s1", manual_event())
         .expect("the engine must remain usable after an unknown finish");
     assert!(matches!(action, SopRunAction::ExecuteStep { .. }));
+}
+
+#[test]
+fn finish_run_twice_returns_typed_already_finished() {
+    let mut engine = engine_with_sops(vec![test_sop(
+        "s1",
+        SopExecutionMode::Auto,
+        SopPriority::Normal,
+    )]);
+    let action = engine.start_run("s1", manual_event()).unwrap();
+    let run_id = extract_run_id(&action).to_string();
+
+    let first = engine
+        .finish_run(&run_id, SopRunStatus::Completed, None)
+        .expect("first finish of an active run must succeed");
+    assert!(matches!(first, SopRunAction::Completed { .. }));
+    assert!(engine.active_runs().is_empty());
+    assert_eq!(engine.finished_runs(None).len(), 1);
+    assert_eq!(
+        engine.finished_runs(None)[0].status,
+        SopRunStatus::Completed
+    );
+
+    let error = engine
+        .finish_run(&run_id, SopRunStatus::Failed, Some("second finish".into()))
+        .expect_err("double-finish must return an error");
+
+    assert!(
+        matches!(
+            err_as_finish_run(&error),
+            Some(FinishRunError::AlreadyFinished { run_id: finished }) if finished == &run_id
+        ),
+        "second finish must be typed AlreadyFinished, not NotFound: {error}"
+    );
+    assert!(engine.active_runs().is_empty());
+    let finished = engine.finished_runs(None);
+    assert_eq!(
+        finished.len(),
+        1,
+        "double-finish must not append a second terminal record"
+    );
+    assert_eq!(finished[0].status, SopRunStatus::Completed);
+    assert_eq!(finished[0].run_id, run_id);
+}
+
+#[test]
+fn finish_run_after_finished_runs_eviction_still_already_finished() {
+    let store = std::sync::Arc::new(InMemoryRunStore::new());
+    let mut engine = SopEngine::new(SopConfig {
+        max_finished_runs: 1,
+        ..SopConfig::default()
+    })
+    .with_store(store.clone());
+    let mut sop = test_sop("s1", SopExecutionMode::Auto, SopPriority::Normal);
+    sop.max_concurrent = 10;
+    engine.sops = vec![sop];
+
+    let first_id = extract_run_id(&engine.start_run("s1", manual_event()).unwrap()).to_string();
+    engine
+        .finish_run(&first_id, SopRunStatus::Completed, None)
+        .unwrap();
+
+    let second_id = extract_run_id(&engine.start_run("s1", manual_event()).unwrap()).to_string();
+    engine
+        .finish_run(&second_id, SopRunStatus::Completed, None)
+        .unwrap();
+
+    assert!(
+        engine
+            .finished_runs(None)
+            .iter()
+            .all(|run| run.run_id != first_id),
+        "first terminal must have left the in-memory window"
+    );
+    let stored = store
+        .load_run(&first_id)
+        .unwrap()
+        .expect("durable store must still hold the evicted terminal");
+    assert_eq!(stored.run.status, SopRunStatus::Completed);
+
+    let error = engine
+        .finish_run(
+            &first_id,
+            SopRunStatus::Failed,
+            Some("second finish".into()),
+        )
+        .expect_err("evicted terminal must still refuse a second finish");
+    assert!(
+        matches!(
+            err_as_finish_run(&error),
+            Some(FinishRunError::AlreadyFinished { run_id }) if run_id == &first_id
+        ),
+        "store-backed terminal must be AlreadyFinished, not NotFound: {error}"
+    );
+
+    let finished = engine.finished_runs(None);
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0].run_id, second_id);
+    assert_eq!(finished[0].status, SopRunStatus::Completed);
+    let stored = store.load_run(&first_id).unwrap().unwrap();
+    assert_eq!(
+        stored.run.status,
+        SopRunStatus::Completed,
+        "refused second finish must not rewrite the durable terminal"
+    );
 }
 
 // ── Concurrency ─────────────────────────────────────

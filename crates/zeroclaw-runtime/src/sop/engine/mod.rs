@@ -129,6 +129,51 @@ impl MaintenanceSummary {
     }
 }
 
+/// Why [`SopEngine::finish_run`] refused to take a run terminal.
+///
+/// Lookup failures are this type (downcast from [`anyhow::Error`]) so
+/// callers distinguish a missing id from a second finish without scraping
+/// Display text. Persistence failures stay a different error and are not
+/// mapped here.
+///
+/// Production `finish_run` callers (step complete/fail, cancel after an
+/// active-set check) propagate these as-is: they already believe the run is
+/// live. Downcast the variants directly when a future caller needs to
+/// classify them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishRunError {
+    /// Not in `active_runs`, not in the `finished_runs` cache, and the
+    /// durable store has no terminal row for this id. A durable
+    /// *non-terminal* row this engine does not hold is also `NotFound`
+    /// (`finish_run` is not the restore/claim path).
+    NotFound { run_id: String },
+    /// A terminal record exists in the `finished_runs` cache or in the
+    /// durable store (the cache is a bounded display window and may have
+    /// already evicted the row).
+    AlreadyFinished { run_id: String },
+}
+
+impl std::fmt::Display for FinishRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound { run_id } => write!(f, "Active run not found: {run_id}"),
+            Self::AlreadyFinished { run_id } => write!(f, "Run already finished: {run_id}"),
+        }
+    }
+}
+
+impl std::error::Error for FinishRunError {}
+
+/// Typed `finish_run` lookup failure, if `err` is one. Persistence and
+/// other engine errors return `None`.
+///
+/// Test-only: production paths propagate `finish_run` errors uniformly.
+/// [`FinishRunError`] stays public so a future caller can downcast.
+#[cfg(test)]
+pub(super) fn err_as_finish_run(err: &anyhow::Error) -> Option<&FinishRunError> {
+    err.downcast_ref()
+}
+
 enum GateClearTransition {
     Active {
         // Boxed: `SopRunAction` is large; keeping it inline makes this the
@@ -2541,17 +2586,60 @@ impl SopEngine {
             .find(|r| r.sop_name == sop_name)
     }
 
+    /// Clone the live run that `finish_run` is about to take terminal, or
+    /// return a typed lookup error.
+    ///
+    /// `active_runs` is the in-flight cache: a hit means this engine can
+    /// finish the run. `finished_runs` is only a bounded display window
+    /// (`max_finished_runs`); a cache hit is a fast `AlreadyFinished`. A
+    /// dual miss is not proof the id was never finished — eviction and
+    /// restart rehydrate only that window — so the durable store is the
+    /// authority for terminal identity. That is a fallback lookup of the
+    /// canonical row, not a copied second map.
+    fn active_run_for_finish(&self, run_id: &str) -> Result<SopRun> {
+        if let Some(run) = self.active_runs.get(run_id).cloned() {
+            return Ok(run);
+        }
+        if self.finished_runs.iter().any(|run| run.run_id == run_id) {
+            return Err(anyhow::Error::new(FinishRunError::AlreadyFinished {
+                run_id: run_id.to_string(),
+            }));
+        }
+        match self.store.load_run(run_id) {
+            Ok(Some(persisted))
+                if matches!(
+                    persisted.run.status,
+                    SopRunStatus::Completed | SopRunStatus::Failed | SopRunStatus::Cancelled
+                ) =>
+            {
+                Err(anyhow::Error::new(FinishRunError::AlreadyFinished {
+                    run_id: run_id.to_string(),
+                }))
+            }
+            Ok(_) => {
+                // `Ok(None)`: never seen. `Ok(Some(non-terminal))`: store has
+                // a live row this engine does not hold (restore-claim
+                // failure, another holder, parked snapshot not in
+                // `active_runs`). `finish_run` takes a run from the live
+                // cache; it is not the restore/claim path. Calling this
+                // `AlreadyFinished` would lie. Rehydrating here would
+                // terminal a run this instance is not executing. `NotFound`
+                // = not finishable by this engine right now.
+                Err(anyhow::Error::new(FinishRunError::NotFound {
+                    run_id: run_id.to_string(),
+                }))
+            }
+            Err(e) => Err(anyhow::Error::new(e)),
+        }
+    }
+
     pub fn finish_run(
         &mut self,
         run_id: &str,
         status: SopRunStatus,
         reason: Option<String>,
     ) -> Result<SopRunAction> {
-        let mut run = self
-            .active_runs
-            .get(run_id)
-            .cloned()
-            .ok_or_else(|| anyhow::Error::msg(format!("Active run not found: {run_id}")))?;
+        let mut run = self.active_run_for_finish(run_id)?;
         run.status = status;
         run.completed_at = Some(now_iso8601());
         let sop_name = run.sop_name.clone();
@@ -2594,11 +2682,7 @@ impl SopEngine {
         reason: Option<String>,
         event: &SopEventRecord,
     ) -> Result<SopRunAction> {
-        let mut run = self
-            .active_runs
-            .get(run_id)
-            .cloned()
-            .ok_or_else(|| anyhow::Error::msg(format!("Active run not found: {run_id}")))?;
+        let mut run = self.active_run_for_finish(run_id)?;
         run.status = status;
         run.completed_at = Some(now_iso8601());
         let sop_name = run.sop_name.clone();
