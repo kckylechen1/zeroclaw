@@ -191,9 +191,7 @@ pub struct CoordinatorConfig {
     /// admits exactly the same set of generations.
     ///
     /// `0` disables the gate, matching `resolve_max_depth`'s
-    /// `.filter(|&d| d > 0)` treatment of a zero profile value and
-    /// `DelegateTool::at_background_capacity`'s "`cap == 0` disables the
-    /// backstop".
+    /// `.filter(|&d| d > 0)` treatment of a zero profile value.
     pub max_spawn_depth: u32,
     /// Operating limit: how many children may be pending or active at once,
     /// across this whole process. One actor per daemon owns this count, so
@@ -205,13 +203,12 @@ pub struct CoordinatorConfig {
     /// panic.
     ///
     /// **Why the default is 6 and not 128.** It was 128, inherited verbatim
-    /// from `DelegateTool::MAX_CONCURRENT_BACKGROUND_DELEGATIONS`
-    /// (`zeroclaw-runtime/src/tools/delegate.rs`). That constant is a runaway
-    /// *backstop*: reaching it means something is broken, and it was never a
-    /// claim that 128 simultaneous agent turns are reasonable. Copying it into
-    /// the slot where an operating limit belongs left this actor effectively
-    /// uncapped. Delegation keeps its own 128 backstop — that is a different
-    /// gate on a different path, and it is not this number.
+    /// from a retired `DelegateTool` runaway backstop. Reaching 128 meant
+    /// something was broken, and it was never a claim that 128 simultaneous
+    /// agent turns are reasonable. Copying it into the slot where an operating
+    /// limit belongs left this actor effectively uncapped. Background delegate
+    /// now shares this operating limit — the file-store path and its 128
+    /// backstop are gone.
     ///
     /// Operators set this through `[subagents] max_concurrent_children`
     /// (`zeroclaw-config/src/subagents.rs`), which
@@ -222,8 +219,7 @@ pub struct CoordinatorConfig {
     /// crate is a leaf and does not depend on the config crate, so the two
     /// literals cannot be one constant. Change one, change the other.
     ///
-    /// `0` disables the limit, same convention as
-    /// `DelegateTool::at_background_capacity`.
+    /// `0` disables the limit, same convention as [`exceeds_spawn_depth`].
     pub max_concurrent_children: usize,
 }
 
@@ -255,12 +251,11 @@ pub fn exceeds_spawn_depth(depth: u32, max: u32) -> bool {
     max != 0 && depth > max
 }
 
-/// Pure predicate for the concurrency backstop, mirroring
-/// `DelegateTool::at_background_capacity` including its `cap == 0` escape.
+/// Pure predicate for the concurrency backstop.
 ///
-/// `in_flight` is the count *before* admitting this request, so the request
-/// that brings the registry to exactly `cap` is admitted and the next one is
-/// not.
+/// `cap == 0` disables the limit. `in_flight` is the count *before* admitting
+/// this request, so the request that brings the registry to exactly `cap` is
+/// admitted and the next one is not.
 #[must_use]
 pub fn at_child_capacity(in_flight: usize, cap: usize) -> bool {
     cap != 0 && in_flight >= cap

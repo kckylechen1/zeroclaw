@@ -59,8 +59,9 @@ pub(crate) fn session_key_is_scoped() -> bool {
 /// **This is the single source of the `agent:<alias>` convention, and the
 /// coupling is load-bearing in both directions.** Producers that register a
 /// background child must write exactly this string into the row's `parent_id`
-/// (the spawn seam in `crate::tools::spawn_subagent` is the caller that has to
-/// agree), because it is the key [`claim_child_announcements_context`] looks
+/// (the spawn seams in `crate::tools::spawn_subagent` and
+/// `crate::tools::delegate` are the callers that have to agree), because it is
+/// the key [`claim_child_announcements_context`] looks
 /// children up by. The two are a lock and a key cut from one blank: a drift as
 /// small as a separator character does not fail loudly — it files every child
 /// under a name no turn ever asks about, and the parent waits forever for

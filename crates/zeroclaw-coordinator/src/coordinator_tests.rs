@@ -1955,8 +1955,8 @@ fn default_child_capacity_is_six_not_the_delegate_backstop() {
     assert_eq!(
         CoordinatorConfig::default().max_concurrent_children,
         6,
-        "128 is `DelegateTool::MAX_CONCURRENT_BACKGROUND_DELEGATIONS`, a backstop meaning \
-         'something is broken' — it is not an operating limit and must not be this default"
+        "128 was the retired delegate file-store runaway backstop — it is not \
+         an operating limit and must not be this default"
     );
 }
 

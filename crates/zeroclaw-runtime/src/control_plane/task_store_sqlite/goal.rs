@@ -154,6 +154,16 @@ pub(super) fn migrate_schema(conn: &Connection, version: i64) -> Result<()> {
         )
         .context("apply control-plane schema v7")?;
     }
+    if version < 8 {
+        add_column_if_missing(
+            conn,
+            "tasks",
+            "executor",
+            "ALTER TABLE tasks ADD COLUMN executor TEXT",
+        )?;
+        conn.execute_batch("PRAGMA user_version = 8;")
+            .context("mark control-plane schema v8")?;
+    }
     Ok(())
 }
 
@@ -635,6 +645,7 @@ mod tests {
             delivered: false,
             idem_key: None,
             principal_id: None,
+            executor: None,
             started_at: "2026-06-18T00:00:00Z".into(),
             finished_at: None,
         }

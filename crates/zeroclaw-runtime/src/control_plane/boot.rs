@@ -146,6 +146,7 @@ mod tests {
                 delivered: false,
                 idem_key: None,
                 principal_id: None,
+                executor: None,
                 started_at: "2026-06-18T00:00:00Z".into(),
                 finished_at: None,
             })

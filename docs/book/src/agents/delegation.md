@@ -184,9 +184,9 @@ Exact, sourced from `crates/zeroclaw-runtime/src/tools/delegate.rs`.
    task_id: <uuid>
    Use action='check_result' with task_id='<uuid>' to retrieve the result.
    ```
-   The result file lives at `<workspace>/delegate_results/<uuid>.json`. While running, the file's `status` field is `running`; terminal states are `completed`, `failed`, or `cancelled`.
+   Requires a running coordinator (the daemon). The child's outcome is announced into a future parent turn via the same claim the detached `spawn_subagent` path uses. `check_result` polls the coordinator; leftover `<workspace>/delegate_results/<uuid>.json` files from before this change are ignored.
 5. `action="check_result"` with an unknown task id: error is `No result found for task_id '<uuid>'`.
-6. `action="await_sessions"` with `task_ids: [<uuid>, ...]` waits for multiple background result files at once. The output is a JSON object with `status` (`complete` or `timeout`), `completed`, `pending`, `missing`, `failed`, and `results`. `timeout_ms` defaults to 30000 and is capped at 120000; on timeout the tool returns partial results and an error saying one or more tasks are still pending or missing. Duplicate task IDs are rejected.
+6. `action="await_sessions"` with `task_ids: [<uuid>, ...]` waits for multiple background coordinator children at once. The output is a JSON object with `status` (`complete` or `timeout`), `completed`, `pending`, `missing`, `failed`, and `results`. `timeout_ms` defaults to 30000 and is capped at 120000; on timeout the tool returns partial results and an error saying one or more tasks are still pending or missing. Duplicate task IDs are rejected.
 7. Parallel fan-out output: begins with `[Parallel delegation: <N> agents]\n\n`, followed by per-agent blocks separated by `\n\n`, each block beginning with `--- <target> (success=<bool>) ---\n`. On per-agent failure the inner block is `--- <target> (success=false) ---\nError: <wrapped error>`.
 8. Unknown target agent: error is `Unknown agent '<target>'. Available agents: <comma-separated list>`.
 9. Depth exceeded (controlled by the parent's `runtime_profile.max_delegation_depth`, default 3): error is `Delegation depth limit reached (<depth>/<max>).`
@@ -197,14 +197,14 @@ Exact, sourced from `crates/zeroclaw-runtime/src/tools/delegate.rs`.
 
 ### `delegate`: how to verify it actually fired
 
-`delegate` does not emit a dedicated tracing span today. The signal is the **target** agent's loop appearing in the log, which inherits whatever scope the parent's tool-call dispatch was inside. Background-mode spawns are easier to verify out-of-band: the result file `<workspace>/delegate_results/<uuid>.json` exists on disk and carries the target agent's `status` + `output` fields; `cat` or `jq` works without touching the log at all.
+`delegate` does not emit a dedicated tracing span today. The signal is the **target** agent's loop appearing in the log, which inherits whatever scope the parent's tool-call dispatch was inside. Background-mode spawns are easier to verify out-of-band: the control-plane task row for that `task_id` carries status and output, and the parent's next turn claims the announcement.
 
 (Cron-launched agent jobs are a separate spawn site and use the explicit `subagent` span described above; `delegate` and cron are not the same path.)
 
 ### What's not in this page (intentionally)
 
 1. Example conversation transcripts. Anything I wrote here describing "what the bot will say" would be model-dependent. The bot's reply is downstream of the tool's output, model, system prompt, and current conversation state, none of which this page controls. The verifiable layer is what the tool returns (above) and what the log captures.
-2. A dedicated "subagent fired" / "delegate fired" log marker. Tracked as a code-side follow-up. Today, operators verify via the scope shape described above (which is the existing structural signal) and via the background-mode result file.
+2. A dedicated "subagent fired" / "delegate fired" log marker. Tracked as a code-side follow-up. Today, operators verify via the scope shape described above (which is the existing structural signal) and via the background-mode task row / announce claim.
 
 ## Choosing between `spawn_subagent` and `delegate`
 
@@ -214,7 +214,7 @@ Exact, sourced from `crates/zeroclaw-runtime/src/tools/delegate.rs`.
 | **Permission model** | Parent's policy verbatim (or narrowed subset) | Bounded targets run under the target policy with the caller's agentic tool registry as ceiling; independent targets run under the target policy and target-owned registry |
 | **Model provider** | Parent's | Target agent's configured provider |
 | **Spawn depth** | Hard cap at 1 | Up to `runtime_profile.max_delegation_depth` (default 3) |
-| **Background mode** | Not supported | `background: true` returns a `task_id` |
+| **Background mode** | `background: true` returns a `child_id`; outcome is announced later | `background: true` returns a `task_id`; outcome is announced later |
 | **Parallel fan-out** | No built-in argument; multiple calls in one turn run concurrently when `parallel_tools = true` | `parallel: [...]` runs multiple targets concurrently |
 | **Gating** | Non-empty `risk_profile.allowed_tools` must list `spawn_subagent`; `excluded_tools` must not list it | The caller's non-empty `risk_profile.allowed_tools` must list `delegate`; `excluded_tools` must not list it; caller's `delegation_policy mode = "allow"`; and the target is in the caller's reachable set (same-profile peer or explicit `delegates` entry) |
 | **Use when** | Internal subtask that should stay within the same identity | Want a different configured specialist (different model, different alias) to own the task under bounded or independent delegation |

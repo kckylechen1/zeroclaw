@@ -124,6 +124,7 @@ mod tests {
             delivered: false,
             idem_key: None,
             principal_id: None,
+            executor: None,
             started_at: Utc::now().to_rfc3339(),
             finished_at: None,
         }

@@ -539,6 +539,7 @@ impl Tool for SpawnSubagentTool {
                     delivered: false,
                     idem_key: None,
                     principal_id: None,
+                    executor: None,
                     started_at: chrono::Utc::now().to_rfc3339(),
                     finished_at: None,
                 })

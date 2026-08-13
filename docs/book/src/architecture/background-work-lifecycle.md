@@ -10,10 +10,10 @@ Use this page when a change adds scheduled or autonomous work, introduces a wait
 | --- | --- | --- |
 | Cron job | Cron scheduler and store | `data/cron/jobs.db` |
 | SOP run | `SopEngine` and `SopRunStore` | Process memory by default; `data/sop/runs.db` when durable SQLite initialization succeeds |
-| Background delegation | Delegate result API, with control-plane supervision overrides when available | `<workspace>/delegate_results/<task-id>.json`; a best-effort task row in `data/control_plane.db` under a booted daemon |
+| Background delegation | Coordinator spawn + announce chain, with durable task rows | a task row in `data/control_plane.db` under a booted daemon |
 | Runtime-spawned subagent | Spawn site, with control-plane supervision when available | A best-effort task row in `data/control_plane.db` under a booted daemon |
 
-Durable metadata is not the same as durable execution. A result file or task row can preserve what was known and let recovery mark work lost, timed out, or terminal without preserving the process-local future that was doing the work.
+Durable metadata is not the same as durable execution. A task row can preserve what was known and let recovery mark work lost, timed out, or terminal without preserving the process-local future that was doing the work.
 
 ## Cron jobs
 
@@ -37,13 +37,11 @@ Approval and checkpoint states are durable control states only when the run stor
 
 Subagents inherit their parent's effective security boundary. Policy and memory overrides may narrow the parent envelope but cannot widen it, and child action accounting uses the parent's tracker so spawning children cannot bypass the parent's action budget.
 
-The `spawn_subagent` path is synchronous: the parent waits for the child run to finish, and this path has no local timeout or background cancellation handle.
+The `spawn_subagent` path can wait for the child in-turn or start it detached (`background: true`) through the coordinator. Detached completions are claimed into a later parent turn by the announce chain.
 
-The delegate tool can run synchronously or start a background task and return a UUID. Background results are written atomically under the workspace passed to the tool and can be checked, listed, awaited in a batch, or cancelled. A live cancellation registry maps task IDs to process-local tokens; cancellation updates the persisted result and signals the running task when that live token is still available.
+The delegate tool can run synchronously or start a background task and return a UUID. Background delegate now takes the same coordinator spawn as detached `spawn_subagent`: admission, persistence (`parent_id` = the parent's session key, with the `agent:<alias>` fallback), cancellation, and the announce chain. `check_result` / `list_results` / `await_sessions` / `cancel_task` query that actor rather than a workspace file store. Pre-migration `delegate_results/*.json` files are ignored.
 
-Under a booted daemon, delegate and subagent producers also write task rows to the durable control plane. These writes are best-effort and independent from delegate result-file writes. Delegate result reads remain file-first; only a file still marked `running` is overlaid as `lost` or `timed_out` from control-plane state, so the two records can diverge.
-
-Current delegate and subagent rows populate agent, status, owner PID and boot ID, depth, and timestamps. They leave heartbeat, parent task, route, and principal absent. Startup recovery marks prior-boot running rows `lost`; `timed_out` applies only to producers that emit stale heartbeats, which these producers do not currently do. The task row makes an interrupted child visible but does not recreate its execution.
+Under a booted daemon, `SubagentPersistence` writes the durable control-plane row as part of coordinator spawn/finish: one write path, not a dual-write alongside a result file. Startup recovery marks prior-boot running rows `lost`. The task row makes an interrupted child visible but does not recreate its execution.
 
 ## Goal-mode target contract
 
