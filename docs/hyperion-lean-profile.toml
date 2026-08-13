@@ -1,0 +1,59 @@
+# Hyperion lean coding profile — copy into config.toml.
+#
+# Three-way split (do not collapse):
+#   allowed_tools              → [risk_profiles.hyperion_lean]
+#   prompt_injection_mode      → [runtime_profiles.hyperion_lean]
+#   deferred_loading           → global [mcp]  (process-wide, not per-agent)
+#   agent alias                → must set BOTH risk_profile and runtime_profile
+#
+# Under ExplicitOnly, every MCP facade must be named. Omitting them empties
+# the filtered deferred set and tool_search is not registered.
+# Fill in [[mcp.servers]] urls for the live hapi-edge / hapi-memory endpoints.
+
+[mcp]
+deferred_loading = true
+
+[[mcp.servers]]
+name = "hapi-edge"
+transport = "http"
+url = "http://127.0.0.1:18789/mcp"
+
+[[mcp.servers]]
+name = "hapi-memory"
+transport = "http"
+url = "http://127.0.0.1:18790/mcp"
+
+[mcp_bundles.hyperion]
+servers = ["hapi-edge", "hapi-memory"]
+
+[runtime_profiles.hyperion_lean]
+prompt_injection_mode = "compact"
+
+[risk_profiles.hyperion_lean]
+level = "supervised"
+workspace_only = true
+mcp_discovered_tool_policy = "explicit_only"
+allowed_tools = [
+  "shell",
+  "file_read",
+  "file_write",
+  "file_edit",
+  "glob_search",
+  "content_search",
+  "memory_recall",
+  "memory_store",
+  "web_search_tool",
+  "web_fetch",
+  "read_skill",
+  "tool_search",
+  "hapi-edge__snapshot",
+  "hapi-edge__batch_snapshot",
+  "hapi-edge__history_klines",
+  "hapi-memory__hapi_memory",
+]
+
+[agents.hyperion]
+enabled = true
+risk_profile = "hyperion_lean"
+runtime_profile = "hyperion_lean"
+mcp_bundles = ["hyperion"]
