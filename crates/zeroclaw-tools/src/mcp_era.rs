@@ -5,8 +5,10 @@
 //! move: probe once per server, resolve a [`PeerEra`], and branch handshake /
 //! session / transport on that one value. Stage 2 speaks the modern POST
 //! headers and per-request `_meta` only on [`PeerEra::Modern`]; Stage 3
-//! classifies `resultType` via [`classify_mcp_result`] the same way. The
-//! Legacy arm is unchanged. Do not bump [`MCP_PROTOCOL_VERSION`] here.
+//! classifies `resultType` via [`classify_mcp_result`] the same way. Stage 4
+//! task handles live in [`crate::mcp_task`] and retry through
+//! [`attach_input_retry`]. The Legacy arm is unchanged. Do not bump
+//! [`MCP_PROTOCOL_VERSION`] here.
 //!
 //! [`MCP_PROTOCOL_VERSION`]: crate::mcp_protocol::MCP_PROTOCOL_VERSION
 
@@ -431,11 +433,12 @@ pub enum McpResultKind {
     InputRequired(InputRequired),
 }
 
-/// Well-formed `input_required` that this client will not retry.
+/// Well-formed `input_required` classified from a JSON-RPC `result`.
 ///
-/// Retry-with-answers (`inputResponses` and echoed `requestState`) belongs
-/// to the later tool-loop stage. Callers must not treat this as a completed
-/// tool result.
+/// This is not a completed tool result. `tools/call` mints an in-process
+/// [`crate::mcp_task::McpTaskPending`] handle and retries via
+/// [`attach_input_retry`]. `prompts/get` and `resources/read` surface this
+/// typed error without minting a handle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpInputRequiredError {
     pub method: String,
@@ -460,7 +463,7 @@ impl std::fmt::Display for McpInputRequiredError {
         if self.input_required.request_state.is_some() {
             write!(f, " with requestState")?;
         }
-        write!(f, "; retry-with-answers is not implemented")
+        write!(f, "; not a completed result")
     }
 }
 
@@ -603,6 +606,38 @@ fn parse_input_required(
         input_requests,
         request_state,
     })
+}
+
+/// Attach MRTR retry fields to the original JSON-RPC params.
+///
+/// `request_state` is echoed verbatim and never inspected. When it is `None`,
+/// the retry **must not** include `requestState`. `_meta` is left untouched;
+/// [`attach_request_meta`] remains the modern-era overlay at send time.
+pub fn attach_input_retry(
+    params: serde_json::Value,
+    input_responses: Option<&serde_json::Value>,
+    request_state: Option<&str>,
+) -> serde_json::Value {
+    match params {
+        serde_json::Value::Object(mut map) => {
+            if let Some(responses) = input_responses {
+                map.insert("inputResponses".to_string(), responses.clone());
+            }
+            match request_state {
+                Some(state) => {
+                    map.insert(
+                        "requestState".to_string(),
+                        serde_json::Value::String(state.to_string()),
+                    );
+                }
+                None => {
+                    map.remove("requestState");
+                }
+            }
+            serde_json::Value::Object(map)
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -1161,5 +1196,48 @@ mod tests {
             !msg.contains(&"B".repeat(600)),
             "unbounded object payload leaked into error"
         );
+    }
+
+    #[test]
+    fn attach_input_retry_echoes_state_and_responses() {
+        let params = attach_input_retry(
+            json!({"name": "echo", "arguments": {"q": 1}}),
+            Some(&json!({"github_login": {"action": "accept"}})),
+            Some("AEAD-protected blob"),
+        );
+        assert_eq!(params["name"], "echo");
+        assert_eq!(params["arguments"], json!({"q": 1}));
+        assert_eq!(
+            params["inputResponses"],
+            json!({"github_login": {"action": "accept"}})
+        );
+        assert_eq!(params["requestState"], "AEAD-protected blob");
+        assert!(params.get("_meta").is_none());
+    }
+
+    #[test]
+    fn attach_input_retry_omits_state_when_absent() {
+        let params = attach_input_retry(
+            json!({"name": "echo", "requestState": "stale"}),
+            Some(&json!({})),
+            None,
+        );
+        assert!(params.get("requestState").is_none());
+        assert_eq!(params["inputResponses"], json!({}));
+    }
+
+    #[test]
+    fn attach_input_retry_preserves_existing_meta() {
+        let params = attach_input_retry(
+            json!({
+                "name": "echo",
+                "_meta": {"keep": true}
+            }),
+            None,
+            Some("blob"),
+        );
+        assert_eq!(params["_meta"], json!({"keep": true}));
+        assert_eq!(params["requestState"], "blob");
+        assert!(params.get("inputResponses").is_none());
     }
 }
