@@ -15,8 +15,9 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use crate::mcp_era::{
-    DiscoverNegotiateError, MCP_MODERN_PROTOCOL_VERSION, PeerEra, PeerProtocol, VersionQuality,
-    attach_request_meta, cache_hints_from_result, is_recognized_modern_error, local_cache_ttl,
+    DiscoverNegotiateError, MCP_MODERN_PROTOCOL_VERSION, McpInputRequiredError, McpResultKind,
+    PeerEra, PeerProtocol, VersionQuality, attach_request_meta, cache_hints_from_result,
+    classify_mcp_result, is_recognized_modern_error, local_cache_ttl,
     versions_from_unsupported_error,
 };
 use crate::mcp_prompt::{McpGetPromptResult, McpPromptsListResult};
@@ -357,6 +358,27 @@ fn check_result_is_error(result: &serde_json::Value, op: &str, server_name: &str
     bail!("MCP `{op}` (server `{server_name}`) returned isError: {detail}");
 }
 
+/// Consume a JSON-RPC `result` under [`PeerEra`]. Complete payloads pass
+/// through; `input_required` is a typed error (no tool-loop retry);
+/// malformed modern envelopes fail closed.
+fn require_complete_result(
+    era: PeerEra,
+    method: &str,
+    result: serde_json::Value,
+) -> Result<serde_json::Value> {
+    match classify_mcp_result(era, method, &result) {
+        Ok(McpResultKind::Complete) => Ok(result),
+        Ok(McpResultKind::InputRequired(input_required)) => Err(McpInputRequiredError {
+            method: method.to_string(),
+            input_required,
+        }
+        .into()),
+        Err(err) => Err(anyhow::Error::msg(format!(
+            "MCP `{method}` resultType rejected: {err}"
+        ))),
+    }
+}
+
 fn cached_list<T: Clone>(
     cache: &HashMap<Option<String>, ListCacheEntry<T>>,
     cursor: &Option<String>,
@@ -668,6 +690,8 @@ impl McpServer {
                 config.name
             ))
         })?;
+        let result = require_complete_result(peer.era, "tools/list", result)
+            .with_context(|| format!("tools/list from `{}` rejected resultType", config.name))?;
         let tools_ttl = tools_ttl_from_list_result(peer.era, &result);
         let tool_list: McpToolsListResult = serde_json::from_value(result)
             .with_context(|| format!("failed to parse tools/list from `{}`", config.name))?;
@@ -1121,7 +1145,11 @@ impl McpServer {
         // protocol errors) with HTTP 200 + `result.isError: true` and the detail
         // in `result.content[].text`, per the MCP spec. Surface it (scrubbed and
         // length-bounded) so the failure is visible to the model and the log.
-        let server_name = self.inner.lock().await.config.name.clone();
+        let (server_name, era) = {
+            let inner = self.inner.lock().await;
+            (inner.config.name.clone(), inner.peer.era)
+        };
+        let result = require_complete_result(era, "tools/call", result)?;
         check_result_is_error(&result, tool_name, &server_name)?;
 
         Ok(result)
@@ -1152,7 +1180,11 @@ impl McpServer {
             bail!("MCP `{rpc_method}` error {}: {}", err.code, err.message);
         }
         let result = resp.result.unwrap_or(serde_json::Value::Null);
-        let server_name = self.inner.lock().await.config.name.clone();
+        let (server_name, era) = {
+            let inner = self.inner.lock().await;
+            (inner.config.name.clone(), inner.peer.era)
+        };
+        let result = require_complete_result(era, rpc_method, result)?;
         check_result_is_error(&result, rpc_method, &server_name)?;
         Ok(result)
     }
@@ -3328,6 +3360,51 @@ done
             .await;
     }
 
+    async fn mount_modern_tools_list(server: &wiremock::MockServer) {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/list"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = serde_json::from_slice::<serde_json::Value>(&request.body)
+                    .expect("JSON-RPC request")
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "complete",
+                        "tools": [{"name": "echo", "inputSchema": {"type": "object"}}]
+                    }
+                }))
+            })
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_modern_echo_tool_call(server: &wiremock::MockServer) {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = serde_json::from_slice::<serde_json::Value>(&request.body)
+                    .expect("JSON-RPC request")
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {"resultType": "complete", "ok": true}
+                }))
+            })
+            .mount(server)
+            .await;
+    }
+
     #[tokio::test]
     async fn connect_legacy_server_reads_initialize_protocol_version() {
         use wiremock::matchers::{body_partial_json, method};
@@ -3527,7 +3604,7 @@ done
             .expect(0)
             .mount(&server)
             .await;
-        mount_tools_list_empty(&server).await;
+        mount_modern_tools_list(&server).await;
 
         let mcp = McpServer::connect(http_server_config(server.uri()))
             .await
@@ -3638,6 +3715,7 @@ done
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
+                        "resultType": "complete",
                         "tools": [{"name": "echo", "inputSchema": {"type": "object"}}],
                         "ttlMs": 60_000,
                         "cacheScope": "public"
@@ -3658,7 +3736,7 @@ done
                 ResponseTemplate::new(200).set_body_json(json!({
                     "jsonrpc": "2.0",
                     "id": id,
-                    "result": {"ok": true}
+                    "result": {"resultType": "complete", "ok": true}
                 }))
             })
             .mount(&server)
@@ -3674,7 +3752,7 @@ done
             .call_tool("echo", json!({}))
             .await
             .expect("modern tools/call");
-        assert_eq!(result, json!({"ok": true}));
+        assert_eq!(result, json!({"resultType": "complete", "ok": true}));
 
         let received = server.received_requests().await.expect("requests");
         assert!(
@@ -3751,8 +3829,8 @@ done
             .expect(0)
             .mount(&server)
             .await;
-        mount_tools_list_empty(&server).await;
-        mount_echo_tool_call(&server).await;
+        mount_modern_tools_list(&server).await;
+        mount_modern_echo_tool_call(&server).await;
 
         let mcp = McpServer::connect(http_server_config(server.uri()))
             .await
@@ -3812,7 +3890,7 @@ done
 
         let server = MockServer::start().await;
         mount_modern_discover(&server).await;
-        mount_tools_list_empty(&server).await;
+        mount_modern_tools_list(&server).await;
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "resources/list"})))
             .respond_with(|request: &wiremock::Request| {
@@ -3824,6 +3902,7 @@ done
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
+                        "resultType": "complete",
                         "resources": [{"uri": "file:///a", "name": "a"}],
                         "ttlMs": 60_000,
                         "cacheScope": "private"
@@ -3856,7 +3935,7 @@ done
 
         let server = MockServer::start().await;
         mount_modern_discover(&server).await;
-        mount_tools_list_empty(&server).await;
+        mount_modern_tools_list(&server).await;
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "resources/list"})))
             .respond_with(|request: &wiremock::Request| {
@@ -3868,6 +3947,7 @@ done
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
+                        "resultType": "complete",
                         "resources": [{"uri": "file:///a", "name": "a"}],
                         "ttlMs": u64::MAX,
                         "cacheScope": "public"
@@ -3903,6 +3983,7 @@ done
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
+                        "resultType": "complete",
                         "tools": [{"name": "echo", "inputSchema": {"type": "object"}}],
                         "ttlMs": 0,
                         "cacheScope": "public"
@@ -3928,7 +4009,7 @@ done
 
         let server = MockServer::start().await;
         mount_modern_discover(&server).await;
-        mount_tools_list_empty(&server).await;
+        mount_modern_tools_list(&server).await;
         Mock::given(method("POST"))
             .and(body_partial_json(json!({"method": "tools/call"})))
             .respond_with(ResponseTemplate::new(400).set_body_json(json!({
@@ -3952,6 +4033,254 @@ done
         let msg = format!("{err:#}");
         assert!(
             msg.contains("-32020") || msg.contains("Header mismatch") || msg.contains("header"),
+            "got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_omitted_result_type_on_call_fails_closed() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {"ok": true}
+                }))
+            })
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("omitted resultType must not be guessed complete");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("resultType"), "got: {msg}");
+        assert!(
+            msg.contains("omitted") || msg.contains("rejected"),
+            "got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_input_required_on_call_is_not_complete_and_does_not_retry() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "input_required",
+                        "inputRequests": {
+                            "github_login": {
+                                "method": "elicitation/create",
+                                "params": {"mode": "form", "message": "name"}
+                            }
+                        },
+                        "requestState": "AEAD-protected blob"
+                    }
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("input_required is not a completed tool result");
+        let typed = err
+            .downcast_ref::<McpInputRequiredError>()
+            .expect("typed MRTR error");
+        assert_eq!(typed.method, "tools/call");
+        assert_eq!(
+            typed.input_required.request_state.as_deref(),
+            Some("AEAD-protected blob")
+        );
+        assert!(
+            typed
+                .input_required
+                .input_requests
+                .as_ref()
+                .is_some_and(|map| map.contains_key("github_login"))
+        );
+        let msg = typed.to_string();
+        assert!(msg.contains("input_required"), "got: {msg}");
+        assert!(msg.contains("not implemented"), "got: {msg}");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_omitted_result_type_on_list_fails_connect() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_tools_list_empty(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(500).set_body_string("initialize must not run"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let result = McpServer::connect(http_server_config(server.uri())).await;
+        let err = match result {
+            Ok(_) => panic!("modern tools/list without resultType must fail"),
+            Err(err) => err,
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains("resultType"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn modern_malformed_result_type_does_not_panic() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": ["complete"],
+                        "ok": true
+                    }
+                }))
+            })
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("array resultType must fail closed");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("resultType"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn modern_malformed_input_requests_does_not_panic() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "input_required",
+                        "inputRequests": u64::MAX,
+                        "requestState": {"not": "a string"}
+                    }
+                }))
+            })
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("malformed MRTR must fail closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("inputRequests") || msg.contains("resultType"),
+            "got: {msg}"
+        );
+        assert!(
+            err.downcast_ref::<McpInputRequiredError>().is_none(),
+            "malformed envelope is not a well-formed input_required"
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_input_required_on_list_fails_closed() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/list"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "input_required",
+                        "requestState": "blob",
+                        "tools": []
+                    }
+                }))
+            })
+            .mount(&server)
+            .await;
+
+        let result = McpServer::connect(http_server_config(server.uri())).await;
+        let err = match result {
+            Ok(_) => panic!("input_required on tools/list must fail"),
+            Err(err) => err,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("input_required") || msg.contains("resultType"),
             "got: {msg}"
         );
     }
