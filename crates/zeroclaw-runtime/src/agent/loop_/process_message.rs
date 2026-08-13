@@ -112,7 +112,8 @@ pub async fn process_message(
                 );
             }
         };
-        let approval_manager = ApprovalManager::for_non_interactive(&risk_profile);
+        let approval_manager =
+            ApprovalManager::for_non_interactive(&risk_profile).with_store_at(&config.data_dir);
         let mem: Arc<dyn Memory> = zeroclaw_memory::create_memory_for_agent(
             &config,
             agent_alias,

@@ -1525,7 +1525,8 @@ pub(crate) async fn assemble_owned_execution(
     // available to the delegated step instead of degrading to auto-denial.
     let approval = match parent_approval {
         Some(parent) => parent.derive_for_risk_profile(&risk_profile),
-        None => crate::approval::ApprovalManager::for_non_interactive(&risk_profile),
+        None => crate::approval::ApprovalManager::for_non_interactive(&risk_profile)
+            .with_store_at(&config.data_dir),
     };
 
     Ok(OwnedAgentExecution {

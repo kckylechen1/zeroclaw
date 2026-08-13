@@ -108,7 +108,7 @@ letting an unattended agent anywhere near execution-tier tools.
 
 ## Still missing
 
-An approval here is memory-only: nothing binds it to a run, a tool, and an
-argument hash, and nothing expires it on restart. There is no durable audit
-trail proving who approved what. Both are tracked in
+Local tool approvals persist in `data_dir/approvals.db` (boot + run + tool +
+args hash, 300s TTL, single-consume, durable audit). Node grant envelope/claim
+and Tachi projection are still missing; both remain tracked in
 [`hyperion-patch-census.md`](./hyperion-patch-census.md).

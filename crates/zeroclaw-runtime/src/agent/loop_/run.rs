@@ -604,7 +604,7 @@ pub async fn run(
 
         // ── Approval manager (supervised mode) ───────────────────────
         let approval_manager = if interactive {
-            Some(ApprovalManager::from_risk_profile(&risk_profile))
+            Some(ApprovalManager::from_risk_profile(&risk_profile).with_store_at(&config.data_dir))
         } else {
             None
         };
