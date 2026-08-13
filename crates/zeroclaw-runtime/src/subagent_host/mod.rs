@@ -87,7 +87,7 @@ use crate::agent::cost::{TOOL_LOOP_TURN_USAGE, TurnUsage};
 use crate::agent::loop_::AgentRunOverrides;
 use crate::subagent::{SubAgentContext, SubAgentOverrides, SubAgentSpawn};
 
-/// Parked result channels for [`ChildOverrides::hosted_run`] children.
+/// Parked result channels for [`zeroclaw_coordinator::ChildOverrides::hosted_execution`] children.
 ///
 /// Background `delegate` inserts the receiver before `Spawn` and keeps the
 /// sender; [`NativeChildRunner`] takes the receiver and waits instead of
@@ -100,11 +100,15 @@ static HOSTED_RUNS: LazyLock<Mutex<HashMap<String, oneshot::Receiver<ChildResult
 /// Register a hosted child the coordinator will admit but not natively run.
 ///
 /// Call this *before* sending `CoordinatorCommand::Spawn` with
-/// `overrides.hosted_run = true`. The returned sender is how the host
-/// delivers the child's ending; dropping it without a send is recorded as
-/// [`ChildOutcome::Lost`].
+/// [`zeroclaw_coordinator::ChildOverrides::hosted_execution`]. The returned
+/// sender is how the host delivers the child's ending; dropping it without a
+/// send is recorded as [`ChildOutcome::Lost`].
+///
+/// Trust boundary: only the background `delegate` worker should call this.
+/// Coordinator Spawn still only enforces duplicate id, spawn depth, and
+/// capacity; policy gates are the caller's responsibility.
 #[must_use]
-pub fn park_hosted_child(child_id: impl Into<String>) -> oneshot::Sender<ChildResult> {
+pub(crate) fn park_hosted_child(child_id: impl Into<String>) -> oneshot::Sender<ChildResult> {
     let (tx, rx) = oneshot::channel();
     HOSTED_RUNS
         .lock()
@@ -114,7 +118,10 @@ pub fn park_hosted_child(child_id: impl Into<String>) -> oneshot::Sender<ChildRe
 }
 
 /// Drop a parked hosted child that was never admitted.
-pub fn abandon_hosted_child(child_id: &str) {
+///
+/// Trust boundary: same as [`park_hosted_child`] — only the background
+/// `delegate` worker should call this.
+pub(crate) fn abandon_hosted_child(child_id: &str) {
     let _ = take_hosted_child(child_id);
 }
 
@@ -468,7 +475,7 @@ impl ChildRunner for NativeChildRunner {
             let started_at = Instant::now();
             let child_id = request.child_id.clone();
 
-            if request.overrides.hosted_run {
+            if request.overrides.hosted_run() {
                 return run_hosted_child(request, cancellation, reporter, started_at).await;
             }
 

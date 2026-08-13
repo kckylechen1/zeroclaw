@@ -1670,4 +1670,73 @@ mod tests {
              bail! in the decode loop used to lose the whole claimed batch for good."
         );
     }
+
+    #[tokio::test]
+    async fn v7_store_migrates_null_executor_and_coalesce_claims_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("control_plane.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                     id              TEXT PRIMARY KEY,
+                     kind            TEXT NOT NULL,
+                     agent           TEXT NOT NULL,
+                     status          TEXT NOT NULL,
+                     owner_pid       INTEGER NOT NULL DEFAULT 0,
+                     owner_boot_id   TEXT NOT NULL DEFAULT '',
+                     heartbeat_at    TEXT,
+                     depth           INTEGER NOT NULL DEFAULT 0,
+                     parent_id       TEXT,
+                     originator_route TEXT,
+                     delivered       INTEGER NOT NULL DEFAULT 0,
+                     idem_key        TEXT,
+                     principal_id    TEXT,
+                     started_at      TEXT NOT NULL,
+                     finished_at     TEXT,
+                     output          TEXT,
+                     error           TEXT
+                 );
+                 INSERT INTO tasks (
+                     id, kind, agent, status, owner_pid, owner_boot_id, depth,
+                     parent_id, delivered, started_at, finished_at, output
+                 ) VALUES (
+                     'kid', 'delegate', 'parent-alias', 'completed', 1, 'boot-old', 0,
+                     'mum', 0, '2026-06-18T00:00:00Z', '2026-06-18T00:00:01Z',
+                     'old-row-output'
+                 );
+                 PRAGMA user_version = 7;",
+            )
+            .unwrap();
+        }
+
+        let s = SqliteTaskStore::new(dir.path()).unwrap();
+        {
+            let conn = s.conn.lock();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, CONTROL_PLANE_SCHEMA_VERSION);
+        }
+
+        let got = s
+            .get("kid")
+            .await
+            .unwrap()
+            .expect("migrated row must be readable");
+        assert!(
+            got.executor.is_none(),
+            "pre-v8 rows have NULL executor after ALTER"
+        );
+        assert_eq!(got.agent, "parent-alias");
+        assert_eq!(got.status, TaskStatus::Completed);
+
+        let claimed = s.claim_undelivered_children("mum").await.unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(
+            claimed[0].agent, "parent-alias",
+            "COALESCE(executor, agent) must fall back to agent when executor is NULL"
+        );
+        assert_eq!(claimed[0].output.as_deref(), Some("old-row-output"));
+    }
 }

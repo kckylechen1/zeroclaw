@@ -3,6 +3,7 @@ use crate::agent::loop_::{
     TOOL_LOOP_SESSION_KEY, ToolLoop, apply_text_tool_prompt_policy, run_tool_call_loop,
 };
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
+use crate::control_plane::task_registry::{TaskKind, TaskRegistry};
 use crate::observability::traits::{Observer, ObserverEvent, ObserverMetric};
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -1337,8 +1338,9 @@ impl Tool for DelegateTool {
                     "enum": DelegateAction::schema_values(),
                     "description": "Action to perform. Default: 'delegate'. Use 'check_result' to \
                                     retrieve a background task result, 'await_sessions' to wait for \
-                                    multiple background results, 'list_results' to list all background \
-                                    tasks, 'cancel_task' to cancel a running background task.",
+                                    multiple background results, 'list_results' to list this parent's \
+                                    promoted (active) background tasks, 'cancel_task' to cancel a \
+                                    running background task.",
                     "default": DelegateAction::Delegate.as_str()
                 },
                 "agent": {
@@ -1802,11 +1804,7 @@ impl DelegateTool {
             parent_prompt_id: None,
             resume_from: None,
             cwd: None,
-            overrides: ChildOverrides {
-                spawn_depth: Some(self.depth + 1),
-                hosted_run: true,
-                ..ChildOverrides::default()
-            },
+            overrides: ChildOverrides::hosted_execution(Some(self.depth + 1)),
             run_in_background: true,
             surface_completion: true,
             await_to_completion: false,
@@ -2225,12 +2223,59 @@ impl DelegateTool {
         rx.await.ok()
     }
 
-    fn check_result_from_snapshot(snapshot: &ChildSnapshot) -> anyhow::Result<ToolResult> {
+    /// Durable fail-closed gate: `kind == Delegate` and `parent_id` is this
+    /// caller. `NULL` parent and any other kind are misses. No store means
+    /// there is no row to consult (Query already scoped the caller).
+    async fn delegate_row_visible_to_caller(&self, task_id: &str) -> bool {
+        let Some(store) = task_store() else {
+            return true;
+        };
+        matches!(
+            store.get(task_id).await,
+            Ok(Some(rec))
+                if rec.kind == TaskKind::Delegate
+                    && rec.parent_id.as_deref() == Some(self.parent_session_id().as_str())
+        )
+    }
+
+    /// Fail-closed SQLite fallback: only a `Delegate` row whose `parent_id`
+    /// is exactly this caller. `NULL` parent and any other kind are misses.
+    fn sqlite_fallback_delegate_snapshot(&self, task_id: &str) -> Option<ChildSnapshot> {
+        let view = task_store()
+            .and_then(|store| store.get_terminal_with_result(task_id).ok().flatten())?;
+        if view.record.kind != TaskKind::Delegate
+            || view.record.parent_id.as_deref() != Some(self.parent_session_id().as_str())
+        {
+            return None;
+        }
+        snapshot_from_terminal(&view)
+    }
+
+    /// `true` when the announce chain already consumed the row (`claim_child`
+    /// found `delivered=1`). `false` when this poll just claimed it, the
+    /// child is still running, or there is no store.
+    fn announced_from_claim(parent_id: &str, task_id: &str, snapshot: &ChildSnapshot) -> bool {
+        if snapshot.is_running() {
+            return false;
+        }
+        match task_store() {
+            Some(store) => matches!(store.claim_child(parent_id, task_id), Ok(None)),
+            None => false,
+        }
+    }
+
+    fn check_result_from_snapshot(
+        snapshot: &ChildSnapshot,
+        announced: bool,
+    ) -> anyhow::Result<ToolResult> {
         let error = match &snapshot.status {
             ChildStatus::Finished { detail, .. } => detail.clone(),
             _ => None,
         };
-        let (state, value) = snapshot_to_result_view(snapshot);
+        let (state, mut value) = snapshot_to_result_view(snapshot);
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("announced".into(), json!(announced));
+        }
         let success = state.is_success();
         Ok(ToolResult {
             success,
@@ -2328,28 +2373,7 @@ impl DelegateTool {
         let snapshot = match self.query_child(task_id, false, None).await {
             Some(snapshot) => snapshot,
             None => {
-                let Some(view) = task_store()
-                    .and_then(|store| store.get_terminal_with_result(task_id).ok().flatten())
-                else {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: ToolOutput::default(),
-                        error: Some(format!("No result found for task_id '{task_id}'")),
-                    });
-                };
-                if view
-                    .record
-                    .parent_id
-                    .as_deref()
-                    .is_some_and(|parent| parent != self.parent_session_id())
-                {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: ToolOutput::default(),
-                        error: Some(format!("No result found for task_id '{task_id}'")),
-                    });
-                }
-                let Some(snapshot) = snapshot_from_terminal(&view) else {
+                let Some(snapshot) = self.sqlite_fallback_delegate_snapshot(task_id) else {
                     return Ok(ToolResult {
                         success: false,
                         output: ToolOutput::default(),
@@ -2359,12 +2383,15 @@ impl DelegateTool {
                 snapshot
             }
         };
-        if !snapshot.is_running()
-            && let Some(store) = task_store()
-        {
-            let _ = store.claim_child(&self.parent_session_id(), task_id);
+        if !self.delegate_row_visible_to_caller(task_id).await {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!("No result found for task_id '{task_id}'")),
+            });
         }
-        Self::check_result_from_snapshot(&snapshot)
+        let announced = Self::announced_from_claim(&self.parent_session_id(), task_id, &snapshot);
+        Self::check_result_from_snapshot(&snapshot, announced)
     }
 
     async fn handle_await_sessions(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
@@ -2444,7 +2471,11 @@ impl DelegateTool {
         }
     }
 
-    /// List in-flight background delegate children for this parent session.
+    /// List this parent's promoted (active) background delegate children.
+    ///
+    /// Pending children (admitted, not yet promoted) are omitted: they have
+    /// not started executing, and `ListActive` is the coordinator's promoted
+    /// surface.
     async fn handle_list_results(&self) -> anyhow::Result<ToolResult> {
         let results: Vec<serde_json::Value> = self
             .list_active_children()
@@ -8672,7 +8703,7 @@ command = "echo hi"
     // a test-serialization lock, not a production lock.
     use crate::control_plane::boot::ControlPlaneHandle;
     use crate::control_plane::coordinator_host;
-    use crate::control_plane::task_registry::{TaskKind, TaskRegistry, TaskStatus};
+    use crate::control_plane::task_registry::{TaskKind, TaskRecord, TaskRegistry, TaskStatus};
     use zeroclaw_config::schema::RiskProfileConfig;
 
     struct FixedReplyProvider(&'static str);
@@ -8831,6 +8862,50 @@ command = "echo hi"
         }
     }
 
+    async fn insert_finished_row(
+        store: &crate::control_plane::SqliteTaskStore,
+        id: &str,
+        kind: TaskKind,
+        parent_id: Option<&str>,
+        output: &str,
+    ) {
+        store
+            .create(TaskRecord {
+                id: id.into(),
+                kind,
+                agent: "caller".into(),
+                status: TaskStatus::Running,
+                owner_pid: 1,
+                owner_boot_id: "boot".into(),
+                heartbeat_at: None,
+                depth: 0,
+                parent_id: parent_id.map(str::to_owned),
+                originator_route: None,
+                delivered: false,
+                idem_key: None,
+                principal_id: None,
+                executor: Some("target".into()),
+                started_at: "2026-06-18T00:00:00Z".into(),
+                finished_at: None,
+            })
+            .await
+            .expect("create");
+        assert!(
+            store
+                .finish_task(id, TaskStatus::Completed, Some(output), None, false,)
+                .await
+                .expect("finish")
+        );
+    }
+
+    fn announced_flag(output: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(output)
+            .expect("check_result output is JSON")
+            .get("announced")
+            .and_then(|v| v.as_bool())
+            .expect("check_result JSON must carry announced")
+    }
+
     /// Discriminating line: `claim_undelivered_children` under the same
     /// key `execute_background` filed `parent_id` as must return the
     /// child's ending. A spawn that still wrote `parent_id: None` would
@@ -8971,6 +9046,11 @@ command = "echo hi"
             "check_result must return the success output: {}",
             check.output
         );
+        assert!(
+            !announced_flag(check.output.as_str()),
+            "this poll consumed the row, so announced must be false: {}",
+            check.output
+        );
 
         let parent_key = format!("agent:{caller}");
         assert!(
@@ -8986,15 +9066,80 @@ command = "echo hi"
     }
 
     #[tokio::test]
-    async fn check_result_falls_back_to_sqlite_when_the_actor_is_gone() {
+    async fn check_result_after_announce_claim_is_readable_and_marked_announced() {
+        let caller = "announce-first-caller";
+        let target = "announce-first-target";
+        let config = config_with_caller_and_target(caller, target);
+        let fixture = boot(config.clone()).await;
+        let tool = DelegateTool::new(config.agents.clone(), None, security_allowing())
+            .with_caller_alias(caller)
+            .with_root_config(Arc::new(config))
+            .with_test_model_provider(Arc::new(FixedReplyProvider("announce-then-check")));
+        let result = tool
+            .execute(json!({
+                "agent": target,
+                "prompt": "go",
+                "background": true
+            }))
+            .await
+            .expect("spawn");
+        assert!(result.success, "{:?}", result.error);
+        let task_id = extract_task_id(result.output.as_str()).to_string();
+        wait_for_terminal(
+            &fixture.handle.sqlite_store,
+            &task_id,
+            Duration::from_secs(10),
+        )
+        .await;
+
+        let parent_key = format!("agent:{caller}");
+        let claimed = fixture
+            .handle
+            .sqlite_store
+            .claim_undelivered_children(&parent_key)
+            .await
+            .expect("announce claim");
+        assert_eq!(
+            claimed.len(),
+            1,
+            "announce must consume the undelivered row"
+        );
+        assert_eq!(claimed[0].task_id, task_id);
+
+        let check = tool
+            .execute(json!({
+                "action": "check_result",
+                "task_id": task_id
+            }))
+            .await
+            .expect("check");
+        assert!(
+            check.success,
+            "explicit check_result is an idempotent read after announce: {:?}",
+            check.error
+        );
+        assert!(
+            check.output.contains("announce-then-check"),
+            "result must still be readable: {}",
+            check.output
+        );
+        assert!(
+            announced_flag(check.output.as_str()),
+            "announce already claimed, so announced must be true: {}",
+            check.output
+        );
+    }
+
+    #[tokio::test]
+    async fn check_result_queries_terminal_state_from_a_second_coordinator() {
         let caller = "persist-caller";
         let target = "persist-target";
         let config = config_with_caller_and_target(caller, target);
         let mut fixture = boot(config.clone()).await;
         let tool = DelegateTool::new(config.agents.clone(), None, security_allowing())
             .with_caller_alias(caller)
-            .with_root_config(Arc::new(config))
-            .with_test_model_provider(Arc::new(FixedReplyProvider("survived-eviction")));
+            .with_root_config(Arc::new(config.clone()))
+            .with_test_model_provider(Arc::new(FixedReplyProvider("survived-restart")));
         let result = tool
             .execute(json!({
                 "agent": target,
@@ -9014,10 +9159,17 @@ command = "echo hi"
 
         if let Some(actor) = fixture.actor.take() {
             actor.abort();
+            let _ = actor.await;
         }
+        let host2 = coordinator_host::start(
+            Arc::new(config),
+            Arc::clone(&fixture.handle.sqlite_store),
+            fixture.handle.boot_id.clone(),
+        );
         *COMMAND_SENDER_TEST_HOOK
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = None;
+            .unwrap_or_else(|e| e.into_inner()) = Some(host2.commands);
+        fixture.actor = Some(host2.actor);
 
         let check = tool
             .execute(json!({
@@ -9028,13 +9180,98 @@ command = "echo hi"
             .expect("check");
         assert!(
             check.success,
-            "sqlite fallback must surface the terminal row: {:?}",
+            "a new coordinator on the same store must surface the terminal row: {:?}",
             check.error
         );
         assert!(
-            check.output.contains("survived-eviction"),
-            "sqlite fallback must return the stored output: {}",
+            check.output.contains("survived-restart"),
+            "restart query must return the stored output: {}",
             check.output
+        );
+    }
+
+    #[tokio::test]
+    async fn check_result_rejects_null_parent_terminal_row() {
+        let caller = "null-parent-caller";
+        let target = "null-parent-target";
+        let config = config_with_caller_and_target(caller, target);
+        let fixture = boot(config.clone()).await;
+        let tool = DelegateTool::new(config.agents.clone(), None, security_allowing())
+            .with_caller_alias(caller)
+            .with_root_config(Arc::new(config));
+        let task_id = uuid::Uuid::new_v4().to_string();
+        insert_finished_row(
+            &fixture.handle.sqlite_store,
+            &task_id,
+            TaskKind::Delegate,
+            None,
+            "leaked-null-parent",
+        )
+        .await;
+
+        let check = tool
+            .execute(json!({
+                "action": "check_result",
+                "task_id": task_id
+            }))
+            .await
+            .expect("check");
+        assert!(!check.success);
+        assert!(
+            check
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("No result found"),
+            "NULL parent_id must be refused, got: {:?}",
+            check.error
+        );
+        assert!(
+            !check.output.contains("leaked-null-parent"),
+            "must not surface the NULL-parent row"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_result_rejects_non_delegate_kind() {
+        let caller = "kind-caller";
+        let target = "kind-target";
+        let config = config_with_caller_and_target(caller, target);
+        let fixture = boot(config.clone()).await;
+        let tool = DelegateTool::new(config.agents.clone(), None, security_allowing())
+            .with_caller_alias(caller)
+            .with_root_config(Arc::new(config));
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let parent_key = format!("agent:{caller}");
+        insert_finished_row(
+            &fixture.handle.sqlite_store,
+            &task_id,
+            TaskKind::Subagent,
+            Some(&parent_key),
+            "leaked-subagent",
+        )
+        .await;
+
+        let check = tool
+            .execute(json!({
+                "action": "check_result",
+                "task_id": task_id
+            }))
+            .await
+            .expect("check");
+        assert!(!check.success);
+        assert!(
+            check
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("No result found"),
+            "non-Delegate kind must be refused, got: {:?}",
+            check.error
+        );
+        assert!(
+            !check.output.contains("leaked-subagent"),
+            "must not surface a Subagent row as a delegate result"
         );
     }
 

@@ -32,7 +32,7 @@
 //!
 //! Background `delegate` children are `TaskKind::Delegate`; `spawn_subagent`
 //! children stay `TaskKind::Subagent`. The discriminator is
-//! `ChildOverrides::hosted_run`.
+//! [`ChildOverrides::hosted_run`](zeroclaw_coordinator::ChildOverrides::hosted_run).
 //!
 //! ## Error posture
 //!
@@ -119,7 +119,7 @@ impl ChildPersistence for SubagentPersistence {
     fn record_spawn(&mut self, request: &ChildRequest) -> Result<(), PersistenceError> {
         let rec = TaskRecord {
             id: request.child_id.clone(),
-            kind: if request.overrides.hosted_run {
+            kind: if request.overrides.hosted_run() {
                 TaskKind::Delegate
             } else {
                 TaskKind::Subagent
@@ -175,6 +175,9 @@ impl ChildPersistence for SubagentPersistence {
         }
     }
 
+    /// Fail-closed: only a `Delegate` row with a non-NULL `parent_id`.
+    /// Query still matches that parent to the caller; NULL and any other
+    /// kind are misses so a UUID cannot leak another session's result.
     fn load_finished(
         &self,
         child_id: &str,
@@ -184,6 +187,10 @@ impl ChildPersistence for SubagentPersistence {
             .get_terminal_with_result(child_id)
             .ok()
             .flatten()?;
+        if view.record.kind != TaskKind::Delegate {
+            return None;
+        }
+        let parent_session_id = view.record.parent_id?;
         let outcome = task_status_to_child_outcome(view.record.status)?;
         let started_at_epoch_ms = rfc3339_to_epoch_ms(&view.record.started_at);
         let finished_at_epoch_ms = view
@@ -199,7 +206,7 @@ impl ChildPersistence for SubagentPersistence {
                 .executor
                 .clone()
                 .unwrap_or_else(|| view.record.agent.clone()),
-            parent_session_id: view.record.parent_id.unwrap_or_default(),
+            parent_session_id,
             outcome,
             output: view.output.unwrap_or_default(),
             detail: view.error,
@@ -397,7 +404,7 @@ mod tests {
     async fn hosted_run_is_delegate_kind_and_claim_names_the_executor() {
         let (mut persistence, store) = harness();
         let mut req = request("kid", "mum");
-        req.overrides.hosted_run = true;
+        req.overrides = ChildOverrides::hosted_execution(None);
         req.agent_type = "researcher".into();
         persistence.record_spawn(&req).expect("spawn write");
 
@@ -421,5 +428,71 @@ mod tests {
 
         let claimed = store.claim_undelivered_children("mum").await.unwrap();
         assert_eq!(claimed[0].agent, "researcher");
+
+        let loaded = persistence
+            .load_finished("kid")
+            .expect("hosted Delegate with parent_id must load");
+        assert_eq!(loaded.parent_session_id, "mum");
+        assert_eq!(loaded.agent_type, "researcher");
+    }
+
+    #[tokio::test]
+    async fn load_finished_rejects_null_parent_id() {
+        let (persistence, store) = harness();
+        store
+            .create(TaskRecord {
+                id: "kid".into(),
+                kind: TaskKind::Delegate,
+                agent: "parent-alias".into(),
+                status: TaskStatus::Running,
+                owner_pid: 1,
+                owner_boot_id: "boot-1".into(),
+                heartbeat_at: None,
+                depth: 0,
+                parent_id: None,
+                originator_route: None,
+                delivered: false,
+                idem_key: None,
+                principal_id: None,
+                executor: Some("explore".into()),
+                started_at: "2026-06-18T00:00:00Z".into(),
+                finished_at: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            store
+                .finish_task("kid", TaskStatus::Completed, Some("secret"), None, false,)
+                .await
+                .unwrap()
+        );
+        assert!(
+            persistence.load_finished("kid").is_none(),
+            "NULL parent_id must not be readable as a delegate result"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_finished_rejects_non_delegate_kind() {
+        let (mut persistence, _store) = harness();
+        persistence
+            .record_spawn(&request("kid", "mum"))
+            .expect("spawn");
+        persistence
+            .record_finish(
+                "kid",
+                &ChildResult {
+                    outcome: ChildOutcome::Completed,
+                    output: Arc::from("secret"),
+                    child_id: "kid".into(),
+                    ..Default::default()
+                },
+                false,
+            )
+            .expect("finish");
+        assert!(
+            persistence.load_finished("kid").is_none(),
+            "a Subagent row must not be returned as a delegate result"
+        );
     }
 }

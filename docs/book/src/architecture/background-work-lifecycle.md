@@ -41,7 +41,7 @@ The `spawn_subagent` path can wait for the child in-turn or start it detached (`
 
 The delegate tool can run synchronously or start a background task and return a UUID. Background delegate now takes the same coordinator spawn as detached `spawn_subagent`: admission, persistence (`parent_id` = the parent's session key, with the `agent:<alias>` fallback), cancellation, and the announce chain. `check_result` / `list_results` / `await_sessions` / `cancel_task` query that actor rather than a workspace file store. Pre-migration `delegate_results/*.json` files are ignored.
 
-Under a booted daemon, `SubagentPersistence` writes the durable control-plane row as part of coordinator spawn/finish — one write path, not a dual-write alongside a result file. Startup recovery marks prior-boot running rows `lost`. The task row makes an interrupted child visible but does not recreate its execution.
+Under a booted daemon, `SubagentPersistence` writes the durable control-plane row as part of coordinator spawn/finish: one write path, not a dual-write alongside a result file. Startup recovery marks prior-boot running rows `lost`. The task row makes an interrupted child visible but does not recreate its execution.
 
 ## Goal-mode target contract
 
