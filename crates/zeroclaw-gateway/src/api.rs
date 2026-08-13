@@ -1594,7 +1594,8 @@ fn normalized_webhook_path(path: Option<&str>) -> String {
 fn companion_outbox_from_state(state: &AppState) -> zeroclaw_api::companion::CompanionOutboxHealth {
     match state.companion_store.as_deref() {
         None => zeroclaw_api::companion::CompanionOutboxHealth::not_configured(),
-        Some(store) => store.observe_local_outbox(),
+        // Read-only SELECT. Aging WARN belongs to the 5-minute observe tick.
+        Some(store) => store.outbox_health(),
     }
 }
 
@@ -2349,6 +2350,54 @@ pub(crate) mod tests {
         assert!(body["companion_outbox"]["oldest_pending_age_secs"].is_null());
         let encoded = body["companion_outbox"].to_string();
         assert!(!encoded.contains("synchronized"), "{encoded}");
+        assert!(!encoded.contains("accumulating"), "{encoded}");
+    }
+
+    #[tokio::test]
+    async fn repeated_api_health_calls_do_not_emit_stale_outbox_warn() {
+        let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+        let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+        zeroclaw_log::try_install_capture_subscriber();
+        let mut rx = zeroclaw_log::subscribe_or_install();
+        while rx.try_recv().is_ok() {}
+
+        let state = test_state(zeroclaw_config::schema::Config::default());
+        for _ in 0..3 {
+            let response = handle_api_health(State(state.clone()), HeaderMap::new())
+                .await
+                .into_response();
+            let body = response_json(response).await;
+            assert_eq!(body["companion_outbox"]["status"], "not_configured");
+            let encoded = body["companion_outbox"].to_string();
+            assert!(!encoded.contains("accumulating"), "{encoded}");
+            assert!(!encoded.contains("synchronized"), "{encoded}");
+        }
+
+        let mut found_stale_warn = false;
+        loop {
+            match rx.try_recv() {
+                Ok(value) => {
+                    if value.get("severity_text").and_then(|v| v.as_str()) != Some("WARN") {
+                        continue;
+                    }
+                    let message = value.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    if message.contains("aging with no drain configured") {
+                        found_stale_warn = true;
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(
+                    tokio::sync::broadcast::error::TryRecvError::Empty
+                    | tokio::sync::broadcast::error::TryRecvError::Closed,
+                ) => break,
+            }
+        }
+        zeroclaw_log::clear_broadcast_hook();
+        assert!(
+            !found_stale_warn,
+            "consecutive /api/health reads must not emit stale outbox WARN"
+        );
     }
 
     #[tokio::test]

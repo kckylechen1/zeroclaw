@@ -550,8 +550,10 @@ impl CaptureReceipt {
 /// type, and never a remote-sync report.
 ///
 /// V1 has no Tachi drain. The only configured state is
-/// [`CompanionOutboxStatus::Accumulating`]. A `synchronized` variant is
+/// [`CompanionOutboxStatus::Pending`]. A `synchronized` variant is
 /// intentionally absent so success cannot be named, deserialized, or logged.
+/// The frozen JSON literals are `not_configured` and `pending`; synonyms
+/// such as `accumulating` are rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompanionOutboxStatus {
@@ -560,7 +562,7 @@ pub enum CompanionOutboxStatus {
     NotConfigured,
     /// A PortableKernel store is open. Pending events may be waiting. This is
     /// the resting state for every configured V1 install.
-    Accumulating,
+    Pending,
 }
 
 impl CompanionOutboxStatus {
@@ -569,7 +571,7 @@ impl CompanionOutboxStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NotConfigured => "not_configured",
-            Self::Accumulating => "accumulating",
+            Self::Pending => "pending",
         }
     }
 }
@@ -603,12 +605,12 @@ impl CompanionOutboxHealth {
         }
     }
 
-    /// Open store. `pending_count == 0` is still accumulating: V1 cannot
+    /// Open store. `pending_count == 0` is still pending: V1 cannot
     /// represent a completed drain.
     #[must_use]
-    pub fn accumulating(pending_count: u64, oldest_pending_age_secs: Option<u64>) -> Self {
+    pub fn pending(pending_count: u64, oldest_pending_age_secs: Option<u64>) -> Self {
         Self {
-            status: CompanionOutboxStatus::Accumulating,
+            status: CompanionOutboxStatus::Pending,
             pending_count,
             oldest_pending_age_secs,
         }
@@ -924,17 +926,17 @@ mod tests {
     fn companion_outbox_status_has_no_synchronized_variant() {
         // Exhaustive match: a third variant (including anything named
         // synchronized) is a compile failure. V1 must not be able to name a
-        // completed remote drain.
+        // completed remote drain. Frozen literals are pending / not_configured.
         for status in [
             CompanionOutboxStatus::NotConfigured,
-            CompanionOutboxStatus::Accumulating,
+            CompanionOutboxStatus::Pending,
         ] {
             match status {
                 CompanionOutboxStatus::NotConfigured => {
                     assert_eq!(status.as_str(), "not_configured");
                 }
-                CompanionOutboxStatus::Accumulating => {
-                    assert_eq!(status.as_str(), "accumulating");
+                CompanionOutboxStatus::Pending => {
+                    assert_eq!(status.as_str(), "pending");
                 }
             }
         }
@@ -943,11 +945,15 @@ mod tests {
             "\"not_configured\""
         );
         assert_eq!(
-            serde_json::to_string(&CompanionOutboxStatus::Accumulating).expect("ser"),
-            "\"accumulating\""
+            serde_json::to_string(&CompanionOutboxStatus::Pending).expect("ser"),
+            "\"pending\""
+        );
+        assert_eq!(
+            serde_json::from_str::<CompanionOutboxStatus>("\"pending\"").expect("de"),
+            CompanionOutboxStatus::Pending
         );
         assert!(serde_json::from_str::<CompanionOutboxStatus>("\"synchronized\"").is_err());
-        assert!(serde_json::from_str::<CompanionOutboxStatus>("\"pending\"").is_err());
+        assert!(serde_json::from_str::<CompanionOutboxStatus>("\"accumulating\"").is_err());
     }
 
     #[test]
@@ -957,10 +963,12 @@ mod tests {
         assert_eq!(closed.pending_count, 0);
         assert_eq!(closed.oldest_pending_age_secs, None);
 
-        let open = CompanionOutboxHealth::accumulating(3, Some(12));
+        let open = CompanionOutboxHealth::pending(3, Some(12));
         let json = serde_json::to_string(&open).expect("ser");
-        assert!(json.contains("accumulating"), "{json}");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(value["status"], "pending");
         assert!(!json.contains("synchronized"), "{json}");
+        assert!(!json.contains("accumulating"), "{json}");
         assert_eq!(open.pending_count, 3);
         assert_eq!(open.oldest_pending_age_secs, Some(12));
     }

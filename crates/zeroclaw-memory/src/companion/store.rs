@@ -25,6 +25,8 @@ impl CompanionStore {
     /// path that already exists.
     ///
     /// Crate-private: the only production caller is [`crate::create_companion_store`].
+    /// Status probes must use [`Self::open_for_status_probe`] instead so a
+    /// missing file cannot race into `create_fresh`.
     ///
     /// # Errors
     /// Returns when the directory cannot be created, memcore refuses the open
@@ -35,6 +37,26 @@ impl CompanionStore {
         } else {
             Self::create_fresh(path)
         }
+    }
+
+    /// Open an existing store for `zeroclaw status`. Never `create_fresh`.
+    ///
+    /// A missing path is an error; the caller maps that to `not_configured`
+    /// without creating the parent directory. Opening is not a strictly
+    /// read-only inspect: SQLite may take a WAL lock, and this path still
+    /// applies owner-only `0600` to the database file and any existing
+    /// `-wal`/`-shm` sidecars.
+    ///
+    /// # Errors
+    /// Returns when the path is missing or memcore refuses deny-migration open.
+    pub fn open_for_status_probe(path: &Path) -> anyhow::Result<Self> {
+        if !path.exists() {
+            anyhow::bail!(
+                "companion memory at {} does not exist; status probe never creates a store",
+                path.display()
+            );
+        }
+        Self::open_existing_deny(path)
     }
 
     /// CLI seam for schema upgrades. Runtime and the daemon must not call this.

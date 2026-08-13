@@ -7396,30 +7396,7 @@ fn build_sop_adapters(config: &Config) -> zeroclaw_runtime::sop::SopEngineAdapte
 fn companion_outbox_health_for_cli(
     config: &zeroclaw_config::schema::Config,
 ) -> zeroclaw_api::companion::CompanionOutboxHealth {
-    use zeroclaw_api::companion::CompanionOutboxHealth;
-
-    if !config.companion_memory.enable {
-        return CompanionOutboxHealth::not_configured();
-    }
-    let path = config.companion_memory.db_path(&config.data_dir);
-    if !path.exists() {
-        return CompanionOutboxHealth::not_configured();
-    }
-    match zeroclaw_memory::create_companion_store(config) {
-        Ok(store) => zeroclaw_memory::companion_outbox_health(store.as_deref()),
-        Err(err) => {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({
-                        "error": err.to_string(),
-                    })),
-                "companion outbox health could not be read for status"
-            );
-            CompanionOutboxHealth::accumulating(0, None)
-        }
-    }
+    zeroclaw_memory::probe_companion_outbox_health(config)
 }
 
 fn print_companion_outbox_line(config: &zeroclaw_config::schema::Config) {
@@ -7436,26 +7413,26 @@ fn print_companion_outbox_line(config: &zeroclaw_config::schema::Config) {
                 )
             );
         }
-        CompanionOutboxStatus::Accumulating => {
+        CompanionOutboxStatus::Pending => {
             let pending = health.pending_count.to_string();
             if let Some(age) = health.oldest_pending_age_secs {
                 let age = age.to_string();
                 let fallback =
-                    format!("Companion outbox: accumulating ({pending} pending, oldest {age}s)");
+                    format!("Companion outbox: pending ({pending} events, oldest {age}s)");
                 println!(
                     "{}",
                     ta(
-                        "cli-status-companion-outbox-accumulating-oldest",
+                        "cli-status-companion-outbox-pending-oldest",
                         &[("pending", &pending), ("age", &age)],
                         &fallback
                     )
                 );
             } else {
-                let fallback = format!("Companion outbox: accumulating ({pending} pending)");
+                let fallback = format!("Companion outbox: pending ({pending} events)");
                 println!(
                     "{}",
                     ta(
-                        "cli-status-companion-outbox-accumulating",
+                        "cli-status-companion-outbox-pending",
                         &[("pending", &pending)],
                         &fallback
                     )

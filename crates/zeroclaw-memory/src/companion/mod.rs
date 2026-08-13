@@ -29,6 +29,7 @@ pub use identity::{
 };
 pub use outbox::{
     OUTBOX_OBSERVE_INTERVAL_SECS, OUTBOX_PENDING_AGE_WARN_SECS, companion_outbox_health,
+    probe_companion_outbox_health,
 };
 
 /// Construct the companion store from config.
