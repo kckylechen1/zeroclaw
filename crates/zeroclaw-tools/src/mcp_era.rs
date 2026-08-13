@@ -4,8 +4,9 @@
 //! module is the seam that must exist *before* [`MCP_PROTOCOL_VERSION`] can
 //! move: probe once per server, resolve a [`PeerEra`], and branch handshake /
 //! session / transport on that one value. Stage 2 speaks the modern POST
-//! headers and per-request `_meta` only on [`PeerEra::Modern`]; the Legacy
-//! arm is unchanged. Do not bump [`MCP_PROTOCOL_VERSION`] here.
+//! headers and per-request `_meta` only on [`PeerEra::Modern`]; Stage 3
+//! classifies `resultType` via [`classify_mcp_result`] the same way. The
+//! Legacy arm is unchanged. Do not bump [`MCP_PROTOCOL_VERSION`] here.
 //!
 //! [`MCP_PROTOCOL_VERSION`]: crate::mcp_protocol::MCP_PROTOCOL_VERSION
 
@@ -398,6 +399,212 @@ pub fn local_cache_ttl(hints: CacheHints) -> Option<std::time::Duration> {
     }
 }
 
+/// Ordinary completed result (`resultType: "complete"`).
+pub const RESULT_TYPE_COMPLETE: &str = "complete";
+/// Multi round-trip interim result (`resultType: "input_required"`).
+pub const RESULT_TYPE_INPUT_REQUIRED: &str = "input_required";
+
+/// Methods on which a server MAY return [`McpResultKind::InputRequired`].
+pub fn method_allows_input_required(method: &str) -> bool {
+    matches!(method, "tools/call" | "prompts/get" | "resources/read")
+}
+
+fn is_allowed_input_request_method(method: &str) -> bool {
+    matches!(
+        method,
+        "elicitation/create" | "sampling/createMessage" | "roots/list"
+    )
+}
+
+/// Parsed `InputRequiredResult` envelope. `request_state` is opaque: callers
+/// MUST echo it unchanged and MUST NOT inspect it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputRequired {
+    pub input_requests: Option<serde_json::Map<String, serde_json::Value>>,
+    pub request_state: Option<String>,
+}
+
+/// How a JSON-RPC `result` should be consumed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpResultKind {
+    Complete,
+    InputRequired(InputRequired),
+}
+
+/// Well-formed `input_required` that this client will not retry.
+///
+/// Retry-with-answers (`inputResponses` and echoed `requestState`) belongs
+/// to the later tool-loop stage. Callers must not treat this as a completed
+/// tool result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpInputRequiredError {
+    pub method: String,
+    pub input_required: InputRequired,
+}
+
+impl std::fmt::Display for McpInputRequiredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "MCP `{}` returned resultType={RESULT_TYPE_INPUT_REQUIRED}",
+            self.method
+        )?;
+        if self
+            .input_required
+            .input_requests
+            .as_ref()
+            .is_some_and(|map| !map.is_empty())
+        {
+            write!(f, " with inputRequests")?;
+        }
+        if self.input_required.request_state.is_some() {
+            write!(f, " with requestState")?;
+        }
+        write!(f, "; retry-with-answers is not implemented")
+    }
+}
+
+impl std::error::Error for McpInputRequiredError {}
+
+/// Why a modern `result` was rejected. Legacy results never produce this:
+/// omitted `resultType` is `complete` and extra fields are ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultTypeError {
+    Missing,
+    NotAnObject,
+    InvalidType { raw: String },
+    InputRequiredNotAllowed { method: String },
+    InputRequiredEmpty,
+    MalformedInputRequests,
+    MalformedRequestState,
+}
+
+impl std::fmt::Display for ResultTypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => write!(
+                f,
+                "modern MCP result omitted required resultType (must not guess complete)"
+            ),
+            Self::NotAnObject => write!(f, "modern MCP result is not a JSON object"),
+            Self::InvalidType { raw } => {
+                write!(f, "unrecognized MCP resultType {raw}")
+            }
+            Self::InputRequiredNotAllowed { method } => write!(
+                f,
+                "resultType={RESULT_TYPE_INPUT_REQUIRED} is not allowed on `{method}`"
+            ),
+            Self::InputRequiredEmpty => write!(
+                f,
+                "resultType={RESULT_TYPE_INPUT_REQUIRED} needs inputRequests or requestState"
+            ),
+            Self::MalformedInputRequests => {
+                write!(f, "malformed inputRequests on input_required result")
+            }
+            Self::MalformedRequestState => {
+                write!(f, "malformed requestState on input_required result")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ResultTypeError {}
+
+/// Classify a JSON-RPC `result` using [`PeerEra`] as the only dispatch source.
+///
+/// Legacy: omitted (or any) `resultType` is [`McpResultKind::Complete`] —
+/// earlier-protocol servers do not carry the field. Modern: the field is
+/// required; unknown values and malformed MRTR envelopes fail closed.
+pub fn classify_mcp_result(
+    era: PeerEra,
+    method: &str,
+    result: &serde_json::Value,
+) -> Result<McpResultKind, ResultTypeError> {
+    match era {
+        PeerEra::Legacy => Ok(McpResultKind::Complete),
+        PeerEra::Modern => classify_modern_result(method, result),
+    }
+}
+
+fn classify_modern_result(
+    method: &str,
+    result: &serde_json::Value,
+) -> Result<McpResultKind, ResultTypeError> {
+    let obj = result.as_object().ok_or(ResultTypeError::NotAnObject)?;
+    match obj.get("resultType") {
+        None => Err(ResultTypeError::Missing),
+        Some(serde_json::Value::String(kind)) if kind == RESULT_TYPE_COMPLETE => {
+            Ok(McpResultKind::Complete)
+        }
+        Some(serde_json::Value::String(kind)) if kind == RESULT_TYPE_INPUT_REQUIRED => {
+            if !method_allows_input_required(method) {
+                return Err(ResultTypeError::InputRequiredNotAllowed {
+                    method: method.to_string(),
+                });
+            }
+            parse_input_required(obj).map(McpResultKind::InputRequired)
+        }
+        Some(other) => Err(invalid_result_type(other)),
+    }
+}
+
+/// Bound untrusted `resultType` text the same way `isError` details are
+/// scrubbed: secrets redacted, length capped. Applied at construction so
+/// Display and model-visible error strings cannot echo an unbounded payload.
+fn invalid_result_type(value: &serde_json::Value) -> ResultTypeError {
+    let raw = match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    ResultTypeError::InvalidType {
+        raw: zeroclaw_providers::sanitize_api_error(&raw),
+    }
+}
+
+fn parse_input_required(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<InputRequired, ResultTypeError> {
+    let input_requests = match obj.get("inputRequests") {
+        None => None,
+        Some(serde_json::Value::Object(map)) => {
+            for value in map.values() {
+                let Some(request) = value.as_object() else {
+                    return Err(ResultTypeError::MalformedInputRequests);
+                };
+                let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+                    return Err(ResultTypeError::MalformedInputRequests);
+                };
+                if !is_allowed_input_request_method(method) {
+                    return Err(ResultTypeError::MalformedInputRequests);
+                }
+                if let Some(params) = request.get("params")
+                    && !params.is_object()
+                {
+                    return Err(ResultTypeError::MalformedInputRequests);
+                }
+            }
+            Some(map.clone())
+        }
+        Some(_) => return Err(ResultTypeError::MalformedInputRequests),
+    };
+    let request_state = match obj.get("requestState") {
+        None => None,
+        Some(serde_json::Value::String(state)) => Some(state.clone()),
+        Some(_) => return Err(ResultTypeError::MalformedRequestState),
+    };
+    if input_requests
+        .as_ref()
+        .is_none_or(serde_json::Map::is_empty)
+        && request_state.is_none()
+    {
+        return Err(ResultTypeError::InputRequiredEmpty);
+    }
+    Ok(InputRequired {
+        input_requests,
+        request_state,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,6 +898,268 @@ mod tests {
                 cache_scope: CacheScope::Public
             })
             .is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_omitted_result_type_is_complete() {
+        let kind = classify_mcp_result(PeerEra::Legacy, "tools/call", &json!({"ok": true}))
+            .expect("legacy omitted");
+        assert_eq!(kind, McpResultKind::Complete);
+    }
+
+    #[test]
+    fn legacy_ignores_input_required_field() {
+        let kind = classify_mcp_result(
+            PeerEra::Legacy,
+            "tools/call",
+            &json!({
+                "resultType": RESULT_TYPE_INPUT_REQUIRED,
+                "requestState": "blob"
+            }),
+        )
+        .expect("legacy does not branch on resultType");
+        assert_eq!(kind, McpResultKind::Complete);
+    }
+
+    #[test]
+    fn modern_complete_is_complete() {
+        let kind = classify_mcp_result(
+            PeerEra::Modern,
+            "tools/list",
+            &json!({"resultType": RESULT_TYPE_COMPLETE, "tools": []}),
+        )
+        .expect("modern complete");
+        assert_eq!(kind, McpResultKind::Complete);
+    }
+
+    #[test]
+    fn modern_omitted_result_type_fails_closed() {
+        let err = classify_mcp_result(PeerEra::Modern, "tools/call", &json!({"ok": true}))
+            .expect_err("modern must not guess complete");
+        assert_eq!(err, ResultTypeError::Missing);
+    }
+
+    #[test]
+    fn modern_non_object_result_fails_closed() {
+        assert_eq!(
+            classify_mcp_result(PeerEra::Modern, "tools/call", &json!("not-an-object"))
+                .expect_err("non-object"),
+            ResultTypeError::NotAnObject
+        );
+        assert_eq!(
+            classify_mcp_result(PeerEra::Modern, "tools/call", &json!(null)).expect_err("null"),
+            ResultTypeError::NotAnObject
+        );
+    }
+
+    #[test]
+    fn modern_unknown_and_non_string_result_type_fail_closed() {
+        assert_eq!(
+            classify_mcp_result(
+                PeerEra::Modern,
+                "tools/call",
+                &json!({"resultType": "task"})
+            )
+            .expect_err("unknown"),
+            ResultTypeError::InvalidType { raw: "task".into() }
+        );
+        let err = classify_mcp_result(
+            PeerEra::Modern,
+            "tools/call",
+            &json!({"resultType": ["complete"]}),
+        )
+        .expect_err("array");
+        assert!(matches!(err, ResultTypeError::InvalidType { .. }));
+        let err = classify_mcp_result(PeerEra::Modern, "tools/call", &json!({"resultType": 1}))
+            .expect_err("number");
+        assert!(matches!(err, ResultTypeError::InvalidType { .. }));
+    }
+
+    #[test]
+    fn modern_input_required_on_list_is_rejected() {
+        let err = classify_mcp_result(
+            PeerEra::Modern,
+            "tools/list",
+            &json!({
+                "resultType": RESULT_TYPE_INPUT_REQUIRED,
+                "requestState": "blob"
+            }),
+        )
+        .expect_err("list methods cannot MRTR");
+        assert_eq!(
+            err,
+            ResultTypeError::InputRequiredNotAllowed {
+                method: "tools/list".into()
+            }
+        );
+    }
+
+    #[test]
+    fn modern_input_required_parses_requests_and_opaque_state() {
+        let kind = classify_mcp_result(
+            PeerEra::Modern,
+            "tools/call",
+            &json!({
+                "resultType": RESULT_TYPE_INPUT_REQUIRED,
+                "inputRequests": {
+                    "github_login": {
+                        "method": "elicitation/create",
+                        "params": {"mode": "form", "message": "name"}
+                    }
+                },
+                "requestState": "AEAD-protected blob"
+            }),
+        )
+        .expect("well-formed MRTR");
+        match kind {
+            McpResultKind::InputRequired(req) => {
+                assert_eq!(req.request_state.as_deref(), Some("AEAD-protected blob"));
+                let requests = req.input_requests.expect("requests");
+                assert_eq!(
+                    requests["github_login"]["method"].as_str(),
+                    Some("elicitation/create")
+                );
+            }
+            other => panic!("expected input_required, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modern_input_required_request_state_only_is_valid() {
+        let kind = classify_mcp_result(
+            PeerEra::Modern,
+            "resources/read",
+            &json!({
+                "resultType": RESULT_TYPE_INPUT_REQUIRED,
+                "requestState": "load-shed"
+            }),
+        )
+        .expect("requestState-only");
+        match kind {
+            McpResultKind::InputRequired(req) => {
+                assert!(req.input_requests.is_none());
+                assert_eq!(req.request_state.as_deref(), Some("load-shed"));
+            }
+            other => panic!("expected input_required, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modern_input_required_empty_fails_closed() {
+        assert_eq!(
+            classify_mcp_result(
+                PeerEra::Modern,
+                "tools/call",
+                &json!({"resultType": RESULT_TYPE_INPUT_REQUIRED})
+            )
+            .expect_err("empty"),
+            ResultTypeError::InputRequiredEmpty
+        );
+    }
+
+    #[test]
+    fn modern_malformed_mrtr_fields_fail_closed_without_panic() {
+        assert_eq!(
+            classify_mcp_result(
+                PeerEra::Modern,
+                "tools/call",
+                &json!({
+                    "resultType": RESULT_TYPE_INPUT_REQUIRED,
+                    "inputRequests": ["not", "an", "object"]
+                })
+            )
+            .expect_err("array requests"),
+            ResultTypeError::MalformedInputRequests
+        );
+        assert_eq!(
+            classify_mcp_result(
+                PeerEra::Modern,
+                "prompts/get",
+                &json!({
+                    "resultType": RESULT_TYPE_INPUT_REQUIRED,
+                    "inputRequests": {
+                        "x": {"method": "tools/call"}
+                    }
+                })
+            )
+            .expect_err("wrong inner method"),
+            ResultTypeError::MalformedInputRequests
+        );
+        assert_eq!(
+            classify_mcp_result(
+                PeerEra::Modern,
+                "tools/call",
+                &json!({
+                    "resultType": RESULT_TYPE_INPUT_REQUIRED,
+                    "requestState": {"not": "a string"}
+                })
+            )
+            .expect_err("object state"),
+            ResultTypeError::MalformedRequestState
+        );
+        let huge = "x".repeat(64 * 1024);
+        let kind = classify_mcp_result(
+            PeerEra::Modern,
+            "tools/call",
+            &json!({
+                "resultType": RESULT_TYPE_INPUT_REQUIRED,
+                "requestState": huge
+            }),
+        )
+        .expect("large opaque blob is not inspected");
+        match kind {
+            McpResultKind::InputRequired(req) => {
+                assert_eq!(req.request_state.as_ref().map(String::len), Some(64 * 1024));
+            }
+            other => panic!("expected input_required, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modern_oversized_string_result_type_is_length_bounded() {
+        let huge = "A".repeat(5000);
+        let err = classify_mcp_result(PeerEra::Modern, "tools/call", &json!({"resultType": huge}))
+            .expect_err("unknown huge string");
+        let msg = err.to_string();
+        assert!(msg.contains("unrecognized MCP resultType"), "got: {msg}");
+        assert!(
+            msg.contains("..."),
+            "bounded detail should be truncated: {msg}"
+        );
+        assert!(
+            msg.len() < 1000,
+            "5000-char resultType not bounded: len={}",
+            msg.len()
+        );
+        assert!(
+            !msg.contains(&"A".repeat(600)),
+            "unbounded payload leaked into error"
+        );
+    }
+
+    #[test]
+    fn modern_oversized_object_result_type_is_length_bounded() {
+        let err = classify_mcp_result(
+            PeerEra::Modern,
+            "tools/call",
+            &json!({"resultType": {"blob": "B".repeat(5000)}}),
+        )
+        .expect_err("object resultType");
+        let msg = err.to_string();
+        assert!(msg.contains("unrecognized MCP resultType"), "got: {msg}");
+        assert!(
+            msg.contains("..."),
+            "bounded detail should be truncated: {msg}"
+        );
+        assert!(
+            msg.len() < 1000,
+            "huge object resultType not bounded: len={}",
+            msg.len()
+        );
+        assert!(
+            !msg.contains(&"B".repeat(600)),
+            "unbounded object payload leaked into error"
         );
     }
 }
