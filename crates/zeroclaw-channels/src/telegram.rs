@@ -640,10 +640,14 @@ enum UpdateOutcome {
 /// Why a Telegram `getFile` lookup failed, classified for retry purposes.
 ///
 /// Classification is deliberately conservative: only a confidently permanent
-/// vendor rejection is `Permanent`. It requires structured evidence from the
-/// Bot API itself — `ok: false` *and* a terminal 4xx `error_code`. 5xx, 429,
-/// 408, transport errors, malformed bodies, body-less non-2xx responses, and
-/// anything unrecognised stay `Transient`.
+/// vendor rejection is `Permanent`. Permanence requires structured evidence
+/// from the Bot API itself — `ok: false` *and* an `error_code` on the
+/// explicit whitelist `{400, 403, 404, 410}`. Upstream #9314 treats the rest
+/// of 4xx (minus 408/429) as permanent; that is looser than this fork and
+/// would silently drop updates on retryable codes such as 425. 408, 425,
+/// 429, any response carrying `parameters.retry_after`, 5xx, transport
+/// errors, malformed bodies, body-less non-2xx responses, and anything
+/// unrecognised stay `Transient`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FileLookupFailure {
     Transient,
@@ -706,11 +710,19 @@ impl FileLookupError {
             description.unwrap_or("no description"),
         );
 
-        const RETRYABLE_4XX: [i64; 2] = [408, 429];
+        // Explicit permanent whitelist — not "all 4xx minus a denylist".
+        // 408/425/429 and any payload with `parameters.retry_after` stay
+        // transient so a retryable vendor code cannot silently drop an update.
+        const PERMANENT_ERROR_CODES: [i64; 4] = [400, 403, 404, 410];
+        let retry_after = body
+            .and_then(|b| b.get("parameters"))
+            .and_then(|p| p.get("retry_after"))
+            .is_some();
 
-        let terminal_rejection = ok_flag == Some(false)
+        let terminal_rejection = !retry_after
+            && ok_flag == Some(false)
             && error_code
-                .map(|c| (400..500).contains(&c) && !RETRYABLE_4XX.contains(&c))
+                .map(|c| PERMANENT_ERROR_CODES.contains(&c))
                 .unwrap_or(false);
 
         if terminal_rejection {
@@ -7154,10 +7166,26 @@ mod tests {
         }
     }
 
+    fn classify_get_file(
+        status: reqwest::StatusCode,
+        body: serde_json::Value,
+    ) -> FileLookupFailure {
+        FileLookupError::classify(status, Some(&body)).kind
+    }
+
+    fn vendor_error(error_code: i64, description: &str) -> serde_json::Value {
+        serde_json::json!({
+            "ok": false,
+            "error_code": error_code,
+            "description": description
+        })
+    }
+
     #[test]
     fn get_file_failures_classify_permanent_vendor_rejections_only() {
         let status400 = reqwest::StatusCode::BAD_REQUEST;
         let status408 = reqwest::StatusCode::REQUEST_TIMEOUT;
+        let status425 = reqwest::StatusCode::from_u16(425).expect("425 is a valid status");
         let status500 = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
 
         assert_eq!(
@@ -7166,38 +7194,56 @@ mod tests {
             "a body-less 400 Bad Request must stay transient"
         );
         assert_eq!(
-            FileLookupError::classify(
+            classify_get_file(
                 status400,
-                Some(&serde_json::json!({"ok": false, "description": "no code"}))
-            )
-            .kind,
+                serde_json::json!({"ok": false, "description": "no code"})
+            ),
             FileLookupFailure::Transient,
             "ok: false with no error_code must stay transient"
         );
         assert_eq!(
-            FileLookupError::classify(
-                status400,
-                Some(&serde_json::json!({
-                    "ok": false,
-                    "error_code": 400,
-                    "description": "Bad Request: invalid file_id"
-                }))
-            )
-            .kind,
+            classify_get_file(status400, vendor_error(400, "Bad Request: invalid file_id")),
             FileLookupFailure::Permanent,
         );
         assert_eq!(
-            FileLookupError::classify(
-                status408,
-                Some(&serde_json::json!({
-                    "ok": false,
-                    "error_code": 408,
-                    "description": "Request Timeout"
-                }))
-            )
-            .kind,
+            classify_get_file(status400, vendor_error(403, "Forbidden")),
+            FileLookupFailure::Permanent,
+        );
+        assert_eq!(
+            classify_get_file(status400, vendor_error(404, "Not Found")),
+            FileLookupFailure::Permanent,
+        );
+        assert_eq!(
+            classify_get_file(status400, vendor_error(410, "Gone")),
+            FileLookupFailure::Permanent,
+        );
+        assert_eq!(
+            classify_get_file(status408, vendor_error(408, "Request Timeout")),
             FileLookupFailure::Transient,
             "a vendor-named 408 must stay transient"
+        );
+        assert_eq!(
+            classify_get_file(status425, vendor_error(425, "Too Early")),
+            FileLookupFailure::Transient,
+            "425 must stay transient so a retryable Too Early cannot drop the update"
+        );
+        assert_eq!(
+            classify_get_file(status400, vendor_error(422, "Unprocessable Entity")),
+            FileLookupFailure::Transient,
+            "a 4xx outside the permanent whitelist must stay transient"
+        );
+        assert_eq!(
+            classify_get_file(
+                status400,
+                serde_json::json!({
+                    "ok": false,
+                    "error_code": 400,
+                    "description": "Too Many Requests",
+                    "parameters": {"retry_after": 12}
+                })
+            ),
+            FileLookupFailure::Transient,
+            "retry_after must keep even a whitelist error_code transient"
         );
         assert_eq!(
             FileLookupError::classify(status500, None).kind,
@@ -7287,6 +7333,151 @@ mod tests {
         assert!(
             telegram_wait_for_main_loop_offset(&mock_server, uid + 1, Duration::from_secs(5)).await,
             "offset never advanced past the update once its retry succeeded"
+        );
+
+        handle.abort();
+    }
+
+    /// 425 Too Early is retryable. Classifying it as permanent would
+    /// silently drop the update; the offset must stay put.
+    #[tokio::test]
+    async fn listen_does_not_advance_offset_on_getfile_425() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        mount_telegram_startup_probe(&mock_server).await;
+
+        let uid = 2_000;
+        let update = telegram_document_update(uid, 6, 556, "alice", "file425", "early.pdf");
+
+        mount_telegram_get_updates(&mock_server, 0, serde_json::json!([update])).await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/bot[^/]+/getFile$"))
+            .respond_with(ResponseTemplate::new(425).set_body_json(serde_json::json!({
+                "ok": false,
+                "error_code": 425,
+                "description": "Too Early"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let ch = Arc::new(
+            TelegramChannel::new(
+                "test-token".into(),
+                "telegram_test_alias",
+                Arc::new(|| vec!["alice".to_string()]),
+                false,
+            )
+            .with_api_base(mock_server.uri())
+            .with_workspace_dir(workspace.path().to_path_buf()),
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let listen_ch = ch.clone();
+        let handle = zeroclaw_spawn::spawn!(async move { listen_ch.listen(tx).await });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let bodies = telegram_main_loop_getupdates_bodies(&mock_server).await;
+            if bodies.len() >= 2 {
+                for body in &bodies {
+                    assert_eq!(
+                        body.get("offset").and_then(serde_json::Value::as_i64),
+                        Some(0),
+                        "offset must not advance while getFile keeps returning 425"
+                    );
+                }
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for a second getUpdates retry at offset 0"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let extra = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+        assert!(
+            extra.is_err(),
+            "a 425 getFile must not deliver or skip the update: {extra:?}"
+        );
+
+        handle.abort();
+    }
+
+    /// A 4xx outside the permanent whitelist (422) must retry, not skip.
+    #[tokio::test]
+    async fn listen_retries_non_whitelist_4xx_download_failure_then_advances() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        mount_telegram_startup_probe(&mock_server).await;
+
+        let uid = 3_000;
+        let update = telegram_document_update(uid, 7, 557, "alice", "file422", "later.pdf");
+
+        mount_telegram_get_updates(&mock_server, 0, serde_json::json!([update])).await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/bot[^/]+/getFile$"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "ok": false,
+                "error_code": 422,
+                "description": "Unprocessable Entity"
+            })))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"/bot[^/]+/getFile$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {"file_path": "documents/later.pdf"}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/file/bot[^/]+/.*$"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"pdf bytes".to_vec()))
+            .mount(&mock_server)
+            .await;
+
+        mount_telegram_get_updates(&mock_server, uid + 1, serde_json::json!([])).await;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let ch = Arc::new(
+            TelegramChannel::new(
+                "test-token".into(),
+                "telegram_test_alias",
+                Arc::new(|| vec!["alice".to_string()]),
+                false,
+            )
+            .with_api_base(mock_server.uri())
+            .with_workspace_dir(workspace.path().to_path_buf()),
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let listen_ch = ch.clone();
+        let handle = zeroclaw_spawn::spawn!(async move { listen_ch.listen(tx).await });
+
+        let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("timed out waiting for the attachment message")
+            .expect("channel closed before delivering the attachment message");
+        assert!(
+            msg.content.contains("later.pdf"),
+            "unexpected content: {}",
+            msg.content
+        );
+
+        assert!(
+            telegram_wait_for_main_loop_offset(&mock_server, uid + 1, Duration::from_secs(5)).await,
+            "offset never advanced past the update once its non-whitelist 4xx retry succeeded"
         );
 
         handle.abort();
