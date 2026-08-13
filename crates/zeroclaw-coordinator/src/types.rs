@@ -93,6 +93,12 @@ pub struct ChildOverrides {
     /// Groups children belonging to one repeating unit of work, so a host can
     /// ask whether that unit still has anything in flight.
     pub loop_task_id: Option<String>,
+    /// When true the coordinator still admits, persists, queries, and
+    /// cancels the child, but the runner does not start a native agent turn.
+    /// The host that set this flag is responsible for delivering the
+    /// [`ChildResult`] (background `delegate` parks a oneshot the runner
+    /// waits on). Default false: a normal spawn runs through the runner.
+    pub hosted_run: bool,
 }
 
 // ── Admission ────────────────────────────────────────────────────────────

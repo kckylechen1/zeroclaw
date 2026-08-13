@@ -80,7 +80,8 @@ pub struct Announcement {
     /// The child's task id, so the parent can correlate it with whatever it
     /// dispatched.
     pub task_id: String,
-    /// The agent alias that ran, which for a subagent is the parent's own.
+    /// The agent that actually ran, which for a coordinator child is the
+    /// executor (`agent_type`), not the owning parent alias.
     pub agent: String,
     pub outcome: AnnouncedOutcome,
     /// The child's result on success, or `None` when it produced none.

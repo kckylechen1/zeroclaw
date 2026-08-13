@@ -67,7 +67,9 @@ pub use driver::{
 };
 pub use native::{NATIVE_HARNESS_ID, NativeAgentDriver};
 pub use outcome::ChildOutcome;
-pub use persistence::{ChildPersistence, NoopPersistence, PersistenceError};
+pub use persistence::{
+    ChildPersistence, NoopPersistence, PersistedFinishedChild, PersistenceError,
+};
 pub use registry::{DriverRegistry, RegistryError};
 pub use state::{
     ChildCompletion, ChildControl, ChildProgress, ChildReporter, ChildRunOutput, ChildRunRequest,

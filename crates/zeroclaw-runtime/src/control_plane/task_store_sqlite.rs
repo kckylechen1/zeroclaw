@@ -11,10 +11,17 @@ use super::task_registry::{TaskKind, TaskRecord, TaskRegistry, TaskStatus};
 
 mod goal;
 
-const CONTROL_PLANE_SCHEMA_VERSION: i64 = 7;
+const CONTROL_PLANE_SCHEMA_VERSION: i64 = 8;
 
 pub struct SqliteTaskStore {
     conn: Mutex<Connection>,
+}
+
+/// A terminal task row plus the output/error `TaskRecord` does not carry.
+pub struct TerminalTaskView {
+    pub record: TaskRecord,
+    pub output: Option<String>,
+    pub error: Option<String>,
 }
 
 impl SqliteTaskStore {
@@ -122,6 +129,75 @@ impl SqliteTaskStore {
     ) -> Result<bool> {
         let conn = self.conn.lock();
         finish_task_record(&conn, id, status, output, error, delivered)
+    }
+
+    /// Terminal row plus its output/error, or `None` if missing or still running.
+    pub fn get_terminal_with_result(&self, id: &str) -> Result<Option<TerminalTaskView>> {
+        let conn = self.conn.lock();
+        let row = conn
+            .query_row("SELECT * FROM tasks WHERE id = ?1", params![id], |row| {
+                let record = row_to_record(row)?;
+                let output: Option<String> = row.get("output")?;
+                let error: Option<String> = row.get("error")?;
+                Ok((record, output, error))
+            })
+            .optional()
+            .context("get terminal task")?;
+        Ok(row.and_then(|(record, output, error)| {
+            record.status.is_terminal().then_some(TerminalTaskView {
+                record,
+                output,
+                error,
+            })
+        }))
+    }
+
+    /// Claim one finished child of `parent_id` by id. Same atomic
+    /// `delivered = 1` semantics as [`TaskRegistry::claim_undelivered_children`].
+    pub fn claim_child(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<Option<zeroclaw_api::announce::Announcement>> {
+        let conn = self.conn.lock();
+        let sql = format!(
+            "UPDATE tasks SET delivered = 1
+              WHERE parent_id = ?1
+                AND id = ?2
+                AND delivered = 0
+                AND status IN ({})
+          RETURNING id, COALESCE(executor, agent) AS agent, status, output, error, finished_at",
+            terminal_status_sql_list()
+        );
+        let mut stmt = conn
+            .prepare_cached(&sql)
+            .context("prepare claim one child")?;
+        let row = stmt
+            .query_row(params![parent_id, child_id], |row| {
+                Ok((
+                    row.get::<_, String>("id")?,
+                    row.get::<_, String>("agent")?,
+                    row.get::<_, String>("status")?,
+                    row.get::<_, Option<String>>("output")?,
+                    row.get::<_, Option<String>>("error")?,
+                    row.get::<_, Option<String>>("finished_at")?,
+                ))
+            })
+            .optional()
+            .context("claim one child")?;
+        Ok(
+            row.map(|(task_id, agent, status, output, error, finished_at)| {
+                let (outcome, degraded_detail) = resolve_claimed_outcome(&task_id, &status);
+                zeroclaw_api::announce::Announcement {
+                    task_id,
+                    agent,
+                    outcome,
+                    output,
+                    detail: degraded_detail.or(error),
+                    finished_at,
+                }
+            }),
+        )
     }
 }
 
@@ -287,6 +363,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         delivered: row.get::<_, i64>("delivered")? != 0,
         idem_key: row.get("idem_key")?,
         principal_id: row.get("principal_id")?,
+        executor: row.get("executor")?,
         started_at: row.get("started_at")?,
         finished_at: row.get("finished_at")?,
     })
@@ -326,9 +403,9 @@ fn insert_task_record(conn: &Connection, rec: TaskRecord) -> Result<()> {
     conn.execute(
         "INSERT INTO tasks
             (id, kind, agent, status, owner_pid, owner_boot_id, heartbeat_at, depth,
-             parent_id, originator_route, delivered, idem_key, principal_id,
+             parent_id, originator_route, delivered, idem_key, principal_id, executor,
              started_at, finished_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
          ON CONFLICT(id) DO NOTHING",
         params![
             rec.id,
@@ -344,6 +421,7 @@ fn insert_task_record(conn: &Connection, rec: TaskRecord) -> Result<()> {
             rec.delivered as i64,
             rec.idem_key,
             rec.principal_id,
+            rec.executor,
             rec.started_at,
             rec.finished_at,
         ],
@@ -555,7 +633,7 @@ impl TaskRegistry for SqliteTaskStore {
               WHERE parent_id = ?1
                 AND delivered = 0
                 AND status IN ({})
-          RETURNING id, agent, status, output, error, finished_at",
+          RETURNING id, COALESCE(executor, agent) AS agent, status, output, error, finished_at",
             terminal_status_sql_list()
         );
         let mut stmt = conn
@@ -756,6 +834,7 @@ mod tests {
             delivered: false,
             idem_key: None,
             principal_id: None,
+            executor: None,
             started_at: "2026-06-18T00:00:00Z".into(),
             finished_at: None,
         }

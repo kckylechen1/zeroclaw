@@ -21,15 +21,18 @@
 //! daemon boot site is the remaining wiring, owned by the phase that
 //! instantiates the actor.
 //!
-//! ## The `agent`/`parent_id` field choice
+//! ## The `agent` / `executor` / `parent_id` field choice
 //!
-//! `TaskRecord::agent` is "the agent alias that owns and executes this task"
-//! (used by alias-delete cascades), and coordinator-spawned children
-//! (`spawn_subagent`, background `delegate`) fill it with the *parent's* alias
-//! via `ChildRequest::parent_alias`, not the child's `agent_type` (which is a
-//! role, e.g. `"explore"`, not an alias). `parent_id` stays
+//! `TaskRecord::agent` is the **owning** parent alias (alias-delete cascades).
+//! `TaskRecord::executor` is who actually ran — `ChildRequest::agent_type`.
+//! [`zeroclaw_api::announce::Announcement::agent`] is the executor
+//! (`COALESCE(executor, agent)` at claim time). `parent_id` stays
 //! `parent_session_id`: session identity is what
 //! `claim_undelivered_children` keys children under.
+//!
+//! Background `delegate` children are `TaskKind::Delegate`; `spawn_subagent`
+//! children stay `TaskKind::Subagent`. The discriminator is
+//! `ChildOverrides::hosted_run`.
 //!
 //! ## Error posture
 //!
@@ -85,6 +88,27 @@ pub fn child_outcome_to_task_status(outcome: ChildOutcome) -> TaskStatus {
     }
 }
 
+/// Inverse of [`child_outcome_to_task_status`] for rows loaded back out of
+/// the store. `None` for a non-terminal status — those are not a finished
+/// child.
+#[must_use]
+pub fn task_status_to_child_outcome(status: TaskStatus) -> Option<ChildOutcome> {
+    Some(match status {
+        TaskStatus::Completed => ChildOutcome::Completed,
+        TaskStatus::Failed => ChildOutcome::Failed,
+        TaskStatus::Cancelled => ChildOutcome::Cancelled,
+        TaskStatus::TimedOut => ChildOutcome::TimedOut,
+        TaskStatus::Lost => ChildOutcome::Lost,
+        TaskStatus::Running | TaskStatus::Paused => return None,
+    })
+}
+
+fn rfc3339_to_epoch_ms(value: &str) -> u64 {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|dt| u64::try_from(dt.timestamp_millis()).unwrap_or(0))
+        .unwrap_or(0)
+}
+
 impl ChildPersistence for SubagentPersistence {
     /// Create the row for a newly spawned child, in `Running` — the only
     /// non-terminal state a coordinator-spawned child is ever written in.
@@ -95,7 +119,11 @@ impl ChildPersistence for SubagentPersistence {
     fn record_spawn(&mut self, request: &ChildRequest) -> Result<(), PersistenceError> {
         let rec = TaskRecord {
             id: request.child_id.clone(),
-            kind: TaskKind::Subagent,
+            kind: if request.overrides.hosted_run {
+                TaskKind::Delegate
+            } else {
+                TaskKind::Subagent
+            },
             agent: request.parent_alias.clone(),
             status: TaskStatus::Running,
             owner_pid: std::process::id(),
@@ -107,6 +135,7 @@ impl ChildPersistence for SubagentPersistence {
             delivered: false,
             idem_key: None,
             principal_id: None,
+            executor: Some(request.agent_type.clone()),
             started_at: chrono::Utc::now().to_rfc3339(),
             finished_at: None,
         };
@@ -144,6 +173,39 @@ impl ChildPersistence for SubagentPersistence {
             ))),
             Err(e) => Err(PersistenceError(format!("{e:#}"))),
         }
+    }
+
+    fn load_finished(
+        &self,
+        child_id: &str,
+    ) -> Option<zeroclaw_coordinator::PersistedFinishedChild> {
+        let view = self
+            .store
+            .get_terminal_with_result(child_id)
+            .ok()
+            .flatten()?;
+        let outcome = task_status_to_child_outcome(view.record.status)?;
+        let started_at_epoch_ms = rfc3339_to_epoch_ms(&view.record.started_at);
+        let finished_at_epoch_ms = view
+            .record
+            .finished_at
+            .as_deref()
+            .map(rfc3339_to_epoch_ms)
+            .unwrap_or(started_at_epoch_ms);
+        Some(zeroclaw_coordinator::PersistedFinishedChild {
+            child_id: view.record.id,
+            agent_type: view
+                .record
+                .executor
+                .clone()
+                .unwrap_or_else(|| view.record.agent.clone()),
+            parent_session_id: view.record.parent_id.unwrap_or_default(),
+            outcome,
+            output: view.output.unwrap_or_default(),
+            detail: view.error,
+            started_at_epoch_ms,
+            duration_ms: finished_at_epoch_ms.saturating_sub(started_at_epoch_ms),
+        })
     }
 }
 
@@ -201,7 +263,12 @@ mod tests {
         assert_eq!(rec.parent_id.as_deref(), Some("mum"));
         assert_eq!(
             rec.agent, "parent-alias",
-            "agent column carries the alias, not the session id"
+            "agent column carries the owning parent alias"
+        );
+        assert_eq!(
+            rec.executor.as_deref(),
+            Some("explore"),
+            "executor is the child that ran"
         );
         assert_eq!(rec.status, TaskStatus::Running);
         assert_eq!(rec.kind, TaskKind::Subagent);
@@ -237,6 +304,10 @@ mod tests {
         let claimed = store.claim_undelivered_children("mum").await.unwrap();
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].task_id, "kid");
+        assert_eq!(
+            claimed[0].agent, "explore",
+            "announcement.agent is the executor, not the owning parent"
+        );
         assert_eq!(claimed[0].output.as_deref(), Some("partial output"));
         assert_eq!(claimed[0].detail.as_deref(), Some("boom"));
 
@@ -320,5 +391,35 @@ mod tests {
                 "{outcome:?} did not actually transition the row to the mapped status"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn hosted_run_is_delegate_kind_and_claim_names_the_executor() {
+        let (mut persistence, store) = harness();
+        let mut req = request("kid", "mum");
+        req.overrides.hosted_run = true;
+        req.agent_type = "researcher".into();
+        persistence.record_spawn(&req).expect("spawn write");
+
+        let rec = store.get("kid").await.unwrap().expect("row");
+        assert_eq!(rec.kind, TaskKind::Delegate);
+        assert_eq!(rec.agent, "parent-alias");
+        assert_eq!(rec.executor.as_deref(), Some("researcher"));
+
+        persistence
+            .record_finish(
+                "kid",
+                &ChildResult {
+                    outcome: ChildOutcome::Completed,
+                    output: Arc::from("done"),
+                    child_id: "kid".into(),
+                    ..Default::default()
+                },
+                false,
+            )
+            .expect("finish");
+
+        let claimed = store.claim_undelivered_children("mum").await.unwrap();
+        assert_eq!(claimed[0].agent, "researcher");
     }
 }

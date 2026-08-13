@@ -19,6 +19,8 @@ pub use goal_task::{
     GoalBlocker, GoalBlockerKind, GoalPauseReason, GoalPauseState, GoalTaskRecord,
     GoalTaskRegistry, TaskContinuationContext, TaskContinuationConversationScope, TaskGoal,
 };
-pub use subagent_persistence::{SubagentPersistence, child_outcome_to_task_status};
+pub use subagent_persistence::{
+    SubagentPersistence, child_outcome_to_task_status, task_status_to_child_outcome,
+};
 pub use task_registry::{TaskKind, TaskRecord, TaskRegistry, TaskStatus};
 pub use task_store_sqlite::SqliteTaskStore;

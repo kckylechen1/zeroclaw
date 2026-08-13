@@ -68,7 +68,8 @@ pub struct TaskRecord {
     pub id: String,
     /// Durable task domain type.
     pub kind: TaskKind,
-    /// Agent alias that owns and executes this task.
+    /// Agent alias that owns this task (alias-delete cascades). Who ran, when
+    /// distinct, lives in [`Self::executor`].
     pub agent: String,
     /// Canonical lifecycle state for the task.
     pub status: TaskStatus,
@@ -104,6 +105,13 @@ pub struct TaskRecord {
     pub idem_key: Option<String>,
     #[serde(default)]
     pub principal_id: Option<String>,
+    /// Agent that actually ran this child, when distinct from [`Self::agent`].
+    ///
+    /// `agent` is the owning parent alias (alias-delete, ownership). `executor`
+    /// is who ran — the child's `agent_type`. Announcements use executor.
+    /// `None` for tasks owned and executed by the same agent.
+    #[serde(default)]
+    pub executor: Option<String>,
     /// Task registration/start timestamp in RFC3339 form.
     pub started_at: String,
     /// Terminal transition timestamp in RFC3339 form.

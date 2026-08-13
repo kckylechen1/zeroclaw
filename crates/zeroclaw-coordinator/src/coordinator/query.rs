@@ -69,6 +69,14 @@ impl<R: ChildRunner, P: ChildPersistence> Coordinator<R, P> {
             }
             return;
         }
+        if let Some(persisted) = self.persistence.load_finished(&id)
+            && parent_session_id
+                .as_deref()
+                .is_none_or(|parent| persisted.parent_session_id == parent)
+        {
+            let _ = respond_to.send(Some(persisted.into_snapshot()));
+            return;
+        }
         let _ = respond_to.send(None);
     }
 

@@ -83,7 +83,8 @@
 //! Plugging in a real implementation — sqlite or otherwise — is
 //! [`Coordinator::with_persistence`](crate::Coordinator::with_persistence).
 
-use crate::types::{ChildRequest, ChildResult};
+use crate::outcome::ChildOutcome;
+use crate::types::{ChildRequest, ChildResult, ChildSnapshot, ChildStatus};
 
 /// Failure detail from a persistence write.
 ///
@@ -138,6 +139,53 @@ pub trait ChildPersistence {
     ) -> Result<(), PersistenceError> {
         let _ = (child_id, result, delivered);
         Ok(())
+    }
+
+    /// Load a finished child the actor no longer holds in its completed cache.
+    ///
+    /// Used by Query after a cache miss (eviction or restart). The no-op
+    /// default returns `None`.
+    fn load_finished(&self, child_id: &str) -> Option<PersistedFinishedChild> {
+        let _ = child_id;
+        None
+    }
+}
+
+/// A terminal child reconstructed from the durable store.
+#[derive(Debug, Clone)]
+pub struct PersistedFinishedChild {
+    pub child_id: String,
+    pub agent_type: String,
+    pub parent_session_id: String,
+    pub outcome: ChildOutcome,
+    pub output: String,
+    pub detail: Option<String>,
+    pub started_at_epoch_ms: u64,
+    pub duration_ms: u64,
+}
+
+impl PersistedFinishedChild {
+    #[must_use]
+    pub fn into_snapshot(self) -> ChildSnapshot {
+        ChildSnapshot {
+            child_id: self.child_id,
+            description: String::new(),
+            agent_type: self.agent_type,
+            status: ChildStatus::Finished {
+                outcome: self.outcome,
+                output: self.output,
+                detail: self.detail,
+                tool_calls: 0,
+                turns: 0,
+                tokens_used: 0,
+                output_tokens_used: 0,
+                total_tokens_used: 0,
+                worktree_path: None,
+            },
+            started_at_epoch_ms: self.started_at_epoch_ms,
+            duration_ms: self.duration_ms,
+            persona: None,
+        }
     }
 }
 
