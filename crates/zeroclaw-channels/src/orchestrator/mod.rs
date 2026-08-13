@@ -4280,7 +4280,7 @@ async fn process_channel_message_body(
             ctx.persist_companion_capture(&msg, &history_key, &turn_id);
 
             // Fire-and-forget LLM-driven curated-memory consolidation.
-            // Companion capture is a separate seam and already ran above.
+            // Companion capture already ran at settlement, before send.
             // Passes the agent's resolved temperature through unchanged —
             // `None` means the provider sends no `temperature` field
             // (necessary for models that reject it, e.g. claude-opus-4-7).

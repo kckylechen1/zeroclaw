@@ -26,7 +26,7 @@ impl<'a> CompanionCapture<'a> {
     /// work.
     #[must_use]
     pub fn capture(&self, context: &CaptureContext) -> CaptureReceipt {
-        self.persist(context, CaptureOutcome::NotEvaluated, persist_write_mode())
+        self.persist(context, CaptureOutcome::NotEvaluated)
     }
 
     /// Read a previously persisted receipt for `turn_id`, if the row exists.
@@ -43,19 +43,14 @@ impl<'a> CompanionCapture<'a> {
         }
     }
 
-    fn persist(
-        &self,
-        context: &CaptureContext,
-        outcome: CaptureOutcome,
-        mode: WriteMode,
-    ) -> CaptureReceipt {
+    fn persist(&self, context: &CaptureContext, outcome: CaptureOutcome) -> CaptureReceipt {
         #[cfg(feature = "tachi")]
         {
-            persist::persist_receipt(self.store, context, outcome, mode)
+            persist::persist_receipt(self.store, context, outcome)
         }
         #[cfg(not(feature = "tachi"))]
         {
-            let _ = (self.store, context, outcome, mode);
+            let _ = (self.store, context, outcome);
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -76,9 +71,8 @@ pub fn capture_turn_if_present(
     store.map(|store| CompanionCapture::new(store).capture(context))
 }
 
-/// Channel close-out helper. `agent_alias` is stamped as the opaque agent
-/// identity until per-alias UUID minting exists; it is not an identity source
-/// of record.
+/// Channel close-out helper. Mints or reuses the alias→UUID mapping before
+/// writing a receipt. A mapping write failure skips the row.
 #[must_use]
 pub fn capture_channel_turn(
     store: Option<&CompanionStore>,
@@ -89,17 +83,19 @@ pub fn capture_channel_turn(
     sender: &str,
     owner: &zeroclaw_api::companion::CompanionOwnerGate,
 ) -> Option<CaptureReceipt> {
+    let store = store?;
+    let agent_identity_id = resolve_agent_identity(store, agent_alias)?;
     let context = CaptureContext::from_channel_identity(
-        zeroclaw_api::companion::AgentIdentityId::from_opaque(agent_alias),
+        agent_identity_id,
         session_id,
         turn_id,
         zeroclaw_api::companion::IngressIdentity::new(format!("{channel}:{sender}")),
         owner,
     );
-    capture_turn_if_present(store, &context)
+    Some(CompanionCapture::new(store).capture(&context))
 }
 
-/// Gateway WebSocket close-out helper. Same agent-identity stand-in as
+/// Gateway WebSocket close-out helper. Same mint-once identity as
 /// [`capture_channel_turn`].
 #[must_use]
 pub fn capture_gateway_turn(
@@ -110,27 +106,39 @@ pub fn capture_gateway_turn(
     identity: &str,
     owner: &zeroclaw_api::companion::CompanionOwnerGate,
 ) -> Option<CaptureReceipt> {
+    let store = store?;
+    let agent_identity_id = resolve_agent_identity(store, agent_alias)?;
     let context = CaptureContext::from_gateway_identity(
-        zeroclaw_api::companion::AgentIdentityId::from_opaque(agent_alias),
+        agent_identity_id,
         session_id,
         turn_id,
         zeroclaw_api::companion::IngressIdentity::new(identity),
         owner,
     );
-    capture_turn_if_present(store, &context)
+    Some(CompanionCapture::new(store).capture(&context))
 }
 
-#[derive(Clone, Copy)]
-enum WriteMode {
-    Normal,
-    #[cfg(all(test, feature = "tachi"))]
-    FailPrimary,
-    #[cfg(all(test, feature = "tachi"))]
-    FailAll,
-}
-
-const fn persist_write_mode() -> WriteMode {
-    WriteMode::Normal
+fn resolve_agent_identity(
+    store: &CompanionStore,
+    agent_alias: &str,
+) -> Option<zeroclaw_api::companion::AgentIdentityId> {
+    let store_dir = store.store_dir()?;
+    match super::identity::resolve_or_mint(store_dir, agent_alias) {
+        Ok(id) => Some(id),
+        Err(err) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "alias": agent_alias,
+                        "error": err.to_string(),
+                    })),
+                "companion agent identity could not be minted; skipping capture rather than writing a non-UUID"
+            );
+            None
+        }
+    }
 }
 
 fn ephemeral_receipt(outcome: CaptureOutcome) -> CaptureReceipt {
@@ -155,7 +163,7 @@ mod persist {
         SourcePartition,
     };
 
-    use super::{WriteMode, ephemeral_receipt, now_rfc3339};
+    use super::{ephemeral_receipt, now_rfc3339};
     use crate::companion::CompanionStore;
 
     fn receipt_object_id(turn_id: &str) -> String {
@@ -184,33 +192,12 @@ mod persist {
         store: &CompanionStore,
         context: &CaptureContext,
         outcome: CaptureOutcome,
-        mode: WriteMode,
     ) -> CaptureReceipt {
         if let Some(existing) = read_receipt(store, context.turn_id()) {
             return existing;
         }
-        #[cfg(test)]
-        if matches!(mode, WriteMode::FailAll) {
-            warn_write_failed(
-                context,
-                &MemoryError::Internal("forced undurable write".to_string()),
-            );
-            return ephemeral_receipt(CaptureOutcome::LocalWriteFailed);
-        }
 
-        #[cfg(test)]
-        let primary = if matches!(mode, WriteMode::FailPrimary) {
-            write_sabotaged(store, context, outcome)
-        } else {
-            write_outcome(store, context, outcome)
-        };
-        #[cfg(not(test))]
-        let primary = {
-            let _ = mode;
-            write_outcome(store, context, outcome)
-        };
-
-        match primary {
+        match write_outcome(store, context, outcome) {
             Ok(receipt) => receipt,
             Err(err) => {
                 if outcome == CaptureOutcome::LocalWriteFailed {
@@ -239,6 +226,12 @@ mod persist {
         context: &CaptureContext,
         outcome: CaptureOutcome,
     ) -> Result<CaptureReceipt, MemoryError> {
+        if store.take_write_refusal() {
+            return Err(MemoryError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "companion store refused the write",
+            )));
+        }
         let persisted_at = now_rfc3339();
         let event_id = outbox_event_id(context, outcome);
         let stored = StoredCaptureReceipt {
@@ -291,33 +284,6 @@ mod persist {
                 })
             }
         }
-    }
-
-    #[cfg(test)]
-    fn write_sabotaged(
-        store: &CompanionStore,
-        context: &CaptureContext,
-        outcome: CaptureOutcome,
-    ) -> Result<CaptureReceipt, MemoryError> {
-        let persisted_at = now_rfc3339();
-        let stored = StoredCaptureReceipt {
-            outcome,
-            event_id: None,
-            persisted_at,
-            agent_identity_id: context.agent_identity_id().as_str().to_string(),
-            principal_id: context.principal().id.as_str().to_string(),
-            session_id: context.session_id().to_string(),
-            turn_id: context.turn_id().to_string(),
-            authority_class: context.authority_class(),
-            origin: context.origin(),
-            partition: context.partition(),
-        };
-        let mut entry = memory_entry(context, &stored)?;
-        entry.id = format!("wiki-rem:{}", entry.id);
-        store.with_store_mut(|mem| mem.upsert(&entry))?;
-        Err(MemoryError::Internal(
-            "sabotaged primary write unexpectedly succeeded".to_string(),
-        ))
     }
 
     fn memory_entry(
@@ -408,19 +374,7 @@ mod persist {
 #[cfg(all(test, feature = "tachi"))]
 impl CompanionCapture<'_> {
     fn capture_outcome(&self, context: &CaptureContext, outcome: CaptureOutcome) -> CaptureReceipt {
-        self.persist(context, outcome, WriteMode::Normal)
-    }
-
-    fn capture_forcing_primary_write_failure(&self, context: &CaptureContext) -> CaptureReceipt {
-        self.persist(
-            context,
-            CaptureOutcome::NotEvaluated,
-            WriteMode::FailPrimary,
-        )
-    }
-
-    fn capture_forcing_all_writes_to_fail(&self, context: &CaptureContext) -> CaptureReceipt {
-        self.persist(context, CaptureOutcome::NotEvaluated, WriteMode::FailAll)
+        self.persist(context, outcome)
     }
 }
 
@@ -568,8 +522,8 @@ mod tests {
         fn primary_write_failure_persists_local_write_failed() {
             let tmp = TempDir::new().unwrap();
             let store = open_store(&tmp);
-            let receipt = CompanionCapture::new(&store)
-                .capture_forcing_primary_write_failure(&context("turn-fallback"));
+            store.fail_next_writes(1);
+            let receipt = CompanionCapture::new(&store).capture(&context("turn-fallback"));
             assert_eq!(receipt.outcome, CaptureOutcome::LocalWriteFailed);
             assert!(receipt.is_durable());
             let read = CompanionCapture::new(&store)
@@ -588,8 +542,8 @@ mod tests {
 
             let tmp = TempDir::new().unwrap();
             let store = open_store(&tmp);
-            let receipt = CompanionCapture::new(&store)
-                .capture_forcing_all_writes_to_fail(&context("turn-ephemeral"));
+            store.fail_next_writes(2);
+            let receipt = CompanionCapture::new(&store).capture(&context("turn-ephemeral"));
             assert_eq!(receipt.outcome, CaptureOutcome::LocalWriteFailed);
             assert!(!receipt.is_durable());
             assert!(
@@ -632,6 +586,120 @@ mod tests {
             assert_eq!(first.outcome, second.outcome);
             assert_eq!(first.event_id, second.event_id);
             assert_eq!(pending_outbox_count(&store), 1);
+        }
+
+        #[test]
+        fn same_alias_reuses_minted_uuid_across_capture_and_restart() {
+            let tmp = TempDir::new().unwrap();
+            let owner = owner_gate();
+            let first_id;
+            {
+                let store = open_store(&tmp);
+                let first = capture_channel_turn(
+                    Some(store.as_ref()),
+                    "alpha",
+                    "sess",
+                    "turn-a",
+                    "wechat",
+                    "alice",
+                    &owner,
+                )
+                .expect("first capture");
+                assert!(first.is_durable());
+                first_id = crate::companion::identity::peek(store.store_dir().unwrap(), "alpha")
+                    .expect("minted");
+                let stored =
+                    store.with_store(|mem| mem.get("capture:turn-a").expect("get").expect("row"));
+                let body: serde_json::Value = serde_json::from_str(&stored.text).expect("json");
+                assert_eq!(
+                    body["agent_identity_id"].as_str(),
+                    Some(first_id.as_str()),
+                    "receipt must stamp the minted UUID, not the alias"
+                );
+                let second = capture_channel_turn(
+                    Some(store.as_ref()),
+                    "alpha",
+                    "sess",
+                    "turn-b",
+                    "wechat",
+                    "alice",
+                    &owner,
+                )
+                .expect("second capture");
+                assert!(second.is_durable());
+                let again = crate::companion::identity::peek(store.store_dir().unwrap(), "alpha")
+                    .expect("same map");
+                assert_eq!(first_id, again);
+                assert!(uuid::Uuid::parse_str(first_id.as_str()).is_ok());
+            }
+            let reopened = crate::companion::CompanionStore::open_runtime(
+                &enabled_config(tmp.path())
+                    .companion_memory
+                    .db_path(tmp.path()),
+            )
+            .expect("reopen");
+            let after = crate::companion::identity::peek(reopened.store_dir().unwrap(), "alpha")
+                .expect("survives restart");
+            assert_eq!(first_id, after);
+        }
+
+        #[test]
+        fn identity_mapping_write_failure_skips_the_receipt_row() {
+            let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+            let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+            zeroclaw_log::try_install_capture_subscriber();
+            let mut rx = zeroclaw_log::subscribe_or_install();
+            while rx.try_recv().is_ok() {}
+
+            let tmp = TempDir::new().unwrap();
+            let store = open_store(&tmp);
+            let blocked = store
+                .store_dir()
+                .unwrap()
+                .join(zeroclaw_config::companion::COMPANION_AGENT_IDENTITY_FILE);
+            std::fs::create_dir(&blocked).unwrap();
+            let owner = owner_gate();
+            assert!(
+                capture_channel_turn(
+                    Some(store.as_ref()),
+                    "blocked",
+                    "sess",
+                    "turn-skip",
+                    "wechat",
+                    "alice",
+                    &owner,
+                )
+                .is_none()
+            );
+            assert!(
+                CompanionCapture::new(&store)
+                    .read_receipt("turn-skip")
+                    .is_none(),
+                "mapping failure must not write a receipt"
+            );
+
+            let mut found = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(value) => {
+                        if value.get("severity_text").and_then(|v| v.as_str()) != Some("WARN") {
+                            continue;
+                        }
+                        let message = value.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                        if message.contains("skipping capture rather than writing a non-UUID") {
+                            found = true;
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                    Err(
+                        tokio::sync::broadcast::error::TryRecvError::Empty
+                        | tokio::sync::broadcast::error::TryRecvError::Closed,
+                    ) => break,
+                }
+            }
+            zeroclaw_log::clear_broadcast_hook();
+            assert!(found, "identity write failure must WARN");
         }
     }
 }

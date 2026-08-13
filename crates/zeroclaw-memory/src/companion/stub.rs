@@ -14,4 +14,10 @@ impl CompanionStore {
     pub fn path(&self) -> &std::path::Path {
         std::path::Path::new("")
     }
+
+    /// Directory beside the database. Unreachable: the factory returns `None`.
+    #[must_use]
+    pub fn store_dir(&self) -> Option<&std::path::Path> {
+        None
+    }
 }

@@ -42,6 +42,8 @@ const WS_APPROVAL_TIMEOUT_SECS: u64 = 120;
 /// or, worse, tools route to an arbitrary seeded channel.
 const WS_CHANNEL_KEY: &str = "wss";
 
+/// Capture at turn settlement, before the outcome frame is transmitted.
+/// Delivery failure does not roll the receipt back: the turn already happened.
 fn persist_companion_capture(
     state: &AppState,
     agent_alias: &str,
@@ -1314,6 +1316,8 @@ async fn process_chat_message(
             }
         }
 
+        persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
+
         // Inform the client the turn was aborted
         let aborted = serde_json::json!({ "type": "aborted" });
         let _ = sender.send(Message::Text(aborted.to_string().into())).await;
@@ -1348,7 +1352,6 @@ async fn process_chat_message(
             "gateway_ws_turn"
         );
 
-        persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
         return;
     }
 
@@ -1468,6 +1471,8 @@ async fn process_chat_message(
                 persist_conversation_messages(backend.as_ref(), session_key, &e.new_messages);
             }
 
+            persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
+
             // Set session state to error
             if let Some(ref backend) = state.session_backend {
                 let _ = backend.set_session_state(session_key, "error", Some(&turn_id));
@@ -1524,7 +1529,6 @@ async fn process_chat_message(
                     })),
                 "gateway_ws_turn"
             );
-            persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
         }
     }
 }
@@ -1533,6 +1537,71 @@ async fn process_chat_message(
 mod tests {
     use super::*;
     use axum::http::HeaderMap;
+
+    fn process_chat_message_src() -> &'static str {
+        let src = include_str!("ws.rs");
+        let start = src
+            .find("async fn process_chat_message")
+            .expect("process_chat_message");
+        let rest = &src[start..];
+        let end = rest
+            .find("\n#[cfg(test)]")
+            .expect("test module follows process_chat_message");
+        &rest[..end]
+    }
+
+    #[test]
+    fn cancel_path_captures_before_aborted_frame() {
+        let src = process_chat_message_src();
+        let cancel = src.find("if was_cancelled").expect("cancel branch");
+        let match_result = src.find("match result").expect("match result");
+        let block = &src[cancel..match_result];
+        let capture = block
+            .find("persist_companion_capture")
+            .expect("cancel must call capture");
+        let transmit = block
+            .find("\"type\": \"aborted\"")
+            .expect("cancel must send aborted");
+        assert!(
+            capture < transmit,
+            "cancel must capture at settlement before transmitting aborted"
+        );
+    }
+
+    #[test]
+    fn error_path_captures_before_error_frame() {
+        let src = process_chat_message_src();
+        let err_arm = src.rfind("Err(e) =>").expect("error arm");
+        let block = &src[err_arm..];
+        let capture = block
+            .find("persist_companion_capture")
+            .expect("error must call capture");
+        let transmit = block
+            .find("\"type\": \"error\"")
+            .expect("error must send error frame");
+        assert!(
+            capture < transmit,
+            "error must capture at settlement before transmitting the error frame"
+        );
+    }
+
+    #[test]
+    fn success_path_captures_before_done_frame() {
+        let src = process_chat_message_src();
+        let ok_arm = src.find("Ok(outcome) =>").expect("success arm");
+        let err_arm = src.rfind("Err(e) =>").expect("error arm");
+        let block = &src[ok_arm..err_arm];
+        let capture = block
+            .find("persist_companion_capture")
+            .expect("success must call capture");
+        let transmit = block
+            .find("\"type\": \"done\"")
+            .expect("success must send done");
+        assert!(
+            capture < transmit,
+            "success must capture at settlement before transmitting done"
+        );
+    }
 
     #[test]
     fn ws_turn_has_a_single_channel_identity() {
