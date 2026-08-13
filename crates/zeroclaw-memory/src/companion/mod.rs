@@ -20,11 +20,15 @@ pub use stub::CompanionStore;
 
 mod capture;
 mod identity;
+mod outbox;
 pub use capture::{
     CompanionCapture, capture_channel_turn, capture_gateway_turn, capture_turn_if_present,
 };
 pub use identity::{
     peek as peek_agent_identity, resolve_or_mint as resolve_or_mint_agent_identity,
+};
+pub use outbox::{
+    OUTBOX_OBSERVE_INTERVAL_SECS, OUTBOX_PENDING_AGE_WARN_SECS, companion_outbox_health,
 };
 
 /// Construct the companion store from config.
@@ -112,6 +116,12 @@ mod tests {
         assert!(store.is_none());
         assert!(!expected.exists());
         assert!(!expected.parent().expect("dir").exists());
+        let health = companion_outbox_health(store.as_deref());
+        assert_eq!(
+            health.status,
+            zeroclaw_api::companion::CompanionOutboxStatus::NotConfigured
+        );
+        assert_eq!(health.pending_count, 0);
     }
 
     #[test]

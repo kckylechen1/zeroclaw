@@ -4165,6 +4165,8 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     zeroclaw_memory::reload_companion_store(companion_store, &current_config)?;
                 let (companion_for_gateway, companion_for_channels) =
                     zeroclaw_memory::clone_for_subsystems(&companion_store);
+                let companion_outbox_observer =
+                    spawn_companion_outbox_observer(companion_store.clone());
                 if let Some(store) = companion_store.as_ref() {
                     ::zeroclaw_log::record!(
                         INFO,
@@ -4330,6 +4332,9 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 ))
                 .await;
                 if let Some(handle) = sop_maintenance {
+                    handle.abort();
+                }
+                if let Some(handle) = companion_outbox_observer {
                     handle.abort();
                 }
                 let exit = exit?;
@@ -4574,6 +4579,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     &memory_fallback
                 )
             );
+            print_companion_outbox_line(&config);
 
             println!();
             // Per-agent security: each enabled agent's risk profile.
@@ -4972,6 +4978,8 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     config.sop.maintenance_interval_secs,
                 );
                 let companion_store = zeroclaw_memory::create_companion_store(&config)?;
+                let companion_outbox_observer =
+                    spawn_companion_outbox_observer(companion_store.clone());
                 let result = Box::pin(channels::start_channels(
                     config,
                     None,
@@ -4982,6 +4990,9 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 ))
                 .await;
                 if let Some(handle) = sop_maintenance {
+                    handle.abort();
+                }
+                if let Some(handle) = companion_outbox_observer {
                     handle.abort();
                 }
                 result
@@ -7380,6 +7391,94 @@ fn build_sop_adapters(config: &Config) -> zeroclaw_runtime::sop::SopEngineAdapte
         forge,
         llm,
     }
+}
+
+fn companion_outbox_health_for_cli(
+    config: &zeroclaw_config::schema::Config,
+) -> zeroclaw_api::companion::CompanionOutboxHealth {
+    use zeroclaw_api::companion::CompanionOutboxHealth;
+
+    if !config.companion_memory.enable {
+        return CompanionOutboxHealth::not_configured();
+    }
+    let path = config.companion_memory.db_path(&config.data_dir);
+    if !path.exists() {
+        return CompanionOutboxHealth::not_configured();
+    }
+    match zeroclaw_memory::create_companion_store(config) {
+        Ok(store) => zeroclaw_memory::companion_outbox_health(store.as_deref()),
+        Err(err) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "error": err.to_string(),
+                    })),
+                "companion outbox health could not be read for status"
+            );
+            CompanionOutboxHealth::accumulating(0, None)
+        }
+    }
+}
+
+fn print_companion_outbox_line(config: &zeroclaw_config::schema::Config) {
+    use zeroclaw_api::companion::CompanionOutboxStatus;
+
+    let health = companion_outbox_health_for_cli(config);
+    match health.status {
+        CompanionOutboxStatus::NotConfigured => {
+            println!(
+                "{}",
+                t(
+                    "cli-status-companion-outbox-not-configured",
+                    "Companion outbox: not configured"
+                )
+            );
+        }
+        CompanionOutboxStatus::Accumulating => {
+            let pending = health.pending_count.to_string();
+            if let Some(age) = health.oldest_pending_age_secs {
+                let age = age.to_string();
+                let fallback =
+                    format!("Companion outbox: accumulating ({pending} pending, oldest {age}s)");
+                println!(
+                    "{}",
+                    ta(
+                        "cli-status-companion-outbox-accumulating-oldest",
+                        &[("pending", &pending), ("age", &age)],
+                        &fallback
+                    )
+                );
+            } else {
+                let fallback = format!("Companion outbox: accumulating ({pending} pending)");
+                println!(
+                    "{}",
+                    ta(
+                        "cli-status-companion-outbox-accumulating",
+                        &[("pending", &pending)],
+                        &fallback
+                    )
+                );
+            }
+        }
+    }
+}
+
+fn spawn_companion_outbox_observer(
+    store: Option<std::sync::Arc<zeroclaw_memory::CompanionStore>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let store = store?;
+    Some(::zeroclaw_spawn::spawn!(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+            zeroclaw_memory::OUTBOX_OBSERVE_INTERVAL_SECS,
+        ));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let _health = store.observe_local_outbox();
+        }
+    }))
 }
 
 /// Spawn the periodic SOP maintenance tick (EPIC A1 + SOP cron): on each interval it

@@ -1591,6 +1591,13 @@ fn normalized_webhook_path(path: Option<&str>) -> String {
     }
 }
 
+fn companion_outbox_from_state(state: &AppState) -> zeroclaw_api::companion::CompanionOutboxHealth {
+    match state.companion_store.as_deref() {
+        None => zeroclaw_api::companion::CompanionOutboxHealth::not_configured(),
+        Some(store) => store.observe_local_outbox(),
+    }
+}
+
 /// GET /api/health — component health snapshot
 pub async fn handle_api_health(
     State(state): State<AppState>,
@@ -1601,7 +1608,12 @@ pub async fn handle_api_health(
     }
 
     let snapshot = zeroclaw_runtime::health::snapshot();
-    Json(serde_json::json!({"health": snapshot})).into_response()
+    let companion_outbox = companion_outbox_from_state(&state);
+    Json(serde_json::json!({
+        "health": snapshot,
+        "companion_outbox": companion_outbox,
+    }))
+    .into_response()
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -2311,6 +2323,32 @@ pub(crate) mod tests {
             .expect("response body")
             .to_bytes();
         serde_json::from_slice(&body).expect("valid json response")
+    }
+
+    #[test]
+    fn companion_outbox_from_state_is_not_configured_without_a_store() {
+        let state = test_state(zeroclaw_config::schema::Config::default());
+        let health = companion_outbox_from_state(&state);
+        assert_eq!(
+            health.status,
+            zeroclaw_api::companion::CompanionOutboxStatus::NotConfigured
+        );
+        assert_eq!(health.pending_count, 0);
+        assert_eq!(health.oldest_pending_age_secs, None);
+    }
+
+    #[tokio::test]
+    async fn api_health_reports_not_configured_companion_outbox_without_a_store() {
+        let state = test_state(zeroclaw_config::schema::Config::default());
+        let response = handle_api_health(State(state), HeaderMap::new())
+            .await
+            .into_response();
+        let body = response_json(response).await;
+        assert_eq!(body["companion_outbox"]["status"], "not_configured");
+        assert_eq!(body["companion_outbox"]["pending_count"], 0);
+        assert!(body["companion_outbox"]["oldest_pending_age_secs"].is_null());
+        let encoded = body["companion_outbox"].to_string();
+        assert!(!encoded.contains("synchronized"), "{encoded}");
     }
 
     #[tokio::test]
