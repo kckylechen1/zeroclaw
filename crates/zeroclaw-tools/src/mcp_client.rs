@@ -16,8 +16,8 @@ use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use crate::mcp_era::{
     DiscoverNegotiateError, MCP_MODERN_PROTOCOL_VERSION, McpInputRequiredError, McpResultKind,
-    PeerEra, PeerProtocol, VersionQuality, attach_request_meta, cache_hints_from_result,
-    classify_mcp_result, is_recognized_modern_error, local_cache_ttl,
+    PeerEra, PeerProtocol, ResultTypeError, VersionQuality, attach_request_meta,
+    cache_hints_from_result, classify_mcp_result, is_recognized_modern_error, local_cache_ttl,
     versions_from_unsupported_error,
 };
 use crate::mcp_prompt::{McpGetPromptResult, McpPromptsListResult};
@@ -63,6 +63,10 @@ enum ProbeOutcome {
     Legacy,
     /// Modern peer listed no revision this client knows.
     Incompatible(DiscoverNegotiateError),
+    /// Discover classified Modern, but the result's `resultType` was missing
+    /// or malformed. Fail closed; do not guess `complete` or fall back to
+    /// Legacy.
+    InvalidModernResult(ResultTypeError),
 }
 
 struct OpenedSession {
@@ -143,10 +147,20 @@ fn classify_discover_response(resp: crate::mcp_protocol::JsonRpcResponse) -> Pro
     };
     match PeerProtocol::from_discover_supported(&supported) {
         Ok(peer) => match peer.era {
-            PeerEra::Modern => ProbeOutcome::Modern {
-                peer,
-                capabilities: McpServerCapabilities::from_init_result(result),
-            },
+            PeerEra::Modern => {
+                match classify_mcp_result(PeerEra::Modern, "server/discover", result) {
+                    Ok(McpResultKind::Complete) => ProbeOutcome::Modern {
+                        peer,
+                        capabilities: McpServerCapabilities::from_init_result(result),
+                    },
+                    Ok(McpResultKind::InputRequired(_)) => ProbeOutcome::InvalidModernResult(
+                        ResultTypeError::InputRequiredNotAllowed {
+                            method: "server/discover".to_string(),
+                        },
+                    ),
+                    Err(err) => ProbeOutcome::InvalidModernResult(err),
+                }
+            }
             PeerEra::Legacy => ProbeOutcome::Legacy,
         },
         Err(err) => ProbeOutcome::Incompatible(err),
@@ -285,6 +299,9 @@ async fn open_session(
 ) -> Result<OpenedSession> {
     match probe_peer_era(transport, epoch).await {
         ProbeOutcome::Incompatible(err) => {
+            bail!("MCP server `{server_name}` is incompatible: {err}");
+        }
+        ProbeOutcome::InvalidModernResult(err) => {
             bail!("MCP server `{server_name}` is incompatible: {err}");
         }
         ProbeOutcome::Modern { peer, capabilities } => {
@@ -3591,6 +3608,7 @@ done
                     "jsonrpc": "2.0",
                     "id": 0,
                     "result": {
+                        "resultType": "complete",
                         "supportedVersions": ["2026-07-28"],
                         "capabilities": {"tools": {}}
                     }
@@ -3802,6 +3820,92 @@ done
         assert!(msg.contains("incompatible"), "got: {msg}");
         assert!(msg.contains("no mutually supported"), "got: {msg}");
         assert!(msg.contains("2027-01-01"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn connect_modern_discover_omitted_result_type_fails_closed() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "server/discover"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": {
+                    "supportedVersions": ["2026-07-28"],
+                    "capabilities": {"tools": {}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(500).set_body_string("initialize must not run"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let result = McpServer::connect(http_server_config(server.uri())).await;
+        let err = match result {
+            Ok(_) => panic!("modern discover without resultType must fail"),
+            Err(err) => err,
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains("incompatible"), "got: {msg}");
+        assert!(msg.contains("resultType"), "got: {msg}");
+        assert!(
+            msg.contains("omitted") || msg.contains("must not guess"),
+            "got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_legacy_discover_omitted_result_type_stays_legacy() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "server/discover"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": {
+                    "supportedVersions": ["2025-11-25"],
+                    "capabilities": {"tools": {}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {"tools": {}}
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "notifications/initialized"}),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        mount_tools_list_empty(&server).await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("legacy discover without resultType still initializes");
+        assert_eq!(mcp.peer_era().await, PeerEra::Legacy);
+        assert_eq!(mcp.peer_protocol_version().await, "2025-11-25");
     }
 
     #[tokio::test]

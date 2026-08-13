@@ -433,8 +433,9 @@ pub enum McpResultKind {
 
 /// Well-formed `input_required` that this client will not retry.
 ///
-/// The tool loop has no retry-with-answers path yet; callers must not treat
-/// this as a completed tool result.
+/// Retry-with-answers (`inputResponses` and echoed `requestState`) belongs
+/// to the later tool-loop stage. Callers must not treat this as a completed
+/// tool result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpInputRequiredError {
     pub method: String,
@@ -487,7 +488,7 @@ impl std::fmt::Display for ResultTypeError {
             ),
             Self::NotAnObject => write!(f, "modern MCP result is not a JSON object"),
             Self::InvalidType { raw } => {
-                write!(f, "unrecognized MCP resultType {raw:?}")
+                write!(f, "unrecognized MCP resultType {raw}")
             }
             Self::InputRequiredNotAllowed { method } => write!(
                 f,
@@ -543,12 +544,20 @@ fn classify_modern_result(
             }
             parse_input_required(obj).map(McpResultKind::InputRequired)
         }
-        Some(serde_json::Value::String(unknown)) => Err(ResultTypeError::InvalidType {
-            raw: unknown.clone(),
-        }),
-        Some(other) => Err(ResultTypeError::InvalidType {
-            raw: other.to_string(),
-        }),
+        Some(other) => Err(invalid_result_type(other)),
+    }
+}
+
+/// Bound untrusted `resultType` text the same way `isError` details are
+/// scrubbed: secrets redacted, length capped. Applied at construction so
+/// Display and model-visible error strings cannot echo an unbounded payload.
+fn invalid_result_type(value: &serde_json::Value) -> ResultTypeError {
+    let raw = match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    ResultTypeError::InvalidType {
+        raw: zeroclaw_providers::sanitize_api_error(&raw),
     }
 }
 
@@ -594,35 +603,6 @@ fn parse_input_required(
         input_requests,
         request_state,
     })
-}
-
-/// Attach MRTR retry fields to the original request params.
-///
-/// `request_state` is echoed verbatim when present and omitted when `None`
-/// (the client must not invent one). Does not inspect the blob.
-pub fn attach_input_retry(
-    params: serde_json::Value,
-    input_responses: serde_json::Value,
-    request_state: Option<&str>,
-) -> serde_json::Value {
-    let mut obj = match params {
-        serde_json::Value::Object(map) => map,
-        serde_json::Value::Null => serde_json::Map::new(),
-        other => return other,
-    };
-    obj.insert("inputResponses".to_string(), input_responses);
-    match request_state {
-        Some(state) => {
-            obj.insert(
-                "requestState".to_string(),
-                serde_json::Value::String(state.to_string()),
-            );
-        }
-        None => {
-            obj.remove("requestState");
-        }
-    }
-    serde_json::Value::Object(obj)
 }
 
 #[cfg(test)]
@@ -1137,26 +1117,49 @@ mod tests {
     }
 
     #[test]
-    fn attach_input_retry_echoes_state_and_strips_when_absent() {
-        let with_state = attach_input_retry(
-            json!({"name": "echo", "arguments": {}, "requestState": "stale"}),
-            json!({"github_login": {"action": "accept"}}),
-            Some("AEAD-protected blob"),
+    fn modern_oversized_string_result_type_is_length_bounded() {
+        let huge = "A".repeat(5000);
+        let err = classify_mcp_result(PeerEra::Modern, "tools/call", &json!({"resultType": huge}))
+            .expect_err("unknown huge string");
+        let msg = err.to_string();
+        assert!(msg.contains("unrecognized MCP resultType"), "got: {msg}");
+        assert!(
+            msg.contains("..."),
+            "bounded detail should be truncated: {msg}"
         );
-        assert_eq!(
-            with_state.get("requestState").and_then(|v| v.as_str()),
-            Some("AEAD-protected blob")
+        assert!(
+            msg.len() < 1000,
+            "5000-char resultType not bounded: len={}",
+            msg.len()
         );
-        assert_eq!(
-            with_state.get("inputResponses"),
-            Some(&json!({"github_login": {"action": "accept"}}))
+        assert!(
+            !msg.contains(&"A".repeat(600)),
+            "unbounded payload leaked into error"
         );
-        let without = attach_input_retry(
-            json!({"name": "echo", "requestState": "must-not-echo"}),
-            json!({}),
-            None,
+    }
+
+    #[test]
+    fn modern_oversized_object_result_type_is_length_bounded() {
+        let err = classify_mcp_result(
+            PeerEra::Modern,
+            "tools/call",
+            &json!({"resultType": {"blob": "B".repeat(5000)}}),
+        )
+        .expect_err("object resultType");
+        let msg = err.to_string();
+        assert!(msg.contains("unrecognized MCP resultType"), "got: {msg}");
+        assert!(
+            msg.contains("..."),
+            "bounded detail should be truncated: {msg}"
         );
-        assert!(without.get("requestState").is_none());
-        assert_eq!(without.get("name").and_then(|v| v.as_str()), Some("echo"));
+        assert!(
+            msg.len() < 1000,
+            "huge object resultType not bounded: len={}",
+            msg.len()
+        );
+        assert!(
+            !msg.contains(&"B".repeat(600)),
+            "unbounded object payload leaked into error"
+        );
     }
 }
