@@ -297,8 +297,8 @@ impl ApprovalManager {
     ///
     /// Open failure is not fatal: log WARN and keep today's in-memory
     /// proceed-without-durability path. Once a store is attached, grant or
-    /// redeem write failure fails closed (the gate already refuses to execute
-    /// when `redeem_one_shot` returns `Err`).
+    /// redeem write failure fails closed (`grant_and_claim_one_shot` refuses
+    /// without redeeming a leftover row).
     #[must_use]
     pub fn with_store_at(self, data_dir: &Path) -> Self {
         match try_open_store(data_dir, process_boot_id()) {
@@ -356,7 +356,7 @@ impl ApprovalManager {
     }
 
     /// Mint a one-shot grant for exactly this call. Returns the grant id when
-    /// a store is attached.
+    /// a store is attached and the write succeeds.
     pub fn grant_one_shot(
         &self,
         run_id: &str,
@@ -423,20 +423,60 @@ impl ApprovalManager {
             }
         }
     }
+
+    /// Persist a one-shot grant for this exact call and claim it.
+    ///
+    /// When a store is attached, a grant write failure refuses immediately
+    /// without calling redeem. Otherwise a leftover unconsumed row for the
+    /// same boot/run/tool/args_hash could be spent as if this approval had
+    /// persisted.
+    pub fn grant_and_claim_one_shot(
+        &self,
+        run_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+        approver: &str,
+        channel: &str,
+    ) -> Result<(), store::RedeemFailure> {
+        if self.has_store()
+            && self
+                .grant_one_shot(run_id, tool_name, args, approver, channel)
+                .is_none()
+        {
+            return Err(store::RedeemFailure::NoGrant);
+        }
+        self.redeem_one_shot(run_id, tool_name, args)
+    }
 }
 
-/// Process boot id for local_tool grants. Prefer the daemon control-plane
-/// epoch when one is live; otherwise mint a process-stable fallback so CLI
-/// and tests that never boot the control plane still share one boot scope.
+/// Resolve the local_tool boot id, freezing the first answer for the process.
+///
+/// The choice is whatever is visible on first use: a live ControlPlane boot
+/// id if the plane is already installed, otherwise a process-local UUID.
+/// Later managers reuse that frozen value even if ControlPlane appears
+/// afterwards.
+///
+/// That is deliberately not "always the ControlPlane id". Gateway and
+/// channel construction can attach an approval store before
+/// `init_control_plane` runs; flipping boot_id afterwards would split one
+/// process across two grant namespaces, so independently opened managers
+/// could not redeem each other's rows. Process-local consistency is the
+/// contract; homology with ControlPlane is not required.
+fn resolve_boot_id(slot: &OnceLock<String>, control_plane_boot: Option<&str>) -> String {
+    slot.get_or_init(|| {
+        control_plane_boot
+            .map(str::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    })
+    .clone()
+}
+
 fn process_boot_id() -> String {
-    crate::control_plane::control_plane()
-        .map(|handle| handle.boot_id.clone())
-        .unwrap_or_else(|| {
-            static FALLBACK: OnceLock<String> = OnceLock::new();
-            FALLBACK
-                .get_or_init(|| uuid::Uuid::new_v4().to_string())
-                .clone()
-        })
+    static BOOT_ID: OnceLock<String> = OnceLock::new();
+    resolve_boot_id(
+        &BOOT_ID,
+        crate::control_plane::control_plane().map(|handle| handle.boot_id.as_str()),
+    )
 }
 
 /// Open `data_dir/approvals.db`. Failure returns `None` so callers keep the
@@ -845,6 +885,167 @@ mod approval_precedence_tests {
             Err(super::store::RedeemFailure::NoGrant),
             "write failure must fail closed: no persisted grant, no execution"
         );
+    }
+
+    /// The gate used to ignore `grant_one_shot` returning `None` and still
+    /// redeem. A leftover unconsumed row for the same tuple would then be
+    /// spent as if this approval had been persisted.
+    #[test]
+    fn grant_write_failure_does_not_spend_a_prior_matching_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = with_store(
+            manager(AutonomyLevel::Supervised, &["shell"], &[]),
+            dir.path(),
+        );
+        let args = json!({"command": "ls"});
+        assert!(
+            manager
+                .grant_one_shot("run-1", "shell", &args, "owner", "cli")
+                .is_some()
+        );
+
+        let conn = rusqlite::Connection::open(dir.path().join("approvals.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER deny_insert BEFORE INSERT ON approval_grants
+             BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            manager.grant_and_claim_one_shot("run-1", "shell", &args, "owner", "cli"),
+            Err(super::store::RedeemFailure::NoGrant),
+            "a grant write failure must refuse without redeeming"
+        );
+
+        let consumed: Option<String> = rusqlite::Connection::open(dir.path().join("approvals.db"))
+            .unwrap()
+            .query_row(
+                "SELECT consumed_at FROM approval_grants
+                  WHERE run_id = ?1 AND tool_name = ?2",
+                rusqlite::params!["run-1", "shell"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            consumed.is_none(),
+            "the prior matching grant must still be unconsumed"
+        );
+        assert!(
+            manager.redeem_one_shot("run-1", "shell", &args).is_ok(),
+            "the leftover grant must remain redeemable after the refused write"
+        );
+    }
+
+    /// First manager is built with no ControlPlane. A ControlPlane then
+    /// starts (later boot id). The frozen choice stays the first one, so a
+    /// second manager on the same DB can redeem the first manager's grant.
+    #[tokio::test]
+    async fn frozen_boot_id_ignores_a_later_control_plane_and_cross_redeems() {
+        let slot = std::sync::OnceLock::new();
+        let dir = tempfile::tempdir().unwrap();
+        let args = json!({"command": "ls"});
+
+        let first_boot = super::resolve_boot_id(&slot, None);
+        let first =
+            manager(AutonomyLevel::Supervised, &["shell"], &[]).with_store(std::sync::Arc::new(
+                super::store::ApprovalStore::open(dir.path(), first_boot.as_str())
+                    .expect("store opens"),
+            ));
+
+        let plane = crate::control_plane::ControlPlaneHandle::start(dir.path())
+            .await
+            .unwrap();
+        let after = super::resolve_boot_id(&slot, Some(plane.boot_id.as_str()));
+        assert_eq!(
+            first_boot, after,
+            "the first boot choice must stay frozen after ControlPlane appears"
+        );
+        assert_ne!(
+            after, plane.boot_id,
+            "a later ControlPlane id must not replace the frozen boot"
+        );
+
+        let second =
+            manager(AutonomyLevel::Supervised, &["shell"], &[]).with_store(std::sync::Arc::new(
+                super::store::ApprovalStore::open(dir.path(), after.as_str()).expect("store opens"),
+            ));
+        assert_eq!(
+            first.store.as_ref().unwrap().boot_id(),
+            second.store.as_ref().unwrap().boot_id()
+        );
+        assert!(
+            first
+                .grant_one_shot("run-1", "shell", &args, "owner", "cli")
+                .is_some()
+        );
+        assert!(
+            second.redeem_one_shot("run-1", "shell", &args).is_ok(),
+            "independently opened managers sharing the frozen boot must cross-redeem"
+        );
+        assert!(
+            first
+                .grant_one_shot("run-2", "shell", &args, "owner", "cli")
+                .is_some()
+        );
+        assert!(
+            first.redeem_one_shot("run-2", "shell", &args).is_ok(),
+            "the first manager must also redeem a grant minted by itself after the plane starts"
+        );
+    }
+
+    /// Two managers, two SQLite connections, one data_dir: the consume
+    /// UPDATE is atomic, so a racing redeem of the same grant succeeds
+    /// exactly once.
+    #[test]
+    fn two_managers_racing_redeem_consume_a_grant_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = json!({"command": "ls"});
+        let a = std::sync::Arc::new(with_store(
+            manager(AutonomyLevel::Supervised, &["shell"], &[]),
+            dir.path(),
+        ));
+        let b = std::sync::Arc::new(with_store(
+            manager(AutonomyLevel::Supervised, &["shell"], &[]),
+            dir.path(),
+        ));
+        assert!(
+            a.grant_one_shot("run-1", "shell", &args, "owner", "cli")
+                .is_some()
+        );
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (left, right) = std::thread::scope(|scope| {
+            let barrier_a = std::sync::Arc::clone(&barrier);
+            let manager_a = std::sync::Arc::clone(&a);
+            let args_a = args.clone();
+            let left = scope.spawn(move || {
+                barrier_a.wait();
+                manager_a.redeem_one_shot("run-1", "shell", &args_a)
+            });
+            let barrier_b = std::sync::Arc::clone(&barrier);
+            let manager_b = std::sync::Arc::clone(&b);
+            let args_b = args.clone();
+            let right = scope.spawn(move || {
+                barrier_b.wait();
+                manager_b.redeem_one_shot("run-1", "shell", &args_b)
+            });
+            (left.join().unwrap(), right.join().unwrap())
+        });
+
+        let wins = [&left, &right].iter().filter(|r| r.is_ok()).count();
+        let losses = [&left, &right]
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    Err(super::store::RedeemFailure::AlreadyConsumed)
+                        | Err(super::store::RedeemFailure::NoGrant)
+                )
+            })
+            .count();
+        assert_eq!(wins, 1, "exactly one racing redeem must succeed");
+        assert_eq!(losses, 1, "the other racing redeem must fail closed");
     }
 
     /// Delegated SOP steps derive a new manager; dropping the store there

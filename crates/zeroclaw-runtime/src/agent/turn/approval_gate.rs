@@ -254,16 +254,16 @@ pub(crate) async fn gate_tool_approval(
             // argument set, then consume it right here. The round trip is the
             // check: it proves the call about to execute is the call that was
             // shown to the approver. Without it, "approved" is a boolean that
-            // has already forgotten what it was approving.
-            mgr.grant_one_shot(
+            // has already forgotten what it was approving. A grant write
+            // failure must refuse before redeem: a leftover unconsumed row
+            // for the same tuple is not this approval.
+            if let Err(failure) = mgr.grant_and_claim_one_shot(
                 ctx.turn_id,
                 tool_name,
                 tool_args,
                 &decision_channel,
                 ctx.channel_name,
-            );
-
-            if let Err(failure) = mgr.redeem_one_shot(ctx.turn_id, tool_name, tool_args) {
+            ) {
                 let reason = format!(
                     "Approval could not be redeemed for this call ({failure:?}); refusing to \
                      execute on an approval that does not match it."
