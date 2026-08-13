@@ -42,6 +42,31 @@ const WS_APPROVAL_TIMEOUT_SECS: u64 = 120;
 /// or, worse, tools route to an arbitrary seeded channel.
 const WS_CHANNEL_KEY: &str = "wss";
 
+fn persist_companion_capture(
+    state: &AppState,
+    agent_alias: &str,
+    session_id: &str,
+    turn_id: &str,
+    auth_subject: Option<&str>,
+) {
+    let Some(store) = state.companion_store.as_ref() else {
+        return;
+    };
+    let owner = state.config.read().companion_memory.owner.gate();
+    let identity = match auth_subject.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(subject) => format!("{WS_CHANNEL_KEY}:{subject}"),
+        None => WS_CHANNEL_KEY.to_string(),
+    };
+    let _ = zeroclaw_memory::capture_gateway_turn(
+        Some(store.as_ref()),
+        agent_alias,
+        session_id,
+        turn_id,
+        &identity,
+        &owner,
+    );
+}
+
 #[derive(Debug, Deserialize)]
 struct ConnectParams {
     #[serde(rename = "type")]
@@ -1323,6 +1348,7 @@ async fn process_chat_message(
             "gateway_ws_turn"
         );
 
+        persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
         return;
     }
 
@@ -1332,8 +1358,10 @@ async fn process_chat_message(
                 persist_conversation_messages(backend.as_ref(), session_key, &outcome.new_messages);
             }
 
-            // Fire-and-forget memory consolidation so facts from WS sessions
-            // are extracted to long-term memory (Daily + Core categories).
+            persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
+
+            // Fire-and-forget curated-memory consolidation (sqlite Memory).
+            // Companion capture is a separate seam and already ran above.
             if state.auto_save {
                 if let Some(mem) = ws_memory.clone() {
                     let model_provider = state.model_provider.clone();
@@ -1496,6 +1524,7 @@ async fn process_chat_message(
                     })),
                 "gateway_ws_turn"
             );
+            persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
         }
     }
 }

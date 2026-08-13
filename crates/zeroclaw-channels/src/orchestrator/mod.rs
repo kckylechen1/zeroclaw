@@ -515,9 +515,24 @@ struct ChannelRuntimeContext {
 
 impl ChannelRuntimeContext {
     /// Companion PortableKernel handle injected from the composition root.
-    /// PR1 owns open/close/reload; turn-path capture is a later slice.
     pub(crate) fn companion_store(&self) -> Option<&Arc<zeroclaw_memory::CompanionStore>> {
         self.companion_store.as_ref()
+    }
+
+    fn persist_companion_capture(&self, msg: &ChannelMessage, session_id: &str, turn_id: &str) {
+        let Some(store) = self.companion_store.as_ref() else {
+            return;
+        };
+        let owner = self.prompt_config.companion_memory.owner.gate();
+        let _ = zeroclaw_memory::capture_channel_turn(
+            Some(store.as_ref()),
+            self.agent_alias.as_str(),
+            session_id,
+            turn_id,
+            msg.channel.as_str(),
+            msg.sender.as_str(),
+            &owner,
+        );
     }
 }
 
@@ -4262,10 +4277,13 @@ async fn process_channel_message_body(
                 ChatMessage::assistant(&history_response),
             );
 
-            // Fire-and-forget LLM-driven memory consolidation. Passes the
-            // agent's resolved temperature through unchanged — `None`
-            // means the provider sends no `temperature` field (necessary
-            // for models that reject it, e.g. claude-opus-4-7).
+            ctx.persist_companion_capture(&msg, &history_key, &turn_id);
+
+            // Fire-and-forget LLM-driven curated-memory consolidation.
+            // Companion capture is a separate seam and already ran above.
+            // Passes the agent's resolved temperature through unchanged —
+            // `None` means the provider sends no `temperature` field
+            // (necessary for models that reject it, e.g. claude-opus-4-7).
             if ctx.auto_save_memory && msg.content.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS {
                 let memory_strategy = Arc::clone(&ctx.memory_strategy);
                 let model_provider = Arc::clone(&ctx.model_provider);

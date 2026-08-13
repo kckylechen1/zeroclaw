@@ -62,7 +62,8 @@ pub use backend::{
     memory_backend_profile, selectable_memory_backends,
 };
 pub use companion::{
-    CompanionStore, clone_for_subsystems, create_companion_store, reload_companion_store,
+    CompanionCapture, CompanionStore, capture_channel_turn, capture_gateway_turn,
+    capture_turn_if_present, clone_for_subsystems, create_companion_store, reload_companion_store,
 };
 #[allow(unused_imports)]
 pub use embeddings::EmbeddingIdentity;

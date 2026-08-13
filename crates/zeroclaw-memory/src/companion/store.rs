@@ -69,6 +69,14 @@ impl CompanionStore {
         self.store.lock().store_profile()
     }
 
+    pub(crate) fn with_store<T>(&self, f: impl FnOnce(&MemoryStore) -> T) -> T {
+        f(&self.store.lock())
+    }
+
+    pub(crate) fn with_store_mut<T>(&self, f: impl FnOnce(&mut MemoryStore) -> T) -> T {
+        f(&mut self.store.lock())
+    }
+
     #[cfg(test)]
     pub(crate) fn store_handle(&self) -> &Mutex<MemoryStore> {
         &self.store
