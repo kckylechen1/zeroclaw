@@ -1,18 +1,30 @@
-//! Companion-memory configuration: who the owner is.
+//! Companion-memory configuration: store enablement, location, and owner gate.
+//!
+//! `[companion_memory].enable` defaults to false. The store file is
+//! `{store_dir}/companion-memory.db`, and `store_dir` defaults to
+//! `{data_dir}/companion`. Capture and domain logic live in later slices.
 //!
 //! `[companion_memory.owner]` declares an opaque `principal_id` plus an
 //! explicit ingress-identity list. A list hit is the owner. Everything else
 //! is shared-operator and can never produce `owner_authored`. Single-user
 //! convenience: an empty list plus `trust_local = true` treats Trusted
 //! CLI/stdio/pairing as owner.
-//!
-//! Store paths, enable flags, and capture wiring live elsewhere. This module
-//! is the owner-gate section only.
+
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use zeroclaw_api::companion::{CompanionOwnerGate, IngressIdentity};
 use zeroclaw_api::principal::PrincipalId;
 use zeroclaw_macros::Configurable;
+
+/// Directory name under `data_dir` when `[companion_memory].store_dir` is unset.
+pub const COMPANION_STORE_DIR_NAME: &str = "companion";
+/// SQLite filename inside the companion store directory.
+pub const COMPANION_MEMORY_DB_FILE: &str = "companion-memory.db";
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 /// Top-level `[companion_memory]` section.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, Configurable)]
@@ -20,6 +32,14 @@ use zeroclaw_macros::Configurable;
 #[serde(default, deny_unknown_fields)]
 #[prefix = "companion_memory"]
 pub struct CompanionMemoryConfig {
+    /// Open the companion PortableKernel store. Compiled default is `false`.
+    /// Feature-off builds still parse this flag but never open memcore.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enable: bool,
+    /// Directory holding `companion-memory.db`. Empty/absent means
+    /// `{data_dir}/companion`. Relative paths are resolved against `data_dir`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_dir: Option<PathBuf>,
     /// Who may produce `owner_authored` companion-memory rows.
     #[nested]
     pub owner: CompanionOwnerConfig,
@@ -31,6 +51,27 @@ impl CompanionMemoryConfig {
     #[must_use]
     pub fn is_unset(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Directory that will hold `companion-memory.db`.
+    #[must_use]
+    pub fn resolved_store_dir(&self, data_dir: &Path) -> PathBuf {
+        match self
+            .store_dir
+            .as_ref()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            Some(dir) if dir.is_absolute() => dir.clone(),
+            Some(dir) => data_dir.join(dir),
+            None => data_dir.join(COMPANION_STORE_DIR_NAME),
+        }
+    }
+
+    /// Full path of the companion PortableKernel database file.
+    #[must_use]
+    pub fn db_path(&self, data_dir: &Path) -> PathBuf {
+        self.resolved_store_dir(data_dir)
+            .join(COMPANION_MEMORY_DB_FILE)
     }
 
     /// # Errors
@@ -184,6 +225,8 @@ trust_local = false
     fn missing_companion_memory_section_defaults_closed() {
         let cfg: Config = toml::from_str("").expect("empty config parses");
         assert!(cfg.companion_memory.is_unset());
+        assert!(!cfg.companion_memory.enable);
+        assert!(cfg.companion_memory.store_dir.is_none());
         assert!(cfg.companion_memory.owner.principal_id.is_empty());
         assert!(cfg.companion_memory.owner.identities.is_empty());
         assert!(!cfg.companion_memory.owner.trust_local);
@@ -296,5 +339,58 @@ nope = true
         .expect_err("deny_unknown_fields on companion_memory");
         let msg = err.to_string();
         assert!(msg.contains("nope") || msg.contains("unknown"), "{msg}");
+    }
+
+    #[test]
+    fn enable_defaults_false_and_is_not_unset_when_true() {
+        let cfg: Config = toml::from_str("").expect("empty config parses");
+        assert!(!cfg.companion_memory.enable);
+        assert!(cfg.companion_memory.is_unset());
+
+        let enabled: Config = toml::from_str(
+            r#"
+[companion_memory]
+enable = true
+"#,
+        )
+        .expect("enable parses");
+        assert!(enabled.companion_memory.enable);
+        assert!(!enabled.companion_memory.is_unset());
+    }
+
+    #[test]
+    fn store_dir_defaults_under_data_dir_and_honors_explicit_path() {
+        let cfg: Config = toml::from_str("").expect("empty");
+        let data = std::path::Path::new("/tmp/zc-data");
+        assert_eq!(
+            cfg.companion_memory.resolved_store_dir(data),
+            data.join("companion")
+        );
+        assert_eq!(
+            cfg.companion_memory.db_path(data),
+            data.join("companion").join("companion-memory.db")
+        );
+
+        let relative: CompanionMemoryConfig = toml::from_str(
+            r#"
+store_dir = "alt-companion"
+"#,
+        )
+        .expect("relative store_dir parses");
+        assert_eq!(
+            relative.resolved_store_dir(data),
+            data.join("alt-companion")
+        );
+
+        let absolute: CompanionMemoryConfig = toml::from_str(
+            r#"
+store_dir = "/var/lib/zeroclaw/companion"
+"#,
+        )
+        .expect("absolute store_dir parses");
+        assert_eq!(
+            absolute.resolved_store_dir(data),
+            std::path::PathBuf::from("/var/lib/zeroclaw/companion")
+        );
     }
 }

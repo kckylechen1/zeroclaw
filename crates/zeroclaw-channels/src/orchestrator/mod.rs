@@ -441,6 +441,9 @@ struct ChannelRuntimeContext {
     prompt_config: Arc<zeroclaw_config::schema::Config>,
     memory: Arc<dyn Memory>,
     memory_strategy: Arc<dyn MemoryStrategy>,
+    /// Companion PortableKernel store. Shared across agents; sibling of
+    /// `memory_strategy`, not inside `TachiMemory`.
+    companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
     tools_registry: Arc<Vec<Box<dyn Tool>>>,
     observer: Arc<dyn Observer>,
     system_prompt: Arc<String>,
@@ -508,6 +511,14 @@ struct ChannelRuntimeContext {
     persist_locks: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
+}
+
+impl ChannelRuntimeContext {
+    /// Companion PortableKernel handle held for later capture. PR1 only owns
+    /// open/close/reload; turn-path capture is a later slice.
+    pub(crate) fn companion_store(&self) -> Option<&Arc<zeroclaw_memory::CompanionStore>> {
+        self.companion_store.as_ref()
+    }
 }
 
 /// Acquire the per-conversation-history-key persistence lock so that
@@ -7069,6 +7080,8 @@ pub async fn start_channels(
         .unwrap_or_else(zeroclaw_runtime::i18n::detect_locale);
     zeroclaw_runtime::i18n::init(&i18n_locale);
 
+    let companion_store = zeroclaw_memory::create_companion_store(&config)?;
+
     // Single session backend shared across agents — they're scoped by
     // `session_key` (which already encodes `<channel_type>.<alias>`), so
     // multiple agent ctxs reading the same backend never overlap.
@@ -7605,6 +7618,7 @@ pub async fn start_channels(
             prompt_config: Arc::new(config.clone()),
             memory: Arc::clone(&mem),
             memory_strategy,
+            companion_store: companion_store.clone(),
             tools_registry: Arc::clone(&tools_registry),
             observer: Arc::clone(&observer),
             system_prompt: Arc::new(system_prompt),
@@ -8167,6 +8181,7 @@ fn concurrent_persist_lock_serialization() {
                 std::path::PathBuf::new(),
             ),
         ),
+        companion_store: None,
         tools_registry: Arc::new(vec![]),
         observer: Arc::new(NoopObserver),
         system_prompt: Arc::new(String::new()),

@@ -493,10 +493,12 @@ pub struct Config {
     #[nested]
     pub personas: HashMap<String, crate::persona::PersonaKnobs>,
 
-    /// Companion-memory owner gate (`[companion_memory.owner]`).
+    /// Companion-memory store and owner gate (`[companion_memory]`).
     ///
-    /// Declares who may produce `owner_authored` rows. Unmatched ingress is
-    /// `shared_operator` and can never produce `owner_authored`.
+    /// `enable` defaults to false. Store files live under `{data_dir}/companion`
+    /// unless `store_dir` is set. `[companion_memory.owner]` declares who may
+    /// produce `owner_authored` rows. Unmatched ingress is `shared-operator`
+    /// and can never produce `owner_authored`.
     #[serde(
         default,
         skip_serializing_if = "crate::companion::CompanionMemoryConfig::is_unset"

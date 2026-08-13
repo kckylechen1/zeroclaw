@@ -13,6 +13,7 @@ pub mod backend;
 pub mod budget;
 pub mod chunker;
 pub mod classify;
+pub mod companion;
 pub mod conflict;
 pub mod consolidation;
 pub mod decay;
@@ -60,6 +61,7 @@ pub use backend::{
     MemoryBackendKind, MemoryBackendProfile, classify_memory_backend, default_memory_backend_key,
     memory_backend_profile, selectable_memory_backends,
 };
+pub use companion::{CompanionStore, create_companion_store, reload_companion_store};
 #[allow(unused_imports)]
 pub use embeddings::EmbeddingIdentity;
 pub use lucid::LucidMemory;
