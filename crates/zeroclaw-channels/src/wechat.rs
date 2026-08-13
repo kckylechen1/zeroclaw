@@ -3854,7 +3854,7 @@ mod tests {
         loop {
             let probe = load_persisted_wechat(&state_dir);
             let token_ready = probe.get_context_token("user_a").as_deref() == Some("ctx_abc123");
-            if token_ready && rx.len() >= 1 {
+            if token_ready && !rx.is_empty() {
                 assert_eq!(
                     *probe.cursor.lock(),
                     "original_cursor",
