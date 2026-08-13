@@ -189,14 +189,9 @@ impl PeerProtocol {
         } else {
             overlap.iter().max().copied().expect("overlap is non-empty")
         };
-        let mut peer = Self::classify(selected);
-        // Answering `server/discover` is itself a modern-era signal. The
-        // modern transport arm cannot speak a handshake-era date in `_meta`.
-        peer.era = PeerEra::Modern;
-        if selected < MCP_MODERN_PROTOCOL_VERSION {
-            peer.version = MCP_MODERN_PROTOCOL_VERSION.to_string();
-        }
-        Ok(peer)
+        // Spoken era follows the selected revision. Handshake-era overlap is
+        // Legacy (initialize is legal); only a modern date selects Modern.
+        Ok(Self::classify(selected))
     }
 
     /// Parse `initialize.result.protocolVersion`. Missing or non-string
@@ -279,15 +274,48 @@ pub fn client_request_meta(version: &str) -> serde_json::Value {
     })
 }
 
-/// Insert modern `_meta` into `params` when it is not already present.
+/// Merge caller `_meta` extensions with the negotiated protocol keys.
+/// `protocolVersion` and `clientCapabilities` always come from `version`;
+/// caller keys that are not those required fields are preserved.
 pub fn attach_request_meta(params: serde_json::Value, version: &str) -> serde_json::Value {
-    let meta = client_request_meta(version);
+    let required = client_request_meta(version);
+    let merged_meta = match params.get("_meta") {
+        Some(serde_json::Value::Object(existing)) => {
+            let mut merged = existing.clone();
+            if let serde_json::Value::Object(required) = required {
+                merged.insert(
+                    META_PROTOCOL_VERSION.to_string(),
+                    required
+                        .get(META_PROTOCOL_VERSION)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                merged.insert(
+                    META_CLIENT_CAPABILITIES.to_string(),
+                    required
+                        .get(META_CLIENT_CAPABILITIES)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                merged
+                    .entry(META_CLIENT_INFO.to_string())
+                    .or_insert_with(|| {
+                        required
+                            .get(META_CLIENT_INFO)
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null)
+                    });
+            }
+            serde_json::Value::Object(merged)
+        }
+        _ => required,
+    };
     match params {
         serde_json::Value::Object(mut map) => {
-            map.entry("_meta").or_insert(meta);
+            map.insert("_meta".to_string(), merged_meta);
             serde_json::Value::Object(map)
         }
-        serde_json::Value::Null => json!({ "_meta": meta }),
+        serde_json::Value::Null => json!({ "_meta": merged_meta }),
         other => other,
     }
 }
@@ -552,12 +580,21 @@ mod tests {
     }
 
     #[test]
-    fn discover_legacy_only_overlap_stays_modern_and_snaps_spoken_version() {
+    fn discover_legacy_only_overlap_is_legacy() {
         let peer =
             PeerProtocol::from_discover_supported(
                 &[MCP_LEGACY_LATEST_PROTOCOL_VERSION.to_string()],
             )
             .expect("overlap");
+        assert_eq!(peer.era, PeerEra::Legacy);
+        assert_eq!(peer.version, MCP_LEGACY_LATEST_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn discover_modern_only_overlap_is_modern() {
+        let peer =
+            PeerProtocol::from_discover_supported(&[MCP_MODERN_PROTOCOL_VERSION.to_string()])
+                .expect("overlap");
         assert_eq!(peer.era, PeerEra::Modern);
         assert_eq!(peer.version, MCP_MODERN_PROTOCOL_VERSION);
     }
@@ -576,17 +613,29 @@ mod tests {
     }
 
     #[test]
-    fn attach_request_meta_does_not_overwrite_existing_meta() {
+    fn attach_request_meta_overlays_required_keys_and_keeps_extensions() {
         let params = attach_request_meta(
-            json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "keep"}}),
+            json!({
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "keep-me",
+                    "io.modelcontextprotocol/clientCapabilities": {"stale": true},
+                    "traceparent": "00-trace"
+                }
+            }),
             MCP_MODERN_PROTOCOL_VERSION,
         );
+        let meta = params.get("_meta").expect("meta");
         assert_eq!(
-            params
-                .get("_meta")
-                .and_then(|m| m.get(META_PROTOCOL_VERSION))
-                .and_then(|v| v.as_str()),
-            Some("keep")
+            meta.get(META_PROTOCOL_VERSION).and_then(|v| v.as_str()),
+            Some(MCP_MODERN_PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            meta.get(META_CLIENT_CAPABILITIES),
+            Some(&json!({"resources": {}, "prompts": {}}))
+        );
+        assert_eq!(
+            meta.get("traceparent").and_then(|v| v.as_str()),
+            Some("00-trace")
         );
     }
 

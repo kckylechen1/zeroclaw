@@ -85,6 +85,22 @@ fn apply_request_timeout(
     }
 }
 
+/// Apply user-configured headers. Modern peers must not send `Mcp-Session-Id`
+/// even when it is present in the server config map.
+fn apply_configured_headers(
+    mut req: reqwest::RequestBuilder,
+    headers: &std::collections::HashMap<String, String>,
+    era: PeerEra,
+) -> reqwest::RequestBuilder {
+    for (key, value) in headers {
+        if era == PeerEra::Modern && key.eq_ignore_ascii_case(MCP_SESSION_ID_HEADER) {
+            continue;
+        }
+        req = req.header(key, value);
+    }
+    req
+}
+
 /// Modern Streamable HTTP POST headers. `MCP-Protocol-Version` is taken from
 /// the request's [`PeerProtocol`], not re-parsed from the body.
 fn apply_modern_post_headers(
@@ -1058,9 +1074,7 @@ impl SharedMcpTransportConn for HttpTransport {
         if !has_content_type {
             req = req.header("Content-Type", MCP_JSON_CONTENT_TYPE);
         }
-        for (key, value) in &self.headers {
-            req = req.header(key, value);
-        }
+        req = apply_configured_headers(req, &self.headers, lifecycle.era());
         if !has_accept {
             req = req.header("Accept", MCP_STREAMABLE_ACCEPT);
         }
@@ -1726,9 +1740,7 @@ impl SharedMcpTransportConn for SseTransport {
         if !has_content_type {
             req = req.header("Content-Type", MCP_JSON_CONTENT_TYPE);
         }
-        for (key, value) in &self.headers {
-            req = req.header(key, value);
-        }
+        req = apply_configured_headers(req, &self.headers, lifecycle.era());
         if !has_accept {
             req = req.header("Accept", MCP_STREAMABLE_ACCEPT);
         }
@@ -1776,21 +1788,25 @@ impl SharedMcpTransportConn for SseTransport {
                     }
                 }
             }
-        }
-        drop(epoch_guard);
-
-        if let Some(resp) = got_direct {
-            return finish_response(request, lifecycle, resp);
-        }
-
-        if !status.is_success() {
+            drop(epoch_guard);
+        } else {
+            drop(epoch_guard);
             if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
                 return Err(McpTransportError::StaleSession {
                     status: status.as_u16(),
                 }
                 .into());
             }
+            let body = resp.text().await.unwrap_or_default();
+            if let Some(rpc) = modern_rpc_error_from_http_body(&body) {
+                return finish_response(request, lifecycle, rpc);
+            }
+            lifecycle.mark_completed();
             bail!("MCP server returned HTTP {}", status);
+        }
+
+        if let Some(resp) = got_direct {
+            return finish_response(request, lifecycle, resp);
         }
 
         let Some((_pending_guard, rx)) = rx else {
@@ -2986,6 +3002,91 @@ mod tests {
             Some("tools/list")
         );
         assert!(req.headers().get(MCP_NAME_HEADER).is_none());
+    }
+
+    #[tokio::test]
+    async fn http_transport_modern_era_strips_configured_session_header() {
+        use std::collections::HashMap;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"ok": true}
+            })))
+            .mount(&server)
+            .await;
+
+        let mut headers = HashMap::new();
+        headers.insert(MCP_SESSION_ID_HEADER.to_string(), "from-config".into());
+        headers.insert("X-Custom".to_string(), "keep".into());
+        let config = McpServerConfig {
+            name: "modern-http".into(),
+            transport: McpTransport::Http,
+            url: Some(server.uri()),
+            headers,
+            ..Default::default()
+        };
+        let transport = HttpTransport::new(&config).expect("build transport");
+        let lifecycle =
+            McpRequestLifecycle::uncoordinated_for_peer(0, &PeerProtocol::modern_default());
+        let request = JsonRpcRequest::new(1, "tools/list", serde_json::json!({}));
+        SharedMcpTransportConn::send_and_recv(&transport, &request, &lifecycle)
+            .await
+            .expect("modern POST");
+
+        let received = server.received_requests().await.expect("requests");
+        assert_eq!(received.len(), 1);
+        assert!(
+            received[0].headers.get(MCP_SESSION_ID_HEADER).is_none(),
+            "configured Mcp-Session-Id must not ride on a modern POST"
+        );
+        assert_eq!(
+            received[0]
+                .headers
+                .get("X-Custom")
+                .and_then(|v| v.to_str().ok()),
+            Some("keep")
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_transport_400_modern_error_is_jsonrpc_response() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "error": {
+                    "code": -32022,
+                    "message": "Unsupported protocol version",
+                    "data": {"supported": ["2026-07-28"], "requested": "1900-01-01"}
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let config = McpServerConfig {
+            name: "test-sse".into(),
+            transport: McpTransport::Sse,
+            url: Some(server.uri()),
+            ..Default::default()
+        };
+        let transport = SseTransport::new(&config).expect("build transport");
+        let req = JsonRpcRequest::new(0, "server/discover", serde_json::json!({}));
+        let lifecycle = McpRequestLifecycle::uncoordinated(0);
+        let resp = transport
+            .send_and_recv(&req, &lifecycle)
+            .await
+            .expect("modern 400 must surface as JSON-RPC");
+        let error = resp.error.expect("error payload");
+        assert_eq!(error.code, crate::mcp_era::UNSUPPORTED_PROTOCOL_VERSION);
     }
 
     #[tokio::test]
