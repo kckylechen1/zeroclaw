@@ -345,6 +345,12 @@ impl OpenAiModelProvider {
         })
     }
 
+    /// Compact JSON of the chat-completions `tools` array. Byte-identical to
+    /// `NativeChatRequest.tools` as serialized by [`Self::chat`].
+    pub fn chat_tools_wire(tools: &[ToolSpec]) -> serde_json::Result<String> {
+        serde_json::to_string(&Self::convert_tools(Some(tools)).unwrap_or_default())
+    }
+
     fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
         messages
             .iter()

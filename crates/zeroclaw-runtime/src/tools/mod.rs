@@ -13,6 +13,8 @@ pub mod delegate;
 pub mod file_read;
 pub mod model_switch;
 pub mod param_options;
+#[cfg(test)]
+mod provider_wire_budget;
 pub mod read_skill;
 mod runtime_command_error;
 pub mod schedule;
