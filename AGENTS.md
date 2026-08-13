@@ -134,13 +134,10 @@ is still ours simply stays.
   `tools/tool_search.rs`, `tools/mcp_deferred.rs`, `config/helpers.rs`). The
   first line of defence stays server-side: expose no trading write tools on the
   hapi-edge profile the agent connects to.
-- **Approvals are memory-only in practice.** The durable half exists but is
-  never wired in: `crates/zeroclaw-runtime/src/approval/store.rs` implements
-  one-shot grants bound to boot + run + tool + args hash (300s TTL,
-  single-consume redeem) plus an `approval_audit` table, and the approval gate
-  already calls it — but every production constructor passes `store: None`, so
-  a restart still erases all approval state and no durable audit trail is
-  written. Activation and the Tachi grant/receipt contract are tracked in #58.
+- **Approvals:** local_tool grants persist in `data_dir/approvals.db` (boot +
+  run + tool + args hash, 300s TTL, single-consume). Store open failure keeps
+  in-memory proceed (WARN); grant/redeem write failure denies. Node grant
+  envelope/claim and Tachi projection remain in #58.
 
 ### Memory Contract (#634 option C; direct-leg mandate superseded by #2389 / #2432)
 

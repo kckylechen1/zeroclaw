@@ -1436,7 +1436,8 @@ impl Agent {
             ApprovalManager::for_non_interactive_backchannel(risk_profile)
         } else {
             ApprovalManager::for_non_interactive(risk_profile)
-        };
+        }
+        .with_store_at(&config.data_dir);
 
         let structured_history_cap_resolver: Arc<dyn Fn() -> usize + Send + Sync> =
             if let Some(cap_config) = live_config {

@@ -17,6 +17,8 @@ use std::collections::HashSet;
 #[cfg(unix)]
 use std::io::BufReader;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 use zeroclaw_config::schema::RiskProfileConfig;
 
 // ── Types ────────────────────────────────────────────────────────
@@ -105,11 +107,12 @@ pub struct ApprovalManager {
     session_allowlist: Mutex<HashSet<String>>,
     /// Audit trail of approval decisions. Process-local: a restart erases it.
     audit_log: Mutex<Vec<ApprovalLogEntry>>,
-    /// Durable half. When present, every gate outcome is also appended to a
-    /// trail that survives a restart, and approvals mint a one-shot grant
-    /// bound to the exact call. Absent in tests and for callers that have no
-    /// data directory, in which case behaviour is unchanged.
-    store: Option<std::sync::Arc<store::ApprovalStore>>,
+    /// Durable half. Production constructors attach `data_dir/approvals.db`
+    /// via [`Self::with_store_at`]; open failure leaves this `None` so
+    /// in-memory approval proceeds. When present, every gate outcome is also
+    /// appended to a trail that survives a restart, and approvals mint a
+    /// one-shot grant bound to the exact call.
+    store: Option<Arc<store::ApprovalStore>>,
 }
 
 impl ApprovalManager {
@@ -161,8 +164,10 @@ impl ApprovalManager {
     /// back-channel parent keeps routing shell approvals through the client
     /// channel, and a plain non-interactive parent stays auto-deny. Policy
     /// sets (`auto_approve` / `always_ask` / autonomy level) come entirely
-    /// from `risk_profile`; the session allowlist and audit trail start
-    /// fresh — "Always" grants to one agent never transfer to another.
+    /// from `risk_profile`; the session allowlist and in-memory audit trail
+    /// start fresh — "Always" grants to one agent never transfer to another.
+    /// The durable store Arc is inherited so a delegated step shares the same
+    /// `approvals.db` rather than silently dropping persistence.
     pub fn derive_for_risk_profile(&self, risk_profile: &RiskProfileConfig) -> Self {
         Self {
             auto_approve: risk_profile.auto_approve.iter().cloned().collect(),
@@ -172,7 +177,7 @@ impl ApprovalManager {
             non_interactive_shell_requires_approval: self.non_interactive_shell_requires_approval,
             session_allowlist: Mutex::new(HashSet::new()),
             audit_log: Mutex::new(Vec::new()),
-            store: None,
+            store: self.store.clone(),
         }
     }
 
@@ -283,9 +288,23 @@ impl ApprovalManager {
     /// before, which is the point: the store is an addition, never a
     /// precondition for the gate working.
     #[must_use]
-    pub fn with_store(mut self, store: std::sync::Arc<store::ApprovalStore>) -> Self {
+    pub fn with_store(mut self, store: Arc<store::ApprovalStore>) -> Self {
         self.store = Some(store);
         self
+    }
+
+    /// Try to attach `data_dir/approvals.db` for this process boot.
+    ///
+    /// Open failure is not fatal: log WARN and keep today's in-memory
+    /// proceed-without-durability path. Once a store is attached, grant or
+    /// redeem write failure fails closed (the gate already refuses to execute
+    /// when `redeem_one_shot` returns `Err`).
+    #[must_use]
+    pub fn with_store_at(self, data_dir: &Path) -> Self {
+        match try_open_store(data_dir, process_boot_id()) {
+            Some(store) => self.with_store(store),
+            None => self,
+        }
     }
 
     #[must_use]
@@ -402,6 +421,44 @@ impl ApprovalManager {
                 );
                 Err(store::RedeemFailure::NoGrant)
             }
+        }
+    }
+}
+
+/// Process boot id for local_tool grants. Prefer the daemon control-plane
+/// epoch when one is live; otherwise mint a process-stable fallback so CLI
+/// and tests that never boot the control plane still share one boot scope.
+fn process_boot_id() -> String {
+    crate::control_plane::control_plane()
+        .map(|handle| handle.boot_id.clone())
+        .unwrap_or_else(|| {
+            static FALLBACK: OnceLock<String> = OnceLock::new();
+            FALLBACK
+                .get_or_init(|| uuid::Uuid::new_v4().to_string())
+                .clone()
+        })
+}
+
+/// Open `data_dir/approvals.db`. Failure returns `None` so callers keep the
+/// in-memory approval path rather than refusing to start.
+fn try_open_store(
+    data_dir: &Path,
+    boot_id: impl Into<String>,
+) -> Option<Arc<store::ApprovalStore>> {
+    match store::ApprovalStore::open(data_dir, boot_id) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(err) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "path": data_dir.display().to_string(),
+                        "error": format!("{err}"),
+                    })),
+                "approval store open failed — continuing without durable grants"
+            );
+            None
         }
     }
 }
@@ -668,6 +725,149 @@ mod approval_precedence_tests {
         let rows = store.audit_for_run("run-1").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].2, "not_required");
+    }
+
+    /// Production constructors attach via `with_store_at`. A grant must
+    /// round-trip, land on `approval_audit`, and still be there after a new
+    /// manager opens the same `data_dir`.
+    #[test]
+    fn with_store_at_round_trips_and_audit_survives_a_new_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = json!({"command": "ls"});
+        let first = manager(AutonomyLevel::Supervised, &["shell"], &[]).with_store_at(dir.path());
+        assert!(
+            first.has_store(),
+            "a writable data_dir must attach the store"
+        );
+
+        assert!(
+            first
+                .grant_one_shot("run-1", "shell", &args, "owner", "cli")
+                .is_some()
+        );
+        assert!(first.redeem_one_shot("run-1", "shell", &args).is_ok());
+        first.record_audit(
+            "run-1",
+            Some("trader"),
+            "shell",
+            &args,
+            super::store::AuditDecision::Granted,
+            Some("owner"),
+            Some("cli"),
+        );
+        drop(first);
+
+        let restarted =
+            manager(AutonomyLevel::Supervised, &["shell"], &[]).with_store_at(dir.path());
+        assert!(
+            restarted.has_store(),
+            "reopening the same data_dir must attach again"
+        );
+        let store = super::store::ApprovalStore::open(dir.path(), "boot-restart").unwrap();
+        let rows = store.audit_for_run("run-1").unwrap();
+        assert_eq!(rows.len(), 1, "the audit row must survive the new manager");
+        assert_eq!(rows[0].2, "granted");
+    }
+
+    /// Open failure must not change today's proceed-without-durability path.
+    #[test]
+    fn store_open_failure_keeps_in_memory_proceed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked = tmp.path().join("not-a-directory");
+        std::fs::write(&blocked, b"this is a file").unwrap();
+
+        let manager = manager(AutonomyLevel::Supervised, &["shell"], &[]).with_store_at(&blocked);
+        assert!(
+            !manager.has_store(),
+            "a path that cannot hold approvals.db must not attach a store"
+        );
+        assert!(
+            manager
+                .redeem_one_shot("run-1", "shell", &json!({"command": "ls"}))
+                .is_ok(),
+            "open failure must keep redemption as a no-op"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_open_failure_on_readonly_dir_keeps_in_memory_proceed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let readonly = tmp.path().join("readonly");
+        std::fs::create_dir(&readonly).unwrap();
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let (has_store, redeem_ok) = {
+            let manager =
+                manager(AutonomyLevel::Supervised, &["shell"], &[]).with_store_at(&readonly);
+            (
+                manager.has_store(),
+                manager
+                    .redeem_one_shot("run-1", "shell", &json!({"command": "ls"}))
+                    .is_ok(),
+            )
+        };
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(!has_store, "a read-only data_dir must not attach a store");
+        assert!(redeem_ok, "open failure must keep redemption as a no-op");
+    }
+
+    /// Once a store is attached, a grant that cannot be written must not
+    /// look like success — redeem then fails closed, which is how the gate
+    /// refuses execution.
+    #[test]
+    fn grant_write_failure_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = with_store(
+            manager(AutonomyLevel::Supervised, &["shell"], &[]),
+            dir.path(),
+        );
+        let conn = rusqlite::Connection::open(dir.path().join("approvals.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER deny_insert BEFORE INSERT ON approval_grants
+             BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let args = json!({"command": "ls"});
+        assert!(
+            manager
+                .grant_one_shot("run-1", "shell", &args, "owner", "cli")
+                .is_none(),
+            "a grant that cannot be persisted must not return an id"
+        );
+        assert_eq!(
+            manager.redeem_one_shot("run-1", "shell", &args),
+            Err(super::store::RedeemFailure::NoGrant),
+            "write failure must fail closed: no persisted grant, no execution"
+        );
+    }
+
+    /// Delegated SOP steps derive a new manager; dropping the store there
+    /// would silently revert them to memory-only.
+    #[test]
+    fn derive_for_risk_profile_keeps_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = manager(AutonomyLevel::Supervised, &["shell"], &[]).with_store_at(dir.path());
+        let derived =
+            parent.derive_for_risk_profile(&zeroclaw_config::schema::RiskProfileConfig::default());
+        assert!(parent.has_store());
+        assert!(
+            derived.has_store(),
+            "derive must inherit the parent's durable store"
+        );
+
+        let args = json!({"command": "ls"});
+        assert!(
+            derived
+                .grant_one_shot("run-1", "shell", &args, "owner", "cli")
+                .is_some()
+        );
+        assert!(derived.redeem_one_shot("run-1", "shell", &args).is_ok());
     }
 
     /// A prior "Always" answer must not survive into an unattended run for a
