@@ -301,7 +301,9 @@ async fn handshake(
 
 /// Resolve [`PeerEra`] via `server/discover`. Modern peers skip the
 /// initialize handshake and speak per-request `_meta`; Legacy peers keep
-/// today's initialize wire byte-for-byte.
+/// initialize. The client declares [`MCP_PROTOCOL_VERSION`]; a Legacy
+/// server that answers with an older date is recorded via Stage 1
+/// negotiation.
 async fn open_session(
     transport: &dyn SharedMcpTransportConn,
     server_name: &str,
@@ -704,8 +706,8 @@ impl McpServer {
             (config.transport != McpTransport::Stdio).then(|| Arc::new(Mutex::new(())));
 
         // Era probe (`server/discover`). Modern peers skip initialize and
-        // speak `_meta` / standard POST headers; Legacy peers keep the
-        // handshake wire unchanged.
+        // speak `_meta` / standard POST headers; Legacy peers keep
+        // initialize and negotiate the peer date from the handshake result.
         let opened = open_session(transport.as_ref(), &config.name, 0).await?;
         let capabilities = opened.capabilities;
         let peer = opened.peer;
@@ -3855,7 +3857,7 @@ done
                 .get("params")
                 .and_then(|p| p.get("protocolVersion"))
                 .and_then(|v| v.as_str()),
-            Some("2024-11-05")
+            Some(MCP_PROTOCOL_VERSION)
         );
         assert!(
             initialize

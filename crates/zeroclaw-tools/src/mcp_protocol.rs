@@ -1,18 +1,16 @@
 //! MCP (Model Context Protocol) JSON-RPC 2.0 protocol types.
-//! Protocol version: 2024-11-05
-//! Dual-era peer classification lives in [`crate::mcp_era`] — do not bump
-//! [`MCP_PROTOCOL_VERSION`] until the remaining protocol-version stage.
-//! Stage 2 speaks modern headers/`_meta` on [`crate::mcp_era::PeerEra::Modern`]
-//! only; Stage 3 classifies `resultType` / MRTR envelopes; Stage 4 mints
-//! in-process handles in [`crate::mcp_task`] for MRTR and the tasks
-//! extension. This constant stays the Legacy initialize pin.
+//! Protocol version: 2026-07-28
+//! Dual-era peer classification lives in [`crate::mcp_era`]. This constant
+//! is the client's declared revision: Legacy `initialize` and Modern `_meta`
+//! both advertise it. A Legacy peer that answers initialize with an older
+//! date is classified and spoken to via Stage 1 negotiation.
 //! Adapted from ops-mcp-server/src/protocol.rs for client use.
 //! Both Serialize and Deserialize are derived — the client both sends (Serialize)
 
 use serde::{Deserialize, Serialize};
 
 pub const JSONRPC_VERSION: &str = "2.0";
-pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+pub const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 
 // Standard JSON-RPC 2.0 error codes
 pub const PARSE_ERROR: i32 = -32700;
@@ -181,7 +179,7 @@ mod tests {
 
     #[test]
     fn mcp_protocol_version_constant_is_correct() {
-        assert_eq!(MCP_PROTOCOL_VERSION, "2024-11-05");
+        assert_eq!(MCP_PROTOCOL_VERSION, "2026-07-28");
     }
 
     #[test]
