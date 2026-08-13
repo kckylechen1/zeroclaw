@@ -1148,7 +1148,13 @@ impl McpServer {
                 .min(MAX_TOOL_TIMEOUT_SECS)
         };
         let operation = format!("tool call `{tool_name}`");
-        if let Some(continuation) = parse_continuation(&arguments)? {
+        let era = {
+            let inner = self.inner.lock().await;
+            inner.peer.era
+        };
+        if era == PeerEra::Modern
+            && let Some(continuation) = parse_continuation(&arguments)?
+        {
             return self
                 .continue_pending_task(
                     "tools/call",
@@ -1222,9 +1228,11 @@ impl McpServer {
         Ok(result)
     }
 
-    /// Classify a JSON-RPC `result`. Complete payloads pass through;
-    /// well-formed `input_required` mints an in-process handle; malformed
-    /// modern envelopes fail closed. Legacy never reaches `InputRequired`.
+    /// Classify a JSON-RPC `result`. Complete payloads pass through.
+    /// Well-formed `input_required` on `tools/call` mints an in-process
+    /// handle; the same envelope on `prompts/get` / `resources/read` stays a
+    /// typed error (no handle). Malformed modern envelopes fail closed.
+    /// Legacy never reaches `InputRequired`.
     async fn finalize_classified_result(
         &self,
         method: &str,
@@ -1238,6 +1246,13 @@ impl McpServer {
         match classify_mcp_result(era, method, &result) {
             Ok(McpResultKind::Complete) => Ok(result),
             Ok(McpResultKind::InputRequired(input_required)) => {
+                if method != "tools/call" {
+                    return Err(McpInputRequiredError {
+                        method: method.to_string(),
+                        input_required,
+                    }
+                    .into());
+                }
                 let pending: McpTaskPending = {
                     let mut inner = self.inner.lock().await;
                     inner.tasks.mint(method, params, input_required)?
@@ -4324,7 +4339,7 @@ done
             .expect("minted task handle");
         assert_eq!(pending.method, "tools/call");
         assert!(
-            pending.handle.starts_with("mcp-task-"),
+            crate::mcp_task::is_our_task_handle(&pending.handle),
             "handle {}",
             pending.handle
         );
@@ -4459,12 +4474,143 @@ done
         let err = mcp
             .call_tool(
                 "echo",
-                json!({ TASK_HANDLE_ARG: "mcp-task-does-not-exist" }),
+                json!({ TASK_HANDLE_ARG: "zc-mrtr-00000000000000000000000000000000" }),
             )
             .await
             .expect_err("unknown handle");
         let msg = format!("{err:#}");
         assert!(msg.contains("unknown"), "got: {msg}");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_mcp_task_handle_argument_is_forwarded_verbatim() {
+        use crate::mcp_task::TASK_HANDLE_ARG;
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "server/discover"})))
+            .respond_with(|request: &wiremock::Request| {
+                if header_str(request, crate::mcp_era::MCP_METHOD_HEADER).is_some()
+                    || header_str(request, crate::mcp_era::MCP_PROTOCOL_VERSION_HEADER).is_some()
+                {
+                    return ResponseTemplate::new(400)
+                        .set_body_string("legacy server rejects Mcp-* headers");
+                }
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "error": {"code": -32601, "message": "Method not found"}
+                }))
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "notifications/initialized"}),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        mount_tools_list_empty(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                if header_str(request, crate::mcp_era::MCP_METHOD_HEADER).is_some()
+                    || header_str(request, crate::mcp_era::MCP_PROTOCOL_VERSION_HEADER).is_some()
+                {
+                    return ResponseTemplate::new(400)
+                        .set_body_string("legacy tools/call must not see modern headers");
+                }
+                let body = request_json(request);
+                let params = body.get("params").cloned().unwrap_or(json!({}));
+                assert!(
+                    params.get("_meta").is_none(),
+                    "legacy tools/call has no _meta"
+                );
+                assert_eq!(
+                    params["arguments"][TASK_HANDLE_ARG],
+                    "zc-mrtr-00000000000000000000000000000000"
+                );
+                let id = body.get("id").cloned().expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {"ok": true}
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("legacy connect");
+        let result = mcp
+            .call_tool(
+                "echo",
+                json!({ TASK_HANDLE_ARG: "zc-mrtr-00000000000000000000000000000000" }),
+            )
+            .await
+            .expect("legacy argument forwarded");
+        assert_eq!(result["ok"], true);
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_foreign_mcp_task_handle_argument_is_forwarded_verbatim() {
+        use crate::mcp_task::TASK_HANDLE_ARG;
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let body = request_json(request);
+                let params = body.get("params").cloned().unwrap_or(json!({}));
+                assert_eq!(params["arguments"][TASK_HANDLE_ARG], "github_login");
+                assert!(
+                    params.get("inputResponses").is_none(),
+                    "foreign mcpTaskHandle is not a continuation"
+                );
+                let id = body.get("id").cloned().expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {"resultType": "complete", "ok": true}
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let result = mcp
+            .call_tool("echo", json!({ TASK_HANDLE_ARG: "github_login" }))
+            .await
+            .expect("foreign argument forwarded");
+        assert_eq!(result["ok"], true);
+        assert!(mcp.inner.lock().await.tasks.is_empty());
         server.verify().await;
     }
 
@@ -4646,6 +4792,106 @@ done
             err.downcast_ref::<McpTaskPending>().is_none(),
             "oversized state must not mint a handle"
         );
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_prompts_get_input_required_is_typed_error_without_handle() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "server/discover"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": {
+                    "resultType": "complete",
+                    "supportedVersions": ["2026-07-28"],
+                    "capabilities": {"tools": {}, "prompts": {}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "prompts/get"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "input_required",
+                        "requestState": "prompt-blob"
+                    }
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .get_prompt("p", json!({}))
+            .await
+            .expect_err("prompts/get input_required is a typed error");
+        let typed = err
+            .downcast_ref::<McpInputRequiredError>()
+            .expect("Stage 3 typed error");
+        assert_eq!(typed.method, "prompts/get");
+        assert!(err.downcast_ref::<McpTaskPending>().is_none());
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_resources_read_input_required_is_typed_error_without_handle() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "resources/read"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "input_required",
+                        "requestState": "resource-blob"
+                    }
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .read_resource("file:///x")
+            .await
+            .expect_err("resources/read input_required is a typed error");
+        let typed = err
+            .downcast_ref::<McpInputRequiredError>()
+            .expect("Stage 3 typed error");
+        assert_eq!(typed.method, "resources/read");
+        assert!(err.downcast_ref::<McpTaskPending>().is_none());
         assert!(mcp.inner.lock().await.tasks.is_empty());
         server.verify().await;
     }

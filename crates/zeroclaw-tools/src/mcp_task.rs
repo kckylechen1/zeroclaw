@@ -24,6 +24,11 @@ use crate::mcp_era::{InputRequired, RESULT_TYPE_INPUT_REQUIRED};
 
 /// Reserved tool-argument key the model uses to continue a pending handle.
 pub const TASK_HANDLE_ARG: &str = "mcpTaskHandle";
+/// Prefix on every minted handle. Intercept only Modern args whose value
+/// matches this format; anything else is a legitimate tool argument.
+pub const TASK_HANDLE_PREFIX: &str = "zc-mrtr-";
+/// `uuid::Uuid::simple()` length (32 hex digits, no hyphens).
+const TASK_HANDLE_ID_LEN: usize = 32;
 /// Wire / argument field carrying client answers keyed like `inputRequests`.
 pub const INPUT_RESPONSES_FIELD: &str = "inputResponses";
 
@@ -58,8 +63,7 @@ impl std::fmt::Display for McpTaskPending {
         if let Some(map) = self.input_required.input_requests.as_ref()
             && !map.is_empty()
         {
-            let keys: Vec<&str> = map.keys().map(String::as_str).collect();
-            write!(f, "; inputRequests keys: {}", keys.join(","))?;
+            write!(f, "; {} inputRequests", map.len())?;
             let raw = serde_json::to_string(map).unwrap_or_else(|_| "{}".to_string());
             write!(
                 f,
@@ -91,7 +95,6 @@ pub enum TaskHandleError {
     BindingMismatch,
     Capacity,
     RequestStateTooLarge,
-    MalformedHandle,
     MalformedInputResponses,
     MissingInputResponses,
 }
@@ -112,9 +115,6 @@ impl std::fmt::Display for TaskHandleError {
                 f,
                 "MCP requestState exceeds {MAX_REQUEST_STATE_BYTES} bytes; refused"
             ),
-            Self::MalformedHandle => {
-                write!(f, "MCP `{TASK_HANDLE_ARG}` must be a non-empty string")
-            }
             Self::MalformedInputResponses => {
                 write!(f, "MCP `{INPUT_RESPONSES_FIELD}` must be a JSON object")
             }
@@ -207,7 +207,7 @@ impl McpTaskStore {
             return Err(TaskHandleError::Capacity);
         }
         let fingerprint = request_fingerprint(method, &params);
-        let handle = format!("mcp-task-{}", uuid::Uuid::new_v4().simple());
+        let handle = format!("{TASK_HANDLE_PREFIX}{}", uuid::Uuid::new_v4().simple());
         let ttl_secs = self.ttl.as_secs();
         self.handles.insert(
             handle.clone(),
@@ -284,10 +284,21 @@ fn binding_value<'a>(method: &str, params: &'a serde_json::Value) -> Option<&'a 
     }
 }
 
+/// True when `value` is a handle this client would mint: [`TASK_HANDLE_PREFIX`]
+/// plus 32 ASCII hex digits. Foreign strings (including a tool's own
+/// `mcpTaskHandle` argument) must not match.
+pub fn is_our_task_handle(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix(TASK_HANDLE_PREFIX) else {
+        return false;
+    };
+    rest.len() == TASK_HANDLE_ID_LEN && rest.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Pull a continuation out of model-supplied tool arguments.
 ///
-/// Absence of [`TASK_HANDLE_ARG`] means a fresh call. A present but malformed
-/// handle fails closed rather than falling through as ordinary arguments.
+/// Only a string matching [`is_our_task_handle`] is intercepted. Any other
+/// `mcpTaskHandle` value is a legitimate tool argument and is left in place.
+/// The caller still gates this on [`crate::mcp_era::PeerEra::Modern`].
 pub fn parse_continuation(
     args: &serde_json::Value,
 ) -> Result<Option<TaskContinuation>, TaskHandleError> {
@@ -295,8 +306,7 @@ pub fn parse_continuation(
         return Ok(None);
     };
     match obj.get(TASK_HANDLE_ARG) {
-        None => Ok(None),
-        Some(serde_json::Value::String(id)) if !id.is_empty() => {
+        Some(serde_json::Value::String(id)) if is_our_task_handle(id) => {
             let input_responses = match obj.get(INPUT_RESPONSES_FIELD) {
                 None => None,
                 Some(value) if value.is_object() => Some(value.clone()),
@@ -307,7 +317,7 @@ pub fn parse_continuation(
                 input_responses,
             }))
         }
-        Some(_) => Err(TaskHandleError::MalformedHandle),
+        _ => Ok(None),
     }
 }
 
@@ -360,6 +370,11 @@ mod tests {
             )
             .expect("mint");
         assert_eq!(store.len(), 1);
+        assert!(
+            is_our_task_handle(&pending.handle),
+            "minted handle {}",
+            pending.handle
+        );
         let redeemed = store
             .redeem(&pending.handle, "tools/call", Some("echo"))
             .expect("redeem");
@@ -380,7 +395,11 @@ mod tests {
     fn unknown_handle_fails_closed() {
         let mut store = McpTaskStore::new();
         assert_eq!(
-            store.redeem("mcp-task-deadbeef", "tools/call", Some("echo")),
+            store.redeem(
+                "zc-mrtr-deadbeefdeadbeefdeadbeefdeadbeef",
+                "tools/call",
+                Some("echo")
+            ),
             Err(TaskHandleError::Unknown)
         );
     }
@@ -463,7 +482,7 @@ mod tests {
         let huge_state = "S".repeat(8000);
         let huge_message = "M".repeat(8000);
         let pending = McpTaskPending {
-            handle: "mcp-task-abc".into(),
+            handle: format!("{TASK_HANDLE_PREFIX}{}", "a".repeat(32)),
             method: "tools/call".into(),
             input_required: InputRequired {
                 input_requests: Some(serde_json::Map::from_iter([(
@@ -478,7 +497,7 @@ mod tests {
             ttl_secs: 300,
         };
         let msg = pending.to_string();
-        assert!(msg.contains("mcp-task-abc"), "got: {msg}");
+        assert!(msg.contains(TASK_HANDLE_PREFIX), "got: {msg}");
         assert!(msg.contains(TASK_HANDLE_ARG), "got: {msg}");
         assert!(msg.contains("inputRequests"), "got: {msg}");
         assert!(
@@ -494,32 +513,90 @@ mod tests {
     }
 
     #[test]
+    fn pending_display_bounds_huge_input_request_keys() {
+        let huge_key = "K".repeat(8000);
+        let pending = McpTaskPending {
+            handle: format!("{TASK_HANDLE_PREFIX}{}", "b".repeat(32)),
+            method: "tools/call".into(),
+            input_required: InputRequired {
+                input_requests: Some(serde_json::Map::from_iter([(
+                    huge_key.clone(),
+                    json!({
+                        "method": "elicitation/create",
+                        "params": {"mode": "form", "message": "x"}
+                    }),
+                )])),
+                request_state: None,
+            },
+            ttl_secs: 300,
+        };
+        let msg = pending.to_string();
+        assert!(msg.contains("1 inputRequests"), "got: {msg}");
+        assert!(
+            !msg.contains(&huge_key),
+            "raw key must not appear unbounded"
+        );
+        assert!(
+            !msg.contains(&"K".repeat(600)),
+            "huge key not bounded: len={}",
+            msg.len()
+        );
+        assert!(msg.contains("..."), "bounded detail should truncate: {msg}");
+    }
+
+    #[test]
     fn parse_continuation_fresh_call_is_none() {
         assert_eq!(parse_continuation(&json!({"q": 1})).expect("ok"), None);
         assert_eq!(parse_continuation(&json!([])).expect("ok"), None);
     }
 
+    fn well_formed_handle() -> String {
+        format!("{TASK_HANDLE_PREFIX}{}", "ab".repeat(16))
+    }
+
+    #[test]
+    fn is_our_task_handle_accepts_only_prefixed_hex() {
+        assert!(is_our_task_handle(&well_formed_handle()));
+        assert!(!is_our_task_handle("mcp-task-abcdef"));
+        assert!(!is_our_task_handle("github_login"));
+        assert!(!is_our_task_handle(&format!("{TASK_HANDLE_PREFIX}short")));
+        assert!(!is_our_task_handle(&format!(
+            "{TASK_HANDLE_PREFIX}{}",
+            "g".repeat(32)
+        )));
+        assert!(!is_our_task_handle(""));
+    }
+
     #[test]
     fn parse_continuation_reads_handle_and_responses() {
+        let handle = well_formed_handle();
         let cont = parse_continuation(&json!({
-            TASK_HANDLE_ARG: "mcp-task-1",
+            TASK_HANDLE_ARG: handle,
             INPUT_RESPONSES_FIELD: {"github_login": {"action": "accept"}}
         }))
         .expect("ok")
         .expect("present");
-        assert_eq!(cont.handle, "mcp-task-1");
+        assert_eq!(cont.handle, well_formed_handle());
         assert!(cont.input_responses.is_some());
     }
 
     #[test]
-    fn parse_continuation_malformed_handle_fails_closed() {
+    fn parse_continuation_foreign_value_is_not_intercepted() {
         assert_eq!(
-            parse_continuation(&json!({ TASK_HANDLE_ARG: 1 })),
-            Err(TaskHandleError::MalformedHandle)
+            parse_continuation(&json!({ TASK_HANDLE_ARG: 1 })).expect("ok"),
+            None
         );
         assert_eq!(
-            parse_continuation(&json!({ TASK_HANDLE_ARG: "" })),
-            Err(TaskHandleError::MalformedHandle)
+            parse_continuation(&json!({ TASK_HANDLE_ARG: "" })).expect("ok"),
+            None
+        );
+        assert_eq!(
+            parse_continuation(&json!({ TASK_HANDLE_ARG: "github_login" })).expect("ok"),
+            None
+        );
+        assert_eq!(
+            parse_continuation(&json!({ TASK_HANDLE_ARG: "mcp-task-1" })).expect("ok"),
+            None
         );
     }
 
@@ -527,7 +604,7 @@ mod tests {
     fn parse_continuation_malformed_responses_fails_closed() {
         assert_eq!(
             parse_continuation(&json!({
-                TASK_HANDLE_ARG: "mcp-task-1",
+                TASK_HANDLE_ARG: well_formed_handle(),
                 INPUT_RESPONSES_FIELD: "not-an-object"
             })),
             Err(TaskHandleError::MalformedInputResponses)

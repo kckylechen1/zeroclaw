@@ -435,9 +435,10 @@ pub enum McpResultKind {
 
 /// Well-formed `input_required` classified from a JSON-RPC `result`.
 ///
-/// This is not a completed tool result. The MCP client mints an in-process
+/// This is not a completed tool result. `tools/call` mints an in-process
 /// [`crate::mcp_task::McpTaskPending`] handle and retries via
-/// [`attach_input_retry`].
+/// [`attach_input_retry`]. `prompts/get` and `resources/read` surface this
+/// typed error without minting a handle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpInputRequiredError {
     pub method: String,
