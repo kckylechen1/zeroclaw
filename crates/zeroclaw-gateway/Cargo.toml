@@ -63,6 +63,7 @@ directories = "6.0"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+ring = { version = "0.17", optional = true }
 
 # Database (session queue)
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -93,7 +94,7 @@ default = ["schema-export", "a2a"]
 # hints + the node tool). Default-off; enable with `--features nodes`.
 # The `[nodes]` / `[nodes.mdns]` config types stay unconditional in
 # zeroclaw-config (schema.rs is a hot upstream file — not worth the churn).
-nodes = []
+nodes = ["dep:ring"]
 # A2A (Agent2Agent) discovery surface: well-known catalog card + per-alias
 # agent cards. Default-on; the runtime surface stays default-closed via
 # [a2a.server] enabled = false. Pure-serde cards on the existing axum stack,

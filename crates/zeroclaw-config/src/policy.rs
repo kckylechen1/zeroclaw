@@ -221,17 +221,18 @@ impl SecurityPolicy {
     /// `allowed_tools = None` is unrestricted; `Some(list)` is the
     /// allowlist. `excluded_tools` always subtracts.
     pub fn is_tool_allowed(&self, name: &str) -> bool {
-        let allowed = self
-            .allowed_tools
-            .as_ref()
-            .is_none_or(|list| list.iter().any(|t| t == name));
+        let allowed = self.allowed_tools.as_ref().is_none_or(|list| {
+            list.iter()
+                .any(|t| crate::node_allowlist::tool_name_matches(t, name))
+        });
         allowed && !self.is_tool_excluded(name)
     }
 
     pub fn is_tool_excluded(&self, name: &str) -> bool {
-        self.excluded_tools
-            .as_ref()
-            .is_some_and(|list| list.iter().any(|t| t == name))
+        self.excluded_tools.as_ref().is_some_and(|list| {
+            list.iter()
+                .any(|t| crate::node_allowlist::tool_name_matches(t, name))
+        })
     }
 }
 

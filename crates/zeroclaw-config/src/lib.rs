@@ -19,6 +19,7 @@ pub mod field_visibility;
 pub mod helpers;
 pub mod migration;
 pub mod multi_agent;
+pub mod node_allowlist;
 pub mod pairing;
 pub mod paths;
 pub mod persona;

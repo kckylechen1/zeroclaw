@@ -5,6 +5,7 @@ pub mod announce;
 pub mod attribution;
 pub mod channel;
 pub mod companion;
+pub mod device_identity;
 pub mod elicitation;
 pub mod hook;
 pub mod ingress;
