@@ -129,6 +129,38 @@ impl MaintenanceSummary {
     }
 }
 
+/// Why [`SopEngine::finish_run`] refused to take a run terminal.
+///
+/// Lookup failures are this type (downcast from [`anyhow::Error`]) so
+/// callers distinguish a missing id from a second finish without scraping
+/// Display text. Persistence failures stay a different error and are not
+/// mapped here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishRunError {
+    /// `run_id` is not in the in-memory active set and is not among
+    /// retained finished runs.
+    NotFound { run_id: String },
+    /// `run_id` already has a terminal record in `finished_runs`.
+    AlreadyFinished { run_id: String },
+}
+
+impl std::fmt::Display for FinishRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound { run_id } => write!(f, "Active run not found: {run_id}"),
+            Self::AlreadyFinished { run_id } => write!(f, "Run already finished: {run_id}"),
+        }
+    }
+}
+
+impl std::error::Error for FinishRunError {}
+
+/// Typed `finish_run` lookup failure, if `err` is one. Persistence and
+/// other engine errors return `None`.
+pub fn err_as_finish_run(err: &anyhow::Error) -> Option<&FinishRunError> {
+    err.downcast_ref()
+}
+
 enum GateClearTransition {
     Active {
         // Boxed: `SopRunAction` is large; keeping it inline makes this the
@@ -2541,17 +2573,32 @@ impl SopEngine {
             .find(|r| r.sop_name == sop_name)
     }
 
+    /// Clone the live run that `finish_run` is about to take terminal, or
+    /// return a typed lookup error. `active_runs` is the in-flight source of
+    /// truth; `finished_runs` is the retained-terminal cache used only to
+    /// distinguish a second finish from a never-seen id. The durable store is
+    /// not consulted here — that would be a second copy of the same fact.
+    fn active_run_for_finish(&self, run_id: &str) -> Result<SopRun> {
+        if let Some(run) = self.active_runs.get(run_id).cloned() {
+            return Ok(run);
+        }
+        if self.finished_runs.iter().any(|run| run.run_id == run_id) {
+            return Err(anyhow::Error::new(FinishRunError::AlreadyFinished {
+                run_id: run_id.to_string(),
+            }));
+        }
+        Err(anyhow::Error::new(FinishRunError::NotFound {
+            run_id: run_id.to_string(),
+        }))
+    }
+
     pub fn finish_run(
         &mut self,
         run_id: &str,
         status: SopRunStatus,
         reason: Option<String>,
     ) -> Result<SopRunAction> {
-        let mut run = self
-            .active_runs
-            .get(run_id)
-            .cloned()
-            .ok_or_else(|| anyhow::Error::msg(format!("Active run not found: {run_id}")))?;
+        let mut run = self.active_run_for_finish(run_id)?;
         run.status = status;
         run.completed_at = Some(now_iso8601());
         let sop_name = run.sop_name.clone();
@@ -2594,11 +2641,7 @@ impl SopEngine {
         reason: Option<String>,
         event: &SopEventRecord,
     ) -> Result<SopRunAction> {
-        let mut run = self
-            .active_runs
-            .get(run_id)
-            .cloned()
-            .ok_or_else(|| anyhow::Error::msg(format!("Active run not found: {run_id}")))?;
+        let mut run = self.active_run_for_finish(run_id)?;
         run.status = status;
         run.completed_at = Some(now_iso8601());
         let sop_name = run.sop_name.clone();
