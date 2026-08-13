@@ -6,9 +6,10 @@
 //! session / transport on that one value. Stage 2 speaks the modern POST
 //! headers and per-request `_meta` only on [`PeerEra::Modern`]; Stage 3
 //! classifies `resultType` via [`classify_mcp_result`] the same way. Stage 4
-//! task handles live in [`crate::mcp_task`] and retry through
-//! [`attach_input_retry`]. The Legacy arm is unchanged. Do not bump
-//! [`MCP_PROTOCOL_VERSION`] here.
+//! mints MRTR handles in [`crate::mcp_task`] and retries through
+//! [`attach_input_retry`]; the same store maps unsolicited
+//! `resultType: "task"` handles for `tasks/get` / `tasks/update`. The Legacy
+//! arm is unchanged. Do not bump [`MCP_PROTOCOL_VERSION`] here.
 //!
 //! [`MCP_PROTOCOL_VERSION`]: crate::mcp_protocol::MCP_PROTOCOL_VERSION
 
@@ -45,6 +46,8 @@ pub const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion
 pub const META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
 /// `_meta` key for client capabilities on each modern request.
 pub const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+/// Official tasks extension id. Advertised only on the Modern `_meta` arm.
+pub const TASKS_EXTENSION: &str = "io.modelcontextprotocol/tasks";
 
 /// Streamable HTTP header that must match [`META_PROTOCOL_VERSION`].
 pub const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
@@ -262,6 +265,18 @@ pub fn take_recognized_modern_error(resp: JsonRpcResponse) -> Option<JsonRpcResp
     is_recognized_modern_error(code).then_some(resp)
 }
 
+/// Capabilities advertised on every Modern request. Legacy initialize and
+/// the era probe keep their existing (empty / resources+prompts) shapes.
+pub fn modern_client_capabilities() -> serde_json::Value {
+    json!({
+        "resources": {},
+        "prompts": {},
+        "extensions": {
+            TASKS_EXTENSION: {}
+        }
+    })
+}
+
 /// Per-request `_meta` object for a modern-era JSON-RPC call.
 pub fn client_request_meta(version: &str) -> serde_json::Value {
     json!({
@@ -270,10 +285,7 @@ pub fn client_request_meta(version: &str) -> serde_json::Value {
             "name": "zeroclaw",
             "version": env!("CARGO_PKG_VERSION")
         },
-        META_CLIENT_CAPABILITIES: {
-            "resources": {},
-            "prompts": {}
-        }
+        META_CLIENT_CAPABILITIES: modern_client_capabilities()
     })
 }
 
@@ -405,10 +417,23 @@ pub fn local_cache_ttl(hints: CacheHints) -> Option<std::time::Duration> {
 pub const RESULT_TYPE_COMPLETE: &str = "complete";
 /// Multi round-trip interim result (`resultType: "input_required"`).
 pub const RESULT_TYPE_INPUT_REQUIRED: &str = "input_required";
+/// Tasks-extension handle (`resultType: "task"`). Legal only on Modern
+/// [`method_allows_task`] methods after the client advertised the extension.
+pub const RESULT_TYPE_TASK: &str = "task";
+/// Server-issued `taskId` is stored opaquely. Larger values fail closed.
+pub const MAX_TASK_ID_BYTES: usize = 256;
+/// Bound for `statusMessage` / timestamp strings on a task envelope.
+pub const MAX_TASK_STRING_BYTES: usize = 4096;
 
 /// Methods on which a server MAY return [`McpResultKind::InputRequired`].
 pub fn method_allows_input_required(method: &str) -> bool {
     matches!(method, "tools/call" | "prompts/get" | "resources/read")
+}
+
+/// Methods that may return [`McpResultKind::Task`]. The extension currently
+/// names only `tools/call`; any other method is an invalid response.
+pub fn method_allows_task(method: &str) -> bool {
+    method == "tools/call"
 }
 
 fn is_allowed_input_request_method(method: &str) -> bool {
@@ -426,11 +451,69 @@ pub struct InputRequired {
     pub request_state: Option<String>,
 }
 
+/// Task status from a `CreateTaskResult` or `tasks/get` envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    Working,
+    InputRequired,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl TaskStatus {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "working" => Some(Self::Working),
+            "input_required" => Some(Self::InputRequired),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::InputRequired => "input_required",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// Parsed `CreateTaskResult` (`resultType: "task"`). `task_id` is the
+/// server-issued identifier and must never be shown to the model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTask {
+    pub task_id: String,
+    pub status: TaskStatus,
+    pub poll_interval_ms: Option<u64>,
+}
+
+/// Outcome of one `tasks/get` poll. The server `taskId` is not included:
+/// callers already know it and must not echo it into model-visible text.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TaskPollState {
+    Working { poll_interval_ms: Option<u64> },
+    InputRequired(InputRequired),
+    Completed(serde_json::Value),
+    Failed { message: String },
+    Cancelled,
+}
+
 /// How a JSON-RPC `result` should be consumed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpResultKind {
     Complete,
     InputRequired(InputRequired),
+    Task(CreateTask),
 }
 
 /// Well-formed `input_required` classified from a JSON-RPC `result`.
@@ -480,6 +563,10 @@ pub enum ResultTypeError {
     InputRequiredEmpty,
     MalformedInputRequests,
     MalformedRequestState,
+    TaskNotAllowed { method: String },
+    MalformedTask,
+    TaskIdTooLarge,
+    NestedTask,
 }
 
 impl std::fmt::Display for ResultTypeError {
@@ -507,6 +594,20 @@ impl std::fmt::Display for ResultTypeError {
             Self::MalformedRequestState => {
                 write!(f, "malformed requestState on input_required result")
             }
+            Self::TaskNotAllowed { method } => {
+                write!(
+                    f,
+                    "resultType={RESULT_TYPE_TASK} is not allowed on `{method}`"
+                )
+            }
+            Self::MalformedTask => write!(f, "malformed MCP task result"),
+            Self::TaskIdTooLarge => {
+                write!(f, "MCP taskId exceeds {MAX_TASK_ID_BYTES} bytes; refused")
+            }
+            Self::NestedTask => write!(
+                f,
+                "MCP task completed with nested resultType={RESULT_TYPE_TASK}; refused"
+            ),
         }
     }
 }
@@ -517,7 +618,8 @@ impl std::error::Error for ResultTypeError {}
 ///
 /// Legacy: omitted (or any) `resultType` is [`McpResultKind::Complete`] —
 /// earlier-protocol servers do not carry the field. Modern: the field is
-/// required; unknown values and malformed MRTR envelopes fail closed.
+/// required; unknown values, malformed MRTR envelopes, and malformed task
+/// envelopes fail closed.
 pub fn classify_mcp_result(
     era: PeerEra,
     method: &str,
@@ -546,6 +648,14 @@ fn classify_modern_result(
                 });
             }
             parse_input_required(obj).map(McpResultKind::InputRequired)
+        }
+        Some(serde_json::Value::String(kind)) if kind == RESULT_TYPE_TASK => {
+            if !method_allows_task(method) {
+                return Err(ResultTypeError::TaskNotAllowed {
+                    method: method.to_string(),
+                });
+            }
+            parse_create_task(obj).map(McpResultKind::Task)
         }
         Some(other) => Err(invalid_result_type(other)),
     }
@@ -606,6 +716,148 @@ fn parse_input_required(
         input_requests,
         request_state,
     })
+}
+
+fn bounded_task_string(
+    value: Option<&serde_json::Value>,
+    required: bool,
+) -> Result<Option<&str>, ResultTypeError> {
+    match value {
+        None if required => Err(ResultTypeError::MalformedTask),
+        None => Ok(None),
+        Some(serde_json::Value::String(s)) => {
+            if s.is_empty() && required {
+                return Err(ResultTypeError::MalformedTask);
+            }
+            if s.len() > MAX_TASK_STRING_BYTES {
+                return Err(ResultTypeError::MalformedTask);
+            }
+            Ok(Some(s.as_str()))
+        }
+        Some(_) => Err(ResultTypeError::MalformedTask),
+    }
+}
+
+fn parse_task_id(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<String, ResultTypeError> {
+    match obj.get("taskId") {
+        Some(serde_json::Value::String(id)) if !id.is_empty() => {
+            if id.len() > MAX_TASK_ID_BYTES {
+                return Err(ResultTypeError::TaskIdTooLarge);
+            }
+            Ok(id.clone())
+        }
+        Some(serde_json::Value::String(_)) | None => Err(ResultTypeError::MalformedTask),
+        Some(_) => Err(ResultTypeError::MalformedTask),
+    }
+}
+
+fn parse_task_status(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<TaskStatus, ResultTypeError> {
+    match obj.get("status") {
+        Some(serde_json::Value::String(raw)) => {
+            if raw.len() > MAX_TASK_STRING_BYTES {
+                return Err(ResultTypeError::MalformedTask);
+            }
+            TaskStatus::parse(raw).ok_or(ResultTypeError::MalformedTask)
+        }
+        _ => Err(ResultTypeError::MalformedTask),
+    }
+}
+
+fn parse_ttl_ms(obj: &serde_json::Map<String, serde_json::Value>) -> Result<(), ResultTypeError> {
+    match obj.get("ttlMs") {
+        Some(serde_json::Value::Null) => Ok(()),
+        Some(serde_json::Value::Number(n)) if n.as_u64().is_some() => Ok(()),
+        _ => Err(ResultTypeError::MalformedTask),
+    }
+}
+
+fn parse_poll_interval_ms(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<u64>, ResultTypeError> {
+    match obj.get("pollIntervalMs") {
+        None => Ok(None),
+        Some(serde_json::Value::Number(n)) => {
+            n.as_u64().map(Some).ok_or(ResultTypeError::MalformedTask)
+        }
+        Some(_) => Err(ResultTypeError::MalformedTask),
+    }
+}
+
+fn parse_create_task(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<CreateTask, ResultTypeError> {
+    let task_id = parse_task_id(obj)?;
+    let status = parse_task_status(obj)?;
+    bounded_task_string(obj.get("createdAt"), true)?;
+    bounded_task_string(obj.get("lastUpdatedAt"), true)?;
+    parse_ttl_ms(obj)?;
+    let _ = bounded_task_string(obj.get("statusMessage"), false)?;
+    let poll_interval_ms = parse_poll_interval_ms(obj)?;
+    Ok(CreateTask {
+        task_id,
+        status,
+        poll_interval_ms,
+    })
+}
+
+/// Parse a `tasks/get` result. The RPC itself is `resultType: "complete"`;
+/// status-specific fields ride beside it. `expected_task_id` must match
+/// exactly; a mismatch is treated as a forged envelope.
+pub fn parse_task_poll_result(
+    expected_task_id: &str,
+    result: &serde_json::Value,
+) -> Result<TaskPollState, ResultTypeError> {
+    let obj = result.as_object().ok_or(ResultTypeError::NotAnObject)?;
+    match obj.get("resultType") {
+        Some(serde_json::Value::String(kind)) if kind == RESULT_TYPE_COMPLETE => {}
+        Some(other) => return Err(invalid_result_type(other)),
+        None => return Err(ResultTypeError::Missing),
+    }
+    let task_id = parse_task_id(obj)?;
+    if task_id != expected_task_id {
+        return Err(ResultTypeError::MalformedTask);
+    }
+    let status = parse_task_status(obj)?;
+    bounded_task_string(obj.get("createdAt"), true)?;
+    bounded_task_string(obj.get("lastUpdatedAt"), true)?;
+    parse_ttl_ms(obj)?;
+    let _ = bounded_task_string(obj.get("statusMessage"), false)?;
+    let poll_interval_ms = parse_poll_interval_ms(obj)?;
+    match status {
+        TaskStatus::Working => Ok(TaskPollState::Working { poll_interval_ms }),
+        TaskStatus::Cancelled => Ok(TaskPollState::Cancelled),
+        TaskStatus::InputRequired => {
+            let input_required = parse_input_required(obj)?;
+            if input_required
+                .input_requests
+                .as_ref()
+                .is_none_or(serde_json::Map::is_empty)
+            {
+                return Err(ResultTypeError::InputRequiredEmpty);
+            }
+            Ok(TaskPollState::InputRequired(input_required))
+        }
+        TaskStatus::Completed => match obj.get("result") {
+            Some(inner) if inner.is_object() => Ok(TaskPollState::Completed(inner.clone())),
+            _ => Err(ResultTypeError::MalformedTask),
+        },
+        TaskStatus::Failed => {
+            let message = match obj.get("error") {
+                Some(serde_json::Value::Object(error)) => error
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("task failed"),
+                _ => return Err(ResultTypeError::MalformedTask),
+            };
+            Ok(TaskPollState::Failed {
+                message: zeroclaw_providers::sanitize_api_error(message),
+            })
+        }
+    }
 }
 
 /// Attach MRTR retry fields to the original JSON-RPC params.
@@ -873,7 +1125,7 @@ mod tests {
         );
         assert_eq!(
             meta.get(META_CLIENT_CAPABILITIES),
-            Some(&json!({"resources": {}, "prompts": {}}))
+            Some(&modern_client_capabilities())
         );
         assert_eq!(
             meta.get("traceparent").and_then(|v| v.as_str()),
@@ -994,10 +1246,12 @@ mod tests {
             classify_mcp_result(
                 PeerEra::Modern,
                 "tools/call",
-                &json!({"resultType": "task"})
+                &json!({"resultType": "stream"})
             )
             .expect_err("unknown"),
-            ResultTypeError::InvalidType { raw: "task".into() }
+            ResultTypeError::InvalidType {
+                raw: "stream".into()
+            }
         );
         let err = classify_mcp_result(
             PeerEra::Modern,
@@ -1195,6 +1449,134 @@ mod tests {
         assert!(
             !msg.contains(&"B".repeat(600)),
             "unbounded object payload leaked into error"
+        );
+    }
+
+    fn sample_create_task(task_id: &str) -> serde_json::Value {
+        json!({
+            "resultType": RESULT_TYPE_TASK,
+            "taskId": task_id,
+            "status": "working",
+            "createdAt": "2026-07-28T00:00:00Z",
+            "lastUpdatedAt": "2026-07-28T00:00:01Z",
+            "ttlMs": 60_000,
+            "pollIntervalMs": 0
+        })
+    }
+
+    #[test]
+    fn modern_client_capabilities_advertise_tasks_extension() {
+        let caps = modern_client_capabilities();
+        assert_eq!(caps["resources"], json!({}));
+        assert_eq!(caps["prompts"], json!({}));
+        assert_eq!(caps["extensions"][TASKS_EXTENSION], json!({}));
+    }
+
+    #[test]
+    fn modern_task_on_tools_call_parses_handle() {
+        let kind = classify_mcp_result(
+            PeerEra::Modern,
+            "tools/call",
+            &sample_create_task("786512e2-9e0d-44bd-8f29-789f320fe840"),
+        )
+        .expect("well-formed task");
+        match kind {
+            McpResultKind::Task(task) => {
+                assert_eq!(task.task_id, "786512e2-9e0d-44bd-8f29-789f320fe840");
+                assert_eq!(task.status, TaskStatus::Working);
+                assert_eq!(task.poll_interval_ms, Some(0));
+            }
+            other => panic!("expected task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modern_task_on_list_is_rejected() {
+        let err = classify_mcp_result(PeerEra::Modern, "tools/list", &sample_create_task("task-1"))
+            .expect_err("list methods cannot return a task");
+        assert_eq!(
+            err,
+            ResultTypeError::TaskNotAllowed {
+                method: "tools/list".into()
+            }
+        );
+    }
+
+    #[test]
+    fn modern_malformed_and_oversized_task_fail_closed() {
+        assert_eq!(
+            classify_mcp_result(
+                PeerEra::Modern,
+                "tools/call",
+                &json!({"resultType": RESULT_TYPE_TASK})
+            )
+            .expect_err("missing fields"),
+            ResultTypeError::MalformedTask
+        );
+        assert_eq!(
+            classify_mcp_result(
+                PeerEra::Modern,
+                "tools/call",
+                &json!({
+                    "resultType": RESULT_TYPE_TASK,
+                    "taskId": "ok",
+                    "status": "flying",
+                    "createdAt": "2026-07-28T00:00:00Z",
+                    "lastUpdatedAt": "2026-07-28T00:00:01Z",
+                    "ttlMs": 1
+                })
+            )
+            .expect_err("unknown status"),
+            ResultTypeError::MalformedTask
+        );
+        let huge = "T".repeat(MAX_TASK_ID_BYTES + 1);
+        let err = classify_mcp_result(
+            PeerEra::Modern,
+            "tools/call",
+            &json!({
+                "resultType": RESULT_TYPE_TASK,
+                "taskId": huge,
+                "status": "working",
+                "createdAt": "2026-07-28T00:00:00Z",
+                "lastUpdatedAt": "2026-07-28T00:00:01Z",
+                "ttlMs": 1
+            }),
+        )
+        .expect_err("huge taskId");
+        assert_eq!(err, ResultTypeError::TaskIdTooLarge);
+        let msg = err.to_string();
+        assert!(!msg.contains(&"T".repeat(80)), "taskId leaked: {msg}");
+        assert!(msg.len() < 200, "error should be short, got {}", msg.len());
+    }
+
+    #[test]
+    fn legacy_ignores_task_shaped_result() {
+        let kind =
+            classify_mcp_result(PeerEra::Legacy, "tools/call", &sample_create_task("forged"))
+                .expect("legacy does not branch on resultType");
+        assert_eq!(kind, McpResultKind::Complete);
+    }
+
+    #[test]
+    fn parse_task_poll_completed_and_mismatch() {
+        let completed = json!({
+            "resultType": RESULT_TYPE_COMPLETE,
+            "taskId": "abc",
+            "status": "completed",
+            "createdAt": "2026-07-28T00:00:00Z",
+            "lastUpdatedAt": "2026-07-28T00:00:02Z",
+            "ttlMs": 60_000,
+            "result": {"resultType": RESULT_TYPE_COMPLETE, "ok": true}
+        });
+        match parse_task_poll_result("abc", &completed).expect("completed") {
+            TaskPollState::Completed(inner) => {
+                assert_eq!(inner["ok"], true);
+            }
+            other => panic!("expected completed, got {other:?}"),
+        }
+        assert_eq!(
+            parse_task_poll_result("other", &completed).expect_err("mismatch"),
+            ResultTypeError::MalformedTask
         );
     }
 

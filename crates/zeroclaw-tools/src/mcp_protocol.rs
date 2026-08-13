@@ -4,8 +4,8 @@
 //! [`MCP_PROTOCOL_VERSION`] until the remaining protocol-version stage.
 //! Stage 2 speaks modern headers/`_meta` on [`crate::mcp_era::PeerEra::Modern`]
 //! only; Stage 3 classifies `resultType` / MRTR envelopes; Stage 4 mints
-//! in-process task handles in [`crate::mcp_task`]. This constant stays the
-//! Legacy initialize pin.
+//! in-process handles in [`crate::mcp_task`] for MRTR and the tasks
+//! extension. This constant stays the Legacy initialize pin.
 //! Adapted from ops-mcp-server/src/protocol.rs for client use.
 //! Both Serialize and Deserialize are derived — the client both sends (Serialize)
 

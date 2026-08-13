@@ -15,16 +15,18 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{Duration, Instant, timeout, timeout_at};
 
 use crate::mcp_era::{
-    DiscoverNegotiateError, MCP_MODERN_PROTOCOL_VERSION, McpInputRequiredError, McpResultKind,
-    PeerEra, PeerProtocol, ResultTypeError, VersionQuality, attach_input_retry,
-    attach_request_meta, cache_hints_from_result, classify_mcp_result, is_recognized_modern_error,
-    local_cache_ttl, versions_from_unsupported_error,
+    CreateTask, DiscoverNegotiateError, MCP_MODERN_PROTOCOL_VERSION, McpInputRequiredError,
+    McpResultKind, PeerEra, PeerProtocol, ResultTypeError, TaskPollState, VersionQuality,
+    attach_input_retry, attach_request_meta, cache_hints_from_result, classify_mcp_result,
+    is_recognized_modern_error, local_cache_ttl, parse_task_poll_result,
+    versions_from_unsupported_error,
 };
 use crate::mcp_prompt::{McpGetPromptResult, McpPromptsListResult};
 use crate::mcp_protocol::{JsonRpcRequest, MCP_PROTOCOL_VERSION, McpToolDef, McpToolsListResult};
 use crate::mcp_resource::{McpResourceContents, McpResourcesListResult};
 use crate::mcp_task::{
-    McpTaskPending, McpTaskStore, TaskContinuation, parse_continuation, require_responses_if_needed,
+    MAX_TASK_POLL_WALL, MAX_TASK_POLLS, McpTaskPending, McpTaskStore, TaskContinuation,
+    TaskHandleError, parse_continuation, poll_delay, require_responses_if_needed,
 };
 use crate::mcp_transport::{
     McpRecoveryGate, McpRequestLifecycle, McpTransportError, SharedMcpTransportConn,
@@ -161,6 +163,11 @@ fn classify_discover_response(resp: crate::mcp_protocol::JsonRpcResponse) -> Pro
                             method: "server/discover".to_string(),
                         },
                     ),
+                    Ok(McpResultKind::Task(_)) => {
+                        ProbeOutcome::InvalidModernResult(ResultTypeError::TaskNotAllowed {
+                            method: "server/discover".to_string(),
+                        })
+                    }
                     Err(err) => ProbeOutcome::InvalidModernResult(err),
                 }
             }
@@ -391,6 +398,10 @@ fn require_complete_result(
         Ok(McpResultKind::InputRequired(input_required)) => Err(McpInputRequiredError {
             method: method.to_string(),
             input_required,
+        }
+        .into()),
+        Ok(McpResultKind::Task(_)) => Err(ResultTypeError::TaskNotAllowed {
+            method: method.to_string(),
         }
         .into()),
         Err(err) => Err(anyhow::Error::msg(format!(
@@ -1231,8 +1242,10 @@ impl McpServer {
     /// Classify a JSON-RPC `result`. Complete payloads pass through.
     /// Well-formed `input_required` on `tools/call` mints an in-process
     /// handle; the same envelope on `prompts/get` / `resources/read` stays a
-    /// typed error (no handle). Malformed modern envelopes fail closed.
-    /// Legacy never reaches `InputRequired`.
+    /// typed error (no handle). Well-formed `resultType: "task"` on
+    /// `tools/call` is mapped into the same table and polled via
+    /// `tasks/get`. Malformed modern envelopes fail closed. Legacy never
+    /// reaches `InputRequired` or `Task`.
     async fn finalize_classified_result(
         &self,
         method: &str,
@@ -1259,6 +1272,205 @@ impl McpServer {
                 };
                 Err(anyhow::Error::new(pending))
             }
+            Ok(McpResultKind::Task(task)) => {
+                self.resolve_extension_task(method, params, task).await
+            }
+            Err(err) => Err(anyhow::Error::msg(format!(
+                "MCP `{method}` resultType rejected: {err}"
+            ))),
+        }
+    }
+
+    async fn resolve_extension_task(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        task: CreateTask,
+    ) -> Result<serde_json::Value> {
+        let (pending, timeout_secs) = {
+            let mut inner = self.inner.lock().await;
+            let timeout_secs = inner
+                .config
+                .tool_timeout_secs
+                .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS)
+                .min(MAX_TOOL_TIMEOUT_SECS);
+            let pending =
+                inner
+                    .tasks
+                    .mint_extension(method, params.clone(), task.task_id.clone())?;
+            (pending, timeout_secs)
+        };
+        let operation = format!("`{method}` task poll");
+        self.poll_extension_task(
+            &task.task_id,
+            method,
+            params,
+            Some(pending.handle),
+            timeout_secs,
+            &operation,
+        )
+        .await
+    }
+
+    async fn poll_extension_task(
+        &self,
+        task_id: &str,
+        origin_method: &str,
+        origin_params: serde_json::Value,
+        pending_handle: Option<String>,
+        timeout_secs: u64,
+        operation: &str,
+    ) -> Result<serde_json::Value> {
+        let wall = Duration::from_secs(timeout_secs).min(MAX_TASK_POLL_WALL);
+        let deadline = Instant::now() + wall;
+        for poll in 0..MAX_TASK_POLLS {
+            if Instant::now() >= deadline {
+                if let Some(handle) = pending_handle.as_deref() {
+                    self.inner.lock().await.tasks.discard(handle);
+                }
+                return Err(TaskHandleError::PollLimitExceeded.into());
+            }
+            let resp = self
+                .dispatch_rpc(
+                    "tasks/get",
+                    json!({ "taskId": task_id }),
+                    timeout_secs,
+                    operation,
+                )
+                .await;
+            let resp = match resp {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if let Some(handle) = pending_handle.as_deref() {
+                        self.inner.lock().await.tasks.discard(handle);
+                    }
+                    return Err(err);
+                }
+            };
+            if let Some(err) = resp.error {
+                if let Some(handle) = pending_handle.as_deref() {
+                    self.inner.lock().await.tasks.discard(handle);
+                }
+                bail!(
+                    "MCP `tasks/get` error {}: {}",
+                    err.code,
+                    zeroclaw_providers::sanitize_api_error(&err.message)
+                );
+            }
+            let result = resp.result.unwrap_or(serde_json::Value::Null);
+            let state = match parse_task_poll_result(task_id, &result) {
+                Ok(state) => state,
+                Err(err) => {
+                    if let Some(handle) = pending_handle.as_deref() {
+                        self.inner.lock().await.tasks.discard(handle);
+                    }
+                    return Err(anyhow::Error::msg(format!(
+                        "MCP `tasks/get` resultType rejected: {err}"
+                    )));
+                }
+            };
+            match state {
+                TaskPollState::Working { poll_interval_ms } => {
+                    if poll + 1 >= MAX_TASK_POLLS {
+                        break;
+                    }
+                    if let Some(delay) = poll_delay(poll_interval_ms) {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        tokio::time::sleep(delay.min(remaining)).await;
+                    }
+                }
+                TaskPollState::Completed(inner) => {
+                    if let Some(handle) = pending_handle.as_deref() {
+                        self.inner.lock().await.tasks.discard(handle);
+                    }
+                    return self
+                        .consume_origin_result(origin_method, origin_params, inner)
+                        .await;
+                }
+                TaskPollState::Failed { message } => {
+                    if let Some(handle) = pending_handle.as_deref() {
+                        self.inner.lock().await.tasks.discard(handle);
+                    }
+                    return Err(TaskHandleError::TaskFailed { message }.into());
+                }
+                TaskPollState::Cancelled => {
+                    if let Some(handle) = pending_handle.as_deref() {
+                        self.inner.lock().await.tasks.discard(handle);
+                    }
+                    return Err(TaskHandleError::TaskCancelled.into());
+                }
+                TaskPollState::InputRequired(input_required) => {
+                    let pending = match pending_handle {
+                        Some(handle) => {
+                            let mut inner = self.inner.lock().await;
+                            inner
+                                .tasks
+                                .bind_input_required(&handle, input_required.clone())?;
+                            McpTaskPending {
+                                handle,
+                                method: origin_method.to_string(),
+                                input_required,
+                                ttl_secs: inner.tasks.ttl_secs(),
+                            }
+                        }
+                        None => {
+                            let mut inner = self.inner.lock().await;
+                            let pending = inner.tasks.mint_extension(
+                                origin_method,
+                                origin_params,
+                                task_id.to_string(),
+                            )?;
+                            inner
+                                .tasks
+                                .bind_input_required(&pending.handle, input_required.clone())?;
+                            McpTaskPending {
+                                handle: pending.handle,
+                                method: origin_method.to_string(),
+                                input_required,
+                                ttl_secs: pending.ttl_secs,
+                            }
+                        }
+                    };
+                    return Err(anyhow::Error::new(pending));
+                }
+            }
+        }
+        if let Some(handle) = pending_handle.as_deref() {
+            self.inner.lock().await.tasks.discard(handle);
+        }
+        Err(TaskHandleError::PollLimitExceeded.into())
+    }
+
+    async fn consume_origin_result(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        result: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let era = {
+            let inner = self.inner.lock().await;
+            inner.peer.era
+        };
+        match classify_mcp_result(era, method, &result) {
+            Ok(McpResultKind::Complete) => Ok(result),
+            Ok(McpResultKind::InputRequired(input_required)) => {
+                if method != "tools/call" {
+                    return Err(McpInputRequiredError {
+                        method: method.to_string(),
+                        input_required,
+                    }
+                    .into());
+                }
+                let pending: McpTaskPending = {
+                    let mut inner = self.inner.lock().await;
+                    inner.tasks.mint(method, params, input_required)?
+                };
+                Err(anyhow::Error::new(pending))
+            }
+            Ok(McpResultKind::Task(_)) => Err(ResultTypeError::NestedTask.into()),
             Err(err) => Err(anyhow::Error::msg(format!(
                 "MCP `{method}` resultType rejected: {err}"
             ))),
@@ -1282,6 +1494,36 @@ impl McpServer {
         };
         require_responses_if_needed(&redeemed.input_required, &continuation.input_responses)?;
         let original_params = redeemed.params.clone();
+        if let Some(task_id) = redeemed.extension_task_id {
+            let mut update_params = json!({ "taskId": task_id });
+            if let Some(responses) = continuation.input_responses
+                && let serde_json::Value::Object(map) = &mut update_params
+            {
+                map.insert("inputResponses".to_string(), responses);
+            }
+            let resp = self
+                .dispatch_rpc("tasks/update", update_params, timeout_secs, operation)
+                .await?;
+            if let Some(err) = resp.error {
+                bail!(
+                    "MCP `tasks/update` error {}: {}",
+                    err.code,
+                    zeroclaw_providers::sanitize_api_error(&err.message)
+                );
+            }
+            let ack = resp.result.unwrap_or(serde_json::Value::Null);
+            require_complete_result(PeerEra::Modern, "tasks/update", ack)?;
+            return self
+                .poll_extension_task(
+                    &task_id,
+                    &redeemed.method,
+                    original_params,
+                    None,
+                    timeout_secs,
+                    operation,
+                )
+                .await;
+        }
         let retry_params = attach_input_retry(
             original_params.clone(),
             continuation.input_responses.as_ref(),
@@ -5041,6 +5283,479 @@ done
             msg.contains("input_required") || msg.contains("resultType"),
             "got: {msg}"
         );
+    }
+
+    fn sample_create_task_result(task_id: &str, poll_interval_ms: u64) -> serde_json::Value {
+        json!({
+            "resultType": "task",
+            "taskId": task_id,
+            "status": "working",
+            "createdAt": "2026-07-28T00:00:00Z",
+            "lastUpdatedAt": "2026-07-28T00:00:01Z",
+            "ttlMs": 60_000,
+            "pollIntervalMs": poll_interval_ms
+        })
+    }
+
+    fn sample_task_get_result(
+        task_id: &str,
+        status: &str,
+        extra: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut result = json!({
+            "resultType": "complete",
+            "taskId": task_id,
+            "status": status,
+            "createdAt": "2026-07-28T00:00:00Z",
+            "lastUpdatedAt": "2026-07-28T00:00:02Z",
+            "ttlMs": 60_000,
+            "pollIntervalMs": 0
+        });
+        if let (Some(obj), Some(extra)) = (result.as_object_mut(), extra.as_object()) {
+            obj.extend(extra.clone());
+        }
+        result
+    }
+
+    fn client_caps(request: &wiremock::Request) -> Option<serde_json::Value> {
+        request_json(request)
+            .get("params")
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.get(crate::mcp_era::META_CLIENT_CAPABILITIES))
+            .cloned()
+    }
+
+    #[tokio::test]
+    async fn modern_task_result_polls_until_complete() {
+        use crate::mcp_era::{TASKS_EXTENSION, modern_client_capabilities};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_create_task_result("srv-task-1", 0)
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let gets = Arc::new(AtomicU32::new(0));
+        let gets_for_mock = Arc::clone(&gets);
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/get"})))
+            .respond_with(move |request: &wiremock::Request| {
+                let body = request_json(request);
+                assert_eq!(body["params"]["taskId"], "srv-task-1");
+                assert_eq!(
+                    body["params"]["_meta"][crate::mcp_era::META_CLIENT_CAPABILITIES],
+                    modern_client_capabilities()
+                );
+                let n = gets_for_mock.fetch_add(1, Ordering::SeqCst);
+                let id = body.get("id").cloned().expect("request id");
+                let result = if n == 0 {
+                    sample_task_get_result("srv-task-1", "working", json!({}))
+                } else {
+                    sample_task_get_result(
+                        "srv-task-1",
+                        "completed",
+                        json!({"result": {"resultType": "complete", "ok": true}}),
+                    )
+                };
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result
+                }))
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/update"})))
+            .respond_with(ResponseTemplate::new(500).set_body_string("must not update"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let result = mcp
+            .call_tool("echo", json!({"q": 1}))
+            .await
+            .expect("task polled to completion");
+        assert_eq!(result, json!({"resultType": "complete", "ok": true}));
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        assert_eq!(gets.load(Ordering::SeqCst), 2);
+
+        let received = server.received_requests().await.expect("requests");
+        for req in &received {
+            let body = request_json(req);
+            let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            if matches!(method, "tools/list" | "tools/call" | "tasks/get") {
+                let caps = client_caps(req).expect("modern _meta");
+                assert_eq!(
+                    caps["extensions"][TASKS_EXTENSION],
+                    json!({}),
+                    "modern {method} must advertise tasks"
+                );
+            }
+        }
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_task_poll_limit_fails_closed() {
+        use crate::mcp_task::MAX_TASK_POLLS;
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_create_task_result("srv-task-limit", 0)
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/get"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_task_get_result("srv-task-limit", "working", json!({}))
+                }))
+            })
+            .expect(u64::from(MAX_TASK_POLLS))
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("poll limit");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("poll limit"), "got: {msg}");
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_task_shaped_payload_never_polls() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "server/discover"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "error": {"code": -32601, "message": "Method not found"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "initialize"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "notifications/initialized"}),
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        mount_tools_list_empty(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let body = request_json(request);
+                assert!(
+                    body.get("params").and_then(|p| p.get("_meta")).is_none(),
+                    "legacy tools/call has no _meta"
+                );
+                let id = body.get("id").cloned().expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_create_task_result("legacy-forged", 0)
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/get"})))
+            .respond_with(ResponseTemplate::new(500).set_body_string("must not poll"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("legacy connect");
+        let result = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect("legacy treats shaped task payload as complete");
+        assert_eq!(result["resultType"], "task");
+        assert_eq!(result["taskId"], "legacy-forged");
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+
+        let received = server.received_requests().await.expect("requests");
+        assert!(
+            received.iter().all(|req| {
+                request_json(req).get("method").and_then(|m| m.as_str()) != Some("tasks/get")
+            }),
+            "legacy peer must not be polled"
+        );
+        for req in &received {
+            let body = request_json(req);
+            let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            match method {
+                "server/discover" => {
+                    let caps = client_caps(req).expect("probe _meta");
+                    assert_eq!(caps, json!({}));
+                    assert!(
+                        caps.get("extensions").is_none(),
+                        "era probe must not advertise tasks"
+                    );
+                }
+                _ => {
+                    assert!(
+                        client_caps(req).is_none(),
+                        "legacy {method} must not carry clientCapabilities"
+                    );
+                }
+            }
+        }
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_malformed_and_oversized_task_payload_fails_closed() {
+        use crate::mcp_era::MAX_TASK_ID_BYTES;
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let body = request_json(request);
+                let id = body.get("id").cloned().expect("request id");
+                let name = body["params"]["name"].as_str().unwrap_or("");
+                let result = if name == "huge" {
+                    let mut payload = sample_create_task_result("x", 0);
+                    payload["taskId"] = json!("H".repeat(MAX_TASK_ID_BYTES + 1));
+                    payload
+                } else {
+                    json!({"resultType": "task", "status": "working"})
+                };
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result
+                }))
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/get"})))
+            .respond_with(ResponseTemplate::new(500).set_body_string("must not poll"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let malformed = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("malformed task");
+        let malformed_msg = format!("{malformed:#}");
+        assert!(
+            malformed_msg.contains("malformed") || malformed_msg.contains("resultType"),
+            "got: {malformed_msg}"
+        );
+        let huge = mcp
+            .call_tool("huge", json!({}))
+            .await
+            .expect_err("oversized taskId");
+        let huge_msg = format!("{huge:#}");
+        assert!(huge_msg.contains("taskId"), "got: {huge_msg}");
+        assert!(
+            !huge_msg.contains(&"H".repeat(80)),
+            "unbounded taskId leaked: {huge_msg}"
+        );
+        assert!(
+            huge_msg.len() < 1000,
+            "error not bounded: {}",
+            huge_msg.len()
+        );
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_task_input_required_continues_via_tasks_update() {
+        use crate::mcp_task::{INPUT_RESPONSES_FIELD, TASK_HANDLE_ARG};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_create_task_result("srv-task-in", 0)
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        let gets = Arc::new(AtomicU32::new(0));
+        let gets_for_mock = Arc::clone(&gets);
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/get"})))
+            .respond_with(move |request: &wiremock::Request| {
+                let body = request_json(request);
+                let id = body.get("id").cloned().expect("request id");
+                let n = gets_for_mock.fetch_add(1, Ordering::SeqCst);
+                let result = if n == 0 {
+                    sample_task_get_result(
+                        "srv-task-in",
+                        "input_required",
+                        json!({
+                            "inputRequests": {
+                                "github_login": {
+                                    "method": "elicitation/create",
+                                    "params": {"mode": "form", "message": "name"}
+                                }
+                            }
+                        }),
+                    )
+                } else {
+                    sample_task_get_result(
+                        "srv-task-in",
+                        "completed",
+                        json!({"result": {"resultType": "complete", "ok": true}}),
+                    )
+                };
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result
+                }))
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/update"})))
+            .respond_with(|request: &wiremock::Request| {
+                let body = request_json(request);
+                let params = body.get("params").cloned().unwrap_or(json!({}));
+                assert_eq!(params["taskId"], "srv-task-in");
+                assert_eq!(
+                    params["inputResponses"],
+                    json!({"github_login": {"action": "accept"}})
+                );
+                assert!(params.get("_meta").is_some());
+                assert!(
+                    params.get(TASK_HANDLE_ARG).is_none(),
+                    "client handle must not go on the wire"
+                );
+                let id = body.get("id").cloned().expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {"resultType": "complete"}
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool("echo", json!({"q": 1}))
+            .await
+            .expect_err("pending handle");
+        let pending = err.downcast_ref::<McpTaskPending>().expect("minted handle");
+        assert!(crate::mcp_task::is_our_task_handle(&pending.handle));
+        let msg = pending.to_string();
+        assert!(!msg.contains("srv-task-in"), "server taskId leaked: {msg}");
+        let result = mcp
+            .call_tool(
+                "echo",
+                json!({
+                    TASK_HANDLE_ARG: pending.handle,
+                    INPUT_RESPONSES_FIELD: {"github_login": {"action": "accept"}}
+                }),
+            )
+            .await
+            .expect("continue via tasks/update");
+        assert_eq!(result, json!({"resultType": "complete", "ok": true}));
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        server.verify().await;
     }
 
     #[tokio::test]

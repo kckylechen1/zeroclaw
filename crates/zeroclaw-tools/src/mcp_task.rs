@@ -6,14 +6,15 @@
 //! and the echoed opaque `requestState` (see [`crate::mcp_era::attach_input_retry`]).
 //!
 //! Lifecycle (process-local; a restart discards the table — the server holds
-//! `requestState`, so that is acceptable):
+//! `requestState` / the durable task, so that is acceptable):
 //! - bounded count and TTL
 //! - bound to the original method + params fingerprint
 //! - single-consume on redeem
 //!
-//! [`PeerEra`](crate::mcp_era::PeerEra) stays the only version dispatch:
-//! Legacy peers never mint handles. This store does not persist and does not
-//! implement the `io.modelcontextprotocol/tasks` extension.
+//! The same table also maps unsolicited `resultType: "task"` envelopes onto
+//! an in-process handle that stores the server `taskId`. That id is never a
+//! model-visible key; intercept still requires our prefix. [`PeerEra`](crate::mcp_era::PeerEra)
+//! stays the only version dispatch: Legacy peers never mint handles.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -39,6 +40,12 @@ pub const TASK_HANDLE_TTL: Duration = Duration::from_secs(300);
 /// Opaque `requestState` is stored for exact echo. Larger blobs fail closed
 /// at mint so a malicious server cannot pin unbounded memory.
 pub const MAX_REQUEST_STATE_BYTES: usize = 64 * 1024;
+/// Bounded `tasks/get` attempts per handle. Exceeding fails closed.
+pub const MAX_TASK_POLLS: u32 = 16;
+/// Wall-clock cap for one poll loop. Exceeding fails closed.
+pub const MAX_TASK_POLL_WALL: Duration = Duration::from_secs(30);
+/// Honor `pollIntervalMs` only up to this cap so a server cannot stall us.
+pub const MAX_POLL_INTERVAL: Duration = Duration::from_millis(2_000);
 
 /// Model-visible continuation after a well-formed `input_required`.
 ///
@@ -97,6 +104,9 @@ pub enum TaskHandleError {
     RequestStateTooLarge,
     MalformedInputResponses,
     MissingInputResponses,
+    PollLimitExceeded,
+    TaskCancelled,
+    TaskFailed { message: String },
 }
 
 impl std::fmt::Display for TaskHandleError {
@@ -122,6 +132,13 @@ impl std::fmt::Display for TaskHandleError {
                 f,
                 "MCP task handle requires `{INPUT_RESPONSES_FIELD}` for the pending inputRequests"
             ),
+            Self::PollLimitExceeded => write!(
+                f,
+                "MCP task poll limit exceeded (max {MAX_TASK_POLLS} gets / {}s); refused",
+                MAX_TASK_POLL_WALL.as_secs()
+            ),
+            Self::TaskCancelled => write!(f, "MCP task was cancelled"),
+            Self::TaskFailed { message } => write!(f, "MCP task failed: {message}"),
         }
     }
 }
@@ -136,11 +153,16 @@ pub struct TaskContinuation {
 }
 
 /// Original request a handle will retry, plus the opaque server state.
+///
+/// `extension_task_id` is set when the handle was minted from
+/// `resultType: "task"`; continuation then uses `tasks/update` rather than
+/// retrying the original method. The id is never included in [`McpTaskPending`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct RedeemedTask {
     pub method: String,
     pub params: serde_json::Value,
     pub input_required: InputRequired,
+    pub extension_task_id: Option<String>,
 }
 
 struct TaskRecord {
@@ -149,6 +171,7 @@ struct TaskRecord {
     fingerprint: [u8; 32],
     input_required: InputRequired,
     expires_at: Instant,
+    extension_task_id: Option<String>,
 }
 
 /// Process-local handle table. Not durable across restart.
@@ -217,6 +240,7 @@ impl McpTaskStore {
                 fingerprint,
                 input_required: input_required.clone(),
                 expires_at: Instant::now() + self.ttl,
+                extension_task_id: None,
             },
         );
         Ok(McpTaskPending {
@@ -257,7 +281,56 @@ impl McpTaskStore {
             method: record.method,
             params: record.params,
             input_required: record.input_required,
+            extension_task_id: record.extension_task_id,
         })
+    }
+
+    /// Mint a handle that stores a server-issued task id. The id is not
+    /// copied into [`McpTaskPending`]; only our prefix is model-visible.
+    pub fn mint_extension(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        task_id: String,
+    ) -> Result<McpTaskPending, TaskHandleError> {
+        if task_id.len() > crate::mcp_era::MAX_TASK_ID_BYTES {
+            return Err(TaskHandleError::RequestStateTooLarge);
+        }
+        let pending = self.mint(
+            method,
+            params,
+            InputRequired {
+                input_requests: None,
+                request_state: None,
+            },
+        )?;
+        if let Some(record) = self.handles.get_mut(&pending.handle) {
+            record.extension_task_id = Some(task_id);
+        }
+        Ok(pending)
+    }
+
+    /// Attach `inputRequests` surfaced by `tasks/get` onto an existing
+    /// extension handle so a later redeem can require answers.
+    pub fn bind_input_required(
+        &mut self,
+        handle: &str,
+        input_required: InputRequired,
+    ) -> Result<(), TaskHandleError> {
+        let Some(record) = self.handles.get_mut(handle) else {
+            return Err(TaskHandleError::Unknown);
+        };
+        if Instant::now() >= record.expires_at {
+            self.handles.remove(handle);
+            return Err(TaskHandleError::Expired);
+        }
+        record.input_required = input_required;
+        Ok(())
+    }
+
+    /// Drop a handle without redeeming it (terminal poll or poll-limit).
+    pub fn discard(&mut self, handle: &str) {
+        self.handles.remove(handle);
     }
 
     fn sweep_expired(&mut self) {
@@ -319,6 +392,12 @@ pub fn parse_continuation(
         }
         _ => Ok(None),
     }
+}
+
+/// Cap a server `pollIntervalMs`. `None` or `0` means do not sleep.
+pub fn poll_delay(poll_interval_ms: Option<u64>) -> Option<Duration> {
+    let ms = poll_interval_ms.filter(|ms| *ms > 0)?;
+    Some(Duration::from_millis(ms).min(MAX_POLL_INTERVAL))
 }
 
 /// Spec: if `inputRequests` was present, the client must construct answers
@@ -641,5 +720,31 @@ mod tests {
             request_fingerprint("tools/call", &params),
             request_fingerprint("prompts/get", &params)
         );
+    }
+
+    #[test]
+    fn mint_extension_stores_server_id_and_omits_it_from_pending() {
+        let mut store = McpTaskStore::new();
+        let pending = store
+            .mint_extension("tools/call", call_params("echo"), "server-task-1".into())
+            .expect("mint");
+        assert!(is_our_task_handle(&pending.handle));
+        assert!(!pending.to_string().contains("server-task-1"));
+        store
+            .bind_input_required(&pending.handle, sample_required(None))
+            .expect("bind");
+        let redeemed = store
+            .redeem(&pending.handle, "tools/call", Some("echo"))
+            .expect("redeem");
+        assert_eq!(redeemed.extension_task_id.as_deref(), Some("server-task-1"));
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn poll_delay_caps_and_treats_zero_as_no_sleep() {
+        assert_eq!(poll_delay(None), None);
+        assert_eq!(poll_delay(Some(0)), None);
+        assert_eq!(poll_delay(Some(50)), Some(Duration::from_millis(50)));
+        assert_eq!(poll_delay(Some(60_000)), Some(MAX_POLL_INTERVAL));
     }
 }
