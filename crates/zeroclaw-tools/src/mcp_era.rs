@@ -1,12 +1,16 @@
-//! Dual-era MCP peer classification.
+//! Dual-era MCP peer classification and modern-wire helpers.
 //!
 //! Protocol version `2026-07-28` removed the `initialize` handshake. This
 //! module is the seam that must exist *before* [`MCP_PROTOCOL_VERSION`] can
-//! move: probe once per server, resolve a [`PeerEra`], and record the peer
-//! version. Stage 1 keeps today's initialize handshake as the wire for
-//! **every** era; modern request `_meta` / header behaviour is a follow-up.
+//! move: probe once per server, resolve a [`PeerEra`], and branch handshake /
+//! session / transport on that one value. Stage 2 speaks the modern POST
+//! headers and per-request `_meta` only on [`PeerEra::Modern`]; the Legacy
+//! arm is unchanged. Do not bump [`MCP_PROTOCOL_VERSION`] here.
 //!
 //! [`MCP_PROTOCOL_VERSION`]: crate::mcp_protocol::MCP_PROTOCOL_VERSION
+
+use base64::Engine;
+use serde_json::json;
 
 use crate::mcp_protocol::{JsonRpcError, JsonRpcResponse, MCP_PROTOCOL_VERSION};
 
@@ -22,14 +26,29 @@ pub const MCP_LEGACY_LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
 /// Streamable HTTP introduction; still handshake-era.
 pub const MCP_LEGACY_STREAMABLE_PROTOCOL_VERSION: &str = "2025-03-26";
 
-/// Revisions this client can name. Stage 1 still speaks all of them over
-/// the legacy initialize wire; the modern constant is classification-only.
+/// Revisions this client can name. Spoken wire still follows [`PeerEra`]:
+/// handshake-era dates use initialize; [`MCP_MODERN_PROTOCOL_VERSION`] uses
+/// per-request `_meta`. [`MCP_PROTOCOL_VERSION`] itself is not bumped here.
 pub const KNOWN_PROTOCOL_VERSIONS: &[&str] = &[
     MCP_PROTOCOL_VERSION,
     MCP_LEGACY_STREAMABLE_PROTOCOL_VERSION,
     MCP_LEGACY_LATEST_PROTOCOL_VERSION,
     MCP_MODERN_PROTOCOL_VERSION,
 ];
+
+/// `_meta` key for the per-request protocol version (`2026-07-28`).
+pub const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+/// `_meta` key for client identity on each modern request.
+pub const META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
+/// `_meta` key for client capabilities on each modern request.
+pub const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+
+/// Streamable HTTP header that must match [`META_PROTOCOL_VERSION`].
+pub const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
+/// Streamable HTTP header mirroring JSON-RPC `method`.
+pub const MCP_METHOD_HEADER: &str = "Mcp-Method";
+/// Streamable HTTP header mirroring `params.name` or `params.uri`.
+pub const MCP_NAME_HEADER: &str = "Mcp-Name";
 
 /// JSON-RPC server-error codes introduced in `2026-07-28` (spec range
 /// `-32020`..`-32099`). A response carrying one of these identifies a
@@ -109,6 +128,17 @@ impl PeerProtocol {
         }
     }
 
+    /// Well-formed pin of the first modern revision. Used by the
+    /// `server/discover` probe and by tests of the modern transport arm.
+    pub fn modern_default() -> Self {
+        Self {
+            era: PeerEra::Modern,
+            version: MCP_MODERN_PROTOCOL_VERSION.to_string(),
+            advertised: MCP_MODERN_PROTOCOL_VERSION.to_string(),
+            quality: VersionQuality::Known,
+        }
+    }
+
     /// Classify a version string the peer named (initialize or discover).
     pub fn classify(advertised: &str) -> Self {
         match advertised {
@@ -160,7 +190,12 @@ impl PeerProtocol {
             overlap.iter().max().copied().expect("overlap is non-empty")
         };
         let mut peer = Self::classify(selected);
+        // Answering `server/discover` is itself a modern-era signal. The
+        // modern transport arm cannot speak a handshake-era date in `_meta`.
         peer.era = PeerEra::Modern;
+        if selected < MCP_MODERN_PROTOCOL_VERSION {
+            peer.version = MCP_MODERN_PROTOCOL_VERSION.to_string();
+        }
         Ok(peer)
     }
 
@@ -227,6 +262,112 @@ pub fn versions_from_unsupported_error(error: &JsonRpcError) -> Vec<String> {
 pub fn take_recognized_modern_error(resp: JsonRpcResponse) -> Option<JsonRpcResponse> {
     let code = resp.error.as_ref()?.code;
     is_recognized_modern_error(code).then_some(resp)
+}
+
+/// Per-request `_meta` object for a modern-era JSON-RPC call.
+pub fn client_request_meta(version: &str) -> serde_json::Value {
+    json!({
+        META_PROTOCOL_VERSION: version,
+        META_CLIENT_INFO: {
+            "name": "zeroclaw",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        META_CLIENT_CAPABILITIES: {
+            "resources": {},
+            "prompts": {}
+        }
+    })
+}
+
+/// Insert modern `_meta` into `params` when it is not already present.
+pub fn attach_request_meta(params: serde_json::Value, version: &str) -> serde_json::Value {
+    let meta = client_request_meta(version);
+    match params {
+        serde_json::Value::Object(mut map) => {
+            map.entry("_meta").or_insert(meta);
+            serde_json::Value::Object(map)
+        }
+        serde_json::Value::Null => json!({ "_meta": meta }),
+        other => other,
+    }
+}
+
+/// Body field mirrored into `Mcp-Name` for the methods that require it.
+pub fn mcp_name_header_source<'a>(
+    method: &str,
+    params: Option<&'a serde_json::Value>,
+) -> Option<&'a str> {
+    let params = params?.as_object()?;
+    match method {
+        "tools/call" | "prompts/get" => params.get("name")?.as_str(),
+        "resources/read" => params.get("uri")?.as_str(),
+        _ => None,
+    }
+}
+
+/// Encode a value for an MCP mirrored header (`Mcp-Name` / `Mcp-Param-*`).
+pub fn encode_mcp_header_value(value: &str) -> String {
+    if mcp_header_needs_encoding(value) {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(value.as_bytes());
+        format!("=?base64?{encoded}?=")
+    } else {
+        value.to_string()
+    }
+}
+
+fn mcp_header_needs_encoding(value: &str) -> bool {
+    if value.starts_with("=?base64?") && value.ends_with("?=") {
+        return true;
+    }
+    if value.starts_with(char::is_whitespace) || value.ends_with(char::is_whitespace) {
+        return true;
+    }
+    !value
+        .chars()
+        .all(|c| c == '\t' || ('\u{0020}'..='\u{007E}').contains(&c))
+}
+
+/// `cacheScope` on a CacheableResult (`tools/list` and the other list/read RPCs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheScope {
+    Public,
+    Private,
+}
+
+/// Freshness hint parsed from a modern list/read result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheHints {
+    pub ttl_ms: u64,
+    pub cache_scope: CacheScope,
+}
+
+/// Parse `ttlMs` + `cacheScope`. Unknown or partial values yield `None`
+/// (do not cache) rather than guessing.
+pub fn cache_hints_from_result(result: &serde_json::Value) -> Option<CacheHints> {
+    let ttl_ms = result.get("ttlMs")?.as_u64()?;
+    let cache_scope = match result.get("cacheScope")?.as_str()? {
+        "public" => CacheScope::Public,
+        "private" => CacheScope::Private,
+        _ => return None,
+    };
+    Some(CacheHints {
+        ttl_ms,
+        cache_scope,
+    })
+}
+
+/// Local cache TTL for a modern list result. `ttlMs == 0` means do not cache.
+/// Both `public` and `private` may be stored on this connection: the
+/// `McpServer` handle is already per-peer, so `private` is not shared.
+pub fn local_cache_ttl(hints: CacheHints) -> Option<std::time::Duration> {
+    if hints.ttl_ms == 0 {
+        return None;
+    }
+    match hints.cache_scope {
+        CacheScope::Public | CacheScope::Private => {
+            Some(std::time::Duration::from_millis(hints.ttl_ms))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -408,5 +549,99 @@ mod tests {
             }),
         };
         assert!(take_recognized_modern_error(resp).is_some());
+    }
+
+    #[test]
+    fn discover_legacy_only_overlap_stays_modern_and_snaps_spoken_version() {
+        let peer =
+            PeerProtocol::from_discover_supported(
+                &[MCP_LEGACY_LATEST_PROTOCOL_VERSION.to_string()],
+            )
+            .expect("overlap");
+        assert_eq!(peer.era, PeerEra::Modern);
+        assert_eq!(peer.version, MCP_MODERN_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn attach_request_meta_inserts_required_keys() {
+        let params = attach_request_meta(json!({"name": "echo"}), MCP_MODERN_PROTOCOL_VERSION);
+        let meta = params.get("_meta").expect("meta");
+        assert_eq!(
+            meta.get(META_PROTOCOL_VERSION).and_then(|v| v.as_str()),
+            Some(MCP_MODERN_PROTOCOL_VERSION)
+        );
+        assert!(meta.get(META_CLIENT_INFO).is_some());
+        assert!(meta.get(META_CLIENT_CAPABILITIES).is_some());
+        assert_eq!(params.get("name").and_then(|v| v.as_str()), Some("echo"));
+    }
+
+    #[test]
+    fn attach_request_meta_does_not_overwrite_existing_meta() {
+        let params = attach_request_meta(
+            json!({"_meta": {"io.modelcontextprotocol/protocolVersion": "keep"}}),
+            MCP_MODERN_PROTOCOL_VERSION,
+        );
+        assert_eq!(
+            params
+                .get("_meta")
+                .and_then(|m| m.get(META_PROTOCOL_VERSION))
+                .and_then(|v| v.as_str()),
+            Some("keep")
+        );
+    }
+
+    #[test]
+    fn mcp_name_header_source_reads_call_and_uri() {
+        assert_eq!(
+            mcp_name_header_source("tools/call", Some(&json!({"name": "echo"}))),
+            Some("echo")
+        );
+        assert_eq!(
+            mcp_name_header_source("resources/read", Some(&json!({"uri": "file:///a"}))),
+            Some("file:///a")
+        );
+        assert_eq!(mcp_name_header_source("tools/list", Some(&json!({}))), None);
+    }
+
+    #[test]
+    fn encode_mcp_header_value_plain_ascii_passthrough() {
+        assert_eq!(encode_mcp_header_value("get_weather"), "get_weather");
+    }
+
+    #[test]
+    fn encode_mcp_header_value_non_ascii_uses_base64_sentinel() {
+        assert_eq!(
+            encode_mcp_header_value("Hello, 世界"),
+            "=?base64?SGVsbG8sIOS4lueVjA==?="
+        );
+    }
+
+    #[test]
+    fn encode_mcp_header_value_encodes_sentinel_literal() {
+        assert_eq!(
+            encode_mcp_header_value("=?base64?literal?="),
+            "=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?="
+        );
+    }
+
+    #[test]
+    fn cache_hints_require_both_fields() {
+        assert!(cache_hints_from_result(&json!({"ttlMs": 1000})).is_none());
+        assert!(cache_hints_from_result(&json!({"cacheScope": "public"})).is_none());
+        let hints = cache_hints_from_result(&json!({"ttlMs": 1500, "cacheScope": "private"}))
+            .expect("hints");
+        assert_eq!(hints.ttl_ms, 1500);
+        assert_eq!(hints.cache_scope, CacheScope::Private);
+        assert_eq!(
+            local_cache_ttl(hints),
+            Some(std::time::Duration::from_millis(1500))
+        );
+        assert!(
+            local_cache_ttl(CacheHints {
+                ttl_ms: 0,
+                cache_scope: CacheScope::Public
+            })
+            .is_none()
+        );
     }
 }

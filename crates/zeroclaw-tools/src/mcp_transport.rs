@@ -14,6 +14,10 @@ use tokio::sync::{Mutex, Notify, OwnedRwLockReadGuard, RwLock, oneshot};
 use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 
+use crate::mcp_era::{
+    MCP_METHOD_HEADER, MCP_NAME_HEADER, MCP_PROTOCOL_VERSION_HEADER, PeerEra, PeerProtocol,
+    encode_mcp_header_value, mcp_name_header_source,
+};
 use crate::mcp_protocol::{JsonRpcRequest, JsonRpcResponse};
 use zeroclaw_config::schema::{McpServerConfig, McpTransport};
 
@@ -81,6 +85,21 @@ fn apply_request_timeout(
     }
 }
 
+/// Modern Streamable HTTP POST headers. `MCP-Protocol-Version` is taken from
+/// the request's [`PeerProtocol`], not re-parsed from the body.
+fn apply_modern_post_headers(
+    mut req: reqwest::RequestBuilder,
+    request: &JsonRpcRequest,
+    protocol_version: &str,
+) -> reqwest::RequestBuilder {
+    req = req.header(MCP_PROTOCOL_VERSION_HEADER, protocol_version);
+    req = req.header(MCP_METHOD_HEADER, request.method.as_str());
+    if let Some(name) = mcp_name_header_source(&request.method, request.params.as_ref()) {
+        req = req.header(MCP_NAME_HEADER, encode_mcp_header_value(name));
+    }
+    req
+}
+
 // ── Transport Errors ───────────────────────────────────────────────────────
 
 /// Transport-level failures that require reconnecting and re-running the MCP
@@ -120,12 +139,18 @@ pub(crate) struct McpRequestLifecycle {
     epoch_gate: Option<Arc<RwLock<u64>>>,
     recovery_gate: Option<Arc<dyn McpRecoveryGate>>,
     fixed_epoch: u64,
+    /// Spoken wire for this request. Always taken from the session's
+    /// [`PeerProtocol`] (or the discover probe's modern pin) — not re-derived
+    /// from the body.
+    era: PeerEra,
+    protocol_version: String,
 }
 
 impl McpRequestLifecycle {
     pub(crate) fn coordinated(
         epoch_gate: Arc<RwLock<u64>>,
         recovery_gate: Option<Arc<dyn McpRecoveryGate>>,
+        peer: &PeerProtocol,
     ) -> Self {
         Self {
             phase: AtomicU8::new(REQUEST_PRE_WRITE),
@@ -133,17 +158,33 @@ impl McpRequestLifecycle {
             epoch_gate: Some(epoch_gate),
             recovery_gate,
             fixed_epoch: 0,
+            era: peer.era,
+            protocol_version: peer.version.clone(),
         }
     }
 
     pub(crate) fn uncoordinated(epoch: u64) -> Self {
+        Self::uncoordinated_for_peer(epoch, &PeerProtocol::legacy_default())
+    }
+
+    pub(crate) fn uncoordinated_for_peer(epoch: u64, peer: &PeerProtocol) -> Self {
         Self {
             phase: AtomicU8::new(REQUEST_PRE_WRITE),
             epoch: AtomicU64::new(0),
             epoch_gate: None,
             recovery_gate: None,
             fixed_epoch: epoch,
+            era: peer.era,
+            protocol_version: peer.version.clone(),
         }
+    }
+
+    pub(crate) fn era(&self) -> PeerEra {
+        self.era
+    }
+
+    fn protocol_version(&self) -> &str {
+        &self.protocol_version
     }
 
     async fn begin_write(&self) -> McpWritePermit {
@@ -1025,7 +1066,11 @@ impl SharedMcpTransportConn for HttpTransport {
         }
 
         let epoch_guard = lifecycle.begin_write().await;
-        req = self.apply_session_header(req);
+        if lifecycle.era() == PeerEra::Legacy {
+            req = self.apply_session_header(req);
+        } else {
+            req = apply_modern_post_headers(req, request, lifecycle.protocol_version());
+        }
         lifecycle.mark_outcome_unknown(epoch_guard.epoch());
         let resp = req
             .send()
@@ -1051,7 +1096,9 @@ impl SharedMcpTransportConn for HttpTransport {
             bail!("MCP server returned HTTP {}", status);
         }
 
-        self.update_session_id_from_headers(resp.headers());
+        if lifecycle.era() == PeerEra::Legacy {
+            self.update_session_id_from_headers(resp.headers());
+        }
 
         if request.id.is_none() {
             return finish_response(
@@ -1604,7 +1651,11 @@ impl SharedMcpTransportConn for SseTransport {
         request: &JsonRpcRequest,
         lifecycle: &McpRequestLifecycle,
     ) -> Result<JsonRpcResponse> {
-        let stream_state = self.ensure_connected().await?;
+        let stream_state = if lifecycle.era() == PeerEra::Modern {
+            SseStreamState::Unsupported
+        } else {
+            self.ensure_connected().await?
+        };
 
         let id = request.id.as_ref().and_then(|v| v.as_u64());
         if request.id.is_some() && id.is_none() {
@@ -1680,6 +1731,9 @@ impl SharedMcpTransportConn for SseTransport {
         }
         if !has_accept {
             req = req.header("Accept", MCP_STREAMABLE_ACCEPT);
+        }
+        if lifecycle.era() == PeerEra::Modern {
+            req = apply_modern_post_headers(req, request, lifecycle.protocol_version());
         }
 
         lifecycle.mark_outcome_unknown(epoch_guard.epoch());
@@ -2095,7 +2149,11 @@ mod tests {
 
         let epoch_gate = Arc::new(RwLock::new(0));
         let epoch_writer = epoch_gate.write().await;
-        let lifecycle = McpRequestLifecycle::coordinated(Arc::clone(&epoch_gate), None);
+        let lifecycle = McpRequestLifecycle::coordinated(
+            Arc::clone(&epoch_gate),
+            None,
+            &PeerProtocol::legacy_default(),
+        );
         let request = JsonRpcRequest::new(7, "tools/call", serde_json::json!({}));
         let mut send = Box::pin(SharedMcpTransportConn::send_and_recv(
             &transport, &request, &lifecycle,
@@ -2874,5 +2932,118 @@ mod tests {
         drop(shared);
         assert!(transport.pending.lock().is_empty());
         assert!(rx.await.is_err(), "pending receiver must be released");
+    }
+
+    #[test]
+    fn apply_modern_post_headers_sets_method_name_and_version() {
+        let request = JsonRpcRequest::new(
+            1,
+            "tools/call",
+            serde_json::json!({"name": "echo", "arguments": {}}),
+        );
+        let req = apply_modern_post_headers(
+            reqwest::Client::new().post("http://localhost/mcp"),
+            &request,
+            crate::mcp_era::MCP_MODERN_PROTOCOL_VERSION,
+        )
+        .build()
+        .expect("build");
+        assert_eq!(
+            req.headers()
+                .get(MCP_METHOD_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("tools/call")
+        );
+        assert_eq!(
+            req.headers()
+                .get(MCP_NAME_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("echo")
+        );
+        assert_eq!(
+            req.headers()
+                .get(MCP_PROTOCOL_VERSION_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some(crate::mcp_era::MCP_MODERN_PROTOCOL_VERSION)
+        );
+        assert!(req.headers().get(MCP_SESSION_ID_HEADER).is_none());
+    }
+
+    #[test]
+    fn apply_modern_post_headers_omits_name_for_list() {
+        let request = JsonRpcRequest::new(1, "tools/list", serde_json::json!({}));
+        let req = apply_modern_post_headers(
+            reqwest::Client::new().post("http://localhost/mcp"),
+            &request,
+            crate::mcp_era::MCP_MODERN_PROTOCOL_VERSION,
+        )
+        .build()
+        .expect("build");
+        assert_eq!(
+            req.headers()
+                .get(MCP_METHOD_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("tools/list")
+        );
+        assert!(req.headers().get(MCP_NAME_HEADER).is_none());
+    }
+
+    #[tokio::test]
+    async fn http_transport_modern_era_does_not_send_or_store_session() {
+        use wiremock::matchers::{header, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(header(MCP_METHOD_HEADER, "tools/call"))
+            .and(header(MCP_NAME_HEADER, "echo"))
+            .and(header(
+                MCP_PROTOCOL_VERSION_HEADER,
+                crate::mcp_era::MCP_MODERN_PROTOCOL_VERSION,
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(MCP_SESSION_ID_HEADER, "must-not-store")
+                    .set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {"ok": true}
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let config = McpServerConfig {
+            name: "modern-http".into(),
+            transport: McpTransport::Http,
+            url: Some(server.uri()),
+            ..Default::default()
+        };
+        let transport = HttpTransport::new(&config).expect("build transport");
+        *transport.session_id.lock() = Some("stale-legacy-session".into());
+
+        let lifecycle =
+            McpRequestLifecycle::uncoordinated_for_peer(0, &PeerProtocol::modern_default());
+        let request = JsonRpcRequest::new(
+            1,
+            "tools/call",
+            serde_json::json!({"name": "echo", "arguments": {}}),
+        );
+        let resp = SharedMcpTransportConn::send_and_recv(&transport, &request, &lifecycle)
+            .await
+            .expect("modern POST");
+        assert_eq!(resp.result, Some(serde_json::json!({"ok": true})));
+        assert_eq!(
+            transport.session_id.lock().as_deref(),
+            Some("stale-legacy-session"),
+            "modern responses must not update Mcp-Session-Id"
+        );
+
+        let received = server.received_requests().await.expect("requests");
+        assert_eq!(received.len(), 1);
+        assert!(
+            received[0].headers.get(MCP_SESSION_ID_HEADER).is_none(),
+            "modern POST must not replay a leftover session id"
+        );
     }
 }
