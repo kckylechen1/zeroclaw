@@ -1,5 +1,7 @@
 # RFC Process
 
+> **Fork governance (this repository):** This fork does not follow the upstream RFC plus two-thirds maintainer ratification process documented below. An epic or leaf issue that the owner has approved is ratified design for this repository. Upstream foundation text (FND-003 / RFC #5577) remains the upstream record; it is not this fork's ratification rule. The rest of this page is kept as upstream text so rebases can merge it unchanged. Trigger: #49.
+
 Substantial changes to ZeroClaw's architecture, user-facing surface, or core policies go through an RFC before implementation. The process exists to surface design trade-offs, give maintainers and contributors a chance to push back early, and leave a searchable record of *why* a decision was made.
 
 Governance, RFC ratification rules, and voting thresholds are defined in RFC #5577.
