@@ -153,12 +153,16 @@ struct InboundAttachmentSpec {
 /// listener can hold the batch cursor on a transient error and skip only
 /// when retrying cannot change the outcome.
 ///
-/// Classification is deliberately conservative and isomorphic to Telegram's
-/// `FileLookupFailure`: only an explicit permanent whitelist is terminal.
+/// Classification is deliberately conservative: only an explicit permanent
+/// whitelist is terminal. The HTTP status classifier follows Telegram's
+/// permanent-whitelist pattern (`FileLookupFailure`), but mixed-message
+/// delivery is a WeChat product choice (keep the text) rather than
+/// Telegram's drop-the-update rule.
 /// Permanence requires HTTP `{400, 403, 404, 410}`, a size-limit rejection,
-/// or a decrypt/decode failure. 408, 425, 429, 5xx, transport errors,
-/// body-read failures, directory-create failures, and workspace write
-/// failures stay `Transient`.
+/// or invalid AES key metadata (wrong length/format, decidable before
+/// touching the payload). 408, 425, 429, 5xx, transport errors, body-read
+/// failures, PKCS7 decrypt failures on a downloaded payload, directory-create
+/// failures, and workspace write failures stay `Transient`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttachmentFailureKind {
     Transient,
@@ -217,19 +221,30 @@ impl AttachmentBuildFailure {
 ///
 /// `None` means the message has no fetchable attachment (or no workspace
 /// is configured). `SkipPermanent` is a logged, terminal skip of the
-/// attachment itself: mixed text+media still delivers the text, and a
-/// pure-attachment message is dropped. `RetryTransient` stops the current
-/// batch so the cursor stays put and the next poll retries the download.
+/// attachment itself: mixed text+media still delivers the text with an
+/// unavailable notice, and a pure-attachment message is dropped.
+/// `RetryTransient` stops the current batch so the cursor stays put and
+/// the next poll retries the download.
 #[derive(Debug)]
 enum AttachmentDisposition {
     None,
     Ready(String),
-    SkipPermanent,
+    SkipPermanent(String),
     RetryTransient,
 }
 
 impl AttachmentDisposition {
-    fn from_failure(failure: AttachmentBuildFailure) -> Self {
+    fn from_failure(failure: AttachmentBuildFailure, kind: WeChatAttachmentKind) -> Self {
+        let (log_msg, disposition) = match failure.kind() {
+            AttachmentFailureKind::Permanent => (
+                "attachment permanently skipped",
+                Self::SkipPermanent(format_unavailable_attachment(kind)),
+            ),
+            AttachmentFailureKind::Transient => (
+                "transient attachment failure, batch will retry",
+                Self::RetryTransient,
+            ),
+        };
         ::zeroclaw_log::record!(
             WARN,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -238,12 +253,9 @@ impl AttachmentDisposition {
                     "error": failure.to_string(),
                     "classification": format!("{:?}", failure.kind()),
                 })),
-            "attachment download skipped"
+            log_msg
         );
-        match failure.kind() {
-            AttachmentFailureKind::Permanent => Self::SkipPermanent,
-            AttachmentFailureKind::Transient => Self::RetryTransient,
-        }
+        disposition
     }
 }
 
@@ -394,6 +406,21 @@ fn format_attachment_content(
         format!("[IMAGE:{}]", local_path.display())
     } else {
         format!("[Document: {}] {}", local_filename, local_path.display())
+    }
+}
+
+/// Human-readable notice when a permanently skipped attachment still has
+/// accompanying text. Matches the inbound status-marker shape used for
+/// transcription failure (`[Audio: transcription failed]`) and media
+/// pipeline annotations (`[Image: {name} attached]`), not the machine
+/// `[IMAGE:/path]` payload marker.
+fn format_unavailable_attachment(kind: WeChatAttachmentKind) -> String {
+    match kind {
+        WeChatAttachmentKind::Image => "[Image: unavailable]".to_string(),
+        WeChatAttachmentKind::Document => "[Document: unavailable]".to_string(),
+        WeChatAttachmentKind::Video => "[Video: unavailable]".to_string(),
+        WeChatAttachmentKind::Audio => "[Audio: unavailable]".to_string(),
+        WeChatAttachmentKind::Voice => "[Voice: unavailable]".to_string(),
     }
 }
 
@@ -1762,7 +1789,7 @@ impl WeChatChannel {
                 let key = parse_aes_key(aes_key)
                     .map_err(|e| AttachmentBuildFailure::permanent(e.to_string()))?;
                 decrypt_aes_ecb(&bytes, &key)
-                    .map_err(|e| AttachmentBuildFailure::permanent(e.to_string()))
+                    .map_err(|e| AttachmentBuildFailure::transient(e.to_string()))
             }
             _ => Ok(bytes),
         }
@@ -1781,24 +1808,28 @@ impl WeChatChannel {
         };
         let bytes = match self.download_inbound_attachment(&spec).await {
             Ok(bytes) => bytes,
-            Err(failure) => return AttachmentDisposition::from_failure(failure),
+            Err(failure) => return AttachmentDisposition::from_failure(failure, spec.kind),
         };
 
         let save_dir = workspace_dir.join("wechat_files");
         if let Err(err) = tokio::fs::create_dir_all(&save_dir).await {
-            return AttachmentDisposition::from_failure(AttachmentBuildFailure::transient(
-                format!("Failed to create WeChat attachment dir: {err}"),
-            ));
+            return AttachmentDisposition::from_failure(
+                AttachmentBuildFailure::transient(format!(
+                    "Failed to create WeChat attachment dir: {err}"
+                )),
+                spec.kind,
+            );
         }
 
         let local_path = save_dir.join(&spec.file_name);
         if let Err(err) = tokio::fs::write(&local_path, bytes).await {
-            return AttachmentDisposition::from_failure(AttachmentBuildFailure::transient(
-                format!(
+            return AttachmentDisposition::from_failure(
+                AttachmentBuildFailure::transient(format!(
                     "Failed to save WeChat attachment to {}: {err}",
                     local_path.display()
-                ),
-            ));
+                )),
+                spec.kind,
+            );
         }
 
         AttachmentDisposition::Ready(format_attachment_content(
@@ -1867,8 +1898,11 @@ impl WeChatChannel {
                 (AttachmentDisposition::Ready(marker), false) => {
                     format!("{marker}\n\n{text}")
                 }
-                (AttachmentDisposition::None | AttachmentDisposition::SkipPermanent, false) => text,
-                (AttachmentDisposition::None | AttachmentDisposition::SkipPermanent, true) => {
+                (AttachmentDisposition::SkipPermanent(notice), false) => {
+                    format!("{notice}\n\n{text}")
+                }
+                (AttachmentDisposition::None, false) => text,
+                (AttachmentDisposition::None | AttachmentDisposition::SkipPermanent(_), true) => {
                     continue;
                 }
             };
@@ -2665,8 +2699,8 @@ impl Channel for WeChatChannel {
             // Process messages. Stage the whole batch before any `tx.send` so
             // a transient attachment failure can discard unpublished work and
             // leave the cursor uncommitted. Permanent skips (size limit,
-            // unauthorized sender, CDN 400/403/404/410) are logged and do
-            // not hold the batch.
+            // unauthorized sender, CDN 400/403/404/410, invalid AES key
+            // metadata) are logged and do not hold the batch.
             let msgs = data
                 .get("msgs")
                 .and_then(|v| v.as_array())
@@ -3242,6 +3276,22 @@ mod tests {
         assert_eq!(
             format_attachment_content(WeChatAttachmentKind::Document, "report.pdf", &path),
             "[Document: report.pdf] /tmp/workspace/report.pdf"
+        );
+    }
+
+    #[test]
+    fn unavailable_attachment_notice_matches_inbound_status_markers() {
+        assert_eq!(
+            format_unavailable_attachment(WeChatAttachmentKind::Image),
+            "[Image: unavailable]"
+        );
+        assert_eq!(
+            format_unavailable_attachment(WeChatAttachmentKind::Document),
+            "[Document: unavailable]"
+        );
+        assert_eq!(
+            format_unavailable_attachment(WeChatAttachmentKind::Audio),
+            "[Audio: unavailable]"
         );
     }
 
@@ -3830,6 +3880,16 @@ mod tests {
         })
     }
 
+    fn inbound_encrypted_image_item(aes_key: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": 2,
+            "image_item": {
+                "aeskey": aes_key,
+                "media": {"encrypt_query_param": "enc_param_1"}
+            }
+        })
+    }
+
     fn inbound_text_item(text: &str) -> serde_json::Value {
         serde_json::json!({
             "type": 1,
@@ -4350,9 +4410,20 @@ mod tests {
             .expect("timed out waiting for the text after a permanent attachment skip")
             .expect("channel closed before the text arrived");
         assert_eq!(delivered.sender, "user_a");
-        assert_eq!(
-            delivered.content, "hello",
-            "a permanent attachment failure must deliver the text without fabricating a marker"
+        assert!(
+            delivered.content.contains("[Image: unavailable]"),
+            "a permanent attachment skip must annotate the kept text, got: {}",
+            delivered.content
+        );
+        assert!(
+            delivered.content.contains("hello"),
+            "a permanent attachment skip must still deliver the text, got: {}",
+            delivered.content
+        );
+        assert!(
+            !delivered.content.contains("[IMAGE:"),
+            "must not fabricate a successful image payload marker, got: {}",
+            delivered.content
         );
 
         handle.abort();
@@ -4468,6 +4539,108 @@ mod tests {
         assert_eq!(
             *load_persisted_wechat(&state_dir).cursor.lock(),
             "cursor_after_batch"
+        );
+    }
+
+    /// A 200 CDN body that fails PKCS7 decrypt (truncated/corrupt ciphertext)
+    /// must be transient: the key metadata was valid, so a later complete
+    /// download can recover. Treating decrypt failure as permanent would
+    /// skip the message and commit the cursor — the same silent loss this
+    /// change exists to close.
+    #[tokio::test]
+    async fn listen_retries_truncated_encrypted_attachment_then_advances() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let aes_hex = "0123456789abcdef0123456789abcdef";
+        let key = parse_aes_key(aes_hex).expect("test AES key must parse");
+        let ciphertext = encrypt_aes_ecb(b"fake-image-bytes", &key).expect("encrypt fixture");
+
+        let temp = tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        let workspace_dir = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let mock_server = MockServer::start().await;
+
+        let held_batch = getupdates_batch(
+            "cursor_after_batch",
+            serde_json::json!([inbound_message(
+                "user_a",
+                1,
+                serde_json::json!([inbound_encrypted_image_item(aes_hex)])
+            )]),
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/ilink/bot/getupdates"))
+            .and(body_partial_json(
+                serde_json::json!({"get_updates_buf": "original_cursor"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(held_batch))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ilink/bot/getupdates"))
+            .and(body_partial_json(
+                serde_json::json!({"get_updates_buf": "cursor_after_batch"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(getupdates_batch(
+                "cursor_after_batch",
+                serde_json::json!([]),
+            )))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"truncated".to_vec()))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(ciphertext))
+            .mount(&mock_server)
+            .await;
+
+        let ch = test_wechat_channel_for_listen(mock_server.uri(), &state_dir, &workspace_dir);
+        *ch.cursor.lock() = "original_cursor".to_string();
+        ch.save_sync_data().unwrap();
+        let ch = Arc::new(ch);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let listen_ch = ch.clone();
+        let handle = zeroclaw_spawn::spawn!(async move { listen_ch.listen(tx).await });
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            *load_persisted_wechat(&state_dir).cursor.lock(),
+            "original_cursor",
+            "a truncated encrypted payload must not commit the batch cursor"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a truncated decrypt must hold the batch, not skip the attachment"
+        );
+
+        let delivered = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("timed out waiting for the attachment after a complete ciphertext retry")
+            .expect("channel closed before the recovered attachment arrived");
+        assert_eq!(delivered.sender, "user_a");
+        assert!(
+            delivered.content.contains("[IMAGE:"),
+            "recovered ciphertext must deliver the attachment, got: {}",
+            delivered.content
+        );
+
+        handle.abort();
+        let _ = handle.await;
+
+        assert_eq!(
+            *load_persisted_wechat(&state_dir).cursor.lock(),
+            "cursor_after_batch",
+            "cursor must advance once the recovered ciphertext is enqueued"
         );
     }
 }
