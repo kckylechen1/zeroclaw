@@ -23,7 +23,7 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -54,9 +54,6 @@ const WS_MAX_MESSAGE_SIZE: usize = HELLO_MAX_BYTES;
 const MAX_AUTH_SIGNATURE_BYTES: usize = 256;
 const MAX_ADVERTISE_CAPS: usize = 16;
 const MAX_CAP_NAME_BYTES: usize = 256;
-
-const NODES_V2_NON_LOOPBACK_LISTEN_WARN: &str =
-    "nodes v2 on a non-loopback listen rejects loopback TCP peers as a closed surface";
 
 /// A single capability advertised by a node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,9 +123,7 @@ pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<String, NodeInfo>>>,
     max_nodes: usize,
     next_generation: Arc<AtomicU64>,
-    /// Canonical listen IP from `TcpListener::local_addr` after bind.
-    listen_addr: IpAddr,
-    identities: DeviceIdentityStore,
+    identities: Option<DeviceIdentityStore>,
     pending_challenges: Arc<RwLock<HashMap<String, PendingChallenge>>>,
     live: Arc<RwLock<HashMap<String, LiveSocket>>>,
 }
@@ -142,42 +137,45 @@ impl Default for NodeRegistry {
 impl NodeRegistry {
     /// Create a new registry with the given capacity limit.
     ///
-    /// Listen defaults to loopback so unit tests of the registry itself stay
-    /// on the unverified bearer path.
+    /// Production starts with no identity store (`None`). Opening the durable
+    /// store is fail-closed: the gateway must call [`Self::with_identities`]
+    /// on success and otherwise refuse node identity service. Tests get an
+    /// in-memory store so existing unit paths stay self-contained.
     pub fn new(max_nodes: usize) -> Self {
         Self {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             max_nodes,
             next_generation: Arc::new(AtomicU64::new(0)),
-            listen_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            identities: DeviceIdentityStore::memory_with_capacity(max_nodes.max(1)),
+            identities: {
+                #[cfg(test)]
+                {
+                    Some(DeviceIdentityStore::memory_with_capacity(max_nodes.max(1)))
+                }
+                #[cfg(not(test))]
+                {
+                    None
+                }
+            },
             pending_challenges: Arc::new(RwLock::new(HashMap::new())),
             live: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Record the socket the gateway actually bound. Source of truth is
-    /// `listener.local_addr()`, not the pre-bind config host string.
-    #[must_use]
-    pub fn with_listen_addr(mut self, listen_addr: IpAddr) -> Self {
-        self.listen_addr = listen_addr;
-        self
-    }
-
     #[must_use]
     pub fn with_identities(mut self, identities: DeviceIdentityStore) -> Self {
-        self.identities = identities;
+        self.identities = Some(identities);
         self
     }
 
     #[must_use]
-    pub fn identities(&self) -> &DeviceIdentityStore {
-        &self.identities
+    pub fn without_identities(mut self) -> Self {
+        self.identities = None;
+        self
     }
 
     #[must_use]
-    pub fn listen_addr(&self) -> IpAddr {
-        self.listen_addr
+    pub fn identities(&self) -> Option<&DeviceIdentityStore> {
+        self.identities.as_ref()
     }
 
     /// Allocate a connection id and monotonic generation for one socket.
@@ -312,7 +310,10 @@ impl NodeRegistry {
         &self,
         device_id: &str,
     ) -> Result<Vec<String>, crate::device_identity::IdentityError> {
-        if !self.identities.revoke(device_id)? {
+        let Some(store) = self.identities.as_ref() else {
+            return Err(crate::device_identity::IdentityError::Unavailable);
+        };
+        if !store.revoke(device_id)? {
             return Ok(Vec::new());
         }
         let mut torn = Vec::new();
@@ -346,7 +347,10 @@ impl NodeRegistry {
         key_fingerprint: &str,
         advertised: &[String],
     ) -> Result<Vec<String>, crate::device_identity::IdentityError> {
-        let Some(identity) = self.identities.active_identity(device_id, key_fingerprint) else {
+        let Some(store) = self.identities.as_ref() else {
+            return Err(crate::device_identity::IdentityError::Unavailable);
+        };
+        let Some(identity) = store.active_identity(device_id, key_fingerprint) else {
             return Err(crate::device_identity::IdentityError::IdentityRejected);
         };
         admit_live_caps(advertised, &identity.capability_ceiling)
@@ -482,38 +486,6 @@ fn client_offers_subprotocol(headers: &HeaderMap, protocol: &str) -> bool {
         .is_some_and(|protos| protos.split(',').any(|p| p.trim() == protocol))
 }
 
-fn peer_is_loopback(peer: SocketAddr) -> bool {
-    peer.ip().is_loopback()
-}
-
-fn listen_is_loopback(listen: IpAddr) -> bool {
-    listen.is_loopback()
-}
-
-/// True only when both the bound listen address and the TCP peer are loopback.
-/// A same-host reverse proxy makes `ConnectInfo` loopback while the gateway
-/// listens on `0.0.0.0` / `::`; that combination is never trusted as local.
-fn trusted_local(listen: IpAddr, peer: SocketAddr) -> bool {
-    listen_is_loopback(listen) && peer_is_loopback(peer)
-}
-
-fn reverse_proxy_disguise(listen: IpAddr, peer: SocketAddr) -> bool {
-    !listen_is_loopback(listen) && peer_is_loopback(peer)
-}
-
-/// WARN copy when nodes are enabled but the gateway did not bind loopback.
-#[must_use]
-pub(crate) fn nodes_v2_non_loopback_listen_warning(
-    enabled: bool,
-    listen: IpAddr,
-) -> Option<&'static str> {
-    if enabled && !listen_is_loopback(listen) {
-        Some(NODES_V2_NON_LOOPBACK_LISTEN_WARN)
-    } else {
-        None
-    }
-}
-
 fn closed_surface() -> NodeWsAdmission {
     NodeWsAdmission::Legacy {
         status: StatusCode::NOT_FOUND,
@@ -523,44 +495,27 @@ fn closed_surface() -> NodeWsAdmission {
 
 /// HTTP admission for `/ws/nodes`.
 ///
-/// Dual loopback (listen + peer from `listener.local_addr()`) is the trusted
-/// local foundation and keeps the typed 404/503/401/400 surface. A loopback
-/// peer on a non-loopback listen is treated as a same-host reverse proxy and
-/// stays on the closed 404 surface. A true remote peer without a valid bearer
-/// (or without v2) receives the same 404 bytes as `enabled=false`. A remote
-/// client that presents a valid bearer and v2 is upgraded; identity is proven
-/// only in-band after Hello.
+/// Verified Ed25519 identity is the only in-band admission gate; this HTTP
+/// check never consults listen or peer IP. Missing bearer, missing v2, or
+/// `enabled=false` all return the same closed 404 bytes so a tokenless
+/// scanner cannot distinguish those cases. A valid bearer plus v2 upgrades;
+/// Hello without a paired identity is rejected after the handshake starts.
 fn admit_node_ws(
     nodes_config: &zeroclaw_config::schema::NodesConfig,
     pairing: &PairingGuard,
     headers: &HeaderMap,
     query_token: Option<&str>,
-    peer: SocketAddr,
-    listen: IpAddr,
 ) -> NodeWsAdmission {
-    if reverse_proxy_disguise(listen, peer) {
-        return closed_surface();
-    }
-    if trusted_local(listen, peer) {
-        if !nodes_config.enabled {
-            return closed_surface();
-        }
-        if let Some((status, body)) = check_node_auth(nodes_config, pairing, headers, query_token) {
-            return NodeWsAdmission::Legacy { status, body };
-        }
-        if !client_offers_subprotocol(headers, WS_NODES_V2) {
-            return NodeWsAdmission::Typed {
-                status: StatusCode::BAD_REQUEST,
-                code: NodeErrorCode::ProtocolUnsupported,
-            };
-        }
-        return NodeWsAdmission::Ok;
-    }
     if !nodes_config.enabled
         || check_node_auth(nodes_config, pairing, headers, query_token).is_some()
-        || !client_offers_subprotocol(headers, WS_NODES_V2)
     {
         return closed_surface();
+    }
+    if !client_offers_subprotocol(headers, WS_NODES_V2) {
+        return NodeWsAdmission::Typed {
+            status: StatusCode::BAD_REQUEST,
+            code: NodeErrorCode::ProtocolUnsupported,
+        };
     }
     NodeWsAdmission::Ok
 }
@@ -663,13 +618,18 @@ fn parse_auth_frame(text: &str) -> Result<(String, u64), NodeErrorCode> {
     Ok((signature, identity_epoch))
 }
 
-fn identity_required(
-    listen: IpAddr,
-    peer: SocketAddr,
-    device_id: Option<&str>,
-    key_fingerprint: Option<&str>,
-) -> bool {
-    !trusted_local(listen, peer) || device_id.is_some() || key_fingerprint.is_some()
+fn require_hello_identity(
+    device_id: Option<String>,
+    key_fingerprint: Option<String>,
+) -> Result<(String, String), NodeErrorCode> {
+    match (device_id, key_fingerprint) {
+        (Some(device_id), Some(key_fingerprint))
+            if !device_id.is_empty() && !key_fingerprint.is_empty() =>
+        {
+            Ok((device_id, key_fingerprint))
+        }
+        _ => Err(NodeErrorCode::IdentityRejected),
+    }
 }
 
 fn hello_ack(conn: &NodeConnection, protocol_version: String) -> GatewayToNode {
@@ -681,7 +641,7 @@ fn hello_ack(conn: &NodeConnection, protocol_version: String) -> GatewayToNode {
 }
 
 /// First in-band frame after a v2 upgrade: Hello with overlapping minors, or reject.
-/// Loopback peers without identity fields still receive HelloAck (bearer test path).
+/// Protocol-parse only — identity admission is [`require_hello_identity`], not IP.
 #[cfg(test)]
 fn handshake_first_frame(text: &str, conn: &NodeConnection) -> NodeHandshakeOutcome {
     match parse_hello_frame(text) {
@@ -719,7 +679,7 @@ fn verify_node_auth(
     });
     let identity = registry
         .identities()
-        .active_identity(&challenge.device_id, &challenge.key_fingerprint);
+        .and_then(|store| store.active_identity(&challenge.device_id, &challenge.key_fingerprint));
     let epoch_ok = identity
         .as_ref()
         .is_some_and(|id| id.identity_epoch == identity_epoch);
@@ -863,7 +823,7 @@ fn inbound_is_v1_register(text: &str) -> bool {
 pub async fn handle_ws_nodes(
     State(state): State<AppState>,
     Query(params): Query<NodeWsQuery>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ConnectInfo(_peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
@@ -873,8 +833,6 @@ pub async fn handle_ws_nodes(
         &state.pairing,
         &headers,
         params.token.as_deref(),
-        peer,
-        state.node_registry.listen_addr(),
     ) {
         NodeWsAdmission::Ok => {}
         NodeWsAdmission::Legacy { status, body } => return (status, body).into_response(),
@@ -882,13 +840,19 @@ pub async fn handle_ws_nodes(
             return (status, Json(NodeProtocolReject { code })).into_response();
         }
     }
+    if state.node_registry.identities().is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "identity store unavailable",
+        )
+            .into_response();
+    }
 
     let registry = state.node_registry.clone();
-    let listen = registry.listen_addr();
     ws.protocols([WS_NODES_V2])
         .max_message_size(WS_MAX_MESSAGE_SIZE)
         .max_frame_size(WS_MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| handle_node_socket(socket, registry, peer, listen))
+        .on_upgrade(move |socket| handle_node_socket(socket, registry))
         .into_response()
 }
 
@@ -903,12 +867,7 @@ impl Drop for LiveSocketGuard {
     }
 }
 
-async fn handle_node_socket(
-    socket: WebSocket,
-    registry: Arc<NodeRegistry>,
-    peer: SocketAddr,
-    listen: IpAddr,
-) {
+async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>) {
     let (mut sender, mut receiver) = socket.split();
     let Some((conn, mut close_rx)) = registry.try_reserve() else {
         let _ = send_json(
@@ -956,73 +915,57 @@ async fn handle_node_socket(
         }
     };
 
-    if identity_required(
-        listen,
-        peer,
-        device_id.as_deref(),
-        key_fingerprint.as_deref(),
-    ) {
-        let Some(device_id) = device_id else {
-            let code = if key_fingerprint.is_none() {
-                NodeErrorCode::LoopbackRequired
-            } else {
-                NodeErrorCode::IdentityRejected
-            };
+    let (device_id, key_fingerprint) = match require_hello_identity(device_id, key_fingerprint) {
+        Ok(identity) => identity,
+        Err(code) => {
             let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
             let _ = close_protocol(&mut sender, code.as_str()).await;
             return;
-        };
-        let Some(key_fingerprint) = key_fingerprint else {
+        }
+    };
+    let challenge = match registry.begin_challenge(&conn, device_id, key_fingerprint.clone()) {
+        Ok(challenge) => challenge,
+        Err(_) => {
             let code = NodeErrorCode::IdentityRejected;
             let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
             let _ = close_protocol(&mut sender, code.as_str()).await;
             return;
-        };
-        let challenge =
-            match registry.begin_challenge(&conn, device_id.clone(), key_fingerprint.clone()) {
-                Ok(challenge) => challenge,
-                Err(_) => {
-                    let code = NodeErrorCode::IdentityRejected;
-                    let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
-                    let _ = close_protocol(&mut sender, code.as_str()).await;
-                    return;
-                }
-            };
-        let frame = GatewayToNode::Challenge {
-            nonce: challenge.nonce.clone(),
-            expires_at: challenge.expires_at.to_rfc3339(),
-        };
-        if send_json(&mut sender, &frame).await.is_err() {
+        }
+    };
+    let frame = GatewayToNode::Challenge {
+        nonce: challenge.nonce.clone(),
+        expires_at: challenge.expires_at.to_rfc3339(),
+    };
+    if send_json(&mut sender, &frame).await.is_err() {
+        return;
+    }
+    let auth_text = match tokio::time::timeout(AUTH_DEADLINE, recv_hello_text(&mut receiver)).await
+    {
+        Ok(Some(Ok(text))) => text,
+        Ok(Some(Err(()))) | Err(_) => {
+            let code = NodeErrorCode::IdentityRejected;
+            let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
+            let _ = close_protocol(&mut sender, code.as_str()).await;
             return;
         }
-        let auth_text =
-            match tokio::time::timeout(AUTH_DEADLINE, recv_hello_text(&mut receiver)).await {
-                Ok(Some(Ok(text))) => text,
-                Ok(Some(Err(()))) | Err(_) => {
-                    let code = NodeErrorCode::IdentityRejected;
-                    let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
-                    let _ = close_protocol(&mut sender, code.as_str()).await;
-                    return;
-                }
-                Ok(None) => return,
-            };
-        let (signature, identity_epoch) = match parse_auth_frame(&auth_text) {
-            Ok(parsed) => parsed,
-            Err(code) => {
-                let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
-                let _ = close_protocol(&mut sender, code.as_str()).await;
-                return;
-            }
-        };
-        match verify_node_auth(&registry, &conn, &signature, identity_epoch) {
-            Ok(verified_id) => {
-                registry.bind_identity(&conn.connection_id, verified_id, key_fingerprint);
-            }
-            Err(code) => {
-                let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
-                let _ = close_protocol(&mut sender, code.as_str()).await;
-                return;
-            }
+        Ok(None) => return,
+    };
+    let (signature, identity_epoch) = match parse_auth_frame(&auth_text) {
+        Ok(parsed) => parsed,
+        Err(code) => {
+            let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
+            let _ = close_protocol(&mut sender, code.as_str()).await;
+            return;
+        }
+    };
+    match verify_node_auth(&registry, &conn, &signature, identity_epoch) {
+        Ok(verified_id) => {
+            registry.bind_identity(&conn.connection_id, verified_id, key_fingerprint);
+        }
+        Err(code) => {
+            let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
+            let _ = close_protocol(&mut sender, code.as_str()).await;
+            return;
         }
     }
 
@@ -1386,14 +1329,7 @@ mod tests {
         let cfg = enabled_secret_cfg();
         let mut headers = bearer_headers("secret");
         headers.insert("sec-websocket-protocol", WS_NODES_V1.parse().unwrap());
-        match admit_node_ws(
-            &cfg,
-            &make_pairing(false),
-            &headers,
-            None,
-            loopback_peer(),
-            loopback_listen(),
-        ) {
+        match admit_node_ws(&cfg, &make_pairing(false), &headers, None) {
             NodeWsAdmission::Typed {
                 status,
                 code: NodeErrorCode::ProtocolUnsupported,
@@ -1406,14 +1342,7 @@ mod tests {
     fn nodes_missing_subprotocol_is_rejected_upgrade_hole_closed() {
         let cfg = enabled_secret_cfg();
         let headers = bearer_headers("secret");
-        match admit_node_ws(
-            &cfg,
-            &make_pairing(false),
-            &headers,
-            None,
-            loopback_peer(),
-            loopback_listen(),
-        ) {
+        match admit_node_ws(&cfg, &make_pairing(false), &headers, None) {
             NodeWsAdmission::Typed {
                 status,
                 code: NodeErrorCode::ProtocolUnsupported,
@@ -1427,14 +1356,7 @@ mod tests {
         let cfg = enabled_secret_cfg();
         let mut headers = HeaderMap::new();
         headers.insert("sec-websocket-protocol", "bearer.secret".parse().unwrap());
-        match admit_node_ws(
-            &cfg,
-            &make_pairing(false),
-            &headers,
-            None,
-            loopback_peer(),
-            loopback_listen(),
-        ) {
+        match admit_node_ws(&cfg, &make_pairing(false), &headers, None) {
             NodeWsAdmission::Typed {
                 status,
                 code: NodeErrorCode::ProtocolUnsupported,
@@ -1452,14 +1374,7 @@ mod tests {
             format!("{WS_NODES_V2}, bearer.secret").parse().unwrap(),
         );
         assert_eq!(
-            admit_node_ws(
-                &cfg,
-                &make_pairing(false),
-                &headers,
-                None,
-                loopback_peer(),
-                loopback_listen(),
-            ),
+            admit_node_ws(&cfg, &make_pairing(false), &headers, None,),
             NodeWsAdmission::Ok
         );
     }
@@ -1493,14 +1408,7 @@ mod tests {
         let mut headers = bearer_headers("secret");
         headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
         assert_eq!(
-            admit_node_ws(
-                &cfg,
-                &make_pairing(false),
-                &headers,
-                None,
-                remote_peer(),
-                loopback_listen(),
-            ),
+            admit_node_ws(&cfg, &make_pairing(false), &headers, None,),
             NodeWsAdmission::Ok
         );
     }
@@ -1516,35 +1424,11 @@ mod tests {
         good.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
         let mut bad = bearer_headers("wrong");
         bad.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
-        let disabled_bytes = admission_http_bytes(&admit_node_ws(
-            &disabled,
-            &make_pairing(false),
-            &good,
-            None,
-            remote_peer(),
-            unspecified_listen(),
-        ));
+        let disabled_bytes =
+            admission_http_bytes(&admit_node_ws(&disabled, &make_pairing(false), &good, None));
         assert_eq!(disabled_bytes, disabled_surface_http_bytes());
         assert_eq!(
-            admission_http_bytes(&admit_node_ws(
-                &enabled,
-                &make_pairing(false),
-                &bad,
-                None,
-                remote_peer(),
-                unspecified_listen(),
-            )),
-            disabled_bytes
-        );
-        assert_eq!(
-            admission_http_bytes(&admit_node_ws(
-                &enabled,
-                &make_pairing(false),
-                &bearer_headers("secret"),
-                None,
-                remote_peer(),
-                unspecified_listen(),
-            )),
+            admission_http_bytes(&admit_node_ws(&enabled, &make_pairing(false), &bad, None,)),
             disabled_bytes
         );
         let unpaired = NodesConfig {
@@ -1553,35 +1437,19 @@ mod tests {
             ..NodesConfig::default()
         };
         assert_eq!(
-            admission_http_bytes(&admit_node_ws(
-                &unpaired,
-                &make_pairing(false),
-                &good,
-                None,
-                remote_peer(),
-                unspecified_listen(),
-            )),
+            admission_http_bytes(&admit_node_ws(&unpaired, &make_pairing(false), &good, None,)),
             disabled_bytes,
             "enabled-unpaired remote HTTP must match disabled bytes"
         );
     }
 
     #[test]
-    fn nodes_ipv6_loopback_is_admitted() {
+    fn nodes_ipv6_loopback_upgrades_with_bearer_like_any_peer() {
         let cfg = enabled_secret_cfg();
         let mut headers = bearer_headers("secret");
         headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
-        let peer = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 40000));
-        assert!(peer_is_loopback(peer));
         assert_eq!(
-            admit_node_ws(
-                &cfg,
-                &make_pairing(false),
-                &headers,
-                None,
-                peer,
-                loopback_listen(),
-            ),
+            admit_node_ws(&cfg, &make_pairing(false), &headers, None),
             NodeWsAdmission::Ok
         );
     }
@@ -1614,14 +1482,7 @@ mod tests {
             enabled: false,
             ..NodesConfig::default()
         };
-        match admit_node_ws(
-            &cfg,
-            &make_pairing(false),
-            &empty_headers(),
-            None,
-            remote_peer(),
-            loopback_listen(),
-        ) {
+        match admit_node_ws(&cfg, &make_pairing(false), &empty_headers(), None) {
             NodeWsAdmission::Legacy {
                 status: StatusCode::NOT_FOUND,
                 ..
@@ -1631,7 +1492,7 @@ mod tests {
     }
 
     #[test]
-    fn nodes_loopback_no_auth_still_503() {
+    fn nodes_no_auth_matches_disabled_404() {
         let cfg = NodesConfig {
             enabled: true,
             auth_token: None,
@@ -1639,19 +1500,12 @@ mod tests {
         };
         let mut headers = HeaderMap::new();
         headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
-        match admit_node_ws(
-            &cfg,
-            &make_pairing(false),
-            &headers,
-            None,
-            loopback_peer(),
-            loopback_listen(),
-        ) {
+        match admit_node_ws(&cfg, &make_pairing(false), &headers, None) {
             NodeWsAdmission::Legacy {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                ..
-            } => {}
-            other => panic!("no-auth posture must stay 503, got {other:?}"),
+                status: StatusCode::NOT_FOUND,
+                body,
+            } => assert_eq!(body, NODES_DISABLED_MSG),
+            other => panic!("no-auth posture must stay closed 404, got {other:?}"),
         }
     }
 
@@ -1710,22 +1564,6 @@ mod tests {
         }
     }
 
-    fn loopback_peer() -> SocketAddr {
-        SocketAddr::from(([127, 0, 0, 1], 40000))
-    }
-
-    fn remote_peer() -> SocketAddr {
-        SocketAddr::from(([203, 0, 113, 50], 40000))
-    }
-
-    fn loopback_listen() -> IpAddr {
-        IpAddr::V4(Ipv4Addr::LOCALHOST)
-    }
-
-    fn unspecified_listen() -> IpAddr {
-        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-    }
-
     fn admission_http_bytes(admission: &NodeWsAdmission) -> (StatusCode, &'static str) {
         match admission {
             NodeWsAdmission::Legacy { status, body } => (*status, *body),
@@ -1745,74 +1583,14 @@ mod tests {
     }
 
     #[test]
-    fn nodes_unspecified_listen_rejects_loopback_peer() {
-        let cfg = enabled_secret_cfg();
-        let mut headers = bearer_headers("secret");
-        headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
-        let rejected = admit_node_ws(
-            &cfg,
-            &make_pairing(false),
-            &headers,
-            None,
-            loopback_peer(),
-            unspecified_listen(),
-        );
-        assert_eq!(
-            admission_http_bytes(&rejected),
-            disabled_surface_http_bytes(),
-            "0.0.0.0 listen + loopback peer must not be treated as local"
-        );
-    }
-
-    #[test]
-    fn nodes_unspecified_listen_admits_true_remote_peer_with_bearer() {
+    fn nodes_http_upgrade_does_not_consult_listen_or_peer_ip() {
         let cfg = enabled_secret_cfg();
         let mut headers = bearer_headers("secret");
         headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
         assert_eq!(
-            admit_node_ws(
-                &cfg,
-                &make_pairing(false),
-                &headers,
-                None,
-                remote_peer(),
-                unspecified_listen(),
-            ),
-            NodeWsAdmission::Ok
-        );
-    }
-
-    #[test]
-    fn nodes_v2_warns_only_when_enabled_on_non_loopback_listen() {
-        assert_eq!(
-            nodes_v2_non_loopback_listen_warning(true, unspecified_listen()),
-            Some(NODES_V2_NON_LOOPBACK_LISTEN_WARN)
-        );
-        assert_eq!(
-            nodes_v2_non_loopback_listen_warning(true, loopback_listen()),
-            None
-        );
-        assert_eq!(
-            nodes_v2_non_loopback_listen_warning(false, unspecified_listen()),
-            None
-        );
-    }
-
-    #[test]
-    fn nodes_loopback_listen_and_peer_are_admitted() {
-        let cfg = enabled_secret_cfg();
-        let mut headers = bearer_headers("secret");
-        headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
-        assert_eq!(
-            admit_node_ws(
-                &cfg,
-                &make_pairing(false),
-                &headers,
-                None,
-                loopback_peer(),
-                loopback_listen(),
-            ),
-            NodeWsAdmission::Ok
+            admit_node_ws(&cfg, &make_pairing(false), &headers, None),
+            NodeWsAdmission::Ok,
+            "valid bearer + v2 upgrades for every peer; identity is in-band"
         );
     }
 
@@ -1824,14 +1602,7 @@ mod tests {
         };
         let mut headers = bearer_headers("secret");
         headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
-        let disabled = admit_node_ws(
-            &disabled_cfg,
-            &make_pairing(false),
-            &headers,
-            None,
-            remote_peer(),
-            unspecified_listen(),
-        );
+        let disabled = admit_node_ws(&disabled_cfg, &make_pairing(false), &headers, None);
         assert_eq!(
             admission_http_bytes(&disabled),
             disabled_surface_http_bytes()
@@ -2040,11 +1811,9 @@ mod tests {
         zeroclaw_api::device_identity::DeviceIdentityV1,
     ) {
         let keys = crate::device_identity::DeviceKeyPair::generate().unwrap();
-        let code = registry.identities().issue_pairing_code(ceiling).unwrap();
-        let identity = registry
-            .identities()
-            .enroll(&code, keys.public_key_hex())
-            .unwrap();
+        let store = registry.identities().expect("test identity store");
+        let code = store.issue_pairing_code(ceiling).unwrap();
+        let identity = store.enroll(&code, keys.public_key_hex()).unwrap();
         (keys, identity)
     }
 
@@ -2061,30 +1830,54 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn unpaired_non_loopback_requires_identity() {
-        assert!(identity_required(
-            loopback_listen(),
-            remote_peer(),
-            None,
-            None
-        ));
-        assert!(!identity_required(
-            loopback_listen(),
-            loopback_peer(),
-            None,
-            None
-        ));
-        assert!(identity_required(
-            unspecified_listen(),
-            loopback_peer(),
-            None,
-            None
-        ));
+    fn hello_identity_from_frame(text: &str) -> Result<(String, String), NodeErrorCode> {
+        match parse_hello_frame(text) {
+            ParsedHello::Ready {
+                device_id,
+                key_fingerprint,
+                ..
+            } => require_hello_identity(device_id, key_fingerprint),
+            ParsedHello::Reject { frame, .. } => match frame {
+                GatewayToNode::Error { code, .. } => Err(code),
+                _ => Err(NodeErrorCode::ProtocolUnsupported),
+            },
+        }
     }
 
     #[test]
-    fn paired_signed_non_loopback_is_admitted() {
+    fn loopback_peer_without_identity_is_rejected() {
+        assert_eq!(
+            hello_identity_from_frame(r#"{"type":"hello","protocol_versions":["2.0"]}"#),
+            Err(NodeErrorCode::IdentityRejected)
+        );
+        assert_eq!(
+            require_hello_identity(None, None),
+            Err(NodeErrorCode::IdentityRejected)
+        );
+    }
+
+    #[test]
+    fn reverse_proxy_peer_without_identity_is_rejected() {
+        let cfg = enabled_secret_cfg();
+        let mut headers = bearer_headers("secret");
+        headers.insert("sec-websocket-protocol", WS_NODES_V2.parse().unwrap());
+        assert_eq!(
+            admit_node_ws(&cfg, &make_pairing(false), &headers, None),
+            NodeWsAdmission::Ok,
+            "0.0.0.0 or loopback listen must not grant identity; HTTP upgrade is not admission"
+        );
+        assert_eq!(
+            require_hello_identity(None, None),
+            Err(NodeErrorCode::IdentityRejected)
+        );
+        assert_eq!(
+            hello_identity_from_frame(r#"{"type":"hello","protocol_versions":["2.0"]}"#),
+            Err(NodeErrorCode::IdentityRejected)
+        );
+    }
+
+    #[test]
+    fn verified_identity_is_admitted_regardless_of_ip() {
         let registry = NodeRegistry::new(8);
         let (keys, identity) = enroll_test_device(&registry, vec!["system.notify".into()]);
         let conn = registry.mint_connection();
@@ -2297,6 +2090,7 @@ mod tests {
         assert_eq!(
             registry
                 .identities()
+                .expect("test identity store")
                 .active_identity(&identity.device_id, &identity.key_fingerprint)
                 .unwrap()
                 .capability_ceiling,

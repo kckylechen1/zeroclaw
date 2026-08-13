@@ -7,21 +7,22 @@
 use super::AppState;
 use crate::device_identity::validate_ceiling;
 use axum::{
+    body::Bytes,
     extract::{ConnectInfo, Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Json},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use zeroclaw_runtime::security::pairing::{PairingGuard, constant_time_eq};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct IssuePairingBody {
     #[serde(default)]
     pub capability_ceiling: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct EnrollBody {
     pub code: String,
     pub public_key: String,
@@ -53,20 +54,23 @@ fn require_operator(
     Ok(())
 }
 
-fn rate_limit_identity(
+fn identity_unavailable() -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "identity store unavailable",
+    )
+        .into_response()
+}
+
+/// Operator bearer is checked before JSON extraction and pair rate-limiting.
+/// Auth lockout still runs first so brute-force bearers can be closed.
+fn gate_operator_identity(
     state: &AppState,
     peer: SocketAddr,
     headers: &HeaderMap,
 ) -> Option<axum::response::Response> {
     let rate_key =
         crate::client_key_from_request(Some(peer), headers, state.trust_forwarded_headers);
-    if !state.rate_limiter.allow_pair(&rate_key) {
-        let err = serde_json::json!({
-            "error": "Too many pairing requests. Please retry later.",
-            "retry_after": crate::RATE_LIMIT_WINDOW_SECS,
-        });
-        return Some((StatusCode::TOO_MANY_REQUESTS, Json(err)).into_response());
-    }
     if let Err(e) = state.auth_limiter.check_rate_limit(&rate_key) {
         let err = serde_json::json!({
             "error": format!("Too many auth attempts. Try again in {}s.", e.retry_after_secs),
@@ -74,7 +78,22 @@ fn rate_limit_identity(
         });
         return Some((StatusCode::TOO_MANY_REQUESTS, Json(err)).into_response());
     }
+    if let Err(err) = require_operator(state, headers) {
+        state.auth_limiter.record_attempt(&rate_key);
+        return Some(err.into_response());
+    }
+    if !state.rate_limiter.allow_pair(&rate_key) {
+        let err = serde_json::json!({
+            "error": "Too many pairing requests. Please retry later.",
+            "retry_after": crate::RATE_LIMIT_WINDOW_SECS,
+        });
+        return Some((StatusCode::TOO_MANY_REQUESTS, Json(err)).into_response());
+    }
     None
+}
+
+fn parse_json<T: serde::de::DeserializeOwned>(body: &Bytes) -> Result<T, StatusCode> {
+    serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST)
 }
 
 /// POST /api/node-identities/pairing — operator issues a one-time enroll code
@@ -83,22 +102,22 @@ pub async fn issue_pairing(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Json(body): Json<IssuePairingBody>,
+    body: Bytes,
 ) -> impl IntoResponse {
-    if let Some(err) = rate_limit_identity(&state, peer, &headers) {
+    if let Some(err) = gate_operator_identity(&state, peer, &headers) {
         return err;
     }
-    if let Err(err) = require_operator(&state, &headers) {
-        return err.into_response();
-    }
+    let body = match parse_json::<IssuePairingBody>(&body) {
+        Ok(body) => body,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid json").into_response(),
+    };
     if let Err(err) = validate_ceiling(&body.capability_ceiling) {
         return (StatusCode::BAD_REQUEST, err.to_string()).into_response();
     }
-    match state
-        .node_registry
-        .identities()
-        .issue_pairing_code(body.capability_ceiling)
-    {
+    let Some(store) = state.node_registry.identities() else {
+        return identity_unavailable();
+    };
+    match store.issue_pairing_code(body.capability_ceiling) {
         Ok(code) => Json(serde_json::json!({ "pairing_code": code })).into_response(),
         Err(crate::device_identity::IdentityError::Capacity) => {
             (StatusCode::SERVICE_UNAVAILABLE, "pairing map at capacity").into_response()
@@ -117,14 +136,15 @@ pub async fn enroll_identity(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Json(body): Json<EnrollBody>,
+    body: Bytes,
 ) -> impl IntoResponse {
-    if let Some(err) = rate_limit_identity(&state, peer, &headers) {
+    if let Some(err) = gate_operator_identity(&state, peer, &headers) {
         return err;
     }
-    if let Err(err) = require_operator(&state, &headers) {
-        return err.into_response();
-    }
+    let body = match parse_json::<EnrollBody>(&body) {
+        Ok(body) => body,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid json").into_response(),
+    };
     if body.capability_ceiling.is_some() {
         return (
             StatusCode::BAD_REQUEST,
@@ -132,11 +152,10 @@ pub async fn enroll_identity(
         )
             .into_response();
     }
-    match state
-        .node_registry
-        .identities()
-        .enroll(&body.code, &body.public_key)
-    {
+    let Some(store) = state.node_registry.identities() else {
+        return identity_unavailable();
+    };
+    match store.enroll(&body.code, &body.public_key) {
         Ok(identity) => Json(serde_json::json!({
             "device_id": identity.device_id,
             "key_fingerprint": identity.key_fingerprint,
@@ -163,6 +182,7 @@ pub async fn enroll_identity(
             "enroll persist failed; pairing code unchanged",
         )
             .into_response(),
+        Err(crate::device_identity::IdentityError::Unavailable) => identity_unavailable(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "enroll failed").into_response(),
     }
 }
@@ -174,15 +194,15 @@ pub async fn revoke_identity(
     headers: HeaderMap,
     Path(device_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Some(err) = rate_limit_identity(&state, peer, &headers) {
+    if let Some(err) = gate_operator_identity(&state, peer, &headers) {
         return err;
     }
-    if let Err(err) = require_operator(&state, &headers) {
-        return err.into_response();
-    }
+    let Some(store) = state.node_registry.identities() else {
+        return identity_unavailable();
+    };
     match state.node_registry.revoke_device(&device_id) {
         Ok(torn) => {
-            if !state.node_registry.identities().contains(&device_id) {
+            if !store.contains(&device_id) {
                 return (StatusCode::NOT_FOUND, "Device not found").into_response();
             }
             Json(serde_json::json!({
@@ -197,6 +217,7 @@ pub async fn revoke_identity(
             "revoke persist failed; identity unchanged",
         )
             .into_response(),
+        Err(crate::device_identity::IdentityError::Unavailable) => identity_unavailable(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "revoke failed").into_response(),
     }
 }
@@ -206,6 +227,7 @@ mod tests {
     use super::*;
     use crate::api::test_state;
     use crate::device_identity::DeviceKeyPair;
+    use axum::body::Bytes;
     use axum::http::HeaderMap;
     use http_body_util::BodyExt;
     use std::sync::Arc;
@@ -246,6 +268,14 @@ mod tests {
         (status, json)
     }
 
+    fn json_bytes<T: serde::Serialize>(value: &T) -> Bytes {
+        Bytes::from(serde_json::to_vec(value).unwrap())
+    }
+
+    fn enroll_bytes(body: EnrollBody) -> Bytes {
+        json_bytes(&body)
+    }
+
     async fn issue(
         state: crate::AppState,
         headers: HeaderMap,
@@ -256,7 +286,7 @@ mod tests {
                 State(state),
                 ConnectInfo(loopback_peer()),
                 headers,
-                Json(IssuePairingBody {
+                json_bytes(&IssuePairingBody {
                     capability_ceiling: ceiling,
                 }),
             )
@@ -283,7 +313,7 @@ mod tests {
                 State(state.clone()),
                 ConnectInfo(loopback_peer()),
                 operator_headers(),
-                Json(EnrollBody {
+                enroll_bytes(EnrollBody {
                     code: code.to_string(),
                     public_key: keys.public_key_hex().to_string(),
                     capability_ceiling: None,
@@ -328,6 +358,7 @@ mod tests {
             state
                 .node_registry
                 .identities()
+                .expect("test identity store")
                 .active_identity(&device_id, keys.fingerprint())
                 .is_none()
         );
@@ -341,7 +372,7 @@ mod tests {
                 State(state.clone()),
                 ConnectInfo(loopback_peer()),
                 HeaderMap::new(),
-                Json(EnrollBody {
+                enroll_bytes(EnrollBody {
                     code: "x".into(),
                     public_key: "aa".into(),
                     capability_ceiling: None,
@@ -376,7 +407,7 @@ mod tests {
                 State(state.clone()),
                 ConnectInfo(loopback_peer()),
                 HeaderMap::new(),
-                Json(EnrollBody {
+                enroll_bytes(EnrollBody {
                     code: "x".into(),
                     public_key: "aa".into(),
                     capability_ceiling: None,
@@ -420,7 +451,7 @@ mod tests {
                 State(state.clone()),
                 ConnectInfo(loopback_peer()),
                 operator_headers(),
-                Json(EnrollBody {
+                enroll_bytes(EnrollBody {
                     code: code.clone(),
                     public_key: keys.public_key_hex().to_string(),
                     capability_ceiling: Some(serde_json::json!(["camera.snap"])),
@@ -436,7 +467,7 @@ mod tests {
                 State(state),
                 ConnectInfo(loopback_peer()),
                 operator_headers(),
-                Json(EnrollBody {
+                enroll_bytes(EnrollBody {
                     code,
                     public_key: keys.public_key_hex().to_string(),
                     capability_ceiling: None,
@@ -466,7 +497,7 @@ mod tests {
                 State(state),
                 ConnectInfo(loopback_peer()),
                 operator_headers(),
-                Json(EnrollBody {
+                enroll_bytes(EnrollBody {
                     code: "missing".into(),
                     public_key: keys.public_key_hex().to_string(),
                     capability_ceiling: None,
@@ -495,7 +526,7 @@ mod tests {
                 State(state.clone()),
                 ConnectInfo(loopback_peer()),
                 operator_headers(),
-                Json(EnrollBody {
+                enroll_bytes(EnrollBody {
                     code: code.clone(),
                     public_key: "zz".into(),
                     capability_ceiling: None,
@@ -512,7 +543,7 @@ mod tests {
                 State(state),
                 ConnectInfo(loopback_peer()),
                 operator_headers(),
-                Json(EnrollBody {
+                enroll_bytes(EnrollBody {
                     code,
                     public_key: keys.public_key_hex().to_string(),
                     capability_ceiling: None,
@@ -538,7 +569,7 @@ mod tests {
                 State(state.clone()),
                 ConnectInfo(remote_peer()),
                 operator_headers(),
-                Json(EnrollBody {
+                enroll_bytes(EnrollBody {
                     code: "x".into(),
                     public_key: "aa".into(),
                     capability_ceiling: None,
@@ -554,7 +585,7 @@ mod tests {
                 State(state),
                 ConnectInfo(remote_peer()),
                 operator_headers(),
-                Json(EnrollBody {
+                enroll_bytes(EnrollBody {
                     code: "x".into(),
                     public_key: "aa".into(),
                     capability_ceiling: None,
@@ -582,5 +613,120 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn malformed_json_without_bearer_is_unauthorized_not_bad_request() {
+        let state = operator_state();
+        let (status, _) = json_of(
+            enroll_identity(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                HeaderMap::new(),
+                Bytes::from_static(b"{not json"),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = json_of(
+            issue_pairing(
+                State(state),
+                ConnectInfo(loopback_peer()),
+                HeaderMap::new(),
+                Bytes::from_static(b"{not json"),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn consecutive_wrong_bearers_lock_out_remote_caller() {
+        let state = operator_state();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer wrong-token".parse().unwrap());
+        let body = enroll_bytes(EnrollBody {
+            code: "x".into(),
+            public_key: "aa".into(),
+            capability_ceiling: None,
+        });
+        for attempt in 0..crate::auth_rate_limit::MAX_ATTEMPTS {
+            let (status, _) = json_of(
+                enroll_identity(
+                    State(state.clone()),
+                    ConnectInfo(remote_peer()),
+                    headers.clone(),
+                    body.clone(),
+                )
+                .await
+                .into_response(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "attempt {attempt} must stay 401 until lockout"
+            );
+        }
+        let (status, body) = json_of(
+            enroll_identity(State(state), ConnectInfo(remote_peer()), headers, body)
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body={body}");
+    }
+
+    #[tokio::test]
+    async fn identity_store_unavailable_enroll_returns_500_without_consuming_code() {
+        let mut state = operator_state();
+        let working = Arc::clone(&state.node_registry);
+        let (status, issued) = issue(
+            state.clone(),
+            operator_headers(),
+            vec!["system.notify".into()],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let code = issued["pairing_code"].as_str().unwrap().to_string();
+        assert_eq!(
+            working
+                .identities()
+                .expect("test identity store")
+                .pairing_len(),
+            1
+        );
+        state.node_registry = Arc::new(crate::nodes::NodeRegistry::new(8).without_identities());
+        let keys = DeviceKeyPair::generate().unwrap();
+        let (status, _) = json_of(
+            enroll_identity(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+                enroll_bytes(EnrollBody {
+                    code: code.clone(),
+                    public_key: keys.public_key_hex().to_string(),
+                    capability_ceiling: None,
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            working
+                .identities()
+                .expect("test identity store")
+                .pairing_len(),
+            1,
+            "unavailable enroll must not consume the issued pairing code"
+        );
+        let (status, _) = issue(state, operator_headers(), vec!["system.notify".into()]).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

@@ -78,6 +78,7 @@ pub enum IdentityError {
     WidenRefused,
     IdentityRejected,
     PersistFailed,
+    Unavailable,
     Capacity,
 }
 
@@ -92,6 +93,7 @@ impl std::fmt::Display for IdentityError {
             Self::WidenRefused => write!(f, "live advertisement exceeds the approved ceiling"),
             Self::IdentityRejected => write!(f, "identity rejected"),
             Self::PersistFailed => write!(f, "identity persist failed"),
+            Self::Unavailable => write!(f, "identity store unavailable"),
             Self::Capacity => write!(f, "identity table at capacity"),
         }
     }
@@ -170,11 +172,13 @@ struct StoreInner {
 }
 
 impl DeviceIdentityStore {
+    #[cfg(test)]
     #[must_use]
     pub fn memory() -> Self {
         Self::memory_with_capacity(16)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn memory_with_capacity(max_entries: usize) -> Self {
         Self {
@@ -298,8 +302,7 @@ impl DeviceIdentityStore {
         let capability_ceiling = issued.capability_ceiling.clone();
 
         let mut rows = self.inner.rows.lock();
-        let active = rows.values().filter(|row| !row.is_revoked()).count();
-        if active >= self.inner.max_entries {
+        if rows.len() >= self.inner.max_entries {
             return Err(IdentityError::Capacity);
         }
         if rows
@@ -538,6 +541,42 @@ mod tests {
         assert_eq!(
             store.enroll(&second, other.public_key_hex()),
             Err(IdentityError::Capacity)
+        );
+    }
+
+    #[test]
+    fn revoked_tombstones_count_against_identity_capacity() {
+        let store = DeviceIdentityStore::memory_with_capacity(1);
+        let keys = DeviceKeyPair::generate().unwrap();
+        let code = store
+            .issue_pairing_code(vec!["system.notify".into()])
+            .unwrap();
+        let identity = store.enroll(&code, keys.public_key_hex()).unwrap();
+        assert_eq!(store.revoke(&identity.device_id), Ok(true));
+        let next = store
+            .issue_pairing_code(vec!["system.notify".into()])
+            .unwrap();
+        let other = DeviceKeyPair::generate().unwrap();
+        assert_eq!(
+            store.enroll(&next, other.public_key_hex()),
+            Err(IdentityError::Capacity),
+            "enroll/revoke must not grow the table past max_nodes"
+        );
+        assert_eq!(
+            store.pairing_len(),
+            1,
+            "failed enroll must not consume the code"
+        );
+    }
+
+    #[test]
+    fn identity_store_open_failure_does_not_create_a_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"not a dir").unwrap();
+        assert!(
+            DeviceIdentityStore::open(&blocker, 16).is_err(),
+            "open must fail closed rather than yield a volatile memory store"
         );
     }
 

@@ -1497,39 +1497,25 @@ pub async fn run_gateway(
     // Node registry for dynamic node discovery
     #[cfg(feature = "nodes")]
     let node_registry = Arc::new({
-        let identities = match crate::device_identity::DeviceIdentityStore::open(
+        let mut registry = nodes::NodeRegistry::new(config.nodes.max_nodes);
+        match crate::device_identity::DeviceIdentityStore::open(
             &config.data_dir,
             config.nodes.max_nodes,
         ) {
-            Ok(store) => store,
+            Ok(store) => registry = registry.with_identities(store),
             Err(err) => {
                 ::zeroclaw_log::record!(
                     ERROR,
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
                         .with_outcome(::zeroclaw_log::EventOutcome::Failure)
                         .with_attrs(::serde_json::json!({"error": format!("{err}")})),
-                    "device identity store failed to open; non-loopback node admission will reject"
+                    "device identity store failed to open; refusing node identity service"
                 );
-                crate::device_identity::DeviceIdentityStore::memory_with_capacity(
-                    config.nodes.max_nodes,
-                )
+                registry = registry.without_identities();
             }
-        };
-        nodes::NodeRegistry::new(config.nodes.max_nodes)
-            .with_listen_addr(actual_addr.ip())
-            .with_identities(identities)
+        }
+        registry
     });
-    #[cfg(feature = "nodes")]
-    if nodes::nodes_v2_non_loopback_listen_warning(config.nodes.enabled, actual_addr.ip()).is_some()
-    {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                .with_attrs(::serde_json::json!({"bind_addr": actual_addr.to_string()})),
-            "nodes v2 on a non-loopback listen rejects loopback TCP peers as a closed surface"
-        );
-    }
     #[cfg(feature = "nodes")]
     let mdns_config_state = Arc::clone(&config_state);
     #[cfg(feature = "nodes")]
