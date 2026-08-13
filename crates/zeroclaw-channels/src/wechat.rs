@@ -149,6 +149,130 @@ struct InboundAttachmentSpec {
     file_name: String,
 }
 
+/// Why an inbound attachment download or save failed, classified so the
+/// listener can hold the batch cursor on a transient error and skip only
+/// when retrying cannot change the outcome.
+///
+/// Classification is deliberately conservative: only an explicit permanent
+/// whitelist is terminal. The HTTP status classifier follows Telegram's
+/// permanent-whitelist pattern (`FileLookupFailure`), but mixed-message
+/// delivery is a WeChat product choice (keep the text) rather than
+/// Telegram's drop-the-update rule.
+/// Permanence requires HTTP `{400, 403, 404, 410}`, a size-limit rejection,
+/// or invalid AES key metadata (wrong length/format, decidable before
+/// touching the payload). 408, 425, 429, 5xx, transport errors, body-read
+/// failures, PKCS7 decrypt failures on a downloaded payload, directory-create
+/// failures, and workspace write failures stay `Transient`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachmentFailureKind {
+    Transient,
+    Permanent,
+}
+
+/// An inbound attachment failure with the classification preserved.
+#[derive(Debug)]
+struct AttachmentBuildFailure {
+    kind: AttachmentFailureKind,
+    message: String,
+}
+
+impl std::fmt::Display for AttachmentBuildFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl AttachmentBuildFailure {
+    fn transient(message: impl Into<String>) -> Self {
+        Self {
+            kind: AttachmentFailureKind::Transient,
+            message: message.into(),
+        }
+    }
+
+    fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            kind: AttachmentFailureKind::Permanent,
+            message: message.into(),
+        }
+    }
+
+    fn kind(&self) -> AttachmentFailureKind {
+        self.kind
+    }
+
+    /// Map a CDN HTTP status onto a classified failure.
+    ///
+    /// Permanent is a whitelist, not "all 4xx minus a denylist": a retryable
+    /// code such as 408 or 425 must not silently drop a pure-attachment
+    /// message by advancing the cursor.
+    fn classify_status(status: reqwest::StatusCode, body: &str) -> Self {
+        const PERMANENT_STATUSES: [u16; 4] = [400, 403, 404, 410];
+        let message = format!("attachment download failed ({status}): {body}");
+        if PERMANENT_STATUSES.contains(&status.as_u16()) {
+            Self::permanent(message)
+        } else {
+            Self::transient(message)
+        }
+    }
+}
+
+/// Outcome of building inbound attachment content for one iLink message.
+///
+/// `None` means the message has no fetchable attachment (or no workspace
+/// is configured). `SkipPermanent` is a logged, terminal skip of the
+/// attachment itself: mixed text+media still delivers the text with an
+/// unavailable notice, and a pure-attachment message is dropped.
+/// `RetryTransient` stops the current batch so the cursor stays put and
+/// the next poll retries the download.
+#[derive(Debug)]
+enum AttachmentDisposition {
+    None,
+    Ready(String),
+    SkipPermanent(String),
+    RetryTransient,
+}
+
+impl AttachmentDisposition {
+    fn from_failure(failure: AttachmentBuildFailure, kind: WeChatAttachmentKind) -> Self {
+        let (log_msg, disposition) = match failure.kind() {
+            AttachmentFailureKind::Permanent => (
+                "attachment permanently skipped",
+                Self::SkipPermanent(format_unavailable_attachment(kind)),
+            ),
+            AttachmentFailureKind::Transient => (
+                "transient attachment failure, batch will retry",
+                Self::RetryTransient,
+            ),
+        };
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({
+                    "error": failure.to_string(),
+                    "classification": format!("{:?}", failure.kind()),
+                })),
+            log_msg
+        );
+        disposition
+    }
+}
+
+/// Staged inbound work for one getUpdates batch. Items are published only
+/// after the whole batch resolves without a transient attachment failure,
+/// so a later retry does not redeliver already-sent messages.
+enum StagedInbound {
+    Deliver(Box<ChannelMessage>),
+    Unauthorized { from_user_id: String, text: String },
+}
+
+/// Result of staging one getUpdates batch before any `tx.send`.
+enum BatchOutcome {
+    Ready(Vec<StagedInbound>),
+    StopBatch,
+}
+
 #[derive(Debug, Clone)]
 struct UploadedWeChatMedia {
     encrypted_query_param: String,
@@ -282,6 +406,21 @@ fn format_attachment_content(
         format!("[IMAGE:{}]", local_path.display())
     } else {
         format!("[Document: {}] {}", local_filename, local_path.display())
+    }
+}
+
+/// Human-readable notice when a permanently skipped attachment still has
+/// accompanying text. Matches the inbound status-marker shape used for
+/// transcription failure (`[Audio: transcription failed]`) and media
+/// pipeline annotations (`[Image: {name} attached]`), not the machine
+/// `[IMAGE:/path]` payload marker.
+fn format_unavailable_attachment(kind: WeChatAttachmentKind) -> String {
+    match kind {
+        WeChatAttachmentKind::Image => "[Image: unavailable]".to_string(),
+        WeChatAttachmentKind::Document => "[Document: unavailable]".to_string(),
+        WeChatAttachmentKind::Video => "[Video: unavailable]".to_string(),
+        WeChatAttachmentKind::Audio => "[Audio: unavailable]".to_string(),
+        WeChatAttachmentKind::Voice => "[Voice: unavailable]".to_string(),
     }
 }
 
@@ -1605,32 +1744,52 @@ impl WeChatChannel {
     async fn download_inbound_attachment(
         &self,
         spec: &InboundAttachmentSpec,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> Result<Vec<u8>, AttachmentBuildFailure> {
         let resp = self
             .client
             .get(self.cdn_download_url(&spec.encrypted_query_param))
             .timeout(API_TIMEOUT)
             .send()
-            .await?;
+            .await
+            .map_err(|e| {
+                AttachmentBuildFailure::transient(format!("attachment request failed: {e}"))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("attachment download failed ({status}): {body}");
+            return Err(AttachmentBuildFailure::classify_status(status, &body));
         }
 
-        let bytes = resp.bytes().await?.to_vec();
+        if let Some(len) = resp.content_length()
+            && len > WECHAT_MEDIA_MAX_BYTES
+        {
+            return Err(AttachmentBuildFailure::permanent(format!(
+                "inbound attachment Content-Length ({len} bytes) exceeds {} MB limit",
+                WECHAT_MEDIA_MAX_BYTES / (1024 * 1024)
+            )));
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| {
+                AttachmentBuildFailure::transient(format!("attachment body read failed: {e}"))
+            })?
+            .to_vec();
         if bytes.len() as u64 > WECHAT_MEDIA_MAX_BYTES {
-            anyhow::bail!(
+            return Err(AttachmentBuildFailure::permanent(format!(
                 "inbound attachment exceeds {} MB limit",
                 WECHAT_MEDIA_MAX_BYTES / (1024 * 1024)
-            );
+            )));
         }
 
         match spec.aes_key.as_deref() {
             Some(aes_key) if !aes_key.is_empty() => {
-                let key = parse_aes_key(aes_key)?;
+                let key = parse_aes_key(aes_key)
+                    .map_err(|e| AttachmentBuildFailure::permanent(e.to_string()))?;
                 decrypt_aes_ecb(&bytes, &key)
+                    .map_err(|e| AttachmentBuildFailure::transient(e.to_string()))
             }
             _ => Ok(bytes),
         }
@@ -1640,54 +1799,137 @@ impl WeChatChannel {
         &self,
         items: &[serde_json::Value],
         message_id: &str,
-    ) -> Option<String> {
-        let workspace_dir = self.workspace_dir.as_ref()?;
-        let spec = Self::find_inbound_attachment(items, message_id)?;
+    ) -> AttachmentDisposition {
+        let Some(workspace_dir) = self.workspace_dir.as_ref() else {
+            return AttachmentDisposition::None;
+        };
+        let Some(spec) = Self::find_inbound_attachment(items, message_id) else {
+            return AttachmentDisposition::None;
+        };
         let bytes = match self.download_inbound_attachment(&spec).await {
             Ok(bytes) => bytes,
-            Err(err) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"error": format!("{}", err)})),
-                    "attachment download skipped"
-                );
-                return None;
-            }
+            Err(failure) => return AttachmentDisposition::from_failure(failure, spec.kind),
         };
 
         let save_dir = workspace_dir.join("wechat_files");
         if let Err(err) = tokio::fs::create_dir_all(&save_dir).await {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"error": format!("{}", err)})),
-                "Failed to create WeChat attachment dir"
+            return AttachmentDisposition::from_failure(
+                AttachmentBuildFailure::transient(format!(
+                    "Failed to create WeChat attachment dir: {err}"
+                )),
+                spec.kind,
             );
-            return None;
         }
 
         let local_path = save_dir.join(&spec.file_name);
         if let Err(err) = tokio::fs::write(&local_path, bytes).await {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                &format!(
+            return AttachmentDisposition::from_failure(
+                AttachmentBuildFailure::transient(format!(
                     "Failed to save WeChat attachment to {}: {err}",
                     local_path.display()
-                )
+                )),
+                spec.kind,
             );
-            return None;
         }
 
-        Some(format_attachment_content(
+        AttachmentDisposition::Ready(format_attachment_content(
             spec.kind,
             &spec.file_name,
             &local_path,
         ))
+    }
+
+    /// Stage every authorized message in a getUpdates batch before any
+    /// `tx.send`. A transient attachment failure discards the staged items
+    /// and returns `StopBatch` so the caller leaves the cursor uncommitted.
+    async fn stage_inbound_batch(&self, msgs: &[serde_json::Value]) -> BatchOutcome {
+        let mut staged = Vec::new();
+
+        for msg in msgs {
+            let from_user_id = msg
+                .get("from_user_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if from_user_id.is_empty() {
+                continue;
+            }
+
+            if let Some(ctx_token) = msg.get("context_token").and_then(|v| v.as_str())
+                && !ctx_token.is_empty()
+                && let Err(e) = self.set_context_token(from_user_id, ctx_token).await
+            {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                    "failed to persist WeChat context token"
+                );
+            }
+
+            let items = msg
+                .get("item_list")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            let message_id = msg
+                .get("message_id")
+                .and_then(|v| v.as_u64())
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| format!("wechat_{}", uuid::Uuid::new_v4()));
+
+            let text = extract_text_from_items(&items);
+
+            if !self.is_user_allowed(from_user_id) {
+                staged.push(StagedInbound::Unauthorized {
+                    from_user_id: from_user_id.to_string(),
+                    text,
+                });
+                continue;
+            }
+
+            let attachment = self.try_build_attachment_content(&items, &message_id).await;
+            let content = match (attachment, text.is_empty()) {
+                (AttachmentDisposition::RetryTransient, _) => {
+                    return BatchOutcome::StopBatch;
+                }
+                (AttachmentDisposition::Ready(marker), true) => marker,
+                (AttachmentDisposition::Ready(marker), false) => {
+                    format!("{marker}\n\n{text}")
+                }
+                (AttachmentDisposition::SkipPermanent(notice), false) => {
+                    format!("{notice}\n\n{text}")
+                }
+                (AttachmentDisposition::None, false) => text,
+                (AttachmentDisposition::None | AttachmentDisposition::SkipPermanent(_), true) => {
+                    continue;
+                }
+            };
+
+            let timestamp = msg
+                .get("create_time_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                / 1000;
+
+            staged.push(StagedInbound::Deliver(Box::new(ChannelMessage {
+                id: message_id,
+                sender: from_user_id.to_string(),
+                reply_target: from_user_id.to_string(),
+                content,
+                channel: "wechat".to_string(),
+                channel_alias: Some(self.alias.clone()),
+                timestamp,
+                thread_ts: None,
+                interruption_scope_id: None,
+                attachments: Vec::new(),
+                subject: None,
+                ..Default::default()
+            })));
+        }
+
+        BatchOutcome::Ready(staged)
     }
 
     /// Perform QR-code login flow. Returns (bot_token, account_id, user_id).
@@ -2454,112 +2696,71 @@ impl Channel for WeChatChannel {
                 long_poll_timeout_ms = next_timeout;
             }
 
-            // Process messages
+            // Process messages. Stage the whole batch before any `tx.send` so
+            // a transient attachment failure can discard unpublished work and
+            // leave the cursor uncommitted. Permanent skips (size limit,
+            // unauthorized sender, CDN 400/403/404/410, invalid AES key
+            // metadata) are logged and do not hold the batch.
             let msgs = data
                 .get("msgs")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
 
-            for msg in &msgs {
-                let from_user_id = msg
-                    .get("from_user_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if from_user_id.is_empty() {
-                    continue;
-                }
-
-                // Cache context_token
-                if let Some(ctx_token) = msg.get("context_token").and_then(|v| v.as_str())
-                    && !ctx_token.is_empty()
-                    && let Err(e) = self.set_context_token(from_user_id, ctx_token).await
-                {
+            match self.stage_inbound_batch(&msgs).await {
+                BatchOutcome::StopBatch => {
                     ::zeroclaw_log::record!(
                         WARN,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                        "failed to persist WeChat context token"
+                            .with_attrs(::serde_json::json!({
+                                "retry_delay_secs": RETRY_DELAY.as_secs(),
+                            })),
+                        "Transient WeChat attachment failure; leaving cursor uncommitted so the next poll retries the batch"
                     );
-                }
-
-                let items = msg
-                    .get("item_list")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-
-                let message_id = msg
-                    .get("message_id")
-                    .and_then(|v| v.as_u64())
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| format!("wechat_{}", uuid::Uuid::new_v4()));
-
-                let text = extract_text_from_items(&items);
-
-                // Check authorization
-                if !self.is_user_allowed(from_user_id) {
-                    self.handle_unauthorized_message(from_user_id, &text).await;
+                    tokio::time::sleep(RETRY_DELAY).await;
                     continue;
                 }
-
-                let attachment_content =
-                    self.try_build_attachment_content(&items, &message_id).await;
-                let content = match (attachment_content, text.is_empty()) {
-                    (Some(marker), true) => marker,
-                    (Some(marker), false) => format!("{marker}\n\n{text}"),
-                    (None, false) => text,
-                    (None, true) => continue,
-                };
-
-                let timestamp = msg
-                    .get("create_time_ms")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0)
-                    / 1000; // Convert to seconds
-
-                let channel_msg = ChannelMessage {
-                    id: message_id,
-                    sender: from_user_id.to_string(),
-                    reply_target: from_user_id.to_string(),
-                    content,
-                    channel: "wechat".to_string(),
-                    channel_alias: Some(self.alias.clone()),
-                    timestamp,
-                    thread_ts: None,
-                    interruption_scope_id: None,
-                    attachments: Vec::new(),
-                    subject: None,
-
-                    ..Default::default()
-                };
-
-                if tx.send(channel_msg).await.is_err() {
-                    ::zeroclaw_log::record!(
-                        INFO,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                        "channel receiver dropped, stopping"
-                    );
-                    // Do NOT commit `next_cursor` here: the batch is only
-                    // partially (or not at all) enqueued, so the old cursor
-                    // must stay on disk. On supervised restart `listen()`
-                    // reloads it and re-polls this batch.
-                    return Ok(());
+                BatchOutcome::Ready(staged) => {
+                    for item in staged {
+                        match item {
+                            StagedInbound::Unauthorized { from_user_id, text } => {
+                                self.handle_unauthorized_message(&from_user_id, &text).await;
+                            }
+                            StagedInbound::Deliver(channel_msg) => {
+                                if tx.send(*channel_msg).await.is_err() {
+                                    ::zeroclaw_log::record!(
+                                        INFO,
+                                        ::zeroclaw_log::Event::new(
+                                            module_path!(),
+                                            ::zeroclaw_log::Action::Note
+                                        ),
+                                        "channel receiver dropped, stopping"
+                                    );
+                                    // Do NOT commit `next_cursor` here: the batch is only
+                                    // partially (or not at all) enqueued, so the old cursor
+                                    // must stay on disk. On supervised restart `listen()`
+                                    // reloads it and re-polls this batch.
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
             // Commit the cursor only now that the whole batch has been
             // enqueued (or there was nothing to enqueue).
             //
-            // At-least-once is an explicit decision (the same trade the
-            // upstream cursor-after-enqueue port makes): a crash in the window
+            // At-least-once is an explicit decision: a crash in the window
             // after enqueue and before this persist, or a persist failure
             // here, can redeliver already-enqueued messages on restart. This
             // repo has no generic inbound dedup. Prefer duplicate delivery
-            // over silent loss. Global inbound dedup and attachment
-            // disposition/staging stay on the channel-ingress durability
-            // leaf as follow-ups, not this PR.
+            // over silent loss.
+            //
+            // A transient attachment failure never reaches this site: the
+            // StopBatch arm above continues without committing, so a
+            // pure-attachment message is retried instead of skipped.
             //
             // Persist failure: log and continue. The in-memory cursor has
             // advanced so this process will not re-poll the batch; the next
@@ -3075,6 +3276,22 @@ mod tests {
         assert_eq!(
             format_attachment_content(WeChatAttachmentKind::Document, "report.pdf", &path),
             "[Document: report.pdf] /tmp/workspace/report.pdf"
+        );
+    }
+
+    #[test]
+    fn unavailable_attachment_notice_matches_inbound_status_markers() {
+        assert_eq!(
+            format_unavailable_attachment(WeChatAttachmentKind::Image),
+            "[Image: unavailable]"
+        );
+        assert_eq!(
+            format_unavailable_attachment(WeChatAttachmentKind::Document),
+            "[Document: unavailable]"
+        );
+        assert_eq!(
+            format_unavailable_attachment(WeChatAttachmentKind::Audio),
+            "[Audio: unavailable]"
         );
     }
 
@@ -3643,6 +3860,99 @@ mod tests {
         .unwrap()
     }
 
+    fn test_wechat_channel_for_listen(
+        mock_uri: String,
+        state_dir: &Path,
+        workspace_dir: &Path,
+    ) -> WeChatChannel {
+        let mut channel = test_wechat_channel_for_api(mock_uri.clone(), state_dir);
+        channel.cdn_base_url = mock_uri;
+        channel.workspace_dir = Some(workspace_dir.to_path_buf());
+        channel
+    }
+
+    fn inbound_image_item() -> serde_json::Value {
+        serde_json::json!({
+            "type": 2,
+            "image_item": {
+                "media": {"encrypt_query_param": "enc_param_1"}
+            }
+        })
+    }
+
+    fn inbound_encrypted_image_item(aes_key: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": 2,
+            "image_item": {
+                "aeskey": aes_key,
+                "media": {"encrypt_query_param": "enc_param_1"}
+            }
+        })
+    }
+
+    fn inbound_text_item(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": 1,
+            "text_item": {"text": text}
+        })
+    }
+
+    fn inbound_message(from: &str, message_id: u64, items: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "from_user_id": from,
+            "message_id": message_id,
+            "create_time_ms": 1_700_000_000_000u64,
+            "item_list": items
+        })
+    }
+
+    #[test]
+    fn cdn_status_classify_uses_permanent_whitelist() {
+        let status400 = reqwest::StatusCode::BAD_REQUEST;
+        let status403 = reqwest::StatusCode::FORBIDDEN;
+        let status404 = reqwest::StatusCode::NOT_FOUND;
+        let status408 = reqwest::StatusCode::REQUEST_TIMEOUT;
+        let status410 = reqwest::StatusCode::GONE;
+        let status425 = reqwest::StatusCode::from_u16(425).expect("425 is a valid status");
+        let status429 = reqwest::StatusCode::TOO_MANY_REQUESTS;
+        let status500 = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
+
+        assert_eq!(
+            AttachmentBuildFailure::classify_status(status400, "gone").kind(),
+            AttachmentFailureKind::Permanent
+        );
+        assert_eq!(
+            AttachmentBuildFailure::classify_status(status403, "forbidden").kind(),
+            AttachmentFailureKind::Permanent
+        );
+        assert_eq!(
+            AttachmentBuildFailure::classify_status(status404, "missing").kind(),
+            AttachmentFailureKind::Permanent
+        );
+        assert_eq!(
+            AttachmentBuildFailure::classify_status(status410, "gone").kind(),
+            AttachmentFailureKind::Permanent
+        );
+        assert_eq!(
+            AttachmentBuildFailure::classify_status(status408, "timeout").kind(),
+            AttachmentFailureKind::Transient,
+            "408 must stay transient so a timed-out CDN object is retried"
+        );
+        assert_eq!(
+            AttachmentBuildFailure::classify_status(status425, "too early").kind(),
+            AttachmentFailureKind::Transient,
+            "a 4xx outside the permanent whitelist must stay transient"
+        );
+        assert_eq!(
+            AttachmentBuildFailure::classify_status(status429, "rate limited").kind(),
+            AttachmentFailureKind::Transient
+        );
+        assert_eq!(
+            AttachmentBuildFailure::classify_status(status500, "upstream").kind(),
+            AttachmentFailureKind::Transient
+        );
+    }
+
     /// Regression for lost inbound batches: if the first `tx.send` in a batch
     /// fails (receiver gone), `listen()` must return without committing the
     /// cursor the response carried. Otherwise a crash between cursor
@@ -3888,6 +4198,449 @@ mod tests {
             *probe.cursor.lock(),
             "original_cursor",
             "mid-batch save must not have leaked the uncommitted new cursor"
+        );
+    }
+
+    /// A pure-attachment message whose CDN download fails transiently (503)
+    /// must not advance the cursor. Folding that failure to `None` and
+    /// committing the batch would permanently skip a message that has no
+    /// text fallback. Once the CDN recovers, the same listener re-fetches
+    /// the held batch, delivers the attachment, and then commits.
+    #[tokio::test]
+    async fn listen_holds_cursor_on_transient_pure_attachment_failure_then_advances() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let temp = tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        let workspace_dir = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let mock_server = MockServer::start().await;
+
+        let held_batch = getupdates_batch(
+            "cursor_after_batch",
+            serde_json::json!([inbound_message(
+                "user_a",
+                1,
+                serde_json::json!([inbound_image_item()])
+            )]),
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/ilink/bot/getupdates"))
+            .and(body_partial_json(
+                serde_json::json!({"get_updates_buf": "original_cursor"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(held_batch))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ilink/bot/getupdates"))
+            .and(body_partial_json(
+                serde_json::json!({"get_updates_buf": "cursor_after_batch"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(getupdates_batch(
+                "cursor_after_batch",
+                serde_json::json!([]),
+            )))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"fake-image-bytes".to_vec()))
+            .mount(&mock_server)
+            .await;
+
+        let ch = test_wechat_channel_for_listen(mock_server.uri(), &state_dir, &workspace_dir);
+        *ch.cursor.lock() = "original_cursor".to_string();
+        ch.save_sync_data().unwrap();
+        let ch = Arc::new(ch);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let listen_ch = ch.clone();
+        let handle = zeroclaw_spawn::spawn!(async move { listen_ch.listen(tx).await });
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let probe = load_persisted_wechat(&state_dir);
+        assert_eq!(
+            *probe.cursor.lock(),
+            "original_cursor",
+            "a transient CDN failure must not commit the batch cursor"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a held batch must not deliver a degraded or empty stand-in"
+        );
+
+        let delivered = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("timed out waiting for the attachment after CDN recovery")
+            .expect("channel closed before the recovered attachment arrived");
+        assert_eq!(delivered.sender, "user_a");
+        assert!(
+            delivered.content.contains("[IMAGE:"),
+            "pure-attachment must be delivered once the CDN recovers, got: {}",
+            delivered.content
+        );
+
+        handle.abort();
+        let _ = handle.await;
+
+        let probe = load_persisted_wechat(&state_dir);
+        assert_eq!(
+            *probe.cursor.lock(),
+            "cursor_after_batch",
+            "cursor must advance once the recovered attachment is enqueued"
+        );
+    }
+
+    /// A deterministic permanent CDN rejection (404) on a pure-attachment
+    /// message is a logged skip, not a hold. The batch must still commit so
+    /// the listener cannot wedge on an object that will never appear.
+    #[tokio::test]
+    async fn listen_advances_cursor_when_pure_attachment_fails_permanently() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let temp = tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        let workspace_dir = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/ilink/bot/getupdates"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(getupdates_batch(
+                "cursor_after_batch",
+                serde_json::json!([inbound_message(
+                    "user_a",
+                    1,
+                    serde_json::json!([inbound_image_item()])
+                )]),
+            )))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let ch = test_wechat_channel_for_listen(mock_server.uri(), &state_dir, &workspace_dir);
+        *ch.cursor.lock() = "original_cursor".to_string();
+        ch.save_sync_data().unwrap();
+        let ch = Arc::new(ch);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let listen_ch = ch.clone();
+        let handle = zeroclaw_spawn::spawn!(async move { listen_ch.listen(tx).await });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let probe = load_persisted_wechat(&state_dir);
+            if *probe.cursor.lock() == "cursor_after_batch" {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for a permanent attachment skip to commit the cursor"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a permanently skipped pure-attachment must not enqueue a stand-in"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    /// Permanent attachment failure on a mixed text+image message still
+    /// delivers the text and advances the cursor. The attachment is
+    /// omitted rather than holding the whole batch.
+    #[tokio::test]
+    async fn listen_delivers_text_and_advances_when_attachment_fails_permanently() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let temp = tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        let workspace_dir = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/ilink/bot/getupdates"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(getupdates_batch(
+                "cursor_after_batch",
+                serde_json::json!([inbound_message(
+                    "user_a",
+                    1,
+                    serde_json::json!([inbound_text_item("hello"), inbound_image_item()])
+                )]),
+            )))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let ch = test_wechat_channel_for_listen(mock_server.uri(), &state_dir, &workspace_dir);
+        *ch.cursor.lock() = "original_cursor".to_string();
+        ch.save_sync_data().unwrap();
+        let ch = Arc::new(ch);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let listen_ch = ch.clone();
+        let handle = zeroclaw_spawn::spawn!(async move { listen_ch.listen(tx).await });
+
+        let delivered = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for the text after a permanent attachment skip")
+            .expect("channel closed before the text arrived");
+        assert_eq!(delivered.sender, "user_a");
+        assert!(
+            delivered.content.contains("[Image: unavailable]"),
+            "a permanent attachment skip must annotate the kept text, got: {}",
+            delivered.content
+        );
+        assert!(
+            delivered.content.contains("hello"),
+            "a permanent attachment skip must still deliver the text, got: {}",
+            delivered.content
+        );
+        assert!(
+            !delivered.content.contains("[IMAGE:"),
+            "must not fabricate a successful image payload marker, got: {}",
+            delivered.content
+        );
+
+        handle.abort();
+        let _ = handle.await;
+
+        let probe = load_persisted_wechat(&state_dir);
+        assert_eq!(
+            *probe.cursor.lock(),
+            "cursor_after_batch",
+            "a permanent attachment skip must still commit the batch cursor"
+        );
+    }
+
+    /// Combining typed disposition with cursor-after-enqueue: a text
+    /// message followed by a retryable attachment must not publish the
+    /// earlier text while the batch is held. Publishing it would
+    /// redeliver that text on every retry pass.
+    #[tokio::test]
+    async fn listen_does_not_publish_prior_text_while_later_attachment_is_held() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let temp = tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        let workspace_dir = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let mock_server = MockServer::start().await;
+
+        let held_batch = getupdates_batch(
+            "cursor_after_batch",
+            serde_json::json!([
+                inbound_message("user_a", 1, serde_json::json!([inbound_text_item("first")])),
+                inbound_message("user_b", 2, serde_json::json!([inbound_image_item()])),
+            ]),
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/ilink/bot/getupdates"))
+            .and(body_partial_json(
+                serde_json::json!({"get_updates_buf": "original_cursor"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(held_batch))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ilink/bot/getupdates"))
+            .and(body_partial_json(
+                serde_json::json!({"get_updates_buf": "cursor_after_batch"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(getupdates_batch(
+                "cursor_after_batch",
+                serde_json::json!([]),
+            )))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"fake-image-bytes".to_vec()))
+            .mount(&mock_server)
+            .await;
+
+        let ch = test_wechat_channel_for_listen(mock_server.uri(), &state_dir, &workspace_dir);
+        *ch.cursor.lock() = "original_cursor".to_string();
+        ch.save_sync_data().unwrap();
+        let ch = Arc::new(ch);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let listen_ch = ch.clone();
+        let handle = zeroclaw_spawn::spawn!(async move { listen_ch.listen(tx).await });
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "text ahead of a retryable attachment must stay staged until the whole batch resolves"
+        );
+        assert_eq!(
+            *load_persisted_wechat(&state_dir).cursor.lock(),
+            "original_cursor"
+        );
+
+        let first = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("timed out waiting for staged text after CDN recovery")
+            .expect("channel closed before staged text arrived");
+        let second = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("timed out waiting for recovered attachment")
+            .expect("channel closed before recovered attachment arrived");
+
+        assert_eq!(first.sender, "user_a");
+        assert_eq!(first.content, "first");
+        assert_eq!(second.sender, "user_b");
+        assert!(
+            second.content.contains("[IMAGE:"),
+            "attachment must arrive after the staged text, got: {}",
+            second.content
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the recovered batch must deliver each message once"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+
+        assert_eq!(
+            *load_persisted_wechat(&state_dir).cursor.lock(),
+            "cursor_after_batch"
+        );
+    }
+
+    /// A 200 CDN body that fails PKCS7 decrypt (truncated/corrupt ciphertext)
+    /// must be transient: the key metadata was valid, so a later complete
+    /// download can recover. Treating decrypt failure as permanent would
+    /// skip the message and commit the cursor — the same silent loss this
+    /// change exists to close.
+    #[tokio::test]
+    async fn listen_retries_truncated_encrypted_attachment_then_advances() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let aes_hex = "0123456789abcdef0123456789abcdef";
+        let key = parse_aes_key(aes_hex).expect("test AES key must parse");
+        let ciphertext = encrypt_aes_ecb(b"fake-image-bytes", &key).expect("encrypt fixture");
+
+        let temp = tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        let workspace_dir = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+        let mock_server = MockServer::start().await;
+
+        let held_batch = getupdates_batch(
+            "cursor_after_batch",
+            serde_json::json!([inbound_message(
+                "user_a",
+                1,
+                serde_json::json!([inbound_encrypted_image_item(aes_hex)])
+            )]),
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/ilink/bot/getupdates"))
+            .and(body_partial_json(
+                serde_json::json!({"get_updates_buf": "original_cursor"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(held_batch))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/ilink/bot/getupdates"))
+            .and(body_partial_json(
+                serde_json::json!({"get_updates_buf": "cursor_after_batch"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(getupdates_batch(
+                "cursor_after_batch",
+                serde_json::json!([]),
+            )))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"truncated".to_vec()))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(ciphertext))
+            .mount(&mock_server)
+            .await;
+
+        let ch = test_wechat_channel_for_listen(mock_server.uri(), &state_dir, &workspace_dir);
+        *ch.cursor.lock() = "original_cursor".to_string();
+        ch.save_sync_data().unwrap();
+        let ch = Arc::new(ch);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let listen_ch = ch.clone();
+        let handle = zeroclaw_spawn::spawn!(async move { listen_ch.listen(tx).await });
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            *load_persisted_wechat(&state_dir).cursor.lock(),
+            "original_cursor",
+            "a truncated encrypted payload must not commit the batch cursor"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "a truncated decrypt must hold the batch, not skip the attachment"
+        );
+
+        let delivered = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("timed out waiting for the attachment after a complete ciphertext retry")
+            .expect("channel closed before the recovered attachment arrived");
+        assert_eq!(delivered.sender, "user_a");
+        assert!(
+            delivered.content.contains("[IMAGE:"),
+            "recovered ciphertext must deliver the attachment, got: {}",
+            delivered.content
+        );
+
+        handle.abort();
+        let _ = handle.await;
+
+        assert_eq!(
+            *load_persisted_wechat(&state_dir).cursor.lock(),
+            "cursor_after_batch",
+            "cursor must advance once the recovered ciphertext is enqueued"
         );
     }
 }
