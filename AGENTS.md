@@ -129,15 +129,22 @@ is still ours simply stays.
 
 ### Known gaps neither side has fixed
 
-- **MCP tools bypass `allowed_tools`.** Any tool name containing `__` is
-  auto-admitted even under a non-empty allow-list (`tools/delegate.rs`,
-  `tools/tool_search.rs`, `tools/mcp_deferred.rs`, `config/helpers.rs`). The
-  first line of defence stays server-side: expose no trading write tools on the
-  hapi-edge profile the agent connects to.
-- **Approvals:** local_tool grants persist in `data_dir/approvals.db` (boot +
-  run + tool + args hash, 300s TTL, single-consume). Store open failure keeps
-  in-memory proceed (WARN); grant/redeem write failure denies. Node grant
-  envelope/claim and Tachi projection remain in #58.
+- **MCP `__` auto-admit is opt-in, not the default.** The default
+  `mcp_discovered_tool_policy` is `explicit_only` (`autonomy.rs`:
+  `McpDiscoveredToolPolicy::ExplicitOnly`; `tool_search.rs` `is_tool_allowed`;
+  `tools/scoped.rs` deferred `filter_by_policy`). A non-empty `allowed_tools`
+  list does **not** admit unlisted `<server>__<tool>` names unless the risk
+  profile sets `mcp_discovered_tool_policy = "auto_admit"`. That escape hatch
+  still restores the old bypass (`admits_unlisted` is `AutoAdmit && name
+  contains "__"`), so a trading agent that flips it is back to "whatever the
+  server offers next." The first line of defence stays server-side: expose no
+  trading write tools on the hapi-edge profile the agent connects to.
+- **Approvals.** Local-tool grants persist in `data_dir/approvals.db` (boot +
+  run + tool + args hash, 300s TTL, single-consume redeem) with an
+  `approval_audit` trail. Production constructors attach the store via
+  `with_store_at`; open failure keeps in-memory proceed (WARN); grant or
+  redeem write failure denies. The remaining gap is the Node grant/receipt
+  contract (#58 follow-up slice).
 
 ### Memory Contract (#634 option C; direct-leg mandate superseded by #2389 / #2432)
 
