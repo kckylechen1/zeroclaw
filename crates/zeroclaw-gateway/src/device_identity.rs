@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_identity_row_fails_open() {
+    fn corrupt_identity_row_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         DeviceIdentityStore::open(dir.path(), 16).expect("create empty store");
         let db = dir.path().join("device_identities.db");
