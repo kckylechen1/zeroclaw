@@ -493,6 +493,18 @@ pub struct Config {
     #[nested]
     pub personas: HashMap<String, crate::persona::PersonaKnobs>,
 
+    /// Companion-memory owner gate (`[companion_memory.owner]`).
+    ///
+    /// Declares who may produce `owner_authored` rows. Unmatched ingress is
+    /// `shared_operator` and can never produce `owner_authored`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::companion::CompanionMemoryConfig::is_unset"
+    )]
+    #[nested]
+    #[group = "Storage"]
+    pub companion_memory: crate::companion::CompanionMemoryConfig,
+
     /// Named skill bundles (`[skill_bundles.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -17726,6 +17738,7 @@ impl Default for Config {
             runtime_profiles: HashMap::new(),
             personas: HashMap::new(),
             cards: HashMap::new(),
+            companion_memory: crate::companion::CompanionMemoryConfig::default(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),
@@ -19531,6 +19544,13 @@ impl Config {
     /// obviously invalid values early instead of failing at arbitrary runtime points.
     pub fn validate(&self) -> Result<()> {
         validate_memory_rerank_config(&self.memory)?;
+        if let Err(reason) = self.companion_memory.validate() {
+            validation_bail!(
+                RequiredFieldEmpty,
+                "companion_memory.owner.principal_id",
+                "{reason}"
+            );
+        }
 
         // Tunnel — OpenVPN
         if self.tunnel.tunnel_provider.trim() == "openvpn" {
@@ -25374,6 +25394,7 @@ auto_save = true
             runtime_profiles: HashMap::new(),
             personas: HashMap::new(),
             cards: HashMap::new(),
+            companion_memory: crate::companion::CompanionMemoryConfig::default(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),
@@ -26249,6 +26270,7 @@ default_temperature = 0.7
             runtime_profiles: HashMap::new(),
             personas: HashMap::new(),
             cards: HashMap::new(),
+            companion_memory: crate::companion::CompanionMemoryConfig::default(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
             mcp_bundles: HashMap::new(),
