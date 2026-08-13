@@ -1,15 +1,10 @@
 //! Dual-era MCP peer classification and modern-wire helpers.
 //!
-//! Protocol version `2026-07-28` removed the `initialize` handshake. This
-//! module is the seam that must exist *before* [`MCP_PROTOCOL_VERSION`] can
-//! move: probe once per server, resolve a [`PeerEra`], and branch handshake /
-//! session / transport on that one value. Stage 2 speaks the modern POST
-//! headers and per-request `_meta` only on [`PeerEra::Modern`]; Stage 3
-//! classifies `resultType` via [`classify_mcp_result`] the same way. Stage 4
-//! mints MRTR handles in [`crate::mcp_task`] and retries through
-//! [`attach_input_retry`]; the same store maps unsolicited
-//! `resultType: "task"` handles for `tasks/get` / `tasks/update`. The Legacy
-//! arm is unchanged. Do not bump [`MCP_PROTOCOL_VERSION`] here.
+//! Protocol version `2026-07-28` removed the `initialize` handshake. Probe
+//! once per server, resolve a [`PeerEra`], and branch handshake / session /
+//! transport on that one value. Modern peers speak POST headers and
+//! per-request `_meta`; Legacy peers keep initialize. The client's declared
+//! revision [`MCP_PROTOCOL_VERSION`] equals [`MCP_MODERN_PROTOCOL_VERSION`].
 //!
 //! [`MCP_PROTOCOL_VERSION`]: crate::mcp_protocol::MCP_PROTOCOL_VERSION
 
@@ -18,11 +13,15 @@ use serde_json::json;
 
 use crate::mcp_protocol::{JsonRpcError, JsonRpcResponse, MCP_PROTOCOL_VERSION};
 
-/// First modern (per-request `_meta`) revision. Used only in the
-/// `server/discover` probe — not a bump of [`MCP_PROTOCOL_VERSION`].
+/// First modern (per-request `_meta`) revision. Identical to
+/// [`MCP_PROTOCOL_VERSION`] now that the client declares the modern date.
 ///
 /// [`MCP_PROTOCOL_VERSION`]: crate::mcp_protocol::MCP_PROTOCOL_VERSION
-pub const MCP_MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+pub const MCP_MODERN_PROTOCOL_VERSION: &str = MCP_PROTOCOL_VERSION;
+
+/// Original handshake-era revision. Oldest known date; conservative
+/// fallback when `initialize.protocolVersion` is missing or malformed.
+pub const MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Latest handshake-era revision this client classifies as [`PeerEra::Legacy`].
 pub const MCP_LEGACY_LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -32,9 +31,9 @@ pub const MCP_LEGACY_STREAMABLE_PROTOCOL_VERSION: &str = "2025-03-26";
 
 /// Revisions this client can name. Spoken wire still follows [`PeerEra`]:
 /// handshake-era dates use initialize; [`MCP_MODERN_PROTOCOL_VERSION`] uses
-/// per-request `_meta`. [`MCP_PROTOCOL_VERSION`] itself is not bumped here.
+/// per-request `_meta`.
 pub const KNOWN_PROTOCOL_VERSIONS: &[&str] = &[
-    MCP_PROTOCOL_VERSION,
+    MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION,
     MCP_LEGACY_STREAMABLE_PROTOCOL_VERSION,
     MCP_LEGACY_LATEST_PROTOCOL_VERSION,
     MCP_MODERN_PROTOCOL_VERSION,
@@ -124,12 +123,13 @@ pub struct PeerProtocol {
 }
 
 impl PeerProtocol {
-    /// Default for test fixtures and a well-formed pin of our client version.
+    /// Default for test fixtures and a well-formed pin of the original
+    /// handshake-era revision.
     pub fn legacy_default() -> Self {
         Self {
             era: PeerEra::Legacy,
-            version: MCP_PROTOCOL_VERSION.to_string(),
-            advertised: MCP_PROTOCOL_VERSION.to_string(),
+            version: MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION.to_string(),
+            advertised: MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION.to_string(),
             quality: VersionQuality::Known,
         }
     }
@@ -148,7 +148,7 @@ impl PeerProtocol {
     /// Classify a version string the peer named (initialize or discover).
     pub fn classify(advertised: &str) -> Self {
         match advertised {
-            MCP_PROTOCOL_VERSION
+            MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION
             | MCP_LEGACY_STREAMABLE_PROTOCOL_VERSION
             | MCP_LEGACY_LATEST_PROTOCOL_VERSION => Self {
                 era: PeerEra::Legacy,
@@ -207,14 +207,14 @@ impl PeerProtocol {
         match value {
             None => Self {
                 era: PeerEra::Legacy,
-                version: MCP_PROTOCOL_VERSION.to_string(),
+                version: MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION.to_string(),
                 advertised: "<missing>".to_string(),
                 quality: VersionQuality::Malformed,
             },
             Some(serde_json::Value::String(advertised)) => Self::classify(advertised),
             Some(other) => Self {
                 era: PeerEra::Legacy,
-                version: MCP_PROTOCOL_VERSION.to_string(),
+                version: MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION.to_string(),
                 advertised: other.to_string(),
                 quality: VersionQuality::Malformed,
             },
@@ -232,7 +232,7 @@ fn nearest_known(advertised: &str) -> (PeerEra, &'static str) {
     } else if advertised >= MCP_LEGACY_STREAMABLE_PROTOCOL_VERSION {
         (PeerEra::Legacy, MCP_LEGACY_STREAMABLE_PROTOCOL_VERSION)
     } else {
-        (PeerEra::Legacy, MCP_PROTOCOL_VERSION)
+        (PeerEra::Legacy, MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION)
     }
 }
 
@@ -918,7 +918,7 @@ mod tests {
     #[test]
     fn known_legacy_dates_stay_legacy() {
         for version in [
-            MCP_PROTOCOL_VERSION,
+            MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION,
             MCP_LEGACY_STREAMABLE_PROTOCOL_VERSION,
             MCP_LEGACY_LATEST_PROTOCOL_VERSION,
         ] {
@@ -930,11 +930,29 @@ mod tests {
     }
 
     #[test]
+    fn declared_version_aliases_modern() {
+        assert_eq!(MCP_PROTOCOL_VERSION, MCP_MODERN_PROTOCOL_VERSION);
+        assert_eq!(MCP_PROTOCOL_VERSION, "2026-07-28");
+        let mut seen = std::collections::HashSet::new();
+        for version in KNOWN_PROTOCOL_VERSIONS {
+            assert!(
+                seen.insert(*version),
+                "KNOWN_PROTOCOL_VERSIONS must not duplicate {version}"
+            );
+        }
+        assert!(KNOWN_PROTOCOL_VERSIONS.contains(&MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION));
+        assert!(KNOWN_PROTOCOL_VERSIONS.contains(&MCP_MODERN_PROTOCOL_VERSION));
+    }
+
+    #[test]
     fn known_modern_date_is_modern() {
         let peer = PeerProtocol::classify(MCP_MODERN_PROTOCOL_VERSION);
         assert_eq!(peer.era, PeerEra::Modern);
         assert_eq!(peer.version, MCP_MODERN_PROTOCOL_VERSION);
         assert_eq!(peer.quality, VersionQuality::Known);
+        let declared = PeerProtocol::classify(MCP_PROTOCOL_VERSION);
+        assert_eq!(declared.era, PeerEra::Modern);
+        assert_eq!(declared.version, MCP_PROTOCOL_VERSION);
     }
 
     #[test]
@@ -958,7 +976,7 @@ mod tests {
     fn unknown_ancient_date_snaps_to_original_legacy() {
         let peer = PeerProtocol::classify("2023-01-01");
         assert_eq!(peer.era, PeerEra::Legacy);
-        assert_eq!(peer.version, MCP_PROTOCOL_VERSION);
+        assert_eq!(peer.version, MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION);
         assert_eq!(peer.quality, VersionQuality::UnknownRevision);
     }
 
@@ -1000,7 +1018,7 @@ mod tests {
     fn initialize_missing_version_is_malformed() {
         let peer = PeerProtocol::from_initialize_field(None);
         assert_eq!(peer.era, PeerEra::Legacy);
-        assert_eq!(peer.version, MCP_PROTOCOL_VERSION);
+        assert_eq!(peer.version, MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION);
         assert_eq!(peer.advertised, "<missing>");
         assert_eq!(peer.quality, VersionQuality::Malformed);
     }
@@ -1009,7 +1027,7 @@ mod tests {
     fn initialize_non_string_version_is_malformed() {
         let peer = PeerProtocol::from_initialize_field(Some(&json!(42)));
         assert_eq!(peer.quality, VersionQuality::Malformed);
-        assert_eq!(peer.version, MCP_PROTOCOL_VERSION);
+        assert_eq!(peer.version, MCP_LEGACY_ORIGINAL_PROTOCOL_VERSION);
         assert_eq!(peer.advertised, "42");
     }
 
