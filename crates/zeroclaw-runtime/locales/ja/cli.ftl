@@ -9,6 +9,17 @@ cli-daemon-about = 長時間実行自動デーモンを開始
 cli-service-about = OSサービスライフサイクルを管理 (launchd/systemd ユーザーサービス)
 cli-doctor-about = デーモン/スケジューラー/チャネル鮮度の診断を実行
 cli-status-about = システムステータスを表示 (詳細)
+cli-status-long-about =
+    システムステータスを表示 (詳細)。
+
+    companion メモリが有効で companion-memory.db が既に存在する場合、
+    このコマンドはそのファイルを deny-migration で開き、欠落したストアを
+    作成しません。このオープンは厳密な読み取り専用検査ではありません:
+    SQLite は WAL ロックを取得し、プローブはデータベースファイルと既存の
+    -wal/-shm サイドカーに所有者専用権限 (0600) を適用します。
+
+    --format exit-code はゲートウェイの /health プローブが成功すると 0、それ以外は 1 で終了します
+    (Docker HEALTHCHECK 用)。
 cli-estop-about = エマージェンシーストップ状態を開始・検査・再開
 cli-cron-about = スケジュール済みタスクを設定・管理
 cli-models-about = プロバイダーモデルカタログを管理
@@ -673,6 +684,9 @@ cli-status-runtime = ⚙️  ランタイム:       {$v}
 cli-status-heartbeat = 💓 ハートビート:      {$v}
 cli-status-heartbeat-every-minutes = {$minutes}分ごと
 cli-status-memory = 🧠 メモリ:         {$backend} (自動保存: {$auto_save})
+cli-status-companion-outbox-not-configured = Companion アウトボックス: 未設定
+cli-status-companion-outbox-pending = Companion アウトボックス: 保留中 ({$pending} 件)
+cli-status-companion-outbox-pending-oldest = Companion アウトボックス: 保留中 ({$pending} 件、最古 {$age}s)
 cli-status-security-noprofile = セキュリティ ({$alias}): <risk_profile なし>
 cli-status-security = セキュリティ ({$alias}):
 cli-status-workspace-only = {"  "}ワークスペースのみ:    {$v}

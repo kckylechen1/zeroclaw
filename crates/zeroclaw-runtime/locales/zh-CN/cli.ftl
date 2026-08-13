@@ -9,6 +9,16 @@ cli-daemon-about = 启动长时间运行的自主守护进程
 cli-service-about = 管理操作系统服务生命周期（launchd/systemd 用户服务）
 cli-doctor-about = 运行守护进程/调度器/渠道新鲜度诊断
 cli-status-about = 显示系统状态（完整详情）
+cli-status-long-about =
+    显示系统状态（完整详情）。
+
+    当 companion 内存已启用且 companion-memory.db 已存在时，本命令以
+    deny-migration 打开该文件，且从不创建缺失的存储。此次打开并非严格只读检查：
+    SQLite 会获取 WAL 锁，探针仍会对数据库文件及任何已有的 -wal/-shm
+    附属文件应用仅所有者权限（0600）。
+
+    --format exit-code 在网关 /health 探针成功时以 0 退出，否则以 1 退出
+    （用于 Docker HEALTHCHECK）。
 cli-estop-about = 启用、检查和恢复紧急停止状态
 cli-cron-about = 配置和管理定时任务
 cli-models-about = 管理提供商模型目录
@@ -672,6 +682,9 @@ cli-status-runtime = ⚙️  运行时：       {$v}
 cli-status-heartbeat = 💓 心跳：      {$v}
 cli-status-heartbeat-every-minutes = 每 {$minutes} 分钟
 cli-status-memory = 🧠 内存：         {$backend}（自动保存：{$auto_save}）
+cli-status-companion-outbox-not-configured = Companion 发件箱：未配置
+cli-status-companion-outbox-pending = Companion 发件箱：待处理（{$pending} 条事件）
+cli-status-companion-outbox-pending-oldest = Companion 发件箱：待处理（{$pending} 条事件，最旧 {$age}s)
 cli-status-security-noprofile = 安全（{$alias}）：<无 risk_profile>
 cli-status-security = 安全（{$alias}）：
 cli-status-workspace-only = {"  "}仅工作区：    {$v}

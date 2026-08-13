@@ -9,6 +9,18 @@ cli-daemon-about = Inicia el daemon autónomo de larga ejecución
 cli-service-about = Gestiona el ciclo de vida del servicio del SO (servicio de usuario launchd/systemd)
 cli-doctor-about = Ejecuta diagnósticos para la actualidad de daemon/programador/canal
 cli-status-about = Muestra el estado del sistema (detalles completos)
+cli-status-long-about =
+    Muestra el estado del sistema (detalles completos).
+
+    Cuando la memoria companion está habilitada y companion-memory.db ya existe,
+    este comando abre ese archivo con deny-migration y nunca crea un almacén
+    ausente. La apertura no es una inspección estrictamente de solo lectura:
+    SQLite toma un bloqueo WAL, y la sonda sigue aplicando permisos solo del
+    propietario (0600) al archivo de la base de datos y a cualquier sidecar
+    -wal/-shm existente.
+
+    --format exit-code sale con 0 si la sonda /health del gateway tiene éxito, 1 en caso contrario
+    (para Docker HEALTHCHECK).
 cli-estop-about = Activa, inspecciona y reanuda los estados de parada de emergencia
 cli-cron-about = Configura y gestiona tareas programadas
 cli-models-about = Gestiona los catálogos de modelos del proveedor
@@ -673,6 +685,9 @@ cli-status-runtime = ⚙️  Entorno de ejecución:       {$v}
 cli-status-heartbeat = 💓 Latido:      {$v}
 cli-status-heartbeat-every-minutes = cada {$minutes}min
 cli-status-memory = 🧠 Memoria:         {$backend} (autoguardado: {$auto_save})
+cli-status-companion-outbox-not-configured = Bandeja de salida companion: no configurada
+cli-status-companion-outbox-pending = Bandeja de salida companion: pendiente ({$pending} eventos)
+cli-status-companion-outbox-pending-oldest = Bandeja de salida companion: pendiente ({$pending} eventos, el más antiguo {$age}s)
 cli-status-security-noprofile = Seguridad ({$alias}): <sin risk_profile>
 cli-status-security = Seguridad ({$alias}):
 cli-status-workspace-only = {"  "}Solo espacio de trabajo:    {$v}
