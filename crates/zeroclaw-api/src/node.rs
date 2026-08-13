@@ -25,9 +25,6 @@ pub enum NodeErrorCode {
     ProtocolUnsupported,
     /// `Hello.protocol_versions` had no intersection with [`SUPPORTED_NODE_V2_MINORS`].
     VersionMismatch,
-    /// In-band only. HTTP admission never emits this code: a non-loopback
-    /// peer without a verified device identity is closed after upgrade.
-    LoopbackRequired,
     /// In-band only. Unknown device, revoked device, and signature failure
     /// share this code so responses do not leak device existence.
     IdentityRejected,
@@ -41,7 +38,6 @@ impl NodeErrorCode {
         match self {
             Self::ProtocolUnsupported => "protocol_unsupported",
             Self::VersionMismatch => "version_mismatch",
-            Self::LoopbackRequired => "loopback_required",
             Self::IdentityRejected => "identity_rejected",
             Self::CapabilityWiden => "capability_widen",
         }
@@ -331,7 +327,6 @@ mod tests {
             r#""protocol_unsupported""#,
         );
         assert_literal(&NodeErrorCode::VersionMismatch, r#""version_mismatch""#);
-        assert_literal(&NodeErrorCode::LoopbackRequired, r#""loopback_required""#);
         assert_literal(&NodeErrorCode::IdentityRejected, r#""identity_rejected""#);
         assert_literal(&NodeErrorCode::CapabilityWiden, r#""capability_widen""#);
         let frame = GatewayToNode::Error {

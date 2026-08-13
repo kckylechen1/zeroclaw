@@ -62,8 +62,9 @@ fn identity_unavailable() -> axum::response::Response {
         .into_response()
 }
 
-/// Operator bearer is checked before JSON extraction and pair rate-limiting.
-/// Auth lockout still runs first so brute-force bearers can be closed.
+/// Operator bearer is classified before JSON extraction and before the 429
+/// lockout gate. Missing bearer is always 401. Wrong bearer records a strict
+/// (no loopback exemption) attempt and returns 401 until lockout, then 429.
 fn gate_operator_identity(
     state: &AppState,
     peer: SocketAddr,
@@ -71,16 +72,26 @@ fn gate_operator_identity(
 ) -> Option<axum::response::Response> {
     let rate_key =
         crate::client_key_from_request(Some(peer), headers, state.trust_forwarded_headers);
-    if let Err(e) = state.auth_limiter.check_rate_limit(&rate_key) {
-        let err = serde_json::json!({
+    let presented = extract_bearer(headers).is_some_and(|token| !token.is_empty());
+    if let Err(err) = require_operator(state, headers) {
+        if presented {
+            if let Err(e) = state.auth_limiter.check_rate_limit_strict(&rate_key) {
+                let body = serde_json::json!({
+                    "error": format!("Too many auth attempts. Try again in {}s.", e.retry_after_secs),
+                    "retry_after": e.retry_after_secs,
+                });
+                return Some((StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response());
+            }
+        }
+        state.auth_limiter.record_attempt_strict(&rate_key);
+        return Some(err.into_response());
+    }
+    if let Err(e) = state.auth_limiter.check_rate_limit_strict(&rate_key) {
+        let body = serde_json::json!({
             "error": format!("Too many auth attempts. Try again in {}s.", e.retry_after_secs),
             "retry_after": e.retry_after_secs,
         });
-        return Some((StatusCode::TOO_MANY_REQUESTS, Json(err)).into_response());
-    }
-    if let Err(err) = require_operator(state, headers) {
-        state.auth_limiter.record_attempt(&rate_key);
-        return Some(err.into_response());
+        return Some((StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response());
     }
     if !state.rate_limiter.allow_pair(&rate_key) {
         let err = serde_json::json!({
@@ -331,11 +342,14 @@ mod tests {
             serde_json::json!(["system.notify"])
         );
         let (conn, close_rx) = state.node_registry.try_reserve().unwrap();
-        state.node_registry.bind_identity(
-            &conn.connection_id,
-            device_id.clone(),
-            keys.fingerprint().to_string(),
-        );
+        state
+            .node_registry
+            .bind_identity(
+                &conn.connection_id,
+                device_id.clone(),
+                keys.fingerprint().to_string(),
+            )
+            .expect("test bind");
         let (status, revoked) = json_of(
             revoke_identity(
                 State(state.clone()),
@@ -679,6 +693,101 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body={body}");
+    }
+
+    #[tokio::test]
+    async fn consecutive_wrong_bearers_lock_out_loopback_peer() {
+        let state = operator_state();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer wrong-token".parse().unwrap());
+        let body = enroll_bytes(EnrollBody {
+            code: "x".into(),
+            public_key: "aa".into(),
+            capability_ceiling: None,
+        });
+        for attempt in 0..crate::auth_rate_limit::MAX_ATTEMPTS {
+            let (status, _) = json_of(
+                enroll_identity(
+                    State(state.clone()),
+                    ConnectInfo(loopback_peer()),
+                    headers.clone(),
+                    body.clone(),
+                )
+                .await
+                .into_response(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "loopback attempt {attempt} must stay 401 until lockout"
+            );
+        }
+        let (status, body) = json_of(
+            enroll_identity(State(state), ConnectInfo(loopback_peer()), headers, body)
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "reverse-proxy-shaped loopback peer must lock out, body={body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn locked_peer_without_bearer_stays_unauthorized() {
+        let state = operator_state();
+        let mut wrong = HeaderMap::new();
+        wrong.insert("authorization", "Bearer wrong-token".parse().unwrap());
+        let body = enroll_bytes(EnrollBody {
+            code: "x".into(),
+            public_key: "aa".into(),
+            capability_ceiling: None,
+        });
+        for _ in 0..crate::auth_rate_limit::MAX_ATTEMPTS {
+            let (status, _) = json_of(
+                enroll_identity(
+                    State(state.clone()),
+                    ConnectInfo(loopback_peer()),
+                    wrong.clone(),
+                    body.clone(),
+                )
+                .await
+                .into_response(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let (locked, _) = json_of(
+            enroll_identity(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                wrong,
+                body.clone(),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(locked, StatusCode::TOO_MANY_REQUESTS);
+        let (status, _) = json_of(
+            enroll_identity(
+                State(state),
+                ConnectInfo(loopback_peer()),
+                HeaderMap::new(),
+                Bytes::from_static(b"{not json"),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "anonymous callers must stay 401 even after the IP is locked"
+        );
     }
 
     #[tokio::test]

@@ -287,11 +287,25 @@ impl NodeRegistry {
         self.pending_challenges.write().remove(connection_id)
     }
 
-    pub fn bind_identity(&self, connection_id: &str, device_id: String, key_fingerprint: String) {
-        if let Some(socket) = self.live.write().get_mut(connection_id) {
-            socket.device_id = Some(device_id);
-            socket.key_fingerprint = Some(key_fingerprint);
-        }
+    pub fn bind_identity(
+        &self,
+        connection_id: &str,
+        device_id: String,
+        key_fingerprint: String,
+    ) -> Result<(), crate::device_identity::IdentityError> {
+        let Some(store) = self.identities.as_ref() else {
+            return Err(crate::device_identity::IdentityError::Unavailable);
+        };
+        store
+            .with_active(&device_id, &key_fingerprint, || {
+                let mut live = self.live.write();
+                let socket = live.get_mut(connection_id)?;
+                socket.device_id = Some(device_id.clone());
+                socket.key_fingerprint = Some(key_fingerprint.clone());
+                Some(())
+            })
+            .flatten()
+            .ok_or(crate::device_identity::IdentityError::IdentityRejected)
     }
 
     pub fn bound_identity(&self, connection_id: &str) -> Option<(String, String)> {
@@ -700,6 +714,21 @@ fn verify_node_auth(
     }
 }
 
+fn commit_verified_identity(
+    registry: &NodeRegistry,
+    connection_id: &str,
+    device_id: &str,
+    key_fingerprint: &str,
+) -> Result<(), NodeErrorCode> {
+    registry
+        .bind_identity(
+            connection_id,
+            device_id.to_string(),
+            key_fingerprint.to_string(),
+        )
+        .map_err(|_| NodeErrorCode::IdentityRejected)
+}
+
 fn apply_advertise(
     registry: &NodeRegistry,
     conn: &NodeConnection,
@@ -960,7 +989,16 @@ async fn handle_node_socket(socket: WebSocket, registry: Arc<NodeRegistry>) {
     };
     match verify_node_auth(&registry, &conn, &signature, identity_epoch) {
         Ok(verified_id) => {
-            registry.bind_identity(&conn.connection_id, verified_id, key_fingerprint);
+            if let Err(code) = commit_verified_identity(
+                &registry,
+                &conn.connection_id,
+                &verified_id,
+                &key_fingerprint,
+            ) {
+                let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
+                let _ = close_protocol(&mut sender, code.as_str()).await;
+                return;
+            }
         }
         Err(code) => {
             let _ = send_json(&mut sender, &protocol_error_frame(code)).await;
@@ -1726,11 +1764,13 @@ mod tests {
         let registry = NodeRegistry::new(8);
         let (_keys, identity) = enroll_test_device(&registry, vec!["system.notify".into()]);
         let (conn, _rx) = registry.try_reserve().expect("reserve");
-        registry.bind_identity(
-            &conn.connection_id,
-            identity.device_id.clone(),
-            identity.key_fingerprint.clone(),
-        );
+        registry
+            .bind_identity(
+                &conn.connection_id,
+                identity.device_id.clone(),
+                identity.key_fingerprint.clone(),
+            )
+            .expect("test bind");
         let too_many: Vec<String> = (0..MAX_ADVERTISE_CAPS + 1)
             .map(|i| format!("cap.{i}"))
             .collect();
@@ -1962,15 +2002,51 @@ mod tests {
     }
 
     #[test]
+    fn revoke_between_verify_and_bind_refuses_admission() {
+        let registry = NodeRegistry::new(8);
+        let (keys, identity) = enroll_test_device(&registry, vec!["system.notify".into()]);
+        let (conn, _close_rx) = registry.try_reserve().expect("reserve");
+        let challenge = registry
+            .begin_challenge(
+                &conn,
+                identity.device_id.clone(),
+                identity.key_fingerprint.clone(),
+            )
+            .unwrap();
+        let signature = sign_challenge(&keys, &challenge, identity.identity_epoch);
+        let verified = verify_node_auth(&registry, &conn, &signature, identity.identity_epoch)
+            .expect("signature must verify before the revoke window");
+        assert_eq!(verified, identity.device_id);
+        registry
+            .revoke_device(&identity.device_id)
+            .expect("revoke between verify and bind");
+        assert_eq!(
+            commit_verified_identity(
+                &registry,
+                &conn.connection_id,
+                &verified,
+                &identity.key_fingerprint,
+            ),
+            Err(NodeErrorCode::IdentityRejected)
+        );
+        assert!(
+            registry.bound_identity(&conn.connection_id).is_none(),
+            "revoked identity must not reach HelloAck/admitted"
+        );
+    }
+
+    #[test]
     fn revoke_tears_live_socket_and_rejects_reconnect() {
         let registry = NodeRegistry::new(8);
         let (keys, identity) = enroll_test_device(&registry, vec!["system.notify".into()]);
         let (conn, close_rx) = registry.try_reserve().expect("reserve");
-        registry.bind_identity(
-            &conn.connection_id,
-            identity.device_id.clone(),
-            identity.key_fingerprint.clone(),
-        );
+        registry
+            .bind_identity(
+                &conn.connection_id,
+                identity.device_id.clone(),
+                identity.key_fingerprint.clone(),
+            )
+            .expect("test bind");
         let torn = registry
             .revoke_device(&identity.device_id)
             .expect("revoke persist");
@@ -2037,11 +2113,13 @@ mod tests {
         let registry = NodeRegistry::new(8);
         let (_keys, identity) = enroll_test_device(&registry, vec!["system.notify".into()]);
         let (conn, _rx) = registry.try_reserve().expect("reserve");
-        registry.bind_identity(
-            &conn.connection_id,
-            identity.device_id.clone(),
-            identity.key_fingerprint.clone(),
-        );
+        registry
+            .bind_identity(
+                &conn.connection_id,
+                identity.device_id.clone(),
+                identity.key_fingerprint.clone(),
+            )
+            .expect("test bind");
         let admitted = process_post_handshake_text(
             &registry,
             &conn,

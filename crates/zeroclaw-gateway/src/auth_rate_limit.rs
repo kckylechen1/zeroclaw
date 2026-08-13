@@ -59,11 +59,18 @@ impl AuthRateLimiter {
     /// Check whether the client identified by `key` is allowed to attempt auth.
     /// Does **not** record a new attempt — call `record_attempt` after
     /// verifying the attempt actually happened (regardless of success/failure).
+    /// Loopback keys are exempt (CLI on the box). Node-identity operator
+    /// endpoints must use [`Self::check_rate_limit_strict`] instead: a reverse
+    /// proxy makes the TCP peer look like loopback.
     pub fn check_rate_limit(&self, key: &str) -> Result<(), RateLimitError> {
         if Self::is_loopback(key) {
             return Ok(());
         }
+        self.check_rate_limit_strict(key)
+    }
 
+    /// Same as [`Self::check_rate_limit`] but never exempts loopback.
+    pub fn check_rate_limit_strict(&self, key: &str) -> Result<(), RateLimitError> {
         let now = Instant::now();
         let mut inner = self.inner.lock();
         Self::maybe_sweep(&mut inner, now);
@@ -97,12 +104,17 @@ impl AuthRateLimiter {
         Ok(())
     }
 
-    /// Record a new authentication attempt for `key`.
+    /// Record a new authentication attempt for `key`. Loopback is exempt;
+    /// node-identity operator endpoints must use [`Self::record_attempt_strict`].
     pub fn record_attempt(&self, key: &str) {
         if Self::is_loopback(key) {
             return;
         }
+        self.record_attempt_strict(key);
+    }
 
+    /// Same as [`Self::record_attempt`] but never exempts loopback.
+    pub fn record_attempt_strict(&self, key: &str) {
         let now = Instant::now();
         let mut inner = self.inner.lock();
         inner.attempts.entry(key.to_owned()).or_default().push(now);
@@ -214,6 +226,17 @@ mod tests {
             limiter.record_attempt(key);
         }
         assert!(limiter.check_rate_limit(key).is_err());
+    }
+
+    #[test]
+    fn strict_lockout_applies_to_loopback() {
+        let limiter = AuthRateLimiter::new();
+        for _ in 0..MAX_ATTEMPTS {
+            assert!(limiter.check_rate_limit_strict("127.0.0.1").is_ok());
+            limiter.record_attempt_strict("127.0.0.1");
+        }
+        assert!(limiter.check_rate_limit_strict("127.0.0.1").is_err());
+        assert!(limiter.check_rate_limit("127.0.0.1").is_ok());
     }
 
     #[test]

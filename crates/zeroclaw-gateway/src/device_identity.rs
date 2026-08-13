@@ -233,7 +233,14 @@ impl DeviceIdentityStore {
         )?;
         let rows = stmt.query_map([], |row| {
             let ceiling_json: String = row.get(8)?;
-            let capability_ceiling = serde_json::from_str(&ceiling_json).unwrap_or_default();
+            let capability_ceiling: Vec<String> =
+                serde_json::from_str(&ceiling_json).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?;
             Ok(DeviceIdentityV1 {
                 device_id: row.get(0)?,
                 public_key: row.get(1)?,
@@ -247,8 +254,9 @@ impl DeviceIdentityStore {
             })
         })?;
         let mut cache = self.inner.rows.lock();
-        for row in rows.flatten() {
-            cache.insert(row.device_id.clone(), row);
+        for row in rows {
+            let identity = row?;
+            cache.insert(identity.device_id.clone(), identity);
         }
         Ok(())
     }
@@ -356,6 +364,23 @@ impl DeviceIdentityStore {
             return None;
         }
         Some(row.clone())
+    }
+
+    /// Run `f` while the matching row is still active. The row lock is held
+    /// across `f` so a concurrent revoke cannot sneak in between the check
+    /// and a live-socket bind.
+    pub(crate) fn with_active<R>(
+        &self,
+        device_id: &str,
+        key_fingerprint: &str,
+        f: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let rows = self.inner.rows.lock();
+        let row = rows.get(device_id)?;
+        if row.is_revoked() || row.key_fingerprint != key_fingerprint {
+            return None;
+        }
+        Some(f())
     }
 
     pub fn revoke(&self, device_id: &str) -> Result<bool, IdentityError> {
@@ -577,6 +602,27 @@ mod tests {
         assert!(
             DeviceIdentityStore::open(&blocker, 16).is_err(),
             "open must fail closed rather than yield a volatile memory store"
+        );
+    }
+
+    #[test]
+    fn corrupt_identity_row_fails_open() {
+        let dir = tempfile::tempdir().unwrap();
+        DeviceIdentityStore::open(dir.path(), 16).expect("create empty store");
+        let db = dir.path().join("device_identities.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO device_identities (
+                device_id, public_key, key_fingerprint, algorithm, role,
+                identity_epoch, admitted_at, revoked_at, capability_ceiling
+             ) VALUES ('dev-1', 'aa', 'bb', 'ed25519', 'node', 1, 'now', NULL, 'not-json')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(
+            DeviceIdentityStore::open(dir.path(), 16).is_err(),
+            "a corrupt durable row must fail closed rather than skip the tombstone"
         );
     }
 
