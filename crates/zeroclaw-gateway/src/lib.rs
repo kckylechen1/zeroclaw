@@ -580,7 +580,7 @@ pub struct AppState {
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run_gateway(
     host: &str,
     port: u16,
@@ -597,6 +597,10 @@ pub async fn run_gateway(
     // Shared SOP engine from the daemon. `None` when standalone — sessions build their own.
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
+    // Companion PortableKernel handle from the composition root. Daemon
+    // constructs once and injects the same Arc into channels. Standalone
+    // gateway constructs at `run_gateway_if_enabled`. Never opened here.
+    companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
 ) -> Result<()> {
     // ── Security: warn on public bind without tunnel or explicit opt-in ──
     if is_public_bind(host)
@@ -775,7 +779,17 @@ pub async fn run_gateway(
         config.memory.clone(),
         config.data_dir.clone(),
     ));
-    let companion_store = zeroclaw_memory::create_companion_store(&config)?;
+    if let Some(store) = companion_store.as_ref() {
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
+                ::serde_json::json!({
+                    "path": store.path().display().to_string(),
+                })
+            ),
+            "gateway holding companion store"
+        );
+    }
     let canvas_store = canvas_store.unwrap_or_default();
     let agent_alias_opt = default_agent_alias(&config);
 
@@ -4886,7 +4900,19 @@ mod tests {
         );
 
         let handle = zeroclaw_spawn::spawn!(async move {
-            run_gateway("127.0.0.1", 0, config, None, None, None, None, None, None).await
+            run_gateway(
+                "127.0.0.1",
+                0,
+                config,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
         });
 
         match tokio::time::timeout(
@@ -4942,7 +4968,19 @@ mod tests {
         config.agents.insert("fake123".to_string(), agent);
 
         let handle = zeroclaw_spawn::spawn!(async move {
-            run_gateway("127.0.0.1", 0, config, None, None, None, None, None, None).await
+            run_gateway(
+                "127.0.0.1",
+                0,
+                config,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
         });
 
         match tokio::time::timeout(
@@ -4983,7 +5021,19 @@ mod tests {
         );
 
         let handle = zeroclaw_spawn::spawn!(async move {
-            run_gateway("127.0.0.1", 0, config, None, None, None, None, None, None).await
+            run_gateway(
+                "127.0.0.1",
+                0,
+                config,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
         });
 
         match tokio::time::timeout(
@@ -5038,6 +5088,7 @@ mod tests {
                 config,
                 None,
                 Some(reload_controls),
+                None,
                 None,
                 None,
                 None,

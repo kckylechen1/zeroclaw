@@ -6,3 +6,12 @@
 pub struct CompanionStore {
     _private: (),
 }
+
+impl CompanionStore {
+    /// Filesystem path of this store. Unreachable: the feature-off factory
+    /// always returns `None`.
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        std::path::Path::new("")
+    }
+}

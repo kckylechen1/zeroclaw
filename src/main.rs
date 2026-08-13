@@ -4145,6 +4145,11 @@ async fn async_main(command: clap::Command) -> Result<()> {
             // the same across reloads — only the in-process subsystems
             // tear down + re-instantiate.
             let mut current_config = config;
+            // Companion store is owned by this loop. Each iteration drops the
+            // previous Arc (after daemon::run returned and subsystem clones
+            // died) and opens again. Gateway and channels receive clones of
+            // the same handle — they must not call the factory themselves.
+            let mut companion_store: Option<Arc<zeroclaw_memory::CompanionStore>> = None;
             // Nag task for the degraded-security warning, scoped to the
             // current config. Re-evaluated each reload iteration so a repaired
             // config stops the warning and a freshly-degraded one starts it.
@@ -4156,6 +4161,20 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 // first iteration; reload would otherwise see a moved value.
                 let canvas_store_for_gateway = canvas_store_for_gateway.clone();
                 let canvas_store_for_channels = canvas_store_for_channels.clone();
+                companion_store =
+                    zeroclaw_memory::reload_companion_store(companion_store, &current_config)?;
+                let (companion_for_gateway, companion_for_channels) =
+                    zeroclaw_memory::clone_for_subsystems(&companion_store);
+                if let Some(store) = companion_store.as_ref() {
+                    ::zeroclaw_log::record!(
+                        INFO,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({
+                                "path": store.path().display().to_string(),
+                            })),
+                        "daemon holding companion store for this generation"
+                    );
+                }
                 let mut registry = daemon::DaemonRegistry::new();
 
                 // SOP loading is gated on `[sop] sops_dir`: unset disables all
@@ -4192,6 +4211,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
                         let canvas_store = canvas_store_for_gateway.clone();
                         let sop_engine = sop_e.clone();
                         let sop_audit = sop_a.clone();
+                        let companion_store = companion_for_gateway.clone();
                         Box::pin(async move {
                             Box::pin(zeroclaw_gateway::run_gateway(
                                 &host,
@@ -4203,6 +4223,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
                                 Some(canvas_store),
                                 sop_engine,
                                 sop_audit,
+                                companion_store,
                             ))
                             .await
                         })
@@ -4216,6 +4237,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
                         let canvas_store = canvas_store_for_channels.clone();
                         let sop_engine = sop_e.clone();
                         let sop_audit = sop_a.clone();
+                        let companion_store = companion_for_channels.clone();
                         Box::pin(async move {
                             Box::pin(zeroclaw_channels::orchestrator::start_channels(
                                 config,
@@ -4223,6 +4245,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
                                 cancel,
                                 sop_engine,
                                 sop_audit,
+                                companion_store,
                             ))
                             .await
                         })
@@ -4948,8 +4971,14 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     sop_audit.as_ref(),
                     config.sop.maintenance_interval_secs,
                 );
+                let companion_store = zeroclaw_memory::create_companion_store(&config)?;
                 let result = Box::pin(channels::start_channels(
-                    config, None, cancel, sop_engine, sop_audit,
+                    config,
+                    None,
+                    cancel,
+                    sop_engine,
+                    sop_audit,
+                    companion_store,
                 ))
                 .await;
                 if let Some(handle) = sop_maintenance {
@@ -7508,8 +7537,19 @@ async fn run_gateway_if_enabled(
     // /admin/reload returns 503 with a clear "no supervisor; restart
     // manually" message, None for tui_registry (no TUI socket), and None
     // for canvas_store so the gateway falls back to its own default.
+    // Companion store is constructed once here — run_gateway never opens it.
+    let companion_store = zeroclaw_memory::create_companion_store(&config)?;
     let result = Box::pin(gateway::run_gateway(
-        host, port, config, tx, None, None, None, None, None,
+        host,
+        port,
+        config,
+        tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        companion_store,
     ))
     .await;
     // Self-respawn after the listener is released, if an in-app upgrade

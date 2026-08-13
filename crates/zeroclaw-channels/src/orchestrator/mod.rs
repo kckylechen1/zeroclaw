@@ -514,8 +514,8 @@ struct ChannelRuntimeContext {
 }
 
 impl ChannelRuntimeContext {
-    /// Companion PortableKernel handle held for later capture. PR1 only owns
-    /// open/close/reload; turn-path capture is a later slice.
+    /// Companion PortableKernel handle injected from the composition root.
+    /// PR1 owns open/close/reload; turn-path capture is a later slice.
     pub(crate) fn companion_store(&self) -> Option<&Arc<zeroclaw_memory::CompanionStore>> {
         self.companion_store.as_ref()
     }
@@ -7028,6 +7028,7 @@ pub async fn start_channels(
     cancel: tokio_util::sync::CancellationToken,
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
+    companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
 ) -> Result<()> {
     let config_arc = Arc::new(RwLock::new(config));
     let config: Config = config_arc.read().clone();
@@ -7080,7 +7081,17 @@ pub async fn start_channels(
         .unwrap_or_else(zeroclaw_runtime::i18n::detect_locale);
     zeroclaw_runtime::i18n::init(&i18n_locale);
 
-    let companion_store = zeroclaw_memory::create_companion_store(&config)?;
+    if let Some(store) = companion_store.as_ref() {
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
+                ::serde_json::json!({
+                    "path": store.path().display().to_string(),
+                })
+            ),
+            "channels supervisor holding companion store"
+        );
+    }
 
     // Single session backend shared across agents — they're scoped by
     // `session_key` (which already encodes `<channel_type>.<alias>`), so
@@ -7694,6 +7705,18 @@ pub async fn start_channels(
             sop_engine: sop_engine.clone(),
             sop_audit: sop_audit.clone(),
         });
+
+        if let Some(store) = runtime_ctx.companion_store() {
+            ::zeroclaw_log::record!(
+                INFO,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_attrs(::serde_json::json!({
+                        "path": store.path().display().to_string(),
+                        "agent": agent_alias,
+                    })),
+                "channel runtime holding companion store"
+            );
+        }
 
         agent_ctxs.insert(agent_alias.clone(), runtime_ctx);
     }

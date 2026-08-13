@@ -22,10 +22,12 @@ impl CompanionStore {
     /// `open_existing_deny`. Never migrates. Never calls `create_fresh` on a
     /// path that already exists.
     ///
+    /// Crate-private: the only production caller is [`crate::create_companion_store`].
+    ///
     /// # Errors
     /// Returns when the directory cannot be created, memcore refuses the open
     /// (including schema mismatch), or owner-only permissions cannot be set.
-    pub fn open_runtime(path: &Path) -> anyhow::Result<Self> {
+    pub(crate) fn open_runtime(path: &Path) -> anyhow::Result<Self> {
         if path.exists() {
             Self::open_existing_deny(path)
         } else {
@@ -33,9 +35,10 @@ impl CompanionStore {
         }
     }
 
-    /// CLI seam for schema upgrades. Runtime must not call this.
+    /// CLI seam for schema upgrades. Runtime and the daemon must not call this.
     ///
-    /// The future `zeroclaw companion migrate` command passes a typed
+    /// The only legitimate caller is the future `zeroclaw companion migrate`
+    /// command in the binary crate. That CLI passes a typed
     /// `Allow { approved_by }` context. The CLI body itself is a later slice.
     ///
     /// # Errors
@@ -129,16 +132,63 @@ fn map_open_error(err: MemoryError, path: &Path) -> anyhow::Error {
 
 #[cfg(unix)]
 fn ensure_owner_only_dir(path: &Path) -> anyhow::Result<()> {
+    use std::io::ErrorKind;
     use std::os::unix::fs::PermissionsExt;
 
-    std::fs::create_dir_all(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    Ok(())
+    match std::fs::create_dir(path) {
+        Ok(()) => {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+            Ok(())
+        }
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+            warn_if_existing_dir_not_owner_only(path);
+            Ok(())
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            std::fs::create_dir_all(path)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+#[cfg(unix)]
+fn warn_if_existing_dir_not_owner_only(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    let actual = meta.permissions().mode() & 0o777;
+    if actual == 0o700 {
+        return;
+    }
+    ::zeroclaw_log::record!(
+        WARN,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+            .with_attrs(::serde_json::json!({
+                "path": path.display().to_string(),
+                "expected_mode": "0700",
+                "actual_mode": format!("{actual:04o}"),
+            })),
+        &format!(
+            "companion store dir {} has mode {actual:04o}; expected 0700. \
+             Leaving permissions unchanged so a shared directory is not silently tightened.",
+            path.display()
+        )
+    );
 }
 
 #[cfg(not(unix))]
 fn ensure_owner_only_dir(path: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(path)?;
+    if !path.exists() {
+        std::fs::create_dir_all(path)?;
+    }
     Ok(())
 }
 
@@ -459,5 +509,68 @@ mod tests {
         assert_eq!(text_hits(&companion_path, "only in tachi"), 0);
         assert_eq!(text_hits(&tachi_path, "only in tachi"), 1);
         assert_eq!(text_hits(&tachi_path, "only in companion"), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_wide_permission_dir_is_left_unchanged_and_warned() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+        let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+        zeroclaw_log::try_install_capture_subscriber();
+        let mut rx = zeroclaw_log::subscribe_or_install();
+        while rx.try_recv().is_ok() {}
+
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("shared-tmp-like");
+        std::fs::create_dir(&store_dir).unwrap();
+        std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(unix_mode(&store_dir), 0o777);
+
+        let mut config = enabled_config(tmp.path());
+        config.companion_memory.store_dir = Some(store_dir.clone());
+        let store = create_companion_store(&config)
+            .expect("open into pre-existing dir")
+            .expect("enabled");
+        drop(store);
+
+        assert_eq!(
+            unix_mode(&store_dir),
+            0o777,
+            "pre-existing store_dir must not be chmod'd"
+        );
+
+        let mut found = false;
+        loop {
+            match rx.try_recv() {
+                Ok(value) => {
+                    if value.get("severity_text").and_then(|v| v.as_str()) != Some("WARN") {
+                        continue;
+                    }
+                    let attrs = value.get("attributes").cloned().unwrap_or_default();
+                    let message = value.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    let expected =
+                        attrs.get("expected_mode").and_then(|v| v.as_str()) == Some("0700");
+                    let actual = attrs.get("actual_mode").and_then(|v| v.as_str()) == Some("0777");
+                    let message_has_modes =
+                        message.contains("expected 0700") && message.contains("0777");
+                    if (expected && actual) || message_has_modes {
+                        found = true;
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(
+                    tokio::sync::broadcast::error::TryRecvError::Empty
+                    | tokio::sync::broadcast::error::TryRecvError::Closed,
+                ) => break,
+            }
+        }
+        zeroclaw_log::clear_broadcast_hook();
+        assert!(
+            found,
+            "pre-existing wide store_dir must WARN with expected 0700 vs actual 0777"
+        );
     }
 }

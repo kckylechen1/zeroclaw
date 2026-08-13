@@ -68,6 +68,17 @@ pub fn reload_companion_store(
     create_companion_store(config)
 }
 
+/// Clone one factory result for the two daemon consumers (gateway + channels).
+///
+/// Both handles are the same `Arc`, or both `None`. Callers must not open a
+/// second store for the other consumer.
+#[must_use]
+pub fn clone_for_subsystems(
+    store: &Option<Arc<CompanionStore>>,
+) -> (Option<Arc<CompanionStore>>, Option<Arc<CompanionStore>>) {
+    (store.clone(), store.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +122,39 @@ mod tests {
         let store = create_companion_store(&config).expect("feature-off factory");
         assert!(store.is_none());
         assert!(!config.companion_memory.db_path(tmp.path()).exists());
+    }
+
+    #[test]
+    fn clone_for_subsystems_keeps_both_consumers_on_the_same_arc() {
+        let tmp = TempDir::new().unwrap();
+        let config = cfg_with(tmp.path(), true);
+        let store = create_companion_store(&config).expect("factory once");
+        let (gateway, channels) = clone_for_subsystems(&store);
+        match (store.as_ref(), gateway.as_ref(), channels.as_ref()) {
+            (None, None, None) => {}
+            (Some(owner), Some(gw), Some(ch)) => {
+                assert!(
+                    Arc::ptr_eq(owner, gw) && Arc::ptr_eq(gw, ch),
+                    "daemon consumers must share the factory Arc, not reopen"
+                );
+            }
+            _ => panic!("clone_for_subsystems split None/Some across consumers"),
+        }
+    }
+
+    #[cfg(feature = "tachi")]
+    #[test]
+    fn enabled_daemon_composition_injects_one_arc_without_second_create() {
+        let tmp = TempDir::new().unwrap();
+        let config = cfg_with(tmp.path(), true);
+        let store = create_companion_store(&config)
+            .expect("factory once")
+            .expect("enabled");
+        let (gateway, channels) = clone_for_subsystems(&Some(store.clone()));
+        let gateway = gateway.expect("gateway clone");
+        let channels = channels.expect("channels clone");
+        assert!(Arc::ptr_eq(&store, &gateway));
+        assert!(Arc::ptr_eq(&gateway, &channels));
+        assert_eq!(Arc::strong_count(&store), 3);
     }
 }
