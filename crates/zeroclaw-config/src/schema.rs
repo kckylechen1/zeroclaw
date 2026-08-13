@@ -19544,6 +19544,13 @@ impl Config {
     /// obviously invalid values early instead of failing at arbitrary runtime points.
     pub fn validate(&self) -> Result<()> {
         validate_memory_rerank_config(&self.memory)?;
+        if let Err(reason) = self.companion_memory.validate() {
+            validation_bail!(
+                RequiredFieldEmpty,
+                "companion_memory.owner.principal_id",
+                "{reason}"
+            );
+        }
 
         // Tunnel — OpenVPN
         if self.tunnel.tunnel_provider.trim() == "openvpn" {

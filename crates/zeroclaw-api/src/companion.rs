@@ -4,6 +4,13 @@
 //! (`authority_class`, `source_partition`). The kernel records them and does
 //! not interpret them. Full User Model lifecycle (review, heads, projection)
 //! is a later slice; this module freezes the lexicon those rows will stamp.
+//!
+//! The owner-gate classifier is a pure function with no I/O, so it lives next
+//! to these types. Production construction of [`CompanionIngress`] is reserved
+//! for the companion-capture entry — that is the only production call site
+//! allowed to mint a trusted-local ingress. Capture is what keeps the
+//! "logic stays where it runs" rule without moving the classifier out of the
+//! types crate.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,8 +18,10 @@ use crate::principal::PrincipalId;
 
 /// Under what authority a companion-memory mutation was made.
 ///
-/// Serialized snake_case literals are the outbox `authority_class` tokens.
+/// Serialized literals are the outbox `authority_class` tokens.
 /// They are a closed vocabulary: `[a-z0-9_.-]`, at most 64 bytes.
+/// [`AuthorityClass::SharedOperator`] uses `shared-operator` to match the
+/// existing principal sentinel; every other variant is snake_case.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorityClass {
@@ -29,6 +38,7 @@ pub enum AuthorityClass {
     TaskScoped,
     /// Unmatched ingress. The shared-operator sentinel: it can never produce
     /// [`AuthorityClass::OwnerAuthored`].
+    #[serde(rename = "shared-operator")]
     SharedOperator,
 }
 
@@ -41,7 +51,7 @@ impl AuthorityClass {
             Self::OwnerRatified => "owner_ratified",
             Self::AgentInferred => "agent_inferred",
             Self::TaskScoped => "task_scoped",
-            Self::SharedOperator => "shared_operator",
+            Self::SharedOperator => "shared-operator",
         }
     }
 }
@@ -54,7 +64,10 @@ impl std::fmt::Display for AuthorityClass {
 
 /// Which companion-memory partition a mutation happened in.
 ///
-/// Serialized snake_case literals are the outbox `source_partition` tokens.
+/// [`SourcePartition::as_str`] is the storage and path name. Ordinary outbox
+/// rows use [`SourcePartition::outbox_token`], which is `None` for the
+/// physically isolated private dyad — that partition must never enter the
+/// ordinary outbox.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourcePartition {
@@ -62,15 +75,16 @@ pub enum SourcePartition {
     UserModel,
     /// Agent identity, dispositions, and persona projection.
     AgentSoul,
-    /// Physically isolated private relationship store. Never enters the
-    /// ordinary outbox.
+    /// Physically isolated private relationship store. Storage name only;
+    /// [`SourcePartition::outbox_token`] is `None`.
     PrivateDyad,
     /// Shared-lexicon store that may travel with the dyad.
     SharedLexicon,
 }
 
 impl SourcePartition {
-    /// The outbox token for this partition.
+    /// Storage and path name for this partition. Not an outbox admission
+    /// token; use [`Self::outbox_token`] before writing an outbox row.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -78,6 +92,17 @@ impl SourcePartition {
             Self::AgentSoul => "agent_soul",
             Self::PrivateDyad => "private_dyad",
             Self::SharedLexicon => "shared_lexicon",
+        }
+    }
+
+    /// Outbox `source_partition` token, if this partition may enter the
+    /// ordinary outbox. The private dyad is physically isolated and returns
+    /// `None`.
+    #[must_use]
+    pub const fn outbox_token(self) -> Option<&'static str> {
+        match self {
+            Self::PrivateDyad => None,
+            other => Some(other.as_str()),
         }
     }
 }
@@ -135,13 +160,17 @@ impl CompanionPrincipal {
 
 /// An opaque ingress-identity token comparable to
 /// `[companion_memory.owner].identities`.
+///
+/// Canonical form is trimmed ASCII-lowercase. Constructors normalize; matching
+/// compares this form on both sides.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IngressIdentity(String);
 
 impl IngressIdentity {
+    /// Normalize `token` to trimmed ASCII-lowercase.
     #[must_use]
-    pub fn new(token: impl Into<String>) -> Self {
-        Self(token.into())
+    pub fn new(token: impl AsRef<str>) -> Self {
+        Self(token.as_ref().trim().to_ascii_lowercase())
     }
 
     #[must_use]
@@ -152,52 +181,66 @@ impl IngressIdentity {
 
 impl From<String> for IngressIdentity {
     fn from(token: String) -> Self {
-        Self(token)
+        Self::new(token)
     }
 }
 
 impl From<&str> for IngressIdentity {
     fn from(token: &str) -> Self {
-        Self(token.to_owned())
+        Self::new(token)
     }
 }
 
 /// How a turn arrived, for owner-gate matching.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Fields are private so a caller cannot stamp `trusted_local` onto a channel
+/// identity. Construct only through the named constructors.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CompanionIngress {
-    /// Channel/gateway sender token, when the ingress has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity: Option<IngressIdentity>,
-    /// Trusted CLI / stdio / pairing. Eligible for owner only when the
-    /// configured identity list is empty and `trust_local` is true.
-    #[serde(default)]
-    pub trusted_local: bool,
+    identity: Option<IngressIdentity>,
+    trusted_local: bool,
 }
 
 impl CompanionIngress {
-    /// An explicit listed identity (channel sender, gateway user, …).
+    /// Channel or gateway sender identity. `trusted_local` is always false.
     #[must_use]
-    pub fn explicit(identity: impl Into<IngressIdentity>) -> Self {
+    pub fn from_channel_identity(identity: IngressIdentity) -> Self {
         Self {
-            identity: Some(identity.into()),
+            identity: Some(identity),
             trusted_local: false,
         }
     }
 
-    /// Trusted CLI / stdio / pairing, with no listed identity token.
+    /// Trusted CLI / stdio / pairing entry.
+    ///
+    /// Production code may call this only from the companion-capture trusted
+    /// entry path. Tests may construct it directly. Channel and gateway
+    /// ingress must use [`Self::from_channel_identity`].
     #[must_use]
-    pub fn trusted_local() -> Self {
+    pub fn trusted_local_entry() -> Self {
         Self {
             identity: None,
             trusted_local: true,
         }
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> Option<&IngressIdentity> {
+        self.identity.as_ref()
+    }
+
+    #[must_use]
+    pub fn is_trusted_local(&self) -> bool {
+        self.trusted_local
     }
 }
 
 /// The owner gate: opaque principal id plus the matching rules.
 ///
 /// Config deserializes into this shape; classification reads it. A list hit
-/// is the owner. Everything else is shared-operator.
+/// is the owner. Everything else is shared-operator. An empty
+/// `principal_id` can never produce [`AuthorityClass::OwnerAuthored`], even
+/// when a list or `trust_local` would otherwise admit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompanionOwnerGate {
     /// Declared owner principal. Stamped on owner-authored rows; not used to
@@ -226,11 +269,11 @@ impl CompanionOwnerGate {
     /// The declared owner principal, when `principal_id` is non-empty.
     #[must_use]
     pub fn principal(&self) -> Option<CompanionPrincipal> {
-        let id = self.principal_id.as_str();
+        let id = self.principal_id.as_str().trim();
         if id.is_empty() {
             None
         } else {
-            Some(CompanionPrincipal::new(self.principal_id.clone()))
+            Some(CompanionPrincipal::new(id))
         }
     }
 }
@@ -240,7 +283,9 @@ impl CompanionOwnerGate {
 /// A hit on the explicit identity list is [`AuthorityClass::OwnerAuthored`].
 /// Empty list plus `trust_local` treats Trusted CLI/stdio/pairing as owner.
 /// Every other ingress is [`AuthorityClass::SharedOperator`] and can never
-/// produce `owner_authored`.
+/// produce `owner_authored`. A missing `principal_id` also yields
+/// [`AuthorityClass::SharedOperator`]: owner admission without a principal
+/// cannot mint owner authority.
 ///
 /// This is the owner *gate*, not User Model content classification.
 /// `owner_ratified` / `agent_inferred` / `task_scoped` are frozen tokens for
@@ -258,11 +303,13 @@ pub fn classify_companion_authority(
 }
 
 fn is_declared_owner(ingress: &CompanionIngress, owner: &CompanionOwnerGate) -> bool {
+    if owner.principal_id.as_str().trim().is_empty() {
+        return false;
+    }
+
     if let Some(identity) = ingress
-        .identity
-        .as_ref()
+        .identity()
         .map(IngressIdentity::as_str)
-        .map(str::trim)
         .filter(|token| !token.is_empty())
         && owner
             .identities
@@ -272,7 +319,7 @@ fn is_declared_owner(ingress: &CompanionIngress, owner: &CompanionOwnerGate) -> 
         return true;
     }
 
-    owner.identities.is_empty() && owner.trust_local && ingress.trusted_local
+    owner.identities.is_empty() && owner.trust_local && ingress.is_trusted_local()
 }
 
 #[cfg(test)]
@@ -305,20 +352,24 @@ mod tests {
             principal_id: PrincipalId::from("owner-principal"),
             identities: identities
                 .iter()
-                .map(|s| IngressIdentity::from(*s))
+                .map(|s| IngressIdentity::new(*s))
                 .collect(),
             trust_local,
         }
     }
 
+    fn channel(identity: &str) -> CompanionIngress {
+        CompanionIngress::from_channel_identity(IngressIdentity::new(identity))
+    }
+
     #[test]
-    fn authority_class_serializes_snake_case_literals() {
+    fn authority_class_serializes_closed_literals() {
         let cases = [
             (AuthorityClass::OwnerAuthored, "owner_authored"),
             (AuthorityClass::OwnerRatified, "owner_ratified"),
             (AuthorityClass::AgentInferred, "agent_inferred"),
             (AuthorityClass::TaskScoped, "task_scoped"),
-            (AuthorityClass::SharedOperator, "shared_operator"),
+            (AuthorityClass::SharedOperator, "shared-operator"),
         ];
         for (value, literal) in cases {
             let json = serde_json::to_string(&value).expect("serialize");
@@ -331,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn source_partition_serializes_snake_case_literals() {
+    fn source_partition_storage_names_are_snake_case() {
         let cases = [
             (SourcePartition::UserModel, "user_model"),
             (SourcePartition::AgentSoul, "agent_soul"),
@@ -344,7 +395,21 @@ mod tests {
             let back: SourcePartition = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(back, value);
             assert_eq!(value.as_str(), literal);
-            assert_outbox_token(literal);
+        }
+    }
+
+    #[test]
+    fn private_dyad_never_yields_an_outbox_token() {
+        assert_eq!(SourcePartition::PrivateDyad.outbox_token(), None);
+        assert_eq!(SourcePartition::PrivateDyad.as_str(), "private_dyad");
+        for part in [
+            SourcePartition::UserModel,
+            SourcePartition::AgentSoul,
+            SourcePartition::SharedLexicon,
+        ] {
+            let token = part.outbox_token().expect("ordinary partitions outbox");
+            assert_eq!(token, part.as_str());
+            assert_outbox_token(token);
         }
     }
 
@@ -360,9 +425,17 @@ mod tests {
     #[test]
     fn explicit_list_hit_is_owner_authored() {
         let owner = gate_with(&["wechat:alice"], false);
-        let ingress = CompanionIngress::explicit("wechat:alice");
         assert_eq!(
-            classify_companion_authority(&ingress, &owner),
+            classify_companion_authority(&channel("wechat:alice"), &owner),
+            AuthorityClass::OwnerAuthored
+        );
+    }
+
+    #[test]
+    fn identity_match_is_ascii_case_insensitive() {
+        let owner = gate_with(&["telegram:42"], false);
+        assert_eq!(
+            classify_companion_authority(&channel("Telegram:42"), &owner),
             AuthorityClass::OwnerAuthored
         );
     }
@@ -370,9 +443,8 @@ mod tests {
     #[test]
     fn explicit_list_miss_is_never_owner_authored() {
         let owner = gate_with(&["wechat:alice"], false);
-        let ingress = CompanionIngress::explicit("wechat:bob");
         assert_eq!(
-            classify_companion_authority(&ingress, &owner),
+            classify_companion_authority(&channel("wechat:bob"), &owner),
             AuthorityClass::SharedOperator
         );
     }
@@ -380,9 +452,8 @@ mod tests {
     #[test]
     fn unmatched_trusted_local_is_never_owner_authored_when_list_is_set() {
         let owner = gate_with(&["wechat:alice"], true);
-        let ingress = CompanionIngress::trusted_local();
         assert_eq!(
-            classify_companion_authority(&ingress, &owner),
+            classify_companion_authority(&CompanionIngress::trusted_local_entry(), &owner),
             AuthorityClass::SharedOperator
         );
     }
@@ -390,9 +461,8 @@ mod tests {
     #[test]
     fn empty_list_trust_local_treats_trusted_cli_as_owner() {
         let owner = gate_with(&[], true);
-        let ingress = CompanionIngress::trusted_local();
         assert_eq!(
-            classify_companion_authority(&ingress, &owner),
+            classify_companion_authority(&CompanionIngress::trusted_local_entry(), &owner),
             AuthorityClass::OwnerAuthored
         );
     }
@@ -400,9 +470,8 @@ mod tests {
     #[test]
     fn empty_list_trust_local_does_not_promote_untrusted_ingress() {
         let owner = gate_with(&[], true);
-        let ingress = CompanionIngress::explicit("wechat:stranger");
         assert_eq!(
-            classify_companion_authority(&ingress, &owner),
+            classify_companion_authority(&channel("wechat:stranger"), &owner),
             AuthorityClass::SharedOperator
         );
     }
@@ -411,12 +480,8 @@ mod tests {
     fn empty_list_without_trust_local_never_yields_owner_authored() {
         let owner = gate_with(&[], false);
         for ingress in [
-            CompanionIngress::trusted_local(),
-            CompanionIngress::explicit("wechat:alice"),
-            CompanionIngress {
-                identity: None,
-                trusted_local: false,
-            },
+            CompanionIngress::trusted_local_entry(),
+            channel("wechat:alice"),
         ] {
             assert_eq!(
                 classify_companion_authority(&ingress, &owner),
@@ -433,11 +498,11 @@ mod tests {
         assert!(owner.identities.is_empty());
         assert!(!owner.trust_local);
         assert_eq!(
-            classify_companion_authority(&CompanionIngress::trusted_local(), &owner),
+            classify_companion_authority(&CompanionIngress::trusted_local_entry(), &owner),
             AuthorityClass::SharedOperator
         );
         assert_eq!(
-            classify_companion_authority(&CompanionIngress::explicit("anyone"), &owner),
+            classify_companion_authority(&channel("anyone"), &owner),
             AuthorityClass::SharedOperator
         );
     }
@@ -445,9 +510,25 @@ mod tests {
     #[test]
     fn blank_ingress_identity_is_not_a_list_hit() {
         let owner = gate_with(&["wechat:alice"], false);
-        let ingress = CompanionIngress::explicit("   ");
         assert_eq!(
-            classify_companion_authority(&ingress, &owner),
+            classify_companion_authority(&channel("   "), &owner),
+            AuthorityClass::SharedOperator
+        );
+    }
+
+    #[test]
+    fn empty_principal_never_yields_owner_authored() {
+        let owner = CompanionOwnerGate {
+            principal_id: PrincipalId::from(""),
+            identities: vec![IngressIdentity::new("wechat:alice")],
+            trust_local: true,
+        };
+        assert_eq!(
+            classify_companion_authority(&channel("wechat:alice"), &owner),
+            AuthorityClass::SharedOperator
+        );
+        assert_eq!(
+            classify_companion_authority(&CompanionIngress::trusted_local_entry(), &owner),
             AuthorityClass::SharedOperator
         );
     }
@@ -463,10 +544,12 @@ mod tests {
     }
 
     #[test]
-    fn companion_ingress_roundtrips_through_json() {
-        let ingress = CompanionIngress::explicit("telegram:42");
-        let json = serde_json::to_string(&ingress).expect("serialize");
-        let back: CompanionIngress = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, ingress);
+    fn channel_constructor_cannot_stamp_trusted_local() {
+        let ingress = channel("wechat:alice");
+        assert!(!ingress.is_trusted_local());
+        assert_eq!(
+            ingress.identity().map(IngressIdentity::as_str),
+            Some("wechat:alice")
+        );
     }
 }
