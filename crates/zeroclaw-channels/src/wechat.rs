@@ -7,6 +7,7 @@ use base64::Engine;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
@@ -527,15 +528,106 @@ struct SyncData {
     context_tokens: HashMap<String, String>,
 }
 
-/// Write bytes to a file with owner-only permissions (0o600) on Unix.
+/// Write bytes to `path` via a sibling temp file: `create_new`, write,
+/// `sync_all`, chmod 0o600 (Unix), then `rename` over the destination.
+///
+/// Process-crash safety: the previous durable file is never truncated in
+/// place, so a crash mid-write cannot replace it with a torn file. Power-loss
+/// durability is best-effort (`sync_all` on the temp file; Unix parent-dir
+/// fsync after rename, logged on failure) — not a guarantee.
+///
+/// Windows `std::fs::rename` is `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`
+/// (see the Rust std docs for [`std::fs::rename`]), so a successful rename
+/// replaces an existing destination. Residual risk: if another handle has the
+/// destination open without `FILE_SHARE_DELETE`, the replace can still fail.
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, data)?;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
+    let tmp = next_private_tmp(dir, file_name, &SEQ);
+    match write_private_to_tmp(&tmp, path, data) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Same-PID / other-namespace collision on the tmp name: retry
+            // once with a fresh name. Do not unlink the colliding file —
+            // we did not create it.
+            let tmp = next_private_tmp(dir, file_name, &SEQ);
+            write_private_to_tmp(&tmp, path, data)
+        }
+        other => other,
+    }
+}
+
+fn next_private_tmp(dir: &Path, file_name: &str, seq: &AtomicU64) -> PathBuf {
+    dir.join(format!(
+        ".{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        seq.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+fn write_private_to_tmp(tmp: &Path, dest: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let created: std::io::Result<()> = (|| {
+        let mut file = std::fs::File::create_new(tmp)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(tmp, dest)?;
+        Ok(())
+    })();
+    if let Err(e) = &created {
+        // Only unlink a tmp we created. `AlreadyExists` from `create_new`
+        // means another writer owns that name.
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            let _ = std::fs::remove_file(tmp);
+        }
+    }
+    created?;
+
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    if let Err(e) = sync_parent_dir(dest) {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+            "best-effort parent directory fsync failed after WeChat state rename"
+        );
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file = std::fs::File::open(dir)?;
+    file.sync_all()
+}
+
+fn persist_sync_data(
+    state_dir: &Path,
+    cursor: String,
+    context_tokens: HashMap<String, String>,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(state_dir).context("failed to create state dir")?;
+    let data = SyncData {
+        get_updates_buf: cursor,
+        context_tokens,
+    };
+    let json = serde_json::to_string(&data).context("failed to serialize sync data")?;
+    write_private(&state_dir.join(SYNC_FILE), json.as_bytes()).context("failed to write sync data")
 }
 
 /// Generate a random X-WECHAT-UIN header value.
@@ -884,17 +976,18 @@ impl WeChatChannel {
     }
 
     /// Save account data to disk.
-    fn save_account_data(&self, token: &str, account_id: &str, user_id: Option<&str>) {
-        if let Err(e) = std::fs::create_dir_all(&self.state_dir) {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                "failed to create state dir"
-            );
-            return;
-        }
+    ///
+    /// Async so the QR-login path does not block the runtime on filesystem
+    /// I/O. The write itself runs on `spawn_blocking` and uses
+    /// [`write_private`] (atomic replace + best-effort fsync). Errors
+    /// propagate to the caller.
+    async fn save_account_data(
+        &self,
+        token: &str,
+        account_id: &str,
+        user_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let state_dir = self.state_dir.clone();
         let data = AccountData {
             token: Some(token.to_string()),
             account_id: Some(account_id.to_string()),
@@ -902,66 +995,45 @@ impl WeChatChannel {
             user_id: user_id.map(String::from),
             saved_at: Some(chrono::Utc::now().to_rfc3339()),
         };
-        let path = self.state_dir.join(ACCOUNT_FILE);
-        match serde_json::to_string_pretty(&data) {
-            Ok(json) => {
-                if let Err(e) = write_private(&path, json.as_bytes()) {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                        "failed to write account data"
-                    );
-                }
-            }
-            Err(e) => ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                "failed to serialize account data"
-            ),
-        }
+        let json =
+            serde_json::to_string_pretty(&data).context("failed to serialize account data")?;
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&state_dir).context("failed to create state dir")?;
+            write_private(&state_dir.join(ACCOUNT_FILE), json.as_bytes())
+                .context("failed to write account data")
+        })
+        .await
+        .context("save_account_data task join")?
     }
 
-    /// Save sync cursor to disk.
-    fn save_sync_data(&self) {
-        if let Err(e) = std::fs::create_dir_all(&self.state_dir) {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                "failed to create state dir"
-            );
-            return;
-        }
-        let data = SyncData {
-            get_updates_buf: self.cursor.lock().clone(),
-            context_tokens: self.context_tokens.lock().clone(),
-        };
-        let path = self.state_dir.join(SYNC_FILE);
-        match serde_json::to_string(&data) {
-            Ok(json) => {
-                if let Err(e) = write_private(&path, json.as_bytes()) {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                        "failed to write sync data"
-                    );
-                }
-            }
-            Err(e) => ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                "failed to serialize sync data"
-            ),
-        }
+    /// Save sync cursor and context tokens to disk (blocking).
+    ///
+    /// Production async callers use [`Self::save_sync_data_async`]. Tests call
+    /// this directly against the same persist helper.
+    #[cfg(test)]
+    fn save_sync_data(&self) -> anyhow::Result<()> {
+        persist_sync_data(
+            &self.state_dir,
+            self.cursor.lock().clone(),
+            self.context_tokens.lock().clone(),
+        )
+    }
+
+    /// Non-blocking wrapper around [`Self::save_sync_data`].
+    async fn save_sync_data_async(&self) -> anyhow::Result<()> {
+        let state_dir = self.state_dir.clone();
+        let cursor = self.cursor.lock().clone();
+        let context_tokens = self.context_tokens.lock().clone();
+        tokio::task::spawn_blocking(move || persist_sync_data(&state_dir, cursor, context_tokens))
+            .await
+            .context("save_sync_data task join")?
+    }
+
+    async fn set_context_token(&self, user_id: &str, token: &str) -> anyhow::Result<()> {
+        self.context_tokens
+            .lock()
+            .insert(user_id.to_string(), token.to_string());
+        self.save_sync_data_async().await
     }
 
     fn has_token(&self) -> bool {
@@ -970,13 +1042,6 @@ impl WeChatChannel {
 
     fn get_token(&self) -> Option<String> {
         self.bot_token.read().ok().and_then(|t| t.clone())
-    }
-
-    fn set_context_token(&self, user_id: &str, token: &str) {
-        self.context_tokens
-            .lock()
-            .insert(user_id.to_string(), token.to_string());
-        self.save_sync_data();
     }
 
     fn get_context_token(&self, user_id: &str) -> Option<String> {
@@ -1913,7 +1978,8 @@ impl WeChatChannel {
         }
 
         // Persist to disk
-        self.save_account_data(&token, &account_id, user_id.as_deref());
+        self.save_account_data(&token, &account_id, user_id.as_deref())
+            .await?;
 
         Ok(())
     }
@@ -2321,7 +2387,18 @@ impl Channel for WeChatChannel {
                         *t = None;
                     }
                     self.context_tokens.lock().clear();
-                    self.save_sync_data();
+                    if let Err(e) = self.save_sync_data_async().await {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                            "failed to persist WeChat sync data after session expiry"
+                        );
+                    }
                     tokio::time::sleep(SESSION_PAUSE_DURATION).await;
                     // Try to re-login
                     if let Err(e) = self.ensure_logged_in().await {
@@ -2362,7 +2439,15 @@ impl Channel for WeChatChannel {
             {
                 cursor = new_cursor.to_string();
                 *self.cursor.lock() = cursor.clone();
-                self.save_sync_data();
+                if let Err(e) = self.save_sync_data_async().await {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                        "failed to persist WeChat sync cursor"
+                    );
+                }
             }
 
             if let Some(next_timeout) = data
@@ -2392,8 +2477,15 @@ impl Channel for WeChatChannel {
                 // Cache context_token
                 if let Some(ctx_token) = msg.get("context_token").and_then(|v| v.as_str())
                     && !ctx_token.is_empty()
+                    && let Err(e) = self.set_context_token(from_user_id, ctx_token).await
                 {
-                    self.set_context_token(from_user_id, ctx_token);
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                        "failed to persist WeChat context token"
+                    );
                 }
 
                 let items = msg
@@ -3275,8 +3367,8 @@ mod tests {
         assert!(data.context_tokens.is_empty());
     }
 
-    #[test]
-    fn context_tokens_survive_channel_restart() {
+    #[tokio::test]
+    async fn context_tokens_survive_channel_restart() {
         let temp = tempdir().unwrap();
         let state_dir = temp.path().to_path_buf();
 
@@ -3289,10 +3381,10 @@ mod tests {
                 Some(state_dir.clone()),
             )
             .unwrap();
-            ch.set_context_token("acct1:userA", "tok_A");
-            ch.set_context_token("acct1:userB", "tok_B");
+            ch.set_context_token("acct1:userA", "tok_A").await.unwrap();
+            ch.set_context_token("acct1:userB", "tok_B").await.unwrap();
             *ch.cursor.lock() = "cursor_123".to_string();
-            ch.save_sync_data();
+            ch.save_sync_data().unwrap();
         }
 
         let ch2 = WeChatChannel::new(
@@ -3316,8 +3408,8 @@ mod tests {
         assert_eq!(*ch2.cursor.lock(), "cursor_123");
     }
 
-    #[test]
-    fn set_context_token_persists_immediately() {
+    #[tokio::test]
+    async fn set_context_token_persists_immediately() {
         let temp = tempdir().unwrap();
         let state_dir = temp.path().to_path_buf();
 
@@ -3329,7 +3421,9 @@ mod tests {
             Some(state_dir.clone()),
         )
         .unwrap();
-        ch.set_context_token("acct:user1", "immediate_tok");
+        ch.set_context_token("acct:user1", "immediate_tok")
+            .await
+            .unwrap();
 
         let ch2 = WeChatChannel::new(
             "test",
@@ -3345,8 +3439,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn save_sync_data_preserves_context_tokens() {
+    #[tokio::test]
+    async fn save_sync_data_preserves_context_tokens() {
         let temp = tempdir().unwrap();
         let state_dir = temp.path().to_path_buf();
 
@@ -3358,9 +3452,11 @@ mod tests {
             Some(state_dir.clone()),
         )
         .unwrap();
-        ch.set_context_token("acct:user1", "my_token");
+        ch.set_context_token("acct:user1", "my_token")
+            .await
+            .unwrap();
         *ch.cursor.lock() = "new_cursor_value".to_string();
-        ch.save_sync_data();
+        ch.save_sync_data().unwrap();
 
         let ch2 = WeChatChannel::new(
             "test",
@@ -3395,8 +3491,8 @@ mod tests {
         assert_eq!(*ch.cursor.lock(), "");
     }
 
-    #[test]
-    fn context_token_overwrite_persists_latest() {
+    #[tokio::test]
+    async fn context_token_overwrite_persists_latest() {
         let temp = tempdir().unwrap();
         let state_dir = temp.path().to_path_buf();
 
@@ -3408,8 +3504,12 @@ mod tests {
             Some(state_dir.clone()),
         )
         .unwrap();
-        ch.set_context_token("acct:user1", "old_token");
-        ch.set_context_token("acct:user1", "new_token");
+        ch.set_context_token("acct:user1", "old_token")
+            .await
+            .unwrap();
+        ch.set_context_token("acct:user1", "new_token")
+            .await
+            .unwrap();
 
         let ch2 = WeChatChannel::new(
             "test",
@@ -3423,5 +3523,74 @@ mod tests {
             ch2.get_context_token("acct:user1"),
             Some("new_token".to_string())
         );
+    }
+
+    #[test]
+    fn write_private_sets_owner_only_permissions() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("account.json");
+        write_private(&path, b"{\"token\":\"x\"}").unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "{\"token\":\"x\"}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "durable file must be owner-read/write only");
+        }
+    }
+
+    #[test]
+    fn write_private_failure_does_not_clobber_existing_file() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("sync.json");
+        write_private(&path, b"{\"get_updates_buf\":\"old\"}").unwrap();
+
+        // Make the directory unwritable so the temp-file create fails.
+        // The existing durable file must remain intact.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = temp.path();
+            let original = std::fs::metadata(dir).unwrap().permissions();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let err = write_private(&path, b"{\"get_updates_buf\":\"new\"}").unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+            std::fs::set_permissions(dir, original).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-Unix, simulate failure by targeting a path whose parent
+            // is a file rather than a directory.
+            let blocker = temp.path().join("not-a-dir");
+            std::fs::write(&blocker, b"file").unwrap();
+            let nested = blocker.join("sync.json");
+            assert!(write_private(&nested, b"new").is_err());
+        }
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents, "{\"get_updates_buf\":\"old\"}",
+            "a failed write must not truncate or replace the previous file"
+        );
+    }
+
+    #[test]
+    fn write_private_replaces_existing_destination() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("sync.json");
+        write_private(&path, b"{\"get_updates_buf\":\"old\"}").unwrap();
+        write_private(&path, b"{\"get_updates_buf\":\"new\"}").unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents, "{\"get_updates_buf\":\"new\"}",
+            "a successful write must replace an existing destination on every platform; Windows std::fs::rename is MoveFileExW+MOVEFILE_REPLACE_EXISTING"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 }

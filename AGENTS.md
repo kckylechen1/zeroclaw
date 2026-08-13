@@ -123,7 +123,7 @@ is still ours simply stays.
 | risk-profile `allowed_tools`: absent ≠ empty | maps `[]` → `None` → unrestricted | ✅ carried |
 | cron `allowed_tools = []` means deny-all | ships a test asserting the opposite (`empty_allowed_tools_stored_as_none`) | ✅ carried, deliberately conflicts |
 | `ModelProvider::set_credential` + real 429 rotation | logs "cannot apply … Retrying with original key" in 4 places | ✅ re-derived on upstream tip |
-| WeChat atomic / non-blocking state persistence | `write_private` still does blocking `std::fs::write`, non-atomic truncate, chmod after write | ⬜ not ported — `save_account_data` is sync `fn`; porting changes its signature and ripples to callers |
+| WeChat atomic / non-blocking state persistence | `write_private` still does blocking `std::fs::write`, non-atomic truncate, chmod after write | ✅ carried — atomic tmp+chmod+rename with best-effort fsync (process-crash safe, not a power-loss guarantee); `save_account_data` is `async` via `spawn_blocking` |
 | Tachi memory backend | absent | ✅ carried, feature-gated behind `tachi` — the fork's own agent-memory backend, distinct from the Hyperion trading memory path |
 | HyperMemory custom CRUD backend | absent | ❌ retired (#634 option C) — never re-add |
 
