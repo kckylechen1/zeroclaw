@@ -2240,6 +2240,7 @@ pub(crate) mod tests {
                     std::path::PathBuf::new(),
                 ),
             ),
+            companion_store: None,
             auto_save: false,
             webhook_secret_hash: None,
             pairing: Arc::new(PairingGuard::new(false, &[])),

@@ -441,6 +441,9 @@ struct ChannelRuntimeContext {
     prompt_config: Arc<zeroclaw_config::schema::Config>,
     memory: Arc<dyn Memory>,
     memory_strategy: Arc<dyn MemoryStrategy>,
+    /// Companion PortableKernel store. Shared across agents; sibling of
+    /// `memory_strategy`, not inside `TachiMemory`.
+    companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
     tools_registry: Arc<Vec<Box<dyn Tool>>>,
     observer: Arc<dyn Observer>,
     system_prompt: Arc<String>,
@@ -508,6 +511,14 @@ struct ChannelRuntimeContext {
     persist_locks: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
+}
+
+impl ChannelRuntimeContext {
+    /// Companion PortableKernel handle injected from the composition root.
+    /// PR1 owns open/close/reload; turn-path capture is a later slice.
+    pub(crate) fn companion_store(&self) -> Option<&Arc<zeroclaw_memory::CompanionStore>> {
+        self.companion_store.as_ref()
+    }
 }
 
 /// Acquire the per-conversation-history-key persistence lock so that
@@ -7017,6 +7028,7 @@ pub async fn start_channels(
     cancel: tokio_util::sync::CancellationToken,
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
+    companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
 ) -> Result<()> {
     let config_arc = Arc::new(RwLock::new(config));
     let config: Config = config_arc.read().clone();
@@ -7068,6 +7080,18 @@ pub async fn start_channels(
         .map(ToString::to_string)
         .unwrap_or_else(zeroclaw_runtime::i18n::detect_locale);
     zeroclaw_runtime::i18n::init(&i18n_locale);
+
+    if let Some(store) = companion_store.as_ref() {
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
+                ::serde_json::json!({
+                    "path": store.path().display().to_string(),
+                })
+            ),
+            "channels supervisor holding companion store"
+        );
+    }
 
     // Single session backend shared across agents — they're scoped by
     // `session_key` (which already encodes `<channel_type>.<alias>`), so
@@ -7605,6 +7629,7 @@ pub async fn start_channels(
             prompt_config: Arc::new(config.clone()),
             memory: Arc::clone(&mem),
             memory_strategy,
+            companion_store: companion_store.clone(),
             tools_registry: Arc::clone(&tools_registry),
             observer: Arc::clone(&observer),
             system_prompt: Arc::new(system_prompt),
@@ -7680,6 +7705,18 @@ pub async fn start_channels(
             sop_engine: sop_engine.clone(),
             sop_audit: sop_audit.clone(),
         });
+
+        if let Some(store) = runtime_ctx.companion_store() {
+            ::zeroclaw_log::record!(
+                INFO,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_attrs(::serde_json::json!({
+                        "path": store.path().display().to_string(),
+                        "agent": agent_alias,
+                    })),
+                "channel runtime holding companion store"
+            );
+        }
 
         agent_ctxs.insert(agent_alias.clone(), runtime_ctx);
     }
@@ -8167,6 +8204,7 @@ fn concurrent_persist_lock_serialization() {
                 std::path::PathBuf::new(),
             ),
         ),
+        companion_store: None,
         tools_registry: Arc::new(vec![]),
         observer: Arc::new(NoopObserver),
         system_prompt: Arc::new(String::new()),
