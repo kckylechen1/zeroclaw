@@ -817,10 +817,68 @@ mod tests {
     #[test]
     fn non_interactive_full_autonomy_never_needs_approval() {
         let mgr = ApprovalManager::for_non_interactive(&full_config());
-        // Full autonomy means no approval needed, even in non-interactive mode.
+        // Full autonomy with empty always_ask means no approval needed,
+        // even in non-interactive mode.
         assert!(!mgr.needs_approval("shell"));
         assert!(!mgr.needs_approval("file_write"));
         assert!(!mgr.needs_approval("anything"));
+    }
+
+    fn full_always_ask_config(always_ask: &[&str], auto_approve: &[&str]) -> RiskProfileConfig {
+        RiskProfileConfig {
+            level: AutonomyLevel::Full,
+            always_ask: always_ask.iter().map(|tool| (*tool).to_string()).collect(),
+            auto_approve: auto_approve
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect(),
+            ..RiskProfileConfig::default()
+        }
+    }
+
+    #[test]
+    fn non_interactive_full_autonomy_honors_exact_always_ask() {
+        let profile = full_always_ask_config(&["shell"], &[]);
+        for mgr in [
+            ApprovalManager::for_non_interactive(&profile),
+            ApprovalManager::for_non_interactive_backchannel(&profile),
+        ] {
+            assert!(
+                mgr.needs_approval("shell"),
+                "exact always_ask must prompt under Full, including non-interactive"
+            );
+            assert!(
+                !mgr.needs_approval("file_write"),
+                "uncovered Full tool must still auto-approve"
+            );
+        }
+    }
+
+    #[test]
+    fn non_interactive_full_autonomy_honors_wildcard_always_ask() {
+        let profile = full_always_ask_config(&["*"], &[]);
+        for mgr in [
+            ApprovalManager::for_non_interactive(&profile),
+            ApprovalManager::for_non_interactive_backchannel(&profile),
+        ] {
+            assert!(mgr.needs_approval("shell"));
+            assert!(mgr.needs_approval("file_write"));
+            assert!(mgr.needs_approval("anything"));
+        }
+    }
+
+    #[test]
+    fn non_interactive_full_autonomy_always_ask_wins_over_auto_approve() {
+        let profile = full_always_ask_config(&["shell"], &["shell"]);
+        for mgr in [
+            ApprovalManager::for_non_interactive(&profile),
+            ApprovalManager::for_non_interactive_backchannel(&profile),
+        ] {
+            assert!(
+                mgr.needs_approval("shell"),
+                "always_ask must win over auto_approve under Full non-interactive"
+            );
+        }
     }
 
     #[test]
