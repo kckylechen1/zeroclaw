@@ -50,18 +50,15 @@ pub struct SubagentsConfig {
     /// the log.
     ///
     /// **Why not 128.** The coordinator's compiled-in default used to be 128,
-    /// inherited verbatim from `DelegateTool::MAX_CONCURRENT_BACKGROUND_DELEGATIONS`
-    /// (`zeroclaw-runtime/src/tools/delegate.rs`). That constant is a *runaway
-    /// backstop* — "if we got here, something is broken" — and it was copied
-    /// into the slot where an operating limit belongs. 128 concurrent agent
-    /// turns on one machine is not a limit; it is the absence of one.
+    /// inherited verbatim from a retired `DelegateTool` runaway backstop.
+    /// That constant meant "if we got here, something is broken" and was
+    /// copied into the slot where an operating limit belongs. 128 concurrent
+    /// agent turns on one machine is not a limit; it is the absence of one.
     ///
-    /// **`0` disables the limit entirely**, matching the convention
-    /// `zeroclaw_coordinator::at_child_capacity` and
-    /// `DelegateTool::at_background_capacity` already use for their own caps.
-    /// It is spelled `0` rather than omitting the key because an absent key
-    /// means "use the default", and "no limit" must be something an operator
-    /// has to type.
+    /// **`0` disables the limit entirely**, matching
+    /// `zeroclaw_coordinator::at_child_capacity`. It is spelled `0` rather
+    /// than omitting the key because an absent key means "use the default",
+    /// and "no limit" must be something an operator has to type.
     #[serde(default = "default_max_concurrent_children")]
     pub max_concurrent_children: usize,
 }

@@ -24,13 +24,11 @@
 //! ## The `agent`/`parent_id` field choice
 //!
 //! `TaskRecord::agent` is "the agent alias that owns and executes this task"
-//! (used by alias-delete cascades), and every existing producer
-//! (`spawn_subagent.rs`, `delegate.rs`) fills it with the *parent's* alias,
-//! not the child's `agent_type` (which is a role, e.g. `"explore"`, not an
-//! alias). `ChildRequest::parent_alias` carries exactly that alias — added
-//! for this purpose after a cold review spelled out what alias-keyed
-//! cascades would do to a session id filed in an alias column.
-//! `parent_id` stays `parent_session_id`: session identity is what
+//! (used by alias-delete cascades), and coordinator-spawned children
+//! (`spawn_subagent`, background `delegate`) fill it with the *parent's* alias
+//! via `ChildRequest::parent_alias`, not the child's `agent_type` (which is a
+//! role, e.g. `"explore"`, not an alias). `parent_id` stays
+//! `parent_session_id`: session identity is what
 //! `claim_undelivered_children` keys children under.
 //!
 //! ## Error posture
@@ -91,10 +89,9 @@ impl ChildPersistence for SubagentPersistence {
     /// Create the row for a newly spawned child, in `Running` — the only
     /// non-terminal state a coordinator-spawned child is ever written in.
     ///
-    /// This is the first production writer of `parent_id`: every existing
-    /// `TaskRecord` producer in this crate (`spawn_subagent.rs`,
-    /// `delegate.rs`) sets it to `None` today, because none of them carry a
-    /// caller-supplied parent identity the way `ChildRequest` does.
+    /// This is the production writer of `parent_id`: coordinator-spawned
+    /// children (`spawn_subagent`, background `delegate`) carry a
+    /// caller-supplied parent identity on `ChildRequest`.
     fn record_spawn(&mut self, request: &ChildRequest) -> Result<(), PersistenceError> {
         let rec = TaskRecord {
             id: request.child_id.clone(),

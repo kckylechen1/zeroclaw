@@ -19,6 +19,11 @@ use zeroclaw_config::schema::{
     AliasedAgentConfig, Config, DelegateExecutionMode, DelegateToolConfig, ModelProviderConfig,
     ResolvedRuntime, RiskProfileConfig, RuntimeProfileConfig, SkillBundleConfig,
 };
+use zeroclaw_coordinator::{
+    ActiveChildSummary, CancelCommand, CancelOutcome, CancelTarget, ChildOutcome, ChildOverrides,
+    ChildRequest, ChildSnapshot, ChildStatus, CommandSender, CoordinatorCommand, ListActiveCommand,
+    QueryCommand, SpawnAdmission, SpawnCommand, spawn_admission_timeout,
+};
 use zeroclaw_log::Instrument as _;
 use zeroclaw_memory::Memory;
 use zeroclaw_providers::{self, ChatMessage, ModelProvider, ProviderDispatch};
@@ -27,6 +32,35 @@ use zeroclaw_tools::memory_forget::MemoryForgetTool;
 use zeroclaw_tools::memory_purge::MemoryPurgeTool;
 use zeroclaw_tools::memory_recall::MemoryRecallTool;
 use zeroclaw_tools::memory_store::MemoryStoreTool;
+
+/// Test seam for [`coordinator_commands`]: a per-test `CommandSender`, so a
+/// background-delegate test can drive a real, locally-booted coordinator
+/// without going through `control_plane::global`'s process-wide `OnceLock`.
+/// Same shape and reason as `spawn_subagent::COMMAND_SENDER_TEST_HOOK`.
+#[cfg(test)]
+static COMMAND_SENDER_TEST_HOOK: std::sync::Mutex<Option<CommandSender>> =
+    std::sync::Mutex::new(None);
+
+/// Where the background path gets the live coordinator's command channel.
+///
+/// Production always reads the process-global control-plane
+/// (`crate::control_plane::control_plane()`); tests may inject a per-test
+/// sender through [`COMMAND_SENDER_TEST_HOOK`] instead. `None` either way
+/// means "no coordinator is running in this process" — the caller's job is
+/// to refuse a background spawn on that, not to guess.
+fn coordinator_commands() -> Option<CommandSender> {
+    #[cfg(test)]
+    {
+        if let Some(hooked) = COMMAND_SENDER_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return Some(hooked);
+        }
+    }
+    crate::control_plane::control_plane().and_then(|cp| cp.commands.clone())
+}
 
 fn current_tool_loop_session_key() -> Option<String> {
     TOOL_LOOP_SESSION_KEY.try_with(Clone::clone).ok().flatten()
@@ -72,15 +106,6 @@ enum BackgroundResultState {
 }
 
 impl BackgroundResultState {
-    fn from_file_status(status: &BackgroundTaskStatus) -> Self {
-        match status {
-            BackgroundTaskStatus::Running => Self::Running,
-            BackgroundTaskStatus::Completed => Self::Completed,
-            BackgroundTaskStatus::Failed => Self::Failed,
-            BackgroundTaskStatus::Cancelled => Self::Cancelled,
-        }
-    }
-
     fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -103,6 +128,110 @@ impl BackgroundResultState {
     fn is_failure(self) -> bool {
         !matches!(self, Self::Running | Self::Completed)
     }
+
+    fn from_child_status(status: &ChildStatus) -> Self {
+        match status {
+            ChildStatus::Initializing | ChildStatus::Running { .. } => Self::Running,
+            ChildStatus::Finished { outcome, .. } => match outcome {
+                ChildOutcome::Completed => Self::Completed,
+                ChildOutcome::Failed => Self::Failed,
+                ChildOutcome::Cancelled => Self::Cancelled,
+                ChildOutcome::TimedOut => Self::TimedOut,
+                ChildOutcome::Lost => Self::Lost,
+            },
+        }
+    }
+
+    fn to_task_status(self) -> Option<BackgroundTaskStatus> {
+        match self {
+            Self::Running => Some(BackgroundTaskStatus::Running),
+            Self::Completed => Some(BackgroundTaskStatus::Completed),
+            Self::Failed => Some(BackgroundTaskStatus::Failed),
+            Self::Cancelled => Some(BackgroundTaskStatus::Cancelled),
+            Self::Lost | Self::TimedOut => None,
+        }
+    }
+}
+
+fn epoch_ms_to_rfc3339(ms: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(i64::try_from(ms).unwrap_or(0))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH)
+        .to_rfc3339()
+}
+
+/// Model-facing JSON for one coordinator child, keeping `check_result`'s
+/// historical `BackgroundDelegateResult` shape.
+fn snapshot_to_result_view(snapshot: &ChildSnapshot) -> (BackgroundResultState, serde_json::Value) {
+    let state = BackgroundResultState::from_child_status(&snapshot.status);
+    let started_at = epoch_ms_to_rfc3339(snapshot.started_at_epoch_ms);
+    if matches!(
+        state,
+        BackgroundResultState::Lost | BackgroundResultState::TimedOut
+    ) {
+        return (
+            state,
+            json!({
+                "task_id": snapshot.child_id,
+                "agent": snapshot.agent_type,
+                "status": state.as_str(),
+                "started_at": started_at,
+                "note": "the owning daemon exited or the task exceeded its max runtime; \
+                         reconciled by the supervision reaper",
+            }),
+        );
+    }
+    let (output, error) = match &snapshot.status {
+        ChildStatus::Finished { output, detail, .. } => (
+            if output.is_empty() {
+                None
+            } else {
+                Some(output.clone())
+            },
+            detail.clone(),
+        ),
+        _ => (None, None),
+    };
+    let finished_at = if state.is_pending() {
+        None
+    } else {
+        Some(epoch_ms_to_rfc3339(
+            snapshot
+                .started_at_epoch_ms
+                .saturating_add(snapshot.duration_ms),
+        ))
+    };
+    let result = BackgroundDelegateResult {
+        task_id: snapshot.child_id.clone(),
+        agent: snapshot.agent_type.clone(),
+        status: state
+            .to_task_status()
+            .unwrap_or(BackgroundTaskStatus::Failed),
+        output,
+        error,
+        started_at,
+        finished_at,
+    };
+    (
+        state,
+        serde_json::to_value(result).unwrap_or_else(|_| json!({})),
+    )
+}
+
+fn active_summary_to_list_entry(summary: &ActiveChildSummary) -> serde_json::Value {
+    json!({
+        "task_id": summary.child_id,
+        "agent": summary.agent_type,
+        "status": "running",
+        "started_at": epoch_ms_to_rfc3339(
+            u64::try_from(
+                chrono::Utc::now()
+                    .timestamp_millis()
+                    .saturating_sub(i64::try_from(summary.elapsed_ms).unwrap_or(0)),
+            )
+            .unwrap_or(0)
+        ),
+        "finished_at": serde_json::Value::Null,
+    })
 }
 
 pub struct DelegateTool {
@@ -146,14 +275,6 @@ pub struct DelegateTool {
     /// advertised roster so an agent is never offered itself as a
     /// delegation target. Empty when unset (legacy unit-test constructors).
     caller_alias: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DelegateAdmission {
-    /// This call entered through the user-visible `delegate` tool and must run
-    /// caller-side tool authorization plus target reachability checks.
-    Required,
-    Prevalidated,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,6 +467,17 @@ impl DelegateTool {
     pub fn with_workspace_dir(mut self, workspace_dir: PathBuf) -> Self {
         self.workspace_dir = workspace_dir;
         self
+    }
+
+    /// Session key the announce chain claims under.
+    ///
+    /// Must match `agent::run`'s fallback byte-for-byte
+    /// (`synthetic_session_key_for_run`) so a detached child's row is
+    /// filed under a name the parent's next turn actually asks about.
+    fn parent_session_id(&self) -> String {
+        crate::agent::loop_::current_session_key().unwrap_or_else(|| {
+            crate::agent::loop_::synthetic_session_key_for_run(&self.caller_alias)
+        })
     }
 
     fn agent_workspace(&self, agent_alias: &str) -> Option<PathBuf> {
@@ -1032,24 +1164,9 @@ impl DelegateTool {
             .collect()
     }
 
-    /// Directory where background delegate results are stored.
-    fn results_dir(&self) -> PathBuf {
-        self.workspace_dir.join("delegate_results")
-    }
-
-    async fn write_result_atomic(
-        result_path: &Path,
-        result: &BackgroundDelegateResult,
-    ) -> anyhow::Result<()> {
-        let bytes = serde_json::to_vec_pretty(result)?;
-        let tmp_path = result_path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
-        tokio::fs::write(&tmp_path, &bytes).await?;
-        tokio::fs::rename(&tmp_path, result_path).await?;
-        Ok(())
-    }
-
-    /// Validate that a user-provided task_id is a valid UUID to prevent
-    /// path traversal attacks (e.g. `../../etc/passwd`).
+    /// Reject non-UUID task ids. The coordinator keys children by the UUID
+    /// `execute_background` minted; anything else is caller error, not a
+    /// lookup.
     fn validate_task_id(task_id: &str) -> Result<(), String> {
         if uuid::Uuid::parse_str(task_id).is_err() {
             return Err(format!("Invalid task_id '{task_id}': must be a valid UUID"));
@@ -1128,9 +1245,10 @@ impl Tool for DelegateTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "When true, the sub-agent runs in a background tokio task and \
-                                    returns a task_id immediately. Results are stored to \
-                                    workspace/delegate_results/{task_id}.json.",
+                    "description": "When true, the sub-agent runs detached through the coordinator \
+                                    and returns a task_id immediately. Requires a running \
+                                    coordinator (the daemon). The outcome is announced into a \
+                                    future turn; action='check_result' can also poll that id.",
                     "default": false
                 },
                 "parallel": {
@@ -1263,7 +1381,7 @@ impl DelegateTool {
         prompt: &str,
         args: &serde_json::Value,
     ) -> anyhow::Result<ToolResult> {
-        self.execute_sync_with_admission(agent_name, prompt, args, DelegateAdmission::Required)
+        self.execute_sync_with_admission(agent_name, prompt, args)
             .await
     }
 
@@ -1272,7 +1390,6 @@ impl DelegateTool {
         agent_name: &str,
         prompt: &str,
         args: &serde_json::Value,
-        admission: DelegateAdmission,
     ) -> anyhow::Result<ToolResult> {
         let context = args
             .get("context")
@@ -1321,28 +1438,26 @@ impl DelegateTool {
             });
         }
 
-        if admission == DelegateAdmission::Required {
-            if let Err(error) = self
-                .security
-                .enforce_tool_operation(ToolOperation::Act, "delegate")
-            {
-                return Ok(ToolResult {
-                    success: false,
-                    output: ToolOutput::default(),
-                    error: Some(error),
-                });
-            }
+        if let Err(error) = self
+            .security
+            .enforce_tool_operation(ToolOperation::Act, "delegate")
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(error),
+            });
+        }
 
-            if let Err(e) = self.policy_for_target(agent_name) {
-                return Ok(ToolResult {
-                    success: false,
-                    output: ToolOutput::default(),
-                    error: Some(format!("{e:#}")),
-                });
-            }
-            if let Some(refusal) = self.independent_always_ask_refusal(agent_name) {
-                return Ok(refusal);
-            }
+        if let Err(e) = self.policy_for_target(agent_name) {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!("{e:#}")),
+            });
+        }
+        if let Some(refusal) = self.independent_always_ask_refusal(agent_name) {
+            return Ok(refusal);
         }
 
         // Create model_provider for this agent
@@ -1373,7 +1488,7 @@ impl DelegateTool {
         // Agentic mode: run full tool-call loop with allowlisted tools.
         if agentic {
             return self
-                .execute_agentic_with_admission(
+                .execute_agentic(
                     agent_name,
                     agent_config,
                     &provider_type,
@@ -1381,7 +1496,6 @@ impl DelegateTool {
                     &*model_provider,
                     &full_prompt,
                     temperature,
-                    admission,
                 )
                 .await;
         }
@@ -1449,8 +1563,11 @@ impl DelegateTool {
 impl DelegateTool {
     // ── Background Execution ────────────────────────────────────────
 
-    /// Spawn a sub-agent in a background tokio task. Returns a task_id immediately.
-    /// The result is persisted to `workspace/delegate_results/{task_id}.json`.
+    /// Hand the child to the coordinator and return a task_id immediately.
+    ///
+    /// Every gate (unknown agent, depth, Act, target policy, independent
+    /// always_ask) has already run before the coordinator sees this spawn.
+    /// Persistence, cancellation, and the announce chain are the coordinator's.
     async fn execute_background(
         &self,
         agent_name: &str,
@@ -1502,40 +1619,30 @@ impl DelegateTool {
             });
         }
 
-        let target_policy = match self.policy_for_target(agent_name) {
-            Ok(p) => p,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: ToolOutput::default(),
-                    error: Some(format!("{e:#}")),
-                });
-            }
-        };
+        if let Err(e) = self.policy_for_target(agent_name) {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!("{e:#}")),
+            });
+        }
         if let Some(refusal) = self.independent_always_ask_refusal(agent_name) {
             return Ok(refusal);
         }
 
-        // Runaway backstop: refuse a new background delegation once too many are already in
-        // flight (each is a full agent loop). The in-flight set is the live cancel-token map.
-        if Self::at_background_capacity(
-            Self::background_task_cancels().lock().len(),
-            Self::MAX_CONCURRENT_BACKGROUND_DELEGATIONS,
-        ) {
+        let Some(commands) = coordinator_commands() else {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
-                error: Some(format!(
-                    "Too many background delegations in flight (limit {}). Wait for some to \
-                     finish (check_result) or cancel one (cancel_task) before starting more.",
-                    Self::MAX_CONCURRENT_BACKGROUND_DELEGATIONS
-                )),
+                error: Some(
+                    "delegate: background=true requires a coordinator, and none is \
+                     running in this process (no daemon control-plane, or a control-plane \
+                     started without one — see `ControlPlaneHandle::commands`). Retry without \
+                     `background`, or run this under the daemon."
+                        .into(),
+                ),
             });
-        }
-
-        let task_id = uuid::Uuid::new_v4().to_string();
-        let results_dir = self.results_dir();
-        tokio::fs::create_dir_all(&results_dir).await?;
+        };
 
         let context = args
             .get("context")
@@ -1548,217 +1655,91 @@ impl DelegateTool {
             format!("[Context]\n{context}\n\n[Task]\n{prompt}")
         };
 
-        let started_at = chrono::Utc::now().to_rfc3339();
-        let agent_name_owned = agent_name.to_string();
-
-        // Write initial "running" status
-        let initial_result = BackgroundDelegateResult {
-            task_id: task_id.clone(),
-            agent: agent_name_owned.clone(),
-            status: BackgroundTaskStatus::Running,
-            output: None,
-            error: None,
-            started_at: started_at.clone(),
-            finished_at: None,
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let parent_session_id = self.parent_session_id();
+        const MAX_DESCRIPTION_CHARS: usize = 200;
+        let description = if full_prompt.chars().count() > MAX_DESCRIPTION_CHARS {
+            let truncated: String = full_prompt.chars().take(MAX_DESCRIPTION_CHARS).collect();
+            format!("delegate (background): {truncated}…")
+        } else {
+            format!("delegate (background): {full_prompt}")
         };
-        let result_path = results_dir.join(format!("{task_id}.json"));
-        Self::write_result_atomic(&result_path, &initial_result).await?;
 
-        // EPIC-A supervision: register the task in the durable control-plane BEFORE the
-        // spawn, so a crash between here and the spawn is recoverable by the reaper. A
-        // no-op when not running under a booted daemon (the plane is absent).
-        if let Some(cp) = crate::control_plane::control_plane() {
-            let _ = cp
-                .store
-                .create(crate::control_plane::TaskRecord {
-                    id: task_id.clone(),
-                    kind: crate::control_plane::TaskKind::Delegate,
-                    agent: agent_name_owned.clone(),
-                    status: crate::control_plane::TaskStatus::Running,
-                    owner_pid: std::process::id(),
-                    owner_boot_id: cp.boot_id.clone(),
-                    heartbeat_at: None,
-                    depth: self.depth,
-                    // No parent-id producer exists: `self` here is always the
-                    // top-level DelegateTool for whatever turn is currently
-                    // running (background/parallel re-delegation never
-                    // reaches this call with `self.depth > 0` — the "delegate"
-                    // tool name is filtered out of every delegated target's
-                    // own sub-agent registry, both Bounded
-                    // (`execute_agentic_with_admission`'s
-                    // `tool.name() != Self::NAME` filter) and Independent
-                    // (`independent_agentic_tools_for_target`'s
-                    // `tools.retain(|tool| tool.name() != Self::NAME)`)).
-                    // Whether *that* top-level turn is itself a tracked
-                    // control-plane task (e.g. a SubAgent run) is unknown
-                    // here: nothing threads a "current turn's own task id"
-                    // into `DelegateTool` (`new`/`new_with_options` in this
-                    // file always construct with no such id, and their sole
-                    // caller, `all_tools_with_runtime` in
-                    // `crates/zeroclaw-runtime/src/tools/mod.rs`, has none to
-                    // give). `None` is correct for a genuinely top-level
-                    // delegate call and merely the best available answer for
-                    // a turn that is itself nested — see the dispatch report
-                    // for the plumbing (`AgentRunOverrides` field +
-                    // `all_tools_with_runtime` wiring) that would
-                    // disambiguate the two.
-                    parent_id: None,
-                    originator_route: None,
-                    delivered: false,
-                    idem_key: None,
-                    principal_id: None,
-                    started_at: started_at.clone(),
-                    finished_at: None,
-                })
-                .await;
+        let request = ChildRequest {
+            child_id: task_id.clone(),
+            prompt: full_prompt,
+            description,
+            agent_type: agent_name.to_string(),
+            parent_session_id,
+            parent_alias: self.caller_alias.clone(),
+            parent_prompt_id: None,
+            resume_from: None,
+            cwd: None,
+            overrides: ChildOverrides {
+                spawn_depth: Some(self.depth + 1),
+                ..ChildOverrides::default()
+            },
+            run_in_background: true,
+            surface_completion: true,
+            await_to_completion: false,
+            fork_context: false,
+            cancel_token: zeroclaw_coordinator::CancelToken::new(),
+        };
+
+        let (admission_tx, admission_rx) = tokio::sync::oneshot::channel();
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        if let Err(error) = commands.0.send(CoordinatorCommand::Spawn(SpawnCommand {
+            request: Box::new(request),
+            admission_tx,
+            result_tx,
+        })) {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!(
+                    "delegate: background spawn failed — the coordinator actor is not \
+                     accepting commands (channel closed): {error}"
+                )),
+            });
         }
 
-        let agents = Arc::clone(&self.agents);
-        let security = target_policy;
-        let global_credential = self.global_credential.clone();
-        let provider_runtime_options = self.provider_runtime_options.clone();
-        // Monotonic descent: was `self.depth` (verbatim copy), which left the
-        // `self.depth >= max_depth` check inert — a chain of background delegations never
-        // escalated depth. Matches the documented `with_depth(parent.depth + 1)` intent.
-        // Behavior change: deep background re-delegation now saturates at `max_delegation_depth`.
-        let depth = self.depth + 1;
-        let parent_tools = Arc::clone(&self.parent_tools);
-        let runtime = self.runtime.clone();
-        let multimodal_config = self.multimodal_config.clone();
-        let delegate_config = self.delegate_config.clone();
-        let workspace_dir = self.workspace_dir.clone();
-        let child_token = self.cancellation_token.child_token();
-        // Register the live token so `cancel_task` can actually abort THIS task (removed
-        // when it settles, in the spawned closure below).
-        Self::background_task_cancels()
-            .lock()
-            .insert(task_id.clone(), child_token.clone());
-        let task_id_clone = task_id.clone();
-        let providers_models = Arc::clone(&self.providers_models);
-        let risk_profiles = Arc::clone(&self.risk_profiles);
-        let runtime_profiles = Arc::clone(&self.runtime_profiles);
-        let skill_bundles = Arc::clone(&self.skill_bundles);
-        let root_config = self.root_config.clone();
-        let caller_alias = self.caller_alias.clone();
-        let memory = self.memory.clone();
-        let parent_session_key = current_tool_loop_session_key();
-        let __zc_delegate_alias = agent_name_owned.clone();
-
-        zeroclaw_spawn::spawn!(
-            scope_delegate_session_key(parent_session_key, async move {
-                let inner = DelegateTool {
-                    agents,
-                    security,
-                    global_credential,
-                    provider_runtime_options,
-                    depth,
-                    parent_tools,
-                    runtime,
-                    multimodal_config,
-                    delegate_config,
-                    workspace_dir: workspace_dir.clone(),
-                    cancellation_token: child_token.clone(),
-                    memory,
-                    providers_models,
-                    risk_profiles,
-                    runtime_profiles,
-                    skill_bundles,
-                    root_config,
-                    caller_alias,
-                };
-
-                let args_inner = json!({
-                    "agent": agent_name_owned,
-                    "prompt": full_prompt,
+        match tokio::time::timeout(spawn_admission_timeout(), admission_rx).await {
+            Ok(Ok(SpawnAdmission::Admitted)) => {}
+            Ok(Ok(SpawnAdmission::Refused(refusal))) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "delegate: the coordinator refused to start this background \
+                         task — {refusal} No child was started (task_id={task_id} was \
+                         never admitted)."
+                    )),
                 });
-
-                // Race the delegation against cancellation
-                let outcome = tokio::select! {
-                    () = child_token.cancelled() => {
-                        Err("Cancelled by parent session".to_string())
-                    }
-                    result = Box::pin(inner.execute_sync_with_admission(
-                        &agent_name_owned,
-                        &full_prompt,
-                        &args_inner,
-                        DelegateAdmission::Prevalidated,
-                    )) => {
-                        match result {
-                            Ok(tool_result) => {
-                                if tool_result.success {
-                                    Ok(tool_result.output.into_string())
-                                } else {
-                                    Err(tool_result.error.unwrap_or_else(|| "Unknown error".into()))
-                                }
-                            }
-                            Err(e) => Err(e.to_string()),
-                        }
-                    }
-                };
-
-                let finished_at = chrono::Utc::now().to_rfc3339();
-                let final_result = match outcome {
-                    Ok(output) => BackgroundDelegateResult {
-                        task_id: task_id_clone.clone(),
-                        agent: agent_name_owned,
-                        status: BackgroundTaskStatus::Completed,
-                        output: Some(output),
-                        error: None,
-                        started_at,
-                        finished_at: Some(finished_at),
-                    },
-                    Err(err) => {
-                        let status = if err.contains("Cancelled") {
-                            BackgroundTaskStatus::Cancelled
-                        } else {
-                            BackgroundTaskStatus::Failed
-                        };
-                        BackgroundDelegateResult {
-                            task_id: task_id_clone.clone(),
-                            agent: agent_name_owned,
-                            status,
-                            output: None,
-                            error: Some(err),
-                            started_at,
-                            finished_at: Some(finished_at),
-                        }
-                    }
-                };
-
-                let result_path = results_dir.join(format!("{}.json", task_id_clone));
-                let _ = DelegateTool::write_result_atomic(&result_path, &final_result).await;
-
-                if let Some(cp) = crate::control_plane::control_plane() {
-                    let cp_status = match final_result.status {
-                        BackgroundTaskStatus::Completed => {
-                            crate::control_plane::TaskStatus::Completed
-                        }
-                        BackgroundTaskStatus::Failed => crate::control_plane::TaskStatus::Failed,
-                        BackgroundTaskStatus::Cancelled => {
-                            crate::control_plane::TaskStatus::Cancelled
-                        }
-                        BackgroundTaskStatus::Running => crate::control_plane::TaskStatus::Running,
-                    };
-                    let _ = cp
-                        .store
-                        .update_status(
-                            &task_id_clone,
-                            cp_status,
-                            final_result.output.clone(),
-                            final_result.error.clone(),
-                        )
-                        .await;
-                }
-
-                // Drop the live cancel token now the task has settled.
-                Self::background_task_cancels()
-                    .lock()
-                    .remove(&task_id_clone);
-            })
-            .instrument(::zeroclaw_log::attribution_span!(
-                &crate::agent::AgentAttribution(__zc_delegate_alias.as_str())
-            ))
-        );
+            }
+            Ok(Err(_)) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "delegate: the coordinator dropped this background spawn without \
+                         deciding it (task_id={task_id}); it was not admitted and nothing is \
+                         known to be running."
+                    )),
+                });
+            }
+            Err(_) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!(
+                        "delegate: the coordinator did not answer this background spawn \
+                         within {timeout:?} (task_id={task_id}); it may or may not have been \
+                         admitted — query that id before retrying.",
+                        timeout = spawn_admission_timeout()
+                    )),
+                });
+            }
+        }
 
         Ok(ToolResult {
             success: true,
@@ -1981,69 +1962,82 @@ impl DelegateTool {
 
     // ── Result Retrieval ────────────────────────────────────────────
 
-    async fn reconciled_loss_label(
-        task_id: &str,
-        file_status: &BackgroundTaskStatus,
-    ) -> Option<&'static str> {
-        let cp = crate::control_plane::control_plane()?;
-        Self::reconciled_loss_label_with(task_id, file_status, cp.store.as_ref()).await
-    }
-
-    /// Store-injected core of [`Self::reconciled_loss_label`] — kept separate from the
-    /// process-global accessor so it is unit-testable against an in-memory store.
-    async fn reconciled_loss_label_with(
-        task_id: &str,
-        file_status: &BackgroundTaskStatus,
-        store: &dyn crate::control_plane::TaskRegistry,
-    ) -> Option<&'static str> {
-        if *file_status != BackgroundTaskStatus::Running {
-            return None;
-        }
-        match store.get(task_id).await.ok().flatten()?.status {
-            crate::control_plane::TaskStatus::Lost => Some("lost"),
-            crate::control_plane::TaskStatus::TimedOut => Some("timed_out"),
-            _ => None,
-        }
-    }
-
-    async fn read_background_result(
+    async fn query_child(
         &self,
         task_id: &str,
-    ) -> anyhow::Result<Option<BackgroundDelegateResult>> {
-        let result_path = self.results_dir().join(format!("{task_id}.json"));
-        let content = match tokio::fs::read_to_string(&result_path).await {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let result = serde_json::from_str(&content)?;
-        Ok(Some(result))
+        block: bool,
+        timeout_ms: Option<u64>,
+    ) -> Option<ChildSnapshot> {
+        let commands = coordinator_commands()?;
+        let (respond_to, rx) = tokio::sync::oneshot::channel();
+        commands
+            .0
+            .send(CoordinatorCommand::Query(QueryCommand {
+                child_id: task_id.to_owned(),
+                parent_session_id: Some(self.parent_session_id()),
+                block,
+                timeout_ms,
+                respond_to,
+            }))
+            .ok()?;
+        rx.await.ok().flatten()
     }
 
-    async fn background_result_view(
-        task_id: &str,
-        result: BackgroundDelegateResult,
-    ) -> anyhow::Result<(BackgroundResultState, serde_json::Value)> {
-        if let Some(label) = Self::reconciled_loss_label(task_id, &result.status).await {
-            let state = match label {
-                "lost" => BackgroundResultState::Lost,
-                "timed_out" => BackgroundResultState::TimedOut,
-                _ => BackgroundResultState::from_file_status(&result.status),
-            };
-            return Ok((
-                state,
-                json!({
-                    "task_id": task_id,
-                    "agent": result.agent,
-                    "status": label,
-                    "started_at": result.started_at,
-                    "note": "the owning daemon exited or the task exceeded its max runtime; \
-                             reconciled by the supervision reaper",
-                }),
-            ));
+    async fn list_active_children(&self) -> Vec<ActiveChildSummary> {
+        let Some(commands) = coordinator_commands() else {
+            return Vec::new();
+        };
+        let (respond_to, rx) = tokio::sync::oneshot::channel();
+        if commands
+            .0
+            .send(CoordinatorCommand::ListActive(ListActiveCommand {
+                parent_session_id: self.parent_session_id(),
+                respond_to,
+            }))
+            .is_err()
+        {
+            return Vec::new();
         }
-        let state = BackgroundResultState::from_file_status(&result.status);
-        Ok((state, serde_json::to_value(result)?))
+        rx.await.unwrap_or_default()
+    }
+
+    async fn cancel_child(&self, task_id: &str) -> Option<CancelOutcome> {
+        let commands = coordinator_commands()?;
+        let (respond_to, rx) = tokio::sync::oneshot::channel();
+        commands
+            .0
+            .send(CoordinatorCommand::Cancel(CancelCommand {
+                parent_session_id: Some(self.parent_session_id()),
+                target: CancelTarget::ChildId(task_id.to_owned()),
+                respond_to,
+            }))
+            .ok()?;
+        rx.await.ok()
+    }
+
+    fn check_result_from_snapshot(snapshot: &ChildSnapshot) -> anyhow::Result<ToolResult> {
+        let error = match &snapshot.status {
+            ChildStatus::Finished { detail, .. } => detail.clone(),
+            _ => None,
+        };
+        let (state, value) = snapshot_to_result_view(snapshot);
+        let success = state.is_success();
+        Ok(ToolResult {
+            success,
+            output: serde_json::to_string_pretty(&value)?.into(),
+            error: if success {
+                None
+            } else if let Some(error) = error {
+                Some(error)
+            } else if state.is_failure() {
+                Some(format!(
+                    "background task is {} and will not complete",
+                    state.as_str()
+                ))
+            } else {
+                None
+            },
+        })
     }
 
     fn task_ids_from_args(args: &serde_json::Value) -> anyhow::Result<Vec<String>> {
@@ -2121,33 +2115,14 @@ impl DelegateTool {
             });
         }
 
-        let Some(result) = self.read_background_result(task_id).await? else {
+        let Some(snapshot) = self.query_child(task_id, false, None).await else {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
                 error: Some(format!("No result found for task_id '{task_id}'")),
             });
         };
-        let error = result.error.clone();
-        let (state, value) = Self::background_result_view(task_id, result).await?;
-        let success = state.is_success();
-
-        Ok(ToolResult {
-            success,
-            output: serde_json::to_string_pretty(&value)?.into(),
-            error: if success {
-                None
-            } else if let Some(error) = error {
-                Some(error)
-            } else if state.is_failure() {
-                Some(format!(
-                    "background task is {} and will not complete",
-                    state.as_str()
-                ))
-            } else {
-                None
-            },
-        })
+        Self::check_result_from_snapshot(&snapshot)
     }
 
     async fn handle_await_sessions(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
@@ -2180,11 +2155,11 @@ impl DelegateTool {
             let mut failed = Vec::new();
 
             for task_id in &task_ids {
-                let Some(result) = self.read_background_result(task_id).await? else {
+                let Some(snapshot) = self.query_child(task_id, false, None).await else {
                     missing.push(task_id.clone());
                     continue;
                 };
-                let (state, value) = Self::background_result_view(task_id, result).await?;
+                let (state, value) = snapshot_to_result_view(&snapshot);
                 if state.is_pending() {
                     pending.push(task_id.clone());
                 } else if state.is_failure() {
@@ -2227,42 +2202,14 @@ impl DelegateTool {
         }
     }
 
-    /// List all background delegate task results.
+    /// List in-flight background delegate children for this parent session.
     async fn handle_list_results(&self) -> anyhow::Result<ToolResult> {
-        let results_dir = self.results_dir();
-        if !results_dir.exists() {
-            return Ok(ToolResult {
-                success: true,
-                output: "No background delegate results found.".into(),
-                error: None,
-            });
-        }
-
-        let mut entries = tokio::fs::read_dir(&results_dir).await?;
-        let mut results = Vec::new();
-
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json")
-                && let Ok(content) = tokio::fs::read_to_string(&path).await
-                && let Ok(result) = serde_json::from_str::<BackgroundDelegateResult>(&content)
-            {
-                // Surface the reconciled loss state (lost/timed_out) for a task whose flat
-                // file still says `Running` but whose owning daemon died / timed out.
-                let status =
-                    match Self::reconciled_loss_label(&result.task_id, &result.status).await {
-                        Some(label) => json!(label),
-                        None => json!(result.status),
-                    };
-                results.push(json!({
-                    "task_id": result.task_id,
-                    "agent": result.agent,
-                    "status": status,
-                    "started_at": result.started_at,
-                    "finished_at": result.finished_at,
-                }));
-            }
-        }
+        let results: Vec<serde_json::Value> = self
+            .list_active_children()
+            .await
+            .iter()
+            .map(active_summary_to_list_entry)
+            .collect();
 
         if results.is_empty() {
             return Ok(ToolResult {
@@ -2277,25 +2224,6 @@ impl DelegateTool {
             output: serde_json::to_string_pretty(&results)?.into(),
             error: None,
         })
-    }
-
-    fn background_task_cancels() -> &'static parking_lot::Mutex<HashMap<String, CancellationToken>>
-    {
-        static M: std::sync::OnceLock<parking_lot::Mutex<HashMap<String, CancellationToken>>> =
-            std::sync::OnceLock::new();
-        M.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
-    }
-
-    /// Runaway backstop: the maximum number of background delegations allowed in flight at
-    /// once across the process. Each is a full agent loop, so this guards against a model
-    /// (or a runaway loop) spawning unbounded background agent runs; normal use stays well
-    /// under it.
-    const MAX_CONCURRENT_BACKGROUND_DELEGATIONS: usize = 128;
-
-    /// Pure predicate for the runaway backstop — separated from the live token-map read so
-    /// it is unit-testable. `cap == 0` disables the backstop.
-    fn at_background_capacity(in_flight: usize, cap: usize) -> bool {
-        cap != 0 && in_flight >= cap
     }
 
     /// Cancel a running background task by task_id.
@@ -2323,70 +2251,31 @@ impl DelegateTool {
             });
         }
 
-        let result_path = self.results_dir().join(format!("{task_id}.json"));
-        if !result_path.exists() {
-            return Ok(ToolResult {
+        match self.cancel_child(task_id).await {
+            None | Some(CancelOutcome::NotFound) => Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
                 error: Some(format!("No task found for task_id '{task_id}'")),
-            });
-        }
-
-        // Read current status
-        let content = tokio::fs::read_to_string(&result_path).await?;
-        let mut result: BackgroundDelegateResult = serde_json::from_str(&content)?;
-
-        if result.status != BackgroundTaskStatus::Running {
-            return Ok(ToolResult {
+            }),
+            Some(CancelOutcome::AlreadyFinished { outcome }) => Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
                 error: Some(format!(
-                    "Task '{task_id}' is not running (status: {:?})",
-                    result.status
+                    "Task '{task_id}' is not running (status: {outcome:?})"
                 )),
-            });
+            }),
+            Some(CancelOutcome::Cancelled) => Ok(ToolResult {
+                success: true,
+                output: format!("Task '{task_id}' cancelled: the running task was aborted.").into(),
+                error: None,
+            }),
         }
-
-        // Actually abort the running task by signalling its registered cancel token —
-        // this cascades into the task's `tokio::select!`, which settles it as Cancelled.
-        // Falls back to file-marking when the task already settled (token absent).
-        let aborted = Self::background_task_cancels()
-            .lock()
-            .remove(task_id)
-            .inspect(CancellationToken::cancel)
-            .is_some();
-
-        result.status = BackgroundTaskStatus::Cancelled;
-        result.error = Some("Cancelled by user request".into());
-        result.finished_at = Some(chrono::Utc::now().to_rfc3339());
-        Self::write_result_atomic(&result_path, &result).await?;
-
-        // Reconcile the durable supervision registry so the supervised view agrees.
-        if let Some(cp) = crate::control_plane::control_plane() {
-            let _ = cp
-                .store
-                .update_status(
-                    task_id,
-                    crate::control_plane::TaskStatus::Cancelled,
-                    None,
-                    Some("cancelled by user request".into()),
-                )
-                .await;
-        }
-
-        Ok(ToolResult {
-            success: true,
-            output: if aborted {
-                format!("Task '{task_id}' cancelled: the running task was aborted.").into()
-            } else {
-                format!("Task '{task_id}' marked cancelled (it had already settled).").into()
-            },
-            error: None,
-        })
     }
 
-    /// Cancel all background tasks (cascade control).
-    /// Call this when the parent session ends.
+    /// Cancel in-flight parallel delegate workers that share this tool's
+    /// cancellation token. Coordinator-backed background children are
+    /// cancelled with `action=cancel_task` (or the coordinator's parent-session
+    /// cancel), not through this token.
     pub fn cancel_all_background_tasks(&self) {
         self.cancellation_token.cancel();
     }
@@ -2531,7 +2420,6 @@ impl DelegateTool {
         }
     }
 
-    #[cfg(test)]
     async fn execute_agentic(
         &self,
         agent_name: &str,
@@ -2541,30 +2429,6 @@ impl DelegateTool {
         model_provider: &dyn ModelProvider,
         full_prompt: &str,
         temperature: Option<f64>,
-    ) -> anyhow::Result<ToolResult> {
-        self.execute_agentic_with_admission(
-            agent_name,
-            agent_config,
-            provider_type,
-            model,
-            model_provider,
-            full_prompt,
-            temperature,
-            DelegateAdmission::Required,
-        )
-        .await
-    }
-
-    async fn execute_agentic_with_admission(
-        &self,
-        agent_name: &str,
-        agent_config: &AliasedAgentConfig,
-        provider_type: &str,
-        model: &str,
-        model_provider: &dyn ModelProvider,
-        full_prompt: &str,
-        temperature: Option<f64>,
-        admission: DelegateAdmission,
     ) -> anyhow::Result<ToolResult> {
         let Some(tool_policy) = self.resolve_agentic_tool_policy(agent_name, agent_config) else {
             return Ok(ToolResult {
@@ -2580,18 +2444,15 @@ impl DelegateTool {
             });
         };
 
-        let target_policy = match admission {
-            DelegateAdmission::Required => match self.policy_for_target(agent_name) {
-                Ok(policy) => policy,
-                Err(e) => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: ToolOutput::default(),
-                        error: Some(format!("{e:#}")),
-                    });
-                }
-            },
-            DelegateAdmission::Prevalidated => Arc::clone(&self.security),
+        let target_policy = match self.policy_for_target(agent_name) {
+            Ok(policy) => policy,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!("{e:#}")),
+                });
+            }
         };
         let target_mode = self.mode_for_target(agent_name);
         // Deferred-MCP side-channels for an INDEPENDENT target: its sub-agent turn must
@@ -2903,13 +2764,13 @@ impl Observer for NoopObserver {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
     use super::*;
     use crate::platform::RuntimeAdapter;
     use crate::security::{AutonomyLevel, SecurityPolicy};
     use crate::tools::{MemoryRecallTool, MemoryStoreTool};
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
-    use tokio::time::{Instant, sleep};
     use zeroclaw_config::schema::{
         Config, CustomModelProviderConfig, DEFAULT_DELEGATE_AGENTIC_TIMEOUT_SECS,
         DEFAULT_DELEGATE_TIMEOUT_SECS, DelegateExecutionMode, DelegateTargetConfig,
@@ -2920,132 +2781,57 @@ mod tests {
 
     zeroclaw_api::mock_tool_attribution!(EchoTool, FakeMcpTool);
 
-    #[tokio::test]
-    async fn reconciled_loss_label_surfaces_registry_truth() {
-        use crate::control_plane::{
-            SqliteTaskStore, TaskKind, TaskRecord, TaskRegistry, TaskStatus,
-        };
-        let store = SqliteTaskStore::new_in_memory().unwrap();
-        let rec = |id: &str, status: TaskStatus| TaskRecord {
-            id: id.into(),
-            kind: TaskKind::Delegate,
-            agent: "main".into(),
-            status,
-            owner_pid: 0,
-            owner_boot_id: "b".into(),
-            heartbeat_at: None,
-            depth: 0,
-            parent_id: None,
-            originator_route: None,
-            delivered: false,
-            idem_key: None,
-            principal_id: None,
-            started_at: "2026-06-21T00:00:00Z".into(),
-            finished_at: None,
-        };
-        store.create(rec("lost", TaskStatus::Lost)).await.unwrap();
-        store
-            .create(rec("timed", TaskStatus::TimedOut))
-            .await
-            .unwrap();
-        store
-            .create(rec("alive", TaskStatus::Running))
-            .await
-            .unwrap();
-
-        // Flat file says Running + registry reconciled to a loss state → surface the loss.
-        assert_eq!(
-            DelegateTool::reconciled_loss_label_with(
-                "lost",
-                &BackgroundTaskStatus::Running,
-                &store
-            )
-            .await,
-            Some("lost")
-        );
-        assert_eq!(
-            DelegateTool::reconciled_loss_label_with(
-                "timed",
-                &BackgroundTaskStatus::Running,
-                &store
-            )
-            .await,
-            Some("timed_out")
-        );
-        // Registry still Running → nothing to overlay.
-        assert_eq!(
-            DelegateTool::reconciled_loss_label_with(
-                "alive",
-                &BackgroundTaskStatus::Running,
-                &store
-            )
-            .await,
-            None
-        );
-        // The flat file already wrote a terminal state → it is authoritative, no overlay.
-        assert_eq!(
-            DelegateTool::reconciled_loss_label_with(
-                "lost",
-                &BackgroundTaskStatus::Completed,
-                &store
-            )
-            .await,
-            None
-        );
-        // Unknown task → None.
-        assert_eq!(
-            DelegateTool::reconciled_loss_label_with(
-                "missing",
-                &BackgroundTaskStatus::Running,
-                &store
-            )
-            .await,
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn background_cancel_token_aborts_and_clears() {
-        let token = CancellationToken::new();
-        let key = "test-cancel-unique-1";
-        DelegateTool::background_task_cancels()
-            .lock()
-            .insert(key.into(), token.clone());
-        // cancel_task-style lookup: remove + signal the live token
-        let aborted = DelegateTool::background_task_cancels()
-            .lock()
-            .remove(key)
-            .inspect(CancellationToken::cancel)
-            .is_some();
-        assert!(aborted, "a registered task token is found and aborted");
-        assert!(
-            token.is_cancelled(),
-            "the running task's token is signalled"
-        );
-        assert!(
-            DelegateTool::background_task_cancels()
-                .lock()
-                .remove(key)
-                .is_none(),
-            "the token is gone after cancellation"
-        );
-        // An unknown id is a no-op (cancel_task falls back to file-marking).
-        assert!(
-            DelegateTool::background_task_cancels()
-                .lock()
-                .remove("test-cancel-missing")
-                .is_none()
-        );
-    }
-
     #[test]
-    fn background_capacity_backstop() {
-        assert!(!DelegateTool::at_background_capacity(0, 128));
-        assert!(!DelegateTool::at_background_capacity(127, 128));
-        assert!(DelegateTool::at_background_capacity(128, 128));
-        assert!(DelegateTool::at_background_capacity(200, 128));
-        // cap 0 disables the backstop
-        assert!(!DelegateTool::at_background_capacity(10_000, 0));
+    fn snapshot_view_keeps_check_result_json_shape_and_maps_lost() {
+        let completed = ChildSnapshot {
+            child_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+            description: "d".into(),
+            agent_type: "researcher".into(),
+            status: ChildStatus::Finished {
+                outcome: ChildOutcome::Completed,
+                output: "done".into(),
+                detail: None,
+                tool_calls: 0,
+                turns: 1,
+                tokens_used: 0,
+                output_tokens_used: 0,
+                total_tokens_used: 0,
+                worktree_path: None,
+            },
+            started_at_epoch_ms: 1_000,
+            duration_ms: 50,
+            persona: None,
+        };
+        let (state, value) = snapshot_to_result_view(&completed);
+        assert_eq!(state, BackgroundResultState::Completed);
+        assert_eq!(value["task_id"], "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+        assert_eq!(value["agent"], "researcher");
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["output"], "done");
+
+        let lost = ChildSnapshot {
+            status: ChildStatus::Finished {
+                outcome: ChildOutcome::Lost,
+                output: String::new(),
+                detail: Some("gone".into()),
+                tool_calls: 0,
+                turns: 0,
+                tokens_used: 0,
+                output_tokens_used: 0,
+                total_tokens_used: 0,
+                worktree_path: None,
+            },
+            ..completed
+        };
+        let (state, value) = snapshot_to_result_view(&lost);
+        assert_eq!(state, BackgroundResultState::Lost);
+        assert_eq!(value["status"], "lost");
+        assert!(
+            value["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("reaper")
+        );
     }
 
     struct DelegateTestRuntime;
@@ -3115,66 +2901,166 @@ mod tests {
         agents
     }
 
-    async fn wait_for_terminal_background_result(
-        workspace: &Path,
-        task_id: &str,
-    ) -> BackgroundDelegateResult {
-        let result_path = workspace
-            .join("delegate_results")
-            .join(format!("{task_id}.json"));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut last_result = None;
+    /// `COMMAND_SENDER_TEST_HOOK` is a single process-global slot.
+    static COORDINATOR_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-        loop {
-            if let Ok(content) = std::fs::read_to_string(&result_path)
-                && let Ok(result) = serde_json::from_str::<BackgroundDelegateResult>(&content)
-            {
-                if result.status != BackgroundTaskStatus::Running {
-                    return result;
+    fn finished_snapshot(
+        id: &str,
+        agent: &str,
+        outcome: ChildOutcome,
+        output: &str,
+        detail: Option<&str>,
+    ) -> ChildSnapshot {
+        ChildSnapshot {
+            child_id: id.into(),
+            description: "d".into(),
+            agent_type: agent.into(),
+            status: ChildStatus::Finished {
+                outcome,
+                output: output.into(),
+                detail: detail.map(str::to_string),
+                tool_calls: 0,
+                turns: 1,
+                tokens_used: 0,
+                output_tokens_used: 0,
+                total_tokens_used: 0,
+                worktree_path: None,
+            },
+            started_at_epoch_ms: 1_000,
+            duration_ms: 10,
+            persona: None,
+        }
+    }
+
+    fn running_snapshot(id: &str, agent: &str) -> ChildSnapshot {
+        ChildSnapshot {
+            child_id: id.into(),
+            description: "d".into(),
+            agent_type: agent.into(),
+            status: ChildStatus::Running {
+                turn_count: 0,
+                tool_call_count: 0,
+                tokens_used: 0,
+                context_window_tokens: 0,
+                context_usage_pct: 0,
+                tools_used: vec![],
+                error_count: 0,
+            },
+            started_at_epoch_ms: 1_000,
+            duration_ms: 10,
+            persona: None,
+        }
+    }
+
+    /// Answers Query/ListActive/Cancel/Spawn from an in-memory snapshot map.
+    struct ScriptedCoordinator {
+        _serialize: std::sync::MutexGuard<'static, ()>,
+        responder: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Drop for ScriptedCoordinator {
+        fn drop(&mut self) {
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            if let Some(responder) = self.responder.take() {
+                responder.abort();
+            }
+        }
+    }
+
+    fn scripted_coordinator(initial: Vec<ChildSnapshot>) -> ScriptedCoordinator {
+        let serialize = COORDINATOR_SERIALIZE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut map = HashMap::new();
+        for snapshot in initial {
+            map.insert(snapshot.child_id.clone(), snapshot);
+        }
+        let snapshots_for_task = Arc::new(std::sync::Mutex::new(map));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        *COMMAND_SENDER_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(CommandSender(tx));
+        let responder = zeroclaw_spawn::spawn!(async move {
+            while let Some(command) = rx.recv().await {
+                match command {
+                    CoordinatorCommand::Query(query) => {
+                        let snapshot = snapshots_for_task
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&query.child_id)
+                            .cloned();
+                        let _ = query.respond_to.send(snapshot);
+                    }
+                    CoordinatorCommand::ListActive(list) => {
+                        let summaries: Vec<ActiveChildSummary> = snapshots_for_task
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .values()
+                            .filter(|snapshot| snapshot.is_running())
+                            .map(|snapshot| ActiveChildSummary {
+                                child_id: snapshot.child_id.clone(),
+                                agent_type: snapshot.agent_type.clone(),
+                                description: snapshot.description.clone(),
+                                elapsed_ms: snapshot.duration_ms,
+                            })
+                            .collect();
+                        let _ = list.respond_to.send(summaries);
+                    }
+                    CoordinatorCommand::Cancel(cancel) => {
+                        let CancelTarget::ChildId(id) = cancel.target else {
+                            let _ = cancel.respond_to.send(CancelOutcome::NotFound);
+                            continue;
+                        };
+                        let mut map = snapshots_for_task.lock().unwrap_or_else(|e| e.into_inner());
+                        let (running, agent, finished_outcome) = match map.get(&id) {
+                            None => {
+                                let _ = cancel.respond_to.send(CancelOutcome::NotFound);
+                                continue;
+                            }
+                            Some(snapshot) => (
+                                snapshot.is_running(),
+                                snapshot.agent_type.clone(),
+                                snapshot.status.outcome().unwrap_or(ChildOutcome::Lost),
+                            ),
+                        };
+                        let outcome = if running {
+                            map.insert(
+                                id.clone(),
+                                finished_snapshot(
+                                    &id,
+                                    &agent,
+                                    ChildOutcome::Cancelled,
+                                    "",
+                                    Some("Cancelled by user request"),
+                                ),
+                            );
+                            CancelOutcome::Cancelled
+                        } else {
+                            CancelOutcome::AlreadyFinished {
+                                outcome: finished_outcome,
+                            }
+                        };
+                        let _ = cancel.respond_to.send(outcome);
+                    }
+                    CoordinatorCommand::Spawn(spawn) => {
+                        let child_id = spawn.request.child_id.clone();
+                        let agent = spawn.request.agent_type.clone();
+                        snapshots_for_task
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(child_id, running_snapshot(&spawn.request.child_id, &agent));
+                        let _ = spawn.admission_tx.send(SpawnAdmission::Admitted);
+                    }
+                    _ => {}
                 }
-                last_result = Some(result);
             }
-
-            if Instant::now() >= deadline {
-                panic!(
-                    "Background task {task_id} did not finish before timeout; last result: {last_result:?}"
-                );
-            }
-
-            sleep(Duration::from_millis(50)).await;
+        });
+        ScriptedCoordinator {
+            _serialize: serialize,
+            responder: Some(responder),
         }
-    }
-
-    fn background_result(
-        task_id: &str,
-        status: BackgroundTaskStatus,
-        output: Option<&str>,
-        error: Option<&str>,
-    ) -> BackgroundDelegateResult {
-        let finished_at = if status == BackgroundTaskStatus::Running {
-            None
-        } else {
-            Some("2026-06-29T12:00:01Z".to_string())
-        };
-        BackgroundDelegateResult {
-            task_id: task_id.to_string(),
-            agent: "researcher".to_string(),
-            status,
-            output: output.map(str::to_string),
-            error: error.map(str::to_string),
-            started_at: "2026-06-29T12:00:00Z".to_string(),
-            finished_at,
-        }
-    }
-
-    fn write_background_result(workspace: &Path, result: &BackgroundDelegateResult) {
-        let results_dir = workspace.join("delegate_results");
-        std::fs::create_dir_all(&results_dir).unwrap();
-        std::fs::write(
-            results_dir.join(format!("{}.json", result.task_id)),
-            serde_json::to_vec_pretty(result).unwrap(),
-        )
-        .unwrap();
     }
 
     #[derive(Default)]
@@ -4744,12 +4630,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_agentic_delegate_rebinds_memory_tools_to_target_agent_scope() {
-        // Same memory-scope invariant as the sync path, but through the detached
-        // task worker that runs after a task id is returned to the caller.
+    async fn background_agentic_delegate_without_coordinator_is_a_structured_failure() {
+        // Memory-scope for agentic children stays a sync-path invariant
+        // (`execute_agentic_rebinds_memory_tools_to_target_agent_scope`).
+        // Background delivery now requires the coordinator; a missing actor
+        // must not fall back to the old file-store worker.
         let server =
             start_memory_tool_chat_server("background-key", "background target memory").await;
         let fixture = delegate_memory_fixture(Some(server.uri.clone())).await;
+        let _serialize = COORDINATOR_SERIALIZE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let result = fixture
             .tool
@@ -4761,24 +4652,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success, "background delegate failed: {result:?}");
-        let task_id = result
-            .output
-            .lines()
-            .find(|line| line.starts_with("task_id:"))
-            .unwrap()
-            .trim_start_matches("task_id: ")
-            .trim();
-        let bg_result = wait_for_terminal_background_result(&fixture.workspace_dir, task_id).await;
-        assert_eq!(bg_result.status, BackgroundTaskStatus::Completed);
+        assert!(!result.success);
+        let err = result.error.as_deref().unwrap_or_default();
         assert!(
-            bg_result
-                .output
-                .as_deref()
-                .unwrap_or_default()
-                .contains("memory workflow done")
+            err.contains("coordinator"),
+            "refusal must name the missing coordinator, got: {err:?}"
         );
-        assert_stored_for_target_only(&fixture, "background-key").await;
+        assert!(
+            !fixture.workspace_dir.join("delegate_results").exists(),
+            "background spawn must not create the retired file store"
+        );
     }
 
     #[tokio::test]
@@ -5001,6 +4884,7 @@ mod tests {
             .with_risk_profiles(config.risk_profiles.clone())
             .with_runtime_profiles(config.runtime_profiles.clone());
 
+        let _coordinator = scripted_coordinator(Vec::new());
         let result = tool
             .execute(json!({
                 "agent": "target",
@@ -5011,29 +4895,11 @@ mod tests {
             .unwrap();
 
         assert!(result.success, "background delegate failed: {result:?}");
-        let task_id = result
-            .output
-            .lines()
-            .find(|line| line.starts_with("task_id:"))
-            .unwrap()
-            .trim_start_matches("task_id: ")
-            .trim();
-        let bg_result = wait_for_terminal_background_result(&workspace_dir, task_id).await;
-
-        assert_eq!(
-            bg_result.status,
-            BackgroundTaskStatus::Completed,
-            "{bg_result:?}"
-        );
         assert!(
-            bg_result
-                .output
-                .as_deref()
-                .unwrap_or_default()
-                .contains("background-ok"),
-            "{bg_result:?}"
+            result.output.contains("task_id:"),
+            "admitted background spawn must return a task_id, got: {}",
+            result.output
         );
-        assert!(bg_result.error.is_none(), "{bg_result:?}");
     }
 
     #[tokio::test]
@@ -6052,14 +5918,9 @@ mod tests {
 
     #[tokio::test]
     async fn background_delegation_returns_task_id() {
-        let workspace = std::env::temp_dir().join(format!(
-            "zeroclaw_delegate_bg_test_{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
-
-        let tool = DelegateTool::new(sample_agents(), None, test_security())
-            .with_workspace_dir(workspace.clone());
+        let _coordinator = scripted_coordinator(Vec::new());
+        let tool =
+            DelegateTool::new(sample_agents(), None, test_security()).with_caller_alias("caller");
         let result = tool
             .execute(json!({
                 "agent": "researcher",
@@ -6069,19 +5930,31 @@ mod tests {
             .await
             .unwrap();
 
-        // The agent will fail at model_provider level (ollama not running),
-        // but the background task should be spawned and return a task_id.
-        assert!(result.success);
+        assert!(result.success, "unexpected failure: {:?}", result.error);
         assert!(result.output.contains("task_id:"));
         assert!(result.output.contains("Background task started"));
+    }
 
-        // Wait a moment for the background task to write its result
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        // The results directory should exist
-        assert!(workspace.join("delegate_results").exists());
-
-        let _ = std::fs::remove_dir_all(workspace);
+    #[tokio::test]
+    async fn background_true_with_no_coordinator_is_a_structured_failure() {
+        let _serialize = COORDINATOR_SERIALIZE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tool = DelegateTool::new(sample_agents(), None, test_security());
+        let result = tool
+            .execute(json!({
+                "agent": "researcher",
+                "prompt": "test background",
+                "background": true
+            }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        let err = result.error.as_deref().unwrap_or_default();
+        assert!(
+            err.contains("coordinator"),
+            "refusal must name the missing coordinator, got: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -6173,34 +6046,25 @@ mod tests {
 
     #[tokio::test]
     async fn await_sessions_returns_completed_results() {
-        let workspace = std::env::temp_dir().join(format!(
-            "zeroclaw_delegate_await_done_{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
         let first = uuid::Uuid::new_v4().to_string();
         let second = uuid::Uuid::new_v4().to_string();
-        write_background_result(
-            &workspace,
-            &background_result(
+        let _coordinator = scripted_coordinator(vec![
+            finished_snapshot(
                 &first,
-                BackgroundTaskStatus::Completed,
-                Some("first output"),
+                "researcher",
+                ChildOutcome::Completed,
+                "first output",
                 None,
             ),
-        );
-        write_background_result(
-            &workspace,
-            &background_result(
+            finished_snapshot(
                 &second,
-                BackgroundTaskStatus::Completed,
-                Some("second output"),
+                "researcher",
+                ChildOutcome::Completed,
+                "second output",
                 None,
             ),
-        );
-
-        let tool = DelegateTool::new(sample_agents(), None, test_security())
-            .with_workspace_dir(workspace.clone());
+        ]);
+        let tool = DelegateTool::new(sample_agents(), None, test_security());
         let result = tool
             .execute(json!({
                 "action": "await_sessions",
@@ -6216,30 +6080,19 @@ mod tests {
         assert_eq!(output["completed"], 2);
         assert_eq!(output["results"].as_array().unwrap().len(), 2);
         assert!(result.error.is_none());
-
-        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[tokio::test]
     async fn await_sessions_reports_failed_results() {
-        let workspace = std::env::temp_dir().join(format!(
-            "zeroclaw_delegate_await_failed_{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
         let task_id = uuid::Uuid::new_v4().to_string();
-        write_background_result(
-            &workspace,
-            &background_result(
-                &task_id,
-                BackgroundTaskStatus::Failed,
-                None,
-                Some("model failed"),
-            ),
-        );
-
-        let tool = DelegateTool::new(sample_agents(), None, test_security())
-            .with_workspace_dir(workspace.clone());
+        let _coordinator = scripted_coordinator(vec![finished_snapshot(
+            &task_id,
+            "researcher",
+            ChildOutcome::Failed,
+            "",
+            Some("model failed"),
+        )]);
+        let tool = DelegateTool::new(sample_agents(), None, test_security());
         let result = tool
             .execute(json!({
                 "action": "await_sessions",
@@ -6260,30 +6113,17 @@ mod tests {
                 .unwrap_or_default()
                 .contains("failed")
         );
-
-        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[tokio::test]
     async fn await_sessions_times_out_with_pending_results() {
-        let workspace = std::env::temp_dir().join(format!(
-            "zeroclaw_delegate_await_pending_{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
         let done = uuid::Uuid::new_v4().to_string();
         let pending = uuid::Uuid::new_v4().to_string();
-        write_background_result(
-            &workspace,
-            &background_result(&done, BackgroundTaskStatus::Completed, Some("done"), None),
-        );
-        write_background_result(
-            &workspace,
-            &background_result(&pending, BackgroundTaskStatus::Running, None, None),
-        );
-
-        let tool = DelegateTool::new(sample_agents(), None, test_security())
-            .with_workspace_dir(workspace.clone());
+        let _coordinator = scripted_coordinator(vec![
+            finished_snapshot(&done, "researcher", ChildOutcome::Completed, "done", None),
+            running_snapshot(&pending, "researcher"),
+        ]);
+        let tool = DelegateTool::new(sample_agents(), None, test_security());
         let result = tool
             .execute(json!({
                 "action": "await_sessions",
@@ -6305,8 +6145,6 @@ mod tests {
                 .unwrap_or_default()
                 .contains("pending")
         );
-
-        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[tokio::test]
@@ -6482,6 +6320,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_results_empty() {
+        let _serialize = COORDINATOR_SERIALIZE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let workspace = std::env::temp_dir().join(format!(
             "zeroclaw_delegate_list_empty_{}",
             uuid::Uuid::new_v4()
@@ -6603,93 +6444,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_task_result_persisted_to_disk() {
-        let workspace = std::env::temp_dir().join(format!(
-            "zeroclaw_delegate_bg_persist_{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
-
-        let tool = DelegateTool::new(sample_agents(), None, test_security())
-            .with_workspace_dir(workspace.clone());
-
-        let result = tool
-            .execute(json!({
-                "agent": "researcher",
-                "prompt": "persistence test",
-                "background": true
-            }))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-
-        // Extract task_id from output
-        let task_id = result
-            .output
-            .lines()
-            .find(|l| l.starts_with("task_id:"))
-            .unwrap()
-            .trim_start_matches("task_id: ")
-            .trim();
-
-        // Check that the result file exists
-        let result_path = workspace
-            .join("delegate_results")
-            .join(format!("{task_id}.json"));
-        assert!(
-            result_path.exists(),
-            "Result file should exist at {result_path:?}"
-        );
-
-        // Read and parse the result
-        let bg_result = wait_for_terminal_background_result(&workspace, task_id).await;
-        assert_eq!(bg_result.task_id, task_id);
-        assert_eq!(bg_result.agent, "researcher");
-        // The task will have failed because ollama isn't running, but it should be persisted
-        assert!(
-            bg_result.status == BackgroundTaskStatus::Completed
-                || bg_result.status == BackgroundTaskStatus::Failed
-        );
-        assert!(bg_result.finished_at.is_some());
-
-        let _ = std::fs::remove_dir_all(workspace);
-    }
-
-    #[tokio::test]
-    async fn check_result_retrieves_persisted_background_result() {
-        let workspace = std::env::temp_dir().join(format!(
-            "zeroclaw_delegate_check_retrieve_{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
-
-        let tool = DelegateTool::new(sample_agents(), None, test_security())
-            .with_workspace_dir(workspace.clone());
-
-        // Start background task
-        let result = tool
-            .execute(json!({
-                "agent": "researcher",
-                "prompt": "retrieval test",
-                "background": true
-            }))
-            .await
-            .unwrap();
-
-        let task_id = result
-            .output
-            .lines()
-            .find(|l| l.starts_with("task_id:"))
-            .unwrap()
-            .trim_start_matches("task_id: ")
-            .trim()
-            .to_string();
-
-        // Wait for background task
-        let _ = wait_for_terminal_background_result(&workspace, &task_id).await;
-
-        // Check result
+    async fn check_result_retrieves_coordinator_snapshot() {
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let _coordinator = scripted_coordinator(vec![finished_snapshot(
+            &task_id,
+            "researcher",
+            ChildOutcome::Failed,
+            "no model",
+            Some("provider down"),
+        )]);
+        let tool = DelegateTool::new(sample_agents(), None, test_security());
         let check = tool
             .execute(json!({
                 "action": "check_result",
@@ -6698,46 +6462,16 @@ mod tests {
             .await
             .unwrap();
 
-        // The output should contain the serialized result
         assert!(check.output.contains(&task_id));
         assert!(check.output.contains("researcher"));
-
-        let _ = std::fs::remove_dir_all(workspace);
+        assert!(check.output.contains("failed") || check.error.is_some());
     }
 
     #[tokio::test]
-    async fn list_results_includes_background_tasks() {
-        let workspace = std::env::temp_dir().join(format!(
-            "zeroclaw_delegate_list_tasks_{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
-
-        let tool = DelegateTool::new(sample_agents(), None, test_security())
-            .with_workspace_dir(workspace.clone());
-
-        // Start a background task
-        let result = tool
-            .execute(json!({
-                "agent": "researcher",
-                "prompt": "list test",
-                "background": true
-            }))
-            .await
-            .unwrap();
-        assert!(result.success);
-        let task_id = result
-            .output
-            .lines()
-            .find(|l| l.starts_with("task_id:"))
-            .unwrap()
-            .trim_start_matches("task_id: ")
-            .trim();
-
-        // Wait for task to complete
-        let _ = wait_for_terminal_background_result(&workspace, task_id).await;
-
-        // List results
+    async fn list_results_includes_in_flight_background_tasks() {
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let _coordinator = scripted_coordinator(vec![running_snapshot(&task_id, "researcher")]);
+        let tool = DelegateTool::new(sample_agents(), None, test_security());
         let list = tool
             .execute(json!({"action": "list_results"}))
             .await
@@ -6745,6 +6479,60 @@ mod tests {
 
         assert!(list.success);
         assert!(list.output.contains("researcher"));
+        assert!(list.output.contains(&task_id));
+    }
+
+    #[tokio::test]
+    async fn leftover_delegate_results_file_is_ignored() {
+        let _serialize = COORDINATOR_SERIALIZE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let workspace = std::env::temp_dir().join(format!(
+            "zeroclaw_delegate_orphan_file_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(workspace.join("delegate_results")).unwrap();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        std::fs::write(
+            workspace
+                .join("delegate_results")
+                .join(format!("{task_id}.json")),
+            serde_json::to_vec_pretty(&BackgroundDelegateResult {
+                task_id: task_id.clone(),
+                agent: "researcher".into(),
+                status: BackgroundTaskStatus::Completed,
+                output: Some("stale file-store result".into()),
+                error: None,
+                started_at: "2026-06-29T12:00:00Z".into(),
+                finished_at: Some("2026-06-29T12:00:01Z".into()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let tool = DelegateTool::new(sample_agents(), None, test_security())
+            .with_workspace_dir(workspace.clone());
+        let check = tool
+            .execute(json!({
+                "action": "check_result",
+                "task_id": task_id
+            }))
+            .await
+            .unwrap();
+        assert!(!check.success);
+        assert!(
+            check
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("No result found"),
+            "retired file-store rows must not be readable, got: {:?}",
+            check.error
+        );
+        assert!(
+            !check.output.contains("stale file-store result"),
+            "check_result must not surface the leftover file contents"
+        );
 
         let _ = std::fs::remove_dir_all(workspace);
     }
@@ -8605,6 +8393,201 @@ command = "echo hi"
             credential.as_deref(),
             Some("sk-ant-global-coordinator-key"),
             "non-OAuth target without api_key must fall back to global credential"
+        );
+    }
+
+    // ── Live coordinator: announce chain end-to-end ──
+    //
+    // The `SERIALIZE` guard holds a `std::sync::Mutex` across `.await` — it is
+    // a test-serialization lock, not a production lock.
+    use crate::control_plane::boot::ControlPlaneHandle;
+    use crate::control_plane::coordinator_host;
+    use crate::control_plane::task_registry::{TaskRegistry, TaskStatus};
+    use zeroclaw_config::schema::RiskProfileConfig;
+
+    struct BootedCoordinator {
+        _serialize: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        handle: ControlPlaneHandle,
+        actor: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Drop for BootedCoordinator {
+        fn drop(&mut self) {
+            *COMMAND_SENDER_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            if let Some(actor) = self.actor.take() {
+                actor.abort();
+            }
+        }
+    }
+
+    fn config_with_caller_and_target(caller: &str, target: &str) -> Config {
+        let mut config = Config::default();
+        config
+            .risk_profiles
+            .insert("default".to_string(), RiskProfileConfig::default());
+        for alias in [caller, target] {
+            config.agents.insert(
+                alias.to_string(),
+                AliasedAgentConfig {
+                    risk_profile: "default".into(),
+                    ..AliasedAgentConfig::default()
+                },
+            );
+        }
+        config
+    }
+
+    async fn boot(config: Config) -> BootedCoordinator {
+        let serialize = COORDINATOR_SERIALIZE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = config;
+        config.data_dir = dir.path().to_path_buf();
+        config.config_path = dir.path().join("config.toml");
+        let handle = ControlPlaneHandle::start(dir.path())
+            .await
+            .expect("start control plane");
+        let host = coordinator_host::start(
+            Arc::new(config),
+            Arc::clone(&handle.sqlite_store),
+            handle.boot_id.clone(),
+        );
+        *COMMAND_SENDER_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(host.commands);
+        BootedCoordinator {
+            _serialize: serialize,
+            _dir: dir,
+            handle,
+            actor: Some(host.actor),
+        }
+    }
+
+    fn extract_task_id(output: &str) -> &str {
+        output
+            .lines()
+            .find(|line| line.starts_with("task_id:"))
+            .expect("success output must carry task_id:")
+            .trim_start_matches("task_id:")
+            .trim()
+    }
+
+    async fn wait_for_terminal(
+        store: &crate::control_plane::SqliteTaskStore,
+        id: &str,
+        timeout: Duration,
+    ) -> crate::control_plane::TaskRecord {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(rec) = store.get(id).await.expect("store read")
+                && rec.status.is_terminal()
+            {
+                return rec;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "child {id} never reached a terminal status within {timeout:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Discriminating line: `claim_undelivered_children` under the same
+    /// key `execute_background` filed `parent_id` as must return the
+    /// child's ending. A spawn that still wrote `parent_id: None` would
+    /// succeed and persist a row, but this claim would be empty — the
+    /// parent would wait forever.
+    #[tokio::test]
+    async fn background_delegate_completion_is_claimed_on_the_announce_chain() {
+        let caller = "announce-caller";
+        let target = "announce-target";
+        let config = config_with_caller_and_target(caller, target);
+        let fixture = boot(config.clone()).await;
+
+        let tool = DelegateTool::new(config.agents.clone(), None, security_allowing())
+            .with_caller_alias(caller)
+            .with_root_config(Arc::new(config));
+        let result = tool
+            .execute(json!({
+                "agent": target,
+                "prompt": "do the background thing",
+                "background": true
+            }))
+            .await
+            .expect("execute returns Ok");
+        assert!(
+            result.success,
+            "background spawn must report success immediately: {:?}",
+            result.error
+        );
+        let task_id = extract_task_id(result.output.as_str()).to_string();
+
+        tokio::task::yield_now().await;
+        let row = fixture
+            .handle
+            .sqlite_store
+            .get(&task_id)
+            .await
+            .expect("store read")
+            .expect("record_spawn must have written the row");
+        let parent_key = format!("agent:{caller}");
+        assert_eq!(
+            row.parent_id.as_deref(),
+            Some(parent_key.as_str()),
+            "parent_id must be the same key agent::run's fallback claims under"
+        );
+        assert_eq!(
+            row.agent, caller,
+            "agent column carries the parent alias, not the target type"
+        );
+
+        let finished = wait_for_terminal(
+            &fixture.handle.sqlite_store,
+            &task_id,
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(
+            finished.status.is_terminal(),
+            "child must settle, got {:?}",
+            finished.status
+        );
+        assert_ne!(
+            finished.status,
+            TaskStatus::Running,
+            "a finished child must not still read as running"
+        );
+
+        let claimed = fixture
+            .handle
+            .sqlite_store
+            .claim_undelivered_children(&parent_key)
+            .await
+            .expect("claim");
+        assert_eq!(
+            claimed.len(),
+            1,
+            "the announce chain must see the finished child: {claimed:?}"
+        );
+        assert_eq!(claimed[0].task_id, task_id);
+        assert!(
+            claimed[0].output.is_some() || claimed[0].detail.is_some(),
+            "an announcement must carry the result, not just the verdict: {:?}",
+            claimed[0]
+        );
+        assert!(
+            fixture
+                .handle
+                .sqlite_store
+                .claim_undelivered_children(&parent_key)
+                .await
+                .expect("second claim")
+                .is_empty(),
+            "a second claim must not re-announce"
         );
     }
 }
