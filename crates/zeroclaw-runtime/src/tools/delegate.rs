@@ -3,7 +3,7 @@ use crate::agent::loop_::{
     TOOL_LOOP_SESSION_KEY, ToolLoop, apply_text_tool_prompt_policy, run_tool_call_loop,
 };
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
-use crate::control_plane::task_registry::{TaskKind, TaskRegistry};
+use crate::control_plane::task_registry::TaskKind;
 use crate::observability::traits::{Observer, ObserverEvent, ObserverMetric};
 use crate::security::SecurityPolicy;
 use crate::security::policy::ToolOperation;
@@ -71,15 +71,19 @@ fn coordinator_commands() -> Option<CommandSender> {
 fn task_store() -> Option<Arc<crate::control_plane::SqliteTaskStore>> {
     #[cfg(test)]
     {
-        if let Some(hooked) = SQLITE_STORE_TEST_HOOK
+        // Tests must not observe another module's process-global control
+        // plane (`OnceLock`). A parallel `init_control_plane` in the same
+        // libtest binary would otherwise make `check_result` consult a
+        // store that does not contain this test's rows.
+        SQLITE_STORE_TEST_HOOK
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-        {
-            return Some(hooked);
-        }
     }
-    crate::control_plane::control_plane().map(|cp| Arc::clone(&cp.sqlite_store))
+    #[cfg(not(test))]
+    {
+        crate::control_plane::control_plane().map(|cp| Arc::clone(&cp.sqlite_store))
+    }
 }
 
 fn current_tool_loop_session_key() -> Option<String> {
@@ -2178,6 +2182,11 @@ impl DelegateTool {
     ) -> Option<ChildSnapshot> {
         let commands = coordinator_commands()?;
         let (respond_to, rx) = tokio::sync::oneshot::channel();
+        // Parent-scoped: coordinator `handle_query` filters completed/active/
+        // pending with `belongs_to_session`, then `load_finished` (kind +
+        // non-NULL parent) plus parent equality. A Query hit is the actor's
+        // word for this caller — `handle_check_result` must not overlay a
+        // SQLite visibility gate on it.
         commands
             .0
             .send(CoordinatorCommand::Query(QueryCommand {
@@ -2223,23 +2232,11 @@ impl DelegateTool {
         rx.await.ok()
     }
 
-    /// Durable fail-closed gate: `kind == Delegate` and `parent_id` is this
-    /// caller. `NULL` parent and any other kind are misses. No store means
-    /// there is no row to consult (Query already scoped the caller).
-    async fn delegate_row_visible_to_caller(&self, task_id: &str) -> bool {
-        let Some(store) = task_store() else {
-            return true;
-        };
-        matches!(
-            store.get(task_id).await,
-            Ok(Some(rec))
-                if rec.kind == TaskKind::Delegate
-                    && rec.parent_id.as_deref() == Some(self.parent_session_id().as_str())
-        )
-    }
-
-    /// Fail-closed SQLite fallback: only a `Delegate` row whose `parent_id`
-    /// is exactly this caller. `NULL` parent and any other kind are misses.
+    /// Fail-closed SQLite fallback used only when Query missed (actor gone
+    /// or never held this id). Store is the sole remaining source, so this
+    /// path requires `kind == Delegate` and `parent_id ==` this caller;
+    /// `NULL` parent and any other kind are misses. Coordinator Query hits
+    /// are already parent-scoped — see `query_child`.
     fn sqlite_fallback_delegate_snapshot(&self, task_id: &str) -> Option<ChildSnapshot> {
         let view = task_store()
             .and_then(|store| store.get_terminal_with_result(task_id).ok().flatten())?;
@@ -2370,6 +2367,8 @@ impl DelegateTool {
             });
         }
 
+        // Query hit: coordinator already parent-scoped (`query_child`).
+        // Query miss: SQLite fallback is fail-closed on kind + parent_id.
         let snapshot = match self.query_child(task_id, false, None).await {
             Some(snapshot) => snapshot,
             None => {
@@ -2383,13 +2382,6 @@ impl DelegateTool {
                 snapshot
             }
         };
-        if !self.delegate_row_visible_to_caller(task_id).await {
-            return Ok(ToolResult {
-                success: false,
-                output: ToolOutput::default(),
-                error: Some(format!("No result found for task_id '{task_id}'")),
-            });
-        }
         let announced = Self::announced_from_claim(&self.parent_session_id(), task_id, &snapshot);
         Self::check_result_from_snapshot(&snapshot, announced)
     }
@@ -3264,6 +3256,9 @@ mod tests {
             *COMMAND_SENDER_TEST_HOOK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = None;
+            *SQLITE_STORE_TEST_HOOK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
             if let Some(responder) = self.responder.take() {
                 responder.abort();
             }
@@ -3274,6 +3269,12 @@ mod tests {
         let serialize = COORDINATOR_SERIALIZE
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // This fixture answers Query from memory. A neighbor that installed
+        // `SQLITE_STORE_TEST_HOOK` must not leak into `task_store()` while
+        // we hold the serialize lock.
+        *SQLITE_STORE_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let mut map = HashMap::new();
         for snapshot in initial {
             map.insert(snapshot.child_id.clone(), snapshot);
@@ -4942,6 +4943,9 @@ mod tests {
         let _serialize = COORDINATOR_SERIALIZE
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        *COMMAND_SENDER_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
 
         let result = fixture
             .tool
@@ -6241,6 +6245,9 @@ mod tests {
         let _serialize = COORDINATOR_SERIALIZE
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        *COMMAND_SENDER_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let tool = DelegateTool::new(sample_agents(), None, test_security());
         let result = tool
             .execute(json!({
@@ -6302,6 +6309,15 @@ mod tests {
 
     #[tokio::test]
     async fn check_result_nonexistent_task() {
+        let _serialize = COORDINATOR_SERIALIZE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *COMMAND_SENDER_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *SQLITE_STORE_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let workspace = std::env::temp_dir().join(format!(
             "zeroclaw_delegate_check_miss_{}",
             uuid::Uuid::new_v4()
@@ -6450,6 +6466,12 @@ mod tests {
 
     #[tokio::test]
     async fn await_sessions_reports_missing_tasks() {
+        let _serialize = COORDINATOR_SERIALIZE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *SQLITE_STORE_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let workspace = std::env::temp_dir().join(format!(
             "zeroclaw_delegate_await_missing_{}",
             uuid::Uuid::new_v4()
@@ -6624,6 +6646,9 @@ mod tests {
         let _serialize = COORDINATOR_SERIALIZE
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        *COMMAND_SENDER_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let workspace = std::env::temp_dir().join(format!(
             "zeroclaw_delegate_list_empty_{}",
             uuid::Uuid::new_v4()
@@ -6699,6 +6724,12 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_task_nonexistent() {
+        let _serialize = COORDINATOR_SERIALIZE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *COMMAND_SENDER_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let workspace = std::env::temp_dir().join(format!(
             "zeroclaw_delegate_cancel_miss_{}",
             uuid::Uuid::new_v4()
@@ -6788,6 +6819,12 @@ mod tests {
         let _serialize = COORDINATOR_SERIALIZE
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        *COMMAND_SENDER_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *SQLITE_STORE_TEST_HOOK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let workspace = std::env::temp_dir().join(format!(
             "zeroclaw_delegate_orphan_file_{}",
             uuid::Uuid::new_v4()
