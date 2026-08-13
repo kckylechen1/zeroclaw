@@ -528,9 +528,18 @@ struct SyncData {
     context_tokens: HashMap<String, String>,
 }
 
-/// Write bytes to `path` via a sibling temp file: write, chmod 0o600 (Unix),
-/// then atomically rename. A crash or I/O error therefore cannot truncate the
-/// previous durable file in place. On failure the temp file is removed.
+/// Write bytes to `path` via a sibling temp file: `create_new`, write,
+/// `sync_all`, chmod 0o600 (Unix), then `rename` over the destination.
+///
+/// Process-crash safety: the previous durable file is never truncated in
+/// place, so a crash mid-write cannot replace it with a torn file. Power-loss
+/// durability is best-effort (`sync_all` on the temp file; Unix parent-dir
+/// fsync after rename, logged on failure) — not a guarantee.
+///
+/// Windows `std::fs::rename` is `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`
+/// (see the Rust std docs for [`std::fs::rename`]), so a successful rename
+/// replaces an existing destination. Residual risk: if another handle has the
+/// destination open without `FILE_SHARE_DELETE`, the replace can still fail.
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = path
@@ -538,26 +547,73 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
-    let tmp = dir.join(format!(
+    let tmp = next_private_tmp(dir, file_name, &SEQ);
+    match write_private_to_tmp(&tmp, path, data) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Same-PID / other-namespace collision on the tmp name: retry
+            // once with a fresh name. Do not unlink the colliding file —
+            // we did not create it.
+            let tmp = next_private_tmp(dir, file_name, &SEQ);
+            write_private_to_tmp(&tmp, path, data)
+        }
+        other => other,
+    }
+}
+
+fn next_private_tmp(dir: &Path, file_name: &str, seq: &AtomicU64) -> PathBuf {
+    dir.join(format!(
         ".{}.{}.{}.tmp",
         file_name,
         std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = (|| {
-        std::fs::write(&tmp, data)?;
+        seq.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+fn write_private_to_tmp(tmp: &Path, dest: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let created: std::io::Result<()> = (|| {
+        let mut file = std::fs::File::create_new(tmp)?;
+        file.write_all(data)?;
+        file.sync_all()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+            std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o600))?;
         }
-        std::fs::rename(&tmp, path)?;
+        std::fs::rename(tmp, dest)?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = &created {
+        // Only unlink a tmp we created. `AlreadyExists` from `create_new`
+        // means another writer owns that name.
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            let _ = std::fs::remove_file(tmp);
+        }
     }
-    result
+    created?;
+
+    #[cfg(unix)]
+    if let Err(e) = sync_parent_dir(dest) {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+            "best-effort parent directory fsync failed after WeChat state rename"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file = std::fs::File::open(dir)?;
+    file.sync_all()
 }
 
 fn persist_sync_data(
@@ -922,8 +978,9 @@ impl WeChatChannel {
     /// Save account data to disk.
     ///
     /// Async so the QR-login path does not block the runtime on filesystem
-    /// I/O. The write itself runs on `spawn_blocking` and is crash-atomic
-    /// via [`write_private`]. Errors propagate to the caller.
+    /// I/O. The write itself runs on `spawn_blocking` and uses
+    /// [`write_private`] (atomic replace + best-effort fsync). Errors
+    /// propagate to the caller.
     async fn save_account_data(
         &self,
         token: &str,
@@ -3516,5 +3573,24 @@ mod tests {
             contents, "{\"get_updates_buf\":\"old\"}",
             "a failed write must not truncate or replace the previous file"
         );
+    }
+
+    #[test]
+    fn write_private_replaces_existing_destination() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("sync.json");
+        write_private(&path, b"{\"get_updates_buf\":\"old\"}").unwrap();
+        write_private(&path, b"{\"get_updates_buf\":\"new\"}").unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents, "{\"get_updates_buf\":\"new\"}",
+            "a successful write must replace an existing destination on every platform; Windows std::fs::rename is MoveFileExW+MOVEFILE_REPLACE_EXISTING"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 }
