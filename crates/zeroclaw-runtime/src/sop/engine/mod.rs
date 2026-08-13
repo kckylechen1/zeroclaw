@@ -135,12 +135,21 @@ impl MaintenanceSummary {
 /// callers distinguish a missing id from a second finish without scraping
 /// Display text. Persistence failures stay a different error and are not
 /// mapped here.
+///
+/// Production `finish_run` callers (step complete/fail, cancel after an
+/// active-set check) propagate these as-is: they already believe the run is
+/// live. Downcast the variants directly when a future caller needs to
+/// classify them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinishRunError {
-    /// `run_id` is not in the in-memory active set and is not among
-    /// retained finished runs.
+    /// Not in `active_runs`, not in the `finished_runs` cache, and the
+    /// durable store has no terminal row for this id. A durable
+    /// *non-terminal* row this engine does not hold is also `NotFound`
+    /// (`finish_run` is not the restore/claim path).
     NotFound { run_id: String },
-    /// `run_id` already has a terminal record in `finished_runs`.
+    /// A terminal record exists in the `finished_runs` cache or in the
+    /// durable store (the cache is a bounded display window and may have
+    /// already evicted the row).
     AlreadyFinished { run_id: String },
 }
 
@@ -157,7 +166,11 @@ impl std::error::Error for FinishRunError {}
 
 /// Typed `finish_run` lookup failure, if `err` is one. Persistence and
 /// other engine errors return `None`.
-pub fn err_as_finish_run(err: &anyhow::Error) -> Option<&FinishRunError> {
+///
+/// Test-only: production paths propagate `finish_run` errors uniformly.
+/// [`FinishRunError`] stays public so a future caller can downcast.
+#[cfg(test)]
+pub(super) fn err_as_finish_run(err: &anyhow::Error) -> Option<&FinishRunError> {
     err.downcast_ref()
 }
 
@@ -2574,10 +2587,15 @@ impl SopEngine {
     }
 
     /// Clone the live run that `finish_run` is about to take terminal, or
-    /// return a typed lookup error. `active_runs` is the in-flight source of
-    /// truth; `finished_runs` is the retained-terminal cache used only to
-    /// distinguish a second finish from a never-seen id. The durable store is
-    /// not consulted here — that would be a second copy of the same fact.
+    /// return a typed lookup error.
+    ///
+    /// `active_runs` is the in-flight cache: a hit means this engine can
+    /// finish the run. `finished_runs` is only a bounded display window
+    /// (`max_finished_runs`); a cache hit is a fast `AlreadyFinished`. A
+    /// dual miss is not proof the id was never finished — eviction and
+    /// restart rehydrate only that window — so the durable store is the
+    /// authority for terminal identity. That is a fallback lookup of the
+    /// canonical row, not a copied second map.
     fn active_run_for_finish(&self, run_id: &str) -> Result<SopRun> {
         if let Some(run) = self.active_runs.get(run_id).cloned() {
             return Ok(run);
@@ -2587,9 +2605,32 @@ impl SopEngine {
                 run_id: run_id.to_string(),
             }));
         }
-        Err(anyhow::Error::new(FinishRunError::NotFound {
-            run_id: run_id.to_string(),
-        }))
+        match self.store.load_run(run_id) {
+            Ok(Some(persisted))
+                if matches!(
+                    persisted.run.status,
+                    SopRunStatus::Completed | SopRunStatus::Failed | SopRunStatus::Cancelled
+                ) =>
+            {
+                Err(anyhow::Error::new(FinishRunError::AlreadyFinished {
+                    run_id: run_id.to_string(),
+                }))
+            }
+            Ok(_) => {
+                // `Ok(None)`: never seen. `Ok(Some(non-terminal))`: store has
+                // a live row this engine does not hold (restore-claim
+                // failure, another holder, parked snapshot not in
+                // `active_runs`). `finish_run` takes a run from the live
+                // cache; it is not the restore/claim path. Calling this
+                // `AlreadyFinished` would lie. Rehydrating here would
+                // terminal a run this instance is not executing. `NotFound`
+                // = not finishable by this engine right now.
+                Err(anyhow::Error::new(FinishRunError::NotFound {
+                    run_id: run_id.to_string(),
+                }))
+            }
+            Err(e) => Err(anyhow::Error::new(e)),
+        }
     }
 
     pub fn finish_run(
