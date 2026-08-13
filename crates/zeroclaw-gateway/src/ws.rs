@@ -119,6 +119,13 @@ fn extract_ws_token<'a>(headers: &'a HeaderMap, query_token: Option<&'a str>) ->
     None
 }
 
+fn client_offers_chat_protocol(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|protos| protos.split(',').any(|p| p.trim() == WS_PROTOCOL))
+}
+
 /// GET /ws/chat — WebSocket upgrade for agent chat
 pub async fn handle_ws_chat(
     State(state): State<AppState>,
@@ -148,11 +155,9 @@ pub async fn handle_ws_chat(
     };
 
     // Echo Sec-WebSocket-Protocol if the client requests our sub-protocol.
-    let ws = if headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|protos| protos.split(',').any(|p| p.trim() == WS_PROTOCOL))
-    {
+    // Absence is allowed: `/ws/chat` is not fail-closed on a missing token.
+    // `/ws/nodes` v2 is the opposite — it rejects a missing or v1-only offer.
+    let ws = if client_offers_chat_protocol(&headers) {
         ws.protocols([WS_PROTOCOL])
     } else {
         ws
@@ -1672,6 +1677,23 @@ mod tests {
             "zeroclaw.v1, bearer.zc_tok, other".parse().unwrap(),
         );
         assert_eq!(extract_ws_token(&headers, None), Some("zc_tok"));
+    }
+
+    #[test]
+    fn chat_ws_unaffected_by_nodes_v2_subprotocol_requirement() {
+        // `/ws/chat` still upgrades when Sec-WebSocket-Protocol is absent or
+        // carries only the nodes token. The nodes v2 handler is fail-closed;
+        // this path is not.
+        assert!(!client_offers_chat_protocol(&HeaderMap::new()));
+        let mut nodes_only = HeaderMap::new();
+        nodes_only.insert(
+            "sec-websocket-protocol",
+            "zeroclaw.nodes.v2".parse().unwrap(),
+        );
+        assert!(!client_offers_chat_protocol(&nodes_only));
+        let mut chat = HeaderMap::new();
+        chat.insert("sec-websocket-protocol", "zeroclaw.v1".parse().unwrap());
+        assert!(client_offers_chat_protocol(&chat));
     }
 
     #[test]
