@@ -642,9 +642,10 @@ enum UpdateOutcome {
 /// Classification is deliberately conservative: only a confidently permanent
 /// vendor rejection is `Permanent`. Permanence requires structured evidence
 /// from the Bot API itself — `ok: false` *and* an `error_code` on the
-/// explicit whitelist `{400, 403, 404, 410}`. Upstream #9314 treats the rest
-/// of 4xx (minus 408/429) as permanent; that is looser than this fork and
-/// would silently drop updates on retryable codes such as 425. 408, 425,
+/// explicit whitelist `{400, 403, 404, 410}`. The upstream typed-disposition
+/// port treats the rest of 4xx (minus 408/429) as permanent; that is looser
+/// than this fork and would silently drop updates on retryable codes such
+/// as 425. 408, 425,
 /// 429, any response carrying `parameters.retry_after`, 5xx, transport
 /// errors, malformed bodies, body-less non-2xx responses, and anything
 /// unrecognised stay `Transient`.
