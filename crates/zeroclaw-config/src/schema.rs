@@ -19553,6 +19553,9 @@ impl Config {
                 "{reason}"
             );
         }
+        if let Err(reason) = crate::node_allowlist::validate_config(self) {
+            validation_bail!(InvalidFormat, "allowed_tools", "{reason}");
+        }
 
         // Tunnel — OpenVPN
         if self.tunnel.tunnel_provider.trim() == "openvpn" {

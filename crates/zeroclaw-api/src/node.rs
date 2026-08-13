@@ -26,8 +26,11 @@ pub enum NodeErrorCode {
     /// `Hello.protocol_versions` had no intersection with [`SUPPORTED_NODE_V2_MINORS`].
     VersionMismatch,
     /// In-band only. HTTP admission never emits this code: a non-loopback
-    /// listen or peer is indistinguishable from a disabled surface.
+    /// peer without a verified device identity is closed after upgrade.
     LoopbackRequired,
+    /// In-band only. Unknown device, revoked device, and signature failure
+    /// share this code so responses do not leak device existence.
+    IdentityRejected,
 }
 
 impl NodeErrorCode {
@@ -37,6 +40,7 @@ impl NodeErrorCode {
             Self::ProtocolUnsupported => "protocol_unsupported",
             Self::VersionMismatch => "version_mismatch",
             Self::LoopbackRequired => "loopback_required",
+            Self::IdentityRejected => "identity_rejected",
         }
     }
 }
@@ -67,6 +71,10 @@ pub enum NodeToGateway {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_fingerprint: Option<String>,
     },
+    Auth {
+        signature: String,
+        identity_epoch: u64,
+    },
     Result {
         call_id: String,
         connection_id: String,
@@ -93,6 +101,10 @@ pub enum GatewayToNode {
         protocol_version: String,
         connection_id: String,
         generation: u64,
+    },
+    Challenge {
+        nonce: String,
+        expires_at: String,
     },
     Invoke {
         call_id: String,
@@ -186,6 +198,26 @@ mod tests {
     }
 
     #[test]
+    fn challenge_and_auth_literals() {
+        let challenge = GatewayToNode::Challenge {
+            nonce: "aa".into(),
+            expires_at: "2026-08-13T00:00:00Z".into(),
+        };
+        assert_literal(
+            &challenge,
+            r#"{"type":"challenge","nonce":"aa","expires_at":"2026-08-13T00:00:00Z"}"#,
+        );
+        let auth = NodeToGateway::Auth {
+            signature: "bb".into(),
+            identity_epoch: 1,
+        };
+        assert_literal(
+            &auth,
+            r#"{"type":"auth","signature":"bb","identity_epoch":1}"#,
+        );
+    }
+
+    #[test]
     fn hello_ack_literal() {
         let frame = GatewayToNode::HelloAck {
             protocol_version: "2.0".into(),
@@ -273,6 +305,7 @@ mod tests {
         );
         assert_literal(&NodeErrorCode::VersionMismatch, r#""version_mismatch""#);
         assert_literal(&NodeErrorCode::LoopbackRequired, r#""loopback_required""#);
+        assert_literal(&NodeErrorCode::IdentityRejected, r#""identity_rejected""#);
         let frame = GatewayToNode::Error {
             code: NodeErrorCode::VersionMismatch,
             retryable: false,
