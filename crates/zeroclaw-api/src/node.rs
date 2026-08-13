@@ -25,7 +25,8 @@ pub enum NodeErrorCode {
     ProtocolUnsupported,
     /// `Hello.protocol_versions` had no intersection with [`SUPPORTED_NODE_V2_MINORS`].
     VersionMismatch,
-    /// Peer address is not loopback. Bearer-only v2 is loopback/test only.
+    /// In-band only. HTTP admission never emits this code: a non-loopback
+    /// listen or peer is indistinguishable from a disabled surface.
     LoopbackRequired,
 }
 

@@ -1492,7 +1492,20 @@ pub async fn run_gateway(
 
     // Node registry for dynamic node discovery
     #[cfg(feature = "nodes")]
-    let node_registry = Arc::new(nodes::NodeRegistry::new(config.nodes.max_nodes));
+    let node_registry = Arc::new(
+        nodes::NodeRegistry::new(config.nodes.max_nodes).with_listen_addr(actual_addr.ip()),
+    );
+    #[cfg(feature = "nodes")]
+    if nodes::nodes_v2_non_loopback_listen_warning(config.nodes.enabled, actual_addr.ip()).is_some()
+    {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({"bind_addr": actual_addr.to_string()})),
+            "nodes v2 requires a loopback listen address until device identity lands"
+        );
+    }
     #[cfg(feature = "nodes")]
     let mdns_config_state = Arc::clone(&config_state);
     #[cfg(feature = "nodes")]
