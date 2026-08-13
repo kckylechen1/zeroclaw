@@ -18,7 +18,7 @@ use crate::mcp_era::{
     CreateTask, DiscoverNegotiateError, MCP_MODERN_PROTOCOL_VERSION, McpInputRequiredError,
     McpResultKind, PeerEra, PeerProtocol, ResultTypeError, TaskPollState, VersionQuality,
     attach_input_retry, attach_request_meta, cache_hints_from_result, classify_mcp_result,
-    is_recognized_modern_error, local_cache_ttl, parse_task_poll_result,
+    is_recognized_modern_error, local_cache_ttl, parse_task_poll_result, redact_known_task_id,
     versions_from_unsupported_error,
 };
 use crate::mcp_prompt::{McpGetPromptResult, McpPromptsListResult};
@@ -606,6 +606,39 @@ impl Drop for WriteBarrierArm<'_> {
     }
 }
 
+/// Discards an in-process extension handle if the poll future is dropped
+/// (cancellation) before a terminal or model-visible pending outcome.
+struct ExtensionHandleGuard {
+    inner: Arc<Mutex<McpServerInner>>,
+    handle: Option<String>,
+}
+
+impl ExtensionHandleGuard {
+    fn new(inner: Arc<Mutex<McpServerInner>>, handle: Option<String>) -> Self {
+        Self { inner, handle }
+    }
+
+    fn defuse(&mut self) -> Option<String> {
+        self.handle.take()
+    }
+}
+
+impl Drop for ExtensionHandleGuard {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        if let Ok(mut inner) = self.inner.try_lock() {
+            inner.tasks.discard(&handle);
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        zeroclaw_spawn::spawn!(async move {
+            inner.lock().await.tasks.discard(&handle);
+        });
+    }
+}
+
 // ── McpServer ──────────────────────────────────────────────────────────────
 
 /// A live connection to one MCP server (any transport).
@@ -1037,7 +1070,24 @@ impl McpServer {
         timeout_secs: u64,
         operation: &str,
     ) -> Result<crate::mcp_protocol::JsonRpcResponse> {
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        self.dispatch_rpc_until(
+            rpc_method,
+            params,
+            Instant::now() + Duration::from_secs(timeout_secs),
+            timeout_secs,
+            operation,
+        )
+        .await
+    }
+
+    async fn dispatch_rpc_until(
+        &self,
+        rpc_method: &str,
+        params: serde_json::Value,
+        deadline: Instant,
+        timeout_secs: u64,
+        operation: &str,
+    ) -> Result<crate::mcp_protocol::JsonRpcResponse> {
         let mut pre_write_retries = 0;
 
         loop {
@@ -1300,14 +1350,17 @@ impl McpServer {
                     .mint_extension(method, params.clone(), task.task_id.clone())?;
             (pending, timeout_secs)
         };
+        let mut guard =
+            ExtensionHandleGuard::new(Arc::clone(&self.inner), Some(pending.handle.clone()));
         let operation = format!("`{method}` task poll");
         self.poll_extension_task(
             &task.task_id,
             method,
             params,
-            Some(pending.handle),
+            &mut guard,
             timeout_secs,
             &operation,
+            task.poll_interval_ms,
         )
         .await
     }
@@ -1317,53 +1370,45 @@ impl McpServer {
         task_id: &str,
         origin_method: &str,
         origin_params: serde_json::Value,
-        pending_handle: Option<String>,
+        guard: &mut ExtensionHandleGuard,
         timeout_secs: u64,
         operation: &str,
+        initial_poll_interval_ms: Option<u64>,
     ) -> Result<serde_json::Value> {
         let wall = Duration::from_secs(timeout_secs).min(MAX_TASK_POLL_WALL);
         let deadline = Instant::now() + wall;
+        if let Some(delay) = poll_delay(initial_poll_interval_ms) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(TaskHandleError::PollLimitExceeded.into());
+            }
+            tokio::time::sleep(delay.min(remaining)).await;
+        }
         for poll in 0..MAX_TASK_POLLS {
-            if Instant::now() >= deadline {
-                if let Some(handle) = pending_handle.as_deref() {
-                    self.inner.lock().await.tasks.discard(handle);
-                }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return Err(TaskHandleError::PollLimitExceeded.into());
             }
             let resp = self
-                .dispatch_rpc(
+                .dispatch_rpc_until(
                     "tasks/get",
                     json!({ "taskId": task_id }),
+                    deadline,
                     timeout_secs,
                     operation,
                 )
-                .await;
-            let resp = match resp {
-                Ok(resp) => resp,
-                Err(err) => {
-                    if let Some(handle) = pending_handle.as_deref() {
-                        self.inner.lock().await.tasks.discard(handle);
-                    }
-                    return Err(err);
-                }
-            };
+                .await?;
             if let Some(err) = resp.error {
-                if let Some(handle) = pending_handle.as_deref() {
-                    self.inner.lock().await.tasks.discard(handle);
-                }
-                bail!(
-                    "MCP `tasks/get` error {}: {}",
-                    err.code,
-                    zeroclaw_providers::sanitize_api_error(&err.message)
+                let message = redact_known_task_id(
+                    &zeroclaw_providers::sanitize_api_error(&err.message),
+                    task_id,
                 );
+                bail!("MCP `tasks/get` error {}: {message}", err.code);
             }
             let result = resp.result.unwrap_or(serde_json::Value::Null);
             let state = match parse_task_poll_result(task_id, &result) {
                 Ok(state) => state,
                 Err(err) => {
-                    if let Some(handle) = pending_handle.as_deref() {
-                        self.inner.lock().await.tasks.discard(handle);
-                    }
                     return Err(anyhow::Error::msg(format!(
                         "MCP `tasks/get` resultType rejected: {err}"
                     )));
@@ -1383,39 +1428,22 @@ impl McpServer {
                     }
                 }
                 TaskPollState::Completed(inner) => {
-                    if let Some(handle) = pending_handle.as_deref() {
-                        self.inner.lock().await.tasks.discard(handle);
+                    if let Some(handle) = guard.defuse() {
+                        self.inner.lock().await.tasks.discard(&handle);
                     }
                     return self
                         .consume_origin_result(origin_method, origin_params, inner)
                         .await;
                 }
                 TaskPollState::Failed { message } => {
-                    if let Some(handle) = pending_handle.as_deref() {
-                        self.inner.lock().await.tasks.discard(handle);
-                    }
                     return Err(TaskHandleError::TaskFailed { message }.into());
                 }
                 TaskPollState::Cancelled => {
-                    if let Some(handle) = pending_handle.as_deref() {
-                        self.inner.lock().await.tasks.discard(handle);
-                    }
                     return Err(TaskHandleError::TaskCancelled.into());
                 }
                 TaskPollState::InputRequired(input_required) => {
-                    let pending = match pending_handle {
-                        Some(handle) => {
-                            let mut inner = self.inner.lock().await;
-                            inner
-                                .tasks
-                                .bind_input_required(&handle, input_required.clone())?;
-                            McpTaskPending {
-                                handle,
-                                method: origin_method.to_string(),
-                                input_required,
-                                ttl_secs: inner.tasks.ttl_secs(),
-                            }
-                        }
+                    let handle = match guard.defuse() {
+                        Some(handle) => handle,
                         None => {
                             let mut inner = self.inner.lock().await;
                             let pending = inner.tasks.mint_extension(
@@ -1423,23 +1451,24 @@ impl McpServer {
                                 origin_params,
                                 task_id.to_string(),
                             )?;
-                            inner
-                                .tasks
-                                .bind_input_required(&pending.handle, input_required.clone())?;
-                            McpTaskPending {
-                                handle: pending.handle,
-                                method: origin_method.to_string(),
-                                input_required,
-                                ttl_secs: pending.ttl_secs,
-                            }
+                            pending.handle
                         }
                     };
-                    return Err(anyhow::Error::new(pending));
+                    let ttl_secs = {
+                        let mut inner = self.inner.lock().await;
+                        inner
+                            .tasks
+                            .bind_input_required(&handle, input_required.clone())?;
+                        inner.tasks.ttl_secs()
+                    };
+                    return Err(anyhow::Error::new(McpTaskPending {
+                        handle,
+                        method: origin_method.to_string(),
+                        input_required,
+                        ttl_secs,
+                    }));
                 }
             }
-        }
-        if let Some(handle) = pending_handle.as_deref() {
-            self.inner.lock().await.tasks.discard(handle);
         }
         Err(TaskHandleError::PollLimitExceeded.into())
     }
@@ -1447,7 +1476,7 @@ impl McpServer {
     async fn consume_origin_result(
         &self,
         method: &str,
-        params: serde_json::Value,
+        _params: serde_json::Value,
         result: serde_json::Value,
     ) -> Result<serde_json::Value> {
         let era = {
@@ -1456,20 +1485,7 @@ impl McpServer {
         };
         match classify_mcp_result(era, method, &result) {
             Ok(McpResultKind::Complete) => Ok(result),
-            Ok(McpResultKind::InputRequired(input_required)) => {
-                if method != "tools/call" {
-                    return Err(McpInputRequiredError {
-                        method: method.to_string(),
-                        input_required,
-                    }
-                    .into());
-                }
-                let pending: McpTaskPending = {
-                    let mut inner = self.inner.lock().await;
-                    inner.tasks.mint(method, params, input_required)?
-                };
-                Err(anyhow::Error::new(pending))
-            }
+            Ok(McpResultKind::InputRequired(_)) => Err(ResultTypeError::NestedInputRequired.into()),
             Ok(McpResultKind::Task(_)) => Err(ResultTypeError::NestedTask.into()),
             Err(err) => Err(anyhow::Error::msg(format!(
                 "MCP `{method}` resultType rejected: {err}"
@@ -1505,22 +1521,24 @@ impl McpServer {
                 .dispatch_rpc("tasks/update", update_params, timeout_secs, operation)
                 .await?;
             if let Some(err) = resp.error {
-                bail!(
-                    "MCP `tasks/update` error {}: {}",
-                    err.code,
-                    zeroclaw_providers::sanitize_api_error(&err.message)
+                let message = redact_known_task_id(
+                    &zeroclaw_providers::sanitize_api_error(&err.message),
+                    &task_id,
                 );
+                bail!("MCP `tasks/update` error {}: {message}", err.code);
             }
             let ack = resp.result.unwrap_or(serde_json::Value::Null);
             require_complete_result(PeerEra::Modern, "tasks/update", ack)?;
+            let mut guard = ExtensionHandleGuard::new(Arc::clone(&self.inner), None);
             return self
                 .poll_extension_task(
                     &task_id,
                     &redeemed.method,
                     original_params,
-                    None,
+                    &mut guard,
                     timeout_secs,
                     operation,
+                    None,
                 )
                 .await;
         }
@@ -5754,6 +5772,449 @@ done
             .await
             .expect("continue via tasks/update");
         assert_eq!(result, json!({"resultType": "complete", "ok": true}));
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        server.verify().await;
+    }
+
+    fn http_server_config_with_timeout(uri: String, timeout_secs: u64) -> McpServerConfig {
+        McpServerConfig {
+            name: "remote".into(),
+            transport: McpTransport::Http,
+            url: Some(uri),
+            tool_timeout_secs: Some(timeout_secs),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn modern_task_wall_budget_caps_slow_get() {
+        use crate::mcp_task::MAX_TASK_POLL_WALL;
+        use std::time::Instant as StdInstant;
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_create_task_result("srv-task-slow", 0)
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/get"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_secs(45))
+                    .set_body_json(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": sample_task_get_result(
+                            "srv-task-slow",
+                            "completed",
+                            json!({"result": {"resultType": "complete", "ok": true}})
+                        )
+                    }))
+            })
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config_with_timeout(server.uri(), 60))
+            .await
+            .expect("modern connect");
+        let started = StdInstant::now();
+        let err = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("slow get must not wait the tool timeout");
+        let elapsed = started.elapsed();
+        let msg = format!("{err:#}");
+        assert!(
+            elapsed <= MAX_TASK_POLL_WALL + std::time::Duration::from_secs(5),
+            "wall budget not enforced: elapsed {elapsed:?} msg {msg}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "used full tool timeout: {elapsed:?}"
+        );
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn modern_task_completed_nested_input_required_fails_closed() {
+        use crate::mcp_task::TASK_HANDLE_ARG;
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_create_task_result("srv-task-nested-ir", 0)
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/get"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_task_get_result(
+                        "srv-task-nested-ir",
+                        "completed",
+                        json!({
+                            "result": {
+                                "resultType": "input_required",
+                                "requestState": "replay-me"
+                            }
+                        })
+                    )
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("nested input_required");
+        assert!(
+            err.downcast_ref::<McpTaskPending>().is_none(),
+            "must not mint an MRTR handle"
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("input_required") || msg.contains("nested"),
+            "got: {msg}"
+        );
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        let continue_err = mcp
+            .call_tool(
+                "echo",
+                json!({ TASK_HANDLE_ARG: "zc-mrtr-00000000000000000000000000000000" }),
+            )
+            .await
+            .expect_err("no minted handle to continue");
+        let continue_msg = format!("{continue_err:#}");
+        assert!(continue_msg.contains("unknown"), "got: {continue_msg}");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_task_honours_create_poll_interval_capped() {
+        use crate::mcp_task::MAX_POLL_INTERVAL;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+        use std::time::Instant as StdInstant;
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let first_get = Arc::new(Mutex::new(None));
+        let first_get_for_mock = Arc::clone(&first_get);
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_create_task_result("srv-task-interval", 10_000)
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/get"})))
+            .respond_with(move |request: &wiremock::Request| {
+                let mut slot = first_get_for_mock.lock().expect("lock");
+                if slot.is_none() {
+                    *slot = Some(StdInstant::now());
+                }
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_task_get_result(
+                        "srv-task-interval",
+                        "completed",
+                        json!({"result": {"resultType": "complete", "ok": true}})
+                    )
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let started = StdInstant::now();
+        let result = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect("polled after create interval");
+        assert_eq!(result["ok"], true);
+        let first = first_get.lock().expect("lock").expect("tasks/get ran");
+        let waited = first.saturating_duration_since(started);
+        assert!(
+            waited >= MAX_POLL_INTERVAL - std::time::Duration::from_millis(400),
+            "create pollIntervalMs ignored: waited {waited:?}"
+        );
+        assert!(
+            waited <= MAX_POLL_INTERVAL + std::time::Duration::from_secs(1),
+            "create pollIntervalMs not capped: waited {waited:?}"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_task_get_error_redacts_task_id() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_create_task_result("srv-secret-id", 0)
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/get"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32000,
+                        "message": "no such task srv-secret-id"
+                    }
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("get error");
+        let msg = format!("{err:#}");
+        assert!(!msg.contains("srv-secret-id"), "taskId leaked: {msg}");
+        assert!(msg.contains("[task-id]"), "got: {msg}");
+        assert!(mcp.inner.lock().await.tasks.is_empty());
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn modern_task_cancel_discards_handle() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_create_task_result("srv-task-cancel", 0)
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/get"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_secs(30))
+                    .set_body_json(json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": sample_task_get_result(
+                            "srv-task-cancel",
+                            "working",
+                            json!({})
+                        )
+                    }))
+            })
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let call_server = mcp.clone();
+        let call =
+            zeroclaw_spawn::spawn!(async move { call_server.call_tool("echo", json!({})).await });
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let received = server.received_requests().await.expect("requests");
+                if received.iter().any(|req| {
+                    request_json(req).get("method").and_then(|m| m.as_str()) == Some("tasks/get")
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("tasks/get did not start");
+        assert_eq!(mcp.inner.lock().await.tasks.len(), 1);
+        call.abort();
+        assert!(
+            call.await
+                .expect_err("call must be cancelled")
+                .is_cancelled()
+        );
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if mcp.inner.lock().await.tasks.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled poll left a zombie handle");
+    }
+
+    #[tokio::test]
+    async fn modern_task_get_nested_task_result_type_fails_closed() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_modern_discover(&server).await;
+        mount_modern_tools_list(&server).await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tools/call"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": sample_create_task_result("srv-task-nested", 0)
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "tasks/get"})))
+            .respond_with(|request: &wiremock::Request| {
+                let id = request_json(request)
+                    .get("id")
+                    .cloned()
+                    .expect("request id");
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "task",
+                        "taskId": "srv-task-nested",
+                        "status": "working",
+                        "createdAt": "2026-07-28T00:00:00Z",
+                        "lastUpdatedAt": "2026-07-28T00:00:02Z",
+                        "ttlMs": 60_000,
+                        "pollIntervalMs": 0
+                    }
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mcp = McpServer::connect(http_server_config(server.uri()))
+            .await
+            .expect("modern connect");
+        let err = mcp
+            .call_tool("echo", json!({}))
+            .await
+            .expect_err("nested task on get");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("resultType") || msg.contains("task"),
+            "got: {msg}"
+        );
         assert!(mcp.inner.lock().await.tasks.is_empty());
         server.verify().await;
     }

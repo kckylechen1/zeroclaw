@@ -567,6 +567,7 @@ pub enum ResultTypeError {
     MalformedTask,
     TaskIdTooLarge,
     NestedTask,
+    NestedInputRequired,
 }
 
 impl std::fmt::Display for ResultTypeError {
@@ -607,6 +608,10 @@ impl std::fmt::Display for ResultTypeError {
             Self::NestedTask => write!(
                 f,
                 "MCP task completed with nested resultType={RESULT_TYPE_TASK}; refused"
+            ),
+            Self::NestedInputRequired => write!(
+                f,
+                "MCP task completed with nested resultType={RESULT_TYPE_INPUT_REQUIRED}; refused"
             ),
         }
     }
@@ -854,10 +859,22 @@ pub fn parse_task_poll_result(
                 _ => return Err(ResultTypeError::MalformedTask),
             };
             Ok(TaskPollState::Failed {
-                message: zeroclaw_providers::sanitize_api_error(message),
+                message: redact_known_task_id(
+                    &zeroclaw_providers::sanitize_api_error(message),
+                    expected_task_id,
+                ),
             })
         }
     }
+}
+
+/// Replace one stored server `taskId` after `sanitize_api_error`. Only the
+/// exact in-process value is redacted; nothing is guessed from shape.
+pub fn redact_known_task_id(text: &str, task_id: &str) -> String {
+    if task_id.is_empty() {
+        return text.to_string();
+    }
+    text.replace(task_id, "[task-id]")
 }
 
 /// Attach MRTR retry fields to the original JSON-RPC params.
@@ -1621,5 +1638,67 @@ mod tests {
         assert_eq!(params["_meta"], json!({"keep": true}));
         assert_eq!(params["requestState"], "blob");
         assert!(params.get("inputResponses").is_none());
+    }
+
+    #[test]
+    fn parse_task_poll_rejects_nested_task_result_type() {
+        let err = parse_task_poll_result(
+            "abc",
+            &json!({
+                "resultType": RESULT_TYPE_TASK,
+                "taskId": "abc",
+                "status": "working",
+                "createdAt": "2026-07-28T00:00:00Z",
+                "lastUpdatedAt": "2026-07-28T00:00:02Z",
+                "ttlMs": 60_000
+            }),
+        )
+        .expect_err("nested task");
+        assert!(matches!(err, ResultTypeError::InvalidType { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("unrecognized MCP resultType"), "got: {msg}");
+    }
+
+    #[test]
+    fn redact_known_task_id_replaces_only_exact_value() {
+        let id = "job-786512e2-9e0d-44bd-8f29-789f320fe840";
+        let sanitized = zeroclaw_providers::sanitize_api_error(&format!("failed for {id}"));
+        assert!(
+            sanitized.contains(id),
+            "fixture id must survive sanitize: {sanitized}"
+        );
+        let redacted = redact_known_task_id(&sanitized, id);
+        assert!(!redacted.contains(id), "id leaked: {redacted}");
+        assert!(redacted.contains("[task-id]"), "got: {redacted}");
+        assert_eq!(
+            redact_known_task_id("no identifier here", id),
+            "no identifier here"
+        );
+        assert_eq!(redact_known_task_id("x", ""), "x");
+    }
+
+    #[test]
+    fn failed_task_error_message_redacts_task_id() {
+        let id = "srv-leaked-id";
+        let state = parse_task_poll_result(
+            id,
+            &json!({
+                "resultType": RESULT_TYPE_COMPLETE,
+                "taskId": id,
+                "status": "failed",
+                "createdAt": "2026-07-28T00:00:00Z",
+                "lastUpdatedAt": "2026-07-28T00:00:02Z",
+                "ttlMs": 1,
+                "error": {"code": -32000, "message": format!("boom {id}")}
+            }),
+        )
+        .expect("failed");
+        match state {
+            TaskPollState::Failed { message } => {
+                assert!(!message.contains(id), "id leaked: {message}");
+                assert!(message.contains("[task-id]"), "got: {message}");
+            }
+            other => panic!("expected failed, got {other:?}"),
+        }
     }
 }
