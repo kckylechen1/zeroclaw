@@ -322,6 +322,230 @@ fn is_declared_owner(ingress: &CompanionIngress, owner: &CompanionOwnerGate) -> 
     owner.identities.is_empty() && owner.trust_local && ingress.is_trusted_local()
 }
 
+/// Where a companion-capture turn arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureOrigin {
+    /// Messaging-channel turn.
+    Channel,
+    /// Gateway WebSocket turn.
+    Gateway,
+    /// Trusted CLI / stdio / pairing entry.
+    TrustedLocal,
+}
+
+/// Typed outcome of one companion-capture close-out.
+///
+/// Every variant is a durable receipt row. An empty store must not mean
+/// "capture never ran."
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureOutcome {
+    /// Capture ran; candidate evaluation is not implemented on this slice.
+    NotEvaluated,
+    /// Evaluation ran and found nothing worth keeping.
+    NoCandidate,
+    /// A candidate was refused by policy before any local write.
+    CandidateRejectedByPolicy,
+    /// The local write of the decided outcome failed.
+    LocalWriteFailed,
+    /// A candidate was written to the companion store.
+    CandidatePersistedLocal,
+}
+
+impl CaptureOutcome {
+    /// Stable storage / log token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotEvaluated => "not_evaluated",
+            Self::NoCandidate => "no_candidate",
+            Self::CandidateRejectedByPolicy => "candidate_rejected_by_policy",
+            Self::LocalWriteFailed => "local_write_failed",
+            Self::CandidatePersistedLocal => "candidate_persisted_local",
+        }
+    }
+}
+
+impl std::fmt::Display for CaptureOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Turn-scoped input to companion capture.
+///
+/// Construct only through the named constructors. Those are the production
+/// minting points for [`CompanionIngress`]: channel/gateway identities use
+/// [`CompanionIngress::from_channel_identity`]; trusted CLI uses
+/// [`CompanionIngress::trusted_local_entry`]. Owner authority is classified
+/// here via [`classify_companion_authority`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CaptureContext {
+    agent_identity_id: AgentIdentityId,
+    principal: CompanionPrincipal,
+    session_id: String,
+    turn_id: String,
+    authority_class: AuthorityClass,
+    origin: CaptureOrigin,
+    partition: SourcePartition,
+}
+
+impl CaptureContext {
+    /// Messaging-channel ingress. `trusted_local` is never set.
+    #[must_use]
+    pub fn from_channel_identity(
+        agent_identity_id: AgentIdentityId,
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+        identity: IngressIdentity,
+        owner: &CompanionOwnerGate,
+    ) -> Self {
+        Self::from_ingress(
+            agent_identity_id,
+            session_id,
+            turn_id,
+            CompanionIngress::from_channel_identity(identity),
+            owner,
+            CaptureOrigin::Channel,
+            SourcePartition::UserModel,
+        )
+    }
+
+    /// Gateway WebSocket ingress. `trusted_local` is never set.
+    #[must_use]
+    pub fn from_gateway_identity(
+        agent_identity_id: AgentIdentityId,
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+        identity: IngressIdentity,
+        owner: &CompanionOwnerGate,
+    ) -> Self {
+        Self::from_ingress(
+            agent_identity_id,
+            session_id,
+            turn_id,
+            CompanionIngress::from_channel_identity(identity),
+            owner,
+            CaptureOrigin::Gateway,
+            SourcePartition::UserModel,
+        )
+    }
+
+    /// Trusted CLI / stdio / pairing ingress. Production may call this only
+    /// from the companion-capture trusted entry path.
+    #[must_use]
+    pub fn from_trusted_local(
+        agent_identity_id: AgentIdentityId,
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+        owner: &CompanionOwnerGate,
+    ) -> Self {
+        Self::from_ingress(
+            agent_identity_id,
+            session_id,
+            turn_id,
+            CompanionIngress::trusted_local_entry(),
+            owner,
+            CaptureOrigin::TrustedLocal,
+            SourcePartition::UserModel,
+        )
+    }
+
+    /// Override the target partition. Capture receipts for
+    /// [`SourcePartition::PrivateDyad`] never enter the ordinary outbox.
+    #[must_use]
+    pub fn with_partition(mut self, partition: SourcePartition) -> Self {
+        self.partition = partition;
+        self
+    }
+
+    fn from_ingress(
+        agent_identity_id: AgentIdentityId,
+        session_id: impl Into<String>,
+        turn_id: impl Into<String>,
+        ingress: CompanionIngress,
+        owner: &CompanionOwnerGate,
+        origin: CaptureOrigin,
+        partition: SourcePartition,
+    ) -> Self {
+        let authority_class = classify_companion_authority(&ingress, owner);
+        let principal = if authority_class == AuthorityClass::OwnerAuthored {
+            owner
+                .principal()
+                .unwrap_or_else(|| CompanionPrincipal::new(PrincipalId::SHARED_OPERATOR))
+        } else {
+            CompanionPrincipal::new(PrincipalId::SHARED_OPERATOR)
+        };
+        Self {
+            agent_identity_id,
+            principal,
+            session_id: session_id.into(),
+            turn_id: turn_id.into(),
+            authority_class,
+            origin,
+            partition,
+        }
+    }
+
+    #[must_use]
+    pub fn agent_identity_id(&self) -> &AgentIdentityId {
+        &self.agent_identity_id
+    }
+
+    #[must_use]
+    pub fn principal(&self) -> &CompanionPrincipal {
+        &self.principal
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
+    }
+
+    #[must_use]
+    pub fn authority_class(&self) -> AuthorityClass {
+        self.authority_class
+    }
+
+    #[must_use]
+    pub fn origin(&self) -> CaptureOrigin {
+        self.origin
+    }
+
+    #[must_use]
+    pub fn partition(&self) -> SourcePartition {
+        self.partition
+    }
+}
+
+/// Durable (or degraded) proof that capture ran for one turn.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureReceipt {
+    pub outcome: CaptureOutcome,
+    /// Outbox event id when the partition admits an ordinary outbox row.
+    pub event_id: Option<String>,
+    /// `memories.revision` when the receipt row landed.
+    pub local_revision: Option<i64>,
+    /// RFC3339 timestamp stamped at persist time (or degrade time).
+    pub persisted_at: String,
+}
+
+impl CaptureReceipt {
+    /// True when a `memories` row landed. A `local_write_failed` outcome can
+    /// still be durable; only a missing revision means the store refused the
+    /// receipt itself.
+    #[must_use]
+    pub fn is_durable(&self) -> bool {
+        self.local_revision.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +774,80 @@ mod tests {
         assert_eq!(
             ingress.identity().map(IngressIdentity::as_str),
             Some("wechat:alice")
+        );
+    }
+
+    #[test]
+    fn capture_outcome_serializes_closed_literals() {
+        let cases = [
+            (CaptureOutcome::NotEvaluated, "not_evaluated"),
+            (CaptureOutcome::NoCandidate, "no_candidate"),
+            (
+                CaptureOutcome::CandidateRejectedByPolicy,
+                "candidate_rejected_by_policy",
+            ),
+            (CaptureOutcome::LocalWriteFailed, "local_write_failed"),
+            (
+                CaptureOutcome::CandidatePersistedLocal,
+                "candidate_persisted_local",
+            ),
+        ];
+        for (value, literal) in cases {
+            let json = serde_json::to_string(&value).expect("serialize");
+            assert_eq!(json, format!("\"{literal}\""));
+            let back: CaptureOutcome = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, value);
+            assert_eq!(value.as_str(), literal);
+        }
+    }
+
+    #[test]
+    fn capture_context_from_channel_classifies_owner_and_never_trusts_local() {
+        let owner = gate_with(&["wechat:alice"], false);
+        let ctx = CaptureContext::from_channel_identity(
+            AgentIdentityId::from_opaque("agent-1"),
+            "session-1",
+            "turn-1",
+            IngressIdentity::new("wechat:alice"),
+            &owner,
+        );
+        assert_eq!(ctx.authority_class(), AuthorityClass::OwnerAuthored);
+        assert_eq!(ctx.principal().id.as_str(), "owner-principal");
+        assert_eq!(ctx.origin(), CaptureOrigin::Channel);
+        assert_eq!(ctx.partition(), SourcePartition::UserModel);
+        assert_eq!(ctx.session_id(), "session-1");
+        assert_eq!(ctx.turn_id(), "turn-1");
+    }
+
+    #[test]
+    fn capture_context_from_gateway_miss_is_shared_operator() {
+        let owner = gate_with(&["wechat:alice"], false);
+        let ctx = CaptureContext::from_gateway_identity(
+            AgentIdentityId::from_opaque("agent-1"),
+            "session-1",
+            "turn-1",
+            IngressIdentity::new("wss:stranger"),
+            &owner,
+        );
+        assert_eq!(ctx.authority_class(), AuthorityClass::SharedOperator);
+        assert_eq!(ctx.principal().id.as_str(), PrincipalId::SHARED_OPERATOR);
+        assert_eq!(ctx.origin(), CaptureOrigin::Gateway);
+    }
+
+    #[test]
+    fn capture_context_trusted_local_is_the_only_trusted_entry() {
+        let owner = gate_with(&[], true);
+        let ctx = CaptureContext::from_trusted_local(
+            AgentIdentityId::from_opaque("agent-1"),
+            "session-1",
+            "turn-1",
+            &owner,
+        );
+        assert_eq!(ctx.authority_class(), AuthorityClass::OwnerAuthored);
+        assert_eq!(ctx.origin(), CaptureOrigin::TrustedLocal);
+        assert_eq!(
+            ctx.with_partition(SourcePartition::PrivateDyad).partition(),
+            SourcePartition::PrivateDyad
         );
     }
 }

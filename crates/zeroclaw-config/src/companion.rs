@@ -2,7 +2,9 @@
 //!
 //! `[companion_memory].enable` defaults to false. The store file is
 //! `{store_dir}/companion-memory.db`, and `store_dir` defaults to
-//! `{data_dir}/companion`. Capture and domain logic live in later slices.
+//! `{data_dir}/companion`. Agent identity is a mint-once alias→UUID map at
+//! `{store_dir}/agent-identity.json`. Renaming an agent alias mints a new
+//! UUID unless the operator copies the old UUID onto the new key.
 //!
 //! `[companion_memory.owner]` declares an opaque `principal_id` plus an
 //! explicit ingress-identity list. A list hit is the owner. Everything else
@@ -21,6 +23,8 @@ use zeroclaw_macros::Configurable;
 pub const COMPANION_STORE_DIR_NAME: &str = "companion";
 /// SQLite filename inside the companion store directory.
 pub const COMPANION_MEMORY_DB_FILE: &str = "companion-memory.db";
+/// Mint-once alias→UUID map beside the companion database.
+pub const COMPANION_AGENT_IDENTITY_FILE: &str = "agent-identity.json";
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -72,6 +76,13 @@ impl CompanionMemoryConfig {
     pub fn db_path(&self, data_dir: &Path) -> PathBuf {
         self.resolved_store_dir(data_dir)
             .join(COMPANION_MEMORY_DB_FILE)
+    }
+
+    /// Full path of the mint-once alias→UUID map.
+    #[must_use]
+    pub fn agent_identity_path(&self, data_dir: &Path) -> PathBuf {
+        self.resolved_store_dir(data_dir)
+            .join(COMPANION_AGENT_IDENTITY_FILE)
     }
 
     /// # Errors
@@ -369,6 +380,10 @@ enable = true
         assert_eq!(
             cfg.companion_memory.db_path(data),
             data.join("companion").join("companion-memory.db")
+        );
+        assert_eq!(
+            cfg.companion_memory.agent_identity_path(data),
+            data.join("companion").join("agent-identity.json")
         );
 
         let relative: CompanionMemoryConfig = toml::from_str(

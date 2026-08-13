@@ -22,10 +22,20 @@ but "which surface owns this data, and how long does it live?"
 | Media attachments | Channel/gateway media pipeline and `MediaAttachment` | Inbound payload by default; persistence depends on the receiving path | Raw bytes should stay bounded and path-validated. Store summaries or references deliberately rather than silently copying media into memory. |
 | Logs and observer events | `zeroclaw-log`, `ObserverEvent`, runtime trace | Optional runtime trace and live observers | Logs are evidence and diagnostics, not source-of-truth memory. Scrub or bound user/tool payloads before logging. |
 | Cost and usage records | Cost tracker and provider usage events | Cost ledger when enabled | Usage records describe model calls. They should not carry prompt bodies, tool outputs, or memory contents. |
+| Companion agent identity | `{companion_store_dir}/agent-identity.json` | Durable mint-once alias→UUID map | First sight of an alias mints a UUID and never rewrites that key. Renaming an `[agents.<alias>]` entry mints a new identity unless the operator copies the old UUID onto the new alias key before the new alias is captured. |
+| Companion capture receipts | Companion PortableKernel `memories` rows | Durable local receipt, including negative outcomes | Capture runs at turn settlement, before the outcome is transmitted. A failed delivery does not roll the receipt back. |
 
 This table complements [Runtime state and persistence](./runtime-state-and-persistence.md).
 That page says where state lives; this page says how user-facing payloads move
 through memory, history, tools, files, media, and provider requests.
+
+Companion receipts stamp `agent_identity_id` from
+`{companion_store_dir}/agent-identity.json`, never from the alias string. The
+file is host-owned so an operator can edit it: a rename of `[agents.<alias>]`
+defaults to a new UUID, and continuing the old identity is a manual copy of
+the existing UUID onto the new alias key before that alias is captured. If
+the map cannot be written, that turn skips the receipt rather than persisting
+a non-UUID.
 
 ## Long-term memory
 

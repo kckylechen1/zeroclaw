@@ -18,6 +18,15 @@ mod stub;
 #[cfg(not(feature = "tachi"))]
 pub use stub::CompanionStore;
 
+mod capture;
+mod identity;
+pub use capture::{
+    CompanionCapture, capture_channel_turn, capture_gateway_turn, capture_turn_if_present,
+};
+pub use identity::{
+    peek as peek_agent_identity, resolve_or_mint as resolve_or_mint_agent_identity,
+};
+
 /// Construct the companion store from config.
 ///
 /// Returns `Ok(None)` when `[companion_memory].enable` is false, or when this
