@@ -554,6 +554,9 @@ jobs:
           if [ "$LEG" = "channels" ]; then
             FEATURE_ARGS="--features zeroclaw-channels/heavy-tests"
           fi
+          if [ "$LEG" = "runtime" ]; then
+            FEATURE_ARGS="--features zeroclaw-runtime/heavy-tests"
+          fi
           echo "==> leg $LEG: cargo nextest run --locked $PKGS $FEATURE_ARGS"
           cargo nextest run --locked $PKGS $FEATURE_ARGS
       # The parallelism regression gate covers zeroclaw-runtime and

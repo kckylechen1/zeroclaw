@@ -344,5 +344,6 @@ pub use super::turn::{
     scrub_credentials,
 };
 
-#[cfg(test)]
+// Heavy suite gated so lib-test iteration does not pay 13.9k lines; CI runtime leg enables it.
+#[cfg(all(test, feature = "heavy-tests"))]
 mod tests;

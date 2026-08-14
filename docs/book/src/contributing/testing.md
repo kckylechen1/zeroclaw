@@ -31,6 +31,7 @@ Plus two non-test directories:
 cargo test                                  # unit + component + integration + system
 cargo test --lib                            # unit only
 cargo test -p zeroclaw-channels --lib --features heavy-tests  # full channels unit suite
+cargo test -p zeroclaw-runtime --lib --features heavy-tests   # full runtime unit suite
 cargo test --test component                 # component only
 cargo test --test integration               # integration only
 cargo test --test system                    # system only
