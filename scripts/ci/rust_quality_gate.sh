@@ -18,11 +18,11 @@ if [ "$MODE" = "strict" ]; then
     echo "==> rust quality: cargo clippy --locked --workspace --exclude zeroclaw-desktop --all-targets --features ci-all -- -D warnings"
     cargo clippy --locked "${CLIPPY_WORKSPACE_ARGS[@]}" --features ci-all -- -D warnings
 else
-    # Local `--correctness` path: deny `clippy::correctness` only on the
-    # default-feature surface. Fast local feedback; full-surface validation
-    # runs via `--strict` or in CI.
-    echo "==> rust quality: cargo clippy --locked --workspace --exclude zeroclaw-desktop --all-targets -- -D clippy::correctness"
-    cargo clippy --locked "${CLIPPY_WORKSPACE_ARGS[@]}" -- -D clippy::correctness
+    # Local `--correctness` path: deny `clippy::correctness` on the
+    # default-feature surface plus the gated channels heavy-tests suite.
+    # Full-surface validation runs via `--strict` or in CI.
+    echo "==> rust quality: cargo clippy --locked --workspace --exclude zeroclaw-desktop --all-targets --features zeroclaw-channels/heavy-tests -- -D clippy::correctness"
+    cargo clippy --locked "${CLIPPY_WORKSPACE_ARGS[@]}" --features zeroclaw-channels/heavy-tests -- -D clippy::correctness
 fi
 
 echo "==> rust quality: provider dispatch gate (no direct ModelProvider method calls outside ProviderDispatch)"

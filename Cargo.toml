@@ -442,6 +442,7 @@ ci-all = [
     "browser-native", "probe",
     "plugins-wasm", "plugins-wasm-cranelift",
     "webauthn", "memory-postgres",
+    "zeroclaw-channels/heavy-tests",
 ]
 
 # Tuned for a 1200+ dependency tree where target directories, not compile time,
