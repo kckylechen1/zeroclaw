@@ -16876,13 +16876,12 @@ async fn announcement_bracket_hands_the_claim_back_when_the_splice_finds_no_user
 /// is exactly how fork #22 went unnoticed the first time.
 #[test]
 fn the_channel_turn_runs_inside_the_background_announcement_bracket() {
+    // `process_channel_message` lives in process_message.rs after the C7 extract.
     const SRC: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/orchestrator/mod.rs"
+        "/src/orchestrator/process_message.rs"
     ));
-    // Production text only: this test necessarily contains the same literal
-    // it searches for, and would otherwise satisfy itself.
-    let production = SRC.split("\nmod tests {").next().unwrap_or(SRC);
+    let production = SRC;
 
     let needle = "let llm_result = run_channel_turn_with_background_announcements(";
     assert!(
