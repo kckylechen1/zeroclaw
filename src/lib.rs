@@ -45,7 +45,16 @@ pub(crate) mod approval;
 pub mod auth;
 #[cfg(feature = "agent-runtime")]
 pub mod channels;
-pub mod commands;
+/// Library surface of `src/commands`. CLI handler slices live in
+/// `src/commands/mod.rs` and compile only in the binary crate — they
+/// depend on clap command enums and `gateway_helpers`.
+pub mod commands {
+    #[cfg(feature = "agent-runtime")]
+    pub mod eval;
+    #[cfg(feature = "agent-runtime")]
+    pub mod self_test;
+    pub mod update;
+}
 pub mod config;
 #[cfg(feature = "agent-runtime")]
 pub(crate) mod cost;

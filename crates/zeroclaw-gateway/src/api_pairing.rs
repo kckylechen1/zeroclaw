@@ -55,6 +55,7 @@ impl DeviceRegistry {
             )",
         )
         .expect("Failed to create devices table");
+        zeroclaw_infra::sqlite_perms::harden_sqlite_owner_only(&db_path);
 
         // Additive migration for DBs created before the capabilities column existed.
         // SQLite has no IF NOT EXISTS for columns; the duplicate-column error here is benign.
@@ -123,6 +124,7 @@ impl DeviceRegistry {
              PRAGMA synchronous = NORMAL;
              PRAGMA temp_store = MEMORY;",
         )?;
+        zeroclaw_infra::sqlite_perms::harden_sqlite_owner_only(&self.db_path);
         Ok(conn)
     }
 
@@ -798,6 +800,59 @@ mod tests {
             state.pairing.tokens().is_empty(),
             "PairingGuard::paired_tokens must be empty after a failed persist; have {:?}",
             state.pairing.tokens()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn devices_db_and_sidecars_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = tmp.path().join("devices.db");
+        let hold = rusqlite::Connection::open(&db).unwrap();
+        let journal: String = hold
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
+        hold.execute_batch("CREATE TABLE IF NOT EXISTS _wal_seed (id INTEGER);")
+            .unwrap();
+        let mut saw_sidecar = false;
+        for suffix in ["-wal", "-shm"] {
+            let path = tmp.path().join(format!("devices.db{suffix}"));
+            if path.exists() {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+                saw_sidecar = true;
+            }
+        }
+        assert!(
+            saw_sidecar,
+            "live WAL connection must create a sidecar so this test can fail on the old chmod-main-only path"
+        );
+        let _registry = DeviceRegistry::new(tmp.path());
+        let mut saw_sidecar = false;
+        for suffix in ["", "-wal", "-shm"] {
+            let path = tmp.path().join(format!("devices.db{suffix}"));
+            if suffix.is_empty() {
+                assert!(path.exists(), "devices.db must exist");
+            }
+            if !path.exists() {
+                continue;
+            }
+            if !suffix.is_empty() {
+                saw_sidecar = true;
+            }
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o600,
+                "{} must be 0o600, got {mode:#o}",
+                path.display()
+            );
+        }
+        assert!(
+            saw_sidecar,
+            "DeviceRegistry::new must leave hardened WAL sidecars while the seed connection is live"
         );
     }
 }
