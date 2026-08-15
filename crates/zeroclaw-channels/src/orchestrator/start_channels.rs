@@ -18,6 +18,8 @@ use zeroclaw_runtime::platform;
 use zeroclaw_runtime::security::{AutonomyLevel, SecurityPolicy};
 use zeroclaw_runtime::tools;
 
+#[cfg(feature = "channel-nostr")]
+use super::NostrChannel;
 use super::{
     ActiveChannelAliases, AgentRouter, CRON_CHANNEL_REGISTRY, ChannelAssembledTools,
     ChannelCostTrackingState, ChannelRuntimeContext, ConfiguredChannel,
@@ -29,8 +31,6 @@ use super::{
     interrupt_on_new_message_config, max_in_flight_messages_for_config, run_message_dispatch_loop,
     runtime_defaults_from_config, spawn_supervised_listener,
 };
-#[cfg(feature = "channel-nostr")]
-use super::NostrChannel;
 
 pub async fn start_channels(
     config: Config,
