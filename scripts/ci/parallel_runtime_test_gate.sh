@@ -24,6 +24,6 @@ crates=(zeroclaw-runtime zeroclaw-channels)
 for crate in "${crates[@]}"; do
     for ((run = 1; run <= runs; run++)); do
         echo "==> parallel runtime regression: $crate run $run/$runs ($threads threads)"
-        cargo test --locked --quiet -p "$crate" --lib -- --test-threads="$threads"
+        cargo test --locked --quiet -p "$crate" --lib --features heavy-tests -- --test-threads="$threads"
     done
 done

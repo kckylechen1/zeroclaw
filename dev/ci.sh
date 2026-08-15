@@ -103,7 +103,7 @@ case "$1" in
     # and reporting behavior (nextest runs each test binary in its own
     # process and emits per-binary JUnit reports; cargo test uses the test
     # harness's default process model).
-    run_in_ci "cargo test --locked --workspace --exclude zeroclaw-desktop --verbose"
+    run_in_ci "cargo test --locked --workspace --exclude zeroclaw-desktop --features zeroclaw-channels/heavy-tests,zeroclaw-runtime/heavy-tests --verbose"
     run_in_ci "./scripts/ci/parallel_runtime_test_gate.sh"
     ;;
 
@@ -156,7 +156,7 @@ case "$1" in
     # update that comment in lockstep.
     run_in_ci "./scripts/ci/rust_quality_gate.sh"
     run_firmware_protocol_gate
-    run_in_ci "cargo test --locked --workspace --exclude zeroclaw-desktop --verbose"
+    run_in_ci "cargo test --locked --workspace --exclude zeroclaw-desktop --features zeroclaw-channels/heavy-tests,zeroclaw-runtime/heavy-tests --verbose"
     run_in_ci "./scripts/ci/parallel_runtime_test_gate.sh"
     run_in_ci "bash tests/manual/test_dockerignore.sh"
     run_in_ci "cargo build --release --locked --verbose"

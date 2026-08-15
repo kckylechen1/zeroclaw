@@ -1569,6 +1569,7 @@ mod safety_net;
 #[path = "parity.rs"]
 mod parity;
 
-#[cfg(test)]
+// Heavy suite gated so lib-test iteration does not pay 6.9k lines; CI runtime leg enables it.
+#[cfg(all(test, feature = "heavy-tests"))]
 #[path = "agent_inline_tests.rs"]
 mod tests;

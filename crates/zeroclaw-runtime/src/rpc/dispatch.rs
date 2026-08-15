@@ -3196,6 +3196,7 @@ pub(crate) fn notification_for_turn_event(
     serde_json::to_string(&n).ok()
 }
 
-#[cfg(test)]
+// Heavy suite gated so lib-test iteration does not pay 5.1k lines; CI runtime leg enables it.
+#[cfg(all(test, feature = "heavy-tests"))]
 #[path = "dispatch_tests.rs"]
 mod tests;
