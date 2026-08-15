@@ -155,7 +155,7 @@ pub async fn handle(config: &Config, format: Option<String>) -> Result<()> {
             "Runtime"
         )
     );
-    if service::is_running(&config) {
+    if service::is_running(config) {
         println!(
             "{}",
             t("cli-status-service-running", "🟢 Service:       running")
@@ -208,7 +208,7 @@ pub async fn handle(config: &Config, format: Option<String>) -> Result<()> {
             &memory_fallback
         )
     );
-    print_companion_outbox_line(&config);
+    print_companion_outbox_line(config);
 
     println!();
     // Per-agent security: each enabled agent's risk profile.

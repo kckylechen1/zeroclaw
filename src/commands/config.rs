@@ -443,7 +443,7 @@ pub async fn handle(config_command: crate::ConfigCommands, config: &mut Config) 
                 let catalog_selector = provider_ref.as_deref().unwrap_or(provider_type);
                 let (models, _pricing, live) =
                     zeroclaw_runtime::quickstart::model_catalog_with_config(
-                        Some(&config),
+                        Some(config),
                         catalog_selector,
                     )
                     .await;
@@ -833,7 +833,7 @@ pub async fn handle(config_command: crate::ConfigCommands, config: &mut Config) 
                             }
                         };
                         let value_str =
-                            json_value_to_setprop_string(value, &config, &path, idx, json)?;
+                            json_value_to_setprop_string(value, config, &path, idx, json)?;
                         match config.set_prop_persistent(&path, &value_str) {
                             Ok(()) => {}
                             Err(err) => {
@@ -921,7 +921,7 @@ pub async fn handle(config_command: crate::ConfigCommands, config: &mut Config) 
                         };
                         let want_str = match zeroclaw_config::typed_value::coerce_for_set_prop(
                             want,
-                            config_patch_prop_kind(&config, &path),
+                            config_patch_prop_kind(config, &path),
                         ) {
                             Ok(want_str) => want_str,
                             Err(err) => {

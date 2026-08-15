@@ -269,7 +269,7 @@ pub async fn handle(plugin_command: crate::PluginCommands, config: &mut Config) 
                             )
                         ),
                         None => {
-                            println!("{}", t("cli-plugin-wasm-none", "WASM: (skill-only plugin)"))
+                            println!("{}", t("cli-plugin-wasm-none", "WASM: (skill-only plugin)"));
                         }
                     }
                 }
