@@ -2316,5 +2316,6 @@ fn holds_exec_claim(status: SopRunStatus) -> bool {
     )
 }
 
-#[cfg(test)]
+// Heavy suite gated so lib-test iteration does not pay 9.3k lines; CI runtime leg enables it.
+#[cfg(all(test, feature = "heavy-tests"))]
 mod tests;

@@ -109,6 +109,9 @@ browser-native = []
 plugins-wasm = ["dep:zeroclaw-plugins", "zeroclaw-plugins/plugins-wasmtime"]
 webauthn = []
 sandbox-bubblewrap = []
+# Heavy agent/SOP/RPC behavioral suites (~35k lines). Gated so lib-test
+# iteration does not compile them; CI runtime leg enables this feature.
+heavy-tests = []
 
 [dev-dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
