@@ -173,10 +173,11 @@ impl ApprovalStore {
     pub fn open(data_dir: &Path, boot_id: impl Into<String>) -> Result<Self> {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("creating approval store dir {}", data_dir.display()))?;
-        let conn =
-            Connection::open(data_dir.join("approvals.db")).context("opening approvals.db")?;
+        let db_path = data_dir.join("approvals.db");
+        let conn = Connection::open(&db_path).context("opening approvals.db")?;
         conn.execute_batch(SCHEMA)
             .context("applying approval store schema")?;
+        zeroclaw_infra::sqlite_perms::harden_sqlite_owner_only(&db_path);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             boot_id: boot_id.into(),
@@ -583,6 +584,39 @@ mod tests {
                 "blocked",
                 "not_required"
             ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn approvals_db_and_sidecars_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let _store = ApprovalStore::open(dir.path(), "boot-1").unwrap();
+        let mut saw_sidecar = false;
+        for suffix in ["", "-wal", "-shm"] {
+            let path = dir.path().join(format!("approvals.db{suffix}"));
+            if suffix.is_empty() {
+                assert!(path.exists(), "approvals.db must exist");
+            }
+            if !path.exists() {
+                continue;
+            }
+            if !suffix.is_empty() {
+                saw_sidecar = true;
+            }
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o600,
+                "{} must be 0o600, got {mode:#o}",
+                path.display()
+            );
+        }
+        assert!(
+            saw_sidecar,
+            "live approval store connection must keep a WAL sidecar so this test can fail on the old chmod-main-only path"
         );
     }
 }

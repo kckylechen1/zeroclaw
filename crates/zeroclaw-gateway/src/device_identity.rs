@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zeroclaw_api::device_identity::{DeviceIdentityV1, DeviceKeyAlgorithm, DeviceRole};
+use zeroclaw_infra::sqlite_perms::harden_sqlite_owner_only;
 
 const PAIRING_TTL: Duration = Duration::from_secs(300);
 const CHALLENGE_TTL_SECS: i64 = 60;
@@ -169,6 +170,8 @@ struct StoreInner {
     pairing: Mutex<HashMap<String, PendingPairing>>,
     db_path: Option<PathBuf>,
     max_entries: usize,
+    #[cfg(test)]
+    persist_probe: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl DeviceIdentityStore {
@@ -187,6 +190,8 @@ impl DeviceIdentityStore {
                 pairing: Mutex::new(HashMap::new()),
                 db_path: None,
                 max_entries: max_entries.max(1),
+                #[cfg(test)]
+                persist_probe: Mutex::new(None),
             }),
         }
     }
@@ -212,13 +217,15 @@ impl DeviceIdentityStore {
                 capability_ceiling TEXT NOT NULL
              );",
         )?;
-        harden_owner_only(&db_path);
+        harden_sqlite_owner_only(&db_path);
         let store = Self {
             inner: Arc::new(StoreInner {
                 rows: Mutex::new(HashMap::new()),
                 pairing: Mutex::new(HashMap::new()),
                 db_path: Some(db_path),
                 max_entries: max_entries.max(1),
+                #[cfg(test)]
+                persist_probe: Mutex::new(None),
             }),
         };
         store.load_from_db(&conn)?;
@@ -309,30 +316,36 @@ impl DeviceIdentityStore {
         }
         let capability_ceiling = issued.capability_ceiling.clone();
 
-        let mut rows = self.inner.rows.lock();
-        if rows.len() >= self.inner.max_entries {
-            return Err(IdentityError::Capacity);
-        }
-        if rows
-            .values()
-            .any(|row| row.key_fingerprint == fingerprint && !row.is_revoked())
-        {
-            return Err(IdentityError::FingerprintConflict);
-        }
-
-        let identity = DeviceIdentityV1 {
-            device_id: uuid::Uuid::new_v4().to_string(),
-            public_key: hex::encode(public_key),
-            key_fingerprint: fingerprint,
-            algorithm: DeviceKeyAlgorithm::Ed25519,
-            role: DeviceRole::Node,
-            identity_epoch: 1,
-            admitted_at: Utc::now().to_rfc3339(),
-            revoked_at: None,
-            capability_ceiling,
+        // Hold `pairing` across persist so the same code cannot double-enroll.
+        // Release `rows` before the blocking write so revoke / bind_identity
+        // are not stalled on disk (they only need `rows`).
+        let identity = {
+            let rows = self.inner.rows.lock();
+            if rows.len() >= self.inner.max_entries {
+                return Err(IdentityError::Capacity);
+            }
+            if rows
+                .values()
+                .any(|row| row.key_fingerprint == fingerprint && !row.is_revoked())
+            {
+                return Err(IdentityError::FingerprintConflict);
+            }
+            DeviceIdentityV1 {
+                device_id: uuid::Uuid::new_v4().to_string(),
+                public_key: hex::encode(public_key),
+                key_fingerprint: fingerprint,
+                algorithm: DeviceKeyAlgorithm::Ed25519,
+                role: DeviceRole::Node,
+                identity_epoch: 1,
+                admitted_at: Utc::now().to_rfc3339(),
+                revoked_at: None,
+                capability_ceiling,
+            }
         };
+
         self.persist_insert(&identity)
             .map_err(|_| IdentityError::PersistFailed)?;
+        let mut rows = self.inner.rows.lock();
         pending.remove(code);
         rows.insert(identity.device_id.clone(), identity.clone());
         Ok(identity)
@@ -406,6 +419,10 @@ impl DeviceIdentityStore {
     }
 
     fn persist_insert(&self, identity: &DeviceIdentityV1) -> Result<(), rusqlite::Error> {
+        #[cfg(test)]
+        if let Some(probe) = self.inner.persist_probe.lock().take() {
+            probe();
+        }
         let Some(path) = &self.inner.db_path else {
             return Ok(());
         };
@@ -429,7 +446,7 @@ impl DeviceIdentityStore {
                 ceiling,
             ],
         )?;
-        harden_owner_only(path);
+        harden_sqlite_owner_only(path);
         Ok(())
     }
 }
@@ -472,16 +489,8 @@ fn create_owner_only_file(path: &Path) -> Result<(), rusqlite::Error> {
     }
     opts.open(path)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    harden_owner_only(path);
+    harden_sqlite_owner_only(path);
     Ok(())
-}
-
-fn harden_owner_only(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
 }
 
 fn persist_revoke(path: &Path, device_id: &str, revoked_at: &str) -> Result<(), rusqlite::Error> {
@@ -490,6 +499,7 @@ fn persist_revoke(path: &Path, device_id: &str, revoked_at: &str) -> Result<(), 
         "UPDATE device_identities SET revoked_at = ?1 WHERE device_id = ?2",
         rusqlite::params![revoked_at, device_id],
     )?;
+    harden_sqlite_owner_only(path);
     Ok(())
 }
 
@@ -743,13 +753,96 @@ mod tests {
         let code = store
             .issue_pairing_code(vec!["system.notify".into()])
             .unwrap();
-        store.enroll(&code, keys.public_key_hex()).unwrap();
-        let path = dir.path().join("device_identities.db");
+        let db = dir.path().join("device_identities.db");
+        // Hold a live connection so WAL sidecars stay on disk after `open`
+        // drops its handle. Seed them world-readable, then enroll — persist
+        // must re-harden, or this test fails.
+        let hold = rusqlite::Connection::open(&db).unwrap();
+        let journal: String = hold
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "device identity db must be 0o600, got {mode:#o}"
+        let mut saw_sidecar = false;
+        for suffix in ["-wal", "-shm"] {
+            let path = dir.path().join(format!("device_identities.db{suffix}"));
+            if path.exists() {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+                saw_sidecar = true;
+            }
+        }
+        assert!(
+            saw_sidecar,
+            "live WAL connection must create a sidecar so this test can fail on the old chmod-main-only path"
         );
+        store.enroll(&code, keys.public_key_hex()).unwrap();
+        let main_mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+        assert_eq!(main_mode, 0o600, "device identity db must be 0o600");
+        for suffix in ["-wal", "-shm"] {
+            let path = dir.path().join(format!("device_identities.db{suffix}"));
+            if !path.exists() {
+                continue;
+            }
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o600,
+                "{} must be 0o600 after enroll persist, got {mode:#o}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn enroll_does_not_hold_rows_lock_across_persist() {
+        let store = DeviceIdentityStore::memory();
+        let keys = DeviceKeyPair::generate().unwrap();
+        let code = store
+            .issue_pairing_code(vec!["system.notify".into()])
+            .unwrap();
+        let store_for_probe = store.clone();
+        *store.inner.persist_probe.lock() = Some(Box::new(move || {
+            assert!(
+                store_for_probe.inner.rows.try_lock().is_some(),
+                "enroll must release rows before persist so revoke/bind can proceed"
+            );
+        }));
+        store.enroll(&code, keys.public_key_hex()).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn enroll_persist_failure_does_not_consume_pairing_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceIdentityStore::open(dir.path(), 16).unwrap();
+        let keys = DeviceKeyPair::generate().unwrap();
+        let code = store
+            .issue_pairing_code(vec!["system.notify".into()])
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for suffix in ["", "-wal", "-shm"] {
+            let path = dir.path().join(format!("device_identities.db{suffix}"));
+            if path.exists() {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+            }
+        }
+        assert_eq!(
+            store.enroll(&code, keys.public_key_hex()),
+            Err(IdentityError::PersistFailed)
+        );
+        assert_eq!(
+            store.pairing_len(),
+            1,
+            "a failed persist must leave the pairing code consumable"
+        );
+        for suffix in ["", "-wal", "-shm"] {
+            let path = dir.path().join(format!("device_identities.db{suffix}"));
+            if path.exists() {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+        store
+            .enroll(&code, keys.public_key_hex())
+            .expect("code must survive persist failure");
     }
 }
