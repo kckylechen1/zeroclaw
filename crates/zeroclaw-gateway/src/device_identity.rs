@@ -319,9 +319,15 @@ impl DeviceIdentityStore {
         // Hold `pairing` across persist so the same code cannot double-enroll.
         // Release `rows` before the blocking write so revoke / bind_identity
         // are not stalled on disk (they only need `rows`).
-        let identity = {
+        let (identity, superseded) = {
             let rows = self.inner.rows.lock();
-            if rows.len() >= self.inner.max_entries {
+            // A revoked row with the same fingerprint is replaced, not
+            // appended: its slot is reused, so it cannot breach capacity.
+            let superseded = rows
+                .values()
+                .find(|row| row.key_fingerprint == fingerprint && row.is_revoked())
+                .map(|row| row.device_id.clone());
+            if rows.len() >= self.inner.max_entries && superseded.is_none() {
                 return Err(IdentityError::Capacity);
             }
             if rows
@@ -330,23 +336,29 @@ impl DeviceIdentityStore {
             {
                 return Err(IdentityError::FingerprintConflict);
             }
-            DeviceIdentityV1 {
-                device_id: uuid::Uuid::new_v4().to_string(),
-                public_key: hex::encode(public_key),
-                key_fingerprint: fingerprint,
-                algorithm: DeviceKeyAlgorithm::Ed25519,
-                role: DeviceRole::Node,
-                identity_epoch: 1,
-                admitted_at: Utc::now().to_rfc3339(),
-                revoked_at: None,
-                capability_ceiling,
-            }
+            (
+                DeviceIdentityV1 {
+                    device_id: uuid::Uuid::new_v4().to_string(),
+                    public_key: hex::encode(public_key),
+                    key_fingerprint: fingerprint,
+                    algorithm: DeviceKeyAlgorithm::Ed25519,
+                    role: DeviceRole::Node,
+                    identity_epoch: 1,
+                    admitted_at: Utc::now().to_rfc3339(),
+                    revoked_at: None,
+                    capability_ceiling,
+                },
+                superseded,
+            )
         };
 
-        self.persist_insert(&identity)
+        self.persist_insert(&identity, superseded.as_deref())
             .map_err(|_| IdentityError::PersistFailed)?;
         let mut rows = self.inner.rows.lock();
         pending.remove(code);
+        if let Some(old_id) = &superseded {
+            rows.remove(old_id);
+        }
         rows.insert(identity.device_id.clone(), identity.clone());
         Ok(identity)
     }
@@ -418,7 +430,11 @@ impl DeviceIdentityStore {
         Ok(true)
     }
 
-    fn persist_insert(&self, identity: &DeviceIdentityV1) -> Result<(), rusqlite::Error> {
+    fn persist_insert(
+        &self,
+        identity: &DeviceIdentityV1,
+        superseded: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
         #[cfg(test)]
         if let Some(probe) = self.inner.persist_probe.lock().take() {
             probe();
@@ -426,10 +442,20 @@ impl DeviceIdentityStore {
         let Some(path) = &self.inner.db_path else {
             return Ok(());
         };
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         let ceiling =
             serde_json::to_string(&identity.capability_ceiling).unwrap_or_else(|_| "[]".into());
-        conn.execute(
+        let tx = conn.transaction()?;
+        // Delete only the revoked row the in-memory check approved to
+        // replace; if it is unexpectedly gone or active, the INSERT below
+        // fails on the fingerprint UNIQUE constraint instead of overwriting.
+        if let Some(old_id) = superseded {
+            tx.execute(
+                "DELETE FROM device_identities WHERE device_id = ?1 AND revoked_at IS NOT NULL",
+                rusqlite::params![old_id],
+            )?;
+        }
+        tx.execute(
             "INSERT INTO device_identities (
                 device_id, public_key, key_fingerprint, algorithm, role,
                 identity_epoch, admitted_at, revoked_at, capability_ceiling
@@ -446,6 +472,7 @@ impl DeviceIdentityStore {
                 ceiling,
             ],
         )?;
+        tx.commit()?;
         harden_sqlite_owner_only(path);
         Ok(())
     }
@@ -791,6 +818,99 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn revoked_fingerprint_reenrolls_and_replaces_tombstone_durably() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceIdentityStore::open(dir.path(), 16).unwrap();
+        let keys = DeviceKeyPair::generate().unwrap();
+        let code = store
+            .issue_pairing_code(vec!["system.notify".into()])
+            .unwrap();
+        let first = store.enroll(&code, keys.public_key_hex()).unwrap();
+        assert_eq!(store.revoke(&first.device_id), Ok(true));
+
+        let next = store
+            .issue_pairing_code(vec!["system.notify".into()])
+            .unwrap();
+        let second = store
+            .enroll(&next, keys.public_key_hex())
+            .expect("a revoked fingerprint must be re-enrollable");
+        assert_ne!(second.device_id, first.device_id);
+        assert_eq!(second.identity_epoch, 1);
+        assert!(
+            store
+                .active_identity(&second.device_id, &second.key_fingerprint)
+                .is_some()
+        );
+        assert!(
+            store
+                .active_identity(&first.device_id, &first.key_fingerprint)
+                .is_none()
+        );
+
+        drop(store);
+        let reopened = DeviceIdentityStore::open(dir.path(), 16).unwrap();
+        assert!(
+            reopened
+                .active_identity(&second.device_id, &second.key_fingerprint)
+                .is_some(),
+            "reopened store must keep the replacement row"
+        );
+        assert!(
+            !reopened.contains(&first.device_id),
+            "the superseded tombstone must not survive re-enrollment"
+        );
+    }
+
+    #[test]
+    fn reenroll_replacing_tombstone_does_not_breach_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceIdentityStore::open(dir.path(), 1).unwrap();
+        let keys = DeviceKeyPair::generate().unwrap();
+        let code = store
+            .issue_pairing_code(vec!["system.notify".into()])
+            .unwrap();
+        let first = store.enroll(&code, keys.public_key_hex()).unwrap();
+        assert_eq!(store.revoke(&first.device_id), Ok(true));
+        let next = store
+            .issue_pairing_code(vec!["system.notify".into()])
+            .unwrap();
+        let second = store
+            .enroll(&next, keys.public_key_hex())
+            .expect("replacing the tombstone it supersedes must not be a capacity breach");
+        drop(store);
+        let reopened = DeviceIdentityStore::open(dir.path(), 1).unwrap();
+        assert!(
+            reopened
+                .active_identity(&second.device_id, &second.key_fingerprint)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn reenroll_drops_superseded_tombstone_from_memory() {
+        let store = DeviceIdentityStore::memory();
+        let keys = DeviceKeyPair::generate().unwrap();
+        let code = store
+            .issue_pairing_code(vec!["system.notify".into()])
+            .unwrap();
+        let first = store.enroll(&code, keys.public_key_hex()).unwrap();
+        assert_eq!(store.revoke(&first.device_id), Ok(true));
+        let next = store
+            .issue_pairing_code(vec!["system.notify".into()])
+            .unwrap();
+        let second = store.enroll(&next, keys.public_key_hex()).unwrap();
+        assert!(
+            !store.contains(&first.device_id),
+            "memory must agree with the durable replacement semantics"
+        );
+        assert!(
+            store
+                .active_identity(&second.device_id, &second.key_fingerprint)
+                .is_some()
+        );
     }
 
     #[test]
