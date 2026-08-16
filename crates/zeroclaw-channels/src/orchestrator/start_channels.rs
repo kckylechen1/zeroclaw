@@ -822,22 +822,33 @@ pub async fn start_channels(
 
     let router = AgentRouter::multi(agent_ctxs, owner_by_channel_key, sop_engine, sop_audit);
 
-    let seen_ids = match SeenMessageStore::open(&config.data_dir) {
-        Ok(store) => Some(Arc::new(store)),
-        Err(err) => {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({
-                        "data_dir": config.data_dir.display().to_string(),
-                        "err": err.to_string(),
-                    })),
-                "seen-id store open failed; inbound redelivery dedup disabled"
-            );
-            None
-        }
-    };
+    let seen_data_dir = config.data_dir.clone();
+    let seen_ids =
+        match tokio::task::spawn_blocking(move || SeenMessageStore::open(&seen_data_dir)).await {
+            Ok(Ok(store)) => Some(Arc::new(store)),
+            Ok(Err(err)) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({
+                            "data_dir": config.data_dir.display().to_string(),
+                            "err": err.to_string(),
+                        })),
+                    "seen-id store open failed; inbound redelivery dedup disabled"
+                );
+                None
+            }
+            Err(_) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                    "seen-id store open task failed; inbound redelivery dedup disabled"
+                );
+                None
+            }
+        };
 
     let rx = rx_holder.expect("rx initialized by first agent's channel setup");
     let max_in_flight =

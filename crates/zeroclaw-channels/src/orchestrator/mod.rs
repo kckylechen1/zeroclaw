@@ -3209,6 +3209,14 @@ fn resolve_effective_debounce_window(
     std::time::Duration::from_millis(per_channel_ms.unwrap_or(global_ms))
 }
 
+/// Channels exempt from ingress dedup: their inbound ids are per-listen
+/// session counters (or interactive input), not durable platform message
+/// ids, so checking them against the durable seen-set would drop fresh
+/// traffic after a listener restart (the counter resets, the store does
+/// not). None of them redelivers via a persisted cursor, which is the
+/// window dedup exists to close.
+const NON_DEDUP_CHANNELS: &[&str] = &["cli", "webhook", "voice_wake"];
+
 async fn run_message_dispatch_loop(
     mut rx: tokio::sync::mpsc::Receiver<zeroclaw_api::channel::ChannelMessage>,
     router: AgentRouter,
@@ -3225,7 +3233,7 @@ async fn run_message_dispatch_loop(
 
     while let Some(msg) = rx.recv().await {
         if let Some(seen_ids) = &seen_ids
-            && msg.channel != "cli"
+            && !NON_DEDUP_CHANNELS.contains(&msg.channel.as_str())
             && !msg.id.is_empty()
         {
             let account = channel_key_for_message(&msg);

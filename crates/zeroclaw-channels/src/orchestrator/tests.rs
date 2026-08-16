@@ -2416,7 +2416,6 @@ impl Channel for RecordingChannel {
     fn name(&self) -> &str {
         "test-channel"
     }
-
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         self.sent_messages
             .lock()
@@ -2475,6 +2474,76 @@ impl Channel for RecordingChannel {
             .lock()
             .await
             .push((reference.to_string(), outcome.to_string()));
+        Ok(true)
+    }
+}
+
+/// Recording channel with a fixed name, for dispatch-loop tests that need
+/// a message `channel` value other than `test-channel` to route somewhere.
+struct StaticNameRecordingChannel {
+    name: &'static str,
+    sent_messages: Arc<tokio::sync::Mutex<Vec<String>>>,
+}
+
+impl ::zeroclaw_api::attribution::Attributable for StaticNameRecordingChannel {
+    fn role(&self) -> ::zeroclaw_api::attribution::Role {
+        ::zeroclaw_api::attribution::Role::Channel(
+            ::zeroclaw_api::attribution::ChannelKind::Webhook,
+        )
+    }
+    fn alias(&self) -> &str {
+        "test"
+    }
+}
+
+#[async_trait::async_trait]
+impl Channel for StaticNameRecordingChannel {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
+        self.sent_messages
+            .lock()
+            .await
+            .push(format!("{}:{}", message.recipient, message.content));
+        Ok(())
+    }
+
+    async fn listen(
+        &self,
+        _tx: tokio::sync::mpsc::Sender<zeroclaw_api::channel::ChannelMessage>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn start_typing(&self, _recipient: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn add_reaction(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn remove_reaction(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn finalize_gate_prompt(&self, _reference: &str, _outcome: &str) -> anyhow::Result<bool> {
         Ok(true)
     }
 }
@@ -7280,7 +7349,8 @@ async fn message_dispatch_processes_messages_in_parallel() {
 
 #[tokio::test]
 async fn message_dispatch_drops_redelivered_message_ids() {
-    let without_dedup = deliver_same_message_twice(None).await;
+    let without_dedup =
+        deliver_messages_through_loop(None, "test-channel", "redelivered-1", 2).await;
     assert_eq!(
         without_dedup, 2,
         "control: without the seen-id store both deliveries start a turn"
@@ -7288,16 +7358,49 @@ async fn message_dispatch_drops_redelivered_message_ids() {
 
     let seen_dir = tempfile::tempdir().unwrap();
     let store = SeenMessageStore::open(seen_dir.path()).unwrap();
-    let with_dedup = deliver_same_message_twice(Some(Arc::new(store))).await;
+    let with_dedup =
+        deliver_messages_through_loop(Some(Arc::new(store)), "test-channel", "redelivered-1", 2)
+            .await;
     assert_eq!(
         with_dedup, 1,
         "a redelivered message id must be dropped before dispatch"
     );
 }
 
-async fn deliver_same_message_twice(seen_ids: Option<Arc<SeenMessageStore>>) -> usize {
-    let channel_impl = Arc::new(RecordingChannel::default());
-    let channel: Arc<dyn Channel> = channel_impl.clone();
+/// Regression (adversarial review of #170): webhook ids are per-listen
+/// session counters (`webhook_0`, `webhook_1`, ...), so a durable seen-set
+/// seeded by a previous session must not drop a restarted listener's fresh
+/// `webhook_0`.
+#[tokio::test]
+async fn message_dispatch_does_not_dedup_session_counter_channels() {
+    let seen_dir = tempfile::tempdir().unwrap();
+    {
+        let previous_session = SeenMessageStore::open(seen_dir.path()).unwrap();
+        assert!(
+            previous_session
+                .check_and_record("webhook", "webhook_0")
+                .unwrap()
+        );
+    }
+    let store = Arc::new(SeenMessageStore::open(seen_dir.path()).unwrap());
+    let replies = deliver_messages_through_loop(Some(store), "webhook", "webhook_0", 1).await;
+    assert_eq!(
+        replies, 1,
+        "a restarted session-counter channel's fresh webhook_0 must not be dropped as a duplicate"
+    );
+}
+
+async fn deliver_messages_through_loop(
+    seen_ids: Option<Arc<SeenMessageStore>>,
+    channel_name: &'static str,
+    message_id: &str,
+    deliveries: usize,
+) -> usize {
+    let sent_messages = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let channel: Arc<dyn Channel> = Arc::new(StaticNameRecordingChannel {
+        name: channel_name,
+        sent_messages: Arc::clone(&sent_messages),
+    });
 
     let mut channels_by_name = HashMap::new();
     channels_by_name.insert(channel.name().to_string(), channel);
@@ -7384,13 +7487,13 @@ async fn deliver_same_message_twice(seen_ids: Option<Arc<SeenMessageStore>>) -> 
     });
 
     let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(4);
-    for _ in 0..2 {
+    for _ in 0..deliveries {
         tx.send(zeroclaw_api::channel::ChannelMessage {
-            id: "redelivered-1".to_string(),
+            id: message_id.to_string(),
             sender: "alice".to_string(),
             reply_target: "alice".to_string(),
             content: "hello".to_string(),
-            channel: "test-channel".into(),
+            channel: channel_name.into(),
             channel_alias: None,
             timestamp: 1,
             thread_ts: None,
@@ -7406,7 +7509,7 @@ async fn deliver_same_message_twice(seen_ids: Option<Arc<SeenMessageStore>>) -> 
 
     run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 2, seen_ids).await;
 
-    let sent = channel_impl.sent_messages.lock().await;
+    let sent = sent_messages.lock().await;
     sent.len()
 }
 

@@ -32,6 +32,7 @@ impl SeenMessageStore {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 5000;
              CREATE TABLE IF NOT EXISTS seen_message_ids (
                 account TEXT NOT NULL,
                 message_id TEXT NOT NULL,
