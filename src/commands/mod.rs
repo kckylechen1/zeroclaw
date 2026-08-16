@@ -14,4 +14,6 @@ pub mod quickstart;
 pub mod self_test;
 #[cfg(feature = "agent-runtime")]
 pub mod status;
+#[cfg(feature = "agent-runtime")]
+pub mod telegram;
 pub mod update;

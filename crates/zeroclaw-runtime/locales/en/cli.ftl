@@ -1101,3 +1101,8 @@ tool-runtime-command-build-failed = Failed to build runtime command: {$error}
 tool-runtime-command-docker-workspace-path = Failed to build runtime command: Failed to canonicalize Docker workspace path {$path}: {$cause}
 tool-runtime-command-docker-allowed-root = Failed to build runtime command: Failed to canonicalize Docker workspace root {$path}: {$cause}
 
+
+# ── Telegram operator tooling ──
+telegram-skip-update-written = Skip marker recorded for update {$update_id} on bot '{$alias}'. The running daemon applies it on its next retry (within a few seconds) and archives the payload as a dead letter under its data directory.
+telegram-skip-update-pending = A skip marker for update {$update_id} on bot '{$alias}' is already pending.
+telegram-skip-update-failed = Failed to record the skip marker for update {$update_id} on bot '{$alias}': {$error}
