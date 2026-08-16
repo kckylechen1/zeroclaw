@@ -77,6 +77,11 @@ pub fn append_telegram_skip_marker(
     update_id: i64,
     reason: &str,
 ) -> Result<(), String> {
+    if alias.is_empty() || alias.contains('/') || alias.contains('\\') {
+        return Err(format!(
+            "invalid bot alias '{alias}': path separators are not allowed"
+        ));
+    }
     let path = telegram_skip_list_path(data_dir, alias);
     let mut markers = load_telegram_skip_markers(data_dir, alias);
     if markers.iter().any(|marker| marker.update_id == update_id) {
@@ -93,8 +98,14 @@ pub fn append_telegram_skip_marker(
     std::fs::create_dir_all(parent).map_err(|err| format!("create {}: {err}", parent.display()))?;
     let body = serde_json::to_string_pretty(&markers).map_err(|err| err.to_string())?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, body.as_bytes())
-        .map_err(|err| format!("write {}: {err}", tmp.display()))?;
+    if let Ok(mut file) = std::fs::File::create(&tmp) {
+        use std::io::Write as _;
+        if let Ok(()) = file.write_all(body.as_bytes()) {
+            let _ = file.sync_all();
+        }
+    } else {
+        return Err(format!("write {}: open failed", tmp.display()));
+    }
     std::fs::rename(&tmp, &path).map_err(|err| format!("rename into {}: {err}", path.display()))?;
     Ok(())
 }
@@ -1122,8 +1133,8 @@ impl TelegramChannel {
     }
 
     /// The daemon `data_dir` via the persistence handle. `None` when
-    /// unset: the operator skip path is disabled in that deployment and
-    /// the escalation log says so explicitly.
+    /// unset: the operator skip path is disabled in that deployment (the
+    /// archive error names the cause at skip time).
     fn persisted_data_dir(&self) -> Option<std::path::PathBuf> {
         let persist = self.persist.as_ref()?;
         let data_dir = persist.read().data_dir.clone();
@@ -1167,9 +1178,15 @@ impl TelegramChannel {
         });
         let body = serde_json::to_string_pretty(&record).map_err(|err| err.to_string())?;
         let tmp = dir.join(format!("{update_id}.json.tmp"));
-        tokio::fs::write(&tmp, body.as_bytes())
+        let mut file = tokio::fs::File::create(&tmp)
+            .await
+            .map_err(|err| format!("create {}: {err}", tmp.display()))?;
+        use tokio::io::AsyncWriteExt as _;
+        file.write_all(body.as_bytes())
             .await
             .map_err(|err| format!("write {}: {err}", tmp.display()))?;
+        let _ = file.sync_all().await;
+        drop(file);
         let path = dir.join(format!("{update_id}.json"));
         tokio::fs::rename(&tmp, &path)
             .await
@@ -7565,6 +7582,11 @@ mod tests {
 
         // A different bot alias has its own list; a missing file reads empty.
         assert!(load_telegram_skip_markers(dir.path(), "bot-b").is_empty());
+
+        // Path separators in an alias must be rejected, not joined.
+        assert!(append_telegram_skip_marker(dir.path(), "../escape", 1, "x").is_err());
+        assert!(append_telegram_skip_marker(dir.path(), "a/b", 1, "x").is_err());
+        assert!(append_telegram_skip_marker(dir.path(), "", 1, "x").is_err());
     }
 
     /// A permanently-poisoned update (getFile always 500) blocks the bot

@@ -356,7 +356,7 @@ impl LogLevel {
 }
 
 /// Subcommands for `zeroclaw telegram`.
-#[cfg(feature = "agent-runtime")]
+#[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
 #[derive(Subcommand, Debug)]
 enum TelegramCommands {
     /// Record an operator skip marker for a poisoned Telegram update
@@ -938,7 +938,7 @@ Examples:
         eval_command: EvalCommands,
     },
 
-    #[cfg(feature = "agent-runtime")]
+    #[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
     /// Telegram channel operator tooling
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
@@ -2725,13 +2725,13 @@ async fn async_main(command: clap::Command) -> Result<()> {
 
         Commands::Status { format } => commands::status::handle(&config, format).await,
 
-        #[cfg(feature = "agent-runtime")]
+        #[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
         Commands::Telegram { telegram_command } => match telegram_command {
             TelegramCommands::SkipUpdate {
                 alias,
                 update_id,
                 reason,
-            } => commands::telegram::run_skip_update(&config, &alias, update_id, reason).await,
+            } => commands::telegram::run_skip_update(&config, &alias, update_id, reason),
         },
 
         #[cfg(feature = "agent-runtime")]

@@ -9,7 +9,7 @@ use zeroclaw_runtime::i18n::get_required_cli_string_with_args;
 /// the marker on its next retry, archives the raw payload as a dead
 /// letter under its data directory, and advances its offset past the
 /// update. Nothing is ever dropped automatically.
-pub async fn run_skip_update(
+pub fn run_skip_update(
     config: &crate::config::Config,
     alias: &str,
     update_id: i64,
@@ -52,7 +52,7 @@ pub async fn run_skip_update(
                     &[arg_refs, &[("error", err.as_str())]].concat(),
                 )
             );
-            Err(anyhow::anyhow!(err))
+            Err(anyhow::Error::msg(err))
         }
     }
 }
