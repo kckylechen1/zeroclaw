@@ -73,6 +73,9 @@ pub(crate) use sop_gate::dispatch_channel_sop_gate;
 mod deliver_announcement;
 pub use deliver_announcement::deliver_announcement;
 
+mod seen_ids;
+pub(crate) use seen_ids::SeenMessageStore;
+
 // Channel types imported directly from source crates (no shim files)
 #[cfg(feature = "channel-amqp")]
 pub use crate::amqp::AmqpChannel;
@@ -3206,10 +3209,19 @@ fn resolve_effective_debounce_window(
     std::time::Duration::from_millis(per_channel_ms.unwrap_or(global_ms))
 }
 
+/// Channels exempt from ingress dedup: their inbound ids are per-listen
+/// session counters (or interactive input), not durable platform message
+/// ids, so checking them against the durable seen-set would drop fresh
+/// traffic after a listener restart (the counter resets, the store does
+/// not). None of them redelivers via a persisted cursor, which is the
+/// window dedup exists to close.
+const NON_DEDUP_CHANNELS: &[&str] = &["cli", "webhook", "voice_wake"];
+
 async fn run_message_dispatch_loop(
     mut rx: tokio::sync::mpsc::Receiver<zeroclaw_api::channel::ChannelMessage>,
     router: AgentRouter,
     max_in_flight_messages: usize,
+    seen_ids: Option<std::sync::Arc<SeenMessageStore>>,
 ) {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_in_flight_messages));
     let mut workers = tokio::task::JoinSet::new();
@@ -3220,6 +3232,59 @@ async fn run_message_dispatch_loop(
     let task_sequence = Arc::new(AtomicU64::new(1));
 
     while let Some(msg) = rx.recv().await {
+        if let Some(seen_ids) = &seen_ids
+            && !NON_DEDUP_CHANNELS.contains(&msg.channel.as_str())
+            && !msg.id.is_empty()
+        {
+            let account = channel_key_for_message(&msg);
+            let message_id = msg.id.clone();
+            let store = Arc::clone(seen_ids);
+            let recorded =
+                tokio::task::spawn_blocking(move || store.check_and_record(&account, &message_id))
+                    .await;
+            match recorded {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => {
+                    ::zeroclaw_log::record!(
+                        INFO,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({
+                                "channel": msg.channel,
+                                "message_id": msg.id,
+                                "sender": msg.sender,
+                            })),
+                        "dropping redelivered inbound message (duplicate id)"
+                    );
+                    continue;
+                }
+                Ok(Err(err)) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "channel": msg.channel,
+                                "message_id": msg.id,
+                                "err": err.to_string(),
+                            })),
+                        "seen-id store failed; processing without dedup"
+                    );
+                }
+                Err(_) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "channel": msg.channel,
+                                "message_id": msg.id,
+                                "err": "spawn_blocking join error",
+                            })),
+                        "seen-id store failed; processing without dedup"
+                    );
+                }
+            }
+        }
         // Gate answers (button-click markers / `approve <ref>` text replies)
         // resolve a PARKED run and must never start one, so they are consumed
         // BEFORE agent ownership lookup. A configured approval route may be

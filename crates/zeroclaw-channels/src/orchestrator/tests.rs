@@ -2416,7 +2416,6 @@ impl Channel for RecordingChannel {
     fn name(&self) -> &str {
         "test-channel"
     }
-
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         self.sent_messages
             .lock()
@@ -2475,6 +2474,76 @@ impl Channel for RecordingChannel {
             .lock()
             .await
             .push((reference.to_string(), outcome.to_string()));
+        Ok(true)
+    }
+}
+
+/// Recording channel with a fixed name, for dispatch-loop tests that need
+/// a message `channel` value other than `test-channel` to route somewhere.
+struct StaticNameRecordingChannel {
+    name: &'static str,
+    sent_messages: Arc<tokio::sync::Mutex<Vec<String>>>,
+}
+
+impl ::zeroclaw_api::attribution::Attributable for StaticNameRecordingChannel {
+    fn role(&self) -> ::zeroclaw_api::attribution::Role {
+        ::zeroclaw_api::attribution::Role::Channel(
+            ::zeroclaw_api::attribution::ChannelKind::Webhook,
+        )
+    }
+    fn alias(&self) -> &str {
+        "test"
+    }
+}
+
+#[async_trait::async_trait]
+impl Channel for StaticNameRecordingChannel {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
+        self.sent_messages
+            .lock()
+            .await
+            .push(format!("{}:{}", message.recipient, message.content));
+        Ok(())
+    }
+
+    async fn listen(
+        &self,
+        _tx: tokio::sync::mpsc::Sender<zeroclaw_api::channel::ChannelMessage>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn start_typing(&self, _recipient: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn add_reaction(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn remove_reaction(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn finalize_gate_prompt(&self, _reference: &str, _outcome: &str) -> anyhow::Result<bool> {
         Ok(true)
     }
 }
@@ -7260,7 +7329,7 @@ async fn message_dispatch_processes_messages_in_parallel() {
     .unwrap();
     drop(tx);
 
-    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 2).await;
+    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 2, None).await;
 
     let peak = peak_in_flight.load(Ordering::SeqCst);
     assert!(
@@ -7276,6 +7345,172 @@ async fn message_dispatch_processes_messages_in_parallel() {
 
     let sent_messages = channel_impl.sent_messages.lock().await;
     assert_eq!(sent_messages.len(), 2);
+}
+
+#[tokio::test]
+async fn message_dispatch_drops_redelivered_message_ids() {
+    let without_dedup =
+        deliver_messages_through_loop(None, "test-channel", "redelivered-1", 2).await;
+    assert_eq!(
+        without_dedup, 2,
+        "control: without the seen-id store both deliveries start a turn"
+    );
+
+    let seen_dir = tempfile::tempdir().unwrap();
+    let store = SeenMessageStore::open(seen_dir.path()).unwrap();
+    let with_dedup =
+        deliver_messages_through_loop(Some(Arc::new(store)), "test-channel", "redelivered-1", 2)
+            .await;
+    assert_eq!(
+        with_dedup, 1,
+        "a redelivered message id must be dropped before dispatch"
+    );
+}
+
+/// Regression (dispatch-loop dedup review): webhook ids are per-listen
+/// session counters (`webhook_0`, `webhook_1`, ...), so a durable seen-set
+/// seeded by a previous session must not drop a restarted listener's fresh
+/// `webhook_0`.
+#[tokio::test]
+async fn message_dispatch_does_not_dedup_session_counter_channels() {
+    let seen_dir = tempfile::tempdir().unwrap();
+    {
+        let previous_session = SeenMessageStore::open(seen_dir.path()).unwrap();
+        assert!(
+            previous_session
+                .check_and_record("webhook", "webhook_0")
+                .unwrap()
+        );
+    }
+    let store = Arc::new(SeenMessageStore::open(seen_dir.path()).unwrap());
+    let replies = deliver_messages_through_loop(Some(store), "webhook", "webhook_0", 1).await;
+    assert_eq!(
+        replies, 1,
+        "a restarted session-counter channel's fresh webhook_0 must not be dropped as a duplicate"
+    );
+}
+
+async fn deliver_messages_through_loop(
+    seen_ids: Option<Arc<SeenMessageStore>>,
+    channel_name: &'static str,
+    message_id: &str,
+    deliveries: usize,
+) -> usize {
+    let sent_messages = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let channel: Arc<dyn Channel> = Arc::new(StaticNameRecordingChannel {
+        name: channel_name,
+        sent_messages: Arc::clone(&sent_messages),
+    });
+
+    let mut channels_by_name = HashMap::new();
+    channels_by_name.insert(channel.name().to_string(), channel);
+
+    let runtime_ctx = Arc::new(ChannelRuntimeContext {
+        channels_by_name: Arc::new(channels_by_name),
+        model_provider: Arc::new(ConcurrencyTrackingProvider {
+            delay: Duration::from_millis(5),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            peak_in_flight: Arc::new(AtomicUsize::new(0)),
+        }),
+        model_provider_ref: Arc::new("test-provider".to_string()),
+        agent_alias: Arc::new("test-agent".to_string()),
+        agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
+        memory: Arc::new(NoopMemory),
+        memory_strategy: Arc::new(
+            zeroclaw_runtime::agent::memory_strategy::DefaultMemoryStrategy::with_config(
+                Arc::new(NoopMemory),
+                zeroclaw_config::schema::MemoryConfig::default(),
+                std::path::PathBuf::new(),
+            ),
+        ),
+        companion_store: None,
+        tools_registry: Arc::new(vec![]),
+        observer: Arc::new(NoopObserver),
+        system_prompt: Arc::new("test-system-prompt".to_string()),
+        model: Arc::new("test-model".to_string()),
+        temperature: Some(0.0),
+        auto_save_memory: false,
+        max_tool_iterations: 10,
+        min_relevance_score: 0.0,
+        conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+        ))),
+        pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+        provider_cache: Arc::new(Mutex::new(HashMap::new())),
+        route_overrides: Arc::new(Mutex::new(HashMap::new())),
+        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
+        scope_overrides: Arc::new(Mutex::new(HashMap::new())),
+        reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
+        provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
+        workspace_dir: Arc::new(std::env::temp_dir()),
+        prompt_config: Arc::new(zeroclaw_config::schema::Config::default()),
+        message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+        interrupt_on_new_message: InterruptOnNewMessageConfig {
+            telegram: false,
+            slack: false,
+            discord: false,
+            mattermost: false,
+            matrix: false,
+            whatsapp: false,
+        },
+        multimodal: zeroclaw_config::schema::MultimodalConfig::default(),
+        media_pipeline: zeroclaw_config::schema::MediaPipelineConfig::default(),
+        transcription_config: zeroclaw_config::schema::TranscriptionConfig::default(),
+        agent_transcription_provider: String::new(),
+        hooks: None,
+        non_cli_excluded_tools: Arc::new(Vec::new()),
+        autonomy_level: AutonomyLevel::default(),
+        tool_call_dedup_exempt: Arc::new(Vec::new()),
+        model_routes: Arc::new(Vec::new()),
+        query_classification: zeroclaw_config::schema::QueryClassificationConfig::default(),
+        ack_reactions: true,
+        show_tool_calls: true,
+        session_store: None,
+        approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+        )),
+        activated_tools: None,
+        cost_tracking: None,
+        pacing: zeroclaw_config::schema::PacingConfig::default(),
+        max_tool_result_chars: 0,
+        context_token_budget: 0,
+        debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
+            Duration::ZERO,
+        )),
+        receipt_generator: None,
+        show_receipts_in_response: false,
+        last_applied_config_stamp: Arc::new(Mutex::new(None)),
+        runtime_defaults_override: Arc::new(Mutex::new(None)),
+        persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        sop_engine: None,
+        sop_audit: None,
+    });
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(4);
+    for _ in 0..deliveries {
+        tx.send(zeroclaw_api::channel::ChannelMessage {
+            id: message_id.to_string(),
+            sender: "alice".to_string(),
+            reply_target: "alice".to_string(),
+            content: "hello".to_string(),
+            channel: channel_name.into(),
+            channel_alias: None,
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            subject: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    drop(tx);
+
+    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 2, seen_ids).await;
+
+    let sent = sent_messages.lock().await;
+    sent.len()
 }
 
 #[tokio::test]
@@ -7407,7 +7642,7 @@ async fn message_dispatch_interrupts_in_flight_telegram_request_and_preserves_co
         .unwrap();
     });
 
-    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 4).await;
+    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 4, None).await;
     send_task.await.unwrap();
 
     let sent_messages = channel_impl.sent_messages.lock().await;
@@ -7567,7 +7802,7 @@ async fn message_dispatch_interrupts_in_flight_slack_request_and_preserves_conte
         .unwrap();
     });
 
-    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 4).await;
+    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 4, None).await;
     send_task.await.unwrap();
 
     let sent_messages = channel_impl.sent_messages.lock().await;
@@ -7730,7 +7965,7 @@ async fn message_dispatch_interrupts_in_flight_whatsapp_request_and_preserves_co
         .unwrap();
     });
 
-    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 4).await;
+    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 4, None).await;
     send_task.await.unwrap();
 
     let sent_messages = channel_impl.sent_messages.lock().await;
@@ -7887,7 +8122,7 @@ async fn message_dispatch_interrupt_scope_is_same_sender_same_chat() {
         .unwrap();
     });
 
-    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 4).await;
+    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 4, None).await;
     send_task.await.unwrap();
 
     let sent_messages = channel_impl.sent_messages.lock().await;
@@ -15253,7 +15488,7 @@ async fn message_dispatch_different_threads_do_not_cancel_each_other() {
         .unwrap();
     });
 
-    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 4).await;
+    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 4, None).await;
     send_task.await.unwrap();
 
     // Both tasks should have completed — different threads, no cancellation.
@@ -17538,7 +17773,7 @@ async fn approval_only_channel_gate_reply_bypasses_agent_ownership() {
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     tx.send(msg).await.expect("queue gate reply");
     drop(tx);
-    run_message_dispatch_loop(rx, router, 1).await;
+    run_message_dispatch_loop(rx, router, 1, None).await;
 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
