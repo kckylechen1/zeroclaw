@@ -355,6 +355,36 @@ impl LogLevel {
     }
 }
 
+/// Subcommands for `zeroclaw telegram`.
+#[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
+#[derive(Subcommand, Debug)]
+enum TelegramCommands {
+    /// Record an operator skip marker for a poisoned Telegram update
+    // i18n-exempt: clap derive help — framework requires a compile-time literal
+    #[command(long_about = "\
+Record an operator skip marker for a poisoned Telegram update (a \
+permanently-failing update that blocks its bot head-of-line). The running \
+daemon consumes the marker on its next retry (within a few seconds), \
+archives the raw payload as a dead letter under its data directory, and \
+advances its offset past the update. Nothing is ever dropped automatically.
+
+Examples:
+  zeroclaw telegram skip-update --alias work --update-id 12345 --reason 'corrupted voice blob'")]
+    SkipUpdate {
+        /// Bot alias under `[channels.telegram.<alias>]`
+        #[arg(long)]
+        alias: String,
+
+        /// The `update_id` shown in the escalation log
+        #[arg(long)]
+        update_id: i64,
+
+        /// Why the update is being skipped (archived with the dead letter)
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
 /// Subcommands for `zeroclaw eval`.
 #[cfg(feature = "agent-runtime")]
 #[derive(Subcommand, Debug)]
@@ -906,6 +936,25 @@ Examples:
     Eval {
         #[command(subcommand)]
         eval_command: EvalCommands,
+    },
+
+    #[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
+    /// Telegram channel operator tooling
+    // i18n-exempt: clap derive help — framework requires a compile-time literal
+    #[command(long_about = "\
+Operator tooling for the Telegram channel.
+
+skip-update records an explicit skip marker for a poisoned Telegram update \
+(a permanently-failing update that blocks the bot head-of-line). The running \
+daemon consumes the marker on its next retry, archives the raw payload as a \
+dead letter under its data directory, and advances past the update. Nothing \
+is ever dropped automatically.
+
+Examples:
+  zeroclaw telegram skip-update --alias work --update-id 12345 --reason 'corrupted voice blob'")]
+    Telegram {
+        #[command(subcommand)]
+        telegram_command: TelegramCommands,
     },
 
     /// Generate shell completion script to stdout
@@ -2675,6 +2724,15 @@ async fn async_main(command: clap::Command) -> Result<()> {
         }
 
         Commands::Status { format } => commands::status::handle(&config, format).await,
+
+        #[cfg(all(feature = "agent-runtime", feature = "channel-telegram"))]
+        Commands::Telegram { telegram_command } => match telegram_command {
+            TelegramCommands::SkipUpdate {
+                alias,
+                update_id,
+                reason,
+            } => commands::telegram::run_skip_update(&config, &alias, update_id, reason),
+        },
 
         #[cfg(feature = "agent-runtime")]
         Commands::Security {

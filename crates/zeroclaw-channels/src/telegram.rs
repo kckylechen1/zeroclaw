@@ -18,6 +18,98 @@ const TELEGRAM_FENCE_REOPEN: &str = "```\n";
 const TELEGRAM_FENCE_CLOSE: &str = "```";
 const TELEGRAM_ACK_REACTIONS: &[&str] = &["⚡️", "👌", "👀", "🔥", "👍"];
 
+/// Operator-authored skip marker for a poisoned Telegram update: written
+/// by `zeroclaw telegram skip-update`, consumed by the retry loop before
+/// its next re-attempt. Explicit human action only — nothing here ever
+/// drops an update automatically.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TelegramSkipMarker {
+    pub update_id: i64,
+    /// Operator-supplied reason, archived alongside the dead letter.
+    pub reason: String,
+    /// Unix epoch seconds when the CLI wrote the marker.
+    pub created_at_unix: u64,
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Where the operator skip list for `alias` lives under the daemon's
+/// `data_dir`. Shared contract between the CLI writer and the listener.
+#[must_use]
+pub fn telegram_skip_list_path(data_dir: &Path, alias: &str) -> std::path::PathBuf {
+    data_dir.join("telegram_skip").join(format!("{alias}.json"))
+}
+
+/// Best-effort read of the skip list; a missing or malformed file means
+/// "no skips" — the retry loop must never fail closed on operator file
+/// trouble.
+pub fn load_telegram_skip_markers(data_dir: &Path, alias: &str) -> Vec<TelegramSkipMarker> {
+    let path = telegram_skip_list_path(data_dir, alias);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str::<Vec<TelegramSkipMarker>>(&raw).unwrap_or_else(|err| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "path": path.display().to_string(),
+                        "err": err.to_string(),
+                    })),
+                "telegram skip list unreadable; treating as empty"
+            );
+            Vec::new()
+        }),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Append a skip marker (the `zeroclaw telegram skip-update` entry
+/// point). Atomic tmp+rename so the listener never observes a torn file.
+/// Idempotent per update_id.
+pub fn append_telegram_skip_marker(
+    data_dir: &Path,
+    alias: &str,
+    update_id: i64,
+    reason: &str,
+) -> Result<(), String> {
+    if alias.is_empty() || alias.contains('/') || alias.contains('\\') {
+        return Err(format!(
+            "invalid bot alias '{alias}': path separators are not allowed"
+        ));
+    }
+    let path = telegram_skip_list_path(data_dir, alias);
+    let mut markers = load_telegram_skip_markers(data_dir, alias);
+    if markers.iter().any(|marker| marker.update_id == update_id) {
+        return Ok(());
+    }
+    markers.push(TelegramSkipMarker {
+        update_id,
+        reason: reason.to_string(),
+        created_at_unix: unix_now_secs(),
+    });
+    let parent = path
+        .parent()
+        .ok_or_else(|| "skip list has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|err| format!("create {}: {err}", parent.display()))?;
+    let body = serde_json::to_string_pretty(&markers).map_err(|err| err.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(mut file) = std::fs::File::create(&tmp) {
+        use std::io::Write as _;
+        if let Ok(()) = file.write_all(body.as_bytes()) {
+            let _ = file.sync_all();
+        }
+    } else {
+        return Err(format!("write {}: open failed", tmp.display()));
+    }
+    std::fs::rename(&tmp, &path).map_err(|err| format!("rename into {}: {err}", path.display()))?;
+    Ok(())
+}
+
 /// Metadata for an incoming document or photo attachment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IncomingAttachment {
@@ -1038,6 +1130,68 @@ impl TelegramChannel {
     pub fn with_persistence(mut self, config: Arc<RwLock<Config>>) -> Self {
         self.persist = Some(config);
         self
+    }
+
+    /// The daemon `data_dir` via the persistence handle. `None` when
+    /// unset: the operator skip path is disabled in that deployment (the
+    /// archive error names the cause at skip time).
+    fn persisted_data_dir(&self) -> Option<std::path::PathBuf> {
+        let persist = self.persist.as_ref()?;
+        let data_dir = persist.read().data_dir.clone();
+        if data_dir.as_os_str().is_empty() {
+            None
+        } else {
+            Some(data_dir)
+        }
+    }
+
+    fn operator_skip_marker_for(&self, update_id: i64) -> Option<TelegramSkipMarker> {
+        let data_dir = self.persisted_data_dir()?;
+        load_telegram_skip_markers(&data_dir, &self.alias)
+            .into_iter()
+            .find(|marker| marker.update_id == update_id)
+    }
+
+    /// Durably archive a skipped poisoned update before advancing the
+    /// offset past it — the payload is preserved for inspection, never
+    /// silently dropped. Atomic tmp+rename.
+    async fn archive_skipped_update(
+        &self,
+        update_id: i64,
+        marker: &TelegramSkipMarker,
+        update: &serde_json::Value,
+    ) -> Result<std::path::PathBuf, String> {
+        let data_dir = self
+            .persisted_data_dir()
+            .ok_or_else(|| "data_dir unavailable".to_string())?;
+        let dir = data_dir.join("telegram_dead_letters").join(&self.alias);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|err| format!("create {}: {err}", dir.display()))?;
+        let record = serde_json::json!({
+            "update_id": update_id,
+            "alias": self.alias,
+            "reason": marker.reason,
+            "marker_created_at_unix": marker.created_at_unix,
+            "skipped_at_unix": unix_now_secs(),
+            "payload": update,
+        });
+        let body = serde_json::to_string_pretty(&record).map_err(|err| err.to_string())?;
+        let tmp = dir.join(format!("{update_id}.json.tmp"));
+        let mut file = tokio::fs::File::create(&tmp)
+            .await
+            .map_err(|err| format!("create {}: {err}", tmp.display()))?;
+        use tokio::io::AsyncWriteExt as _;
+        file.write_all(body.as_bytes())
+            .await
+            .map_err(|err| format!("write {}: {err}", tmp.display()))?;
+        let _ = file.sync_all().await;
+        drop(file);
+        let path = dir.join(format!("{update_id}.json"));
+        tokio::fs::rename(&tmp, &path)
+            .await
+            .map_err(|err| format!("rename into {}: {err}", path.display()))?;
+        Ok(path)
     }
 
     async fn persist_allowed_identity(&self, identity: &str) -> anyhow::Result<()> {
@@ -3425,6 +3579,11 @@ Allowlist Telegram username (without '@') or numeric user ID.",
     /// disposition may advance the Telegram offset.
     const TRANSIENT_RETRY_DELAY_SECS: u64 = 2;
 
+    /// Every Nth failed attempt escalates the poison WARN to ERROR with
+    /// operator guidance. Purely diagnostic — the retry posture itself
+    /// never changes without an explicit operator skip.
+    const POISON_ESCALATE_EVERY_ATTEMPTS: u32 = 15;
+
     /// Route a single update from a `getUpdates` batch through the shared
     /// delivered/permanent-skip/retry-transient disposition path.
     ///
@@ -3556,17 +3715,79 @@ Allowlist Telegram username (without '@') or numeric user ID.",
                 } else {
                     1
                 };
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({
-                            "update_id": uid,
-                            "attempts": attempts,
-                            "retry_delay_secs": Self::TRANSIENT_RETRY_DELAY_SECS,
-                        })),
-                    "Transient failure parsing update; leaving offset unadvanced so the next poll retries it"
-                );
+                if let Some(uid) = uid
+                    && let Some(marker) = self.operator_skip_marker_for(uid)
+                {
+                    match self.archive_skipped_update(uid, &marker, update).await {
+                        Ok(archive_path) => {
+                            ::zeroclaw_log::record!(
+                                ERROR,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "update_id": uid,
+                                    "alias": self.alias,
+                                    "reason": marker.reason,
+                                    "archive": archive_path.display().to_string(),
+                                })),
+                                "operator skip applied: poisoned update archived, offset advanced, batch resumed"
+                            );
+                            *offset = uid + 1;
+                            *transient_retry = None;
+                            return UpdateOutcome::Advanced;
+                        }
+                        Err(err) => {
+                            ::zeroclaw_log::record!(
+                                ERROR,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_attrs(::serde_json::json!({
+                                    "update_id": uid,
+                                    "alias": self.alias,
+                                    "err": err,
+                                })),
+                                "operator skip found but archiving failed; update stays head-of-line (never dropped)"
+                            );
+                        }
+                    }
+                }
+                if attempts > 0 && attempts % Self::POISON_ESCALATE_EVERY_ATTEMPTS == 0 {
+                    ::zeroclaw_log::record!(
+                        ERROR,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "update_id": uid,
+                                "attempts": attempts,
+                                "retry_delay_secs": Self::TRANSIENT_RETRY_DELAY_SECS,
+                                "alias": self.alias,
+                                "skip_command": format!(
+                                    "zeroclaw telegram skip-update --alias {} --update-id {}",
+                                    self.alias,
+                                    uid.map(|v| v.to_string()).unwrap_or_default()
+                                ),
+                            })),
+                        "poisoned update is head-of-line blocking this bot; run the skip command to archive and advance"
+                    );
+                } else {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "update_id": uid,
+                                "attempts": attempts,
+                                "retry_delay_secs": Self::TRANSIENT_RETRY_DELAY_SECS,
+                            })),
+                        "Transient failure parsing update; leaving offset unadvanced so the next poll retries it"
+                    );
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(
                     Self::TRANSIENT_RETRY_DELAY_SECS,
                 ))
@@ -7334,6 +7555,123 @@ mod tests {
         assert!(
             telegram_wait_for_main_loop_offset(&mock_server, uid + 1, Duration::from_secs(5)).await,
             "offset never advanced past the update once its retry succeeded"
+        );
+
+        handle.abort();
+    }
+
+    #[test]
+    fn skip_marker_append_load_roundtrip_and_idempotency() {
+        let dir = tempfile::tempdir().unwrap();
+        append_telegram_skip_marker(dir.path(), "bot-a", 42, "operator: corrupted voice blob")
+            .unwrap();
+        let markers = load_telegram_skip_markers(dir.path(), "bot-a");
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].update_id, 42);
+        assert_eq!(markers[0].reason, "operator: corrupted voice blob");
+
+        append_telegram_skip_marker(dir.path(), "bot-a", 43, "second skip").unwrap();
+        // Same update_id again is a no-op (idempotent).
+        append_telegram_skip_marker(dir.path(), "bot-a", 42, "duplicate").unwrap();
+        let markers = load_telegram_skip_markers(dir.path(), "bot-a");
+        assert_eq!(
+            markers.iter().map(|m| m.update_id).collect::<Vec<_>>(),
+            vec![42, 43],
+            "markers must append once per update_id"
+        );
+
+        // A different bot alias has its own list; a missing file reads empty.
+        assert!(load_telegram_skip_markers(dir.path(), "bot-b").is_empty());
+
+        // Path separators in an alias must be rejected, not joined.
+        assert!(append_telegram_skip_marker(dir.path(), "../escape", 1, "x").is_err());
+        assert!(append_telegram_skip_marker(dir.path(), "a/b", 1, "x").is_err());
+        assert!(append_telegram_skip_marker(dir.path(), "", 1, "x").is_err());
+    }
+
+    /// A permanently-poisoned update (getFile always 500) blocks the bot
+    /// head-of-line until an operator writes a skip marker; the listener
+    /// must then archive the raw payload and advance the offset — never
+    /// deliver it, never drop it silently.
+    #[tokio::test]
+    async fn listen_operator_skip_archives_poisoned_update_and_advances_offset() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        mount_telegram_startup_probe(&mock_server).await;
+
+        let uid = 3_000;
+        let update = telegram_document_update(uid, 7, 557, "alice", "filePoison", "poison.pdf");
+
+        mount_telegram_get_updates(&mock_server, 0, serde_json::json!([update])).await;
+
+        Mock::given(method("GET"))
+            .and(path_regex(r"/bot[^/]+/getFile$"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+
+        mount_telegram_get_updates(&mock_server, uid + 1, serde_json::json!([])).await;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        append_telegram_skip_marker(
+            data_dir.path(),
+            "telegram_test_alias",
+            uid,
+            "operator: known poison, skip after archive",
+        )
+        .unwrap();
+        let persist_config = Config {
+            data_dir: data_dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        let ch = Arc::new(
+            TelegramChannel::new(
+                "test-token".into(),
+                "telegram_test_alias",
+                Arc::new(|| vec!["alice".to_string()]),
+                false,
+            )
+            .with_api_base(mock_server.uri())
+            .with_workspace_dir(workspace.path().to_path_buf())
+            .with_persistence(Arc::new(RwLock::new(persist_config))),
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let listen_ch = ch.clone();
+        let handle = zeroclaw_spawn::spawn!(async move { listen_ch.listen(tx).await });
+
+        assert!(
+            telegram_wait_for_main_loop_offset(&mock_server, uid + 1, Duration::from_secs(15))
+                .await,
+            "operator skip must advance the offset past the poisoned update"
+        );
+
+        let dead_letter = data_dir
+            .path()
+            .join("telegram_dead_letters")
+            .join("telegram_test_alias")
+            .join(format!("{uid}.json"));
+        let raw = std::fs::read_to_string(&dead_letter)
+            .unwrap_or_else(|err| panic!("dead letter {} missing: {err}", dead_letter.display()));
+        let archived: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(archived["update_id"].as_i64(), Some(uid));
+        assert_eq!(
+            archived["reason"].as_str(),
+            Some("operator: known poison, skip after archive")
+        );
+        assert_eq!(
+            archived["payload"]["update_id"].as_i64(),
+            Some(uid),
+            "the raw poisoned payload must be preserved for inspection"
+        );
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a skipped poisoned update must never be delivered"
         );
 
         handle.abort();
