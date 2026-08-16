@@ -7367,7 +7367,7 @@ async fn message_dispatch_drops_redelivered_message_ids() {
     );
 }
 
-/// Regression (adversarial review of #170): webhook ids are per-listen
+/// Regression (dispatch-loop dedup review): webhook ids are per-listen
 /// session counters (`webhook_0`, `webhook_1`, ...), so a durable seen-set
 /// seeded by a previous session must not drop a restarted listener's fresh
 /// `webhook_0`.
