@@ -341,6 +341,17 @@ impl NodeRegistry {
                 true
             }
         });
+        ::zeroclaw_log::record!(
+            INFO,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
+                ::serde_json::json!({
+                    "device_id": device_id,
+                    "revoked": true,
+                    "torn_connections": torn,
+                })
+            ),
+            "device identity revoked; live sockets torn down (auditable receipt)"
+        );
         Ok(torn)
     }
 
@@ -2065,6 +2076,26 @@ mod tests {
         assert_eq!(
             verify_node_auth(&registry, &reconnect, &signature, identity.identity_epoch),
             Err(NodeErrorCode::IdentityRejected)
+        );
+    }
+
+    /// Disconnect cleanup is keyed by `connection_id` (the per-socket
+    /// generation token), so a stale disconnect for a superseded socket
+    /// cannot evict the newer connection of the same device.
+    #[test]
+    fn stale_detach_cannot_remove_newer_connection() {
+        let registry = NodeRegistry::new(8);
+        let (older, _older_close) = registry.try_reserve().expect("reserve older");
+        let (newer, _newer_close) = registry.try_reserve().expect("reserve newer");
+        registry.detach_socket(&older.connection_id);
+        let live = registry.live_connection_ids();
+        assert!(
+            live.contains(&newer.connection_id),
+            "the newer connection must survive a stale detach"
+        );
+        assert!(
+            !live.contains(&older.connection_id),
+            "the detached connection must be gone"
         );
     }
 
