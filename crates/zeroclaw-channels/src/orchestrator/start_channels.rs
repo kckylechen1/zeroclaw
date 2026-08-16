@@ -24,12 +24,13 @@ use super::{
     ActiveChannelAliases, AgentRouter, CRON_CHANNEL_REGISTRY, ChannelAssembledTools,
     ChannelCostTrackingState, ChannelRuntimeContext, ConfiguredChannel,
     DEFAULT_CHANNEL_INITIAL_BACKOFF_SECS, DEFAULT_CHANNEL_MAX_BACKOFF_SECS, MAX_CHANNEL_HISTORY,
-    MAX_CONVERSATION_SENDERS, assemble_channel_agent_tools, build_owner_by_channel_key,
-    build_system_prompt_with_mode_and_autonomy, collect_configured_channels,
-    compose_channel_mcp_prompt_sections, composite_channel_key, configured_channel_map,
-    create_resilient_model_provider_nonblocking, effective_channel_message_timeout_secs,
-    interrupt_on_new_message_config, max_in_flight_messages_for_config, run_message_dispatch_loop,
-    runtime_defaults_from_config, spawn_supervised_listener,
+    MAX_CONVERSATION_SENDERS, SeenMessageStore, assemble_channel_agent_tools,
+    build_owner_by_channel_key, build_system_prompt_with_mode_and_autonomy,
+    collect_configured_channels, compose_channel_mcp_prompt_sections, composite_channel_key,
+    configured_channel_map, create_resilient_model_provider_nonblocking,
+    effective_channel_message_timeout_secs, interrupt_on_new_message_config,
+    max_in_flight_messages_for_config, run_message_dispatch_loop, runtime_defaults_from_config,
+    spawn_supervised_listener,
 };
 
 pub async fn start_channels(
@@ -821,10 +822,27 @@ pub async fn start_channels(
 
     let router = AgentRouter::multi(agent_ctxs, owner_by_channel_key, sop_engine, sop_audit);
 
+    let seen_ids = match SeenMessageStore::open(&config.data_dir) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(err) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "data_dir": config.data_dir.display().to_string(),
+                        "err": err.to_string(),
+                    })),
+                "seen-id store open failed; inbound redelivery dedup disabled"
+            );
+            None
+        }
+    };
+
     let rx = rx_holder.expect("rx initialized by first agent's channel setup");
     let max_in_flight =
         max_in_flight_messages.expect("max_in_flight initialized by first agent's channel setup");
-    run_message_dispatch_loop(rx, router, max_in_flight).await;
+    run_message_dispatch_loop(rx, router, max_in_flight, seen_ids).await;
 
     for h in listener_handles {
         let _ = h.await;
