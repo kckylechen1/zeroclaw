@@ -84,14 +84,16 @@ So the rule for anything new:
    *read* a result must not have to link the runtime that produces it.
 3. **New config sections get their own module** under `zeroclaw-config/src/`,
    not another block in `schema.rs`. See `persona.rs` and `card.rs`.
-4. **Do not restructure `schema.rs` to fix this.** It grows ~6k lines a month
-   upstream; a fork that reorganises it re-fights that churn every rebase, and
-   measurement says the ceiling on the win is small — removing an entire derive
-   (`JsonSchema`) cuts the rlib by 16%.
+4. **Do not restructure `schema.rs` to fix this.** Restructuring is no longer
+   rebase-constrained (own-project mode), but the ceiling on the win is
+   small — removing an entire derive (`JsonSchema`) cuts the rlib by 16% —
+   and it still churns ~6k lines a month upstream, so any future port that
+   touches it pays for the difference.
 
 The rule is "new things follow the new shape", not "go fix the old shape".
-New files rebase for free; edits inside upstream's hot files are charged at the
-rate upstream churns them.
+New files cost nothing to maintain against upstream; edits inside upstream's
+hot files cost whatever upstream churns them at whenever we port nearby
+changes.
 
 ## Hyperion Integration Context
 
@@ -110,21 +112,37 @@ ZeroClaw (this repo)
          — NO direct connection to any memory backend (#2389 / #2432)
 ```
 
-### Carried patches
+### Upstream relationship (own-project mode)
 
-This is a fork. Rebasing onto upstream is how we pull their work in — it is not
-a reason to keep our own surface small. Every row below states what upstream does
-today so each rebase can re-test whether a patch has been absorbed; a patch that
-is still ours simply stays.
+This repository is maintained as an independent project (decision: 2026-08-16).
+Upstream (`zeroclaw-labs/zeroclaw`) is a reference to port from deliberately,
+not a stream to track: no scheduled rebases, no wholesale merges of upstream
+master. Wholesale rebases silently import unreviewed changes — the
+provider-dispatch violation from upstream #8979 arrived that way and no
+required CI check caught it.
 
-| Patch | Upstream today | Status |
+- **Baseline:** history contains upstream work through PR #9356; `master`
+  `40cc158e8` (2026-08-16) is the last wholesale-aligned point. When porting
+  or comparing against upstream, diff from this baseline.
+- **Port-on-demand protocol:** when a specific upstream fix or feature is
+  needed, read the upstream diff, port/adapt it deliberately, validate at the
+  touched surface's risk level, and record provenance in the commit message
+  ("ported from upstream #NNNN").
+- **Dependency CVEs** stay covered by `cargo audit` (CI and local
+  validation); upstream's own code fixes do not arrive automatically.
+
+The table below records intentional behavioral divergences from upstream —
+no longer a rebase-carrying ledger, it remains the map of where our behavior
+deliberately differs when porting nearby code.
+
+| Divergence | Upstream today | Status |
 |---|---|---|
-| `always_ask` outranks Full autonomy | `approval/mod.rs` returns `Approved` for Full **before** consulting `always_ask` — fail-open | ✅ carried |
-| risk-profile `allowed_tools`: absent ≠ empty | maps `[]` → `None` → unrestricted | ✅ carried |
-| cron `allowed_tools = []` means deny-all | ships a test asserting the opposite (`empty_allowed_tools_stored_as_none`) | ✅ carried, deliberately conflicts |
-| `ModelProvider::set_credential` + real 429 rotation | logs "cannot apply … Retrying with original key" in 4 places | ✅ re-derived on upstream tip |
-| WeChat atomic / non-blocking state persistence | `write_private` still does blocking `std::fs::write`, non-atomic truncate, chmod after write | ✅ carried — atomic tmp+chmod+rename with best-effort fsync (process-crash safe, not a power-loss guarantee); `save_account_data` is `async` via `spawn_blocking` |
-| Tachi memory backend | absent | ✅ carried, feature-gated behind `tachi` — the fork's own agent-memory backend, distinct from the Hyperion trading memory path |
+| `always_ask` outranks Full autonomy | `approval/mod.rs` returns `Approved` for Full **before** consulting `always_ask` — fail-open | ✅ deliberate |
+| risk-profile `allowed_tools`: absent ≠ empty | maps `[]` → `None` → unrestricted | ✅ deliberate |
+| cron `allowed_tools = []` means deny-all | ships a test asserting the opposite (`empty_allowed_tools_stored_as_none`) | ✅ deliberate |
+| `ModelProvider::set_credential` + real 429 rotation | logs "cannot apply … Retrying with original key" in 4 places | ✅ deliberate |
+| WeChat atomic / non-blocking state persistence | `write_private` still does blocking `std::fs::write`, non-atomic truncate, chmod after write | ✅ deliberate — atomic tmp+chmod+rename with best-effort fsync (process-crash safe, not a power-loss guarantee); `save_account_data` is `async` via `spawn_blocking` |
+| Tachi memory backend | absent | ✅ deliberate, feature-gated behind `tachi` — the fork's own agent-memory backend, distinct from the Hyperion trading memory path |
 | HyperMemory custom CRUD backend | absent | ❌ retired (#634 option C) — never re-add |
 
 ### Known gaps neither side has fixed
