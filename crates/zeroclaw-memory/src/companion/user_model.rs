@@ -179,6 +179,9 @@ impl UserModelStore {
     /// Record an explicit owner-authored statement and make it the active
     /// revision for its semantic key immediately (local-first; no review
     /// round-trip required when the owner speaks directly).
+    ///
+    /// Lookup and insert share ONE lock scope so two concurrent writers on
+    /// the same key cannot both supersede the same prior revision.
     pub fn record_owner_statement(
         &self,
         kind: UserModelKind,
@@ -187,20 +190,52 @@ impl UserModelStore {
         scope: &str,
         now_unix: u64,
     ) -> Result<UserModelRevision, rusqlite::Error> {
-        let mut revision = UserModelRevision {
+        let conn = self.conn.lock();
+        let supersedes: Option<String> = conn
+            .query_row(
+                "SELECT id FROM user_model_revisions
+                 WHERE semantic_key = ?1 AND valid_from_unix <= ?2
+                 ORDER BY created_at_unix DESC, id DESC LIMIT 1",
+                rusqlite::params![semantic_key, now_unix],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        let revision = UserModelRevision {
             id: uuid::Uuid::new_v4().to_string(),
             semantic_key: semantic_key.to_string(),
             kind,
             statement: statement.to_string(),
             scope: scope.to_string(),
             authority: AuthorityClass::OwnerAuthored,
-            supersedes: self.active_revision_id(semantic_key, now_unix),
+            supersedes,
             valid_from_unix: now_unix,
             valid_until_unix: None,
             source_candidate: None,
             created_at_unix: now_unix,
         };
-        self.insert_revision(&mut revision)?;
+        conn.execute(
+            "INSERT INTO user_model_revisions
+                 (id, semantic_key, kind, statement, scope, authority, supersedes,
+                  valid_from_unix, valid_until_unix, source_candidate, created_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                revision.id,
+                revision.semantic_key,
+                revision.kind.as_str(),
+                revision.statement,
+                revision.scope,
+                revision.authority.as_str(),
+                revision.supersedes,
+                revision.valid_from_unix,
+                revision.valid_until_unix,
+                revision.source_candidate,
+                revision.created_at_unix,
+            ],
+        )?;
         Ok(revision)
     }
 
@@ -307,7 +342,7 @@ impl UserModelStore {
                               WHERE semantic_key = ?2
                                 AND valid_from_unix <= ?7
                                 AND (valid_until_unix IS NULL OR valid_until_unix > ?7)
-                              ORDER BY created_at_unix DESC LIMIT 1),
+                              ORDER BY created_at_unix DESC, id DESC LIMIT 1),
                              ?7, NULL, ?8, ?7)",
                     rusqlite::params![
                         uuid::Uuid::new_v4().to_string(),
@@ -349,7 +384,8 @@ impl UserModelStore {
                    WHERE r2.semantic_key = r.semantic_key
                      AND r2.valid_from_unix <= ?1
                )
-               AND (r.valid_until_unix IS NULL OR r.valid_until_unix > ?1)",
+               AND (r.valid_until_unix IS NULL OR r.valid_until_unix > ?1)
+             ORDER BY r.created_at_unix DESC, r.id DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![as_of], revision_from_row)?;
         let mut seen = std::collections::HashSet::new();
@@ -362,38 +398,6 @@ impl UserModelStore {
         }
         heads.sort_by(|a, b| a.semantic_key.cmp(&b.semantic_key));
         Ok(heads)
-    }
-
-    fn active_revision_id(&self, semantic_key: &str, now_unix: u64) -> Option<String> {
-        let heads = self.active_heads(Some(now_unix)).ok()?;
-        heads
-            .into_iter()
-            .find(|revision| revision.semantic_key == semantic_key)
-            .map(|revision| revision.id)
-    }
-
-    fn insert_revision(&self, revision: &mut UserModelRevision) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "INSERT INTO user_model_revisions
-                 (id, semantic_key, kind, statement, scope, authority, supersedes,
-                  valid_from_unix, valid_until_unix, source_candidate, created_at_unix)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            rusqlite::params![
-                revision.id,
-                revision.semantic_key,
-                revision.kind.as_str(),
-                revision.statement,
-                revision.scope,
-                revision.authority.as_str(),
-                revision.supersedes,
-                revision.valid_from_unix,
-                revision.valid_until_unix,
-                revision.source_candidate,
-                revision.created_at_unix,
-            ],
-        )?;
-        Ok(())
     }
 }
 
@@ -698,6 +702,36 @@ mod tests {
         drop(conn);
         assert!(s.active_heads(Some(3_500)).unwrap().is_empty());
         assert_eq!(s.active_heads(Some(2_500)).unwrap().len(), 1);
+    }
+
+    /// Same-timestamp revisions for one key must resolve to exactly one
+    /// head, stably across reads (tie broken by id, deterministic).
+    #[test]
+    fn same_timestamp_tie_resolves_to_one_stable_head() {
+        let (_dir, s) = store();
+        s.record_owner_statement(
+            UserModelKind::Preference,
+            "First statement in the same second.",
+            "communication.tie",
+            "global",
+            5_000,
+        )
+        .unwrap();
+        s.record_owner_statement(
+            UserModelKind::Preference,
+            "Second statement in the same second.",
+            "communication.tie",
+            "global",
+            5_000,
+        )
+        .unwrap();
+        let first_read = s.active_heads(Some(5_000)).unwrap();
+        assert_eq!(first_read.len(), 1, "a tie must yield exactly one head");
+        let second_read = s.active_heads(Some(5_000)).unwrap();
+        assert_eq!(
+            first_read[0].id, second_read[0].id,
+            "the tie winner must be stable across reads"
+        );
     }
 
     /// Durable across reopen: local-first means no daemon lifetime magic.
