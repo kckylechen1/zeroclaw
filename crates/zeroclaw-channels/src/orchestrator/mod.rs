@@ -466,6 +466,9 @@ struct ChannelRuntimeContext {
     /// Companion PortableKernel store. Shared across agents; sibling of
     /// `memory_strategy`, not inside `TachiMemory`.
     companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
+    /// Local User Model authority store (#51): owner values/goals/
+    /// preferences projected into turn prompts. `None` disables projection.
+    user_model: Option<Arc<zeroclaw_memory::companion::UserModelStore>>,
     tools_registry: Arc<Vec<Box<dyn Tool>>>,
     observer: Arc<dyn Observer>,
     system_prompt: Arc<String>,
@@ -539,6 +542,10 @@ impl ChannelRuntimeContext {
     /// Companion PortableKernel handle injected from the composition root.
     pub(crate) fn companion_store(&self) -> Option<&Arc<zeroclaw_memory::CompanionStore>> {
         self.companion_store.as_ref()
+    }
+
+    pub(crate) fn user_model(&self) -> Option<&Arc<zeroclaw_memory::companion::UserModelStore>> {
+        self.user_model.as_ref()
     }
 
     fn persist_companion_capture(&self, msg: &ChannelMessage, session_id: &str, turn_id: &str) {
@@ -4283,6 +4290,7 @@ fn concurrent_persist_lock_serialization() {
         persist_locks: Arc::new(Mutex::new(HashMap::new())),
         sop_engine: None,
         sop_audit: None,
+        user_model: None,
     });
     ctx.conversation_histories
         .lock()

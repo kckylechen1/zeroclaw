@@ -11,6 +11,7 @@
 //! - `supersede` appends a new revision; history is never rewritten.
 //! - Works fully offline; nothing here requires Tachi.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use parking_lot::Mutex;
@@ -401,6 +402,67 @@ impl UserModelStore {
     }
 }
 
+/// Default character budget for the projected prompt section. The
+/// projection is bounded so a large active set can never crowd out the
+/// rest of the system prompt.
+pub const USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS: usize = 1_200;
+
+/// The rendered projection plus the revision ids behind it. The ids are
+/// for internal correction paths (logging, review UI) — they are NOT
+/// embedded in the prompt text the model sees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserModelStateProjection {
+    /// Ready-to-append prompt section; empty when nothing is active.
+    pub prompt_section: String,
+    /// Active revision ids backing the section, newest first.
+    pub revision_ids: Vec<String>,
+}
+
+/// Render the active heads into a bounded prompt section. Newest heads get
+/// the budget first; anything that no longer fits is elided with a count.
+pub fn project_active_heads(
+    heads: &[UserModelRevision],
+    max_chars: usize,
+) -> UserModelStateProjection {
+    if heads.is_empty() {
+        return UserModelStateProjection {
+            prompt_section: String::new(),
+            revision_ids: Vec::new(),
+        };
+    }
+    let mut ordered: Vec<&UserModelRevision> = heads.iter().collect();
+    ordered.sort_by(|a, b| {
+        b.created_at_unix
+            .cmp(&a.created_at_unix)
+            .then(a.id.cmp(&b.id))
+    });
+
+    let mut section = String::from("## Owner profile (authoritative)\n");
+    let mut included_ids = Vec::new();
+    let mut elided = 0usize;
+    for revision in ordered {
+        let line = format!(
+            "- {}: {} [scope: {}]\n",
+            revision.kind.as_str(),
+            revision.statement,
+            revision.scope
+        );
+        if section.len() + line.len() > max_chars {
+            elided += 1;
+            continue;
+        }
+        section.push_str(&line);
+        included_ids.push(revision.id.clone());
+    }
+    if elided > 0 {
+        let _ = writeln!(section, "- (+{elided} elided; review to trim)");
+    }
+    UserModelStateProjection {
+        prompt_section: section,
+        revision_ids: included_ids,
+    }
+}
+
 fn kind_from_str(raw: &str) -> Option<UserModelKind> {
     match raw {
         "value" => Some(UserModelKind::Value),
@@ -732,6 +794,79 @@ mod tests {
             first_read[0].id, second_read[0].id,
             "the tie winner must be stable across reads"
         );
+    }
+
+    /// Projection: empty heads render nothing; the section is bounded with
+    /// newest-first priority and an elision count; ids ride alongside for
+    /// internal correction without entering the prompt text.
+    #[test]
+    fn projection_is_bounded_and_reports_ids() {
+        let (_dir, s) = store();
+        for i in 0..40 {
+            s.record_owner_statement(
+                UserModelKind::Preference,
+                &format!("Preference number {i} with some words to consume budget."),
+                &format!("pref.{i}"),
+                "global",
+                1_000 + i,
+            )
+            .unwrap();
+        }
+        let heads = s.active_heads(None).unwrap();
+        let projection = project_active_heads(&heads, 600);
+        assert!(
+            projection.prompt_section.len() <= 700,
+            "section must stay near the budget"
+        );
+        assert!(
+            projection.prompt_section.contains("elided"),
+            "a 40-head set over a 600-char budget must elide"
+        );
+        assert!(
+            !projection.prompt_section.contains(&heads[0].id),
+            "revision ids must not enter the prompt text"
+        );
+        assert!(!projection.revision_ids.is_empty());
+
+        let empty = project_active_heads(&[], 600);
+        assert!(empty.prompt_section.is_empty());
+        assert!(empty.revision_ids.is_empty());
+    }
+
+    #[test]
+    fn projection_prefers_newest_heads() {
+        let (_dir, s) = store();
+        s.record_owner_statement(
+            UserModelKind::Value,
+            "Old value statement.",
+            "value.only",
+            "global",
+            1_000,
+        )
+        .unwrap();
+        s.record_owner_statement(
+            UserModelKind::Goal,
+            "Newest goal statement.",
+            "goal.only",
+            "global",
+            2_000,
+        )
+        .unwrap();
+        let heads = s.active_heads(None).unwrap();
+        let projection = project_active_heads(&heads, 4_000);
+        let goal_pos = projection
+            .prompt_section
+            .find("Newest goal statement.")
+            .unwrap();
+        let value_pos = projection
+            .prompt_section
+            .find("Old value statement.")
+            .unwrap();
+        assert!(
+            goal_pos < value_pos,
+            "newest revisions must be rendered first"
+        );
+        assert_eq!(projection.revision_ids.len(), 2);
     }
 
     /// Durable across reopen: local-first means no daemon lifetime magic.
