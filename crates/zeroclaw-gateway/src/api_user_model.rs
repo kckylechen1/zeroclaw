@@ -1,5 +1,5 @@
 //! `GET/POST /api/user-model/*` — operator review surface for the User
-//! Model authority (#51). Every route is operator-gated: reviewing and
+//! Model authority. Every route is operator-gated: reviewing and
 //! authoring is owner authority, exactly the surface the store's rules
 //! exist to govern.
 

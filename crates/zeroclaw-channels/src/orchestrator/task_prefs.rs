@@ -1,4 +1,4 @@
-//! Session-scoped task preferences (#51 slice 4).
+//! Session-scoped task preferences.
 //!
 //! A task-scoped request ("for this task use Codex") is an override, NOT a
 //! durable preference: it lives in this in-process overlay keyed by the
@@ -106,7 +106,7 @@ impl TaskPreferenceOverlay {
 mod tests {
     use super::*;
 
-    /// Discrimination 3 (#51): a task-scoped request stays inside its
+    /// A task-scoped request stays inside its
     /// session and never appears in an unrelated one.
     #[test]
     fn task_prefs_are_session_scoped() {
