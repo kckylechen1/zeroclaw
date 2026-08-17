@@ -1,8 +1,8 @@
-//! Durable inbound-message inbox (#170 rework): bounded, stateful
+//! Durable inbound-message inbox: bounded, stateful
 //! redelivery suppression for the at-least-once channel world.
 //!
-//! Channels deliver at-least-once across restarts (cursor persistence,
-//! #132). Suppressing a redelivery is only safe once the original turn
+//! Channels deliver at-least-once across restarts (cursor persistence).
+//! Suppressing a redelivery is only safe once the original turn
 //! COMPLETED; a message recorded but unfinished (a crash mid-turn) must
 //! re-process on redelivery rather than vanish. States:
 //!
@@ -187,7 +187,7 @@ mod tests {
         );
     }
 
-    /// The #170 crash window: a message admitted but never completed (the
+    /// The crash window: a message admitted but never completed (the
     /// process died mid-turn) must RE-PROCESS on redelivery, not vanish.
     #[test]
     fn uncompleted_message_reprocesses_after_restart() {
