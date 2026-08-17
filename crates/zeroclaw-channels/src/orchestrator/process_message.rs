@@ -52,6 +52,18 @@ use super::{
     take_pending_new_session, timestamped_channel_user_history_content,
 };
 
+/// Merge the durable owner-profile section and the session task-scoped
+/// section into one prompt block; either may be empty.
+pub(super) fn merge_projection_sections(durable: &str, task: &str) -> String {
+    if durable.is_empty() {
+        return task.to_string();
+    }
+    if task.is_empty() {
+        return durable.to_string();
+    }
+    format!("{}\n{}", durable.trim_end(), task)
+}
+
 pub(super) async fn process_channel_message(
     ctx: Arc<ChannelRuntimeContext>,
     msg: zeroclaw_api::channel::ChannelMessage,
@@ -490,38 +502,49 @@ async fn process_channel_message_body(
         target_channel.as_ref(),
         per_turn_native_tool_specs_present,
     );
-    if let Some(user_model) = ctx.user_model().cloned() {
-        let heads = tokio::task::spawn_blocking(move || user_model.active_heads(None))
-            .await
-            .ok()
-            .and_then(Result::ok);
-        match heads {
-            Some(heads) => {
-                let projection = zeroclaw_memory::companion::project_active_heads(
-                    &heads,
-                    zeroclaw_memory::companion::USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS,
-                );
-                let task_section = ctx.task_prefs().render_section(&history_key);
-                let combined = if projection.prompt_section.is_empty() {
-                    task_section
-                } else if task_section.is_empty() {
-                    projection.prompt_section
-                } else {
-                    format!("{}\n{}", projection.prompt_section.trim_end(), task_section)
-                };
-                if !combined.is_empty() {
-                    let _ = write!(system_prompt, "\n\n{}", combined);
+    // Durable owner profile and session task preferences are INDEPENDENT
+    // projections: the task-scoped section must render even when the User
+    // Model store is unavailable or fails to open.
+    let durable_section = match ctx.user_model().cloned() {
+        Some(user_model) => {
+            let heads = tokio::task::spawn_blocking(move || user_model.active_heads(None))
+                .await
+                .ok()
+                .and_then(Result::ok);
+            match heads {
+                Some(heads) => {
+                    let applicability = zeroclaw_memory::companion::ApplicabilityContext::new(
+                        ctx.agent_alias.as_str(),
+                        &channel_composite,
+                        &history_key,
+                    );
+                    let applicable: Vec<_> = heads
+                        .into_iter()
+                        .filter(|revision| applicability.applies_str(&revision.scope))
+                        .collect();
+                    zeroclaw_memory::companion::project_active_heads(
+                        &applicable,
+                        zeroclaw_memory::companion::USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS,
+                    )
+                    .prompt_section
+                }
+                None => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                        "user model read failed; owner-profile projection skipped for this turn"
+                    );
+                    String::new()
                 }
             }
-            None => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                    "user model read failed; owner-profile projection skipped for this turn"
-                );
-            }
         }
+        None => String::new(),
+    };
+    let task_section = ctx.task_prefs().render_section(&history_key);
+    let combined = merge_projection_sections(&durable_section, &task_section);
+    if !combined.is_empty() {
+        let _ = write!(system_prompt, "\n\n{}", combined);
     }
     if send_message_to_peer_tool_available(ctx.as_ref(), &msg)
         && let Some(current_channel_ref) = peer_prompt_channel_ref(ctx.as_ref(), &msg)
@@ -1912,5 +1935,24 @@ async fn process_channel_message_body(
         let _ = channel
             .add_reaction(&msg.reply_target, &msg.id, reaction_done_emoji)
             .await;
+    }
+}
+
+#[cfg(test)]
+mod projection_merge_tests {
+    use super::merge_projection_sections;
+
+    #[test]
+    fn either_section_survives_alone() {
+        assert_eq!(merge_projection_sections("", ""), "");
+        assert_eq!(merge_projection_sections("", "task only"), "task only");
+        assert_eq!(
+            merge_projection_sections("durable only", ""),
+            "durable only"
+        );
+        assert_eq!(
+            merge_projection_sections("durable\n", "task"),
+            "durable\ntask"
+        );
     }
 }
