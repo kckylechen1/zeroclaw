@@ -128,3 +128,7 @@ target/openapi.json
 /v[0-9]*.toml
 .worktrees/
 .zero-to-5/
+# Local runtime state — never commit (hotfix after accidental inclusion)
+/.tachi/
+/.zcode/
+/mvp/
