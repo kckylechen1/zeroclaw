@@ -75,8 +75,8 @@ pub(crate) use sop_gate::dispatch_channel_sop_gate;
 mod deliver_announcement;
 pub use deliver_announcement::deliver_announcement;
 
-mod seen_ids;
-pub(crate) use seen_ids::SeenMessageStore;
+mod inbox;
+pub(crate) use inbox::{Admission, MessageInbox};
 
 mod task_prefs;
 pub(crate) use task_prefs::TaskPreferenceOverlay;
@@ -2957,8 +2957,11 @@ async fn dispatch_worker(
     in_flight: Arc<tokio::sync::Mutex<HashMap<String, InFlightSenderTaskState>>>,
     task_sequence: Arc<AtomicU64>,
     permit: tokio::sync::OwnedSemaphorePermit,
+    inbox: Option<Arc<MessageInbox>>,
 ) {
     let _permit = permit;
+    let inbox_account = channel_key_for_message(&msg);
+    let inbox_message_id = msg.id.clone();
     let interrupt_enabled = ctx
         .interrupt_on_new_message
         .enabled_for_channel(msg.channel.as_str());
@@ -2995,6 +2998,16 @@ async fn dispatch_worker(
     }
 
     process_channel_message(ctx, msg, cancellation_token).await;
+
+    // The turn is finished: only now is a future redelivery safely
+    // suppressible. Failure here means at-least-once re-processing, never
+    // a silent drop.
+    if let Some(inbox) = inbox {
+        let _ = tokio::task::spawn_blocking(move || {
+            inbox.mark_completed(&inbox_account, &inbox_message_id)
+        })
+        .await;
+    }
 
     if register_in_flight {
         let mut active = in_flight.lock().await;
@@ -3251,7 +3264,7 @@ async fn run_message_dispatch_loop(
     mut rx: tokio::sync::mpsc::Receiver<zeroclaw_api::channel::ChannelMessage>,
     router: AgentRouter,
     max_in_flight_messages: usize,
-    seen_ids: Option<std::sync::Arc<SeenMessageStore>>,
+    inbox: Option<std::sync::Arc<MessageInbox>>,
 ) {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_in_flight_messages));
     let mut workers = tokio::task::JoinSet::new();
@@ -3262,7 +3275,7 @@ async fn run_message_dispatch_loop(
     let task_sequence = Arc::new(AtomicU64::new(1));
 
     while let Some(msg) = rx.recv().await {
-        if let Some(seen_ids) = &seen_ids
+        if let Some(seen_ids) = &inbox
             && !NON_DEDUP_CHANNELS.contains(&msg.channel.as_str())
             && !msg.id.is_empty()
         {
@@ -3270,11 +3283,10 @@ async fn run_message_dispatch_loop(
             let message_id = msg.id.clone();
             let store = Arc::clone(seen_ids);
             let recorded =
-                tokio::task::spawn_blocking(move || store.check_and_record(&account, &message_id))
-                    .await;
+                tokio::task::spawn_blocking(move || store.admit(&account, &message_id)).await;
             match recorded {
-                Ok(Ok(true)) => {}
-                Ok(Ok(false)) => {
+                Ok(Ok(Admission::Fresh)) => {}
+                Ok(Ok(Admission::DuplicateCompleted)) => {
                     ::zeroclaw_log::record!(
                         INFO,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -3283,7 +3295,20 @@ async fn run_message_dispatch_loop(
                                 "message_id": msg.id,
                                 "sender": msg.sender,
                             })),
-                        "dropping redelivered inbound message (duplicate id)"
+                        "dropping redelivered inbound message (turn already completed)"
+                    );
+                    continue;
+                }
+                Ok(Ok(Admission::DuplicateInFlight)) => {
+                    ::zeroclaw_log::record!(
+                        INFO,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_attrs(::serde_json::json!({
+                                "channel": msg.channel,
+                                "message_id": msg.id,
+                                "sender": msg.sender,
+                            })),
+                        "dropping concurrent duplicate of an in-flight message"
                     );
                     continue;
                 }
@@ -3297,7 +3322,7 @@ async fn run_message_dispatch_loop(
                                 "message_id": msg.id,
                                 "err": err.to_string(),
                             })),
-                        "seen-id store failed; processing without dedup"
+                        "inbox store failed; processing without dedup"
                     );
                 }
                 Err(_) => {
@@ -3434,6 +3459,7 @@ async fn run_message_dispatch_loop(
                     let debounce_in_flight = Arc::clone(&in_flight_by_sender);
                     let debounce_semaphore = Arc::clone(&semaphore);
                     let debounce_task_seq = Arc::clone(&task_sequence);
+                    let debounce_inbox = inbox.clone();
                     let mut debounce_msg = msg;
                     workers.spawn(async move {
                         let combined = match rx.await {
@@ -3457,6 +3483,7 @@ async fn run_message_dispatch_loop(
                             debounce_in_flight,
                             debounce_task_seq,
                             permit,
+                            debounce_inbox,
                         )
                         .await;
                     });
@@ -3480,8 +3507,17 @@ async fn run_message_dispatch_loop(
         let worker_ctx = Arc::clone(&ctx);
         let in_flight = Arc::clone(&in_flight_by_sender);
         let task_sequence = Arc::clone(&task_sequence);
+        let worker_inbox = inbox.clone();
         workers.spawn(async move {
-            dispatch_worker(worker_ctx, msg, in_flight, task_sequence, permit).await;
+            dispatch_worker(
+                worker_ctx,
+                msg,
+                in_flight,
+                task_sequence,
+                permit,
+                worker_inbox,
+            )
+            .await;
         });
 
         while let Some(result) = workers.try_join_next() {
