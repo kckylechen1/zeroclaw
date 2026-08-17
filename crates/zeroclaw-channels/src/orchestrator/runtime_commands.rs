@@ -55,6 +55,10 @@ pub(crate) enum ChannelRuntimeCommand {
     NewSession,
     SetThinking(Option<ThinkingLevel>),
     InvalidThinking(String),
+    /// `/task-pref <kind> <semantic-key> <statement...>` — session-scoped
+    /// override; never enters the durable User Model store.
+    SetTaskPref(&'static str, String, String),
+    InvalidTaskPref(String),
 }
 
 pub(crate) fn supports_runtime_model_switch(channel_name: &str) -> bool {
@@ -129,6 +133,26 @@ pub(crate) fn parse_runtime_command(
                     Ok(level) => Some(ChannelRuntimeCommand::SetThinking(level)),
                     Err(raw) => Some(ChannelRuntimeCommand::InvalidThinking(raw)),
                 }
+            }
+        }
+        "/task-pref" => {
+            let rest: Vec<&str> = parts.collect();
+            if rest.len() < 3 {
+                Some(ChannelRuntimeCommand::InvalidTaskPref(trimmed.to_string()))
+            } else {
+                let kind = match rest[0] {
+                    "value" => "value",
+                    "goal" => "goal",
+                    "preference" => "preference",
+                    "habit" => "habit",
+                    "constraint" => "constraint",
+                    _ => return Some(ChannelRuntimeCommand::InvalidTaskPref(trimmed.to_string())),
+                };
+                Some(ChannelRuntimeCommand::SetTaskPref(
+                    kind,
+                    rest[1].to_string(),
+                    rest[2..].join(" "),
+                ))
             }
         }
         // Model/model_provider switching is channel-gated.
@@ -563,4 +587,40 @@ pub(crate) fn build_config_block_kit(
     ]);
 
     blocks.to_string()
+}
+
+#[cfg(test)]
+mod task_pref_parse_tests {
+    use super::*;
+
+    #[test]
+    fn task_pref_command_parses() {
+        match parse_runtime_command(
+            "telegram",
+            "/task-pref preference model.choice use Codex for this task",
+        ) {
+            Some(ChannelRuntimeCommand::SetTaskPref(kind, key, statement)) => {
+                assert_eq!(kind, "preference");
+                assert_eq!(key, "model.choice");
+                assert_eq!(statement, "use Codex for this task");
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_pref_command_rejects_unknown_kind() {
+        assert!(matches!(
+            parse_runtime_command("telegram", "/task-pref vibe model.x y"),
+            Some(ChannelRuntimeCommand::InvalidTaskPref(_))
+        ));
+    }
+
+    #[test]
+    fn task_pref_command_requires_statement() {
+        assert!(matches!(
+            parse_runtime_command("telegram", "/task-pref preference model.choice"),
+            Some(ChannelRuntimeCommand::InvalidTaskPref(_))
+        ));
+    }
 }

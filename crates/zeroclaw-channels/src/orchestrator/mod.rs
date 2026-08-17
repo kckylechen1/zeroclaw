@@ -78,6 +78,9 @@ pub use deliver_announcement::deliver_announcement;
 mod seen_ids;
 pub(crate) use seen_ids::SeenMessageStore;
 
+mod task_prefs;
+pub(crate) use task_prefs::TaskPreferenceOverlay;
+
 // Channel types imported directly from source crates (no shim files)
 #[cfg(feature = "channel-amqp")]
 pub use crate::amqp::AmqpChannel;
@@ -469,6 +472,9 @@ struct ChannelRuntimeContext {
     /// Local User Model authority store (#51): owner values/goals/
     /// preferences projected into turn prompts. `None` disables projection.
     user_model: Option<Arc<zeroclaw_memory::companion::UserModelStore>>,
+    /// Session-scoped task preferences (#51 slice 4): overrides that
+    /// expire with their session and never enter the durable store.
+    task_prefs: Arc<TaskPreferenceOverlay>,
     tools_registry: Arc<Vec<Box<dyn Tool>>>,
     observer: Arc<dyn Observer>,
     system_prompt: Arc<String>,
@@ -546,6 +552,10 @@ impl ChannelRuntimeContext {
 
     pub(crate) fn user_model(&self) -> Option<&Arc<zeroclaw_memory::companion::UserModelStore>> {
         self.user_model.as_ref()
+    }
+
+    pub(crate) fn task_prefs(&self) -> &TaskPreferenceOverlay {
+        &self.task_prefs
     }
 
     fn persist_companion_capture(&self, msg: &ChannelMessage, session_id: &str, turn_id: &str) {
@@ -1904,6 +1914,17 @@ async fn handle_runtime_command_if_needed(
 
     let response = match command {
         ChannelRuntimeCommand::ShowProviders => build_providers_help_response(&current),
+        ChannelRuntimeCommand::SetTaskPref(kind, semantic_key, statement) => {
+            ctx.task_prefs()
+                .set(&sender_key, kind, &semantic_key, &statement);
+            channel_runtime_cli_string_with_args(
+                "channel-runtime-task-pref-set",
+                &[("kind", kind), ("statement", statement.as_str())],
+            )
+        }
+        ChannelRuntimeCommand::InvalidTaskPref(_raw) => {
+            channel_runtime_cli_string("channel-runtime-task-pref-invalid")
+        }
         ChannelRuntimeCommand::SetProvider(raw_model_provider) => {
             match resolve_models_command(defaults_snapshot.config.as_ref(), &raw_model_provider) {
                 ModelsCommandResolution::Resolved(provider_ref) => {
@@ -4291,6 +4312,7 @@ fn concurrent_persist_lock_serialization() {
         sop_engine: None,
         sop_audit: None,
         user_model: None,
+        task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
     ctx.conversation_histories
         .lock()
