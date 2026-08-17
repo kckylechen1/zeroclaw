@@ -33,8 +33,9 @@ pub use outbox::{
     probe_companion_outbox_health,
 };
 pub use user_model::{
-    AuthorityClass, ReviewAction, UserModelCandidate, UserModelKind, UserModelReviewReceipt,
-    UserModelRevision, UserModelStore,
+    AuthorityClass, ReviewAction, USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS, UserModelCandidate,
+    UserModelKind, UserModelReviewReceipt, UserModelRevision, UserModelStateProjection,
+    UserModelStore, project_active_heads,
 };
 
 /// Construct the companion store from config.

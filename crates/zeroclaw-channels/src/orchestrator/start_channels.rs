@@ -150,6 +150,37 @@ pub async fn start_channels(
 
     let mut agent_ctxs: HashMap<String, Arc<ChannelRuntimeContext>> = HashMap::new();
 
+    let user_model_store = match tokio::task::spawn_blocking({
+        let data_dir = config.data_dir.clone();
+        move || zeroclaw_memory::companion::UserModelStore::open(&data_dir)
+    })
+    .await
+    {
+        Ok(Ok(store)) => Some(Arc::new(store)),
+        Ok(Err(err)) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "data_dir": config.data_dir.display().to_string(),
+                        "err": err.to_string(),
+                    })),
+                "user model store open failed; owner-profile projection disabled"
+            );
+            None
+        }
+        Err(_) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                "user model store open task failed; owner-profile projection disabled"
+            );
+            None
+        }
+    };
+
     for agent_alias in &enabled_agents {
         let agent = config
             .resolved_agent_config(agent_alias)
@@ -643,6 +674,7 @@ pub async fn start_channels(
             memory: Arc::clone(&mem),
             memory_strategy,
             companion_store: companion_store.clone(),
+            user_model: user_model_store.clone(),
             tools_registry: Arc::clone(&tools_registry),
             observer: Arc::clone(&observer),
             system_prompt: Arc::new(system_prompt),

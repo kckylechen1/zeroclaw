@@ -490,6 +490,31 @@ async fn process_channel_message_body(
         target_channel.as_ref(),
         per_turn_native_tool_specs_present,
     );
+    if let Some(user_model) = ctx.user_model().cloned() {
+        let heads = tokio::task::spawn_blocking(move || user_model.active_heads(None))
+            .await
+            .ok()
+            .and_then(Result::ok);
+        match heads {
+            Some(heads) => {
+                let projection = zeroclaw_memory::companion::project_active_heads(
+                    &heads,
+                    zeroclaw_memory::companion::USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS,
+                );
+                if !projection.prompt_section.is_empty() {
+                    let _ = write!(system_prompt, "\n\n{}", projection.prompt_section);
+                }
+            }
+            None => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                    "user model read failed; owner-profile projection skipped for this turn"
+                );
+            }
+        }
+    }
     if send_message_to_peer_tool_available(ctx.as_ref(), &msg)
         && let Some(current_channel_ref) = peer_prompt_channel_ref(ctx.as_ref(), &msg)
     {
