@@ -1,8 +1,8 @@
-//! Local-first User Model authority (#51 slice 1): owner values, goals,
+//! Local-first User Model authority: owner values, goals,
 //! preferences as governed, append-only records — not an inferred profile
 //! and not a generic memcore category.
 //!
-//! Authority rules (frozen in #51):
+//! Authority rules (frozen in the User Model spec):
 //! - An explicit owner-authored statement may become an active revision
 //!   immediately.
 //! - An observation is ALWAYS a candidate; no amount of repetition

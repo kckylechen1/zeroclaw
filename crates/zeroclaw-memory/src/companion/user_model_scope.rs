@@ -1,5 +1,5 @@
-//! Typed scopes and applicability for the User Model (#175/#176 review
-//! finding). A revision's scope decides which turns it may project into;
+//! Typed scopes and applicability for the User Model.
+//! A revision's scope decides which turns it may project into;
 //! the string form is the durable contract, the enum is the runtime view.
 
 use std::fmt;
