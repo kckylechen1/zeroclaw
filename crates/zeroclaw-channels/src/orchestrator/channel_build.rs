@@ -1,13 +1,77 @@
 //! Per-id channel construction. Extracted from orchestrator/mod.rs (god-file remainder C7).
 
+#[cfg(any(
+    test,
+    feature = "channel-discord",
+    feature = "channel-lark",
+    feature = "channel-matrix",
+    feature = "channel-slack",
+    feature = "channel-telegram",
+    feature = "channel-wechat",
+    feature = "whatsapp-web",
+))]
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+#[cfg(any(
+    feature = "channel-dingtalk",
+    feature = "channel-discord",
+    feature = "channel-email",
+    feature = "channel-git",
+    feature = "channel-irc",
+    feature = "channel-lark",
+    feature = "channel-line",
+    feature = "channel-linq",
+    feature = "channel-matrix",
+    feature = "channel-mattermost",
+    feature = "channel-mochat",
+    feature = "channel-nextcloud",
+    feature = "channel-qq",
+    feature = "channel-signal",
+    feature = "channel-slack",
+    feature = "channel-telegram",
+    feature = "channel-twitch",
+    feature = "channel-twitter",
+    feature = "channel-voice-call",
+    feature = "channel-wati",
+    feature = "channel-wechat",
+    feature = "channel-wecom",
+    feature = "whatsapp-web",
+))]
+use anyhow::Context;
+use anyhow::Result;
 use parking_lot::RwLock;
 use zeroclaw_api::channel::Channel;
 use zeroclaw_config::schema::Config;
 
+#[cfg(any(
+    test,
+    feature = "channel-dingtalk",
+    feature = "channel-discord",
+    feature = "channel-email",
+    feature = "channel-git",
+    feature = "channel-imessage",
+    feature = "channel-irc",
+    feature = "channel-lark",
+    feature = "channel-line",
+    feature = "channel-linq",
+    feature = "channel-matrix",
+    feature = "channel-mattermost",
+    feature = "channel-mochat",
+    feature = "channel-nextcloud",
+    feature = "channel-qq",
+    feature = "channel-signal",
+    feature = "channel-slack",
+    feature = "channel-telegram",
+    feature = "channel-twitch",
+    feature = "channel-twitter",
+    feature = "channel-voice-call",
+    feature = "channel-wati",
+    feature = "channel-wechat",
+    feature = "channel-wecom",
+    feature = "channel-wecom-ws",
+    feature = "whatsapp-web",
+))]
 use super::*;
 
 #[cfg(any(

@@ -2,6 +2,11 @@
 
 #[cfg(feature = "channel-slack")]
 use anyhow::Context;
+#[cfg(any(
+    feature = "channel-discord",
+    feature = "channel-slack",
+    feature = "channel-telegram",
+))]
 use std::sync::Arc;
 
 #[cfg(feature = "channel-discord")]

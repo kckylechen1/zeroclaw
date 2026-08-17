@@ -26,6 +26,8 @@ pub(crate) use channel_system_prompt::{
 mod outbound_sanitize;
 #[cfg(test)]
 pub(crate) use outbound_sanitize::strip_think_tags_inline;
+#[cfg(feature = "channel-telegram")]
+pub(crate) use outbound_sanitize::strip_tool_call_tags;
 #[cfg(test)]
 pub(crate) use outbound_sanitize::{
     EMPTY_CHANNEL_REPLY_FALLBACK, OutboundContentFormat, channel_outbound_protected_spans,
@@ -35,8 +37,7 @@ pub(crate) use outbound_sanitize::{
 pub(crate) use outbound_sanitize::{
     ensure_nonempty_channel_reply, outbound_content_format_for_channel,
     redact_channel_outbound_leaks, sanitize_channel_response_for_format_with_leak_detection,
-    sanitize_streaming_draft_text, strip_tool_call_tags, strip_tool_result_content,
-    strip_tool_summary_prefix,
+    sanitize_streaming_draft_text, strip_tool_result_content, strip_tool_summary_prefix,
 };
 
 mod runtime_commands;
@@ -48,11 +49,12 @@ pub(crate) use runtime_commands::{
 };
 
 mod channel_factories;
+#[cfg(any(feature = "channel-nostr", feature = "channel-filesystem"))]
+pub(crate) use channel_factories::ActiveChannelAliases;
 #[cfg(feature = "channel-matrix")]
 pub(crate) use channel_factories::matrix_state_dir;
 pub(crate) use channel_factories::{
-    ActiveChannelAliases, ConfiguredChannel, collect_configured_channels, composite_channel_key,
-    configured_channel_map,
+    ConfiguredChannel, collect_configured_channels, composite_channel_key, configured_channel_map,
 };
 pub use channel_factories::{build_channel_map, register_channels_for_tools};
 
