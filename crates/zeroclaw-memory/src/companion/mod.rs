@@ -21,6 +21,7 @@ pub use stub::CompanionStore;
 mod capture;
 mod identity;
 mod outbox;
+mod user_model;
 pub use capture::{
     CompanionCapture, capture_channel_turn, capture_gateway_turn, capture_turn_if_present,
 };
@@ -30,6 +31,10 @@ pub use identity::{
 pub use outbox::{
     OUTBOX_OBSERVE_INTERVAL_SECS, OUTBOX_PENDING_AGE_WARN_SECS, companion_outbox_health,
     probe_companion_outbox_health,
+};
+pub use user_model::{
+    AuthorityClass, ReviewAction, UserModelCandidate, UserModelKind, UserModelReviewReceipt,
+    UserModelRevision, UserModelStore,
 };
 
 /// Construct the companion store from config.
