@@ -1106,3 +1106,7 @@ tool-runtime-command-docker-allowed-root = Failed to build runtime command: Fail
 telegram-skip-update-written = Skip marker recorded for update {$update_id} on bot '{$alias}'. The running daemon applies it on its next retry (within a few seconds) and archives the payload as a dead letter under its data directory.
 telegram-skip-update-pending = A skip marker for update {$update_id} on bot '{$alias}' is already pending.
 telegram-skip-update-failed = Failed to record the skip marker for update {$update_id} on bot '{$alias}': {$error}
+
+# ── Task-scoped preference runtime command ──
+channel-runtime-task-pref-set = Task preference recorded for this session only: {$kind}: {$statement}
+channel-runtime-task-pref-invalid = Invalid task preference. Usage: /task-pref <value|goal|preference|habit|constraint> <semantic-key> <statement...>

@@ -24,12 +24,13 @@ use super::{
     AgentRouter, CRON_CHANNEL_REGISTRY, ChannelAssembledTools, ChannelCostTrackingState,
     ChannelRuntimeContext, ConfiguredChannel, DEFAULT_CHANNEL_INITIAL_BACKOFF_SECS,
     DEFAULT_CHANNEL_MAX_BACKOFF_SECS, MAX_CHANNEL_HISTORY, MAX_CONVERSATION_SENDERS,
-    SeenMessageStore, assemble_channel_agent_tools, build_owner_by_channel_key,
-    build_system_prompt_with_mode_and_autonomy, collect_configured_channels,
-    compose_channel_mcp_prompt_sections, composite_channel_key, configured_channel_map,
-    create_resilient_model_provider_nonblocking, effective_channel_message_timeout_secs,
-    interrupt_on_new_message_config, max_in_flight_messages_for_config, run_message_dispatch_loop,
-    runtime_defaults_from_config, spawn_supervised_listener,
+    SeenMessageStore, TaskPreferenceOverlay, assemble_channel_agent_tools,
+    build_owner_by_channel_key, build_system_prompt_with_mode_and_autonomy,
+    collect_configured_channels, compose_channel_mcp_prompt_sections, composite_channel_key,
+    configured_channel_map, create_resilient_model_provider_nonblocking,
+    effective_channel_message_timeout_secs, interrupt_on_new_message_config,
+    max_in_flight_messages_for_config, run_message_dispatch_loop, runtime_defaults_from_config,
+    spawn_supervised_listener,
 };
 
 #[cfg(any(feature = "channel-nostr", feature = "channel-filesystem"))]
@@ -180,6 +181,8 @@ pub async fn start_channels(
             None
         }
     };
+
+    let task_prefs = Arc::new(TaskPreferenceOverlay::new());
 
     for agent_alias in &enabled_agents {
         let agent = config
@@ -675,6 +678,7 @@ pub async fn start_channels(
             memory_strategy,
             companion_store: companion_store.clone(),
             user_model: user_model_store.clone(),
+            task_prefs: Arc::clone(&task_prefs),
             tools_registry: Arc::clone(&tools_registry),
             observer: Arc::clone(&observer),
             system_prompt: Arc::new(system_prompt),

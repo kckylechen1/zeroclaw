@@ -501,8 +501,16 @@ async fn process_channel_message_body(
                     &heads,
                     zeroclaw_memory::companion::USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS,
                 );
-                if !projection.prompt_section.is_empty() {
-                    let _ = write!(system_prompt, "\n\n{}", projection.prompt_section);
+                let task_section = ctx.task_prefs().render_section(&history_key);
+                let combined = if projection.prompt_section.is_empty() {
+                    task_section
+                } else if task_section.is_empty() {
+                    projection.prompt_section
+                } else {
+                    format!("{}\n{}", projection.prompt_section.trim_end(), task_section)
+                };
+                if !combined.is_empty() {
+                    let _ = write!(system_prompt, "\n\n{}", combined);
                 }
             }
             None => {
