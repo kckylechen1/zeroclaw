@@ -19,7 +19,8 @@ use rusqlite::Connection;
 use zeroclaw_infra::sqlite_perms::harden_sqlite_owner_only;
 
 /// What kind of statement this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UserModelKind {
     Value,
     Goal,
@@ -42,7 +43,8 @@ impl UserModelKind {
 
 /// How a revision earned authority. Frequency and confidence never appear
 /// here — evidence quality is not authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AuthorityClass {
     OwnerAuthored,
     OwnerRatified,
@@ -59,7 +61,8 @@ impl AuthorityClass {
 
 /// The review actions an owner can take on a candidate. Each produces a
 /// distinct append-only history.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReviewAction {
     Accept,
     Reject,
@@ -80,7 +83,7 @@ impl ReviewAction {
 
 /// An observation awaiting review. Never active on its own, regardless of
 /// how many times it (or its siblings) was observed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UserModelCandidate {
     pub id: String,
     pub kind: UserModelKind,
@@ -94,7 +97,7 @@ pub struct UserModelCandidate {
 /// An append-only revision. The active head for a semantic key is derived
 /// at read time (latest applicable revision), so supersession never edits
 /// history.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UserModelRevision {
     pub id: String,
     pub semantic_key: String,
@@ -111,7 +114,7 @@ pub struct UserModelRevision {
 
 /// Receipt for an explicit review decision. Even a rejection keeps the
 /// candidate and its evidence intact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UserModelReviewReceipt {
     pub id: String,
     pub candidate_id: String,
@@ -276,6 +279,33 @@ impl UserModelStore {
             ],
         )?;
         Ok(candidate)
+    }
+
+    /// All candidates, newest first, with their evidence.
+    pub fn list_candidates(&self) -> Result<Vec<UserModelCandidate>, rusqlite::Error> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, statement, semantic_key, scope, evidence, created_at_unix
+             FROM user_model_candidates
+             ORDER BY created_at_unix DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let kind_raw: String = row.get(1)?;
+            Ok((UserModelCandidate {
+                id: row.get(0)?,
+                kind: kind_from_str(&kind_raw).ok_or(rusqlite::Error::QueryReturnedNoRows)?,
+                statement: row.get(2)?,
+                semantic_key: row.get(3)?,
+                scope: row.get(4)?,
+                evidence: row.get(5)?,
+                created_at_unix: row.get::<_, i64>(6)?.max(0) as u64,
+            },))
+        })?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            candidates.push(row?.0);
+        }
+        Ok(candidates)
     }
 
     /// Apply an explicit review action to a candidate. Every action writes

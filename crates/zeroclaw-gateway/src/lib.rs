@@ -23,6 +23,7 @@ pub mod api_sections;
 pub mod api_skills;
 pub mod api_sop;
 pub mod api_sop_author;
+pub mod api_user_model;
 #[cfg(feature = "webauthn")]
 pub mod api_webauthn;
 #[cfg(any(
@@ -41,6 +42,7 @@ pub mod node_tool;
 #[cfg(feature = "nodes")]
 pub mod nodes;
 pub mod openapi;
+pub mod operator_auth;
 pub mod security_headers;
 pub mod session_queue;
 pub mod sse;
@@ -1997,6 +1999,14 @@ pub async fn run_gateway(
     );
 
     let inner = inner
+        // ── User Model operator review surface ──
+        .route("/api/user-model/candidates", get(api_user_model::list_candidates))
+        .route("/api/user-model/heads", get(api_user_model::list_heads))
+        .route(
+            "/api/user-model/candidates/{id}/review",
+            post(api_user_model::review_candidate),
+        )
+        .route("/api/user-model/statements", post(api_user_model::create_statement))
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
         .route("/api/events/history", get(sse::handle_events_history))
