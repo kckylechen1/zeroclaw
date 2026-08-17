@@ -12,6 +12,8 @@
 //! - Works fully offline; nothing here requires Tachi.
 
 use std::fmt::Write as _;
+
+use super::user_model_scope::Scope;
 use std::path::Path;
 
 use parking_lot::Mutex;
@@ -194,6 +196,11 @@ impl UserModelStore {
         scope: &str,
         now_unix: u64,
     ) -> Result<UserModelRevision, rusqlite::Error> {
+        if Scope::parse(scope).is_none() {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "invalid scope '{scope}': global | agent:<id> | channel:<id> | session:<id>"
+            )));
+        }
         let conn = self.conn.lock();
         let supersedes: Option<String> = conn
             .query_row(
@@ -364,6 +371,11 @@ impl UserModelStore {
                     ReviewAction::Narrow => narrowed_scope.unwrap_or("global"),
                     _ => "global",
                 };
+                if Scope::parse(scope).is_none() {
+                    return Err(rusqlite::Error::InvalidParameterName(format!(
+                        "invalid narrowed scope '{scope}'"
+                    )));
+                }
                 conn.execute(
                     "INSERT INTO user_model_revisions
                          (id, semantic_key, kind, statement, scope, authority, supersedes,
@@ -680,14 +692,14 @@ mod tests {
                 ReviewAction::Narrow,
                 "owner",
                 None,
-                Some("session.trading"),
+                Some("session:trading"),
                 3_000,
             )
             .unwrap();
         assert_eq!(narrowed.action, ReviewAction::Narrow);
         let heads = s.active_heads(Some(3_000)).unwrap();
         assert_eq!(heads.len(), 1);
-        assert_eq!(heads[0].scope, "session.trading");
+        assert_eq!(heads[0].scope, "session:trading");
 
         let superseded_by = s.record_owner_statement(
             UserModelKind::Preference,
@@ -767,7 +779,7 @@ mod tests {
             UserModelKind::Preference,
             "For this task use Codex.",
             "task.model-choice",
-            "task:one-off",
+            "session:one-off",
             1_000,
         )
         .unwrap();
@@ -781,7 +793,7 @@ mod tests {
                 UserModelKind::Preference,
                 "For this task use Codex.",
                 "task.model-choice",
-                "task:one-off",
+                "session:one-off",
                 2_000,
             )
             .unwrap();

@@ -513,8 +513,17 @@ async fn process_channel_message_body(
                 .and_then(Result::ok);
             match heads {
                 Some(heads) => {
+                    let applicability = zeroclaw_memory::companion::ApplicabilityContext::new(
+                        ctx.agent_alias.as_str(),
+                        &channel_composite,
+                        &history_key,
+                    );
+                    let applicable: Vec<_> = heads
+                        .into_iter()
+                        .filter(|revision| applicability.applies_str(&revision.scope))
+                        .collect();
                     zeroclaw_memory::companion::project_active_heads(
-                        &heads,
+                        &applicable,
                         zeroclaw_memory::companion::USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS,
                     )
                     .prompt_section

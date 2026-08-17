@@ -22,6 +22,7 @@ mod capture;
 mod identity;
 mod outbox;
 mod user_model;
+mod user_model_scope;
 pub use capture::{
     CompanionCapture, capture_channel_turn, capture_gateway_turn, capture_turn_if_present,
 };
@@ -37,6 +38,7 @@ pub use user_model::{
     UserModelKind, UserModelReviewReceipt, UserModelRevision, UserModelStateProjection,
     UserModelStore, project_active_heads,
 };
+pub use user_model_scope::{ApplicabilityContext, Scope};
 
 /// Construct the companion store from config.
 ///
