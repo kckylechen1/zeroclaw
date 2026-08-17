@@ -7403,7 +7403,7 @@ async fn message_dispatch_drops_redelivered_message_ids() {
     );
 
     let seen_dir = tempfile::tempdir().unwrap();
-    let store = SeenMessageStore::open(seen_dir.path()).unwrap();
+    let store = MessageInbox::open(seen_dir.path()).unwrap();
     let with_dedup =
         deliver_messages_through_loop(Some(Arc::new(store)), "test-channel", "redelivered-1", 2)
             .await;
@@ -7421,14 +7421,14 @@ async fn message_dispatch_drops_redelivered_message_ids() {
 async fn message_dispatch_does_not_dedup_session_counter_channels() {
     let seen_dir = tempfile::tempdir().unwrap();
     {
-        let previous_session = SeenMessageStore::open(seen_dir.path()).unwrap();
-        assert!(
-            previous_session
-                .check_and_record("webhook", "webhook_0")
-                .unwrap()
+        let previous_session = MessageInbox::open(seen_dir.path()).unwrap();
+        assert_eq!(
+            previous_session.admit("webhook", "webhook_0").unwrap(),
+            Admission::Fresh,
+            "the previous session recorded the id but never completed it"
         );
     }
-    let store = Arc::new(SeenMessageStore::open(seen_dir.path()).unwrap());
+    let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
     let replies = deliver_messages_through_loop(Some(store), "webhook", "webhook_0", 1).await;
     assert_eq!(
         replies, 1,
@@ -7437,7 +7437,7 @@ async fn message_dispatch_does_not_dedup_session_counter_channels() {
 }
 
 async fn deliver_messages_through_loop(
-    seen_ids: Option<Arc<SeenMessageStore>>,
+    seen_ids: Option<Arc<MessageInbox>>,
     channel_name: &'static str,
     message_id: &str,
     deliveries: usize,
