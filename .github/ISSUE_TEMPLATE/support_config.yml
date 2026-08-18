@@ -2,7 +2,7 @@ name: Support / Configuration Help
 description: Ask for help with setup, configuration, or usage
 title: "[Support]: "
 labels:
-  - "r:support"
+  - question
 body:
   - type: markdown
     attributes:

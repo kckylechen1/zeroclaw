@@ -6,8 +6,7 @@ body:
     attributes:
       value: |
         Use this for an active coordination surface, not for a single ordinary bug or feature request.
-        Trackers can supply stale-exemption evidence while they remain current, but maintainers
-        still decide whether to apply `status:no-stale`.
+        Keep the routing evidence and close criteria current so the tracker remains useful.
 
   - type: dropdown
     id: tracker_kind
@@ -79,7 +78,7 @@ body:
     id: stale_exemption
     attributes:
       label: Stale-exemption requested?
-      description: Maintainers decide the label separately; this field records the request and evidence.
+      description: This field records the reason for keeping a long-lived tracker open; no dedicated status label is required.
       options:
         - "No"
         - "Yes - tracker itself is the active coordination surface"
