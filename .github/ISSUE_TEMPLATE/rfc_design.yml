@@ -1,8 +1,6 @@
 name: RFC / Design Proposal
 description: Propose a significant architecture, governance, or user-facing direction change
 title: "RFC: "
-labels:
-  - "type:rfc"
 body:
   - type: markdown
     attributes:

@@ -1,12 +1,37 @@
 # Labels
 
-Single reference for every label used on PRs and issues. Sources of truth:
+Reference for project labels and label automation. Sources of truth:
 
 - `.github/labeler.yml`: path-label config consumed by `actions/labeler`
 - `.github/label-policy.json`: contributor tier thresholds
+- the repository's live GitHub label list: labels available to issues and templates
 - This page: definitions, behavior, and what's automated vs manual
 
 When definitions conflict, update the source file first, then sync this page.
+
+## Fork issue taxonomy
+
+This fork keeps issue classification deliberately small:
+
+1. The title records the work type. Maintainer-planned work uses `[EPIC]`,
+   `[TRACKER]`, `[LEAF]`, `[DESIGN]`, `[AUDIT]`, `[BUG]`, `[SECURITY]`, or
+   `[CI]`. Public intake templates use `[Bug]`, `[Feature]`, `[Docs]`,
+   `[Support]`, or `RFC:`; triage may normalize a promoted item to the
+   maintainer prefix that matches its role.
+2. Use the familiar `bug`, `enhancement`, `documentation`, or `question` label
+   when one applies.
+3. Add one or two live area labels such as `agent`, `runtime`, `memory`,
+   `gateway`, `channel`, `security`, `ci`, or `tool`.
+4. Use assignees for active work. Keep dependencies, readiness, remaining
+   acceptance criteria, and long-lived tracker rationale in the issue body.
+5. Fixing PRs use `Closes #N` only when every acceptance item is complete;
+   partial work uses `Refs #N` and updates the issue's remaining scope.
+
+Do not create a parallel `type:*`, `status:*`, `risk:*`, or `r:*` issue-label
+system merely because an extended label is documented below. Extended labels
+are optional and may be used only when they exist in the live repository and a
+maintained workflow or maintainer practice consumes them. Issue templates must
+reference live labels only.
 
 ## Ownership boundaries
 
@@ -75,11 +100,15 @@ Some label families are intentionally outside mechanical cleanup, even when they
 
 The test for keeping a sensitive label live is operational: can maintainers name a real action that becomes harder if the live label disappears? If yes, keep or replace it deliberately. If no, preserve the historical mapping in the audit packet and migrate or delete through the approved operation.
 
-## Type labels
+## Extended type labels
 
 Type labels capture the high-level work class. They are separate from path labels such as `docs`, `ci`, or `dependencies`.
 
-New or manual applications should use the canonical no-space labels below when the live label exists. Existing legacy open refs may keep spaced labels until the open-reference migration packet handles them; see [Canonical spelling](#canonical-spelling).
+These labels are not part of the fork's default issue taxonomy. Use the title
+prefixes in [Fork issue taxonomy](#fork-issue-taxonomy) unless a label below
+exists live and has an active consumer. Existing legacy open refs may keep
+spaced labels until an approved migration handles them; see
+[Canonical spelling](#canonical-spelling).
 
 `type:tracker` is the canonical tracker-marker spelling for active parent coordination issues. Do not create or apply `roadmap`, `type:roadmap`, or another tracker marker as an alias. If the live `type:tracker` label does not exist yet, label creation and any tracker-marker migration must happen only through a separate exact maintainer-approved packet.
 
@@ -303,9 +332,12 @@ Defined in `.github/label-policy.json`. Based on the author's merged PR count qu
 | `principal contributor` | 20 |
 | `distinguished contributor` | 50 |
 
-## Status labels
+## Extended status labels
 
-Track lifecycle state of RFCs and tracked work items. Applied manually unless a maintained workflow says otherwise.
+These labels are not installed or required by the fork's current issue process.
+Record lifecycle state in the issue body, linked work, and assignee instead.
+If a maintained workflow later installs these labels, the meanings below are
+the compatibility contract.
 
 | Label | Description |
 |---|---|
@@ -317,7 +349,10 @@ Track lifecycle state of RFCs and tracked work items. Applied manually unless a 
 
 ## Issue stale policy
 
-This section is the canonical operational source for issue stale timing, qualifying activity, exclusions, and re-engagement. Other maintainer docs and skills should link here instead of copying these rules.
+The fork does not currently run this label-based stale process. Long-lived
+trackers stay open while their bodies name current routing evidence and close
+criteria. If `status:stale` and its automation are installed later, this section
+is the compatibility policy for timing, exclusions, and re-engagement.
 
 - **Entry window:** Apply `status:stale` once 15 or more days have elapsed without qualifying activity.
 - **Response window:** Close only when 15 or more days have elapsed since `status:stale` was applied and no qualifying activity occurred afterward.
@@ -341,9 +376,12 @@ Do not create or apply proposed terminal labels such as `status:wont-do` or `sta
 
 Superseding is a replacement process, not currently a live label. Use [Superseding PRs](./superseding.md) for replacement rules and attribution requirements until a later approved migration packet creates or maps a superseding label.
 
-## Triage labels
+## Extended triage labels
 
-Applied manually: the auto-response automation that used to handle these was removed during CI simplification.
+The fork's templates use live GitHub defaults (`bug`, `documentation`,
+`question`) rather than the absent `r:*` family. The labels below are retained
+only as an extended compatibility vocabulary; do not apply them unless they are
+created through an approved taxonomy change.
 
 | Label | Purpose |
 |---|---|
