@@ -1,0 +1,63 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Wiring-phase-2b implementation of `zeroclaw_coordinator::ChildRunner`: a child runs as a ZeroClaw-native agent turn, in this process."><title>zeroclaw_runtime::subagent_host - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="zeroclaw_runtime" data-themes="" data-resource-suffix="" data-rustdoc-version="1.97.1 (8bab26f4f 2026-07-14)" data-channel="1.97.1" data-search-js="search-fd9372ac.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-fcd733ba.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module subagent_host</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../zeroclaw_runtime/index.html">zeroclaw_<wbr>runtime</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module subagent_<wbr>host</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#which-execution-entry-and-why-that-one" title="Which execution entry, and why that one">Which execution entry, and why that one</a></li><li><a href="#capability-discipline" title="Capability discipline">Capability discipline</a></li><li><a href="#seams-this-phase-did-not-open" title="Seams this phase did not open">Seams this phase did not open</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate zeroclaw_<wbr>runtime</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">zeroclaw_runtime</a></div><h1>Module <span>subagent_<wbr>host</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Wiring-phase-2b implementation of <a href="../../zeroclaw_coordinator/state/trait.ChildRunner.html" title="trait zeroclaw_coordinator::state::ChildRunner"><code>zeroclaw_coordinator::ChildRunner</code></a>:
+a child runs as a ZeroClaw-native agent turn, in this process.</p>
+<p><code>ChildRunner</code> is the coordinator’s only host-specific seam (see that
+crate’s <code>state</code> module doc). Everything in here is translation: a
+<a href="../../zeroclaw_coordinator/state/struct.ChildRunRequest.html" title="struct zeroclaw_coordinator::state::ChildRunRequest"><code>ChildRunRequest</code></a> becomes one call to <a href="../agent/loop_/fn.run.html" title="fn zeroclaw_runtime::agent::loop_::run"><code>crate::agent::run</code></a> — the same
+entry <code>tools/spawn_subagent.rs</code> uses — and the turn’s <code>Result&lt;String&gt;</code>
+becomes a <a href="../../zeroclaw_coordinator/types/struct.ChildResult.html" title="struct zeroclaw_coordinator::types::ChildResult"><code>ChildResult</code></a>.</p>
+<h3 id="which-execution-entry-and-why-that-one"><a class="doc-anchor" href="#which-execution-entry-and-why-that-one">§</a>Which execution entry, and why that one</h3>
+<p><a href="../agent/loop_/fn.run.html" title="fn zeroclaw_runtime::agent::loop_::run"><code>crate::agent::run</code></a> (<code>agent/loop_.rs:1141</code>, re-exported at
+<code>agent/mod.rs:68</code>) is the whole-turn entry: it resolves the agent config,
+builds the tool registry through the one gated seam
+(<code>ScopedToolRegistry::assemble</code>), builds memory for the alias, resolves the
+model provider, and drives <code>run_tool_call_loop</code>. <code>spawn_subagent.rs:293</code>
+calls exactly this. Wrapping it — rather than <code>run_tool_call_loop</code>
+directly, the way <code>delegate.rs:2731</code> does — is what keeps a coordinator
+child identical to a <code>spawn_subagent</code> child: same registry assembly, same
+prompt build, same memory scope. <code>delegate.rs</code>’s path is deliberately
+<em>not</em> reused: it starts from a caller’s already-built registry (bounded
+mode) or a target-specific assembly (independent mode) and is welded to
+<code>DelegateTool</code>’s own fields (<code>parent_tools</code>, <code>workspace_dir</code>,
+<code>multimodal_config</code>), none of which a coordinator child has.</p>
+<p><code>agent::run</code> is <code>pub</code> and takes no tool-loop state, so nothing had to be
+opened up for this module. What it does <em>not</em> offer is listed under
+“Seams this phase did not open” below; those are the reason several
+request fields are refused rather than silently dropped.</p>
+<h3 id="capability-discipline"><a class="doc-anchor" href="#capability-discipline">§</a>Capability discipline</h3>
+<p>A child runs under the <strong>target</strong> agent’s own policy, resolved by
+<a href="../security/struct.SecurityPolicy.html#method.for_agent" title="associated function zeroclaw_runtime::security::SecurityPolicy::for_agent"><code>SecurityPolicy::for_agent</code></a> via <a href="../subagent/struct.SubAgentSpawn.html#method.for_agent" title="associated function zeroclaw_runtime::subagent::SubAgentSpawn::for_agent"><code>SubAgentSpawn::for_agent</code></a>
+(<code>subagent/mod.rs:46</code>) — never the parent’s, never a hand-built one. That
+resolver is card-aware (<code>zeroclaw-config/src/policy.rs:2250-2279</code>: a card
+replaces <code>allowed_tools</code> wholesale and closes the MCP auto-admit escape
+hatch), so a carded child gets exactly its card’s grants. The resolved
+policy is handed to <code>agent::run</code> through <code>AgentRunOverrides::security</code>;
+passing <code>None</code> there would make <code>agent::run</code> resolve the same policy for
+the same alias (<code>agent/loop_.rs:1233-1236</code>), so this is explicit rather
+than load-bearing — but explicit is what makes it <em>testable</em>, and what
+makes an accidental switch to the parent’s alias a red test instead of a
+silent privilege change.</p>
+<h3 id="seams-this-phase-did-not-open"><a class="doc-anchor" href="#seams-this-phase-did-not-open">§</a>Seams this phase did not open</h3>
+<ul>
+<li><strong>Cancellation.</strong> <code>agent::run</code> takes no cancellation token; the turn
+engine it drives is handed <code>cancellation_token: None</code>
+(<code>agent/loop_.rs:1933</code>). So cancellation here is <em>dropping the turn
+future</em> at its next await point (<a href="fn.race_cancellation.html" title="fn zeroclaw_runtime::subagent_host::race_cancellation"><code>race_cancellation</code></a>). Work the turn
+spawned onto the runtime with <code>tokio::spawn</code> is not dropped with it.</li>
+<li><strong>Live progress.</strong> <code>agent::run</code> returns <code>Result&lt;String&gt;</code> and reports no
+intermediate state, so <a href="struct.NativeChildControl.html#method.progress" title="method zeroclaw_runtime::subagent_host::NativeChildControl::progress"><code>NativeChildControl::progress</code></a> can only report
+the turn count. Tool-call counts, context usage and per-tool names need
+a progress sink threaded into <code>run_tool_call_loop</code>.</li>
+<li><strong>Completion delivery.</strong> <a href="struct.NativeChildRunner.html#method.on_completed" title="method zeroclaw_runtime::subagent_host::NativeChildRunner::on_completed"><code>NativeChildRunner::on_completed</code></a> logs and
+returns. Waking the parent session on a child’s ending is the next
+phase; nothing here buffers, routes, or notifies.</li>
+<li><strong>Persisted output.</strong> <a href="../../zeroclaw_coordinator/state/trait.ChildRunner.html#method.persisted_output_ref" title="method zeroclaw_coordinator::state::ChildRunner::persisted_output_ref"><code>ChildRunner::persisted_output_ref</code></a> and
+<code>load_persisted_output</code> keep their defaults (<code>None</code>). A native child
+returns its whole output in-band on <a href="../../zeroclaw_coordinator/types/struct.ChildResult.html#structfield.output" title="field zeroclaw_coordinator::types::ChildResult::output"><code>ChildResult::output</code></a>, so there is
+no out-of-line blob to reference; the coordinator only blanks
+<code>result.output</code> when a reference exists (<code>coordinator.rs:567-569</code>), and
+blanking it with nothing to load in its place would lose the answer.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.NativeChildControl.html" title="struct zeroclaw_runtime::subagent_host::NativeChildControl">Native<wbr>Child<wbr>Control</a></dt><dd>The coordinator’s live handle on a running native child.</dd><dt><a class="struct" href="struct.NativeChildRunner.html" title="struct zeroclaw_runtime::subagent_host::NativeChildRunner">Native<wbr>Child<wbr>Runner</a></dt><dd>Runs coordinator children as native in-process agent turns.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.TurnEnding.html" title="enum zeroclaw_runtime::subagent_host::TurnEnding">Turn<wbr>Ending</a></dt><dd>How one native turn ended, before it is mapped onto a <a href="../../zeroclaw_coordinator/outcome/enum.ChildOutcome.html" title="enum zeroclaw_coordinator::outcome::ChildOutcome"><code>ChildOutcome</code></a>.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.CHILD_TOOL_KINDS.html" title="constant zeroclaw_runtime::subagent_host::CHILD_TOOL_KINDS">CHILD_<wbr>TOOL_<wbr>KINDS</a></dt><dd>Tool kinds a described child is reported against, mapped to the tool name
+this host actually dispatches.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.child_context.html" title="fn zeroclaw_runtime::subagent_host::child_context">child_<wbr>context</a></dt><dd>Resolve the child’s own identity and policy from its alias.</dd><dt><a class="fn" href="fn.race_cancellation.html" title="fn zeroclaw_runtime::subagent_host::race_cancellation">race_<wbr>cancellation</a></dt><dd>Run <code>turn</code> until it ends, or drop it when <code>cancellation</code> fires.</dd><dt><a class="fn" href="fn.unsupported_request_fields.html" title="fn zeroclaw_runtime::subagent_host::unsupported_request_fields">unsupported_<wbr>request_<wbr>fields</a></dt><dd>Request fields this phase cannot honour, named so a refusal can say which.</dd></dl></section></div></main></body></html>

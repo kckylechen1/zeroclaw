@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["append_telegram_skip_marker","load_telegram_skip_markers","telegram_skip_list_path"],"struct":["TelegramChannel","TelegramSkipMarker"]};

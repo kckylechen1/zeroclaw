@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["approval_channel","attachments","config_handlers","context","cron_handlers","dispatch","fs","git","local","locales","memory_handlers","session","session_handlers","transport","tui_identity","turn","types","wss"]};

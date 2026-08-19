@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["claim_announcements_for_scoped_turn","scope_session_key","scope_thread_id","settle_announcement_guards"],"static":["TOOL_LOOP_SESSION_KEY","TOOL_LOOP_THREAD_ID"],"struct":["UnclaimOnDrop"],"trait":["TurnOutcome"]};

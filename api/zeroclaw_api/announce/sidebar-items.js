@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AnnouncedOutcome"],"struct":["Announcement","AnnouncementBatch"]};
