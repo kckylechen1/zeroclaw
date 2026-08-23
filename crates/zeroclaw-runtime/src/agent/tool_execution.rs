@@ -13,6 +13,7 @@ use zeroclaw_api::agent::TurnEvent;
 
 // Items that still live in `loop_` — import via the parent module.
 use super::loop_::{ParsedToolCall, ToolLoopCancelled, is_tool_loop_cancelled, scrub_credentials};
+use super::turn::redact::scrub_credentials_json;
 use super::turn::redact::scrub_credentials_value;
 use super::turn::{ModelSwitchCallback, TurnMeta, scope_model_switch_state};
 
@@ -120,8 +121,10 @@ pub(crate) async fn execute_one_tool(
     // Rendering-boundary copy of the arguments for observer events. Results
     // are already scrubbed at this boundary; arguments carry the same
     // credential exposure (e.g. a rejected raw `api_key`) and get the same
-    // treatment. The data path below (`tool.execute`, receipts) stays raw.
-    let full_args = scrub_credentials(&call_arguments.to_string());
+    // treatment — via the structured walk so composite shapes the text regex
+    // cannot see are redacted too. The data path below (`tool.execute`,
+    // receipts) stays raw.
+    let full_args = scrub_credentials_json(&call_arguments);
     let tool_call_id_owned = tool_call_id.map(str::to_string);
     observer.record_event(&ObserverEvent::ToolCallStart {
         tool: call_name.to_string(),
@@ -823,6 +826,9 @@ mod tests {
         let secret_args = serde_json::json!({
             "action": "upsert_agent",
             "api_key": "sk-test-raw-secret-material",
+            // Composite credential shape: the text regex cannot see a
+            // non-scalar under a secret-named key; the structured walk must.
+            "metadata": {"api_key": {"nested": "sk-composite-secret-value"}},
             "model": "gpt-5.3-codex"
         });
         let registry: Vec<Box<dyn Tool>> = vec![Box::new(tool)];
@@ -867,6 +873,10 @@ mod tests {
                 "observer event must not echo the secret: {rendered}"
             );
             assert!(
+                !rendered.contains("sk-composite-secret-value"),
+                "observer event must not echo the composite-wrapped secret: {rendered}"
+            );
+            assert!(
                 rendered.contains("[REDACTED]"),
                 "observer event should show the redaction marker: {rendered}"
             );
@@ -884,6 +894,10 @@ mod tests {
         assert!(
             !rendered.contains("sk-test-raw-secret-material"),
             "turn event must not echo the secret: {rendered}"
+        );
+        assert!(
+            !rendered.contains("sk-composite-secret-value"),
+            "turn event must not echo the composite-wrapped secret: {rendered}"
         );
         assert!(
             rendered.contains("[REDACTED]"),

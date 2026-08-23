@@ -107,6 +107,14 @@ fn redact_credential_leaf(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Serialize a JSON value for a log/render surface with credentials redacted.
+/// Structured walk, not the text regex: composite shapes the regex cannot see
+/// (`api_key: {"nested": "secret"}`) are redacted here. Same
+/// rendering-boundary contract as [`scrub_credentials_value`].
+pub fn scrub_credentials_json(value: &serde_json::Value) -> String {
+    scrub_credentials_value(value.clone()).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{scrub_credentials, scrub_credentials_value};

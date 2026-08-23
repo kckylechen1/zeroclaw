@@ -4,6 +4,7 @@
 use super::context::TurnCtx;
 use super::events::StreamDelta;
 use super::redact::scrub_credentials;
+use super::redact::scrub_credentials_json;
 use crate::agent::tool_execution::ToolExecutionOutcome;
 use crate::approval::store::AuditDecision;
 use crate::approval::{ApprovalRequest, ApprovalRequirement, ApprovalResponse};
@@ -181,7 +182,7 @@ pub(crate) async fn gate_tool_approval(
                         "model": ctx.model,
                         "iteration": iteration + 1,
                         "tool": tool_name,
-                        "arguments": scrub_credentials(&tool_args.to_string()),
+                        "arguments": scrub_credentials_json(tool_args),
                         "result": denied,
                         "trace_id": ctx.turn_id,
                         // Operator-facing only. The remedy lives here rather than
@@ -237,7 +238,7 @@ pub(crate) async fn gate_tool_approval(
                         "model": ctx.model,
                         "iteration": iteration + 1,
                         "tool": tool_name,
-                        "arguments": scrub_credentials(&tool_args.to_string()),
+                        "arguments": scrub_credentials_json(tool_args),
                         "replaced": true,
                         "output": scrub_credentials(replacement),
                         "trace_id": ctx.turn_id,
