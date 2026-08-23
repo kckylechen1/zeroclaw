@@ -82,6 +82,41 @@ impl ModelRoutingConfigTool {
         None
     }
 
+    /// Reject any call that still carries an `api_key` argument. Credential
+    /// mutation is not part of the model-visible surface: raw secrets must go
+    /// through the trusted operator config API (PUT /api/config/{path}, with
+    /// secret-masked reads) or the settings UI. Reject the whole call — never
+    /// silently drop the parameter (the caller must not believe a key was
+    /// stored) and never echo the submitted value or any prefix of it.
+    fn reject_raw_credential_args(args: &Value) -> Option<ToolResult> {
+        // Presence of the parameter (any JSON value, including null) is the
+        // rejection condition; the submitted value is never inspected or logged.
+        args.get("api_key")?;
+
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "action": args.get("action").and_then(Value::as_str).unwrap_or("get"),
+                    "reason": "raw credential argument",
+                })),
+            "model_routing_config: rejected call carrying api_key"
+        );
+
+        Some(ToolResult {
+            success: false,
+            output: ToolOutput::default(),
+            error: Some(
+                "'api_key' is not accepted by model_routing_config. Raw credentials must be \
+                 configured through the trusted operator config surface (PUT /api/config/{path} \
+                 or the settings UI), never through model tool arguments. The whole call was \
+                 rejected and nothing was written."
+                    .into(),
+            ),
+        })
+    }
+
     fn parse_string_list(raw: &Value, field: &str) -> anyhow::Result<Vec<String>> {
         if let Some(raw_string) = raw.as_str() {
             return Ok(raw_string
@@ -694,7 +729,6 @@ impl ModelRoutingConfigTool {
         let hint = Self::parse_non_empty_string(args, "hint")?;
         let model_provider = Self::parse_non_empty_string(args, "model_provider")?;
         let model = Self::parse_non_empty_string(args, "model")?;
-        let api_key_update = Self::parse_optional_string_update(args, "api_key")?;
 
         let keywords_update = if let Some(raw) = args.get("keywords") {
             Some(Self::parse_string_list(raw, "keywords")?)
@@ -736,12 +770,6 @@ impl ModelRoutingConfigTool {
         next_route.hint = hint.clone();
         next_route.model_provider = model_provider;
         next_route.model = model;
-
-        match api_key_update {
-            MaybeSet::Set(api_key) => next_route.api_key = Some(api_key),
-            MaybeSet::Null => next_route.api_key = None,
-            MaybeSet::Unset => {}
-        }
 
         cfg.model_routes.retain(|route| route.hint != hint);
         cfg.model_routes.push(next_route);
@@ -875,7 +903,6 @@ impl ModelRoutingConfigTool {
         let model_provider = Self::parse_non_empty_string(args, "model_provider")?;
         let model = Self::parse_non_empty_string(args, "model")?;
 
-        let api_key_update = Self::parse_optional_string_update(args, "api_key")?;
         let temperature_update = Self::parse_optional_f64_update(args, "temperature")?;
         let max_depth_update = Self::parse_optional_u32_update(args, "max_depth")?;
         let max_iterations_update = Self::parse_optional_usize_update(args, "max_iterations")?;
@@ -922,11 +949,6 @@ impl ModelRoutingConfigTool {
                         ))
                     })?;
             provider_entry.model = Some(model.clone());
-            match api_key_update {
-                MaybeSet::Set(ref v) => provider_entry.api_key = Some(v.clone()),
-                MaybeSet::Null => provider_entry.api_key = None,
-                MaybeSet::Unset => {}
-            }
             match temperature_update {
                 MaybeSet::Set(value) => {
                     if !(0.0..=2.0).contains(&value) {
@@ -1090,10 +1112,6 @@ impl Tool for ModelRoutingConfigTool {
                     "type": ["number", "null"],
                     "description": "Optional temperature override (0.0-2.0)"
                 },
-                "api_key": {
-                    "type": ["string", "null"],
-                    "description": "Optional API key override for scenario route or aliased agent"
-                },
                 "keywords": {
                     "description": "Classification keywords for upsert_scenario (string or string array)",
                     "oneOf": [
@@ -1171,6 +1189,10 @@ impl Tool for ModelRoutingConfigTool {
             .and_then(Value::as_str)
             .unwrap_or("get")
             .to_ascii_lowercase();
+
+        if let Some(rejected) = Self::reject_raw_credential_args(&args) {
+            return Ok(rejected);
+        }
 
         let result = match action.as_str() {
             "get" => self.handle_get(),
@@ -1423,6 +1445,177 @@ mod tests {
             output["agents"]["aaa"]["delegates"],
             json!([{"agent": "aaalore", "mode": "independent"}])
         );
+    }
+
+    #[tokio::test]
+    async fn upsert_scenario_rejects_api_key_without_writing() {
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let tool = ModelRoutingConfigTool::new(test_config(&tmp).await, test_security());
+
+        let result = tool
+            .execute(json!({
+                "action": "upsert_scenario",
+                "hint": "coding",
+                "model_provider": "openai",
+                "model": "gpt-5.3-codex",
+                "api_key": "sk-test-raw-secret-material"
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            !result.success,
+            "upsert_scenario must reject calls that carry api_key"
+        );
+        let error = result.error.unwrap_or_default();
+        assert!(error.contains("api_key"));
+        assert!(
+            error.contains("/api/config"),
+            "error must name the trusted config surface: {error}"
+        );
+        assert!(
+            !error.contains("sk-test-raw-secret-material"),
+            "error must not echo the submitted secret"
+        );
+
+        // The rejected call must write nothing: no secret on disk and no
+        // materialized route for the rejected hint.
+        let contents = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            !contents.contains("sk-test-raw-secret-material"),
+            "rejected call must not persist the submitted secret"
+        );
+        let get_result = tool.execute(json!({"action": "get"})).await.unwrap();
+        let output: Value = serde_json::from_str(&get_result.output).unwrap();
+        let scenarios_empty = output["scenarios"]
+            .as_array()
+            .is_some_and(|items| items.is_empty());
+        assert!(
+            scenarios_empty,
+            "rejected upsert_scenario must not create the route: {output}"
+        );
+
+        // Explicit null is still a credential mutation attempt: reject too.
+        let null_result = tool
+            .execute(json!({
+                "action": "upsert_scenario",
+                "hint": "coding",
+                "model_provider": "openai",
+                "model": "gpt-5.3-codex",
+                "api_key": null
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !null_result.success,
+            "api_key: null must also be rejected, not silently clear a credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_agent_rejects_api_key_without_writing() {
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let tool = ModelRoutingConfigTool::new(test_config(&tmp).await, test_security());
+
+        let result = tool
+            .execute(json!({
+                "action": "upsert_agent",
+                "name": "coder",
+                "model_provider": "openai",
+                "model": "gpt-5.3-codex",
+                "api_key": "sk-test-raw-secret-material"
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            !result.success,
+            "upsert_agent must reject calls that carry api_key"
+        );
+        let error = result.error.unwrap_or_default();
+        assert!(error.contains("api_key"));
+        assert!(
+            error.contains("/api/config"),
+            "error must name the trusted config surface: {error}"
+        );
+        assert!(
+            !error.contains("sk-test-raw-secret-material"),
+            "error must not echo the submitted secret"
+        );
+
+        // The rejected call must write nothing: no secret on disk, no
+        // synthesized provider slot, no aliased agent.
+        let contents = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            !contents.contains("sk-test-raw-secret-material"),
+            "rejected call must not persist the submitted secret"
+        );
+        assert!(
+            read_saved_provider_entry(&cfg_path, "openai", "coder").is_none(),
+            "rejected upsert_agent must not materialize the provider slot"
+        );
+        let get_result = tool.execute(json!({"action": "get"})).await.unwrap();
+        let output: Value = serde_json::from_str(&get_result.output).unwrap();
+        assert!(
+            output["agents"]["coder"].is_null(),
+            "rejected upsert_agent must not create the agent entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_agent_without_api_key_preserves_existing_credential() {
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let config = test_config(&tmp).await;
+
+        // Seed a credential through the trusted path (direct config write,
+        // the equivalent of PUT /api/config/providers.models.openai.coder.api_key).
+        // Secrets are encrypted at rest, so pin the stored form through the
+        // same read path before and after the upsert.
+        let mut on_disk = zeroclaw_config::migration::migrate_to_current(
+            &std::fs::read_to_string(&cfg_path).unwrap(),
+        )
+        .unwrap();
+        on_disk.config_path = config.config_path.clone();
+        on_disk.data_dir = config.data_dir.clone();
+        let entry = on_disk
+            .providers
+            .models
+            .ensure("openai", "coder")
+            .expect("openai family must have a typed slot");
+        entry.api_key = Some("sk-preexisting-trusted-credential".to_string());
+        on_disk.save().await.unwrap();
+        let seeded_api_key = read_saved_provider_entry(&cfg_path, "openai", "coder")
+            .expect("seeded provider slot must be readable")
+            .api_key
+            .expect("seeded credential must round-trip through the read path");
+
+        // Non-secret upsert on the same alias must succeed as before and must
+        // neither overwrite nor clear the existing credential.
+        let tool = ModelRoutingConfigTool::new(config, test_security());
+        let result = tool
+            .execute(json!({
+                "action": "upsert_agent",
+                "name": "coder",
+                "model_provider": "openai",
+                "model": "gpt-5.3-codex",
+                "temperature": 0.3
+            }))
+            .await
+            .unwrap();
+        assert!(result.success, "{:?}", result.error);
+
+        let entry = read_saved_provider_entry(&cfg_path, "openai", "coder")
+            .expect("upsert_agent must keep the provider slot");
+        assert_eq!(
+            entry.api_key,
+            Some(seeded_api_key),
+            "non-secret upsert must preserve the credential set via the trusted surface"
+        );
+        assert_eq!(entry.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(entry.temperature, Some(0.3));
     }
 
     #[tokio::test]
