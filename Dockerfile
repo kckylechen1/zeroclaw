@@ -10,7 +10,7 @@ ARG ZEROCLAW_BASE_RUST_SLIM=rust:1.96-slim@sha256:31ee7fc65186be7e0e0ccb3f2ca305
 ARG ZEROCLAW_BASE_DEBIAN=debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
 # >>> end generated:base-arg-debian <<<
 # >>> generated:base-arg-distroless from dev/ci/container-base-images.toml by `cargo generate installers` - do not edit <<<
-ARG ZEROCLAW_BASE_DISTROLESS=gcr.io/distroless/cc-debian13:nonroot@sha256:d97bc0a941b8d4be647dc0ee75b264ddbb772f1ac5ba690a4309c00723b23775
+ARG ZEROCLAW_BASE_DISTROLESS=gcr.io/distroless/cc-debian13:nonroot@sha256:a77defd6fedbb3392b175ba8ea3d1c22be963c1597c248c3ba987ddd80bfb512
 # >>> end generated:base-arg-distroless <<<
 
 # ── Stage 0: Frontend build ─────────────────────────────────────
@@ -53,7 +53,7 @@ FROM --platform=$BUILDPLATFORM ${ZEROCLAW_BASE_RUST_SLIM} AS builder
 WORKDIR /app
 ARG TARGETARCH
 # >>> generated:docker-features-arg by `cargo generate installers` - do not edit <<<
-ARG ZEROCLAW_CARGO_FLAGS="--no-default-features --features acp-bridge,agent-runtime,channel-acp-server,channel-discord,channel-email,channel-filesystem,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,observability-prometheus,schema-export,whatsapp-web"
+ARG ZEROCLAW_CARGO_FLAGS="--no-default-features --features acp-bridge,agent-runtime,channel-acp-server,channel-discord,channel-email,channel-filesystem,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,hardware-tools,integrations-saas,observability-prometheus,schema-export,whatsapp-web"
 # >>> end generated:docker-features-arg <<<
 
 # Install build dependencies. g++ is required by inkjet (zerocode's syntax

@@ -98,7 +98,12 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", 
 encoding_rs = "0.8"
 
 [features]
-default = ["observability-prometheus", "schema-export"]
+default = [
+    "observability-prometheus",
+    "schema-export",
+    "integrations-saas",
+    "hardware-tools",
+]
 observability-prometheus = ["dep:prometheus"]
 observability-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
 sandbox-landlock = ["dep:landlock"]
@@ -106,6 +111,12 @@ schema-export = ["dep:schemars", "zeroclaw-config/schema-export", "zeroclaw-sop-
 
 
 browser-native = []
+# Concrete integration families from zeroclaw-tools. Default-on so this
+# crate's standalone build and test surface are unchanged; the root package
+# consumes this crate with default-features = false and forwards these from
+# its own default so the slim companion selection can omit them.
+integrations-saas = ["zeroclaw-tools/integrations-saas"]
+hardware-tools = ["zeroclaw-tools/hardware-tools"]
 plugins-wasm = ["dep:zeroclaw-plugins", "zeroclaw-plugins/plugins-wasmtime"]
 webauthn = []
 sandbox-bubblewrap = []

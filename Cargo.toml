@@ -20,7 +20,7 @@ zeroclaw-commands = { path = "crates/zeroclaw-commands", version = "0.8.3" }
 zeroclaw-providers = { path = "crates/zeroclaw-providers", version = "0.8.3" }
 zeroclaw-memory = { path = "crates/zeroclaw-memory", version = "0.8.3" }
 zeroclaw-channels = { path = "crates/zeroclaw-channels", version = "0.8.3", default-features = false }
-zeroclaw-tools = { path = "crates/zeroclaw-tools", version = "0.8.3" }
+zeroclaw-tools = { path = "crates/zeroclaw-tools", version = "0.8.3", default-features = false }
 zeroclaw-sop-graph = { path = "crates/zeroclaw-sop-graph", version = "0.8.3", default-features = false }
 zeroclaw-runtime = { path = "crates/zeroclaw-runtime", version = "0.8.3", default-features = false }
 zeroclaw-eval = { path = "crates/zeroclaw-eval", version = "0.8.3" }
@@ -283,6 +283,23 @@ default = [
     "gateway",
     "observability-prometheus",
     "schema-export",
+    "integrations-saas",
+    "hardware-tools",
+]
+
+# Concrete integration families forwarded from zeroclaw-tools. Default-on so
+# the standard build is byte-equivalent to the pre-feature build; a slim
+# companion build selects `--no-default-features --features agent-runtime,...`
+# and omits these to keep the families out of the dependency graph. The
+# implementations stay in-tree either way — turning a family off is a compile
+# selection, not a deletion.
+integrations-saas = [
+    "zeroclaw-tools/integrations-saas",
+    "zeroclaw-runtime/integrations-saas",
+]
+hardware-tools = [
+    "zeroclaw-tools/hardware-tools",
+    "zeroclaw-runtime/hardware-tools",
 ]
 
 # The core agent runtime — agent loop, tools, persistence subsystems.

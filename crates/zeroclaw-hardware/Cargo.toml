@@ -39,7 +39,14 @@ rppal = { version = "0.22", optional = true }
 
 [features]
 default = []
-hardware = ["dep:aardvark-sys", "dep:nusb", "dep:tokio-serial", "dep:dialoguer", "dep:console"]
+hardware = [
+    "dep:aardvark-sys",
+    "dep:nusb",
+    "dep:tokio-serial",
+    "dep:dialoguer",
+    "dep:console",
+    "zeroclaw-tools/hardware-tools",
+]
 peripheral-rpi = ["rppal"]
 probe = ["dep:probe-rs"]
 # Extends the serial peripheral allow-list with `/tmp/zc-sim-*` for hardware-free

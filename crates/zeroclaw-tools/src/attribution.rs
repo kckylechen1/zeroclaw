@@ -19,6 +19,7 @@ use crate::claude_code_runner::ClaudeCodeRunnerTool;
 use crate::cloud_ops::CloudOpsTool;
 use crate::cloud_patterns::CloudPatternsTool;
 use crate::codex_cli::CodexCliTool;
+#[cfg(feature = "integrations-saas")]
 use crate::composio::ComposioTool;
 use crate::content_search::ContentSearchTool;
 use crate::data_management::DataManagementTool;
@@ -33,15 +34,21 @@ use crate::gemini_cli::GeminiCliTool;
 use crate::git_forge::GitForgeTool;
 use crate::git_operations::GitOperationsTool;
 use crate::glob_search::GlobSearchTool;
+#[cfg(feature = "integrations-saas")]
 use crate::google_workspace::GoogleWorkspaceTool;
+#[cfg(feature = "hardware-tools")]
 use crate::hardware_board_info::HardwareBoardInfoTool;
+#[cfg(feature = "hardware-tools")]
 use crate::hardware_memory_map::HardwareMemoryMapTool;
+#[cfg(feature = "hardware-tools")]
 use crate::hardware_memory_read::HardwareMemoryReadTool;
 use crate::http_request::HttpRequestTool;
 use crate::image_gen::ImageGenTool;
 use crate::image_info::ImageInfoTool;
+#[cfg(feature = "integrations-saas")]
 use crate::jira_tool::JiraTool;
 use crate::knowledge_tool::KnowledgeTool;
+#[cfg(feature = "integrations-saas")]
 use crate::linkedin::LinkedInTool;
 use crate::llm_task::LlmTaskTool;
 use crate::mcp_tool::McpToolWrapper;
@@ -50,14 +57,17 @@ use crate::memory_forget::MemoryForgetTool;
 use crate::memory_purge::MemoryPurgeTool;
 use crate::memory_recall::MemoryRecallTool;
 use crate::memory_store::MemoryStoreTool;
+#[cfg(feature = "integrations-saas")]
 use crate::microsoft365::Microsoft365Tool;
 use crate::model_routing_config::ModelRoutingConfigTool;
+#[cfg(feature = "integrations-saas")]
 use crate::notion_tool::NotionTool;
 use crate::opencode_cli::OpenCodeCliTool;
 use crate::pipeline::PipelineTool;
 use crate::poll::PollTool;
 use crate::project_intel::ProjectIntelTool;
 use crate::proxy_config::ProxyConfigTool;
+#[cfg(feature = "integrations-saas")]
 use crate::pushover::PushoverTool;
 use crate::reaction::ReactionTool;
 use crate::report_template_tool::ReportTemplateTool;
@@ -86,6 +96,7 @@ tool_attribution!(ClaudeCodeRunnerTool, ToolKind::Plugin);
 tool_attribution!(CloudOpsTool, ToolKind::Plugin);
 tool_attribution!(CloudPatternsTool, ToolKind::Plugin);
 tool_attribution!(CodexCliTool, ToolKind::Plugin);
+#[cfg(feature = "integrations-saas")]
 tool_attribution!(ComposioTool, ToolKind::Plugin);
 tool_attribution!(ContentSearchTool, ToolKind::Search);
 tool_attribution!(DataManagementTool, ToolKind::Plugin);
@@ -100,15 +111,21 @@ tool_attribution!(GeminiCliTool, ToolKind::Plugin);
 tool_attribution!(GitOperationsTool, ToolKind::Shell);
 tool_attribution!(GitForgeTool, ToolKind::Plugin);
 tool_attribution!(GlobSearchTool, ToolKind::Search);
+#[cfg(feature = "integrations-saas")]
 tool_attribution!(GoogleWorkspaceTool, ToolKind::Plugin);
+#[cfg(feature = "hardware-tools")]
 tool_attribution!(HardwareBoardInfoTool, ToolKind::Plugin);
+#[cfg(feature = "hardware-tools")]
 tool_attribution!(HardwareMemoryMapTool, ToolKind::Plugin);
+#[cfg(feature = "hardware-tools")]
 tool_attribution!(HardwareMemoryReadTool, ToolKind::Plugin);
 tool_attribution!(HttpRequestTool, ToolKind::HttpRequest);
 tool_attribution!(ImageGenTool, ToolKind::Plugin);
 tool_attribution!(ImageInfoTool, ToolKind::Plugin);
+#[cfg(feature = "integrations-saas")]
 tool_attribution!(JiraTool, ToolKind::Plugin);
 tool_attribution!(KnowledgeTool, ToolKind::Plugin);
+#[cfg(feature = "integrations-saas")]
 tool_attribution!(LinkedInTool, ToolKind::Plugin);
 tool_attribution!(LlmTaskTool, ToolKind::Plugin);
 tool_attribution!(McpToolWrapper, ToolKind::Plugin);
@@ -117,14 +134,17 @@ tool_attribution!(MemoryForgetTool, ToolKind::Memory);
 tool_attribution!(MemoryPurgeTool, ToolKind::Memory);
 tool_attribution!(MemoryRecallTool, ToolKind::Memory);
 tool_attribution!(MemoryStoreTool, ToolKind::Memory);
+#[cfg(feature = "integrations-saas")]
 tool_attribution!(Microsoft365Tool, ToolKind::Plugin);
 tool_attribution!(ModelRoutingConfigTool, ToolKind::Plugin);
+#[cfg(feature = "integrations-saas")]
 tool_attribution!(NotionTool, ToolKind::Plugin);
 tool_attribution!(OpenCodeCliTool, ToolKind::Plugin);
 tool_attribution!(PipelineTool, ToolKind::Plugin);
 tool_attribution!(PollTool, ToolKind::Wait);
 tool_attribution!(ProjectIntelTool, ToolKind::Plugin);
 tool_attribution!(ProxyConfigTool, ToolKind::Plugin);
+#[cfg(feature = "integrations-saas")]
 tool_attribution!(PushoverTool, ToolKind::Plugin);
 tool_attribution!(ReactionTool, ToolKind::Plugin);
 tool_attribution!(ReportTemplateTool, ToolKind::Plugin);
