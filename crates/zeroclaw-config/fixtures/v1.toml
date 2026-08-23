@@ -508,13 +508,6 @@ idempotency_max_keys = 10000
 session_persistence = true
 session_ttl_hours = 0
 
-[gateway.pairing_dashboard]
-code_length = 8
-code_ttl_secs = 3600
-max_pending_codes = 3
-max_failed_attempts = 5
-lockout_secs = 300
-
 [composio]
 enabled = false
 entity_id = "default"
