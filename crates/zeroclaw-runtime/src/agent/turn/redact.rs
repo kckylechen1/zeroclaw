@@ -53,8 +53,18 @@ pub fn scrub_credentials(input: &str) -> String {
 }
 
 static SENSITIVE_KEY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(authorization|token|api[_-]?key|password|secret|user[_-]?key|bearer|credential|set[_-]?cookie|cookie)"#).unwrap()
+    Regex::new(
+        r#"(?i)(authorization|token|api[_-]?key|password|passwd|secret|user[_-]?key|bearer|credential|auth|private[_-]?key|set[_-]?cookie|cookie)"#,
+    )
+    .unwrap()
 });
+
+/// True when a JSON object key names credential material. Single source for
+/// the structured redaction walk and the approval secret predicate so the
+/// two surfaces cannot drift apart.
+pub fn is_sensitive_key(key: &str) -> bool {
+    SENSITIVE_KEY_REGEX.is_match(key)
+}
 
 /// Structured-aware credential scrub for a JSON value bound for a human-facing
 /// surface. Object entries whose key names a credential have their string value
@@ -69,7 +79,7 @@ pub fn scrub_credentials_value(value: serde_json::Value) -> serde_json::Value {
             let scrubbed = map
                 .into_iter()
                 .map(|(key, val)| {
-                    if SENSITIVE_KEY_REGEX.is_match(&key) {
+                    if is_sensitive_key(&key) {
                         (key, redact_credential_leaf(val))
                     } else {
                         (key, scrub_credentials_value(val))
@@ -154,6 +164,29 @@ mod tests {
         );
         assert!(rendered.contains("[REDACTED]"));
         assert_eq!(out["status"], "ok");
+    }
+
+    #[test]
+    fn scrub_credentials_value_redacts_auth_passwd_private_key_variants() {
+        // The key predicate is shared with the approval secret heuristic;
+        // these variants must not survive anywhere on the walk.
+        let input = serde_json::json!({
+            "metadata": {"auth": "SECRET-SENTINEL-auth"},
+            "credentials": {"passwd": "SECRET-SENTINEL-passwd"},
+            "envelope": {"private_key": "SECRET-SENTINEL-privatekey"}
+        });
+        let out = scrub_credentials_value(input);
+        let rendered = out.to_string();
+        for sentinel in [
+            "SECRET-SENTINEL-auth",
+            "SECRET-SENTINEL-passwd",
+            "SECRET-SENTINEL-privatekey",
+        ] {
+            assert!(
+                !rendered.contains(sentinel),
+                "{sentinel} must be redacted: {rendered}"
+            );
+        }
     }
 
     #[test]

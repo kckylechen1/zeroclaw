@@ -1214,28 +1214,14 @@ pub fn summarize_args(args: &serde_json::Value) -> String {
 }
 
 /// Heuristic for argument keys that should have their value redacted in
-/// human-readable summaries. Matches anywhere in the (lowercased) key:
+/// human-readable summaries. Matches anywhere in the (case-insensitive) key:
 /// covers `api_key`, `api-key`, `apiKey`, `oauth_token`, `secret`,
-/// `password`, `auth_token`, `bearer`, `client_secret`, `private_key`, etc.
+/// `password`, `passwd`, `auth`, `auth_token`, `bearer`, `client_secret`,
+/// `private_key`, `credential`, cookie headers, etc. The predicate lives in
+/// `agent::turn::redact` and is shared with the structured credential walk
+/// so the two surfaces cannot drift apart.
 fn looks_like_secret_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    [
-        "secret",
-        "password",
-        "passwd",
-        "token",
-        "api_key",
-        "api-key",
-        "apikey",
-        "auth",
-        "bearer",
-        "private_key",
-        "private-key",
-        "privatekey",
-        "credential",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    crate::agent::turn::redact::is_sensitive_key(key)
 }
 
 fn truncate_for_summary(input: &str, max_chars: usize) -> String {
