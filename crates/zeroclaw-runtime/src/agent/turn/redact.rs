@@ -173,7 +173,9 @@ mod tests {
         let input = serde_json::json!({
             "metadata": {"auth": "SECRET-SENTINEL-auth"},
             "credentials": {"passwd": "SECRET-SENTINEL-passwd"},
-            "envelope": {"private_key": "SECRET-SENTINEL-privatekey"}
+            "envelope": {"private_key": "SECRET-SENTINEL-privatekey"},
+            "pem": {"private-key": "SECRET-SENTINEL-private-dash"},
+            "ssh": {"privatekey": "SECRET-SENTINEL-privatejoined"}
         });
         let out = scrub_credentials_value(input);
         let rendered = out.to_string();
@@ -181,6 +183,8 @@ mod tests {
             "SECRET-SENTINEL-auth",
             "SECRET-SENTINEL-passwd",
             "SECRET-SENTINEL-privatekey",
+            "SECRET-SENTINEL-private-dash",
+            "SECRET-SENTINEL-privatejoined",
         ] {
             assert!(
                 !rendered.contains(sentinel),
