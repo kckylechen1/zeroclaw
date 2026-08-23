@@ -52,6 +52,7 @@ pub use zeroclaw_tools::cli_discovery::{DiscoveredCli, discover_cli_tools};
 pub use zeroclaw_tools::cloud_ops::CloudOpsTool;
 pub use zeroclaw_tools::cloud_patterns::CloudPatternsTool;
 pub use zeroclaw_tools::codex_cli::CodexCliTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::composio::ComposioTool;
 pub use zeroclaw_tools::content_search::ContentSearchTool;
 pub use zeroclaw_tools::data_management::DataManagementTool;
@@ -68,15 +69,21 @@ pub use zeroclaw_tools::gemini_cli::GeminiCliTool;
 pub use zeroclaw_tools::git_forge::GitForgeTool;
 pub use zeroclaw_tools::git_operations::GitOperationsTool;
 pub use zeroclaw_tools::glob_search::GlobSearchTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::google_workspace::GoogleWorkspaceTool;
+#[cfg(feature = "hardware-tools")]
 pub use zeroclaw_tools::hardware_board_info::HardwareBoardInfoTool;
+#[cfg(feature = "hardware-tools")]
 pub use zeroclaw_tools::hardware_memory_map::HardwareMemoryMapTool;
+#[cfg(feature = "hardware-tools")]
 pub use zeroclaw_tools::hardware_memory_read::HardwareMemoryReadTool;
 pub use zeroclaw_tools::http_request::HttpRequestTool;
 pub use zeroclaw_tools::image_gen::ImageGenTool;
 pub use zeroclaw_tools::image_info::ImageInfoTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::jira_tool::JiraTool;
 pub use zeroclaw_tools::knowledge_tool::KnowledgeTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::linkedin::LinkedInTool;
 pub use zeroclaw_tools::llm_task::LlmTaskTool;
 pub use zeroclaw_tools::mcp_client::{McpRegistry, McpServer};
@@ -93,14 +100,17 @@ pub use zeroclaw_tools::memory_forget::MemoryForgetTool;
 pub use zeroclaw_tools::memory_purge::MemoryPurgeTool;
 pub use zeroclaw_tools::memory_recall::MemoryRecallTool;
 pub use zeroclaw_tools::memory_store::MemoryStoreTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::microsoft365::Microsoft365Tool;
 pub use zeroclaw_tools::model_routing_config::ModelRoutingConfigTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::notion_tool::NotionTool;
 pub use zeroclaw_tools::opencode_cli::OpenCodeCliTool;
 pub use zeroclaw_tools::pipeline::PipelineTool;
 pub use zeroclaw_tools::poll::PollTool;
 pub use zeroclaw_tools::project_intel::ProjectIntelTool;
 pub use zeroclaw_tools::proxy_config::ProxyConfigTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::pushover::PushoverTool;
 pub use zeroclaw_tools::reaction::ReactionTool;
 pub use zeroclaw_tools::report_template_tool::ReportTemplateTool;
@@ -577,6 +587,10 @@ pub fn all_tools_with_runtime(
 ) -> AllToolsResult {
     let has_shell_access = runtime.has_shell_access();
     let persistent_writes = runtime.has_filesystem_access();
+    // Composio credentials are only consumed when the SaaS family is compiled
+    // in; the parameters stay part of the stable signature for both builds.
+    #[cfg(not(feature = "integrations-saas"))]
+    let _ = (composio_key, composio_entity_id);
     let register_coding_cli_tools = has_shell_access && persistent_writes;
     let runtime_kind = root_config.runtime.kind.as_wire();
     let sandbox_cfg = risk_profile.sandbox_config();
@@ -680,15 +694,22 @@ pub fn all_tools_with_runtime(
             security.clone(),
             workspace_dir.to_path_buf(),
         )),
-        Arc::new(PushoverTool::new(
-            security.clone(),
-            workspace_dir.to_path_buf(),
-        )),
-        Arc::new(CalculatorTool::new()),
-        Arc::new(WeatherTool::new()),
-        Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())),
-        Arc::new(TodoWriteTool::new()),
     ];
+
+    // Pushover notifications are part of the SaaS integration family: only
+    // registered when the family is compiled in. Pushed here — between the
+    // git tool and the calculator group — so the full build keeps the exact
+    // registry position it had before the feature gate.
+    #[cfg(feature = "integrations-saas")]
+    tool_arcs.push(Arc::new(PushoverTool::new(
+        security.clone(),
+        workspace_dir.to_path_buf(),
+    )));
+
+    tool_arcs.push(Arc::new(CalculatorTool::new()));
+    tool_arcs.push(Arc::new(WeatherTool::new()));
+    tool_arcs.push(Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())));
+    tool_arcs.push(Arc::new(TodoWriteTool::new()));
 
     // A SubAgent runs as an ephemeral clone of its parent and inherits the
     // parent's model verbatim; it must not be able to switch the active
@@ -946,6 +967,7 @@ pub fn all_tools_with_runtime(
     }
 
     // Notion API tool (conditionally registered)
+    #[cfg(feature = "integrations-saas")]
     if root_config.notion.enabled {
         let notion_api_key = if root_config.notion.api_key.trim().is_empty() {
             std::env::var("NOTION_API_KEY").unwrap_or_default()
@@ -965,6 +987,7 @@ pub fn all_tools_with_runtime(
     }
 
     // Jira integration (config-gated)
+    #[cfg(feature = "integrations-saas")]
     if root_config.jira.enabled {
         let api_token = if root_config.jira.api_token.trim().is_empty() {
             std::env::var("JIRA_API_TOKEN").unwrap_or_default()
@@ -1058,6 +1081,7 @@ pub fn all_tools_with_runtime(
     }
 
     // Google Workspace CLI (gws) integration — requires shell access
+    #[cfg(feature = "integrations-saas")]
     if root_config.google_workspace.enabled && has_shell_access {
         tool_arcs.push(Arc::new(GoogleWorkspaceTool::new(
             security.clone(),
@@ -1171,6 +1195,7 @@ pub fn all_tools_with_runtime(
     }
 
     // LinkedIn integration (config-gated)
+    #[cfg(feature = "integrations-saas")]
     if root_config.linkedin.enabled {
         tool_arcs.push(Arc::new(LinkedInTool::new(
             security.clone(),
@@ -1273,6 +1298,7 @@ pub fn all_tools_with_runtime(
         }
     }
 
+    #[cfg(feature = "integrations-saas")]
     if let Some(key) = composio_key
         && !key.is_empty()
     {
@@ -1334,6 +1360,7 @@ pub fn all_tools_with_runtime(
     tool_arcs.push(Arc::new(escalate_tool));
 
     // Microsoft 365 Graph API integration
+    #[cfg(feature = "integrations-saas")]
     if root_config.microsoft365.enabled {
         let ms_cfg = &root_config.microsoft365;
         let tenant_id = ms_cfg
@@ -1636,6 +1663,33 @@ pub fn all_tools_with_runtime(
 
     // Pipeline construction waits for ScopedToolRegistry::assemble(), where the
     // effective per-agent policy and optional caller allowlist are both known.
+
+    // The concrete SaaS integration family is not compiled into this build
+    // (the `integrations-saas` feature is off). Config sections still parse,
+    // so an install that enables one of these families must hear about the
+    // mismatch instead of silently losing the tool.
+    #[cfg(not(feature = "integrations-saas"))]
+    {
+        let enabled_but_absent = [
+            ("jira", root_config.jira.enabled),
+            ("notion", root_config.notion.enabled),
+            ("google_workspace", root_config.google_workspace.enabled),
+            ("microsoft365", root_config.microsoft365.enabled),
+            ("linkedin", root_config.linkedin.enabled),
+            ("composio", root_config.composio.enabled),
+        ];
+        for (family, enabled) in enabled_but_absent {
+            if enabled {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"integration": family})),
+                    "config enables an integration whose tool family is not compiled into this build (integrations-saas feature is off); skipping registration"
+                );
+            }
+        }
+    }
 
     apply_install_composition(&mut tool_arcs, root_config);
 
@@ -2733,6 +2787,8 @@ mod tests {
         assert!(!names.contains(&"browser_open"));
         assert!(names.contains(&"schedule"));
         assert!(names.contains(&"model_routing_config"));
+        // The pushover tool only exists when the SaaS family is compiled in.
+        #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
         assert!(names.contains(&"proxy_config"));
     }
@@ -2862,6 +2918,8 @@ mod tests {
         // Absent field resolves as full: today's default assembly, unchanged.
         assert!(names.contains(&"model_routing_config"));
         assert!(names.contains(&"proxy_config"));
+        // The pushover tool only exists when the SaaS family is compiled in.
+        #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
     }
 
@@ -2909,6 +2967,8 @@ mod tests {
         assert!(names.contains(&"browser_open"));
         assert!(names.contains(&"content_search"));
         assert!(names.contains(&"model_routing_config"));
+        // The pushover tool only exists when the SaaS family is compiled in.
+        #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
         assert!(names.contains(&"proxy_config"));
     }

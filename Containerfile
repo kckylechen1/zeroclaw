@@ -185,7 +185,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
     # Release build — zeroclawlabs (daemon)
     # >>> generated:container-standard by `cargo generate installers` - do not edit <<<
-    ZEROCLAW_FEATURES="acp-bridge,agent-runtime,channel-acp-server,channel-discord,channel-email,channel-filesystem,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,observability-prometheus,schema-export,whatsapp-web"
+    ZEROCLAW_FEATURES="acp-bridge,agent-runtime,channel-acp-server,channel-discord,channel-email,channel-filesystem,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,hardware-tools,integrations-saas,observability-prometheus,schema-export,whatsapp-web"
 # >>> end generated:container-standard <<<
     CARGO_TARGET_DIR=/target \
     cargo build \
@@ -271,7 +271,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
     # Release build — zeroclawlabs (all channels)
     # >>> generated:container-fat by `cargo generate installers` - do not edit <<<
-    ZEROCLAW_FEATURES="acp-bridge,agent-runtime,browser-native,channel-acp-server,channel-amqp,channel-bluesky,channel-clawdtalk,channel-dingtalk,channel-discord,channel-email,channel-feishu,channel-filesystem,channel-git,channel-imessage,channel-irc,channel-lark,channel-line,channel-linq,channel-matrix,channel-mattermost,channel-mochat,channel-mqtt,channel-nextcloud,channel-nostr,channel-notion,channel-qq,channel-reddit,channel-signal,channel-slack,channel-telegram,channel-twitch,channel-twitter,channel-voice-call,channel-wati,channel-webhook,channel-wechat,channel-wecom,channel-wecom-ws,channel-whatsapp-cloud,dev-sim,gateway,hardware,memory-postgres,memory-tachi,nodes,observability-otel,observability-prometheus,peripheral-rpi,plugins-wasm,plugins-wasm-cranelift,plugins-wasm-pulley,plugins-wasm-runtime-only,probe,provider-gitea,provider-github,sandbox-bubblewrap,sandbox-landlock,schema-export,webauthn,whatsapp-web"
+    ZEROCLAW_FEATURES="acp-bridge,agent-runtime,browser-native,channel-acp-server,channel-amqp,channel-bluesky,channel-clawdtalk,channel-dingtalk,channel-discord,channel-email,channel-feishu,channel-filesystem,channel-git,channel-imessage,channel-irc,channel-lark,channel-line,channel-linq,channel-matrix,channel-mattermost,channel-mochat,channel-mqtt,channel-nextcloud,channel-nostr,channel-notion,channel-qq,channel-reddit,channel-signal,channel-slack,channel-telegram,channel-twitch,channel-twitter,channel-voice-call,channel-wati,channel-webhook,channel-wechat,channel-wecom,channel-wecom-ws,channel-whatsapp-cloud,dev-sim,gateway,hardware,hardware-tools,integrations-saas,memory-postgres,memory-tachi,nodes,observability-otel,observability-prometheus,peripheral-rpi,plugins-wasm,plugins-wasm-cranelift,plugins-wasm-pulley,plugins-wasm-runtime-only,probe,provider-gitea,provider-github,sandbox-bubblewrap,sandbox-landlock,schema-export,webauthn,whatsapp-web"
 # >>> end generated:container-fat <<<
     CARGO_TARGET_DIR=/target \
     cargo build \

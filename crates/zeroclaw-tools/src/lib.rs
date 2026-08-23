@@ -3,7 +3,34 @@
 pub mod attribution;
 pub mod helpers;
 pub(crate) mod i18n;
+// Concrete SaaS/vendor business tools. Gated so slim companion builds keep
+// the family out of the compiled surface; default-on via the
+// `integrations-saas` feature preserves the standard build.
+#[cfg(feature = "integrations-saas")]
+pub mod composio;
+#[cfg(feature = "integrations-saas")]
+pub mod google_workspace;
+#[cfg(feature = "integrations-saas")]
+pub mod jira_tool;
+#[cfg(feature = "integrations-saas")]
+pub mod linkedin;
+#[cfg(feature = "integrations-saas")]
+pub mod linkedin_client;
+#[cfg(feature = "integrations-saas")]
 pub mod microsoft365;
+#[cfg(feature = "integrations-saas")]
+pub mod notion_tool;
+#[cfg(feature = "integrations-saas")]
+pub mod pushover;
+// Concrete hardware board/memory tools. Gated behind `hardware-tools`; the
+// hardware install templates enable the `hardware` root feature, which
+// forwards it.
+#[cfg(feature = "hardware-tools")]
+pub mod hardware_board_info;
+#[cfg(feature = "hardware-tools")]
+pub mod hardware_memory_map;
+#[cfg(feature = "hardware-tools")]
+pub mod hardware_memory_read;
 pub mod util_helpers;
 
 pub mod ask_user;
@@ -21,7 +48,6 @@ pub mod cloud_ops;
 pub mod cloud_patterns;
 pub mod codex_cli;
 pub mod coding_cli;
-pub mod composio;
 pub mod content_search;
 pub mod data_management;
 pub mod discord_search;
@@ -38,17 +64,10 @@ pub mod gemini_cli;
 pub mod git_forge;
 pub mod git_operations;
 pub mod glob_search;
-pub mod google_workspace;
-pub mod hardware_board_info;
-pub mod hardware_memory_map;
-pub mod hardware_memory_read;
 pub mod http_request;
 pub mod image_gen;
 pub mod image_info;
-pub mod jira_tool;
 pub mod knowledge_tool;
-pub mod linkedin;
-pub mod linkedin_client;
 pub mod llm_task;
 pub mod mcp_client;
 pub mod mcp_context;
@@ -69,13 +88,11 @@ pub mod memory_recall;
 pub mod memory_store;
 pub mod model_routing_config;
 pub mod node_capabilities;
-pub mod notion_tool;
 pub mod opencode_cli;
 pub mod pipeline;
 pub mod poll;
 pub mod project_intel;
 pub mod proxy_config;
-pub mod pushover;
 pub mod reaction;
 pub mod report_template_tool;
 pub mod report_templates;
