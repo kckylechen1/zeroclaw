@@ -18982,11 +18982,13 @@ impl Config {
                 ..Config::default()
             };
             // A brand-new install starts on the minimal companion
-            // composition. This branch and the shipped config template are
-            // the only places a fresh config file is produced, and both pin
-            // the key explicitly. Existing installs are never migrated:
-            // an absent `composition` field keeps resolving as `full`, so
-            // upgrades do not silently change the tool surface.
+            // composition. This bootstrap and the shipped config
+            // templates (dev container, production container images,
+            // Kubernetes sample) are the places a fresh config file is
+            // produced, and all of them pin the key explicitly.
+            // Existing installs are never migrated: an absent
+            // `composition` field keeps resolving as `full`, so upgrades
+            // do not silently change the tool surface.
             config.composition = Some(crate::composition::Composition::Minimal);
             // Save defaults FIRST so env-injected values never reach the
             // freshly-created config file. Env overrides apply post-save to
