@@ -362,7 +362,6 @@
 "runtime:wasm":
   - changed-files:
       - any-glob-to-any-file:
-          - "crates/zeroclaw-runtime/src/platform/wasm.rs"
           - "crates/zeroclaw-plugins/src/wasm_tool.rs"
           - "crates/zeroclaw-plugins/src/wasm_channel.rs"
 
@@ -423,12 +422,6 @@
           - "src/providers/gemini_cli.rs"
           - "crates/zeroclaw-providers/src/gemini.rs"
           - "crates/zeroclaw-providers/src/gemini_cli.rs"
-
-"provider:glm":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/providers/glm.rs"
-          - "crates/zeroclaw-providers/src/glm.rs"
 
 "provider:kilocli":
   - changed-files:
