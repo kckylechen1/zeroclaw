@@ -172,7 +172,7 @@ Scoped path labels do not guarantee a same-prefix base label. Because `pr-path-l
 | `observability:log` | `crates/zeroclaw-log/src/**`, `crates/zeroclaw-runtime/src/observability/log.rs` |
 | `observability:otel` | `otel.rs`, OTel dependency feature regression coverage |
 | `observability:prometheus` | `prometheus.rs` |
-| `runtime:wasm` | runtime WASM platform and first-party WASM plugin host files |
+| `runtime:wasm` | first-party WASM plugin host files |
 | `security:bubblewrap` | `bubblewrap.rs` |
 | `security:docker` | `docker.rs` |
 | `security:leak-detector` | LeakDetector redaction and sensitive-output scanning |
@@ -253,7 +253,6 @@ to one provider.
 | `provider:compatible` | `compatible.rs` |
 | `provider:copilot` | `copilot.rs` |
 | `provider:gemini` | `gemini.rs`, `gemini_cli.rs` |
-| `provider:glm` | `glm.rs` |
 | `provider:kilocli` | `kilocli.rs` |
 | `provider:ollama` | `ollama.rs` |
 | `provider:openai` | `openai.rs`, `openai_codex.rs` |
@@ -262,7 +261,7 @@ to one provider.
 | `provider:router` | `router.rs` |
 | `provider:telnyx` | `telnyx.rs` |
 
-Some provider labels describe provider families that currently share the OpenAI-compatible provider implementation instead of a dedicated source file. Maintainers may apply these manually when an issue or PR is truly about that family: `provider:groq`, `provider:kimi`, `provider:minimax`, `provider:moonshot`, and `provider:qwen`. Do not add shared factory or compatible-provider files to these labeler rules; that would over-label unrelated shared changes.
+Some provider labels describe provider families that currently share the OpenAI-compatible provider implementation instead of a dedicated source file. Maintainers may apply these manually when an issue or PR is truly about that family: `provider:glm`, `provider:groq`, `provider:kimi`, `provider:minimax`, `provider:moonshot`, and `provider:qwen`. Do not add shared factory or compatible-provider files to these labeler rules; that would over-label unrelated shared changes.
 
 ### Per-tool-group labels
 
