@@ -1,5 +1,10 @@
 workspace_dir = "/zeroclaw-data/workspace"
 config_path = "/zeroclaw-data/.zeroclaw/config.toml"
+# Tool surface for this install. This template only reaches brand-new
+# installs; an existing config without the key keeps the full surface.
+# Set "full" (alias "legacy") explicitly to opt back into the complete
+# built-in tool registry — a transitional compatibility profile.
+composition = "minimal"
 # This is the Ollama Base URL, not a secret key
 api_key = "http://host.docker.internal:11434"
 default_provider = "ollama"

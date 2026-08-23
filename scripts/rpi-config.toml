@@ -8,6 +8,10 @@
 # Or set api_key directly below (not recommended for version control).
 
 # api_key = ""
+# This deployment template keeps the complete tool surface because it is a
+# hardware-oriented install (see [hardware] below); the minimal companion
+# profile excludes hardware tools, so opting in here is explicit.
+composition = "full"
 default_provider = "anthropic-custom:https://api.z.ai/api/anthropic"
 default_model = "claude-3-5-sonnet-20241022"
 default_temperature = 0.4

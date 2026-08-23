@@ -18981,6 +18981,13 @@ impl Config {
                 data_dir: workspace_dir,
                 ..Config::default()
             };
+            // A brand-new install starts on the minimal companion
+            // composition. This branch and the shipped config template are
+            // the only places a fresh config file is produced, and both pin
+            // the key explicitly. Existing installs are never migrated:
+            // an absent `composition` field keeps resolving as `full`, so
+            // upgrades do not silently change the tool surface.
+            config.composition = Some(crate::composition::Composition::Minimal);
             // Save defaults FIRST so env-injected values never reach the
             // freshly-created config file. Env overrides apply post-save to
             // populate the in-memory Config for the running process.
@@ -28714,6 +28721,75 @@ wire_api = "ws"
         assert!(
             !workspace_dir.join("agents").exists(),
             "fresh init must not create agents/ tree"
+        );
+
+        // SAFETY: test-only, single-threaded test runner.
+        unsafe { std::env::remove_var("ZEROCLAW_WORKSPACE") };
+        if let Some(home) = original_home {
+            // SAFETY: test-only, single-threaded test runner.
+            unsafe { std::env::set_var("HOME", home) };
+        } else {
+            // SAFETY: test-only, single-threaded test runner.
+            unsafe { std::env::remove_var("HOME") };
+        }
+        let _ = fs::remove_dir_all(temp_home).await;
+    }
+
+    #[test]
+    async fn load_or_init_fresh_install_pins_minimal_composition_and_keeps_existing_full() {
+        let _env_guard = env_override_lock().await;
+        let temp_home =
+            std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
+        let workspace_dir = temp_home.join("profile-a");
+
+        let original_home = std::env::var("HOME").ok();
+        // SAFETY: test-only, single-threaded test runner.
+        unsafe { std::env::set_var("HOME", &temp_home) };
+        // SAFETY: test-only, single-threaded test runner.
+        unsafe { std::env::set_var("ZEROCLAW_WORKSPACE", &workspace_dir) };
+
+        // Fresh install: the bootstrap writes the minimal composition into
+        // the brand-new file and the in-memory config carries the same
+        // value, so the first turn assembles the minimal surface.
+        let fresh = Box::pin(Config::load_or_init()).await.unwrap();
+        assert_eq!(
+            fresh.composition,
+            Some(crate::composition::Composition::Minimal)
+        );
+        let raw = fs::read_to_string(fresh.config_path.clone()).await.unwrap();
+        assert!(
+            raw.contains("composition = \"minimal\""),
+            "fresh config must pin composition = \"minimal\", got: {raw}"
+        );
+
+        // Existing install without the key: no migration. The field stays
+        // absent on disk and in memory, so it keeps resolving as `full`.
+        let existing_dir = temp_home.join("profile-existing");
+        let existing_path = existing_dir.join("config.toml");
+        fs::create_dir_all(&existing_dir).await.unwrap();
+        fs::write(
+            &existing_path,
+            r#"default_temperature = 0.7
+default_model = "persisted-profile"
+"#,
+        )
+        .await
+        .unwrap();
+        // SAFETY: test-only, single-threaded test runner.
+        unsafe { std::env::set_var("ZEROCLAW_WORKSPACE", &existing_dir) };
+        let existing = Box::pin(Config::load_or_init()).await.unwrap();
+        assert!(
+            existing.composition.is_none(),
+            "existing config without the key must not gain one"
+        );
+        assert_eq!(
+            crate::composition::Composition::effective(existing.composition),
+            crate::composition::Composition::Full
+        );
+        let raw_existing = fs::read_to_string(&existing_path).await.unwrap();
+        assert!(
+            !raw_existing.contains("composition"),
+            "existing config file must not be rewritten with a composition: {raw_existing}"
         );
 
         // SAFETY: test-only, single-threaded test runner.

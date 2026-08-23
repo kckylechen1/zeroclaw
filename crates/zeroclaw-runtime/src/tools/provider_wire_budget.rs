@@ -750,3 +750,91 @@ async fn lean_worst_case_skills_and_mcp_under_ceiling() {
         budget.names
     );
 }
+
+/// Owner-ratified hard CI ceiling on the provider-wire `tools[]` array for
+/// the `composition = "minimal"` profile. This number is a ratified budget,
+/// not a tuning knob: an over-budget regression is resolved by shrinking the
+/// wire surface or by recording an owner-ratified exception on the fork's
+/// governance tracker, never by editing this constant.
+const MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING: usize = 5_000;
+
+#[tokio::test]
+async fn minimal_composition_tools_wire_under_owner_ceiling() {
+    // A fresh default install pinned to `composition = "minimal"`: every
+    // tool[] entry below is what the model sees on the wire. The gate is
+    // the measured `NativeChatRequest.tools` array (ceil(len/4) over the
+    // whole serialized array), assembled through the real production path
+    // (`all_tools_with_runtime` + `ScopedToolRegistry::assemble` +
+    // `build_iteration_tool_specs` + `chat_tools_wire`); every stage
+    // `.expect`s, so a failure to measure fails this test rather than
+    // skipping the gate.
+    let tmp = TempDir::new().unwrap();
+    seed_personality(tmp.path(), true);
+    let mut config = Config {
+        config_path: tmp.path().join("config.toml"),
+        data_dir: tmp.path().join("data"),
+        ..Config::default()
+    };
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+    let (_, budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "default",
+        skills: &[],
+        connect_mcp: false,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    print_budget("composition=minimal default install (gate)", &budget);
+
+    // Fail-closed measurement: the wire rows must cover every assembled
+    // registry tool, otherwise the token count describes an array this test
+    // never fully measured.
+    assert!(
+        !budget.names.is_empty(),
+        "minimal assembly must register tools; empty registry means the fixture measured nothing"
+    );
+    assert_eq!(
+        budget.rows.len(),
+        budget.names.len(),
+        "wire rows must match the assembled registry (rows={} names={:?}); a mismatch means the measurement dropped entries",
+        budget.rows.len(),
+        budget.names
+    );
+
+    // The membership table is the canonical allowlist: nothing outside it
+    // may appear on the wire under minimal (the banned-category tripwire on
+    // the table itself lives with the table in the config crate).
+    for name in &budget.names {
+        assert!(
+            zeroclaw_config::composition::is_minimal_member(name),
+            "non-member reached the minimal wire surface: {name}"
+        );
+    }
+
+    // Measured report: tool count, system-prompt tokens, largest individual
+    // schema, and total pre-history tokens (system prompt + tools[]).
+    let largest = budget
+        .rows
+        .first()
+        .expect("rows are non-empty; largest schema must be reportable");
+    eprintln!(
+        "minimal profile report: tools={} tools_array_tok={} system_prompt_tok={} largest_schema={} ({} tok) pre_history_tok={}",
+        budget.names.len(),
+        budget.native_tools_tokens,
+        budget.system_prompt_tokens,
+        largest.name,
+        largest.native_tokens,
+        budget.whole_turn_tokens
+    );
+
+    assert!(
+        budget.native_tools_tokens <= MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING,
+        "minimal composition tools[] {} exceeded owner ceiling {} (tools={:?} largest={} at {} tok)",
+        budget.native_tools_tokens,
+        MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING,
+        budget.names,
+        largest.name,
+        largest.native_tokens
+    );
+}
