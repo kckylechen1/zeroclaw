@@ -85,6 +85,10 @@ jobs:
           fi
       - name: Test translation release submodule handling
         run: scripts/release/refresh-translations.test.sh
+      - name: Tracked runtime-state hygiene gate (self-test + index scan)
+        run: |
+          bash scripts/ci/tracked_state_gate.test.sh
+          bash scripts/ci/tracked_state_gate.sh
 
   # ── Post-format required quality gate ─────────────────────────────────────
 
