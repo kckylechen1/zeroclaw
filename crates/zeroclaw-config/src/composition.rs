@@ -172,4 +172,62 @@ mod tests {
         assert!(!is_minimal_member("delegate"));
         assert!(!is_minimal_member(""));
     }
+
+    /// Banned tool categories for the minimal companion profile, as
+    /// registered tool names. This list is the CI wire-surface tripwire's
+    /// single explicit input: additions to it are reviewed via the diff on
+    /// this file, and a name joining the membership table is a widening
+    /// change that this test exists to catch.
+    const BANNED_MINIMAL_TOOL_NAMES: &[&str] = &[
+        // direct coding-harness launchers
+        "claude_code",
+        "claude_code_runner",
+        "codex_cli",
+        "gemini_cli",
+        "opencode_cli",
+        "coding_cli",
+        "coding_cli_executor",
+        // repo/git mutation
+        "git_operations",
+        "git_forge",
+        // operator/admin mutation
+        "model_routing_config",
+        "proxy_config",
+        "security_ops",
+        "backup",
+        "data_management",
+        // concrete SaaS/vendor business adapters
+        "jira",
+        "notion",
+        "google_workspace",
+        "microsoft365",
+        "linkedin",
+        "composio",
+        "pushover",
+    ];
+
+    /// Banned name prefixes (category-level bans that cover families).
+    const BANNED_MINIMAL_TOOL_NAME_PREFIXES: &[&str] = &["hardware_"];
+
+    #[test]
+    fn membership_table_admits_no_banned_category() {
+        // Tripwire: nobody adds a banned name (or a banned-prefix family)
+        // to the membership table. The runtime's assembly totality test
+        // proves assembly stays within the table, so table purity is what
+        // keeps these categories off the minimal provider wire.
+        for banned in BANNED_MINIMAL_TOOL_NAMES {
+            assert!(
+                !is_minimal_member(banned),
+                "`{banned}` is a banned category and must never join the minimal membership table"
+            );
+        }
+        for member in MINIMAL_TOOL_MEMBERSHIP {
+            for prefix in BANNED_MINIMAL_TOOL_NAME_PREFIXES {
+                assert!(
+                    !member.starts_with(prefix),
+                    "`{member}` matches banned prefix `{prefix}` and must never join the minimal membership table"
+                );
+            }
+        }
+    }
 }

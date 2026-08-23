@@ -362,6 +362,9 @@ nohup python3 ~/sensor_loop.py &
 # https://github.com/zeroclaw-labs/zeroclaw/blob/master/docs/book/src/providers/configuration.md#minimal-working-example
 cat > ~/.zeroclaw/config.toml << 'EOF'
 schema_version = 3
+# Robot installs need the complete tool surface (the minimal companion
+# profile excludes hardware tools), so `full` is pinned explicitly.
+composition = "full"
 
 [providers.models.ollama.local]    # type = ollama; alias = local (you choose)
 model = "llama3.2:3b"

@@ -52,6 +52,18 @@ Conditionally registered:
 | `sop_*` tools | Registered when `sop.sops_dir` is configured: run and inspect SOPs |
 | `discord_search` | Registered when a Discord alias has `archive` enabled |
 
+## Install-wide composition
+
+The root `composition` key selects which tool surface an install assembles:
+
+- `composition = "minimal"` assembles only the curated companion primitives: workspace basics (`shell`, `file_read`, `file_write`, `file_edit`, `glob_search`, `content_search`), personal memory (`memory_recall`, `memory_store`), skill discovery (`read_skill`), extension discovery (`tool_search`), universal web primitives (`web_search_tool`, `web_fetch`), bounded interaction (`ask_user`), the SubAgent entry point (`spawn_subagent`), and scheduling (`schedule`). Individual tool `enabled` flags do not widen it back.
+- `composition = "full"` (alias `"legacy"`) keeps the complete built-in registry. This is a **transitional opt-in compatibility profile**, not a target: new specialist capabilities should stay out of the ordinary provider-wire surface until they are measured in.
+- An absent key behaves as `full`: configs written before the field existed keep today's tool surface across upgrades, and existing installs are not migrated.
+
+Fresh installs start on `minimal`: the install bootstrap (`Config::load_or_init` on a first run, and the shipped config template used by the dev container) pins `composition = "minimal"` into the brand-new config file. Set `composition = "full"` explicitly to opt an install back into the complete registry.
+
+The membership table is an allowlist, so a newly registered tool stays out of the minimal surface until it is deliberately added. CI guards the minimal profile from both directions: a wire-budget ceiling on the provider-wire `tools[]` array, and a banned-category tripwire (direct coding-harness launchers, repo/git mutation, operator/admin mutation, concrete SaaS adapters, hardware tools) on the membership table.
+
 ## Extension protocols
 
 Beyond built-in tools, ZeroClaw supports the **[MCP](./mcp.md)** (Model Context Protocol) extension surface. Connect any MCP server (Claude Code's filesystem, Playwright, your own) and the agent picks up its tools at startup.

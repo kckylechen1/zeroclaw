@@ -19,6 +19,7 @@ RUN <<-EOF
         'default_provider = "custom"' \
         'default_model = "opencode/big-pickle"' \
         'default_temperature = 0.7' \
+        'composition = "minimal"' \
         '' \
         '[gateway]' \
         'port = 42617' \
