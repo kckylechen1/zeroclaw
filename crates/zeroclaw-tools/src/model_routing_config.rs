@@ -88,10 +88,15 @@ impl ModelRoutingConfigTool {
     /// secret-masked reads) or the settings UI. Reject the whole call — never
     /// silently drop the parameter (the caller must not believe a key was
     /// stored) and never echo the submitted value or any prefix of it.
+    ///
+    /// The check is recursive over object keys and array elements so a
+    /// credential cannot hide inside an unrelated nested argument either.
     fn reject_raw_credential_args(args: &Value) -> Option<ToolResult> {
-        // Presence of the parameter (any JSON value, including null) is the
-        // rejection condition; the submitted value is never inspected or logged.
-        args.get("api_key")?;
+        // Presence of the key (any JSON value, including null) is the rejection
+        // condition; the submitted value is never inspected or logged.
+        if !Self::contains_api_key_arg(args) {
+            return None;
+        }
 
         ::zeroclaw_log::record!(
             WARN,
@@ -115,6 +120,18 @@ impl ModelRoutingConfigTool {
                     .into(),
             ),
         })
+    }
+
+    /// True when any object key named `api_key` exists anywhere in the
+    /// arguments (objects and arrays are walked; string values are not keys).
+    fn contains_api_key_arg(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => map
+                .iter()
+                .any(|(key, val)| key == "api_key" || Self::contains_api_key_arg(val)),
+            Value::Array(items) => items.iter().any(Self::contains_api_key_arg),
+            _ => false,
+        }
     }
 
     fn parse_string_list(raw: &Value, field: &str) -> anyhow::Result<Vec<String>> {
@@ -1510,6 +1527,27 @@ mod tests {
         assert!(
             !null_result.success,
             "api_key: null must also be rejected, not silently clear a credential"
+        );
+
+        // A credential nested inside an unrelated argument object must not
+        // smuggle through either: the whole call is rejected, not just ignored.
+        let nested_result = tool
+            .execute(json!({
+                "action": "set_default",
+                "model_provider": "openai",
+                "model": "gpt-5.3-codex",
+                "metadata": {"api_key": "sk-test-raw-secret-material"}
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !nested_result.success,
+            "nested api_key must also be rejected, not silently ignored"
+        );
+        let contents = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(
+            !contents.contains("sk-test-raw-secret-material"),
+            "nested api_key call must not persist the submitted secret"
         );
     }
 
