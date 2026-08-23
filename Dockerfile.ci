@@ -41,7 +41,6 @@ COPY --chown=65534:65534 zeroclaw-data/ /zeroclaw-data/
 ENV LANG=C.UTF-8
 ENV ZEROCLAW_DATA_DIR=/zeroclaw-data/data
 ENV HOME=/zeroclaw-data
-ENV ZEROCLAW_GATEWAY_PORT=42617
 
 WORKDIR /zeroclaw-data
 USER 65534:65534
