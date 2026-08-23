@@ -694,19 +694,22 @@ pub fn all_tools_with_runtime(
             security.clone(),
             workspace_dir.to_path_buf(),
         )),
-        Arc::new(CalculatorTool::new()),
-        Arc::new(WeatherTool::new()),
-        Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())),
-        Arc::new(TodoWriteTool::new()),
     ];
 
     // Pushover notifications are part of the SaaS integration family: only
-    // registered when the family is compiled in.
+    // registered when the family is compiled in. Pushed here — between the
+    // git tool and the calculator group — so the full build keeps the exact
+    // registry position it had before the feature gate.
     #[cfg(feature = "integrations-saas")]
     tool_arcs.push(Arc::new(PushoverTool::new(
         security.clone(),
         workspace_dir.to_path_buf(),
     )));
+
+    tool_arcs.push(Arc::new(CalculatorTool::new()));
+    tool_arcs.push(Arc::new(WeatherTool::new()));
+    tool_arcs.push(Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())));
+    tool_arcs.push(Arc::new(TodoWriteTool::new()));
 
     // A SubAgent runs as an ephemeral clone of its parent and inherits the
     // parent's model verbatim; it must not be able to switch the active
@@ -2784,6 +2787,8 @@ mod tests {
         assert!(!names.contains(&"browser_open"));
         assert!(names.contains(&"schedule"));
         assert!(names.contains(&"model_routing_config"));
+        // The pushover tool only exists when the SaaS family is compiled in.
+        #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
         assert!(names.contains(&"proxy_config"));
     }
@@ -2913,6 +2918,8 @@ mod tests {
         // Absent field resolves as full: today's default assembly, unchanged.
         assert!(names.contains(&"model_routing_config"));
         assert!(names.contains(&"proxy_config"));
+        // The pushover tool only exists when the SaaS family is compiled in.
+        #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
     }
 
@@ -2960,6 +2967,8 @@ mod tests {
         assert!(names.contains(&"browser_open"));
         assert!(names.contains(&"content_search"));
         assert!(names.contains(&"model_routing_config"));
+        // The pushover tool only exists when the SaaS family is compiled in.
+        #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
         assert!(names.contains(&"proxy_config"));
     }

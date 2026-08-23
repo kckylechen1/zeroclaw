@@ -288,8 +288,8 @@ default = [
 ]
 
 # Concrete integration families forwarded from zeroclaw-tools. Default-on so
-# the standard build is byte-equivalent to the pre-feature build; a slim
-# companion build selects `--no-default-features --features agent-runtime,...`
+# the standard build keeps the pre-feature compiled surface and registry; a
+# slim companion build selects `--no-default-features --features agent-runtime,...`
 # and omits these to keep the families out of the dependency graph. The
 # implementations stay in-tree either way — turning a family off is a compile
 # selection, not a deletion.
