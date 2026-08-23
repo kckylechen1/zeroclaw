@@ -87,8 +87,11 @@ pub fn scrub_credentials_value(value: serde_json::Value) -> serde_json::Value {
 }
 
 /// Redact a value sitting under a credential-named key. String values keep a
-/// short prefix for context; non-strings recurse so nested secret objects are
-/// still walked.
+/// short prefix for context; non-string values (arrays, objects, numbers) are
+/// redacted wholesale — everything under a credential-named key is credential
+/// material, and structural recursion would let a composite shape (e.g.
+/// `api_key: ["raw-secret"]`) resurface the secret through a non-sensitive
+/// child key.
 fn redact_credential_leaf(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::String(s) => {
@@ -100,7 +103,7 @@ fn redact_credential_leaf(value: serde_json::Value) -> serde_json::Value {
                 .unwrap_or("");
             serde_json::Value::String(format!("{prefix}*[REDACTED]"))
         }
-        nested => scrub_credentials_value(nested),
+        _ => serde_json::Value::String("*[REDACTED]".to_string()),
     }
 }
 
@@ -120,6 +123,29 @@ mod tests {
         assert!(!token.contains("abcdef0123456789"));
         assert_eq!(out["body"]["status"], "ok");
         assert_eq!(out["count"], 3);
+    }
+
+    #[test]
+    fn scrub_credentials_value_redacts_composite_secret_values() {
+        // A credential-named key whose value is an array/object is credential
+        // material as a whole; structural walking must not resurface it.
+        let input = serde_json::json!({
+            "metadata": {"api_key": ["sk-live-abcdef0123456789"]},
+            "auth": {"bearer": {"token": "topsecret-token-value", "kid": "2026-01"}},
+            "status": "ok"
+        });
+        let out = scrub_credentials_value(input);
+        let rendered = out.to_string();
+        assert!(
+            !rendered.contains("sk-live-abcdef0123456789"),
+            "array-wrapped credential must be redacted: {rendered}"
+        );
+        assert!(
+            !rendered.contains("topsecret-token-value"),
+            "object-wrapped credential must be redacted: {rendered}"
+        );
+        assert!(rendered.contains("[REDACTED]"));
+        assert_eq!(out["status"], "ok");
     }
 
     #[test]

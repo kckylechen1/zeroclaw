@@ -1469,6 +1469,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cfg_path = tmp.path().join("config.toml");
         let tool = ModelRoutingConfigTool::new(test_config(&tmp).await, test_security());
+        let config_before = std::fs::read(&cfg_path).unwrap();
 
         let result = tool
             .execute(json!({
@@ -1496,21 +1497,12 @@ mod tests {
             "error must not echo the submitted secret"
         );
 
-        // The rejected call must write nothing: no secret on disk and no
-        // materialized route for the rejected hint.
-        let contents = std::fs::read_to_string(&cfg_path).unwrap();
-        assert!(
-            !contents.contains("sk-test-raw-secret-material"),
-            "rejected call must not persist the submitted secret"
-        );
-        let get_result = tool.execute(json!({"action": "get"})).await.unwrap();
-        let output: Value = serde_json::from_str(&get_result.output).unwrap();
-        let scenarios_empty = output["scenarios"]
-            .as_array()
-            .is_some_and(|items| items.is_empty());
-        assert!(
-            scenarios_empty,
-            "rejected upsert_scenario must not create the route: {output}"
+        // The rejected call must write nothing: the config file is
+        // byte-for-byte identical to its pre-call state.
+        let config_after = std::fs::read(&cfg_path).unwrap();
+        assert_eq!(
+            config_before, config_after,
+            "rejected upsert_scenario must not touch the config file"
         );
 
         // Explicit null is still a credential mutation attempt: reject too.
@@ -1544,10 +1536,27 @@ mod tests {
             !nested_result.success,
             "nested api_key must also be rejected, not silently ignored"
         );
-        let contents = std::fs::read_to_string(&cfg_path).unwrap();
+
+        // After every rejected variant: no route materialized, no secret on
+        // disk, config still byte-for-byte the pre-call state.
+        let config_after_all = std::fs::read(&cfg_path).unwrap();
+        assert_eq!(
+            config_before, config_after_all,
+            "no rejected variant may touch the config file"
+        );
+        let contents = String::from_utf8_lossy(&config_after_all).to_string();
         assert!(
             !contents.contains("sk-test-raw-secret-material"),
-            "nested api_key call must not persist the submitted secret"
+            "rejected calls must not persist the submitted secret"
+        );
+        let get_result = tool.execute(json!({"action": "get"})).await.unwrap();
+        let output: Value = serde_json::from_str(&get_result.output).unwrap();
+        let scenarios_empty = output["scenarios"]
+            .as_array()
+            .is_some_and(|items| items.is_empty());
+        assert!(
+            scenarios_empty,
+            "rejected upsert_scenario must not create the route: {output}"
         );
     }
 
@@ -1556,6 +1565,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cfg_path = tmp.path().join("config.toml");
         let tool = ModelRoutingConfigTool::new(test_config(&tmp).await, test_security());
+        let config_before = std::fs::read(&cfg_path).unwrap();
 
         let result = tool
             .execute(json!({
@@ -1583,9 +1593,15 @@ mod tests {
             "error must not echo the submitted secret"
         );
 
-        // The rejected call must write nothing: no secret on disk, no
-        // synthesized provider slot, no aliased agent.
-        let contents = std::fs::read_to_string(&cfg_path).unwrap();
+        // The rejected call must write nothing: the config file is
+        // byte-for-byte identical to its pre-call state; no secret on disk,
+        // no synthesized provider slot, no aliased agent.
+        let config_after = std::fs::read(&cfg_path).unwrap();
+        assert_eq!(
+            config_before, config_after,
+            "rejected upsert_agent must not touch the config file"
+        );
+        let contents = String::from_utf8_lossy(&config_after).to_string();
         assert!(
             !contents.contains("sk-test-raw-secret-material"),
             "rejected call must not persist the submitted secret"

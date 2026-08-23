@@ -67,7 +67,12 @@ pub(crate) async fn gate_tool_approval(
                 let ch_request = zeroclaw_api::channel::ChannelApprovalRequest {
                     tool_name: request.tool_name.clone(),
                     arguments_summary: crate::approval::summarize_args(&request.arguments),
-                    raw_arguments: Some(request.arguments.clone()),
+                    // Raw structure for approver context, secrets redacted at
+                    // the rendering boundary — credential material must not
+                    // transit to chat/plugin approval surfaces verbatim.
+                    raw_arguments: Some(crate::agent::turn::redact::scrub_credentials_value(
+                        request.arguments.clone(),
+                    )),
                 };
                 let recipient = ctx.channel_reply_target.unwrap_or_default();
                 match ch.request_approval_attributed(recipient, &ch_request).await {

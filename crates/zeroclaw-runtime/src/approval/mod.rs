@@ -1205,7 +1205,9 @@ pub fn summarize_args(args: &serde_json::Value) -> String {
             parts.join(", ")
         }
         other => {
-            let s = other.to_string();
+            // Non-object top-level args (e.g. an array of calls) get the same
+            // rendering-boundary scrub before they reach the operator.
+            let s = scrub_credentials_value(other.clone()).to_string();
             truncate_for_summary(&s, 120)
         }
     }
