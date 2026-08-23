@@ -9,6 +9,7 @@
 
 pub mod store;
 
+use crate::agent::turn::redact::scrub_credentials_value;
 use crate::security::AutonomyLevel;
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -1171,7 +1172,7 @@ pub fn summarize_args(args: &serde_json::Value) -> String {
                     match v {
                         serde_json::Value::String(s) => truncate_for_summary(s, 80),
                         other => {
-                            let s = other.to_string();
+                            let s = scrub_credentials_value(other.clone()).to_string();
                             truncate_for_summary(&s, 80)
                         }
                     }
@@ -1188,8 +1189,13 @@ pub fn summarize_args(args: &serde_json::Value) -> String {
                 } else {
                     match v {
                         serde_json::Value::String(s) => truncate_for_summary(s, 80),
+                        // Nested objects/arrays are rendered to the operator
+                        // (and persisted in the approval audit trail); run
+                        // them through the rendering-boundary scrub so a
+                        // credential hidden inside a nested argument (e.g.
+                        // metadata.api_key) is not echoed verbatim.
                         other => {
-                            let s = other.to_string();
+                            let s = scrub_credentials_value(other.clone()).to_string();
                             truncate_for_summary(&s, 80)
                         }
                     }
@@ -1518,6 +1524,39 @@ mod tests {
         let summary = summarize_args(&args);
         assert!(summary.contains('…'));
         assert!(summary.len() < 200);
+    }
+
+    #[test]
+    pub fn summarize_args_redacts_credential_nested_in_object_value() {
+        // A credential smuggled inside a nested argument object must not be
+        // echoed verbatim into the approval prompt or the audit trail.
+        let args = serde_json::json!({
+            "action": "upsert_agent",
+            "metadata": {"api_key": "sk-test-raw-secret-material"},
+            "model": "gpt-5.3-codex"
+        });
+        let summary = summarize_args(&args);
+        assert!(
+            !summary.contains("sk-test-raw-secret-material"),
+            "nested credential must not be echoed: {summary}"
+        );
+        assert!(
+            summary.contains("[REDACTED]"),
+            "nested credential should show the redaction marker: {summary}"
+        );
+        assert!(summary.contains("model: gpt-5.3-codex"));
+    }
+
+    #[test]
+    pub fn summarize_args_redacts_credential_nested_in_path_value() {
+        let args = serde_json::json!({
+            "path": {"api_key": "sk-test-raw-secret-material", "hint": "coding"}
+        });
+        let summary = summarize_args(&args);
+        assert!(
+            !summary.contains("sk-test-raw-secret-material"),
+            "nested credential under 'path' must not be echoed: {summary}"
+        );
     }
 
     #[test]
