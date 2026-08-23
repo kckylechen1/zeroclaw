@@ -287,7 +287,6 @@ ENV HOME=/zeroclaw-data
 # Default provider and model are set in config.toml, not here,
 # so config file edits are not silently overridden
 #ENV PROVIDER=
-ENV ZEROCLAW_GATEWAY_PORT=42617
 
 # API_KEY must be provided at runtime!
 
