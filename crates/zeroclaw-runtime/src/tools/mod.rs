@@ -1362,6 +1362,7 @@ pub fn all_tools_with_runtime(
                         .with_outcome(::zeroclaw_log::EventOutcome::Failure),
                     "microsoft365: client_credentials auth_flow requires a non-empty client_secret"
                 );
+                apply_install_composition(&mut tool_arcs, root_config);
                 return AllToolsResult {
                     unfiltered_tool_arcs: tool_arcs.clone(),
                     tools: boxed_registry_from_arcs(tool_arcs),
@@ -1636,6 +1637,8 @@ pub fn all_tools_with_runtime(
     // Pipeline construction waits for ScopedToolRegistry::assemble(), where the
     // effective per-agent policy and optional caller allowlist are both known.
 
+    apply_install_composition(&mut tool_arcs, root_config);
+
     AllToolsResult {
         unfiltered_tool_arcs: tool_arcs.clone(),
         tools: boxed_registry_from_arcs(tool_arcs),
@@ -1645,6 +1648,44 @@ pub fn all_tools_with_runtime(
         reaction_handle,
         poll_handle: Some(poll_handle),
         escalate_handle,
+    }
+}
+
+/// Apply the install-wide composition cut to the assembled registry.
+///
+/// Under `composition = "minimal"` the registry is reduced to the explicit
+/// membership table (`zeroclaw_config::composition::MINIMAL_TOOL_MEMBERSHIP`)
+/// before anything derives from it — the boxed registry and the
+/// skill-elevation arcs both clone the filtered set — so no later stage can
+/// resurrect a built-in non-member (scoped assembly gates its own built-in
+/// appends the same way). Extension surfaces — MCP tools admitted by the
+/// effective policy and skill-defined tools — are not built-ins and stay
+/// governed by their own admission policies. An absent field keeps today's assembly: existing
+/// installs must not lose tools on upgrade. Individual `enabled = true`
+/// flags do not widen the minimal profile back; the exclusion is logged.
+fn apply_install_composition(
+    tool_arcs: &mut Vec<Arc<dyn Tool>>,
+    root_config: &zeroclaw_config::schema::Config,
+) {
+    use zeroclaw_config::composition::Composition;
+
+    if Composition::effective(root_config.composition) != Composition::Minimal {
+        return;
+    }
+    let before = tool_arcs.len();
+    tool_arcs.retain(|tool| Composition::is_minimal_member(tool.name()));
+    let dropped = before - tool_arcs.len();
+    if dropped > 0 {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({
+                    "dropped": dropped,
+                    "composition": "minimal"
+                })),
+            "Minimal composition excluded non-member tools from assembly"
+        );
     }
 }
 
@@ -2694,6 +2735,134 @@ mod tests {
         assert!(names.contains(&"model_routing_config"));
         assert!(names.contains(&"pushover"));
         assert!(names.contains(&"proxy_config"));
+    }
+
+    #[test]
+    fn minimal_composition_cuts_registry_to_membership() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig {
+            enabled: false,
+            allowed_domains: vec!["example.com".into()],
+            session_name: None,
+            ..BrowserConfig::default()
+        };
+        let http = zeroclaw_config::schema::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        cfg.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+        // Explicitly enabled non-members must not widen the minimal profile.
+        cfg.claude_code.enabled = true;
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            &zeroclaw_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            None,
+            false,
+            None,
+        )
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+
+        // `read_skill` and `tool_search` are conditional members (compact
+        // skills mode / deferred MCP respectively); in this default-config
+        // fixture they are not registered at all, which the totality check
+        // below covers from the other side.
+        for member in [
+            "shell",
+            "file_read",
+            "file_write",
+            "file_edit",
+            "glob_search",
+            "content_search",
+            "schedule",
+        ] {
+            assert!(
+                names.contains(&member),
+                "minimal profile must keep {member}, got: {names:?}"
+            );
+        }
+        // Fail-closed totality: nothing outside the membership table may be
+        // assembled under minimal, whatever flags enabled it.
+        for name in &names {
+            assert!(
+                zeroclaw_config::composition::is_minimal_member(name),
+                "non-member leaked into minimal assembly: {name}"
+            );
+        }
+        assert!(!names.contains(&"model_routing_config"));
+        assert!(!names.contains(&"proxy_config"));
+        assert!(!names.contains(&"pushover"));
+        assert!(!names.contains(&"claude_code"));
+    }
+
+    #[test]
+    fn absent_composition_keeps_full_assembly() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig {
+            enabled: false,
+            allowed_domains: vec!["example.com".into()],
+            session_name: None,
+            ..BrowserConfig::default()
+        };
+        let http = zeroclaw_config::schema::HttpRequestConfig::default();
+        let cfg = test_config(&tmp);
+        assert!(
+            cfg.composition.is_none(),
+            "test_config must not set a composition"
+        );
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            &zeroclaw_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            None,
+            false,
+            None,
+        )
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        // Absent field resolves as full: today's default assembly, unchanged.
+        assert!(names.contains(&"model_routing_config"));
+        assert!(names.contains(&"proxy_config"));
+        assert!(names.contains(&"pushover"));
     }
 
     #[test]

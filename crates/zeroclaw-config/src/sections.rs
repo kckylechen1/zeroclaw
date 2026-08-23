@@ -336,6 +336,15 @@ sections! {
         help:  "Model Context Protocol settings. Toggle `enabled` and pick deferred \
                 or eager loading. Individual MCP servers live under `mcp.servers[]`.",
     },
+    Composition => {
+        key:   "composition",
+        shape: DirectForm,
+        group: Tools,
+        help:  "Install-wide tool surface. `minimal` assembles only the curated \
+                companion primitives (about a dozen universal tools); `full` \
+                (alias `legacy`) keeps the complete tool registry and is a \
+                transitional compatibility profile. Unset behaves as `full`.",
+    },
     McpServers => {
         key:   "mcp.servers",
         shape: OneTierAliasMap,
@@ -520,6 +529,7 @@ pub fn section_has_signal(cfg: &crate::schema::Config, section: Section) -> bool
         | Section::Mcp
         | Section::McpBundles
         | Section::KnowledgeBundles
+        | Section::Composition
         | Section::QuickstartState => false,
     }
 }
