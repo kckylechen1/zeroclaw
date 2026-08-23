@@ -471,6 +471,18 @@ pub struct Config {
     #[nested]
     pub risk_profiles: HashMap<String, RiskProfileConfig>,
 
+    /// Install-wide tool composition selector (`composition`).
+    ///
+    /// `"minimal"` assembles only the explicit minimal companion membership
+    /// (`crate::composition::MINIMAL_TOOL_MEMBERSHIP`); individual tool
+    /// `enabled` flags do not widen it back. `"full"` (alias `"legacy"`) is
+    /// today's assembly — a transitional opt-in compatibility profile. An
+    /// absent field resolves as `"full"` so existing installs never lose
+    /// tools on upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[group = "Operations"]
+    pub composition: Option<crate::composition::Composition>,
+
     /// Named runtime/LLM execution profiles (`[runtime_profiles.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -17680,6 +17692,7 @@ impl Default for Config {
         Self {
             data_dir: zeroclaw_dir.join("data"),
             config_path: zeroclaw_dir.join("config.toml"),
+            composition: None,
             env_overridden_paths: std::collections::HashSet::new(),
             pre_override_snapshots: std::collections::HashMap::new(),
             onepassword_reference_snapshots: std::collections::HashMap::new(),
@@ -25227,6 +25240,7 @@ auto_save = true
     async fn config_toml_roundtrip() {
         let config = Config {
             eval: crate::scattered_types::EvalHarnessConfig::default(),
+            composition: None,
             degraded_security: Vec::new(),
             degraded_sections: Vec::new(),
             schema_version: crate::migration::CURRENT_SCHEMA_VERSION,
@@ -26217,6 +26231,7 @@ default_temperature = 0.7
         );
         let config = Config {
             eval: crate::scattered_types::EvalHarnessConfig::default(),
+            composition: None,
             degraded_security: Vec::new(),
             degraded_sections: Vec::new(),
             schema_version: crate::migration::CURRENT_SCHEMA_VERSION,

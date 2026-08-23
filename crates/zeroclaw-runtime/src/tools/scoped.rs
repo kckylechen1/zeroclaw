@@ -193,11 +193,22 @@ impl ScopedToolRegistry {
             unfiltered_tool_arcs,
         } = built;
 
+        // Install-wide composition. `minimal` is a terminal gate for built-in
+        // surface: the registry arrives pre-cut from `all_tools`, and every
+        // built-in appended during this assembly (peripherals, pipeline) is
+        // gated too. Extension surfaces — MCP tools admitted by the effective
+        // policy and skill-defined tools — are NOT built-ins and stay governed
+        // by their own admission policies.
+        let composition_minimal =
+            zeroclaw_config::composition::Composition::effective(config.composition)
+                == zeroclaw_config::composition::Composition::Minimal;
+
         // 1. Peripherals. Loading CONNECTS hardware (serial opens are exclusive for
         //    real devices), so this is gated: execution surfaces pass
-        //    `connect_peripherals: true`; listing-only surfaces pass `false` and
-        //    enumerate without holding devices.
-        if connect_peripherals {
+        //    `connect_peripherals = true`; listing-only surfaces pass `false` and
+        //    enumerate without holding devices. Hardware is demoted from the
+        //    minimal composition, so it never connects there either.
+        if connect_peripherals && !composition_minimal {
             let peripheral_tools = load_peripheral_tools(config.peripherals.clone()).await;
             if emit_assembly_logs && !peripheral_tools.is_empty() {
                 ::zeroclaw_log::record!(
@@ -219,7 +230,7 @@ impl ScopedToolRegistry {
             .filter(|tool| tool_allowed_in_context(tool.name(), exclude_memory))
             .cloned()
             .collect();
-        let pipeline_tool = config.pipeline.enabled.then(|| {
+        let pipeline_tool = (!composition_minimal && config.pipeline.enabled).then(|| {
             Arc::new(tools::PipelineTool::with_access_policy(
                 config.pipeline.clone(),
                 context_filtered_tool_arcs.clone(),
@@ -699,6 +710,43 @@ mod tests {
             mcp_registry: None,
         })
         .await
+    }
+
+    #[tokio::test]
+    async fn minimal_composition_drops_pipeline_from_assembly() {
+        // The existing pipeline tests prove `pipeline.enabled = true`
+        // registers under absent composition; this locks the inverse: an
+        // enabled flag cannot widen the minimal surface, at the assemble
+        // boundary where the pipeline tool is appended after the built-in
+        // cut. Peripherals share the same `composition_minimal` gate.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let security = Arc::new(SecurityPolicy::default());
+        let mut config = Config::default();
+        config.pipeline.enabled = true;
+        config.pipeline.max_steps = 20;
+        config.pipeline.allowed_tools = vec!["shell".to_string(), "file_write".to_string()];
+        config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+        let assembled = ScopedToolRegistry::assemble(ScopedAssembly {
+            config: &config,
+            agent_alias: "default",
+            security: &security,
+            built: built_with_pipeline(calls),
+            skills: &[],
+            runtime: Arc::new(crate::platform::NativeRuntime::new()),
+            caller_allowed: None,
+            connect_mcp: false,
+            connect_peripherals: false,
+            exclude_memory: false,
+            list_deferred_mcp_specs: false,
+            emit_assembly_logs: false,
+            mcp_registry: None,
+        })
+        .await;
+        let names: Vec<&str> = assembled.registry.iter().map(|t| t.name()).collect();
+        assert!(
+            !names.contains(&tools::PipelineTool::NAME),
+            "pipeline must not join the minimal assembly: {names:?}"
+        );
     }
 
     #[tokio::test]
