@@ -521,10 +521,6 @@ pub async fn run(
             "channel_room",
             "Create channel rooms and invite users through active channels. Use with Matrix channel keys such as matrix.default.",
         ));
-        tool_descs.push((
-        "model_routing_config",
-        "Configure default model, scenario routing, and delegate agents. Use for natural-language requests like: 'set conversation to kimi and coding to gpt-5.3-codex'.",
-    ));
         if !config.agents.is_empty() {
             tool_descs.push((
             "delegate",

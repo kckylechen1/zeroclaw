@@ -1877,10 +1877,19 @@ async fn async_main(command: clap::Command) -> Result<()> {
     }
     #[cfg(feature = "agent-runtime")]
     observability::runtime_trace::init_from_config(&config.observability, &config.data_dir);
+    // Startup application of the persisted `[proxy]` config. The
+    // model-visible `proxy_config` tool no longer registers, so proxy
+    // state changes only through trusted config writes and takes effect
+    // at boot (and, runtime-global only, at daemon reload below). Runs
+    // before the channels/gateway/agent tasks that consume proxy state
+    // are spawned.
+    config::apply_persisted_proxy_on_boot(&config.proxy);
     // Must follow the trace sink init above, or the record has no destination.
     // The daemon reload arm calls the same helper against its reloaded config.
     #[cfg(feature = "agent-runtime")]
     warn_verifiable_intent_withheld(&config);
+    #[cfg(feature = "agent-runtime")]
+    warn_withheld_operator_tools(&config);
     #[cfg(feature = "agent-runtime")]
     if config.security.otp.enabled {
         let config_dir = config
@@ -2693,6 +2702,11 @@ async fn async_main(command: clap::Command) -> Result<()> {
                             "🔄 Daemon reload — re-reading config from disk"
                         );
                         current_config = Box::pin(Config::load_or_init()).await?;
+                        // A reload refreshes the runtime proxy global from
+                        // the re-read config; live process-env application
+                        // stays restart-only (see
+                        // `apply_persisted_proxy_on_boot`).
+                        config::set_runtime_proxy_config(current_config.proxy.clone());
                         #[cfg(feature = "agent-runtime")]
                         observability::runtime_trace::init_from_config(
                             &current_config.observability,
@@ -2703,6 +2717,8 @@ async fn async_main(command: clap::Command) -> Result<()> {
                         // is still absent without having to restart.
                         #[cfg(feature = "agent-runtime")]
                         warn_verifiable_intent_withheld(&current_config);
+                        #[cfg(feature = "agent-runtime")]
+                        warn_withheld_operator_tools(&current_config);
                         if let Some(handle) = degraded_nag.take() {
                             handle.abort();
                         }
@@ -3370,6 +3386,40 @@ fn warn_verifiable_intent_withheld(config: &Config) {
             .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
         "verifiable_intent: vi_verify is not registered as a model-callable tool because no credential chain verifier exists yet (see #9328)"
     );
+}
+
+/// Operator/admin tools retired from the model-visible registry: sections
+/// that used to enable them as model tools stay parseable, so an operator
+/// whose config still enables one learns where the capability went. Same
+/// lifecycle as `warn_verifiable_intent_withheld` — process startup and
+/// daemon reload, deliberately not registry assembly (which runs per
+/// gateway request and per nested rebuild).
+#[cfg(feature = "agent-runtime")]
+fn warn_withheld_operator_tools(config: &Config) {
+    if config.backup.enabled {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+            "backup: the backup model tool is retired; backup create/list/verify/restore are operator-only via the gateway operator API (POST/GET /api/agents/<alias>/backup). The [backup] section still configures that surface"
+        );
+    }
+    if config.data_retention.enabled {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+            "data_retention: the data_management model tool is retired; retention status/stats/purge are operator-only via the gateway operator API (/api/agents/<alias>/data-retention). The [data_retention] section still configures that surface"
+        );
+    }
+    if config.security_ops.enabled {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+            "security_ops: the security_ops model tool is retired and has no replacement surface; the diagnostics module is unreachable while enabled stays true. Unset security_ops.enabled to silence this notice"
+        );
+    }
 }
 
 fn gate_security_posture(

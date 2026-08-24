@@ -33,7 +33,7 @@ pub use schema::{
     TextBrowserConfig, ToolFilterGroup, ToolFilterGroupMode, TranscriptionConfig, TtsConfig,
     TtsProviderConfig, TunnelConfig, VerifiableIntentConfig, WebFetchConfig, WebSearchConfig,
     WebhookConfig, WhatsAppChatPolicy, WhatsAppWebMode, apply_channel_proxy_to_builder,
-    apply_runtime_proxy_to_builder, build_channel_proxy_client,
+    apply_persisted_proxy_on_boot, apply_runtime_proxy_to_builder, build_channel_proxy_client,
     build_channel_proxy_client_with_timeouts, build_runtime_proxy_client,
     build_runtime_proxy_client_with_timeouts, runtime_proxy_config, set_runtime_proxy_config,
     ws_connect_with_proxy,
