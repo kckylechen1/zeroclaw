@@ -8163,7 +8163,13 @@ impl Default for ProjectIntelConfig {
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "backup"]
 pub struct BackupConfig {
-    /// Enable the `backup` tool.
+    /// Kept for config compatibility. This no longer registers a
+    /// model-callable tool: backup create/list/verify/restore live on the
+    /// operator-only gateway API (`/api/agents/{alias}/backup*`), whose
+    /// authorization is the operator bearer gate — this flag does not
+    /// gate that API. The section's parameters (`max_keep`,
+    /// `include_dirs`) configure it; enabling the flag never widens the
+    /// model-visible tool registry.
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Maximum number of backups to keep (oldest are pruned).
@@ -8228,7 +8234,13 @@ impl Default for BackupConfig {
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "data_retention"]
 pub struct DataRetentionConfig {
-    /// Enable the `data_management` tool.
+    /// Kept for config compatibility. This no longer registers a
+    /// model-callable tool: retention status/stats/purge live on the
+    /// operator-only gateway API
+    /// (`/api/agents/{alias}/data-retention*`), whose authorization is
+    /// the operator bearer gate — this flag does not gate that API. The
+    /// section's parameters (`retention_days`) configure it; enabling
+    /// the flag never widens the model-visible tool registry.
     #[serde(default)]
     pub enabled: bool,
     /// Days of data to retain before purge eligibility.
@@ -10012,6 +10024,81 @@ pub fn runtime_proxy_config() -> ProxyConfig {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
     }
+}
+
+/// Reapply the persisted canonical `[proxy]` config at process startup.
+///
+/// The model-visible `proxy_config` tool no longer registers, so the
+/// persisted config file is the only way proxy state changes; the daemon
+/// must therefore make the loaded file effective on its own:
+///
+/// - the runtime proxy global (read by every proxy-aware client builder)
+///   is seeded unconditionally, whatever the scope, and
+/// - process proxy environment variables are broadcast only when the
+///   config is enabled with `scope = "environment"`, matching the
+///   condition the retired `apply_env` action enforced.
+///
+/// A config that fails `validate()` is applied disabled (mirroring the
+/// original config-load behavior): the global gets the explicit default
+/// and no environment variable is written. Callers must invoke this once
+/// per process boot, before the multi-threaded async runtime (and any
+/// task that reads proxy environment variables) starts — process-env
+/// mutation is only sound there. A daemon reload refreshes only the
+/// runtime global (`set_runtime_proxy_config`), keeping live-env
+/// application restart-only.
+pub fn apply_persisted_proxy_on_boot(proxy: &ProxyConfig) {
+    let mut effective = proxy.clone();
+    if let Err(error) = effective.validate() {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({"error": format!("{error}")})),
+            "Invalid persisted proxy configuration ignored at startup; applying disabled proxy"
+        );
+        effective.enabled = false;
+    }
+    set_runtime_proxy_config(effective.clone());
+    if effective.enabled && effective.scope == ProxyScope::Environment {
+        effective.apply_to_process_env();
+    }
+}
+
+/// Read the persisted `[proxy]` section using the same install-directory
+/// resolution as [`Config::load_or_init`], for the pre-runtime startup
+/// application of proxy state. Returns `None` when the install or its
+/// config file cannot be read (including a fresh install with no file
+/// yet), or when the on-disk schema version is not the current one: a
+/// legacy V1/V2 config is auto-migrated in memory by the full loader and
+/// the disk file is deliberately left untouched, so a raw pre-read of a
+/// legacy file is not authoritative — boot application for such an
+/// install starts once the migration is locked into the file
+/// (`zeroclaw config migrate` or any config save). Before this
+/// mechanism existed nothing applied persisted proxy state at boot, so
+/// never-migrated legacy installs are no worse than they were; a
+/// future/unknown version is rejected by the full loader and must not
+/// be applied speculatively either. Proxy fields are never
+/// secret-annotated, so plain parsing is sufficient.
+///
+/// This is a raw file read by design: `ZEROCLAW_PROXY_*` env-var
+/// overrides are NOT reflected here. The runtime global is refreshed
+/// from the fully-loaded config after `load_or_init` runs; the process
+/// env stays restart-only and follows the persisted file.
+pub async fn read_persisted_proxy_for_boot() -> Option<ProxyConfig> {
+    let (default_zeroclaw_dir, default_workspace_dir) = default_config_and_data_dirs().ok()?;
+    let (zeroclaw_dir, _legacy_workspace_dir, _source) =
+        resolve_runtime_config_dirs(&default_zeroclaw_dir, &default_workspace_dir)
+            .await
+            .ok()?;
+    let raw = std::fs::read_to_string(zeroclaw_dir.join("config.toml")).ok()?;
+    let value: toml::Value = toml::from_str(&raw).ok()?;
+    if crate::migration::detect_version(&value).ok()
+        != Some(crate::migration::CURRENT_SCHEMA_VERSION)
+    {
+        return None;
+    }
+    let proxy_table = value.get("proxy")?.clone();
+    ProxyConfig::deserialize(proxy_table).ok()
 }
 
 pub fn apply_runtime_proxy_to_builder(
@@ -17641,7 +17728,11 @@ impl Default for ConversationalAiConfig {
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "security_ops"]
 pub struct SecurityOpsConfig {
-    /// Enable security operations tools.
+    /// Enable security operations support. This no longer registers a
+    /// model-callable tool: the diagnostics module stays compiled but is
+    /// unreachable from every assembly path, and no operator surface
+    /// exists for it. The flag is kept parseable so existing config files
+    /// load unchanged; the daemon notes the withheld section at startup.
     #[serde(default)]
     pub enabled: bool,
     /// Directory containing incident response playbook definitions (JSON).
@@ -29838,6 +29929,172 @@ api_token = "tok"
 
         set_runtime_proxy_config(ProxyConfig::default());
         assert!(!runtime_proxy_cache_contains(&cache_key));
+    }
+
+    // Restart-equivalence for the retired live-env proxy actions: the
+    // persisted canonical `[proxy]` config must take effect again at
+    // process startup without any model-driven action.
+    #[test]
+    async fn boot_proxy_application_seeds_runtime_global_and_env_for_environment_scope() {
+        let _env_guard = env_override_lock().await;
+        let snapshot = snapshot_proxy_env();
+
+        let proxy = ProxyConfig {
+            enabled: true,
+            scope: ProxyScope::Environment,
+            http_proxy: Some("http://persisted.example:3128".to_string()),
+            ..Default::default()
+        };
+        apply_persisted_proxy_on_boot(&proxy);
+
+        assert_eq!(
+            runtime_proxy_config().http_proxy.as_deref(),
+            Some("http://persisted.example:3128"),
+            "startup must reseed the runtime proxy global from persisted config"
+        );
+        assert_eq!(
+            std::env::var("HTTP_PROXY").ok().as_deref(),
+            Some("http://persisted.example:3128"),
+            "enabled environment-scope proxy must be broadcast to process env at startup"
+        );
+
+        restore_proxy_env(&snapshot);
+        set_runtime_proxy_config(ProxyConfig::default());
+    }
+
+    #[test]
+    async fn boot_proxy_application_seeds_global_without_env_outside_environment_scope() {
+        let _env_guard = env_override_lock().await;
+        let snapshot = snapshot_proxy_env();
+
+        let proxy = ProxyConfig {
+            enabled: true,
+            scope: ProxyScope::Zeroclaw,
+            http_proxy: Some("http://internal.example:3128".to_string()),
+            ..Default::default()
+        };
+        apply_persisted_proxy_on_boot(&proxy);
+
+        assert_eq!(
+            runtime_proxy_config().http_proxy.as_deref(),
+            Some("http://internal.example:3128"),
+            "the runtime global is seeded for every scope"
+        );
+        assert_eq!(
+            std::env::var("HTTP_PROXY").ok(),
+            snapshot
+                .prev
+                .iter()
+                .find(|(key, _)| *key == "HTTP_PROXY")
+                .and_then(|(_, value)| value.clone()),
+            "non-environment scope must not touch process env at startup"
+        );
+
+        restore_proxy_env(&snapshot);
+        set_runtime_proxy_config(ProxyConfig::default());
+    }
+
+    #[test]
+    async fn boot_proxy_application_disabled_seeds_explicit_default_without_env() {
+        let _env_guard = env_override_lock().await;
+        let snapshot = snapshot_proxy_env();
+
+        apply_persisted_proxy_on_boot(&ProxyConfig::default());
+
+        assert!(!runtime_proxy_config().enabled);
+        assert_eq!(
+            std::env::var("HTTP_PROXY").ok(),
+            snapshot
+                .prev
+                .iter()
+                .find(|(key, _)| *key == "HTTP_PROXY")
+                .and_then(|(_, value)| value.clone()),
+            "disabled proxy must not touch process env at startup"
+        );
+
+        restore_proxy_env(&snapshot);
+    }
+
+    #[test]
+    async fn boot_proxy_application_invalid_config_applies_disabled_without_env() {
+        let _env_guard = env_override_lock().await;
+        let snapshot = snapshot_proxy_env();
+
+        // scope=services with an empty services list fails validate().
+        let invalid = ProxyConfig {
+            enabled: true,
+            scope: ProxyScope::Environment,
+            http_proxy: Some("http://persisted.example:3128".to_string()),
+            services: vec!["model_provider.openai".to_string()],
+            ..Default::default()
+        };
+        // Force a validate() failure without relying on private field
+        // invariants: enabled environment scope with no proxy URL at all
+        // is valid, so instead use a scope/services contradiction.
+        let invalid = {
+            let mut p = invalid;
+            p.scope = ProxyScope::Services;
+            p.services.clear();
+            p
+        };
+        assert!(
+            invalid.validate().is_err(),
+            "fixture must be invalid or this test proves nothing"
+        );
+        apply_persisted_proxy_on_boot(&invalid);
+
+        assert!(
+            !runtime_proxy_config().enabled,
+            "invalid persisted proxy must be applied disabled"
+        );
+        assert_eq!(
+            std::env::var("HTTP_PROXY").ok(),
+            snapshot
+                .prev
+                .iter()
+                .find(|(key, _)| *key == "HTTP_PROXY")
+                .and_then(|(_, value)| value.clone()),
+            "invalid persisted proxy must not touch process env at startup"
+        );
+
+        restore_proxy_env(&snapshot);
+    }
+
+    /// `apply_to_process_env` writes all four proxy variable pairs (upper
+    /// and lowercase), so tests that trigger it must snapshot and restore
+    /// every pair — restoring only `HTTP_PROXY` would permanently drop an
+    /// inherited `HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` for later tests.
+    struct ProxyEnvSnapshot {
+        prev: Vec<(&'static str, Option<String>)>,
+    }
+
+    fn snapshot_proxy_env() -> ProxyEnvSnapshot {
+        let mut prev = Vec::new();
+        for key in [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ] {
+            prev.push((key, std::env::var(key).ok()));
+        }
+        ProxyEnvSnapshot { prev }
+    }
+
+    fn restore_proxy_env(snapshot: &ProxyEnvSnapshot) {
+        for (key, value) in &snapshot.prev {
+            // SAFETY: test-only restore under the env override lock.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     #[test]

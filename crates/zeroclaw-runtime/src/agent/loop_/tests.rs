@@ -12995,14 +12995,14 @@ async fn run_still_closes_the_bracket_when_the_model_call_fails() {
     );
 }
 
-/// An in-loop model switch (the real `model_switch` tool, driven exactly
-/// as production traffic would) must still close the bracket with
-/// exactly one balanced pair, attributed to the switched-TO route — the
-/// second open-coded `AgentStart` this fix replaced with
-/// `turn_guard.set_model_route(..)` would have shown up here as two
-/// `AgentStart`s for one `AgentEnd`.
+/// A `model_switch` tool call from the model must be rejected — the tool is
+/// retired from the ordinary registry, so the loop answers "Unknown tool"
+/// instead of switching — and the run must still complete with exactly one
+/// balanced lifecycle pair, attributed to the ORIGINAL route. Runtime model
+/// switching belongs to the trusted channel `/model` command path, which
+/// applies the route outside the tool loop.
 #[tokio::test]
-async fn run_model_switch_emits_single_balanced_pair_for_the_switched_route() {
+async fn run_rejects_model_switch_tool_call_and_keeps_original_route() {
     use axum::{Json, Router, extract::State, routing::post};
     use tokio::net::TcpListener;
     use zeroclaw_config::schema::{
@@ -13105,20 +13105,20 @@ async fn run_model_switch_emits_single_balanced_pair_for_the_switched_route() {
     drop(hook_guard);
     server.abort();
 
-    let output = result.expect("run() should complete after the model switch");
+    let output = result.expect("run() should complete after the rejected switch request");
     assert_eq!(output, "done");
 
     let events = capturing.events.lock();
+    let scoped = events_for_alias(&events, "run-lifecycle-switch-agent");
     let (starts, ends) = lifecycle_events_for_alias(&events, "run-lifecycle-switch-agent");
     assert_eq!(
         starts, 1,
-        "a model switch must not open a second bracket, got {events:?}"
+        "a rejected switch must not open a second bracket, got {events:?}"
     );
     assert_eq!(
         ends, 1,
-        "a model switch must still close with exactly one AgentEnd, got {events:?}"
+        "a rejected switch must still close with exactly one AgentEnd, got {events:?}"
     );
-    let scoped = events_for_alias(&events, "run-lifecycle-switch-agent");
     assert!(
         matches!(scoped.first(), Some(ObserverEvent::AgentStart { .. })),
         "first event must be AgentStart, got {scoped:?}"
@@ -13126,6 +13126,28 @@ async fn run_model_switch_emits_single_balanced_pair_for_the_switched_route() {
     assert!(
         matches!(scoped.last(), Some(ObserverEvent::AgentEnd { .. })),
         "last event must be AgentEnd, got {scoped:?}"
+    );
+
+    // The rejected request must surface as a failed ToolCall, never a route
+    // change: the loop kept the original provider for the follow-up call.
+    let switch_call = events.iter().find_map(|e| match e {
+        ObserverEvent::ToolCall {
+            tool,
+            success,
+            result,
+            ..
+        } if tool == "model_switch" => Some((*success, result.clone())),
+        _ => None,
+    });
+    let (switch_success, switch_result) =
+        switch_call.expect("the model_switch tool call should be observable");
+    assert!(
+        !switch_success,
+        "the retired model_switch tool must fail, got {events:?}"
+    );
+    assert!(
+        switch_result.unwrap_or_default().contains("Unknown tool"),
+        "the failure must be an unknown-tool rejection, got {events:?}"
     );
 
     let end_route = events
@@ -13144,9 +13166,12 @@ async fn run_model_switch_emits_single_balanced_pair_for_the_switched_route() {
         .expect("AgentEnd for the switch agent should be present");
     assert_eq!(
         end_route,
-        ("ollama.switched".to_string(), "switched-model".to_string()),
-        "AgentEnd must be attributed to the switched-TO route (set_model_route), \
-         not the original one, got {events:?}"
+        (
+            "ollama.default".to_string(),
+            "run-lifecycle-switch-default-model".to_string()
+        ),
+        "AgentEnd must stay attributed to the original route — the model \
+         cannot switch its own route through a tool call, got {events:?}"
     );
 }
 

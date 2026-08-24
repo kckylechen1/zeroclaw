@@ -472,6 +472,21 @@ pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Tool names retired from the ordinary model-visible registry. Their
+/// implementations stay compiled (operator surfaces and tests construct
+/// them directly), but no assembly path may register them and no plugin
+/// may claim the names. Kept as one list so the registry totality test
+/// and the plugin collision guard assert the same set.
+#[cfg(any(test, feature = "plugins-wasm"))]
+pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
+    "model_routing_config",
+    "model_switch",
+    "proxy_config",
+    "security_ops",
+    "backup",
+    "data_management",
+];
+
 /// Bundled return values from tool registry construction.
 /// Named struct to avoid an ever-growing positional tuple that's painful
 /// to destructure across many callers.
@@ -684,12 +699,15 @@ pub fn all_tools_with_runtime(
             Arc::new(root_config.clone()),
             agent_alias,
         )),
-        Arc::new(ModelRoutingConfigTool::new(
-            config.clone(),
-            security.clone(),
-        )),
-        Arc::new(ModelSwitchTool::new(security.clone(), config.clone())),
-        Arc::new(ProxyConfigTool::new(config.clone(), security.clone())),
+        // Operator/admin tools are deliberately absent from this registry:
+        // model_routing_config, model_switch, and proxy_config mutate
+        // routing/proxy state whose authority is operator-level. The
+        // trusted surfaces are the gateway config API
+        // (PUT/DELETE /api/config...) for routing and proxy config, the
+        // channel `/model` command for runtime model switching, and
+        // startup application of persisted proxy config. The tool
+        // implementations stay compiled and are re-exported below; they
+        // are simply never handed to the model.
         Arc::new(GitOperationsTool::new(
             security.clone(),
             workspace_dir.to_path_buf(),
@@ -710,13 +728,6 @@ pub fn all_tools_with_runtime(
     tool_arcs.push(Arc::new(WeatherTool::new()));
     tool_arcs.push(Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())));
     tool_arcs.push(Arc::new(TodoWriteTool::new()));
-
-    // A SubAgent runs as an ephemeral clone of its parent and inherits the
-    // parent's model verbatim; it must not be able to switch the active
-    // model out from under the parent (the switch signal is process-wide).
-    if is_subagent_caller {
-        tool_arcs.retain(|tool| tool.name() != ModelSwitchTool::NAME);
-    }
 
     // Register discord_search if any configured Discord alias has
     // archive enabled. Multiple Discord aliases are supported (one per
@@ -1050,29 +1061,17 @@ pub fn all_tools_with_runtime(
         tool_arcs.push(Arc::new(ReportTemplateTool::new()));
     }
 
-    // MCSS Security Operations
-    if root_config.security_ops.enabled {
-        tool_arcs.push(Arc::new(SecurityOpsTool::new(
-            root_config.security_ops.clone(),
-        )));
-    }
-
-    // Backup tool (enabled by default)
-    if root_config.backup.enabled {
-        tool_arcs.push(Arc::new(BackupTool::new(
-            workspace_dir.to_path_buf(),
-            root_config.backup.include_dirs.clone(),
-            root_config.backup.max_keep,
-        )));
-    }
-
-    // Data management tool (disabled by default)
-    if root_config.data_retention.enabled {
-        tool_arcs.push(Arc::new(DataManagementTool::new(
-            workspace_dir.to_path_buf(),
-            root_config.data_retention.retention_days,
-        )));
-    }
+    // MCSS Security Operations: no longer registered as a model tool. The
+    // diagnostics module stays compiled; `security_ops.enabled` no longer
+    // admits it to any registry (the daemon notes the withheld section at
+    // boot and reload instead).
+    //
+    // Backup and data management: operator-only surfaces. The gateway
+    // operator API (`/api/agents/{alias}/backup*`,
+    // `/api/agents/{alias}/data-retention*`) dispatches to the same
+    // BackupTool / DataManagementTool command methods; the `[backup]` and
+    // `[data_retention]` sections keep configuring that surface, not a
+    // model tool.
 
     // Cloud operations advisory tools (read-only analysis)
     if root_config.cloud_ops.enabled {
@@ -1548,6 +1547,12 @@ pub fn all_tools_with_runtime(
                     if root_config.pipeline.enabled {
                         registered_names.insert(PipelineTool::NAME.to_string());
                     }
+                    // Operator/admin tools retired from the model surface keep
+                    // their names reserved: a plugin must not be able to claim
+                    // `backup` or `proxy_config` and ride the retired name back
+                    // onto the provider wire.
+                    registered_names
+                        .extend(RETIRED_OPERATOR_TOOL_NAMES.iter().map(|s| s.to_string()));
                     let plugin_limits = zeroclaw_plugins::component::PluginLimits {
                         call_fuel: config.plugins.limits.call_fuel,
                         max_memory_bytes: config
@@ -2786,11 +2791,12 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"browser_open"));
         assert!(names.contains(&"schedule"));
-        assert!(names.contains(&"model_routing_config"));
+        // Operator/admin tools are never part of the model surface.
+        assert!(!names.contains(&"model_routing_config"));
+        assert!(!names.contains(&"proxy_config"));
         // The pushover tool only exists when the SaaS family is compiled in.
         #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
-        assert!(names.contains(&"proxy_config"));
     }
 
     #[test]
@@ -2915,9 +2921,10 @@ mod tests {
         )
         .tools;
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        // Absent field resolves as full: today's default assembly, unchanged.
-        assert!(names.contains(&"model_routing_config"));
-        assert!(names.contains(&"proxy_config"));
+        // Absent field resolves as full: today's default assembly minus the
+        // retired operator/admin tools, which no composition may re-admit.
+        assert!(!names.contains(&"model_routing_config"));
+        assert!(!names.contains(&"proxy_config"));
         // The pushover tool only exists when the SaaS family is compiled in.
         #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
@@ -2966,11 +2973,12 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"browser_open"));
         assert!(names.contains(&"content_search"));
-        assert!(names.contains(&"model_routing_config"));
+        // Operator/admin tools are never part of the model surface.
+        assert!(!names.contains(&"model_routing_config"));
+        assert!(!names.contains(&"proxy_config"));
         // The pushover tool only exists when the SaaS family is compiled in.
         #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
-        assert!(names.contains(&"proxy_config"));
     }
 
     #[tokio::test]
@@ -3311,54 +3319,107 @@ mod tests {
         assert!(!names.contains(&"read_skill"));
     }
 
-    fn registry_names(tmp: &TempDir, is_subagent_caller: bool) -> Vec<String> {
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let cfg = test_config(tmp);
-
-        all_tools(
-            Arc::new(cfg.clone()),
-            &security,
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-            "test-agent",
-            mem,
-            None,
-            None,
-            &BrowserConfig::default(),
-            &zeroclaw_config::schema::HttpRequestConfig::default(),
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            is_subagent_caller,
-            None,
-        )
-        .tools
-        .iter()
-        .map(|t| t.name().to_string())
-        .collect()
-    }
-
     #[test]
-    fn model_switch_present_for_top_level_absent_for_subagent() {
-        let tmp = TempDir::new().unwrap();
-        let top = registry_names(&tmp, false);
-        assert!(
-            top.iter().any(|n| n == ModelSwitchTool::NAME),
-            "top-level agent must keep model_switch"
-        );
-        let subagent = registry_names(&tmp, true);
-        assert!(
-            !subagent.iter().any(|n| n == ModelSwitchTool::NAME),
-            "subagent must not be able to switch the inherited model"
-        );
+    fn retired_operator_tools_absent_from_every_assembly_path() {
+        // Totality check for the operator/admin retirement: the retired
+        // names must not appear in the assembled registry (`tools`) NOR in
+        // the pre-policy `unfiltered_tool_arcs` (the vector skill builtin
+        // elevation resolves targets against), whatever re-admits them:
+        //
+        // - absent `composition` (resolves as full),
+        // - explicit `composition = "full"`,
+        // - a SubAgent caller (the registry factory the spawned-child path
+        //   shares with the top level; inheritance is downstream of the
+        //   cut, so there is nothing to inherit),
+        // - config sections explicitly enabling the retired tools.
+        fn assembled(
+            tmp: &TempDir,
+            composition: Option<zeroclaw_config::composition::Composition>,
+            is_subagent_caller: bool,
+            enable_retired_sections: bool,
+        ) -> (Vec<String>, Vec<String>) {
+            let security = Arc::new(SecurityPolicy::default());
+            let mem: Arc<dyn Memory> = Arc::from(
+                zeroclaw_memory::create_memory(
+                    &MemoryConfig {
+                        backend: "markdown".into(),
+                        ..MemoryConfig::default()
+                    },
+                    tmp.path(),
+                    None,
+                )
+                .unwrap(),
+            );
+            let mut cfg = test_config(tmp);
+            cfg.composition = composition;
+            if enable_retired_sections {
+                cfg.security_ops.enabled = true;
+                cfg.backup.enabled = true;
+                cfg.data_retention.enabled = true;
+            }
+            let result = all_tools(
+                Arc::new(cfg.clone()),
+                &security,
+                &zeroclaw_config::schema::RiskProfileConfig::default(),
+                "test-agent",
+                mem,
+                None,
+                None,
+                &BrowserConfig::default(),
+                &zeroclaw_config::schema::HttpRequestConfig::default(),
+                &zeroclaw_config::schema::WebFetchConfig::default(),
+                tmp.path(),
+                &HashMap::new(),
+                None,
+                &cfg,
+                None,
+                is_subagent_caller,
+                None,
+            );
+            (
+                result.tools.iter().map(|t| t.name().to_string()).collect(),
+                result
+                    .unfiltered_tool_arcs
+                    .iter()
+                    .map(|t| t.name().to_string())
+                    .collect(),
+            )
+        }
+
+        for (label, composition, is_subagent, enable) in [
+            ("absent composition", None, false, false),
+            (
+                "explicit full composition",
+                Some(zeroclaw_config::composition::Composition::Full),
+                false,
+                false,
+            ),
+            (
+                "subagent caller, full composition",
+                Some(zeroclaw_config::composition::Composition::Full),
+                true,
+                false,
+            ),
+            (
+                "enabled retired sections, absent composition",
+                None,
+                false,
+                true,
+            ),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let (tools, arcs) = assembled(&tmp, composition, is_subagent, enable);
+            for retired in RETIRED_OPERATOR_TOOL_NAMES {
+                assert!(
+                    !tools.iter().any(|n| n == retired),
+                    "retired tool {retired} leaked into the registry under {label}: {tools:?}"
+                );
+                assert!(
+                    !arcs.iter().any(|n| n == retired),
+                    "retired tool {retired} leaked into the unfiltered arcs under {label}: {arcs:?}"
+                );
+            }
+        }
     }
 
     #[test]

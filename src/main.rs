@@ -1694,7 +1694,59 @@ fn main() -> Result<()> {
         unsafe { std::env::set_var("ZEROCLAW_CONFIG_DIR", config_dir) };
     }
 
+    // Startup application of the persisted `[proxy]` config. The
+    // model-visible `proxy_config` tool no longer registers, so proxy
+    // state changes only through trusted config writes and takes effect
+    // here, before any task that consumes proxy state (runtime global for
+    // every scope, plus process env when enabled with
+    // scope=environment). Must run before the multi-threaded runtime
+    // starts: process-env mutation is only sound while no runtime worker
+    // or blocking-pool threads exist, so the reading runtime is fully
+    // dropped before anything is applied. Daemon reloads refresh the
+    // runtime global only, keeping live-env application restart-only.
+    // Stdout-only invocations (completions, markdown-help/schema, help,
+    // version, parse errors) skip this read; the pre-existing i18n
+    // locale detection is unchanged by this gate.
+    if invocation_needs_config() {
+        let proxy = {
+            let pre_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let proxy = pre_runtime.block_on(config::read_persisted_proxy_for_boot());
+            // Drop before applying: shutting the runtime down joins its
+            // blocking-pool threads (the resolver may have touched
+            // tokio::fs), leaving the process single-threaded again.
+            drop(pre_runtime);
+            proxy
+        };
+        if let Some(proxy) = proxy {
+            config::apply_persisted_proxy_on_boot(&proxy);
+        }
+    }
+
     async_main(command)
+}
+
+/// Decide pre-parse whether this invocation will need the config-driven
+/// runtime, using a non-exiting trial parse of the canonical (not yet
+/// localized) CLI. Parse errors, `--help` and `--version` surface as
+/// `Err` and re-parse inside `async_main` for the localized error/help
+/// path; the stdout-only subcommands are enumerated explicitly so they
+/// skip the proxy bootstrap read. (The pre-existing locale detection in
+/// `apply_i18n_to_command` still reads config.toml on every invocation,
+/// including these — unchanged by this gate.)
+fn invocation_needs_config() -> bool {
+    let command = Cli::command();
+    let Ok(matches) = command.try_get_matches_from(std::env::args_os()) else {
+        return false;
+    };
+    let config_free = [
+        matches.subcommand_matches("completions").is_some(),
+        matches.subcommand_matches("markdown-help").is_some(),
+        matches.subcommand_matches("markdown-schema").is_some(),
+        matches.subcommand_matches("help").is_some(),
+    ];
+    !config_free.into_iter().any(|excluded| excluded)
 }
 
 #[tokio::main]
@@ -1877,10 +1929,18 @@ async fn async_main(command: clap::Command) -> Result<()> {
     }
     #[cfg(feature = "agent-runtime")]
     observability::runtime_trace::init_from_config(&config.observability, &config.data_dir);
+    // Note: the persisted [proxy] config (including its process-env
+    // broadcast) was applied in the synchronous `main()` bootstrap. The
+    // load above can carry ZEROCLAW_PROXY_* env-var overrides the raw
+    // bootstrap read could not see, so refresh the runtime global from
+    // the fully-loaded config; live-env application stays restart-only.
+    config::set_runtime_proxy_config(config.proxy.clone());
     // Must follow the trace sink init above, or the record has no destination.
     // The daemon reload arm calls the same helper against its reloaded config.
     #[cfg(feature = "agent-runtime")]
     warn_verifiable_intent_withheld(&config);
+    #[cfg(feature = "agent-runtime")]
+    warn_withheld_operator_tools(&config);
     #[cfg(feature = "agent-runtime")]
     if config.security.otp.enabled {
         let config_dir = config
@@ -2693,6 +2753,11 @@ async fn async_main(command: clap::Command) -> Result<()> {
                             "🔄 Daemon reload — re-reading config from disk"
                         );
                         current_config = Box::pin(Config::load_or_init()).await?;
+                        // A reload refreshes the runtime proxy global from
+                        // the re-read config; live process-env application
+                        // stays restart-only (see
+                        // `apply_persisted_proxy_on_boot`).
+                        config::set_runtime_proxy_config(current_config.proxy.clone());
                         #[cfg(feature = "agent-runtime")]
                         observability::runtime_trace::init_from_config(
                             &current_config.observability,
@@ -2703,6 +2768,8 @@ async fn async_main(command: clap::Command) -> Result<()> {
                         // is still absent without having to restart.
                         #[cfg(feature = "agent-runtime")]
                         warn_verifiable_intent_withheld(&current_config);
+                        #[cfg(feature = "agent-runtime")]
+                        warn_withheld_operator_tools(&current_config);
                         if let Some(handle) = degraded_nag.take() {
                             handle.abort();
                         }
@@ -3370,6 +3437,40 @@ fn warn_verifiable_intent_withheld(config: &Config) {
             .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
         "verifiable_intent: vi_verify is not registered as a model-callable tool because no credential chain verifier exists yet (see #9328)"
     );
+}
+
+/// Operator/admin tools retired from the model-visible registry: sections
+/// that used to enable them as model tools stay parseable, so an operator
+/// whose config still enables one learns where the capability went. Same
+/// lifecycle as `warn_verifiable_intent_withheld` — process startup and
+/// daemon reload, deliberately not registry assembly (which runs per
+/// gateway request and per nested rebuild).
+#[cfg(feature = "agent-runtime")]
+fn warn_withheld_operator_tools(config: &Config) {
+    if config.backup.enabled {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+            "backup: the backup model tool is retired; backup create/list/verify/restore are operator-only via the gateway operator API (POST/GET /api/agents/<alias>/backup). The [backup] section still configures that surface"
+        );
+    }
+    if config.data_retention.enabled {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+            "data_retention: the data_management model tool is retired; retention status/stats/purge are operator-only via the gateway operator API (/api/agents/<alias>/data-retention). The [data_retention] section still configures that surface"
+        );
+    }
+    if config.security_ops.enabled {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+            "security_ops: the security_ops model tool is retired and has no replacement surface; the diagnostics module is unreachable while enabled stays true. Unset security_ops.enabled to silence this notice"
+        );
+    }
 }
 
 fn gate_security_posture(
