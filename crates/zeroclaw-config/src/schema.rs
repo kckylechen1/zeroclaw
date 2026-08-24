@@ -16160,21 +16160,35 @@ pub struct OtpConfig {
     #[serde(default = "default_otp_cache_valid_secs")]
     pub cache_valid_secs: u64,
 
-    /// Tool/action names gated by OTP. Empty or malformed entries are rejected
-    /// at config load; an entry that does not match a known gated action is
-    /// accepted but logged at WARN, since it cannot be enforced.
+    /// Deprecated and unsupported: ZeroClaw has no OTP action-gating, so
+    /// this list is parsed for backward compatibility but never enforced
+    /// and provides no authorization boundary. Malformed entries still
+    /// fail validation for compatibility; a non-default value emits an
+    /// `otp_action_gating_unsupported` config-health warning. High-risk
+    /// action authorization is owned by the Tachi approval/grant plane
+    /// with Node-local enforcement.
     #[serde(default = "default_otp_gated_actions")]
     pub gated_actions: Vec<String>,
 
-    /// Explicit domain patterns gated by OTP.
+    /// Deprecated and unsupported: no runtime path matches domains against
+    /// OTP policy, so this list is parsed for backward compatibility but
+    /// never enforced. A non-empty value emits an
+    /// `otp_action_gating_unsupported` config-health warning (see
+    /// `gated_actions` for the authorization owner).
     #[serde(default)]
     pub gated_domains: Vec<String>,
 
-    /// Domain-category presets expanded into `gated_domains`.
+    /// Deprecated and unsupported: like `gated_domains`, parsed for
+    /// backward compatibility but never enforced. A non-empty value emits
+    /// an `otp_action_gating_unsupported` config-health warning.
     #[serde(default)]
     pub gated_domain_categories: Vec<String>,
 
-    /// Maximum number of OTP challenge attempts before lockout.
+    /// Deprecated and unsupported: no OTP challenge-attempt limiter
+    /// consumes this value, so it is parsed for backward compatibility but
+    /// never enforced. `0` still fails validation for compatibility; any
+    /// other non-default value emits an `otp_action_gating_unsupported`
+    /// config-health warning.
     #[serde(default = "default_otp_challenge_max_attempts")]
     pub challenge_max_attempts: u32,
 }
@@ -19047,6 +19061,7 @@ impl Config {
         // warning when the more specific cross-provider diagnostic already
         // covers the same path.
         self.collect_context_compression_ignored_warnings(&mut warnings);
+        self.collect_deprecated_otp_action_gating_warnings(&mut warnings);
         warnings.extend(validate_memory_semantics(&self.memory));
         // `wire_api` is only honored by bring-your-own-endpoint families; on a
         // branded family with a fixed wire protocol it is silently ignored.
@@ -19401,6 +19416,63 @@ impl Config {
                     format!("runtime_profiles.{alias}.context_compression.{field}"),
                 ));
             }
+        }
+    }
+
+    /// Surface every authored `[security.otp]` action-gating knob as
+    /// deprecated and unsupported: ZeroClaw has no OTP action-gating, so
+    /// `gated_actions`, `gated_domains`, `gated_domain_categories`, and
+    /// `challenge_max_attempts` have no runtime consumer and provide no
+    /// authorization boundary. OTP itself remains a live authentication
+    /// mechanism — `enabled`, `token_ttl_secs`, and `cache_valid_secs`
+    /// drive TOTP validation, the replay-cache window, and the e-stop
+    /// resume challenge (`method` is parsed for forward compatibility;
+    /// only TOTP is implemented today) — and authorization for high-risk
+    /// actions is owned by the Tachi approval/grant plane with Node-local
+    /// enforcement, not by OTP config.
+    ///
+    /// Mirrors `collect_context_compression_ignored_warnings`: one warning
+    /// per non-default field, so a user sees exactly which of their
+    /// authored knobs are dead. A field explicitly written at its default
+    /// value is indistinguishable from an omitted one post-deserialization
+    /// and stays silent (same limitation as that collector).
+    fn collect_deprecated_otp_action_gating_warnings(
+        &self,
+        warnings: &mut Vec<crate::validation_warnings::ValidationWarning>,
+    ) {
+        let otp = &self.security.otp;
+        let deprecated = "is deprecated and unsupported: ZeroClaw has no OTP action-gating, so it \
+                          is parsed for backward compatibility but not enforced and provides no \
+                          authorization boundary. High-risk action authorization is owned by the \
+                          Tachi approval/grant plane with Node-local enforcement. Remove the \
+                          setting.";
+        if otp.gated_actions != default_otp_gated_actions() {
+            warnings.push(crate::validation_warnings::ValidationWarning::new(
+                "otp_action_gating_unsupported",
+                format!("security.otp.gated_actions {deprecated}"),
+                "security.otp.gated_actions",
+            ));
+        }
+        if !otp.gated_domains.is_empty() {
+            warnings.push(crate::validation_warnings::ValidationWarning::new(
+                "otp_action_gating_unsupported",
+                format!("security.otp.gated_domains {deprecated}"),
+                "security.otp.gated_domains",
+            ));
+        }
+        if !otp.gated_domain_categories.is_empty() {
+            warnings.push(crate::validation_warnings::ValidationWarning::new(
+                "otp_action_gating_unsupported",
+                format!("security.otp.gated_domain_categories {deprecated}"),
+                "security.otp.gated_domain_categories",
+            ));
+        }
+        if otp.challenge_max_attempts != default_otp_challenge_max_attempts() {
+            warnings.push(crate::validation_warnings::ValidationWarning::new(
+                "otp_action_gating_unsupported",
+                format!("security.otp.challenge_max_attempts {deprecated}"),
+                "security.otp.challenge_max_attempts",
+            ));
         }
     }
 
@@ -20115,7 +20187,8 @@ impl Config {
                             "action": normalized,
                             "known_actions": default_otp_gated_actions(),
                         })),
-                    "security.otp.gated_actions entry does not match a known gated action and will not be enforced: "
+                    "security.otp.gated_actions is deprecated and never enforced (ZeroClaw has no \
+                     OTP action-gating); entry does not match a known action name: "
                 );
             }
         }
@@ -31383,17 +31456,97 @@ high_entropy_tokens = false
 
     #[test]
     async fn security_validation_accepts_unknown_gated_action_but_does_not_bail() {
-        // An unknown but well-formed action name is a silent no-op today
-        // (OTP enforcement of gated_actions is not wired through). Config load
-        // must not fail on it — the operator's whole config would be rejected
-        // for a typo'd gate — but the runtime emits a WARN so the no-op is not
-        // silent. This asserts the warn-and-continue contract: load succeeds.
+        // An unknown but well-formed action name must not reject the config
+        // during the deprecation window: `gated_actions` is deprecated and
+        // never enforced (no OTP action-gating exists), and the operator's
+        // whole config must keep parsing. The runtime emits a WARN naming
+        // the unknown entry, and `collect_warnings` emits the
+        // `otp_action_gating_unsupported` deprecation diagnostic. This
+        // asserts the warn-and-continue contract: load succeeds.
         let mut config = Config::default();
         config.security.otp.gated_actions = vec!["kubectl_write".into()];
 
         config
             .validate()
             .expect("an unknown gated action must warn, not reject the config");
+    }
+
+    #[test]
+    async fn collect_warnings_flags_deprecated_otp_action_gating_knobs() {
+        // The four action-gating knobs are misleading config: they must
+        // keep parsing/validating (compat) but every non-default value
+        // must surface an explicit deprecation diagnostic naming the
+        // knob, stating it is not enforced, and naming the intended path.
+        let mut config = Config::default();
+        config.security.otp.gated_actions = vec!["shell".to_string()];
+        config.security.otp.gated_domains = vec!["*.example.com".to_string()];
+        config.security.otp.gated_domain_categories = vec!["banking".to_string()];
+        config.security.otp.challenge_max_attempts = 5;
+
+        config
+            .validate()
+            .expect("deprecated OTP gate knobs must keep validating (compat)");
+
+        let warnings = config.collect_warnings();
+        for path in [
+            "security.otp.gated_actions",
+            "security.otp.gated_domains",
+            "security.otp.gated_domain_categories",
+            "security.otp.challenge_max_attempts",
+        ] {
+            let warning = warnings
+                .iter()
+                .find(|w| w.path == path && w.code == "otp_action_gating_unsupported");
+            let warning = warning.unwrap_or_else(|| {
+                panic!(
+                    "expected otp_action_gating_unsupported warning for {path}, got: {warnings:?}"
+                )
+            });
+            assert!(
+                warning.message.contains("not enforced"),
+                "warning for {path} must state the knob is not enforced: {}",
+                warning.message
+            );
+        }
+
+        // The deprecation message must also name the intended authorization
+        // path so the diagnostic points somewhere real.
+        let gated_actions_warning = warnings
+            .iter()
+            .find(|w| w.path == "security.otp.gated_actions")
+            .expect("gated_actions warning");
+        assert!(
+            gated_actions_warning
+                .message
+                .contains("Tachi approval/grant")
+        );
+        assert!(gated_actions_warning.message.contains("Node"));
+    }
+
+    #[test]
+    async fn collect_warnings_stay_silent_for_live_otp_knobs_and_defaults() {
+        // Live OTP mechanics must not be over-deprecated: a config that only
+        // touches the genuinely consumed knobs (enabled, token_ttl_secs,
+        // cache_valid_secs) produces no OTP warning, and the untouched
+        // default config is silent as well. `method` is parsed but never
+        // read at runtime; it is out of scope for this deprecation.
+        let mut config = Config::default();
+        config.security.otp.enabled = true;
+        config.security.otp.token_ttl_secs = 60;
+        config.security.otp.cache_valid_secs = 120;
+
+        config.validate().expect("live OTP knobs must validate");
+        for warnings in [
+            config.collect_warnings(),
+            Config::default().collect_warnings(),
+        ] {
+            assert!(
+                warnings
+                    .iter()
+                    .all(|w| w.code != "otp_action_gating_unsupported"),
+                "no OTP action-gating warning expected, got: {warnings:?}"
+            );
+        }
     }
 
     #[test]

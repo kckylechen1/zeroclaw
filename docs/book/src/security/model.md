@@ -65,7 +65,7 @@ Docs: [Tool receipts](./tool-receipts.md).
 
 Beyond the six layers:
 
-- **OTP gating**: `[security.otp] gated_actions = ["shell", "browser", "file_write"]` requires a one-time code before each listed action. Useful for remote-access scenarios.
+- **OTP (authentication only)**: `[security.otp]` configures TOTP authentication (`enabled`, `token_ttl_secs`, `cache_valid_secs`) consumed by the e-stop resume challenge. The `gated_actions`, `gated_domains`, `gated_domain_categories`, and `challenge_max_attempts` knobs are deprecated and unsupported: they are parsed for compatibility but never enforced, because ZeroClaw has no OTP action-gating. Configuring them emits a deprecation warning; high-risk action authorization is owned by the approval/grant plane (Tachi approval/grant with Node-local enforcement).
 - **Emergency stop**: `zeroclaw estop` halts all in-flight tool calls. With `[security.estop] enabled = true`, resuming requires an OTP.
 - **Prompt injection guard**: scans model output for known injection patterns before tool calls are validated.
 - **Leak detector**: scans outbound channel responses for credentials and redacts matches before delivery. It covers deterministic credential patterns and can also run a standalone high-entropy-token heuristic.

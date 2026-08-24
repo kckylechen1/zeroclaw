@@ -141,6 +141,11 @@ enabled = true
 method = "totp"
 token_ttl_secs = 30
 cache_valid_secs = 300
+# Deprecated and not enforced: ZeroClaw has no OTP action-gating, so the
+# four knobs below are parsed for compatibility but provide no authorization
+# boundary. High-risk action authorization is owned by the Tachi
+# approval/grant plane with Node-local enforcement. A non-default value
+# emits an otp_action_gating_unsupported config-health warning.
 gated_actions = [
     "shell",
     "file_write",
