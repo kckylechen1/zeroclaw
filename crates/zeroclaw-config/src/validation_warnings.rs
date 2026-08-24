@@ -80,19 +80,26 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[(
 /// config file. `GatewayConfig`-style structs do not use
 /// `deny_unknown_fields`, so serde silently drops an unknown nested
 /// section and configs carrying a retired section keep parsing; this makes
-/// the retirement visible instead of a silent no-op. Shared by every
-/// config-file load path (`Config::load_or_init`, the channels standalone
-/// loader, and the gateway migrate handler) so no live loader can miss it.
+/// the retirement visible instead of a silent no-op. Called by the
+/// config-file LOAD paths (`Config::load_or_init`, the channels standalone
+/// loader, and the gateway migrate handler); incidental single-key file
+/// readers (e.g. the web-search Brave-key reload) never participated in
+/// any config warning machinery and are out of this boundary.
 ///
 /// Each hit also logs a WARN at detection time, symmetric with the env
 /// tombstone's apply-time log: loaders that never call
 /// `validate()`/`collect_warnings()` (the channels per-message reload)
-/// still surface the retirement, the warning fires even when a later step
-/// on the same load errors and the returned vec would be discarded, and it
-/// is not gated behind `validate()`'s replay loop (which an earlier
-/// validation error skips). Successful loads additionally replay the
-/// structured warning through `collect_warnings()` — the same documented
-/// dual emission as the env tombstone.
+/// still surface the retirement, and the warning is not gated behind
+/// `validate()`'s replay loop (which an earlier validation error skips).
+/// Ordering caveat, stated honestly: in `Config::load_or_init`, detection
+/// runs before the `composition` hard-error gate, so a config with both
+/// problems still warns before the load fails; on the channels loader,
+/// strict migration runs first, so a file that fails strict migration
+/// (e.g. invalid `composition`) errors before detection. A failed load
+/// has its own error to fix; after the fix, the tombstone surfaces.
+/// Successful loads additionally replay the structured warning through
+/// `collect_warnings()` — the same documented dual emission as the env
+/// tombstone.
 pub fn retired_section_tombstones(contents: &str) -> Vec<ValidationWarning> {
     let Ok(root) = toml::from_str::<toml::Value>(contents) else {
         return Vec::new();
