@@ -18,6 +18,13 @@ use serde::{Deserialize, Serialize};
 ///   has no runtime consumer — the context compressor was removed —
 ///   so it currently has no effect. One warning per non-default field (see
 ///   `collect_context_compression_ignored_warnings` in `schema.rs`).
+/// - `otp_action_gating_unsupported`: a `[security.otp]` action-gating knob
+///   (`gated_actions`, `gated_domains`, `gated_domain_categories`, or
+///   `challenge_max_attempts`) is set to a non-default value but ZeroClaw
+///   has no OTP action-gating, so it is parsed for compatibility and never
+///   enforced (see `collect_deprecated_otp_action_gating_warnings` in
+///   `schema.rs`); live OTP authentication (`enabled`, `token_ttl_secs`,
+///   `cache_valid_secs`) is unaffected.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ValidationWarning {
