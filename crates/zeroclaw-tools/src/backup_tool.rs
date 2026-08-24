@@ -59,33 +59,34 @@ impl BackupTool {
                 anyhow::bail!("invalid backup.include_dirs entry: {sub:?}");
             }
         }
-        let backups_root = self.checked_backups_root().await?;
+        // Anchor the workspace and backups root BEFORE any mutation: both
+        // links join the guard chains of everything below, including the
+        // creation of the backup child itself.
+        let ws_link = self.ensure_workspace_root().await?;
+        let src_base = vec![ws_link];
+        let root_link = self.ensure_backups_root(&src_base[0]).await?;
         // The random suffix makes the generated child name unguessable, so
         // an attacker with write access inside `backups` cannot pre-create
-        // a symlink at the exact name this create will use. The freshly
-        // created child is still verified below — defense against a
-        // collision or a swap, not a substitute for the check.
+        // a symlink at the exact name this create will use. The child is
+        // created inside a blocking step that re-verifies the root chain,
+        // and verified again below — defense against a collision or a
+        // swap, not a substitute for the checks.
         let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
         let name = format!("backup-{ts}-{}", uuid::Uuid::new_v4().simple());
-        let backup_dir = backups_root.join(&name);
-        fs::create_dir_all(&backup_dir).await?;
+        let backup_dir = root_link.path.join(&name);
+        let root_chain = vec![root_link.clone()];
+        let child_id = tokio::task::spawn_blocking({
+            let dir = backup_dir.clone();
+            move || guarded_create_dir(root_chain, &dir)
+        })
+        .await?
+        .map_err(anyhow::Error::msg)?;
+        let child_link = DirLink {
+            path: backup_dir.clone(),
+            id: child_id,
+        };
         let (backup_dir, root_link, child_link) =
-            self.verify_created_child(&backups_root, &name).await?;
-        // The workspace root anchors the source side of every copy; the
-        // verified backups root and child anchor the destination side.
-        // Both chains are re-verified before every mutation below, so a
-        // component swapped mid-create fails the create instead of
-        // writing through wherever the swapped name points.
-        let ws_meta = fs::symlink_metadata(&self.workspace_dir).await?;
-        anyhow::ensure!(
-            ws_meta.is_dir() && !ws_meta.file_type().is_symlink(),
-            "workspace root is not a real directory: {}",
-            self.workspace_dir.display()
-        );
-        let src_base = vec![DirLink {
-            path: self.workspace_dir.clone(),
-            id: file_id_of(&ws_meta),
-        }];
+            self.verify_created_child(&root_link, &child_link).await?;
 
         let result = self
             .create_into(
@@ -155,18 +156,88 @@ impl BackupTool {
         Ok(())
     }
 
-    /// The backups root, refusing to operate through a symlinked one: a
-    /// planted `<workspace>/backups` link would let create write, and
-    /// max_keep delete, directories outside the workspace.
-    async fn checked_backups_root(&self) -> anyhow::Result<PathBuf> {
-        let dir = self.backups_dir();
-        if is_symlink(&dir).await {
-            anyhow::bail!(
-                "refusing to operate through symlinked backups root: {}",
-                dir.display()
-            );
+    /// The workspace root as a verified chain link. Every mutation chain
+    /// in this tool is anchored here (source side for copies, parent for
+    /// the backups root), so a swap of the workspace root itself — or any
+    /// relative resolution through it — is refused downstream. A missing
+    /// root yields `None` for callers that treat it as "not created yet".
+    async fn workspace_root_link(&self) -> anyhow::Result<Option<DirLink>> {
+        match fs::symlink_metadata(&self.workspace_dir).await {
+            Ok(m) => {
+                anyhow::ensure!(
+                    m.is_dir() && !m.file_type().is_symlink(),
+                    "workspace root is not a real directory: {}",
+                    self.workspace_dir.display()
+                );
+                Ok(Some(DirLink {
+                    path: self.workspace_dir.clone(),
+                    id: file_id_of(&m),
+                }))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
         }
-        Ok(dir)
+    }
+
+    /// Like [`Self::workspace_root_link`], but creates a missing workspace
+    /// root first (its own parents are operator-configured install paths,
+    /// outside any attacker-reachable jail) and refuses a symlinked one,
+    /// so copy chains always anchor on a real, existing directory.
+    async fn ensure_workspace_root(&self) -> anyhow::Result<DirLink> {
+        if let Some(link) = self.workspace_root_link().await? {
+            return Ok(link);
+        }
+        let dir = self.workspace_dir.clone();
+        let id = tokio::task::spawn_blocking(move || guarded_create_dir(Vec::new(), &dir))
+            .await?
+            .map_err(anyhow::Error::msg)?;
+        Ok(DirLink {
+            path: self.workspace_dir.clone(),
+            id,
+        })
+    }
+
+    /// The backups root as a verified chain link, refusing to operate
+    /// through a symlinked one: a planted `<workspace>/backups` link
+    /// would let create write, and max_keep delete, directories outside
+    /// the workspace. A missing root yields `None` for callers that treat
+    /// it as "no backups yet".
+    async fn existing_backups_root(&self) -> anyhow::Result<Option<DirLink>> {
+        let dir = self.backups_dir();
+        match fs::symlink_metadata(&dir).await {
+            Ok(m) => {
+                if m.file_type().is_symlink() || !m.is_dir() {
+                    anyhow::bail!(
+                        "refusing to operate through symlinked backups root: {}",
+                        dir.display()
+                    );
+                }
+                Ok(Some(DirLink {
+                    path: dir,
+                    id: file_id_of(&m),
+                }))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Like [`Self::existing_backups_root`], but creates a missing root
+    /// inside a blocking step guarded by the workspace-root chain, so the
+    /// create path never mkdirs through an unverified name.
+    async fn ensure_backups_root(&self, ws_link: &DirLink) -> anyhow::Result<DirLink> {
+        if let Some(link) = self.existing_backups_root().await? {
+            return Ok(link);
+        }
+        let chain = vec![ws_link.clone()];
+        let dir = self.backups_dir();
+        let id = tokio::task::spawn_blocking(move || guarded_create_dir(chain, &dir))
+            .await?
+            .map_err(anyhow::Error::msg)?;
+        Ok(DirLink {
+            path: self.backups_dir(),
+            id,
+        })
     }
 
     async fn enforce_max_keep(&self) -> anyhow::Result<()> {
@@ -181,53 +252,58 @@ impl BackupTool {
     }
 
     /// Verify the freshly created backup child is a real directory that
-    /// sits directly under the real backups root, with no component of the
-    /// path having resolved through a symlink, and return the path plus
-    /// the verified root and child links for the mutation guards that
-    /// follow. A pre-planted `backups/backup-*` symlink that
-    /// `create_dir_all` silently accepted is caught here before anything
-    /// is written through it.
+    /// still has the identity the guarded creation observed, sits
+    /// directly under the real backups root (canonical containment, so
+    /// nothing on the path resolved through a symlink), and return the
+    /// verified root and child links for the mutation guards that follow.
+    /// A pre-planted `backups/backup-*` symlink that `create_dir_all`
+    /// would silently accept is caught here before anything is written
+    /// through it.
     async fn verify_created_child(
         &self,
-        backups_root: &Path,
-        name: &str,
+        root_link: &DirLink,
+        child_link: &DirLink,
     ) -> anyhow::Result<(PathBuf, DirLink, DirLink)> {
-        let root_meta = fs::symlink_metadata(backups_root).await?;
-        if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
+        let root_meta = fs::symlink_metadata(&root_link.path).await?;
+        if root_meta.file_type().is_symlink()
+            || !root_meta.is_dir()
+            || file_id_of(&root_meta) != root_link.id
+        {
             anyhow::bail!(
-                "backups root is not a real directory: {}",
-                backups_root.display()
+                "backups root changed identity during create: {}",
+                root_link.path.display()
             );
         }
-        let root_link = DirLink {
-            path: backups_root.to_path_buf(),
-            id: file_id_of(&root_meta),
-        };
-        let child = backups_root.join(name);
-        let child_meta = fs::symlink_metadata(&child).await?;
+        let child_meta = fs::symlink_metadata(&child_link.path).await?;
         if child_meta.file_type().is_symlink() || !child_meta.is_dir() {
             anyhow::bail!(
                 "created backup path is not a real directory: {}",
-                child.display()
+                child_link.path.display()
+            );
+        }
+        if file_id_of(&child_meta) != child_link.id {
+            anyhow::bail!(
+                "created backup path changed identity during create: {}",
+                child_link.path.display()
             );
         }
         // Canonical containment: the resolved child must sit directly
         // inside the resolved root. If any component resolved through a
         // symlink, the canonical paths disagree with the parent check.
-        let root_canon = fs::canonicalize(backups_root).await?;
-        let child_canon = fs::canonicalize(&child).await?;
+        let root_canon = fs::canonicalize(&root_link.path).await?;
+        let child_canon = fs::canonicalize(&child_link.path).await?;
         if child_canon.parent() != Some(root_canon.as_path()) {
             anyhow::bail!(
                 "backup directory resolved outside the backups root: {} -> {}",
-                child.display(),
+                child_link.path.display(),
                 child_canon.display()
             );
         }
-        let child_link = DirLink {
-            path: child.clone(),
-            id: file_id_of(&child_meta),
-        };
-        Ok((child, root_link, child_link))
+        Ok((
+            child_link.path.clone(),
+            root_link.clone(),
+            child_link.clone(),
+        ))
     }
 
     /// Remove a listed backup directory after re-verifying the whole chain
@@ -235,30 +311,23 @@ impl BackupTool {
     /// swapped to a symlink between the listing and the removal must not
     /// be pruned through.
     async fn remove_verified_backup_dir(&self, old: &Path) -> anyhow::Result<()> {
-        let backups_root = self.checked_backups_root().await?;
+        let Some(root_link) = self.existing_backups_root().await? else {
+            return Ok(());
+        };
         let old_canon = fs::canonicalize(old).await?;
-        let root_canon = fs::canonicalize(&backups_root).await?;
+        let root_canon = fs::canonicalize(&root_link.path).await?;
         if old_canon.parent() != Some(root_canon.as_path()) {
             anyhow::bail!(
                 "refusing to prune outside the backups root: {}",
                 old.display()
             );
         }
-        let root_meta = fs::symlink_metadata(&backups_root).await?;
-        anyhow::ensure!(
-            root_meta.is_dir() && !root_meta.file_type().is_symlink(),
-            "backups root is not a real directory: {}",
-            backups_root.display()
-        );
         let meta = fs::symlink_metadata(old).await?;
         if meta.file_type().is_symlink() || !meta.is_dir() {
             anyhow::bail!("refusing to prune through symlink: {}", old.display());
         }
         let chain = vec![
-            DirLink {
-                path: backups_root,
-                id: file_id_of(&root_meta),
-            },
+            root_link,
             DirLink {
                 path: old.to_path_buf(),
                 id: file_id_of(&meta),
@@ -271,15 +340,11 @@ impl BackupTool {
     }
 
     async fn list_backup_dirs(&self) -> anyhow::Result<Vec<PathBuf>> {
-        let dir = self.checked_backups_root().await?;
-        match fs::symlink_metadata(&dir).await {
-            Ok(m) if m.is_dir() => {}
-            Ok(_) => anyhow::bail!("backups root is not a real directory: {}", dir.display()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        }
+        let Some(dir) = self.existing_backups_root().await? else {
+            return Ok(Vec::new());
+        };
         let mut entries = Vec::new();
-        let mut rd = fs::read_dir(&dir).await?;
+        let mut rd = fs::read_dir(&dir.path).await?;
         while let Some(e) = rd.next_entry().await? {
             // Non-following check: a symlink named `backup-*` must not
             // make an arbitrary target look like a backup.
@@ -340,8 +405,14 @@ impl BackupTool {
         if !valid_backup_name(backup_name) {
             return Ok(invalid_backup_name(backup_name));
         }
-        let backups_root = self.checked_backups_root().await?;
-        let backup_dir = backups_root.join(backup_name);
+        let Some(root_link) = self.existing_backups_root().await? else {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!("Backup not found: {backup_name}")),
+            });
+        };
+        let backup_dir = root_link.path.join(backup_name);
         let backup_meta = match fs::symlink_metadata(&backup_dir).await {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -353,6 +424,7 @@ impl BackupTool {
             }
             Err(e) => return Err(e.into()),
         };
+        let backup_id = file_id_of(&backup_meta);
         if backup_meta.file_type().is_symlink() {
             anyhow::bail!(
                 "refusing to verify through symlink: {}",
@@ -377,6 +449,26 @@ impl BackupTool {
         let data = fs::read_to_string(&manifest_path).await?;
         let expected: HashMap<String, String> = serde_json::from_str(&data)?;
         let actual = compute_checksums(&backup_dir).await?;
+        // The verify result must describe the tree it started from: if
+        // the backups root or the backup child was swapped during the
+        // read, refuse rather than report a verdict about foreign data.
+        for link in [
+            DirLink {
+                path: root_link.path.clone(),
+                id: root_link.id,
+            },
+            DirLink {
+                path: backup_dir.clone(),
+                id: backup_id,
+            },
+        ] {
+            let m = fs::symlink_metadata(&link.path).await?;
+            anyhow::ensure!(
+                m.is_dir() && !m.file_type().is_symlink() && file_id_of(&m) == link.id,
+                "backup changed during verification: {}",
+                link.path.display()
+            );
+        }
 
         let mut mismatches = Vec::new();
         for (path, expected_hash) in &expected {
@@ -435,8 +527,18 @@ impl BackupTool {
         if !valid_backup_name(backup_name) {
             return Ok(invalid_backup_name(backup_name));
         }
-        let backups_root = self.checked_backups_root().await?;
-        let backup_dir = backups_root.join(backup_name);
+        // Anchor the backups root BEFORE resolving the backup child, so
+        // the child identity cannot be adopted through a root swapped
+        // between an earlier check and this resolution; the root link
+        // rides the source chain of every copy below.
+        let Some(root_link) = self.existing_backups_root().await? else {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!("Backup not found: {backup_name}")),
+            });
+        };
+        let backup_dir = root_link.path.join(backup_name);
         let backup_meta = match fs::symlink_metadata(&backup_dir).await {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -523,23 +625,23 @@ impl BackupTool {
         if !m.is_dir() || file_id_of(&m) != backup_id {
             anyhow::bail!("backup changed while restore was starting: {backup_name}");
         }
+        let m = fs::symlink_metadata(&root_link.path).await?;
+        if !m.is_dir() || file_id_of(&m) != root_link.id {
+            anyhow::bail!("backups root changed while restore was starting");
+        }
         // The workspace root anchors the destination side of every copy;
-        // the verified backup root anchors the source side. Both chains
-        // are re-verified before every mutation inside the copy walk.
-        let ws_meta = fs::symlink_metadata(&self.workspace_dir).await?;
-        anyhow::ensure!(
-            ws_meta.is_dir() && !ws_meta.file_type().is_symlink(),
-            "workspace root is not a real directory: {}",
-            self.workspace_dir.display()
-        );
-        let dst_base = vec![DirLink {
-            path: self.workspace_dir.clone(),
-            id: file_id_of(&ws_meta),
-        }];
-        let src_base = vec![DirLink {
-            path: backup_dir.clone(),
-            id: backup_id,
-        }];
+        // the verified backups root and backup child anchor the source
+        // side. All chains are re-verified before every mutation inside
+        // the copy walk, so a swapped ancestor anywhere between a jail
+        // root and a copied file refuses the copy.
+        let dst_base = vec![self.ensure_workspace_root().await?];
+        let src_base = vec![
+            root_link,
+            DirLink {
+                path: backup_dir.clone(),
+                id: backup_id,
+            },
+        ];
         for (sub, id) in &sub_ids {
             // Re-verify each source immediately before its copy, not all
             // of them up front: earlier copies take time, and a name that
@@ -1323,6 +1425,112 @@ mod tests {
             "precious",
             "the shared inode outside the workspace must not be truncated"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_refuses_symlinked_backups_root() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        std::fs::write(tmp.path().join("config/a.toml"), "v1").unwrap();
+        // A planted <workspace>/backups symlink: restore must not resolve
+        // the requested backup (nor write anything) through it.
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("backups")).unwrap();
+
+        let tool = make_tool(&tmp);
+        let res = tool
+            .execute(json!({"command": "restore", "backup_name": "backup-x", "confirm": true}))
+            .await;
+        assert!(res.is_err(), "restore must refuse a symlinked backups root");
+        let entries = std::fs::read_dir(outside.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(
+            entries, 0,
+            "nothing may be read or written through the link"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copy_walk_refuses_destination_ancestor_swapped() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("config");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("a.toml"), "v1").unwrap();
+
+        // Real workspace / backups / child chains captured before the swap.
+        let backups = tmp.path().join("backups");
+        let child = backups.join("backup-x");
+        std::fs::create_dir_all(&child).unwrap();
+        let mk_link = |p: &Path| {
+            let m = std::fs::symlink_metadata(p).unwrap();
+            DirLink {
+                path: p.to_path_buf(),
+                id: file_id_of(&m),
+            }
+        };
+        let ws_link = mk_link(tmp.path());
+        let root_link = mk_link(&backups);
+        let child_link = mk_link(&child);
+
+        // Swap the verified child for a symlink to an outside directory,
+        // then run the copy walk with the stale (honest) chains: the walk
+        // must refuse to create or write anything through the link.
+        std::fs::rename(&child, backups.join("staged-away")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &child).unwrap();
+
+        let res = copy_dir_recursive(
+            &src_dir,
+            &child.join("config"),
+            &[ws_link],
+            &[root_link, child_link],
+        )
+        .await;
+        assert!(
+            res.is_err(),
+            "the copy walk must refuse a swapped destination ancestor"
+        );
+        let leaked = std::fs::read_dir(outside.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(leaked, 0, "nothing may be created through the link");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn guarded_creation_refuses_swapped_root() {
+        use crate::fs_guard::guarded_create_dir;
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+
+        // A verified backups root whose identity is captured, then swapped
+        // for a symlink: creating a directory inside a chain anchored on
+        // the stale root must refuse instead of creating outside.
+        let backups = tmp.path().join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        let root_meta = std::fs::symlink_metadata(&backups).unwrap();
+        let root_link = DirLink {
+            path: backups.clone(),
+            id: file_id_of(&root_meta),
+        };
+        std::fs::rename(&backups, tmp.path().join("staged-away")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &backups).unwrap();
+
+        let res = guarded_create_dir(vec![root_link], &backups.join("backup-new"));
+        assert!(
+            res.is_err(),
+            "guarded creation must refuse a swapped backups root"
+        );
+        let leaked = std::fs::read_dir(outside.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(leaked, 0, "no directory may be created through the link");
     }
 
     #[tokio::test]
