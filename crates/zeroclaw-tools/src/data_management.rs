@@ -544,6 +544,7 @@ mod tests {
 
     /// Pin a file's modification time one year in the past so it is always
     /// older than any retention cutoff a test computes.
+    #[cfg(unix)]
     fn make_old(path: &Path) {
         let f = std::fs::File::options().write(true).open(path).unwrap();
         let past = std::time::SystemTime::now() - std::time::Duration::from_secs(365 * 86_400);
