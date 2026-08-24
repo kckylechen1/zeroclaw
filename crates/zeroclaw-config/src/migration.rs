@@ -138,6 +138,13 @@ pub fn generate(target_version: u32, opts: &GenerateOptions<'_>) -> Result<Strin
     };
 
     let mut value = value;
+    // The generator must never emit a retired config surface: the seed
+    // fixture predates retirements and the migration lenses pass unknown
+    // nested tables through, so without this filter a freshly generated
+    // config would carry a section the running binary immediately flags
+    // with its own removal warning. The retired set is the single shared
+    // table the load-time tombstones also derive from.
+    strip_retired_surfaces(&mut value);
     if opts.encrypt_secrets {
         let store_dir = opts.secret_store_dir.context(
             "--encrypt requires a secret-store directory \
@@ -156,6 +163,34 @@ fn secret_key_names() -> &'static std::collections::HashSet<&'static str> {
     use std::sync::OnceLock;
     static CACHE: OnceLock<HashSet<&'static str>> = OnceLock::new();
     CACHE.get_or_init(|| Config::secret_field_terminals().into_iter().collect())
+}
+
+/// Remove retired config sections (by dotted path, from
+/// [`crate::validation_warnings::RETIRED_CONFIG_SURFACES`]) from a
+/// generated config value. Drops only the final segment of each retired
+/// path when its parent chain fully resolves, so adjacent live keys are
+/// untouched and a missing parent is a no-op.
+fn strip_retired_surfaces(value: &mut toml::Value) {
+    for (path, _) in crate::validation_warnings::RETIRED_CONFIG_SURFACES {
+        let segments: Vec<&str> = path.split('.').collect();
+        remove_dotted(value, &segments);
+    }
+}
+
+/// Recursive descent so each step owns exactly one mutable borrow; drops
+/// only the final segment when the parent chain fully resolves.
+fn remove_dotted(value: &mut toml::Value, segments: &[&str]) {
+    let Some((first, rest)) = segments.split_first() else {
+        return;
+    };
+    let Some(table) = value.as_table_mut() else {
+        return;
+    };
+    if rest.is_empty() {
+        table.remove(*first);
+    } else if let Some(child) = table.get_mut(*first) {
+        remove_dotted(child, rest);
+    }
 }
 
 pub fn encrypt_secret_strings(

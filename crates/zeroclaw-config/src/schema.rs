@@ -18869,6 +18869,18 @@ impl Config {
                 .and_then(|v| crate::migration::detect_version(v).ok())
                 .filter(|n| *n != crate::migration::CURRENT_SCHEMA_VERSION);
 
+            // Retired-section tombstone: serde silently drops the unknown
+            // nested section (no `deny_unknown_fields`), so deployments
+            // carrying it keep parsing; the shared helper records one
+            // structured warning per retired section so the retirement is
+            // visible instead of a silent no-op. Runs BEFORE the
+            // composition hard-error gate so a config with both problems
+            // still surfaces the tombstone WARN even though the load then
+            // fails. Sunset: this tombstone is a compatibility shim and
+            // will be removed in a later announced window.
+            let retired_section_warnings =
+                crate::validation_warnings::retired_section_tombstones(&contents);
+
             // `composition` hard-error gate. The key is brand-new (no
             // release predating it can legitimately carry a value this
             // binary didn't ship), so an invalid value is an operator
@@ -18901,16 +18913,6 @@ impl Config {
                     crate::composition::DOCUMENTED_VALUES
                 );
             }
-
-            // Retired-section tombstone: serde silently drops the unknown
-            // nested section (no `deny_unknown_fields`), so deployments
-            // carrying it keep parsing; the shared helper records one
-            // structured warning per retired section so the retirement is
-            // visible instead of a silent no-op. Sunset: this tombstone is
-            // a compatibility shim and will be removed in a later
-            // announced window.
-            let retired_section_warnings =
-                crate::validation_warnings::retired_section_tombstones(&contents);
 
             // Daemon load must never hard-fail on a malformed config — the
             // operator needs the process up to repair it. The resilient path

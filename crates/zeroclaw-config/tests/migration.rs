@@ -2082,6 +2082,25 @@ fn generate_every_version_migrates_and_validates() {
 }
 
 #[test]
+fn generate_never_emits_retired_config_surfaces() {
+    // The seed fixture predates retirements and the migration lenses pass
+    // unknown nested tables through, so the generator must strip retired
+    // sections itself — a freshly generated config must not trigger the
+    // running binary's own removal warning on first load. Asserted through
+    // the real detector so every retired surface in the shared table is
+    // covered without re-implementing the walk.
+    for target in 1..=CURRENT_SCHEMA_VERSION {
+        let raw = generate(target, &GenerateOptions::default())
+            .unwrap_or_else(|e| panic!("generate({target}) failed: {e:#}"));
+        let warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+        assert!(
+            warnings.is_empty(),
+            "generate({target}) must not emit retired config surfaces: {warnings:?}"
+        );
+    }
+}
+
+#[test]
 fn generate_current_emits_at_current_schema_version() {
     let raw = generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
         .expect("generate current succeeds");
