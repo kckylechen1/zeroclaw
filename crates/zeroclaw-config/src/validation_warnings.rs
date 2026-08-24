@@ -81,8 +81,18 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[(
 /// `deny_unknown_fields`, so serde silently drops an unknown nested
 /// section and configs carrying a retired section keep parsing; this makes
 /// the retirement visible instead of a silent no-op. Shared by every
-/// config-file load path (`Config::load_or_init` and the channels
-/// standalone loader) so no live loader can miss it.
+/// config-file load path (`Config::load_or_init`, the channels standalone
+/// loader, and the gateway migrate handler) so no live loader can miss it.
+///
+/// Each hit also logs a WARN at detection time, symmetric with the env
+/// tombstone's apply-time log: loaders that never call
+/// `validate()`/`collect_warnings()` (the channels per-message reload)
+/// still surface the retirement, the warning fires even when a later step
+/// on the same load errors and the returned vec would be discarded, and it
+/// is not gated behind `validate()`'s replay loop (which an earlier
+/// validation error skips). Successful loads additionally replay the
+/// structured warning through `collect_warnings()` — the same documented
+/// dual emission as the env tombstone.
 pub fn retired_section_tombstones(contents: &str) -> Vec<ValidationWarning> {
     let Ok(root) = toml::from_str::<toml::Value>(contents) else {
         return Vec::new();
@@ -91,7 +101,7 @@ pub fn retired_section_tombstones(contents: &str) -> Vec<ValidationWarning> {
         .iter()
         .filter(|(path, _)| table_path_exists(root.as_table(), path))
         .map(|(path, code)| {
-            ValidationWarning::new(
+            let warning = ValidationWarning::new(
                 *code,
                 format!(
                     "[{path}] in config.toml is ignored: the section was removed from the \
@@ -99,7 +109,15 @@ pub fn retired_section_tombstones(contents: &str) -> Vec<ValidationWarning> {
                      removed in a later announced window. Remove the section."
                 ),
                 (*path).to_string(),
-            )
+            );
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"path": path, "code": code})),
+                &warning.message
+            );
+            warning
         })
         .collect()
 }
