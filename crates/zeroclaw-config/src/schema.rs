@@ -18862,8 +18862,7 @@ impl Config {
             // line when the daemon auto-migrates an older config in memory:
             // the disk file is left untouched and the user is advised to lock
             // the migration in with `zeroclaw config migrate`. The parsed raw
-            // root also feeds the composition gate and the retired-section
-            // tombstone below, so parse once here.
+            // root also feeds the composition gate below, so parse once here.
             let raw_root = toml::from_str::<toml::Value>(&contents).ok();
             let stale_version = raw_root
                 .as_ref()
@@ -18903,28 +18902,15 @@ impl Config {
                 );
             }
 
-            // Retired `[gateway.pairing_dashboard]` section tombstone.
-            // `GatewayConfig` does not use `deny_unknown_fields`, so serde
-            // silently drops the unknown nested section and deployments
-            // carrying it keep parsing; record one structured warning so
-            // the retirement is visible instead of a silent no-op.
-            // Sunset: this tombstone is a compatibility shim and will be
-            // removed in a later announced window.
-            let retired_section_warning = raw_root
-                .as_ref()
-                .and_then(|v| v.get("gateway"))
-                .and_then(toml::Value::as_table)
-                .and_then(|g| g.get("pairing_dashboard"))
-                .map(|_| {
-                    crate::validation_warnings::ValidationWarning::new(
-                        "gateway_pairing_dashboard_removed",
-                        "[gateway.pairing_dashboard] in config.toml is ignored: the section \
-                         was removed from the schema and has no runtime consumer. This \
-                         compatibility shim will be removed in a later announced window. \
-                         Remove the section.",
-                        "gateway.pairing_dashboard",
-                    )
-                });
+            // Retired-section tombstone: serde silently drops the unknown
+            // nested section (no `deny_unknown_fields`), so deployments
+            // carrying it keep parsing; the shared helper records one
+            // structured warning per retired section so the retirement is
+            // visible instead of a silent no-op. Sunset: this tombstone is
+            // a compatibility shim and will be removed in a later
+            // announced window.
+            let retired_section_warnings =
+                crate::validation_warnings::retired_section_tombstones(&contents);
 
             // Daemon load must never hard-fail on a malformed config — the
             // operator needs the process up to repair it. The resilient path
@@ -19078,7 +19064,7 @@ impl Config {
             let applied = crate::env_overrides::apply_env_overrides(&mut config)?;
             config.env_overridden_paths = applied.paths;
             config.pre_override_snapshots = applied.snapshots;
-            config.retired_surface_warnings = retired_section_warning
+            config.retired_surface_warnings = retired_section_warnings
                 .into_iter()
                 .chain(applied.tombstone_warnings)
                 .collect();

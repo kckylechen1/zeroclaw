@@ -13,20 +13,30 @@ const SEP: &str = "__";
 /// as a structured deprecation warning so existing deployments setting
 /// these env vars keep booting instead of failing config load after the
 /// backing schema was deleted. This is deliberately a narrow prefix
-/// carve-out, not a relaxation of the walker: every other unknown env path
-/// still hard-errors.
+/// carve-out, not a relaxation of the walker: every other walker-eligible
+/// (conforming lowercase-tail) unknown env path still hard-errors; tails
+/// that fail the lowercase prefilter were never overrides to begin with.
 ///
+/// The prefix set is derived from the single retired-surface table
+/// (`RETIRED_CONFIG_SURFACES`): dotted path → env form with a trailing
+/// `__`, so the env shim and the file-section shim cannot drift apart.
 /// Sunset: these tombstones are compatibility shims; they will be removed
 /// in a later announced window, after which the paths hard-error like any
 /// other unknown path.
-const RETIRED_ENV_TOMBSTONES: &[(&str, &str, &str)] = &[(
-    // env-form prefix (with trailing `__`)
-    "gateway__pairing_dashboard__",
-    // dotted config path the prefix retires
-    "gateway.pairing_dashboard",
-    // stable warning code (documented in validation_warnings.rs)
-    "gateway_pairing_dashboard_removed",
-)];
+static RETIRED_ENV_TOMBSTONE_PREFIXES: LazyLock<Vec<(String, &'static str)>> =
+    LazyLock::new(|| {
+        crate::validation_warnings::RETIRED_CONFIG_SURFACES
+            .iter()
+            .map(|(path, code)| (format!("{}{SEP}", path.replace('.', SEP)), *code))
+            .collect()
+    });
+
+/// Test-visible view of the derived env-prefix set, so the SSOT guard can
+/// assert the walker carries a prefix for every retired surface.
+#[cfg(test)]
+pub(crate) fn retired_env_tombstone_prefixes() -> &'static [(String, &'static str)] {
+    &RETIRED_ENV_TOMBSTONE_PREFIXES
+}
 
 static NON_OVERRIDABLE_PATHS: LazyLock<HashSet<&'static str>> =
     LazyLock::new(|| HashSet::from(["schema_version"]));
@@ -64,13 +74,21 @@ pub fn apply_env_overrides(config: &mut Config) -> Result<AppliedOverrides> {
     let mut tombstone_warnings: Vec<crate::validation_warnings::ValidationWarning> = Vec::new();
     for (env_name, value, tail) in entries {
         // Retired-surface tombstone: exact-prefix carve-out consulted
-        // BEFORE the unknown-path rejection. The hit is ignored and
-        // warned; it must never be applied (the schema no longer has a
-        // destination) and must never mask an otherwise-unknown path.
-        if let Some((_, dotted, code)) = RETIRED_ENV_TOMBSTONES
+        // BEFORE the unknown-path rejection (so no map-key section can
+        // intercept first). The hit is ignored and warned; it must never
+        // be applied (the schema no longer has a destination) and must
+        // never mask an otherwise-unknown path. The apply-time log is
+        // deliberate dual emission with the collect_warnings replay: it
+        // covers loaders that never call validate()/collect_warnings
+        // (the channels standalone reload) and fires even when a later
+        // entry hard-errors and the structured vec is discarded with the
+        // Err — deprecation visibility should not depend on the rest of
+        // the environment being clean.
+        if let Some((prefix, code)) = RETIRED_ENV_TOMBSTONE_PREFIXES
             .iter()
-            .find(|(prefix, _, _)| tail.starts_with(prefix))
+            .find(|(prefix, _)| tail.starts_with(prefix.as_str()))
         {
+            let dotted = prefix.trim_end_matches(SEP).replace(SEP, ".");
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -86,7 +104,7 @@ pub fn apply_env_overrides(config: &mut Config) -> Result<AppliedOverrides> {
                      consumer; this compatibility shim will be removed in a later \
                      announced window. Remove the env var."
                 ),
-                (*dotted).to_string(),
+                dotted.clone(),
             ));
             continue;
         }
