@@ -9,6 +9,7 @@ pub mod a2a;
 pub mod acp;
 pub mod agent_owned_state;
 pub mod api;
+pub mod api_backup_retention;
 pub mod api_browse;
 pub mod api_config;
 pub mod api_logs;
@@ -2007,6 +2008,35 @@ pub async fn run_gateway(
             post(api_user_model::review_candidate),
         )
         .route("/api/user-model/statements", post(api_user_model::create_statement))
+        // ── Backup / data-retention operator surface ──
+        // Thin operator-bearer-gated entries over the same BackupTool /
+        // DataManagementTool command methods the model-visible tools use;
+        // restore keeps its confirm/dry-run guard, purge keeps its
+        // dry-run default.
+        .route(
+            "/api/agents/{alias}/backup",
+            get(api_backup_retention::list_backups).post(api_backup_retention::create_backup),
+        )
+        .route(
+            "/api/agents/{alias}/backup/{name}/verify",
+            post(api_backup_retention::verify_backup),
+        )
+        .route(
+            "/api/agents/{alias}/backup/{name}/restore",
+            post(api_backup_retention::restore_backup),
+        )
+        .route(
+            "/api/agents/{alias}/data-retention/status",
+            get(api_backup_retention::retention_status),
+        )
+        .route(
+            "/api/agents/{alias}/data-retention/stats",
+            get(api_backup_retention::retention_stats),
+        )
+        .route(
+            "/api/agents/{alias}/data-retention/purge",
+            post(api_backup_retention::retention_purge),
+        )
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
         .route("/api/events/history", get(sse::handle_events_history))

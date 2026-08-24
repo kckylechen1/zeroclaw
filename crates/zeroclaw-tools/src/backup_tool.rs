@@ -27,7 +27,10 @@ impl BackupTool {
         self.workspace_dir.join("backups")
     }
 
-    async fn cmd_create(&self) -> anyhow::Result<ToolResult> {
+    /// Create a timestamped backup. Shared with the gateway operator
+    /// surface (`/api/agents/{alias}/backup`); the model-visible `Tool`
+    /// entry point and the operator API must stay behaviour-identical.
+    pub async fn cmd_create(&self) -> anyhow::Result<ToolResult> {
         let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
         let name = format!("backup-{ts}");
         let backup_dir = self.backups_dir().join(&name);
@@ -90,7 +93,8 @@ impl BackupTool {
         Ok(entries)
     }
 
-    async fn cmd_list(&self) -> anyhow::Result<ToolResult> {
+    /// List backups (newest first). Shared with the gateway operator surface.
+    pub async fn cmd_list(&self) -> anyhow::Result<ToolResult> {
         let dirs = self.list_backup_dirs().await?;
         let mut items = Vec::new();
         for d in &dirs {
@@ -125,7 +129,9 @@ impl BackupTool {
         })
     }
 
-    async fn cmd_verify(&self, backup_name: &str) -> anyhow::Result<ToolResult> {
+    /// Verify a backup against its SHA-256 manifest. Shared with the
+    /// gateway operator surface.
+    pub async fn cmd_verify(&self, backup_name: &str) -> anyhow::Result<ToolResult> {
         let backup_dir = self.backups_dir().join(backup_name);
         if !backup_dir.is_dir() {
             return Ok(ToolResult {
@@ -173,7 +179,15 @@ impl BackupTool {
         })
     }
 
-    async fn cmd_restore(&self, backup_name: &str, confirm: bool) -> anyhow::Result<ToolResult> {
+    /// Restore a backup. `confirm = false` returns a dry-run preview and
+    /// mutates nothing; `confirm = true` overwrites workspace directories
+    /// from the backup. Shared with the gateway operator surface, which
+    /// must keep both halves of that contract intact.
+    pub async fn cmd_restore(
+        &self,
+        backup_name: &str,
+        confirm: bool,
+    ) -> anyhow::Result<ToolResult> {
         let backup_dir = self.backups_dir().join(backup_name);
         if !backup_dir.is_dir() {
             return Ok(ToolResult {

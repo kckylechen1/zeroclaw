@@ -19,7 +19,10 @@ impl DataManagementTool {
         }
     }
 
-    async fn cmd_retention_status(&self) -> anyhow::Result<ToolResult> {
+    /// Retention window status. Shared with the gateway operator surface
+    /// (`/api/agents/{alias}/data-retention`); the model-visible `Tool`
+    /// entry point and the operator API must stay behaviour-identical.
+    pub async fn cmd_retention_status(&self) -> anyhow::Result<ToolResult> {
         let cutoff = chrono::Utc::now()
             - chrono::Duration::days(i64::try_from(self.retention_days).unwrap_or(i64::MAX));
         let cutoff_ts = cutoff.timestamp().try_into().unwrap_or(0u64);
@@ -38,7 +41,11 @@ impl DataManagementTool {
         })
     }
 
-    async fn cmd_purge(&self, dry_run: bool) -> anyhow::Result<ToolResult> {
+    /// Purge files older than the retention window. `dry_run = true`
+    /// reports what would be deleted and removes nothing. Shared with the
+    /// gateway operator surface, which must keep the destructive guard
+    /// intact.
+    pub async fn cmd_purge(&self, dry_run: bool) -> anyhow::Result<ToolResult> {
         let cutoff = chrono::Utc::now()
             - chrono::Duration::days(i64::try_from(self.retention_days).unwrap_or(i64::MAX));
         let cutoff_ts: u64 = cutoff.timestamp().try_into().unwrap_or(0);
@@ -58,7 +65,8 @@ impl DataManagementTool {
         })
     }
 
-    async fn cmd_stats(&self) -> anyhow::Result<ToolResult> {
+    /// Workspace storage statistics. Shared with the gateway operator surface.
+    pub async fn cmd_stats(&self) -> anyhow::Result<ToolResult> {
         let (total_files, total_bytes, breakdown) = dir_stats(&self.workspace_dir).await?;
         Ok(ToolResult {
             success: true,
