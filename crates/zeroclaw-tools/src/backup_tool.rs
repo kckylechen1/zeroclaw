@@ -61,20 +61,24 @@ impl BackupTool {
         }
         // Anchor the workspace and backups root BEFORE any mutation: both
         // links join the guard chains of everything below, including the
-        // creation of the backup child itself.
+        // creation of the backup child itself. The workspace link rides
+        // the DESTINATION chains too: per-agent workspace overrides allow
+        // arbitrary paths, so no ancestor above the workspace is trusted
+        // by default — every mutation below re-verifies the workspace
+        // identity itself.
         let ws_link = self.ensure_workspace_root().await?;
-        let src_base = vec![ws_link];
-        let root_link = self.ensure_backups_root(&src_base[0]).await?;
+        let src_base = vec![ws_link.clone()];
+        let root_link = self.ensure_backups_root(&ws_link).await?;
         // The random suffix makes the generated child name unguessable, so
         // an attacker with write access inside `backups` cannot pre-create
         // a symlink at the exact name this create will use. The child is
-        // created inside a blocking step that re-verifies the root chain,
-        // and verified again below — defense against a collision or a
-        // swap, not a substitute for the checks.
+        // created inside a blocking step that re-verifies the workspace
+        // and root chain, and verified again below — defense against a
+        // collision or a swap, not a substitute for the checks.
         let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
         let name = format!("backup-{ts}-{}", uuid::Uuid::new_v4().simple());
         let backup_dir = root_link.path.join(&name);
-        let root_chain = vec![root_link.clone()];
+        let root_chain = vec![ws_link.clone(), root_link.clone()];
         let child_id = tokio::task::spawn_blocking({
             let dir = backup_dir.clone();
             move || guarded_create_dir(root_chain, &dir)
@@ -87,29 +91,24 @@ impl BackupTool {
         };
         let (backup_dir, root_link, child_link) =
             self.verify_created_child(&root_link, &child_link).await?;
+        let dst_base = vec![ws_link, root_link.clone(), child_link.clone()];
 
-        let result = self
-            .create_into(
-                &backup_dir,
-                &src_base,
-                &[root_link.clone(), child_link.clone()],
-            )
-            .await;
+        let result = self.create_into(&backup_dir, &src_base, &dst_base).await;
         if result.is_err() {
             // Never leave a partial, listable, restorable backup behind a
             // failed create — but only remove it if the whole chain down
             // to it is still the real directories this call created,
             // never through a swapped name.
-            let chain = vec![root_link.clone(), child_link.clone()];
+            let chain = dst_base.clone();
             let _ = tokio::task::spawn_blocking(move || guarded_remove_dir_all(chain)).await;
         }
         result?;
 
-        let checksums = compute_checksums(&backup_dir).await?;
+        let checksums = compute_checksums(&backup_dir, &dst_base).await?;
         let file_count = checksums.len();
         let manifest = serde_json::to_string_pretty(&checksums)?;
         let manifest_path = backup_dir.join("manifest.json");
-        let chain = vec![root_link, child_link];
+        let chain = dst_base;
         tokio::task::spawn_blocking(move || {
             guarded_write(chain, manifest_path, manifest.into_bytes())
         })
@@ -354,6 +353,9 @@ impl BackupTool {
                 entries.push(e.path());
             }
         }
+        // The listing must describe the root it anchored on: a root
+        // swapped mid-listing must not hand back outside names.
+        verify_chain_unchanged(std::slice::from_ref(&dir)).await?;
         entries.sort();
         entries.reverse(); // newest first
         Ok(entries)
@@ -448,11 +450,7 @@ impl BackupTool {
         }
         let data = fs::read_to_string(&manifest_path).await?;
         let expected: HashMap<String, String> = serde_json::from_str(&data)?;
-        let actual = compute_checksums(&backup_dir).await?;
-        // The verify result must describe the tree it started from: if
-        // the backups root or the backup child was swapped during the
-        // read, refuse rather than report a verdict about foreign data.
-        for link in [
+        let read_chain = [
             DirLink {
                 path: root_link.path.clone(),
                 id: root_link.id,
@@ -461,7 +459,12 @@ impl BackupTool {
                 path: backup_dir.clone(),
                 id: backup_id,
             },
-        ] {
+        ];
+        let actual = compute_checksums(&backup_dir, &read_chain).await?;
+        // The verify result must describe the tree it started from: if
+        // the backups root or the backup child was swapped during the
+        // read, refuse rather than report a verdict about foreign data.
+        for link in read_chain {
             let m = fs::symlink_metadata(&link.path).await?;
             anyhow::ensure!(
                 m.is_dir() && !m.file_type().is_symlink() && file_id_of(&m) == link.id,
@@ -608,6 +611,21 @@ impl BackupTool {
         }
 
         if !confirm {
+            // The preview must describe the tree it just walked: re-check
+            // the root and child identities before publishing the names,
+            // so a swap mid-collection cannot feed outside-derived entries
+            // to the operator.
+            verify_chain_unchanged(&[
+                DirLink {
+                    path: root_link.path.clone(),
+                    id: root_link.id,
+                },
+                DirLink {
+                    path: backup_dir.clone(),
+                    id: backup_id,
+                },
+            ])
+            .await?;
             return Ok(ToolResult {
                 success: true,
                 output: json!({
@@ -918,18 +936,43 @@ async fn preflight_no_symlinks(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn compute_checksums(dir: &Path) -> anyhow::Result<HashMap<String, String>> {
+/// Hash the file tree under `dir`, refusing symlinks and re-verifying the
+/// ancestor `chain` before each directory read and file read, so names
+/// and hashes cannot be sourced from a tree swapped in mid-walk (which
+/// would poison a manifest or forge a verify verdict; a swap-away and
+/// swap-back around the post-walk identity check could otherwise pass).
+/// The chain check and the read are still two steps, so a swap landing
+/// exactly between them remains possible in principle — the same
+/// single-step residual every path-based guard here carries.
+async fn compute_checksums(
+    dir: &Path,
+    chain: &[DirLink],
+) -> anyhow::Result<HashMap<String, String>> {
     let mut map = HashMap::new();
     let base = dir.to_path_buf();
-    walk_and_hash(&base, dir, &mut map).await?;
+    Box::pin(walk_and_hash(&base, dir, chain, &mut map)).await?;
     Ok(map)
+}
+
+async fn verify_chain_unchanged(chain: &[DirLink]) -> anyhow::Result<()> {
+    for link in chain {
+        let m = fs::symlink_metadata(&link.path).await?;
+        anyhow::ensure!(
+            m.is_dir() && !m.file_type().is_symlink() && file_id_of(&m) == link.id,
+            "{} changed identity during the operation; refusing its data",
+            link.path.display()
+        );
+    }
+    Ok(())
 }
 
 async fn walk_and_hash(
     base: &Path,
     dir: &Path,
+    chain: &[DirLink],
     map: &mut HashMap<String, String>,
 ) -> anyhow::Result<()> {
+    verify_chain_unchanged(chain).await?;
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
         let path = entry.path();
@@ -938,7 +981,7 @@ async fn walk_and_hash(
             anyhow::bail!("refusing to follow symlink: {}", path.display());
         }
         if file_type.is_dir() {
-            Box::pin(walk_and_hash(base, &path, map)).await?;
+            Box::pin(walk_and_hash(base, &path, chain, map)).await?;
         } else {
             let rel = path
                 .strip_prefix(base)
@@ -948,6 +991,7 @@ async fn walk_and_hash(
             if rel == "manifest.json" {
                 continue;
             }
+            verify_chain_unchanged(chain).await?;
             let bytes = fs::read(&path).await?;
             let hash = hex::encode(Sha256::digest(&bytes));
             map.insert(rel, hash);
@@ -1531,6 +1575,77 @@ mod tests {
             .filter_map(|e| e.ok())
             .count();
         assert_eq!(leaked, 0, "no directory may be created through the link");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn create_refuses_workspace_swapped_mid_create() {
+        let holder = TempDir::new().unwrap();
+        let ws = holder.path().join("ws");
+        let relocated = holder.path().join("relocated");
+        std::fs::create_dir_all(&relocated).unwrap();
+        // No copyable include dirs (hundreds of absent names): the only
+        // destination-side mutation after the child appears is the
+        // manifest write, whose guard chain must include the workspace
+        // identity for the swap below to be caught.
+        let absent_dirs: Vec<String> = (0..500).map(|i| format!("absent{i:03}")).collect();
+
+        // Swapper: once the freshly created backup child appears under
+        // the workspace, move the WHOLE workspace elsewhere and put a
+        // symlink in its place. The relocation preserves every inode, so
+        // root/child identities alone stay valid — only a chain anchored
+        // on the workspace identity itself notices the swap.
+        let swapper = {
+            let ws = ws.clone();
+            let moved = relocated.join("ws-moved");
+            std::thread::spawn(move || {
+                loop {
+                    let child = std::fs::read_dir(ws.join("backups")).ok().and_then(|rd| {
+                        rd.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+                            std::fs::symlink_metadata(p)
+                                .map(|m| m.is_dir())
+                                .unwrap_or(false)
+                        })
+                    });
+                    if child.is_some() {
+                        let _ = std::fs::rename(&ws, &moved);
+                        let _ = std::os::unix::fs::symlink(&moved, &ws);
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(20));
+                }
+            })
+        };
+
+        let tool = BackupTool::new(ws.clone(), absent_dirs, 10);
+        let res = tool.execute(json!({"command": "create"})).await;
+        let _ = swapper.join();
+
+        assert!(
+            std::fs::symlink_metadata(&ws)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
+            "swapper never swapped the workspace; test setup failed"
+        );
+        let relocated_manifest = std::fs::read_dir(relocated.join("ws-moved/backups"))
+            .ok()
+            .and_then(|rd| {
+                rd.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+                    std::fs::symlink_metadata(p)
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false)
+                })
+            })
+            .map(|child| child.join("manifest.json").exists())
+            .unwrap_or(false);
+        // On the fixed code the guarded manifest write refuses the swap
+        // and the create fails loudly; on code whose destination chains
+        // skip the workspace identity the write succeeds through the
+        // swapped name and the manifest lands in the relocated tree.
+        assert!(
+            !(res.is_ok() && relocated_manifest),
+            "create wrote its manifest through the swapped workspace into the relocated tree"
+        );
     }
 
     #[tokio::test]
