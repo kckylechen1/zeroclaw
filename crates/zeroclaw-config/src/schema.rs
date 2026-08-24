@@ -10068,11 +10068,17 @@ pub fn apply_persisted_proxy_on_boot(proxy: &ProxyConfig) {
 /// resolution as [`Config::load_or_init`], for the pre-runtime startup
 /// application of proxy state. Returns `None` when the install or its
 /// config file cannot be read (including a fresh install with no file
-/// yet), or when the on-disk schema version is not the current one — a
-/// legacy config is migrated by the full loader first and takes effect
-/// on the next boot, and a future/unknown version will be rejected by
-/// that loader, so neither may be applied speculatively. Proxy fields
-/// are never secret-annotated, so plain parsing is sufficient.
+/// yet), or when the on-disk schema version is not the current one: a
+/// legacy V1/V2 config is auto-migrated in memory by the full loader and
+/// the disk file is deliberately left untouched, so a raw pre-read of a
+/// legacy file is not authoritative — boot application for such an
+/// install starts once the migration is locked into the file
+/// (`zeroclaw config migrate` or any config save). Before this
+/// mechanism existed nothing applied persisted proxy state at boot, so
+/// never-migrated legacy installs are no worse than they were; a
+/// future/unknown version is rejected by the full loader and must not
+/// be applied speculatively either. Proxy fields are never
+/// secret-annotated, so plain parsing is sufficient.
 ///
 /// This is a raw file read by design: `ZEROCLAW_PROXY_*` env-var
 /// overrides are NOT reflected here. The runtime global is refreshed
