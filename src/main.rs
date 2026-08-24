@@ -1700,20 +1700,51 @@ fn main() -> Result<()> {
     // here, before any task that consumes proxy state (runtime global for
     // every scope, plus process env when enabled with
     // scope=environment). Must run before the multi-threaded runtime
-    // starts: process-env mutation is only sound while no worker threads
-    // exist. Daemon reloads refresh the runtime global only, keeping
-    // live-env application restart-only. Completions must not load
-    // config, so that invocation is excluded.
-    if std::env::args().nth(1).as_deref() != Some("completions") {
-        let pre_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        if let Some(proxy) = pre_runtime.block_on(config::read_persisted_proxy_for_boot()) {
+    // starts: process-env mutation is only sound while no runtime worker
+    // or blocking-pool threads exist, so the reading runtime is fully
+    // dropped before anything is applied. Daemon reloads refresh the
+    // runtime global only, keeping live-env application restart-only.
+    // Config-free invocations (stdout-only subcommands, help/version,
+    // parse errors — which re-parse below with localized help) skip the
+    // read entirely so their no-config-load contract is preserved.
+    if invocation_needs_config() {
+        let proxy = {
+            let pre_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let proxy = pre_runtime.block_on(config::read_persisted_proxy_for_boot());
+            // Drop before applying: shutting the runtime down joins its
+            // blocking-pool threads (the resolver may have touched
+            // tokio::fs), leaving the process single-threaded again.
+            drop(pre_runtime);
+            proxy
+        };
+        if let Some(proxy) = proxy {
             config::apply_persisted_proxy_on_boot(&proxy);
         }
     }
 
     async_main(command)
+}
+
+/// Decide pre-parse whether this invocation will need the config-driven
+/// runtime, using a non-exiting trial parse of the canonical (not yet
+/// localized) CLI. Parse errors, `--help` and `--version` surface as
+/// `Err` and re-parse inside `async_main` for the localized error/help
+/// path; the stdout-only subcommands are enumerated explicitly so they
+/// never touch the filesystem.
+fn invocation_needs_config() -> bool {
+    let command = Cli::command();
+    let Ok(matches) = command.try_get_matches_from(std::env::args_os()) else {
+        return false;
+    };
+    let config_free = [
+        matches.subcommand_matches("completions").is_some(),
+        matches.subcommand_matches("markdown-help").is_some(),
+        matches.subcommand_matches("markdown-schema").is_some(),
+        matches.subcommand_matches("help").is_some(),
+    ];
+    !config_free.into_iter().any(|excluded| excluded)
 }
 
 #[tokio::main]

@@ -10068,9 +10068,16 @@ pub fn apply_persisted_proxy_on_boot(proxy: &ProxyConfig) {
 /// resolution as [`Config::load_or_init`], for the pre-runtime startup
 /// application of proxy state. Returns `None` when the install or its
 /// config file cannot be read (including a fresh install with no file
-/// yet); proxy fields are never secret-annotated, so plain parsing is
-/// sufficient. Runs on a current-thread runtime inside the caller so no
-/// worker threads exist while the result is applied.
+/// yet), or when the on-disk schema version is not the current one — a
+/// legacy config is migrated by the full loader first and takes effect
+/// on the next boot, and a future/unknown version will be rejected by
+/// that loader, so neither may be applied speculatively. Proxy fields
+/// are never secret-annotated, so plain parsing is sufficient.
+///
+/// This is a raw file read by design: `ZEROCLAW_PROXY_*` env-var
+/// overrides are NOT reflected here. The runtime global is refreshed
+/// from the fully-loaded config after `load_or_init` runs; the process
+/// env stays restart-only and follows the persisted file.
 pub async fn read_persisted_proxy_for_boot() -> Option<ProxyConfig> {
     let (default_zeroclaw_dir, default_workspace_dir) = default_config_and_data_dirs().ok()?;
     let (zeroclaw_dir, _legacy_workspace_dir, _source) =
@@ -10079,6 +10086,11 @@ pub async fn read_persisted_proxy_for_boot() -> Option<ProxyConfig> {
             .ok()?;
     let raw = std::fs::read_to_string(zeroclaw_dir.join("config.toml")).ok()?;
     let value: toml::Value = toml::from_str(&raw).ok()?;
+    if crate::migration::detect_version(&value).ok()
+        != Some(crate::migration::CURRENT_SCHEMA_VERSION)
+    {
+        return None;
+    }
     let proxy_table = value.get("proxy")?.clone();
     ProxyConfig::deserialize(proxy_table).ok()
 }
