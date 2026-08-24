@@ -1704,9 +1704,9 @@ fn main() -> Result<()> {
     // or blocking-pool threads exist, so the reading runtime is fully
     // dropped before anything is applied. Daemon reloads refresh the
     // runtime global only, keeping live-env application restart-only.
-    // Config-free invocations (stdout-only subcommands, help/version,
-    // parse errors — which re-parse below with localized help) skip the
-    // read entirely so their no-config-load contract is preserved.
+    // Stdout-only invocations (completions, markdown-help/schema, help,
+    // version, parse errors) skip this read; the pre-existing i18n
+    // locale detection is unchanged by this gate.
     if invocation_needs_config() {
         let proxy = {
             let pre_runtime = tokio::runtime::Builder::new_current_thread()
@@ -1732,7 +1732,9 @@ fn main() -> Result<()> {
 /// localized) CLI. Parse errors, `--help` and `--version` surface as
 /// `Err` and re-parse inside `async_main` for the localized error/help
 /// path; the stdout-only subcommands are enumerated explicitly so they
-/// never touch the filesystem.
+/// skip the proxy bootstrap read. (The pre-existing locale detection in
+/// `apply_i18n_to_command` still reads config.toml on every invocation,
+/// including these — unchanged by this gate.)
 fn invocation_needs_config() -> bool {
     let command = Cli::command();
     let Ok(matches) = command.try_get_matches_from(std::env::args_os()) else {
