@@ -256,18 +256,18 @@ impl BackupTool {
     }
 
     async fn enforce_max_keep(&self) -> anyhow::Result<()> {
-        // Capture the same [workspace, backups root] anchor the listing
-        // uses, so pruning verifies the identities the listing observed
-        // rather than re-deriving them against a possibly swapped tree.
-        let anchor = self.anchored_read_root().await?;
-        let mut backups = self.list_backup_dirs().await?;
+        // List and prune under ONE captured [workspace, backups root]
+        // anchor, so the identities the listing observed are exactly the
+        // ones every removal verifies — never a mix of two independently
+        // captured anchors.
+        let (mut backups, anchor) = self.list_backup_dirs_anchored().await?;
         // Sorted newest-first; drop excess from the tail.
         while backups.len() > self.max_keep {
             if let Some(old) = backups.pop() {
-                match &anchor {
-                    Some(chain) => self.remove_verified_backup_dir(&old, chain).await?,
-                    None => anyhow::bail!("backups root vanished between listing and pruning"),
+                if anchor.is_empty() {
+                    anyhow::bail!("backups root vanished between listing and pruning");
                 }
+                self.remove_verified_backup_dir(&old, &anchor).await?;
             }
         }
         Ok(())
@@ -365,9 +365,12 @@ impl BackupTool {
         Ok(())
     }
 
-    async fn list_backup_dirs(&self) -> anyhow::Result<Vec<PathBuf>> {
+    /// List backups together with the single anchor the listing observed,
+    /// so a caller that also mutates (pruning) can verify against exactly
+    /// these identities instead of capturing a second, independent one.
+    async fn list_backup_dirs_anchored(&self) -> anyhow::Result<(Vec<PathBuf>, Vec<DirLink>)> {
         let Some(chain) = self.anchored_read_root().await? else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
         let root = chain.last().cloned().expect("anchor chain has a root");
         let mut entries = Vec::new();
@@ -386,7 +389,11 @@ impl BackupTool {
         verify_chain(&chain).await?;
         entries.sort();
         entries.reverse(); // newest first
-        Ok(entries)
+        Ok((entries, chain))
+    }
+
+    async fn list_backup_dirs(&self) -> anyhow::Result<Vec<PathBuf>> {
+        Ok(self.list_backup_dirs_anchored().await?.0)
     }
 
     /// List backups (newest first). Shared with the gateway operator surface.
