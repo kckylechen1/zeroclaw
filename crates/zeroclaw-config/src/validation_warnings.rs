@@ -25,6 +25,14 @@ use serde::{Deserialize, Serialize};
 ///   enforced (see `collect_deprecated_otp_action_gating_warnings` in
 ///   `schema.rs`); live OTP authentication (`enabled`, `token_ttl_secs`,
 ///   `cache_valid_secs`) is unaffected.
+/// - `gateway_pairing_dashboard_removed`: the `[gateway.pairing_dashboard]`
+///   config section was removed from the schema; a `ZEROCLAW_gateway__
+///   pairing_dashboard__*` env override (ignored by the env-override
+///   tombstone before the unknown-path rejection) or a leftover
+///   `[gateway.pairing_dashboard]` file section is ignored and reported via
+///   this warning (see `RETIRED_ENV_TOMBSTONES` in `env_overrides.rs` and
+///   the retired-section tombstone in `Config::load_or_init`). The
+///   compatibility shims will be removed in a later announced window.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ValidationWarning {

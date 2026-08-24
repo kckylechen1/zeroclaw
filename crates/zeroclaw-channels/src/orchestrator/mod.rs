@@ -1168,6 +1168,7 @@ async fn load_runtime_config_and_defaults(
     let applied = zeroclaw_config::env_overrides::apply_env_overrides(&mut parsed)?;
     parsed.env_overridden_paths = applied.paths;
     parsed.pre_override_snapshots = applied.snapshots;
+    parsed.retired_surface_warnings = applied.tombstone_warnings;
 
     let model_provider = resolved_runtime_model_provider_ref(&parsed, agent_alias)?;
     let defaults = runtime_defaults_from_config(&parsed, &model_provider)?;

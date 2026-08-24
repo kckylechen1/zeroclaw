@@ -122,6 +122,19 @@ pub struct Config {
     /// section is impossible to miss.
     #[serde(skip)]
     pub degraded_sections: Vec<String>,
+    /// Structured deprecation warnings for retired config surfaces,
+    /// observed at load time: `ZEROCLAW_gateway__pairing_dashboard__*` env
+    /// overrides (ignored by the env-override tombstone) and a
+    /// `[gateway.pairing_dashboard]` section left in a config file. This
+    /// field is the only place those observations can live — nothing else
+    /// in the loaded `Config` remembers them. Replayed by
+    /// `collect_warnings()` so the stable-code warning machinery (logs,
+    /// gateway API, dashboard) surfaces them like any other warning.
+    /// Never serialized — a load-time signal. Sunset: these tombstones are
+    /// compatibility shims and will be removed in a later announced
+    /// window, after which the paths hard-error or parse-drop silently.
+    #[serde(skip)]
+    pub retired_surface_warnings: Vec<crate::validation_warnings::ValidationWarning>,
     /// Config file schema version.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -7089,11 +7102,6 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub session_ttl_hours: u32,
 
-    /// Pairing dashboard configuration
-    #[serde(default)]
-    #[nested]
-    pub pairing_dashboard: PairingDashboardConfig,
-
     /// Path to the web dashboard `dist` directory. When set, the gateway
     /// serves the compiled frontend from the filesystem instead of requiring
     /// it to be embedded in the binary. Accepts absolute paths or paths
@@ -7202,63 +7210,12 @@ impl Default for GatewayConfig {
             idempotency_max_keys: default_gateway_idempotency_max_keys(),
             session_persistence: true,
             session_ttl_hours: 0,
-            pairing_dashboard: PairingDashboardConfig::default(),
             web_dist_dir: None,
             tls: None,
             request_timeout_secs: default_gateway_request_timeout_secs(),
             long_running_request_timeout_secs: default_gateway_long_running_request_timeout_secs(),
             check_updates: true,
             allow_self_upgrade: false,
-        }
-    }
-}
-
-/// Pairing dashboard configuration (`[gateway.pairing_dashboard]`).
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "gateway.pairing_dashboard"]
-pub struct PairingDashboardConfig {
-    /// Length of pairing codes (default: 8)
-    #[serde(default = "default_pairing_code_length")]
-    pub code_length: usize,
-    /// Time-to-live for pending pairing codes in seconds (default: 3600)
-    #[serde(default = "default_pairing_ttl")]
-    pub code_ttl_secs: u64,
-    /// Maximum concurrent pending pairing codes (default: 3)
-    #[serde(default = "default_max_pending_codes")]
-    pub max_pending_codes: usize,
-    /// Maximum failed pairing attempts before lockout (default: 5)
-    #[serde(default = "default_max_failed_attempts")]
-    pub max_failed_attempts: u32,
-    /// Lockout duration in seconds after max attempts (default: 300)
-    #[serde(default = "default_pairing_lockout_secs")]
-    pub lockout_secs: u64,
-}
-
-fn default_pairing_code_length() -> usize {
-    8
-}
-fn default_pairing_ttl() -> u64 {
-    3600
-}
-fn default_max_pending_codes() -> usize {
-    3
-}
-fn default_max_failed_attempts() -> u32 {
-    5
-}
-fn default_pairing_lockout_secs() -> u64 {
-    300
-}
-
-impl Default for PairingDashboardConfig {
-    fn default() -> Self {
-        Self {
-            code_length: default_pairing_code_length(),
-            code_ttl_secs: default_pairing_ttl(),
-            max_pending_codes: default_max_pending_codes(),
-            max_failed_attempts: default_max_failed_attempts(),
-            lockout_secs: default_pairing_lockout_secs(),
         }
     }
 }
@@ -17804,6 +17761,7 @@ impl Default for Config {
             dirty_paths: std::collections::HashSet::new(),
             degraded_security: Vec::new(),
             degraded_sections: Vec::new(),
+            retired_surface_warnings: Vec::new(),
             schema_version: crate::migration::CURRENT_SCHEMA_VERSION,
             providers: crate::providers::Providers::default(),
             model_routes: Vec::new(),
@@ -18903,12 +18861,71 @@ impl Config {
             // Detect the on-disk version up-front so we can emit one WARN
             // line when the daemon auto-migrates an older config in memory:
             // the disk file is left untouched and the user is advised to lock
-            // the migration in with `zeroclaw config migrate`.
-            let stale_version = toml::from_str::<toml::Value>(&contents)
-                .ok()
+            // the migration in with `zeroclaw config migrate`. The parsed raw
+            // root also feeds the composition gate and the retired-section
+            // tombstone below, so parse once here.
+            let raw_root = toml::from_str::<toml::Value>(&contents).ok();
+            let stale_version = raw_root
                 .as_ref()
                 .and_then(|v| crate::migration::detect_version(v).ok())
                 .filter(|n| *n != crate::migration::CURRENT_SCHEMA_VERSION);
+
+            // `composition` hard-error gate. The key is brand-new (no
+            // release predating it can legitimately carry a value this
+            // binary didn't ship), so an invalid value is an operator
+            // typo, never a legacy artifact. Without this gate the
+            // resilient loader below would silently drop the key and
+            // resolve absent → `full`, widening the assembled tool
+            // surface past what the operator asked for. Validity is
+            // decided by the enum's own deserializer (single source of
+            // truth for accepted values); the message names the
+            // documented set including the `legacy` alias, which the raw
+            // serde error omits.
+            if let Some(raw_composition) = raw_root.as_ref().and_then(|v| v.get("composition"))
+                && <crate::composition::Composition as serde::Deserialize>::deserialize(
+                    raw_composition.clone(),
+                )
+                .is_err()
+            {
+                ::zeroclaw_log::record!(
+                    ERROR,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "value": raw_composition.to_string(),
+                        })),
+                    "config.toml `composition` value is invalid; refusing to load"
+                );
+                anyhow::bail!(
+                    "config.toml `composition` value {} is invalid; expected one of {}",
+                    raw_composition,
+                    crate::composition::DOCUMENTED_VALUES
+                );
+            }
+
+            // Retired `[gateway.pairing_dashboard]` section tombstone.
+            // `GatewayConfig` does not use `deny_unknown_fields`, so serde
+            // silently drops the unknown nested section and deployments
+            // carrying it keep parsing; record one structured warning so
+            // the retirement is visible instead of a silent no-op.
+            // Sunset: this tombstone is a compatibility shim and will be
+            // removed in a later announced window.
+            let retired_section_warning = raw_root
+                .as_ref()
+                .and_then(|v| v.get("gateway"))
+                .and_then(toml::Value::as_table)
+                .and_then(|g| g.get("pairing_dashboard"))
+                .map(|_| {
+                    crate::validation_warnings::ValidationWarning::new(
+                        "gateway_pairing_dashboard_removed",
+                        "[gateway.pairing_dashboard] in config.toml is ignored: the section \
+                         was removed from the schema and has no runtime consumer. This \
+                         compatibility shim will be removed in a later announced window. \
+                         Remove the section.",
+                        "gateway.pairing_dashboard",
+                    )
+                });
+
             // Daemon load must never hard-fail on a malformed config — the
             // operator needs the process up to repair it. The resilient path
             // degrades (dropping invalid blocks to defaults); security-critical
@@ -19061,6 +19078,10 @@ impl Config {
             let applied = crate::env_overrides::apply_env_overrides(&mut config)?;
             config.env_overridden_paths = applied.paths;
             config.pre_override_snapshots = applied.snapshots;
+            config.retired_surface_warnings = retired_section_warning
+                .into_iter()
+                .chain(applied.tombstone_warnings)
+                .collect();
 
             // Validation must NOT prevent the daemon from booting. If
             // it did, a single broken agent reference would lock the
@@ -19110,6 +19131,7 @@ impl Config {
             let applied = crate::env_overrides::apply_env_overrides(&mut config)?;
             config.env_overridden_paths = applied.paths;
             config.pre_override_snapshots = applied.snapshots;
+            config.retired_surface_warnings = applied.tombstone_warnings;
 
             // Same boot-resilience as the load-existing branch above:
             // a fresh-init config can't realistically fail validation,
@@ -19143,6 +19165,10 @@ impl Config {
     /// and document the code in `validation_warnings.rs`.
     pub fn collect_warnings(&self) -> Vec<crate::validation_warnings::ValidationWarning> {
         let mut warnings = Vec::new();
+        // Load-time observations (retired env prefixes, retired file
+        // sections) have no other in-config representation; replay them so
+        // the structured warning surface stays the single exit point.
+        warnings.extend(self.retired_surface_warnings.iter().cloned());
         self.collect_fallback_warnings(&mut warnings);
         self.collect_cross_provider_summary_model_warnings(&mut warnings);
         self.collect_a2a_exposed_skills_warnings(&mut warnings);
@@ -25416,6 +25442,7 @@ auto_save = true
             composition: None,
             degraded_security: Vec::new(),
             degraded_sections: Vec::new(),
+            retired_surface_warnings: Vec::new(),
             schema_version: crate::migration::CURRENT_SCHEMA_VERSION,
             providers: {
                 let mut p = crate::providers::Providers::default();
@@ -26407,6 +26434,7 @@ default_temperature = 0.7
             composition: None,
             degraded_security: Vec::new(),
             degraded_sections: Vec::new(),
+            retired_surface_warnings: Vec::new(),
             schema_version: crate::migration::CURRENT_SCHEMA_VERSION,
             providers,
             model_routes: Vec::new(),
@@ -27918,7 +27946,6 @@ allowed_numbers = ["+1", "+2"]
             idempotency_max_keys: 4096,
             session_persistence: true,
             session_ttl_hours: 0,
-            pairing_dashboard: PairingDashboardConfig::default(),
             web_dist_dir: None,
             tls: None,
             request_timeout_secs: 30,
@@ -28887,6 +28914,124 @@ wire_api = "ws"
         assert!(
             !workspace_dir.join("agents").exists(),
             "fresh init must not create agents/ tree"
+        );
+
+        // SAFETY: test-only, single-threaded test runner.
+        unsafe { std::env::remove_var("ZEROCLAW_WORKSPACE") };
+        if let Some(home) = original_home {
+            // SAFETY: test-only, single-threaded test runner.
+            unsafe { std::env::set_var("HOME", home) };
+        } else {
+            // SAFETY: test-only, single-threaded test runner.
+            unsafe { std::env::remove_var("HOME") };
+        }
+        let _ = fs::remove_dir_all(temp_home).await;
+    }
+
+    #[test]
+    async fn load_or_init_invalid_composition_hard_errors() {
+        // `composition` is brand-new (no released config can carry a value
+        // this binary didn't ship), so an invalid value is an operator
+        // typo, never a legacy artifact. It must fail the load with the
+        // documented value list instead of being silently salvaged to
+        // absent → `full`, which would widen the assembled tool surface
+        // past what the operator asked for.
+        let _env_guard = env_override_lock().await;
+        let temp_home =
+            std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
+        let existing_dir = temp_home.join("profile-invalid-composition");
+        let existing_path = existing_dir.join("config.toml");
+        fs::create_dir_all(&existing_dir).await.unwrap();
+        fs::write(
+            &existing_path,
+            "composition = \"everything\"\ndefault_temperature = 0.7\n",
+        )
+        .await
+        .unwrap();
+        let original_home = std::env::var("HOME").ok();
+        // SAFETY: test-only, single-threaded test runner.
+        unsafe { std::env::set_var("HOME", &temp_home) };
+        // SAFETY: test-only, single-threaded test runner.
+        unsafe { std::env::set_var("ZEROCLAW_WORKSPACE", &existing_dir) };
+
+        let err = Box::pin(Config::load_or_init())
+            .await
+            .expect_err("invalid composition must fail config load");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("composition"),
+            "error must name the offending key: {msg}"
+        );
+        assert!(
+            msg.contains("minimal") && msg.contains("full") && msg.contains("legacy"),
+            "error must list the valid values (minimal/full/legacy): {msg}"
+        );
+
+        // SAFETY: test-only, single-threaded test runner.
+        unsafe { std::env::remove_var("ZEROCLAW_WORKSPACE") };
+        if let Some(home) = original_home {
+            // SAFETY: test-only, single-threaded test runner.
+            unsafe { std::env::set_var("HOME", home) };
+        } else {
+            // SAFETY: test-only, single-threaded test runner.
+            unsafe { std::env::remove_var("HOME") };
+        }
+        let _ = fs::remove_dir_all(temp_home).await;
+    }
+
+    #[test]
+    async fn load_or_init_retired_pairing_dashboard_section_parses_with_tombstone_warning() {
+        // Section-parse finding: `[gateway.pairing_dashboard]` in a config
+        // file is an unknown (silently ignored) nested section after schema
+        // removal — serde drops it because `GatewayConfig` does not use
+        // `deny_unknown_fields`, so deployments carrying the section keep
+        // parsing. This tombstone mirrors the env-prefix shim: the load
+        // succeeds and the retired section surfaces one structured
+        // `gateway_pairing_dashboard_removed` warning.
+        let _env_guard = env_override_lock().await;
+        let temp_home =
+            std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
+        let existing_dir = temp_home.join("profile-retired-section");
+        let existing_path = existing_dir.join("config.toml");
+        fs::create_dir_all(&existing_dir).await.unwrap();
+        fs::write(
+            &existing_path,
+            "default_temperature = 0.7\n\n[gateway.pairing_dashboard]\ncode_length = 8\ncode_ttl_secs = 3600\nmax_pending_codes = 3\nmax_failed_attempts = 5\nlockout_secs = 300\n",
+        )
+        .await
+        .unwrap();
+        let original_home = std::env::var("HOME").ok();
+        // SAFETY: test-only, single-threaded test runner.
+        unsafe { std::env::set_var("HOME", &temp_home) };
+        // SAFETY: test-only, single-threaded test runner.
+        unsafe { std::env::set_var("ZEROCLAW_WORKSPACE", &existing_dir) };
+
+        let config = Box::pin(Config::load_or_init())
+            .await
+            .expect("retired section must keep parsing (tombstone, not error)");
+
+        // Strict migration path tolerates the section too (serde ignores
+        // unknown nested sections) — the file section is not a load error
+        // on any path.
+        let contents = fs::read_to_string(&existing_path).await.unwrap();
+        crate::migration::migrate_to_current(&contents)
+            .expect("strict parse must also tolerate the retired section");
+
+        let warnings = config.collect_warnings();
+        let warning = warnings
+            .iter()
+            .find(|w| w.path == "gateway.pairing_dashboard")
+            .unwrap_or_else(|| panic!("expected tombstone warning, got: {warnings:?}"));
+        assert_eq!(warning.code, "gateway_pairing_dashboard_removed");
+        assert!(
+            warning.message.contains("ignored"),
+            "warning must state the section is ignored: {}",
+            warning.message
+        );
+        assert!(
+            warning.message.contains("[gateway.pairing_dashboard]"),
+            "warning must name the retired section: {}",
+            warning.message
         );
 
         // SAFETY: test-only, single-threaded test runner.
