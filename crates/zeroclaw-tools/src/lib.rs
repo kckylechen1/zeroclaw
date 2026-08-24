@@ -60,6 +60,7 @@ pub mod file_edit;
 pub mod file_upload;
 pub mod file_upload_bundle;
 pub mod file_write;
+mod fs_guard;
 pub mod gemini_cli;
 pub mod git_forge;
 pub mod git_operations;

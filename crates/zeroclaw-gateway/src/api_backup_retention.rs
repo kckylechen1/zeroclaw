@@ -817,4 +817,66 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(stats["total_files"], 0);
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn purge_failure_surfaces_as_error_status() {
+        let (_dir, state) = state_with_workspace();
+        state.config.write().data_retention.retention_days = 0;
+        let workspace = state.config.read().agent_workspace_dir("main");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        // A purge-eligible file inside a read-only directory: the operator
+        // API must report the failed deletion as an error status, never as
+        // a successful purge.
+        let locked = workspace.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let doomed = locked.join("old.txt");
+        std::fs::write(&doomed, "old").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(365 * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&doomed)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(past))
+            .unwrap();
+        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&locked, perms).unwrap();
+
+        let (status, payload) = json_of(
+            retention_purge(
+                State(state),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+                Path("main".to_string()),
+                body(&serde_json::json!({ "dry_run": false })),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+        }
+
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "a purge whose deletion failed must not surface as success: {payload}"
+        );
+        assert_eq!(status, StatusCode::CONFLICT, "body={payload}");
+        assert_eq!(
+            payload["result"]["files"], 0,
+            "counters must count only confirmed deletions: {payload}"
+        );
+        let failures = payload["result"]["failures"].as_array().unwrap();
+        assert_eq!(
+            failures.len(),
+            1,
+            "the failure must be in the payload: {payload}"
+        );
+    }
 }

@@ -1,3 +1,4 @@
+use crate::fs_guard::{FileId, UnlinkOutcome, file_id_of, guarded_unlink};
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -43,28 +44,44 @@ impl DataManagementTool {
     }
 
     /// Purge files older than the retention window. `dry_run = true`
-    /// reports what would be deleted and removes nothing. Shared with the
-    /// gateway operator surface, which must keep the destructive guard
-    /// intact.
+    /// reports what would be deleted and removes nothing. Deletion
+    /// failures are never swallowed: they are reported per entry in the
+    /// result, the counters count only confirmed deletions, and any
+    /// failure makes the whole purge report failure so the operator
+    /// surface cannot mistake a no-op purge for a successful one.
+    /// Shared with the gateway operator surface, which must keep the
+    /// destructive guard intact.
     pub async fn cmd_purge(&self, dry_run: bool) -> anyhow::Result<ToolResult> {
         let cutoff = chrono::Utc::now()
             - chrono::Duration::days(i64::try_from(self.retention_days).unwrap_or(i64::MAX));
         let cutoff_ts: u64 = cutoff.timestamp().try_into().unwrap_or(0);
-        let ((deleted, bytes), skipped) =
-            purge_old_files(&self.workspace_dir, cutoff_ts, dry_run).await?;
+        let outcome = purge_old_files(&self.workspace_dir, cutoff_ts, dry_run).await?;
 
+        let failures: Vec<serde_json::Value> = outcome
+            .failures
+            .iter()
+            .map(|f| json!({ "path": f.path, "error": f.error }))
+            .collect();
+        let failed = failures.len();
         Ok(ToolResult {
-            success: true,
+            success: failed == 0,
             output: json!({
                 "dry_run": dry_run,
-                "files": deleted,
-                "bytes_freed": bytes,
-                "bytes_freed_human": format_bytes(bytes),
-                "symlinks_skipped": skipped,
+                "files": outcome.deleted,
+                "bytes_freed": outcome.bytes,
+                "bytes_freed_human": format_bytes(outcome.bytes),
+                "symlinks_skipped": outcome.skipped,
+                "failures": failures,
             })
             .to_string()
             .into(),
-            error: None,
+            error: if failed == 0 {
+                None
+            } else {
+                Some(format!(
+                    "{failed} deletion(s) failed; counts reflect confirmed deletions only"
+                ))
+            },
         })
     }
 
@@ -164,12 +181,20 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 /// Counts files older than the cutoff, plus how many symlinks were
-/// skipped so the operator sees the blind spot instead of guessing.
+/// skipped so the operator sees the blind spot instead of guessing. All
+/// stats are non-following: a symlink never contributes foreign data.
 async fn count_files_older_than(dir: &Path, cutoff_epoch: u64) -> anyhow::Result<(usize, usize)> {
     let mut count = 0;
     let mut skipped = 0;
-    if !dir.is_dir() {
-        return Ok((0, 0));
+    match fs::symlink_metadata(dir).await {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => {
+            // A symlinked or non-directory root is a blind spot, not a
+            // subtree to traverse through.
+            return Ok((0, 1));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(e) => return Err(e.into()),
     }
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
@@ -185,7 +210,9 @@ async fn count_files_older_than(dir: &Path, cutoff_epoch: u64) -> anyhow::Result
             let (c, s) = Box::pin(count_files_older_than(&path, cutoff_epoch)).await?;
             count += c;
             skipped += s;
-        } else if let Ok(meta) = fs::metadata(&path).await {
+        } else if file_type.is_file()
+            && let Ok(meta) = fs::symlink_metadata(&path).await
+        {
             let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             let epoch = modified
                 .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -199,50 +226,150 @@ async fn count_files_older_than(dir: &Path, cutoff_epoch: u64) -> anyhow::Result
     Ok((count, skipped))
 }
 
-/// Purges real files older than the cutoff, never following or deleting
-/// symlinks; the returned `skipped` count makes those omissions visible.
+/// Outcome of a purge walk: confirmed (or, in dry-run mode, planned)
+/// deletions, and per-entry failures for deletions that did not succeed.
+struct PurgeOutcome {
+    deleted: usize,
+    bytes: u64,
+    skipped: usize,
+    failures: Vec<PurgeFailure>,
+}
+
+struct PurgeFailure {
+    path: String,
+    error: String,
+}
+
+/// Purge old files under `dir`, never following or deleting symlinks and
+/// never deleting through a path component that changed identity since
+/// the walk observed it.
 async fn purge_old_files(
     dir: &Path,
     cutoff_epoch: u64,
     dry_run: bool,
-) -> anyhow::Result<((usize, u64), usize)> {
-    let mut deleted = 0usize;
-    let mut bytes = 0u64;
-    let mut skipped = 0usize;
-    if !dir.is_dir() {
-        return Ok(((0, 0), 0));
+) -> anyhow::Result<PurgeOutcome> {
+    let mut out = PurgeOutcome {
+        deleted: 0,
+        bytes: 0,
+        skipped: 0,
+        failures: Vec::new(),
+    };
+    Box::pin(purge_walk(dir, cutoff_epoch, dry_run, None, &mut out)).await?;
+    Ok(out)
+}
+
+/// One step of the purge walk. Every stat is non-following
+/// (`symlink_metadata` / `DirEntry::file_type`): a symlink is skipped,
+/// never traversed, and any directory that no longer has the identity the
+/// parent walk observed is refused, because that is exactly what a
+/// mid-walk swap to a symlink looks like. Each file removal re-verifies,
+/// in a single blocking step, both the containing directory's identity
+/// and the entry's own identity immediately before the unlink. The
+/// residual window between that re-check and the unlink itself is one
+/// syscall wide — inherent to path-based APIs, and the same discipline
+/// the `fs_guard` helpers apply.
+async fn purge_walk(
+    dir: &Path,
+    cutoff_epoch: u64,
+    dry_run: bool,
+    expected_id: Option<FileId>,
+    out: &mut PurgeOutcome,
+) -> anyhow::Result<()> {
+    let meta = match fs::symlink_metadata(dir).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if meta.file_type().is_symlink() {
+        anyhow::bail!("refusing to purge through symlink: {}", dir.display());
     }
+    if !meta.is_dir() {
+        return Ok(());
+    }
+    if let Some(id) = expected_id
+        && file_id_of(&meta) != id
+    {
+        anyhow::bail!(
+            "{} changed identity during the purge; refusing to continue",
+            dir.display()
+        );
+    }
+    let dir_id = file_id_of(&meta);
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
         let file_type = entry.file_type().await?;
         if file_type.is_symlink() {
             // Never delete through or descend into a symlink: purge stays
             // jailed to real workspace files even if a link points outside.
-            skipped += 1;
+            out.skipped += 1;
             continue;
         }
         let path = entry.path();
         if file_type.is_dir() {
-            let ((d, b), s) = Box::pin(purge_old_files(&path, cutoff_epoch, dry_run)).await?;
-            deleted += d;
-            bytes += b;
-            skipped += s;
-        } else if let Ok(meta) = fs::metadata(&path).await {
-            let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            // Re-check before recursing: the name must still name the same
+            // real directory the walk just listed, or the recursion could
+            // follow a symlink swapped in after the listing.
+            let child_meta = fs::symlink_metadata(&path).await?;
+            if child_meta.file_type().is_symlink() {
+                anyhow::bail!("refusing to purge through symlink: {}", path.display());
+            }
+            if child_meta.is_dir() {
+                Box::pin(purge_walk(
+                    &path,
+                    cutoff_epoch,
+                    dry_run,
+                    Some(file_id_of(&child_meta)),
+                    out,
+                ))
+                .await?;
+            }
+        } else if file_type.is_file() {
+            let m = fs::symlink_metadata(&path).await?;
+            if m.file_type().is_symlink() {
+                anyhow::bail!("refusing to purge through symlink: {}", path.display());
+            }
+            if !m.is_file() {
+                continue;
+            }
+            let modified = m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             let epoch = modified
                 .duration_since(std::time::SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
             if epoch < cutoff_epoch {
-                bytes += meta.len();
-                deleted += 1;
-                if !dry_run {
-                    let _ = fs::remove_file(&path).await;
+                if dry_run {
+                    out.deleted += 1;
+                    out.bytes += m.len();
+                } else {
+                    let file_id = file_id_of(&m);
+                    let path_str = path.display().to_string();
+                    let dir_path = dir.to_path_buf();
+                    let res = tokio::task::spawn_blocking(move || {
+                        guarded_unlink(dir_path, dir_id, path, file_id)
+                    })
+                    .await?;
+                    match res {
+                        Ok(UnlinkOutcome::Removed) => {
+                            out.deleted += 1;
+                            out.bytes += m.len();
+                        }
+                        Ok(UnlinkOutcome::Vanished) => {
+                            // Deleted by someone else mid-purge: not our
+                            // deletion, so it is neither counted nor
+                            // reported as a failure.
+                        }
+                        Err(error) => out.failures.push(PurgeFailure {
+                            path: path_str,
+                            error,
+                        }),
+                    }
                 }
             }
         }
+        // Other entry kinds (sockets, devices) are not workspace data
+        // files and are left alone.
     }
-    Ok(((deleted, bytes), skipped))
+    Ok(())
 }
 
 async fn dir_stats(root: &Path) -> anyhow::Result<(usize, u64, serde_json::Value, usize)> {
@@ -251,8 +378,13 @@ async fn dir_stats(root: &Path) -> anyhow::Result<(usize, u64, serde_json::Value
     let mut skipped = 0usize;
     let mut breakdown = serde_json::Map::new();
 
-    if !root.is_dir() {
-        return Ok((0, 0, serde_json::Value::Object(breakdown), 0));
+    match fs::symlink_metadata(root).await {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Ok((0, 0, serde_json::Value::Object(breakdown), 1)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((0, 0, serde_json::Value::Object(breakdown), 0));
+        }
+        Err(e) => return Err(e.into()),
     }
 
     let mut rd = fs::read_dir(root).await?;
@@ -275,7 +407,9 @@ async fn dir_stats(root: &Path) -> anyhow::Result<(usize, u64, serde_json::Value
                 name,
                 json!({"files": f, "size": b, "size_human": format_bytes(b)}),
             );
-        } else if let Ok(meta) = fs::metadata(&path).await {
+        } else if file_type.is_file()
+            && let Ok(meta) = fs::symlink_metadata(&path).await
+        {
             total_files += 1;
             total_bytes += meta.len();
         }
@@ -305,7 +439,9 @@ async fn count_dir_contents(dir: &Path) -> anyhow::Result<(usize, u64, usize)> {
             files += f;
             bytes += b;
             skipped += s;
-        } else if let Ok(meta) = fs::metadata(&path).await {
+        } else if file_type.is_file()
+            && let Ok(meta) = fs::symlink_metadata(&path).await
+        {
             files += 1;
             bytes += meta.len();
         }
@@ -404,6 +540,134 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&res.output).unwrap();
         assert_eq!(v["symlinks_skipped"], 2);
+    }
+
+    /// Pin a file's modification time one year in the past so it is always
+    /// older than any retention cutoff a test computes.
+    fn make_old(path: &Path) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(365 * 86_400);
+        f.set_times(std::fs::FileTimes::new().set_modified(past))
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn purge_reports_deletion_failures_and_counts_only_confirmed() {
+        let tmp = TempDir::new().unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let doomed = locked.join("old.txt");
+        std::fs::write(&doomed, "old").unwrap();
+        make_old(&doomed);
+
+        // A read-only containing directory: the file is purge-eligible but
+        // its deletion fails, so a purge that swallowed the error would
+        // report files it never removed.
+        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&locked, perms).unwrap();
+        let _restore = scopeguard::guard(locked.clone(), |p| {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755));
+        });
+
+        let tool = DataManagementTool::new(tmp.path().to_path_buf(), 0);
+        let res = tool
+            .execute(json!({"command": "purge", "dry_run": false}))
+            .await
+            .unwrap();
+        assert!(
+            !res.success,
+            "a purge whose deletion failed must not report success"
+        );
+        let v: serde_json::Value = serde_json::from_str(&res.output).unwrap();
+        assert_eq!(
+            v["files"], 0,
+            "counters must count only confirmed deletions: {v}"
+        );
+        let failures = v["failures"].as_array().unwrap();
+        assert_eq!(
+            failures.len(),
+            1,
+            "the failed deletion must be reported: {v}"
+        );
+        assert!(doomed.exists(), "the undeletable file must still exist");
+        assert!(
+            res.error.is_some(),
+            "the error channel must carry the failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn purge_recursion_cannot_follow_a_directory_swapped_mid_walk() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let swap_dir = tmp.path().join("swap");
+        std::fs::create_dir(&swap_dir).unwrap();
+
+        // Two hundred real purge-eligible files inside the swap directory...
+        for i in 0..200 {
+            let f = swap_dir.join(format!("a{i:03}"));
+            std::fs::write(&f, "x").unwrap();
+            make_old(&f);
+        }
+        // ...but only ten matching names exist outside the jail. Any walk
+        // step that resolves through a symlinked `swap` deletes those.
+        for i in 190..200 {
+            let f = outside.path().join(format!("a{i:03}"));
+            std::fs::write(&f, "precious").unwrap();
+            make_old(&f);
+        }
+
+        // Swapper: wait until the purge has started removing files from the
+        // real directory, then rename it away and put a symlink to the
+        // outside directory in its place, keeping that link for the rest
+        // of the walk. Renaming instead of deleting keeps the swap to two
+        // syscalls so it reliably lands mid-walk.
+        let swapper = {
+            let target = outside.path().to_path_buf();
+            let swap_dir = swap_dir.clone();
+            let staging = tmp.path().join("staged-away");
+            std::thread::spawn(move || {
+                loop {
+                    let remaining = std::fs::read_dir(&swap_dir)
+                        .map(|rd| rd.count())
+                        .unwrap_or(0);
+                    if remaining < 200 {
+                        let _ = std::fs::rename(&swap_dir, &staging);
+                        let _ = std::os::unix::fs::symlink(&target, &swap_dir);
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                }
+            })
+        };
+
+        let tool = DataManagementTool::new(tmp.path().to_path_buf(), 0);
+        let _ = tool
+            .execute(json!({"command": "purge", "dry_run": false}))
+            .await;
+        let _ = swapper.join();
+
+        // The attack itself must have landed, otherwise this test proves
+        // nothing: `swap` is now a symlink, its real contents renamed away.
+        assert!(
+            std::fs::symlink_metadata(&swap_dir)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
+            "swapper never replaced the directory; test setup failed"
+        );
+
+        for i in 190..200 {
+            let f = outside.path().join(format!("a{i:03}"));
+            assert!(
+                f.exists(),
+                "purge escaped through the swapped directory and deleted {}",
+                f.display()
+            );
+        }
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+use crate::fs_guard::{FileId, file_id_of, guarded_copy, guarded_remove_dir_all, guarded_write};
 use async_trait::async_trait;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -24,8 +25,8 @@ fn is_single_component(name: &str) -> bool {
 }
 
 /// A backup name must be a single path component. Names this tool creates
-/// always satisfy this (`backup-<timestamp>`); refusing anything else
-/// keeps verify/restore rooted under `<workspace>/backups/`.
+/// always satisfy this (`backup-<timestamp>-<random>`); refusing anything
+/// else keeps verify/restore rooted under `<workspace>/backups/`.
 fn valid_backup_name(name: &str) -> bool {
     is_single_component(name)
 }
@@ -56,23 +57,38 @@ impl BackupTool {
             }
         }
         let backups_root = self.checked_backups_root().await?;
+        // The random suffix makes the generated child name unguessable, so
+        // an attacker with write access inside `backups` cannot pre-create
+        // a symlink at the exact name this create will use. The freshly
+        // created child is still verified below — defense against a
+        // collision or a swap, not a substitute for the check.
         let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-        let name = format!("backup-{ts}");
+        let name = format!("backup-{ts}-{}", uuid::Uuid::new_v4().simple());
         let backup_dir = backups_root.join(&name);
         fs::create_dir_all(&backup_dir).await?;
+        let (backup_dir, child_id) = self.verify_created_child(&backups_root, &name).await?;
 
         let result = self.create_into(&backup_dir).await;
         if result.is_err() {
             // Never leave a partial, listable, restorable backup behind a
-            // failed create.
-            let _ = fs::remove_dir_all(&backup_dir).await;
+            // failed create — but only remove it if it is still the real
+            // directory this call created, never through a swapped name.
+            let dir = backup_dir.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || guarded_remove_dir_all(dir, child_id)).await;
         }
         result?;
 
         let checksums = compute_checksums(&backup_dir).await?;
         let file_count = checksums.len();
         let manifest = serde_json::to_string_pretty(&checksums)?;
-        fs::write(backup_dir.join("manifest.json"), &manifest).await?;
+        let dir = backup_dir.clone();
+        let manifest_path = dir.join("manifest.json");
+        tokio::task::spawn_blocking(move || {
+            guarded_write(dir, child_id, manifest_path, manifest.into_bytes())
+        })
+        .await?
+        .map_err(anyhow::Error::msg)?;
 
         // Enforce max_keep: remove oldest backups beyond the limit.
         self.enforce_max_keep().await?;
@@ -98,7 +114,10 @@ impl BackupTool {
             if is_symlink(&src).await {
                 anyhow::bail!("refusing to follow symlink: {}", src.display());
             }
-            if src.is_dir() {
+            let meta = fs::symlink_metadata(&src).await;
+            if let Ok(m) = meta
+                && m.is_dir()
+            {
                 let dst = backup_dir.join(sub);
                 copy_dir_recursive(&src, &dst).await?;
             }
@@ -125,16 +144,86 @@ impl BackupTool {
         // Sorted newest-first; drop excess from the tail.
         while backups.len() > self.max_keep {
             if let Some(old) = backups.pop() {
-                fs::remove_dir_all(old).await?;
+                self.remove_verified_backup_dir(&old).await?;
             }
         }
         Ok(())
     }
 
+    /// Verify the freshly created backup child is a real directory that
+    /// sits directly under the real backups root, with no component of the
+    /// path having resolved through a symlink, and return its path and
+    /// identity for the mutation guards that follow. A pre-planted
+    /// `backups/backup-*` symlink that `create_dir_all` silently accepted
+    /// is caught here before anything is written through it.
+    async fn verify_created_child(
+        &self,
+        backups_root: &Path,
+        name: &str,
+    ) -> anyhow::Result<(PathBuf, FileId)> {
+        let root_meta = fs::symlink_metadata(backups_root).await?;
+        if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
+            anyhow::bail!(
+                "backups root is not a real directory: {}",
+                backups_root.display()
+            );
+        }
+        let child = backups_root.join(name);
+        let child_meta = fs::symlink_metadata(&child).await?;
+        if child_meta.file_type().is_symlink() || !child_meta.is_dir() {
+            anyhow::bail!(
+                "created backup path is not a real directory: {}",
+                child.display()
+            );
+        }
+        // Canonical containment: the resolved child must sit directly
+        // inside the resolved root. If any component resolved through a
+        // symlink, the canonical paths disagree with the parent check.
+        let root_canon = fs::canonicalize(backups_root).await?;
+        let child_canon = fs::canonicalize(&child).await?;
+        if child_canon.parent() != Some(root_canon.as_path()) {
+            anyhow::bail!(
+                "backup directory resolved outside the backups root: {} -> {}",
+                child.display(),
+                child_canon.display()
+            );
+        }
+        Ok((child, file_id_of(&child_meta)))
+    }
+
+    /// Remove a listed backup directory after re-verifying it is still a
+    /// real directory directly under the real backups root: a name swapped
+    /// to a symlink between the listing and the removal must not be pruned
+    /// through.
+    async fn remove_verified_backup_dir(&self, old: &Path) -> anyhow::Result<()> {
+        let backups_root = self.checked_backups_root().await?;
+        let old_canon = fs::canonicalize(old).await?;
+        let root_canon = fs::canonicalize(&backups_root).await?;
+        if old_canon.parent() != Some(root_canon.as_path()) {
+            anyhow::bail!(
+                "refusing to prune outside the backups root: {}",
+                old.display()
+            );
+        }
+        let meta = fs::symlink_metadata(old).await?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            anyhow::bail!("refusing to prune through symlink: {}", old.display());
+        }
+        let id = file_id_of(&meta);
+        let dir = old.to_path_buf();
+        tokio::task::spawn_blocking(move || guarded_remove_dir_all(dir, id))
+            .await?
+            .map_err(anyhow::Error::msg)?;
+        Ok(())
+    }
+
     async fn list_backup_dirs(&self) -> anyhow::Result<Vec<PathBuf>> {
         let dir = self.checked_backups_root().await?;
-        if !dir.is_dir() {
-            return Ok(Vec::new());
+        match fs::symlink_metadata(&dir).await {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => anyhow::bail!("backups root is not a real directory: {}", dir.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
         }
         let mut entries = Vec::new();
         let mut rd = fs::read_dir(&dir).await?;
@@ -162,14 +251,18 @@ impl BackupTool {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             let manifest_path = d.join("manifest.json");
-            let file_count = if manifest_path.is_file() {
-                let data = fs::read_to_string(&manifest_path).await?;
-                let map: HashMap<String, String> = serde_json::from_str(&data).unwrap_or_default();
-                map.len()
-            } else {
-                0
+            // Non-following: a swapped-in symlinked manifest must not make
+            // a foreign file readable as this backup's manifest.
+            let file_count = match fs::symlink_metadata(&manifest_path).await {
+                Ok(m) if m.is_file() => {
+                    let data = fs::read_to_string(&manifest_path).await?;
+                    let map: HashMap<String, String> =
+                        serde_json::from_str(&data).unwrap_or_default();
+                    map.len()
+                }
+                _ => 0,
             };
-            let meta = fs::metadata(d).await?;
+            let meta = fs::symlink_metadata(d).await?;
             let created = meta
                 .created()
                 .or_else(|_| meta.modified())
@@ -196,13 +289,24 @@ impl BackupTool {
         }
         let backups_root = self.checked_backups_root().await?;
         let backup_dir = backups_root.join(backup_name);
-        if is_symlink(&backup_dir).await {
+        let backup_meta = match fs::symlink_metadata(&backup_dir).await {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!("Backup not found: {backup_name}")),
+                });
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if backup_meta.file_type().is_symlink() {
             anyhow::bail!(
                 "refusing to verify through symlink: {}",
                 backup_dir.display()
             );
         }
-        if !backup_dir.is_dir() {
+        if !backup_meta.is_dir() {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
@@ -210,6 +314,13 @@ impl BackupTool {
             });
         }
         let manifest_path = backup_dir.join("manifest.json");
+        let manifest_meta = fs::symlink_metadata(&manifest_path).await?;
+        if manifest_meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "refusing to read manifest through symlink: {}",
+                manifest_path.display()
+            );
+        }
         let data = fs::read_to_string(&manifest_path).await?;
         let expected: HashMap<String, String> = serde_json::from_str(&data)?;
         let actual = compute_checksums(&backup_dir).await?;
@@ -273,19 +384,31 @@ impl BackupTool {
         }
         let backups_root = self.checked_backups_root().await?;
         let backup_dir = backups_root.join(backup_name);
-        if is_symlink(&backup_dir).await {
+        let backup_meta = match fs::symlink_metadata(&backup_dir).await {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(format!("Backup not found: {backup_name}")),
+                });
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if backup_meta.file_type().is_symlink() {
             anyhow::bail!(
                 "refusing to restore through symlink: {}",
                 backup_dir.display()
             );
         }
-        if !backup_dir.is_dir() {
+        if !backup_meta.is_dir() {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
                 error: Some(format!("Backup not found: {backup_name}")),
             });
         }
+        let backup_id = file_id_of(&backup_meta);
 
         // Collect restorable subdirectories (skip manifest.json). Symlink
         // entries are refused: a backup this tool created contains only
@@ -314,6 +437,21 @@ impl BackupTool {
             preflight_no_symlinks(&backup_dir.join(sub)).await?;
         }
 
+        // Record the identity of the backup root and of each restorable
+        // subdirectory as observed now: after the dry-run gate the restore
+        // re-verifies them, so a backup swapped for a symlink or for a
+        // different directory in that window fails instead of copying
+        // from wherever the swapped name points.
+        let mut sub_ids: Vec<(String, FileId)> = Vec::with_capacity(restore_items.len());
+        for sub in &restore_items {
+            let m = fs::symlink_metadata(&backup_dir.join(sub)).await?;
+            anyhow::ensure!(
+                m.is_dir() && !m.file_type().is_symlink(),
+                "restorable entry is not a real directory: {sub}"
+            );
+            sub_ids.push((sub.clone(), file_id_of(&m)));
+        }
+
         if !confirm {
             return Ok(ToolResult {
                 success: true,
@@ -328,7 +466,19 @@ impl BackupTool {
             });
         }
 
-        for sub in &restore_items {
+        let m = fs::symlink_metadata(&backup_dir).await?;
+        if !m.is_dir() || file_id_of(&m) != backup_id {
+            anyhow::bail!("backup changed while restore was starting: {backup_name}");
+        }
+        for (sub, id) in &sub_ids {
+            // Re-verify each source immediately before its copy, not all
+            // of them up front: earlier copies take time, and a name that
+            // changed identity in that window must fail its own copy
+            // rather than be trusted from an earlier check.
+            let m = fs::symlink_metadata(backup_dir.join(sub)).await?;
+            if !m.is_dir() || file_id_of(&m) != *id {
+                anyhow::bail!("backup entry changed while restore was running: {sub}");
+            }
             let src = backup_dir.join(sub);
             let dst = self.workspace_dir.join(sub);
             copy_dir_recursive(&src, &dst).await?;
@@ -470,17 +620,42 @@ async fn is_symlink(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Copy `src` into `dst` recursively, refusing to follow symlinks on
-/// either side: a symlinked source entry or symlinked destination
-/// directory would let a backup or restore escape the workspace jail.
+/// Copy `src` into `dst` recursively, never following symlinks on either
+/// side and never overwriting a destination that is a symlink or a hard
+/// link. Each file copy re-verifies, in one blocking step, that the source
+/// entry, the destination directory, and the destination entry are still
+/// the objects the walk observed, so a component swapped for a symlink
+/// between the walk and the copy is refused instead of written through.
+/// The residual window between that re-check and the copy's own open is a
+/// single syscall wide — inherent to path-based APIs — and is the same
+/// discipline applied by the `fs_guard` helpers.
 async fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
-    if is_symlink(src).await {
+    let src_meta = fs::symlink_metadata(src).await?;
+    if src_meta.file_type().is_symlink() {
         anyhow::bail!("refusing to follow symlink: {}", src.display());
     }
-    if is_symlink(dst).await {
-        anyhow::bail!("refusing to copy through symlink: {}", dst.display());
+    if !src_meta.is_dir() {
+        anyhow::bail!("not a directory: {}", src.display());
+    }
+    match fs::symlink_metadata(dst).await {
+        Ok(m) => {
+            if m.file_type().is_symlink() {
+                anyhow::bail!("refusing to copy through symlink: {}", dst.display());
+            }
+            if !m.is_dir() {
+                anyhow::bail!("destination is not a directory: {}", dst.display());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
     fs::create_dir_all(dst).await?;
+    let dst_meta = fs::symlink_metadata(dst).await?;
+    if dst_meta.file_type().is_symlink() || !dst_meta.is_dir() {
+        anyhow::bail!("refusing to copy through symlink: {}", dst.display());
+    }
+    let dst_dir_id = file_id_of(&dst_meta);
+
     let mut rd = fs::read_dir(src).await?;
     while let Some(entry) = rd.next_entry().await? {
         let file_type = entry.file_type().await?;
@@ -491,17 +666,22 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
         let dst_path = dst.join(entry.file_name());
         if file_type.is_dir() {
             Box::pin(copy_dir_recursive(&src_path, &dst_path)).await?;
-        } else {
-            // `fs::copy` would follow a symlinked destination file and
-            // clobber its target; refuse instead.
-            if is_symlink(&dst_path).await {
-                anyhow::bail!(
-                    "refusing to overwrite through symlink: {}",
-                    dst_path.display()
-                );
+        } else if file_type.is_file() {
+            let entry_meta = entry.metadata().await?;
+            if !entry_meta.is_file() {
+                anyhow::bail!("{} changed while being copied", src_path.display());
             }
-            fs::copy(&src_path, &dst_path).await?;
+            let src_id = file_id_of(&entry_meta);
+            let dir = dst.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                guarded_copy(src_path, src_id, dir, dst_dir_id, dst_path)
+            })
+            .await?
+            .map_err(anyhow::Error::msg)?;
         }
+        // Other entry kinds (sockets, devices) carry no file data and are
+        // skipped: a copy that cannot be checksummed or restored has no
+        // business being in a backup.
     }
     Ok(())
 }
@@ -869,6 +1049,77 @@ mod tests {
         assert!(
             mismatches.iter().any(|m| m["error"] == "unexpected"),
             "the planted file must be reported as unexpected: {mismatches:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_refuses_planted_symlink_backup_child() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        std::fs::write(tmp.path().join("config/a.toml"), "v1").unwrap();
+
+        // Pre-plant the deterministic per-second backup names for the
+        // current and the next second as symlinks to an outside directory.
+        // A create that only does create_dir_all on the predictable child
+        // copies workspace data and writes its manifest straight through
+        // such a link.
+        let backups = tmp.path().join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        let now = chrono::Utc::now();
+        for delta in [0, 1] {
+            let ts = (now + chrono::Duration::seconds(delta)).format("%Y%m%dT%H%M%SZ");
+            let link = backups.join(format!("backup-{ts}"));
+            std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        }
+
+        let tool = make_tool(&tmp);
+        let _ = tool.execute(json!({"command": "create"})).await;
+
+        let leaked: Vec<String> = std::fs::read_dir(outside.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "create wrote through the planted symlink child: {leaked:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_refuses_hardlinked_destination() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        std::fs::write(tmp.path().join("config/a.toml"), "v1").unwrap();
+
+        let tool = make_tool(&tmp);
+        let res = tool.execute(json!({"command": "create"})).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&res.output).unwrap();
+        let name = parsed["backup"].as_str().unwrap().to_string();
+
+        // Replace the workspace file with a hard link to a foreign file:
+        // the destination pathname stays inside the workspace, but the
+        // inode it names is shared with a file outside it, so an
+        // overwriting copy truncates foreign data.
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious").unwrap();
+        std::fs::remove_file(tmp.path().join("config/a.toml")).unwrap();
+        std::fs::hard_link(&victim, tmp.path().join("config/a.toml")).unwrap();
+
+        let res = tool
+            .execute(json!({"command": "restore", "backup_name": name, "confirm": true}))
+            .await;
+        assert!(
+            res.is_err(),
+            "restore must refuse a hard-linked destination"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "precious",
+            "the shared inode outside the workspace must not be truncated"
         );
     }
 
