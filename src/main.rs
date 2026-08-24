@@ -1694,6 +1694,25 @@ fn main() -> Result<()> {
         unsafe { std::env::set_var("ZEROCLAW_CONFIG_DIR", config_dir) };
     }
 
+    // Startup application of the persisted `[proxy]` config. The
+    // model-visible `proxy_config` tool no longer registers, so proxy
+    // state changes only through trusted config writes and takes effect
+    // here, before any task that consumes proxy state (runtime global for
+    // every scope, plus process env when enabled with
+    // scope=environment). Must run before the multi-threaded runtime
+    // starts: process-env mutation is only sound while no worker threads
+    // exist. Daemon reloads refresh the runtime global only, keeping
+    // live-env application restart-only. Completions must not load
+    // config, so that invocation is excluded.
+    if std::env::args().nth(1).as_deref() != Some("completions") {
+        let pre_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        if let Some(proxy) = pre_runtime.block_on(config::read_persisted_proxy_for_boot()) {
+            config::apply_persisted_proxy_on_boot(&proxy);
+        }
+    }
+
     async_main(command)
 }
 
@@ -1877,13 +1896,12 @@ async fn async_main(command: clap::Command) -> Result<()> {
     }
     #[cfg(feature = "agent-runtime")]
     observability::runtime_trace::init_from_config(&config.observability, &config.data_dir);
-    // Startup application of the persisted `[proxy]` config. The
-    // model-visible `proxy_config` tool no longer registers, so proxy
-    // state changes only through trusted config writes and takes effect
-    // at boot (and, runtime-global only, at daemon reload below). Runs
-    // before the channels/gateway/agent tasks that consume proxy state
-    // are spawned.
-    config::apply_persisted_proxy_on_boot(&config.proxy);
+    // Note: the persisted [proxy] config (including its process-env
+    // broadcast) was applied in the synchronous `main()` bootstrap. The
+    // load above can carry ZEROCLAW_PROXY_* env-var overrides the raw
+    // bootstrap read could not see, so refresh the runtime global from
+    // the fully-loaded config; live-env application stays restart-only.
+    config::set_runtime_proxy_config(config.proxy.clone());
     // Must follow the trace sink init above, or the record has no destination.
     // The daemon reload arm calls the same helper against its reloaded config.
     #[cfg(feature = "agent-runtime")]
