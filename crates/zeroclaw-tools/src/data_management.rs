@@ -26,7 +26,7 @@ impl DataManagementTool {
         let cutoff = chrono::Utc::now()
             - chrono::Duration::days(i64::try_from(self.retention_days).unwrap_or(i64::MAX));
         let cutoff_ts = cutoff.timestamp().try_into().unwrap_or(0u64);
-        let count = count_files_older_than(&self.workspace_dir, cutoff_ts).await?;
+        let (count, skipped) = count_files_older_than(&self.workspace_dir, cutoff_ts).await?;
 
         Ok(ToolResult {
             success: true,
@@ -34,6 +34,7 @@ impl DataManagementTool {
                 "retention_days": self.retention_days,
                 "cutoff": cutoff.to_rfc3339(),
                 "affected_files": count,
+                "symlinks_skipped": skipped,
             })
             .to_string()
             .into(),
@@ -49,7 +50,8 @@ impl DataManagementTool {
         let cutoff = chrono::Utc::now()
             - chrono::Duration::days(i64::try_from(self.retention_days).unwrap_or(i64::MAX));
         let cutoff_ts: u64 = cutoff.timestamp().try_into().unwrap_or(0);
-        let (deleted, bytes) = purge_old_files(&self.workspace_dir, cutoff_ts, dry_run).await?;
+        let ((deleted, bytes), skipped) =
+            purge_old_files(&self.workspace_dir, cutoff_ts, dry_run).await?;
 
         Ok(ToolResult {
             success: true,
@@ -58,6 +60,7 @@ impl DataManagementTool {
                 "files": deleted,
                 "bytes_freed": bytes,
                 "bytes_freed_human": format_bytes(bytes),
+                "symlinks_skipped": skipped,
             })
             .to_string()
             .into(),
@@ -67,7 +70,7 @@ impl DataManagementTool {
 
     /// Workspace storage statistics. Shared with the gateway operator surface.
     pub async fn cmd_stats(&self) -> anyhow::Result<ToolResult> {
-        let (total_files, total_bytes, breakdown) = dir_stats(&self.workspace_dir).await?;
+        let (total_files, total_bytes, breakdown, skipped) = dir_stats(&self.workspace_dir).await?;
         Ok(ToolResult {
             success: true,
             output: json!({
@@ -75,6 +78,7 @@ impl DataManagementTool {
                 "total_size": total_bytes,
                 "total_size_human": format_bytes(total_bytes),
                 "subdirectories": breakdown,
+                "symlinks_skipped": skipped,
             })
             .to_string()
             .into(),
@@ -159,10 +163,13 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-async fn count_files_older_than(dir: &Path, cutoff_epoch: u64) -> anyhow::Result<usize> {
+/// Counts files older than the cutoff, plus how many symlinks were
+/// skipped so the operator sees the blind spot instead of guessing.
+async fn count_files_older_than(dir: &Path, cutoff_epoch: u64) -> anyhow::Result<(usize, usize)> {
     let mut count = 0;
+    let mut skipped = 0;
     if !dir.is_dir() {
-        return Ok(0);
+        return Ok((0, 0));
     }
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
@@ -170,11 +177,14 @@ async fn count_files_older_than(dir: &Path, cutoff_epoch: u64) -> anyhow::Result
         if file_type.is_symlink() {
             // Never traverse or count through a symlink: a link planted in
             // the workspace must not make foreign data retention-eligible.
+            skipped += 1;
             continue;
         }
         let path = entry.path();
         if file_type.is_dir() {
-            count += Box::pin(count_files_older_than(&path, cutoff_epoch)).await?;
+            let (c, s) = Box::pin(count_files_older_than(&path, cutoff_epoch)).await?;
+            count += c;
+            skipped += s;
         } else if let Ok(meta) = fs::metadata(&path).await {
             let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             let epoch = modified
@@ -186,18 +196,21 @@ async fn count_files_older_than(dir: &Path, cutoff_epoch: u64) -> anyhow::Result
             }
         }
     }
-    Ok(count)
+    Ok((count, skipped))
 }
 
+/// Purges real files older than the cutoff, never following or deleting
+/// symlinks; the returned `skipped` count makes those omissions visible.
 async fn purge_old_files(
     dir: &Path,
     cutoff_epoch: u64,
     dry_run: bool,
-) -> anyhow::Result<(usize, u64)> {
+) -> anyhow::Result<((usize, u64), usize)> {
     let mut deleted = 0usize;
     let mut bytes = 0u64;
+    let mut skipped = 0usize;
     if !dir.is_dir() {
-        return Ok((0, 0));
+        return Ok(((0, 0), 0));
     }
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
@@ -205,13 +218,15 @@ async fn purge_old_files(
         if file_type.is_symlink() {
             // Never delete through or descend into a symlink: purge stays
             // jailed to real workspace files even if a link points outside.
+            skipped += 1;
             continue;
         }
         let path = entry.path();
         if file_type.is_dir() {
-            let (d, b) = Box::pin(purge_old_files(&path, cutoff_epoch, dry_run)).await?;
+            let ((d, b), s) = Box::pin(purge_old_files(&path, cutoff_epoch, dry_run)).await?;
             deleted += d;
             bytes += b;
+            skipped += s;
         } else if let Ok(meta) = fs::metadata(&path).await {
             let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             let epoch = modified
@@ -227,31 +242,35 @@ async fn purge_old_files(
             }
         }
     }
-    Ok((deleted, bytes))
+    Ok(((deleted, bytes), skipped))
 }
 
-async fn dir_stats(root: &Path) -> anyhow::Result<(usize, u64, serde_json::Value)> {
+async fn dir_stats(root: &Path) -> anyhow::Result<(usize, u64, serde_json::Value, usize)> {
     let mut total_files = 0usize;
     let mut total_bytes = 0u64;
+    let mut skipped = 0usize;
     let mut breakdown = serde_json::Map::new();
 
     if !root.is_dir() {
-        return Ok((0, 0, serde_json::Value::Object(breakdown)));
+        return Ok((0, 0, serde_json::Value::Object(breakdown), 0));
     }
 
     let mut rd = fs::read_dir(root).await?;
     while let Some(entry) = rd.next_entry().await? {
         let file_type = entry.file_type().await?;
         if file_type.is_symlink() {
-            // Symlinks are links, not workspace data; never traverse them.
+            // Symlinks are links, not workspace data; never traverse them,
+            // but count them so stats shows the blind spot.
+            skipped += 1;
             continue;
         }
         let path = entry.path();
         if file_type.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
-            let (f, b) = count_dir_contents(&path).await?;
+            let (f, b, s) = count_dir_contents(&path).await?;
             total_files += f;
             total_bytes += b;
+            skipped += s;
             breakdown.insert(
                 name,
                 json!({"files": f, "size": b, "size_human": format_bytes(b)}),
@@ -265,29 +284,33 @@ async fn dir_stats(root: &Path) -> anyhow::Result<(usize, u64, serde_json::Value
         total_files,
         total_bytes,
         serde_json::Value::Object(breakdown),
+        skipped,
     ))
 }
 
-async fn count_dir_contents(dir: &Path) -> anyhow::Result<(usize, u64)> {
+async fn count_dir_contents(dir: &Path) -> anyhow::Result<(usize, u64, usize)> {
     let mut files = 0usize;
     let mut bytes = 0u64;
+    let mut skipped = 0usize;
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
         let file_type = entry.file_type().await?;
         if file_type.is_symlink() {
+            skipped += 1;
             continue;
         }
         let path = entry.path();
         if file_type.is_dir() {
-            let (f, b) = Box::pin(count_dir_contents(&path)).await?;
+            let (f, b, s) = Box::pin(count_dir_contents(&path)).await?;
             files += f;
             bytes += b;
+            skipped += s;
         } else if let Ok(meta) = fs::metadata(&path).await {
             files += 1;
             bytes += meta.len();
         }
     }
-    Ok((files, bytes))
+    Ok((files, bytes, skipped))
 }
 
 #[cfg(test)]
@@ -362,10 +385,25 @@ mod tests {
         assert!(res.success);
         let v: serde_json::Value = serde_json::from_str(&res.output).unwrap();
         assert_eq!(v["files"], 0, "symlinks must not be purged: {v}");
+        assert_eq!(
+            v["symlinks_skipped"], 2,
+            "skipped links must be visible: {v}"
+        );
         assert!(
             outside.path().join("victim/old.txt").exists(),
             "purge must not delete through a symlink"
         );
+
+        // Stats and status surface the same blind spot instead of hiding it.
+        let res = tool.execute(json!({"command": "stats"})).await.unwrap();
+        let v: serde_json::Value = serde_json::from_str(&res.output).unwrap();
+        assert_eq!(v["symlinks_skipped"], 2);
+        let res = tool
+            .execute(json!({"command": "retention_status"}))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&res.output).unwrap();
+        assert_eq!(v["symlinks_skipped"], 2);
     }
 
     #[tokio::test]

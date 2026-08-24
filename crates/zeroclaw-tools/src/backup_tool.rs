@@ -14,13 +14,20 @@ pub struct BackupTool {
     max_keep: usize,
 }
 
-/// A backup name must be a single path component: non-empty, no
-/// separators, not `.`/`..`. Names this tool creates always satisfy this
-/// (`backup-<timestamp>`); refusing anything else keeps verify/restore
-/// rooted under `<workspace>/backups/` even when the name arrives from a
-/// percent-decoded HTTP path parameter.
+/// A normal relative path component: non-empty, no separators (`/`,
+/// `\\`), no NUL, no drive-prefix colon (Windows `C:foo`), not `.`/`..`.
+/// Shared by backup-name validation and `include_dirs` validation so
+/// neither can splice a path outside its root — including when the name
+/// arrives percent-decoded from an HTTP path parameter.
+fn is_single_component(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':', '\0'])
+}
+
+/// A backup name must be a single path component. Names this tool creates
+/// always satisfy this (`backup-<timestamp>`); refusing anything else
+/// keeps verify/restore rooted under `<workspace>/backups/`.
 fn valid_backup_name(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
+    is_single_component(name)
 }
 
 impl BackupTool {
@@ -40,24 +47,27 @@ impl BackupTool {
     /// surface (`/api/agents/{alias}/backup`); the model-visible `Tool`
     /// entry point and the operator API must stay behaviour-identical.
     pub async fn cmd_create(&self) -> anyhow::Result<ToolResult> {
-        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-        let name = format!("backup-{ts}");
-        let backup_dir = self.backups_dir().join(&name);
-        fs::create_dir_all(&backup_dir).await?;
-
+        // include_dirs come from operator config, not the caller, but a
+        // non-component entry would splice the copy outside the workspace
+        // or backup root — refuse it here rather than trusting the file.
         for sub in &self.include_dirs {
-            let src = self.workspace_dir.join(sub);
-            // Fail closed on a symlinked include dir (whether it points at
-            // a file or a directory): copying through it would snapshot or
-            // follow foreign data, so refuse instead of skipping silently.
-            if is_symlink(&src).await {
-                anyhow::bail!("refusing to follow symlink: {}", src.display());
-            }
-            if src.is_dir() {
-                let dst = backup_dir.join(sub);
-                copy_dir_recursive(&src, &dst).await?;
+            if !is_single_component(sub) {
+                anyhow::bail!("invalid backup.include_dirs entry: {sub:?}");
             }
         }
+        let backups_root = self.checked_backups_root().await?;
+        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        let name = format!("backup-{ts}");
+        let backup_dir = backups_root.join(&name);
+        fs::create_dir_all(&backup_dir).await?;
+
+        let result = self.create_into(&backup_dir).await;
+        if result.is_err() {
+            // Never leave a partial, listable, restorable backup behind a
+            // failed create.
+            let _ = fs::remove_dir_all(&backup_dir).await;
+        }
+        result?;
 
         let checksums = compute_checksums(&backup_dir).await?;
         let file_count = checksums.len();
@@ -79,6 +89,37 @@ impl BackupTool {
         })
     }
 
+    async fn create_into(&self, backup_dir: &Path) -> anyhow::Result<()> {
+        for sub in &self.include_dirs {
+            let src = self.workspace_dir.join(sub);
+            // Fail closed on a symlinked include dir (whether it points at
+            // a file or a directory): copying through it would snapshot or
+            // follow foreign data, so refuse instead of skipping silently.
+            if is_symlink(&src).await {
+                anyhow::bail!("refusing to follow symlink: {}", src.display());
+            }
+            if src.is_dir() {
+                let dst = backup_dir.join(sub);
+                copy_dir_recursive(&src, &dst).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The backups root, refusing to operate through a symlinked one: a
+    /// planted `<workspace>/backups` link would let create write, and
+    /// max_keep delete, directories outside the workspace.
+    async fn checked_backups_root(&self) -> anyhow::Result<PathBuf> {
+        let dir = self.backups_dir();
+        if is_symlink(&dir).await {
+            anyhow::bail!(
+                "refusing to operate through symlinked backups root: {}",
+                dir.display()
+            );
+        }
+        Ok(dir)
+    }
+
     async fn enforce_max_keep(&self) -> anyhow::Result<()> {
         let mut backups = self.list_backup_dirs().await?;
         // Sorted newest-first; drop excess from the tail.
@@ -91,7 +132,7 @@ impl BackupTool {
     }
 
     async fn list_backup_dirs(&self) -> anyhow::Result<Vec<PathBuf>> {
-        let dir = self.backups_dir();
+        let dir = self.checked_backups_root().await?;
         if !dir.is_dir() {
             return Ok(Vec::new());
         }
@@ -153,7 +194,14 @@ impl BackupTool {
         if !valid_backup_name(backup_name) {
             return Ok(invalid_backup_name(backup_name));
         }
-        let backup_dir = self.backups_dir().join(backup_name);
+        let backups_root = self.checked_backups_root().await?;
+        let backup_dir = backups_root.join(backup_name);
+        if is_symlink(&backup_dir).await {
+            anyhow::bail!(
+                "refusing to verify through symlink: {}",
+                backup_dir.display()
+            );
+        }
         if !backup_dir.is_dir() {
             return Ok(ToolResult {
                 success: false,
@@ -179,6 +227,17 @@ impl BackupTool {
                     "file": path,
                     "error": "missing",
                 })),
+            }
+        }
+        // Files present in the backup but absent from the manifest are
+        // mismatches too: a trimmed manifest must not be able to report a
+        // clean verify over extra planted payloads.
+        for path in actual.keys() {
+            if !expected.contains_key(path) {
+                mismatches.push(json!({
+                    "file": path,
+                    "error": "unexpected",
+                }));
             }
         }
         let pass = mismatches.is_empty();
@@ -212,7 +271,14 @@ impl BackupTool {
         if !valid_backup_name(backup_name) {
             return Ok(invalid_backup_name(backup_name));
         }
-        let backup_dir = self.backups_dir().join(backup_name);
+        let backups_root = self.checked_backups_root().await?;
+        let backup_dir = backups_root.join(backup_name);
+        if is_symlink(&backup_dir).await {
+            anyhow::bail!(
+                "refusing to restore through symlink: {}",
+                backup_dir.display()
+            );
+        }
         if !backup_dir.is_dir() {
             return Ok(ToolResult {
                 success: false,
@@ -239,6 +305,13 @@ impl BackupTool {
             if file_type.is_dir() {
                 restore_items.push(name);
             }
+        }
+
+        // Preflight the whole source tree before writing anything, so a
+        // nested symlink fails the restore up front instead of after some
+        // directories have already been overwritten.
+        for sub in &restore_items {
+            preflight_no_symlinks(&backup_dir.join(sub)).await?;
         }
 
         if !confirm {
@@ -419,7 +492,32 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
         if file_type.is_dir() {
             Box::pin(copy_dir_recursive(&src_path, &dst_path)).await?;
         } else {
+            // `fs::copy` would follow a symlinked destination file and
+            // clobber its target; refuse instead.
+            if is_symlink(&dst_path).await {
+                anyhow::bail!(
+                    "refusing to overwrite through symlink: {}",
+                    dst_path.display()
+                );
+            }
             fs::copy(&src_path, &dst_path).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Refuse any symlink anywhere under `dir` (non-following traversal).
+/// Used as a preflight so destructive operations fail before partial
+/// writes rather than midway through them.
+async fn preflight_no_symlinks(dir: &Path) -> anyhow::Result<()> {
+    let mut rd = fs::read_dir(dir).await?;
+    while let Some(entry) = rd.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if file_type.is_symlink() {
+            anyhow::bail!("refusing to follow symlink: {}", entry.path().display());
+        }
+        if file_type.is_dir() {
+            Box::pin(preflight_no_symlinks(&entry.path())).await?;
         }
     }
     Ok(())
@@ -505,7 +603,7 @@ mod tests {
     async fn verify_and_restore_reject_traversal_names() {
         let tmp = TempDir::new().unwrap();
         let tool = make_tool(&tmp);
-        for bad in ["../escape", "sub/dir", "back\\slash", "..", "."] {
+        for bad in ["../escape", "sub/dir", "back\\slash", "..", ".", "C:escape"] {
             let res = tool
                 .execute(json!({"command": "verify", "backup_name": bad}))
                 .await
@@ -616,6 +714,162 @@ mod tests {
         assert!(res.success);
         let v: serde_json::Value = serde_json::from_str(&res.output).unwrap();
         assert!(v.get("restored").is_some());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_traversal_include_dirs() {
+        let tmp = TempDir::new().unwrap();
+        // Config is operator-trusted, but a traversal-shaped include dir
+        // must still be refused at the tool boundary, before any copying.
+        let tool = BackupTool::new(tmp.path().to_path_buf(), vec!["../outside".into()], 10);
+        let res = tool.execute(json!({"command": "create"})).await;
+        assert!(res.is_err(), "traversal include dir must be refused");
+        assert!(
+            !tmp.path().join("backups").exists(),
+            "nothing may be created"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_cleans_up_partial_backup_on_failure() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        std::fs::write(tmp.path().join("config/a.toml"), "v1").unwrap();
+        // Second include dir is a symlink: fails midway, after `config`
+        // was already copied, so the partial backup dir must be removed.
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("memory")).unwrap();
+
+        let tool = make_tool(&tmp);
+        let res = tool.execute(json!({"command": "create"})).await;
+        assert!(res.is_err(), "create must fail on a symlinked include dir");
+        let backups = tmp.path().join("backups");
+        let leftovers: Vec<_> = std::fs::read_dir(&backups)
+            .map(|rd| rd.filter_map(|e| e.ok()).collect())
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "failed create must not leave a partial backup"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_refuses_symlinked_backups_root() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        // A planted <workspace>/backups symlink: create must not write
+        // through it and max_keep must not be able to prune through it.
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("backups")).unwrap();
+        let tool = make_tool(&tmp);
+        let res = tool.execute(json!({"command": "create"})).await;
+        assert!(res.is_err(), "symlinked backups root must be refused");
+        let entries: Vec<_> = std::fs::read_dir(outside.path())
+            .map(|rd| rd.filter_map(|e| e.ok()).collect())
+            .unwrap_or_default();
+        assert!(
+            entries.is_empty(),
+            "nothing may be written through the link"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_refuses_symlinked_destination_file() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        std::fs::write(tmp.path().join("config/a.toml"), "v1").unwrap();
+
+        let tool = make_tool(&tmp);
+        let res = tool.execute(json!({"command": "create"})).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&res.output).unwrap();
+        let name = parsed["backup"].as_str().unwrap().to_string();
+
+        // Replace the workspace file with a symlink to a foreign file:
+        // a confirmed restore must refuse rather than clobber the target.
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious").unwrap();
+        std::fs::remove_file(tmp.path().join("config/a.toml")).unwrap();
+        std::os::unix::fs::symlink(&victim, tmp.path().join("config/a.toml")).unwrap();
+
+        let res = tool
+            .execute(json!({"command": "restore", "backup_name": name, "confirm": true}))
+            .await;
+        assert!(
+            res.is_err(),
+            "restore must refuse to overwrite through a symlinked file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "precious",
+            "the symlink target must be untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_preflight_refuses_nested_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        std::fs::write(tmp.path().join("config/a.toml"), "v1").unwrap();
+
+        let tool = make_tool(&tmp);
+        let res = tool.execute(json!({"command": "create"})).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&res.output).unwrap();
+        let name = parsed["backup"].as_str().unwrap().to_string();
+
+        // Plant a symlink NESTED inside the backup's config dir. The
+        // preflight must fail the restore (even dry-run) before any
+        // workspace directory is overwritten.
+        let nested = tmp.path().join("backups").join(&name).join("config");
+        std::os::unix::fs::symlink(outside.path(), nested.join("link")).unwrap();
+
+        let res = tool
+            .execute(json!({"command": "restore", "backup_name": name}))
+            .await;
+        assert!(res.is_err(), "nested symlinks must fail the preflight");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("config/a.toml")).unwrap(),
+            "v1",
+            "dry-run or not, nothing may be overwritten before preflight"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_reports_unexpected_files() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
+        std::fs::write(tmp.path().join("config/a.toml"), "v1").unwrap();
+
+        let tool = make_tool(&tmp);
+        let res = tool.execute(json!({"command": "create"})).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&res.output).unwrap();
+        let name = parsed["backup"].as_str().unwrap().to_string();
+
+        // Tamper: add an unmanifested payload to the backup.
+        std::fs::write(
+            tmp.path()
+                .join("backups")
+                .join(&name)
+                .join("config/planted.txt"),
+            "extra",
+        )
+        .unwrap();
+
+        let res = tool
+            .execute(json!({"command": "verify", "backup_name": name}))
+            .await
+            .unwrap();
+        assert!(!res.success, "extra unmanifested files must fail verify");
+        let v: serde_json::Value = serde_json::from_str(&res.output).unwrap();
+        let mismatches = v["mismatches"].as_array().unwrap();
+        assert!(
+            mismatches.iter().any(|m| m["error"] == "unexpected"),
+            "the planted file must be reported as unexpected: {mismatches:?}"
+        );
     }
 
     #[tokio::test]
