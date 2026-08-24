@@ -200,6 +200,13 @@ pub(crate) fn guarded_copy(
     dst: std::path::PathBuf,
     dst_chain: Vec<DirLink>,
 ) -> Result<(), String> {
+    chain_recheck(&src_chain)?;
+    chain_recheck(&dst_chain)?;
+    dst_recheck(&dst)?;
+    // The source entry is checked LAST, immediately before the copy
+    // opens it: a final-component swap of the source between an earlier
+    // check and the open would otherwise be undetectable by the chain
+    // guards, which never resolve the source's own name.
     let sm = std::fs::symlink_metadata(&src)
         .map_err(|e| format!("re-checking {} failed: {e}", src.display()))?;
     if sm.file_type().is_symlink() || !sm.is_file() || file_id_of(&sm) != src_id {
@@ -208,9 +215,6 @@ pub(crate) fn guarded_copy(
             src.display()
         ));
     }
-    chain_recheck(&src_chain)?;
-    chain_recheck(&dst_chain)?;
-    dst_recheck(&dst)?;
     std::fs::copy(&src, &dst)
         .map_err(|e| format!("copying {} to {} failed: {e}", src.display(), dst.display()))?;
     Ok(())

@@ -256,11 +256,18 @@ impl BackupTool {
     }
 
     async fn enforce_max_keep(&self) -> anyhow::Result<()> {
+        // Capture the same [workspace, backups root] anchor the listing
+        // uses, so pruning verifies the identities the listing observed
+        // rather than re-deriving them against a possibly swapped tree.
+        let anchor = self.anchored_read_root().await?;
         let mut backups = self.list_backup_dirs().await?;
         // Sorted newest-first; drop excess from the tail.
         while backups.len() > self.max_keep {
             if let Some(old) = backups.pop() {
-                self.remove_verified_backup_dir(&old).await?;
+                match &anchor {
+                    Some(chain) => self.remove_verified_backup_dir(&old, chain).await?,
+                    None => anyhow::bail!("backups root vanished between listing and pruning"),
+                }
             }
         }
         Ok(())
@@ -322,12 +329,18 @@ impl BackupTool {
     }
 
     /// Remove a listed backup directory after re-verifying the whole chain
-    /// — backups root then the backup itself — is still real: a name
-    /// swapped to a symlink between the listing and the removal must not
-    /// be pruned through.
-    async fn remove_verified_backup_dir(&self, old: &Path) -> anyhow::Result<()> {
-        let Some(root_link) = self.existing_backups_root().await? else {
-            return Ok(());
+    /// — workspace, backups root, then the backup itself — is still real:
+    /// a name swapped to a symlink, or a workspace/root swapped between
+    /// the listing and the removal, must not be pruned through or into.
+    /// The `[workspace, backups root]` anchor is the one the listing
+    /// itself captured, not a re-derived one.
+    async fn remove_verified_backup_dir(
+        &self,
+        old: &Path,
+        anchor: &[DirLink],
+    ) -> anyhow::Result<()> {
+        let Some(root_link) = anchor.last().cloned() else {
+            anyhow::bail!("pruning requested without a verified backups root");
         };
         let old_canon = fs::canonicalize(old).await?;
         let root_canon = fs::canonicalize(&root_link.path).await?;
@@ -341,13 +354,11 @@ impl BackupTool {
         if meta.file_type().is_symlink() || !meta.is_dir() {
             anyhow::bail!("refusing to prune through symlink: {}", old.display());
         }
-        let chain = vec![
-            root_link,
-            DirLink {
-                path: old.to_path_buf(),
-                id: file_id_of(&meta),
-            },
-        ];
+        let mut chain = anchor.to_vec();
+        chain.push(DirLink {
+            path: old.to_path_buf(),
+            id: file_id_of(&meta),
+        });
         tokio::task::spawn_blocking(move || guarded_remove_dir_all(chain))
             .await?
             .map_err(anyhow::Error::msg)?;
@@ -1423,8 +1434,14 @@ mod tests {
         let swapper = {
             let backups = tmp.path().join("backups");
             let target = outside.path().to_path_buf();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             std::thread::spawn(move || {
                 loop {
+                    if std::time::Instant::now() > deadline {
+                        // Never hang the suite: a swap that never triggers
+                        // fails the test via its landed-attack assertion.
+                        return;
+                    }
                     let child = std::fs::read_dir(&backups).ok().and_then(|rd| {
                         rd.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
                             std::fs::symlink_metadata(p)
@@ -1643,8 +1660,14 @@ mod tests {
         let swapper = {
             let ws = ws.clone();
             let moved = relocated.join("ws-moved");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             std::thread::spawn(move || {
                 loop {
+                    if std::time::Instant::now() > deadline {
+                        // Never hang the suite: a swap that never triggers
+                        // fails the test via its landed-attack assertion.
+                        return;
+                    }
                     let child = std::fs::read_dir(ws.join("backups")).ok().and_then(|rd| {
                         rd.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
                             std::fs::symlink_metadata(p)

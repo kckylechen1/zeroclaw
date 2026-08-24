@@ -353,6 +353,10 @@ async fn purge_walk(
             dir.display()
         );
     }
+    // Verify every ancestor before enumerating: directory-only and
+    // symlink-only subtrees must not be adopted on the strength of the
+    // last-element check alone.
+    verify_chain(chain).await?;
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
         let file_type = entry.file_type().await?;
@@ -364,10 +368,11 @@ async fn purge_walk(
         }
         let path = entry.path();
         if file_type.is_dir() {
-            // Re-check before recursing: the name must still name a real
-            // directory. The captured identity joins the chain, where it
-            // is re-verified before every mutation underneath — even one
-            // resolved through a swapped ancestor is refused there.
+            // Re-check the whole chain before adopting a child identity:
+            // the name must still name a real directory reached through
+            // the same ancestors. The captured identity joins the chain,
+            // where it is re-verified before every mutation underneath.
+            verify_chain(chain).await?;
             let child_meta = match fs::symlink_metadata(&path).await {
                 Ok(m) => m,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -725,8 +730,14 @@ mod tests {
             let target = outside.path().to_path_buf();
             let swap_dir = swap_dir.clone();
             let staging = tmp.path().join("staged-away");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             std::thread::spawn(move || {
                 loop {
+                    if std::time::Instant::now() > deadline {
+                        // Never hang the suite: a swap that never triggers
+                        // fails the test via its landed-attack assertion.
+                        return;
+                    }
                     let remaining = std::fs::read_dir(&swap_dir)
                         .map(|rd| rd.count())
                         .unwrap_or(0);
@@ -813,8 +824,14 @@ mod tests {
             let target = outside.path().to_path_buf();
             let swap_dir = swap_dir.clone();
             let staging = tmp.path().join("staged-away");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             std::thread::spawn(move || {
                 loop {
+                    if std::time::Instant::now() > deadline {
+                        // Never hang the suite: a swap that never triggers
+                        // fails the test via its landed-attack assertion.
+                        return;
+                    }
                     let remaining = std::fs::read_dir(&swap_dir)
                         .map(|rd| rd.count())
                         .unwrap_or(0);
