@@ -166,8 +166,14 @@ async fn count_files_older_than(dir: &Path, cutoff_epoch: u64) -> anyhow::Result
     }
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if file_type.is_symlink() {
+            // Never traverse or count through a symlink: a link planted in
+            // the workspace must not make foreign data retention-eligible.
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             count += Box::pin(count_files_older_than(&path, cutoff_epoch)).await?;
         } else if let Ok(meta) = fs::metadata(&path).await {
             let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
@@ -195,8 +201,14 @@ async fn purge_old_files(
     }
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if file_type.is_symlink() {
+            // Never delete through or descend into a symlink: purge stays
+            // jailed to real workspace files even if a link points outside.
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             let (d, b) = Box::pin(purge_old_files(&path, cutoff_epoch, dry_run)).await?;
             deleted += d;
             bytes += b;
@@ -229,8 +241,13 @@ async fn dir_stats(root: &Path) -> anyhow::Result<(usize, u64, serde_json::Value
 
     let mut rd = fs::read_dir(root).await?;
     while let Some(entry) = rd.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if file_type.is_symlink() {
+            // Symlinks are links, not workspace data; never traverse them.
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
             let (f, b) = count_dir_contents(&path).await?;
             total_files += f;
@@ -256,8 +273,12 @@ async fn count_dir_contents(dir: &Path) -> anyhow::Result<(usize, u64)> {
     let mut bytes = 0u64;
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             let (f, b) = Box::pin(count_dir_contents(&path)).await?;
             files += f;
             bytes += b;
@@ -311,6 +332,40 @@ mod tests {
         assert_eq!(v["files"], 0);
         // File still exists.
         assert!(tmp.path().join("recent.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn purge_never_deletes_through_symlinks() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(outside.path().join("victim")).unwrap();
+        std::fs::write(outside.path().join("victim/old.txt"), "old").unwrap();
+
+        // A file symlink and a directory symlink planted in the workspace,
+        // both pointing outside it. With retention_days = 0 every real file
+        // is purge-eligible; the links must be neither followed nor
+        // deleted, and nothing under the link targets may be removed.
+        std::os::unix::fs::symlink(
+            outside.path().join("victim/old.txt"),
+            tmp.path().join("file-link"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path().join("victim"), tmp.path().join("dir-link"))
+            .unwrap();
+
+        let tool = DataManagementTool::new(tmp.path().to_path_buf(), 0);
+        let res = tool
+            .execute(json!({"command": "purge", "dry_run": false}))
+            .await
+            .unwrap();
+        assert!(res.success);
+        let v: serde_json::Value = serde_json::from_str(&res.output).unwrap();
+        assert_eq!(v["files"], 0, "symlinks must not be purged: {v}");
+        assert!(
+            outside.path().join("victim/old.txt").exists(),
+            "purge must not delete through a symlink"
+        );
     }
 
     #[tokio::test]

@@ -14,6 +14,15 @@ pub struct BackupTool {
     max_keep: usize,
 }
 
+/// A backup name must be a single path component: non-empty, no
+/// separators, not `.`/`..`. Names this tool creates always satisfy this
+/// (`backup-<timestamp>`); refusing anything else keeps verify/restore
+/// rooted under `<workspace>/backups/` even when the name arrives from a
+/// percent-decoded HTTP path parameter.
+fn valid_backup_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
+}
+
 impl BackupTool {
     pub fn new(workspace_dir: PathBuf, include_dirs: Vec<String>, max_keep: usize) -> Self {
         Self {
@@ -38,6 +47,12 @@ impl BackupTool {
 
         for sub in &self.include_dirs {
             let src = self.workspace_dir.join(sub);
+            // Fail closed on a symlinked include dir (whether it points at
+            // a file or a directory): copying through it would snapshot or
+            // follow foreign data, so refuse instead of skipping silently.
+            if is_symlink(&src).await {
+                anyhow::bail!("refusing to follow symlink: {}", src.display());
+            }
             if src.is_dir() {
                 let dst = backup_dir.join(sub);
                 copy_dir_recursive(&src, &dst).await?;
@@ -83,9 +98,12 @@ impl BackupTool {
         let mut entries = Vec::new();
         let mut rd = fs::read_dir(&dir).await?;
         while let Some(e) = rd.next_entry().await? {
-            let p = e.path();
-            if p.is_dir() && e.file_name().to_string_lossy().starts_with("backup-") {
-                entries.push(p);
+            // Non-following check: a symlink named `backup-*` must not
+            // make an arbitrary target look like a backup.
+            if e.file_type().await?.is_dir()
+                && e.file_name().to_string_lossy().starts_with("backup-")
+            {
+                entries.push(e.path());
             }
         }
         entries.sort();
@@ -132,6 +150,9 @@ impl BackupTool {
     /// Verify a backup against its SHA-256 manifest. Shared with the
     /// gateway operator surface.
     pub async fn cmd_verify(&self, backup_name: &str) -> anyhow::Result<ToolResult> {
+        if !valid_backup_name(backup_name) {
+            return Ok(invalid_backup_name(backup_name));
+        }
         let backup_dir = self.backups_dir().join(backup_name);
         if !backup_dir.is_dir() {
             return Ok(ToolResult {
@@ -188,6 +209,9 @@ impl BackupTool {
         backup_name: &str,
         confirm: bool,
     ) -> anyhow::Result<ToolResult> {
+        if !valid_backup_name(backup_name) {
+            return Ok(invalid_backup_name(backup_name));
+        }
         let backup_dir = self.backups_dir().join(backup_name);
         if !backup_dir.is_dir() {
             return Ok(ToolResult {
@@ -197,7 +221,10 @@ impl BackupTool {
             });
         }
 
-        // Collect restorable subdirectories (skip manifest.json).
+        // Collect restorable subdirectories (skip manifest.json). Symlink
+        // entries are refused: a backup this tool created contains only
+        // real directories, so a symlink here means someone planted one
+        // and restore must not copy through it.
         let mut restore_items: Vec<String> = Vec::new();
         let mut rd = fs::read_dir(&backup_dir).await?;
         while let Some(e) = rd.next_entry().await? {
@@ -205,7 +232,11 @@ impl BackupTool {
             if name == "manifest.json" {
                 continue;
             }
-            if e.path().is_dir() {
+            let file_type = e.file_type().await?;
+            if file_type.is_symlink() {
+                anyhow::bail!("refusing to restore through symlink: {}", name);
+            }
+            if file_type.is_dir() {
                 restore_items.push(name);
             }
         }
@@ -348,13 +379,44 @@ impl Tool for BackupTool {
 
 // -- Helpers ------------------------------------------------------------------
 
+/// Rejection payload for a traversal-shaped backup name. Recognized by the
+/// gateway operator surface as a 400.
+fn invalid_backup_name(backup_name: &str) -> ToolResult {
+    ToolResult {
+        success: false,
+        output: ToolOutput::default(),
+        error: Some(format!("Invalid backup name: {backup_name}")),
+    }
+}
+
+/// True when `path` itself is a symlink (does not look at the target).
+async fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .await
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Copy `src` into `dst` recursively, refusing to follow symlinks on
+/// either side: a symlinked source entry or symlinked destination
+/// directory would let a backup or restore escape the workspace jail.
 async fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    if is_symlink(src).await {
+        anyhow::bail!("refusing to follow symlink: {}", src.display());
+    }
+    if is_symlink(dst).await {
+        anyhow::bail!("refusing to copy through symlink: {}", dst.display());
+    }
     fs::create_dir_all(dst).await?;
     let mut rd = fs::read_dir(src).await?;
     while let Some(entry) = rd.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if file_type.is_symlink() {
+            anyhow::bail!("refusing to follow symlink: {}", entry.path().display());
+        }
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
+        if file_type.is_dir() {
             Box::pin(copy_dir_recursive(&src_path, &dst_path)).await?;
         } else {
             fs::copy(&src_path, &dst_path).await?;
@@ -378,7 +440,11 @@ async fn walk_and_hash(
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
         let path = entry.path();
-        if path.is_dir() {
+        let file_type = entry.file_type().await?;
+        if file_type.is_symlink() {
+            anyhow::bail!("refusing to follow symlink: {}", path.display());
+        }
+        if file_type.is_dir() {
             Box::pin(walk_and_hash(base, &path, map)).await?;
         } else {
             let rel = path
@@ -433,6 +499,67 @@ mod tests {
             .join(backup_name)
             .join("manifest.json");
         assert!(manifest.exists());
+    }
+
+    #[tokio::test]
+    async fn verify_and_restore_reject_traversal_names() {
+        let tmp = TempDir::new().unwrap();
+        let tool = make_tool(&tmp);
+        for bad in ["../escape", "sub/dir", "back\\slash", "..", "."] {
+            let res = tool
+                .execute(json!({"command": "verify", "backup_name": bad}))
+                .await
+                .unwrap();
+            assert!(!res.success, "{bad} must be rejected by verify");
+            let err = res.error.unwrap();
+            assert!(err.starts_with("Invalid backup name"), "{bad}: {err}");
+        }
+        // Even a confirmed restore with a traversal name must refuse
+        // before touching the filesystem.
+        let res = tool
+            .execute(json!({"command": "restore", "backup_name": "../escape", "confirm": true}))
+            .await
+            .unwrap();
+        assert!(!res.success);
+        assert!(res.error.unwrap().starts_with("Invalid backup name"));
+        assert!(!tmp.path().parent().unwrap().join("escape").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_refuses_symlinked_include_dir() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        // A symlink where an include dir is expected: copying through it
+        // would snapshot foreign data, so create must fail closed.
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), tmp.path().join("config"))
+            .unwrap();
+        let tool = make_tool(&tmp);
+        let res = tool.execute(json!({"command": "create"})).await;
+        assert!(res.is_err(), "create must refuse to follow a symlink");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_refuses_backup_containing_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(outside.path().join("victim")).unwrap();
+        std::fs::write(outside.path().join("victim/data.txt"), "data").unwrap();
+
+        // Plant a backup whose entry is a symlink pointing outside the
+        // workspace; restore must refuse even in dry-run.
+        let planted = tmp.path().join("backups/backup-planted");
+        std::fs::create_dir_all(&planted).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("victim"), planted.join("config")).unwrap();
+
+        let tool = make_tool(&tmp);
+        let res = tool
+            .execute(json!({"command": "restore", "backup_name": "backup-planted"}))
+            .await;
+        assert!(res.is_err(), "restore must refuse symlinked backup entries");
+        assert!(outside.path().join("victim/data.txt").exists());
     }
 
     #[tokio::test]

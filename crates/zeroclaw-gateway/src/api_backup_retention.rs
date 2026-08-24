@@ -79,20 +79,18 @@ fn tool_response(result: anyhow::Result<zeroclaw_api::tool::ToolResult>) -> Resp
             if tool_result.success {
                 (StatusCode::OK, axum::Json(payload)).into_response()
             } else {
-                let status = if tool_result
+                let error = tool_result
                     .error
-                    .as_deref()
-                    .unwrap_or_default()
-                    .starts_with("Backup not found")
-                {
-                    StatusCode::NOT_FOUND
-                } else {
-                    StatusCode::CONFLICT
+                    .unwrap_or_else(|| "operation failed".into());
+                let status = match error.as_str() {
+                    e if e.starts_with("Backup not found") => StatusCode::NOT_FOUND,
+                    e if e.starts_with("Invalid backup name") => StatusCode::BAD_REQUEST,
+                    _ => StatusCode::CONFLICT,
                 };
                 (
                     status,
                     axum::Json(serde_json::json!({
-                        "error": tool_result.error.unwrap_or_else(|| "operation failed".into()),
+                        "error": error,
                         "result": payload,
                     })),
                 )
@@ -114,6 +112,39 @@ fn parse_body<T: serde::de::DeserializeOwned + Default>(body: &Bytes) -> Result<
         status: StatusCode::BAD_REQUEST,
         message: err.to_string(),
     })
+}
+
+/// Route table for the operator backup / data-retention surface. Single
+/// source of truth for the paths: `lib.rs` merges this into the gateway
+/// router, and the module tests drive it end-to-end through a real
+/// `Router` so registration and gating are exercised together.
+pub(crate) fn routes() -> axum::Router<crate::AppState> {
+    use axum::routing::{get, post};
+    axum::Router::new()
+        .route(
+            "/api/agents/{alias}/backup",
+            get(list_backups).post(create_backup),
+        )
+        .route(
+            "/api/agents/{alias}/backup/{name}/verify",
+            post(verify_backup),
+        )
+        .route(
+            "/api/agents/{alias}/backup/{name}/restore",
+            post(restore_backup),
+        )
+        .route(
+            "/api/agents/{alias}/data-retention/status",
+            get(retention_status),
+        )
+        .route(
+            "/api/agents/{alias}/data-retention/stats",
+            get(retention_stats),
+        )
+        .route(
+            "/api/agents/{alias}/data-retention/purge",
+            post(retention_purge),
+        )
 }
 
 /// `POST /api/agents/{alias}/backup` — create a timestamped workspace
@@ -332,26 +363,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operator_gate_rejects_anonymous_and_wrong_token() {
+    async fn operator_gate_rejects_anonymous_on_every_handler() {
         let (_dir, state) = state_with_workspace();
 
-        let (status, _) = json_of(
-            create_backup(
+        // Every handler must 401 anonymous access before touching state —
+        // removing the gate from any single one fails here.
+        let alias = || Path("main".to_string());
+        let peer = || ConnectInfo(loopback_peer());
+        let responses: Vec<Response> = vec![
+            create_backup(State(state.clone()), peer(), anon_headers(), alias())
+                .await
+                .into_response(),
+            list_backups(State(state.clone()), peer(), anon_headers(), alias())
+                .await
+                .into_response(),
+            verify_backup(
                 State(state.clone()),
-                ConnectInfo(loopback_peer()),
+                peer(),
                 anon_headers(),
-                Path("main".to_string()),
+                Path(("main".to_string(), "backup-x".to_string())),
             )
             .await
             .into_response(),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "anonymous must be rejected"
-        );
+            restore_backup(
+                State(state.clone()),
+                peer(),
+                anon_headers(),
+                Path(("main".to_string(), "backup-x".to_string())),
+                Bytes::new(),
+            )
+            .await
+            .into_response(),
+            retention_status(State(state.clone()), peer(), anon_headers(), alias())
+                .await
+                .into_response(),
+            retention_stats(State(state.clone()), peer(), anon_headers(), alias())
+                .await
+                .into_response(),
+            retention_purge(
+                State(state.clone()),
+                peer(),
+                anon_headers(),
+                alias(),
+                Bytes::new(),
+            )
+            .await
+            .into_response(),
+        ];
+        assert_eq!(responses.len(), 7);
+        for response in responses {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
 
+        // A presented-but-wrong token is rejected identically.
         let mut wrong = operator_headers();
         wrong.insert(
             "authorization",
@@ -359,7 +423,7 @@ mod tests {
         );
         let (status, _) = json_of(
             retention_stats(
-                State(state.clone()),
+                State(state),
                 ConnectInfo(loopback_peer()),
                 wrong,
                 Path("main".to_string()),
@@ -373,6 +437,87 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "bad token must be rejected"
         );
+    }
+
+    /// Drive the real route table through a Router so registration and
+    /// gating are exercised together, not just the handlers in isolation.
+    #[tokio::test]
+    async fn routes_registered_and_gated_through_the_router() {
+        use tower::ServiceExt as _;
+
+        let (_dir, state) = state_with_workspace();
+        let mut make = routes()
+            .with_state(state)
+            .into_make_service_with_connect_info::<SocketAddr>();
+        let svc = tower::Service::call(&mut make, loopback_peer())
+            .await
+            .unwrap();
+
+        let request = |method: &str, uri: &str, bearer: bool| {
+            let mut builder = axum::http::Request::builder().method(method).uri(uri);
+            if bearer {
+                builder = builder.header("authorization", "Bearer op-token");
+            }
+            builder.body(axum::body::Body::empty()).unwrap()
+        };
+
+        // Unauthenticated create through the real router → 401.
+        let response = svc
+            .clone()
+            .oneshot(request("POST", "/api/agents/main/backup", false))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Operator-authenticated create → 200.
+        let response = svc
+            .clone()
+            .oneshot(request("POST", "/api/agents/main/backup", true))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "authenticated create must be routed and succeed"
+        );
+
+        // Percent-encoded traversal in the backup name: axum decodes the
+        // path capture, and the tool-layer name validation turns it into a
+        // 400 instead of an escape.
+        let response = svc
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/api/agents/main/backup/..%2Fescape/restore",
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "traversal-shaped backup names must be rejected as 400"
+        );
+
+        // Wrong method on a registered route → 405, proving the route
+        // exists (a missing registration would 404).
+        let response = svc
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/api/agents/main/data-retention/purge",
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        // Unregistered sibling path → 404.
+        let response = svc
+            .oneshot(request("GET", "/api/agents/main/data-retention/nope", true))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
