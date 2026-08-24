@@ -1,4 +1,4 @@
-use crate::fs_guard::{FileId, UnlinkOutcome, file_id_of, guarded_unlink};
+use crate::fs_guard::{DirLink, UnlinkOutcome, file_id_of, guarded_unlink};
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -254,25 +254,43 @@ async fn purge_old_files(
         skipped: 0,
         failures: Vec::new(),
     };
-    Box::pin(purge_walk(dir, cutoff_epoch, dry_run, None, &mut out)).await?;
+    let meta = match fs::symlink_metadata(dir).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e.into()),
+    };
+    if meta.file_type().is_symlink() {
+        anyhow::bail!("refusing to purge through symlink: {}", dir.display());
+    }
+    if !meta.is_dir() {
+        return Ok(out);
+    }
+    let chain = vec![DirLink {
+        path: dir.to_path_buf(),
+        id: file_id_of(&meta),
+    }];
+    Box::pin(purge_walk(dir, cutoff_epoch, dry_run, &chain, &mut out)).await?;
     Ok(out)
 }
 
 /// One step of the purge walk. Every stat is non-following
 /// (`symlink_metadata` / `DirEntry::file_type`): a symlink is skipped,
-/// never traversed, and any directory that no longer has the identity the
-/// parent walk observed is refused, because that is exactly what a
-/// mid-walk swap to a symlink looks like. Each file removal re-verifies,
-/// in a single blocking step, both the containing directory's identity
-/// and the entry's own identity immediately before the unlink. The
-/// residual window between that re-check and the unlink itself is one
+/// never traversed. `chain` is the verified ancestor path from the
+/// workspace root down to this directory; every file removal re-verifies
+/// the WHOLE chain as adjacent syscalls in one blocking step, so a
+/// directory anywhere above a deletion that was renamed away and replaced
+/// by a symlink mid-walk cannot have its replacement adopted and deleted
+/// through — an identity captured through a swapped ancestor never
+/// satisfies the ancestor's own chain entry. Entries that vanish on their
+/// own mid-walk are skipped, not treated as walk failures. The residual
+/// window between the last chain re-check and the unlink itself is one
 /// syscall wide — inherent to path-based APIs, and the same discipline
 /// the `fs_guard` helpers apply.
 async fn purge_walk(
     dir: &Path,
     cutoff_epoch: u64,
     dry_run: bool,
-    expected_id: Option<FileId>,
+    chain: &[DirLink],
     out: &mut PurgeOutcome,
 ) -> anyhow::Result<()> {
     let meta = match fs::symlink_metadata(dir).await {
@@ -286,15 +304,15 @@ async fn purge_walk(
     if !meta.is_dir() {
         return Ok(());
     }
-    if let Some(id) = expected_id
-        && file_id_of(&meta) != id
+    // The chain's last entry is this directory as the parent walk saw it.
+    if let Some(expected) = chain.last()
+        && file_id_of(&meta) != expected.id
     {
         anyhow::bail!(
             "{} changed identity during the purge; refusing to continue",
             dir.display()
         );
     }
-    let dir_id = file_id_of(&meta);
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
         let file_type = entry.file_type().await?;
@@ -306,25 +324,32 @@ async fn purge_walk(
         }
         let path = entry.path();
         if file_type.is_dir() {
-            // Re-check before recursing: the name must still name the same
-            // real directory the walk just listed, or the recursion could
-            // follow a symlink swapped in after the listing.
-            let child_meta = fs::symlink_metadata(&path).await?;
+            // Re-check before recursing: the name must still name a real
+            // directory. The captured identity joins the chain, where it
+            // is re-verified before every mutation underneath — even one
+            // resolved through a swapped ancestor is refused there.
+            let child_meta = match fs::symlink_metadata(&path).await {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
             if child_meta.file_type().is_symlink() {
                 anyhow::bail!("refusing to purge through symlink: {}", path.display());
             }
             if child_meta.is_dir() {
-                Box::pin(purge_walk(
-                    &path,
-                    cutoff_epoch,
-                    dry_run,
-                    Some(file_id_of(&child_meta)),
-                    out,
-                ))
-                .await?;
+                let mut child_chain = chain.to_vec();
+                child_chain.push(DirLink {
+                    path: path.clone(),
+                    id: file_id_of(&child_meta),
+                });
+                Box::pin(purge_walk(&path, cutoff_epoch, dry_run, &child_chain, out)).await?;
             }
         } else if file_type.is_file() {
-            let m = fs::symlink_metadata(&path).await?;
+            let m = match fs::symlink_metadata(&path).await {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
             if m.file_type().is_symlink() {
                 anyhow::bail!("refusing to purge through symlink: {}", path.display());
             }
@@ -343,9 +368,9 @@ async fn purge_walk(
                 } else {
                     let file_id = file_id_of(&m);
                     let path_str = path.display().to_string();
-                    let dir_path = dir.to_path_buf();
+                    let guard_chain = chain.to_vec();
                     let res = tokio::task::spawn_blocking(move || {
-                        guarded_unlink(dir_path, dir_id, path, file_id)
+                        guarded_unlink(guard_chain, path, file_id)
                     })
                     .await?;
                     match res {
@@ -669,6 +694,154 @@ mod tests {
                 f.display()
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn purge_recursion_refuses_nested_child_of_swapped_directory() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let swap_dir = tmp.path().join("swap");
+        std::fs::create_dir(&swap_dir).unwrap();
+
+        // Junk files to keep the walk busy, plus ten real subdirectories...
+        for i in 0..600 {
+            let f = swap_dir.join(format!("d{i:03}"));
+            std::fs::write(&f, "x").unwrap();
+            make_old(&f);
+        }
+        for i in 0..10 {
+            let nested = swap_dir.join(format!("nested{i:02}"));
+            std::fs::create_dir(&nested).unwrap();
+            let inner = nested.join("inner");
+            std::fs::write(&inner, "junk").unwrap();
+            make_old(&inner);
+        }
+        // ...and a full mirror of those names outside the jail. The
+        // mirror matters: after the swap the walk keeps resolving names
+        // through the symlink, and only entries that still exist there
+        // keep the walk alive long enough to reach the nested ones. A
+        // walk that adopts a nested child resolved through a swapped
+        // parent — trusting the child identity it just captured —
+        // deletes the mirrored `inner` files.
+        for i in 0..600 {
+            let f = outside.path().join(format!("d{i:03}"));
+            std::fs::write(&f, "mirror").unwrap();
+            make_old(&f);
+        }
+        for i in 0..10 {
+            let nested = outside.path().join(format!("nested{i:02}"));
+            std::fs::create_dir(&nested).unwrap();
+            let inner = nested.join("inner");
+            std::fs::write(&inner, "precious").unwrap();
+            make_old(&inner);
+        }
+
+        // Swapper: once the purge starts removing entries from the real
+        // directory, rename it away and put a symlink in its place for the
+        // rest of the walk.
+        let swapper = {
+            let target = outside.path().to_path_buf();
+            let swap_dir = swap_dir.clone();
+            let staging = tmp.path().join("staged-away");
+            std::thread::spawn(move || {
+                loop {
+                    let remaining = std::fs::read_dir(&swap_dir)
+                        .map(|rd| rd.count())
+                        .unwrap_or(0);
+                    if remaining < 610 {
+                        let _ = std::fs::rename(&swap_dir, &staging);
+                        let _ = std::os::unix::fs::symlink(&target, &swap_dir);
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                }
+            })
+        };
+
+        let tool = DataManagementTool::new(tmp.path().to_path_buf(), 0);
+        let _ = tool
+            .execute(json!({"command": "purge", "dry_run": false}))
+            .await;
+        let _ = swapper.join();
+
+        assert!(
+            std::fs::symlink_metadata(&swap_dir)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
+            "swapper never replaced the directory; test setup failed"
+        );
+        for i in 0..10 {
+            let inner = outside.path().join(format!("nested{i:02}/inner"));
+            assert!(
+                inner.exists(),
+                "purge adopted a nested child of the swapped directory and deleted {}",
+                inner.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn purge_walk_refuses_identity_adopted_through_swapped_ancestor() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let swap_dir = tmp.path().join("swap");
+        let nested = swap_dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("inner"), "junk").unwrap();
+        make_old(&nested.join("inner"));
+        let target = outside.path().join("nested");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("inner"), "precious").unwrap();
+        make_old(&target.join("inner"));
+
+        // Swap the ancestor after the walk observed it, then capture the
+        // child identity the way a mid-walk walk does: by resolving
+        // through the swapped name. A walk that trusts that adopted
+        // identity must still refuse to delete through the swapped
+        // ancestor: the chain carried down from the real workspace and
+        // real `swap` identities must veto it. (Against the pre-chain
+        // walk this exact setup deleted the outside file; the end-to-end
+        // variant of the attack is covered by the swap race test above.)
+        std::fs::rename(&swap_dir, tmp.path().join("staged-away")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &swap_dir).unwrap();
+        let poisoned_id = file_id_of(&fs::symlink_metadata(swap_dir.join("nested")).await.unwrap());
+        let real_swap_id = file_id_of(
+            &fs::symlink_metadata(tmp.path().join("staged-away"))
+                .await
+                .unwrap(),
+        );
+        let tmp_id = file_id_of(&fs::symlink_metadata(tmp.path()).await.unwrap());
+        let chain = vec![
+            DirLink {
+                path: tmp.path().to_path_buf(),
+                id: tmp_id,
+            },
+            DirLink {
+                path: swap_dir.clone(),
+                id: real_swap_id,
+            },
+            DirLink {
+                path: swap_dir.join("nested"),
+                id: poisoned_id,
+            },
+        ];
+        let mut out = PurgeOutcome {
+            deleted: 0,
+            bytes: 0,
+            skipped: 0,
+            failures: Vec::new(),
+        };
+        let _ = purge_walk(&swap_dir.join("nested"), u64::MAX, false, &chain, &mut out).await;
+        assert!(
+            target.join("inner").exists(),
+            "purge deleted outside the jail through an identity adopted via a swapped ancestor"
+        );
+        assert!(
+            !out.failures.is_empty(),
+            "the refused deletion must be reported as a failure"
+        );
     }
 
     #[tokio::test]

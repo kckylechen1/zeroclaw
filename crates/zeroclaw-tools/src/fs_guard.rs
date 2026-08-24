@@ -5,9 +5,20 @@
 //! symlinks (`symlink_metadata` all the way), and the re-check plus the
 //! mutation run as adjacent syscalls inside one blocking task, so the
 //! window in which a path component can be swapped for a symlink between
-//! the check and the use is a single syscall wide. That residual window is
-//! inherent to path-based APIs; closing it fully would require
-//! descriptor-relative (openat-style) operations.
+//! the check and the use is a single syscall wide.
+//!
+//! Re-checks cover the WHOLE ancestor chain leading to the mutation, not
+//! just the final component. `symlink_metadata` does not follow the final
+//! component, but it still resolves intermediate components: renaming a
+//! verified directory away and replacing it with a symlink would otherwise
+//! let a walk "adopt" whatever the swapped name resolves to — including
+//! identities captured through the link — and mutate through it. A chain
+//! element that no longer has its captured identity (or became a symlink,
+//! or vanished) refuses the mutation.
+//!
+//! The residual window between the last chain re-check and the mutation
+//! itself is one syscall wide and inherent to path-based APIs; closing it
+//! fully would require descriptor-relative (openat-style) operations.
 
 /// Identity of a filesystem object. Names can be swapped behind a walk's
 /// back, but a different object under the same name has a different
@@ -39,6 +50,14 @@ pub(crate) fn file_id_of(_meta: &std::fs::Metadata) -> FileId {
     FileId
 }
 
+/// A verified ancestor: a directory path together with the identity it had
+/// when the walk last trusted it.
+#[derive(Clone)]
+pub(crate) struct DirLink {
+    pub path: std::path::PathBuf,
+    pub id: FileId,
+}
+
 /// What a guarded unlink did.
 pub(crate) enum UnlinkOutcome {
     Removed,
@@ -47,29 +66,38 @@ pub(crate) enum UnlinkOutcome {
     Vanished,
 }
 
-fn dir_recheck(dir: &std::path::Path, dir_id: FileId) -> Result<std::fs::Metadata, String> {
-    let dm = std::fs::symlink_metadata(dir)
-        .map_err(|e| format!("re-checking {} failed: {e}", dir.display()))?;
-    if dm.file_type().is_symlink() || !dm.is_dir() || file_id_of(&dm) != dir_id {
+/// Re-check one chain element: still a real directory, still the same
+/// object.
+fn link_recheck(link: &DirLink) -> Result<(), String> {
+    let m = std::fs::symlink_metadata(&link.path)
+        .map_err(|e| format!("re-checking {} failed: {e}", link.path.display()))?;
+    if m.file_type().is_symlink() || !m.is_dir() || file_id_of(&m) != link.id {
         return Err(format!(
             "{} changed identity mid-operation; refusing to touch paths under it",
-            dir.display()
+            link.path.display()
         ));
     }
-    Ok(dm)
+    Ok(())
 }
 
-/// Unlink `path` only if its containing directory `dir` still has identity
-/// `dir_id` and the entry itself still is the regular file `file_id` that
-/// the walk observed. Refuses anything that resolved through a swapped
-/// component. Runs the re-checks and the unlink as adjacent syscalls.
+/// Re-check the whole ancestor chain (outermost first, immediate parent
+/// last). Runs as adjacent syscalls with the mutation that follows it.
+fn chain_recheck(chain: &[DirLink]) -> Result<(), String> {
+    for link in chain {
+        link_recheck(link)?;
+    }
+    Ok(())
+}
+
+/// Unlink `path` only if every ancestor in `chain` (ending with the
+/// containing directory) still has its captured identity and the entry
+/// itself still is the regular file `file_id` the walk observed.
 pub(crate) fn guarded_unlink(
-    dir: std::path::PathBuf,
-    dir_id: FileId,
+    chain: Vec<DirLink>,
     path: std::path::PathBuf,
     file_id: FileId,
 ) -> Result<UnlinkOutcome, String> {
-    dir_recheck(&dir, dir_id)?;
+    chain_recheck(&chain)?;
     match std::fs::symlink_metadata(&path) {
         Ok(fm) => {
             if fm.file_type().is_symlink() || !fm.is_file() || file_id_of(&fm) != file_id {
@@ -92,8 +120,10 @@ pub(crate) fn guarded_unlink(
 /// True when the metadata describes a file whose inode is shared with
 /// other names (a hard link). Overwriting such a destination truncates
 /// every file that shares the inode — including files outside the
-/// workspace — so guarded copies and writes refuse them. On platforms
-/// without a link count the check cannot run and is skipped.
+/// workspace — so guarded copies and writes refuse them. Stable std does
+/// not expose a link count on every platform (on Windows it is only
+/// available through an unstable metadata extension), so there the check
+/// cannot run and hard-link overwrite remains a documented residual.
 #[cfg(unix)]
 pub(crate) fn hardlinked(meta: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -135,14 +165,16 @@ fn dst_recheck(dst: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// Copy regular file `src` (identity `src_id`) onto `dst` (inside `dir`,
-/// identity `dir_id`) after re-verifying all three in one blocking step.
+/// Copy regular file `src` (identity `src_id`, ancestor chain `src_chain`)
+/// onto `dst` (ancestor chain `dst_chain`, ending with the containing
+/// directory) after re-verifying both chains, the source entry, and the
+/// destination entry in one blocking step.
 pub(crate) fn guarded_copy(
     src: std::path::PathBuf,
     src_id: FileId,
-    dir: std::path::PathBuf,
-    dir_id: FileId,
+    src_chain: Vec<DirLink>,
     dst: std::path::PathBuf,
+    dst_chain: Vec<DirLink>,
 ) -> Result<(), String> {
     let sm = std::fs::symlink_metadata(&src)
         .map_err(|e| format!("re-checking {} failed: {e}", src.display()))?;
@@ -152,36 +184,55 @@ pub(crate) fn guarded_copy(
             src.display()
         ));
     }
-    dir_recheck(&dir, dir_id)?;
+    chain_recheck(&src_chain)?;
+    chain_recheck(&dst_chain)?;
     dst_recheck(&dst)?;
     std::fs::copy(&src, &dst)
         .map_err(|e| format!("copying {} to {} failed: {e}", src.display(), dst.display()))?;
     Ok(())
 }
 
-/// Write `bytes` to `dst` (inside `dir`, identity `dir_id`) after
-/// re-verifying the directory identity and the destination entry in one
-/// blocking step.
+/// Write `bytes` to `dst` after re-verifying its ancestor chain and the
+/// destination entry in one blocking step.
 pub(crate) fn guarded_write(
-    dir: std::path::PathBuf,
-    dir_id: FileId,
+    chain: Vec<DirLink>,
     dst: std::path::PathBuf,
     bytes: Vec<u8>,
 ) -> Result<(), String> {
-    dir_recheck(&dir, dir_id)?;
+    chain_recheck(&chain)?;
     dst_recheck(&dst)?;
     std::fs::write(&dst, bytes).map_err(|e| format!("writing {} failed: {e}", dst.display()))
 }
 
-/// Recursively remove `dir` only after re-verifying it is still the real
-/// directory `dir_id` observed earlier. `std::fs::remove_dir_all` itself
-/// refuses to follow the top-level name if it is a symlink; the identity
-/// re-check additionally rejects a swap that happened after that refusal
-/// point was passed.
-pub(crate) fn guarded_remove_dir_all(
-    dir: std::path::PathBuf,
-    dir_id: FileId,
-) -> Result<(), String> {
-    dir_recheck(&dir, dir_id)?;
-    std::fs::remove_dir_all(&dir).map_err(|e| format!("removing {} failed: {e}", dir.display()))
+/// Create `dst` (or accept it if it already exists as a real directory)
+/// after re-verifying its ancestor chain, and return the new directory's
+/// identity. Refuses anything that resolved through a swapped component.
+pub(crate) fn guarded_create_dir(
+    chain: Vec<DirLink>,
+    dst: &std::path::Path,
+) -> Result<FileId, String> {
+    chain_recheck(&chain)?;
+    std::fs::create_dir_all(dst).map_err(|e| format!("creating {} failed: {e}", dst.display()))?;
+    let m = std::fs::symlink_metadata(dst)
+        .map_err(|e| format!("re-checking {} failed: {e}", dst.display()))?;
+    if m.file_type().is_symlink() || !m.is_dir() {
+        return Err(format!(
+            "created path is not a real directory: {}",
+            dst.display()
+        ));
+    }
+    Ok(file_id_of(&m))
+}
+
+/// Recursively remove the directory named by the last chain element, only
+/// after re-verifying the whole chain. `std::fs::remove_dir_all` itself
+/// refuses to follow the top-level name if it is a symlink; the chain
+/// re-check additionally rejects a swap of any ancestor.
+pub(crate) fn guarded_remove_dir_all(chain: Vec<DirLink>) -> Result<(), String> {
+    let Some(target) = chain.last() else {
+        return Err("removal requested without a target directory".into());
+    };
+    chain_recheck(&chain)?;
+    std::fs::remove_dir_all(&target.path)
+        .map_err(|e| format!("removing {} failed: {e}", target.path.display()))
 }
