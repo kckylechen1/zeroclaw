@@ -58,6 +58,12 @@ pub const MINIMAL_TOOL_MEMBERSHIP: &[&str] = &[
     "schedule",
 ];
 
+/// The documented values accepted for the root `composition` key, joined
+/// for error messages. Kept beside the enum so the accepted set and its
+/// human-facing spelling cannot drift apart; the enum's own deserializer
+/// remains the single source of truth for validity.
+pub const DOCUMENTED_VALUES: &str = "\"minimal\", \"full\", or \"legacy\" (alias of \"full\")";
+
 /// Install-wide composition selector value.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, zeroclaw_macros::ConfigEnum,

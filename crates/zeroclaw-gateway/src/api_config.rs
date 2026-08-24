@@ -2409,6 +2409,15 @@ pub async fn handle_migrate(State(state): State<AppState>, headers: HeaderMap) -
                     ));
                 }
             };
+            // Retired-section tombstones for whatever the migrated content
+            // still carries: same structured warning + detection-time log as
+            // the other live config load paths, attached so later
+            // collect_warnings() consumers (/api/config/prop and PATCH
+            // responses — GET /api/config serializes `Config`, whose
+            // warnings field is serde-skip) surface them.
+            let mut new_cfg = new_cfg;
+            new_cfg.retired_surface_warnings =
+                zeroclaw_config::validation_warnings::retired_section_tombstones(&new_content);
             *state.config.write() = new_cfg;
 
             axum::Json(MigrateResponse {

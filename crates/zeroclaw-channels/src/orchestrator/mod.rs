@@ -1168,6 +1168,15 @@ async fn load_runtime_config_and_defaults(
     let applied = zeroclaw_config::env_overrides::apply_env_overrides(&mut parsed)?;
     parsed.env_overridden_paths = applied.paths;
     parsed.pre_override_snapshots = applied.snapshots;
+    // Same retired-surface tombstones as `Config::load_or_init`: env-prefix
+    // hits plus any retired section still present in the file being
+    // (re)loaded, so the live per-message reload path surfaces the same
+    // structured warnings the startup path does.
+    parsed.retired_surface_warnings =
+        zeroclaw_config::validation_warnings::retired_section_tombstones(&contents)
+            .into_iter()
+            .chain(applied.tombstone_warnings)
+            .collect();
 
     let model_provider = resolved_runtime_model_provider_ref(&parsed, agent_alias)?;
     let defaults = runtime_defaults_from_config(&parsed, &model_provider)?;
