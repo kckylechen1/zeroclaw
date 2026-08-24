@@ -246,17 +246,20 @@ async fn count_files_older_than(
                 Box::pin(count_files_older_than(&path, cutoff_epoch, &child_chain)).await?;
             count += c;
             skipped += s;
-        } else if file_type.is_file()
-            && let Ok(meta) = fs::symlink_metadata(&path).await
-        {
+        } else if file_type.is_file() {
+            // Verify the chain BEFORE reading the entry's metadata: a
+            // swapped component must be refused before a foreign file's
+            // age can be observed, not after.
             verify_chain(chain).await?;
-            let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            let epoch = modified
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            if epoch < cutoff_epoch {
-                count += 1;
+            if let Ok(meta) = fs::symlink_metadata(&path).await {
+                let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let epoch = modified
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if epoch < cutoff_epoch {
+                    count += 1;
+                }
             }
         }
     }
@@ -382,6 +385,12 @@ async fn purge_walk(
                 Box::pin(purge_walk(&path, cutoff_epoch, dry_run, &child_chain, out)).await?;
             }
         } else if file_type.is_file() {
+            // Verify the chain BEFORE reading the entry's metadata: a
+            // swapped component must be refused before a foreign file's
+            // age or size can be observed, not after (a swap-away and
+            // swap-back around a later check would otherwise count the
+            // foreign file).
+            verify_chain(chain).await?;
             let m = match fs::symlink_metadata(&path).await {
                 Ok(m) => m,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -401,10 +410,8 @@ async fn purge_walk(
             if epoch < cutoff_epoch {
                 if dry_run {
                     // Dry-run counters describe the same tree the real
-                    // purge would delete: verify the chain so outside
-                    // files swapped in mid-walk are not reported as
-                    // deletable.
-                    verify_chain(chain).await?;
+                    // purge would delete; the chain was verified before
+                    // this entry was even read.
                     out.deleted += 1;
                     out.bytes += m.len();
                 } else {
@@ -480,12 +487,12 @@ async fn dir_stats(
                 name,
                 json!({"files": f, "size": b, "size_human": format_bytes(b)}),
             );
-        } else if file_type.is_file()
-            && let Ok(meta) = fs::symlink_metadata(&path).await
-        {
+        } else if file_type.is_file() {
             verify_chain(chain).await?;
-            total_files += 1;
-            total_bytes += meta.len();
+            if let Ok(meta) = fs::symlink_metadata(&path).await {
+                total_files += 1;
+                total_bytes += meta.len();
+            }
         }
     }
     Ok((
@@ -525,12 +532,12 @@ async fn count_dir_contents(dir: &Path, chain: &[DirLink]) -> anyhow::Result<(us
             files += f;
             bytes += b;
             skipped += s;
-        } else if file_type.is_file()
-            && let Ok(meta) = fs::symlink_metadata(&path).await
-        {
+        } else if file_type.is_file() {
             verify_chain(chain).await?;
-            files += 1;
-            bytes += meta.len();
+            if let Ok(meta) = fs::symlink_metadata(&path).await {
+                files += 1;
+                bytes += meta.len();
+            }
         }
     }
     Ok((files, bytes, skipped))
@@ -895,15 +902,18 @@ mod tests {
             skipped: 0,
             failures: Vec::new(),
         };
-        let _ = purge_walk(&swap_dir.join("nested"), u64::MAX, false, &chain, &mut out).await;
+        let res = purge_walk(&swap_dir.join("nested"), u64::MAX, false, &chain, &mut out).await;
         assert!(
             target.join("inner").exists(),
             "purge deleted outside the jail through an identity adopted via a swapped ancestor"
         );
+        // The refusal must surface: either the walk fails loudly on the
+        // broken chain or the refused deletion is recorded per entry.
         assert!(
-            !out.failures.is_empty(),
-            "the refused deletion must be reported as a failure"
+            res.is_err() || !out.failures.is_empty(),
+            "the swapped ancestor must produce a visible error or failure"
         );
+        assert_eq!(out.deleted, 0, "nothing may be counted as deleted");
     }
 
     #[tokio::test]

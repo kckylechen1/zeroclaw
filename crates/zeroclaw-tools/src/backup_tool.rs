@@ -650,9 +650,15 @@ impl BackupTool {
         // Preflight the whole source tree before writing anything, so a
         // nested symlink fails the restore up front instead of after some
         // directories have already been overwritten. The preflight walks
-        // under the verified chain and verifies it at every step.
-        for sub in &restore_items {
-            preflight_no_symlinks(&backup_dir.join(sub), &src_anchor).await?;
+        // under the verified chain, extended with the starting
+        // subdirectory's own identity, and verifies it at every step.
+        for (sub, id) in &sub_ids {
+            let mut chain = src_anchor.clone();
+            chain.push(DirLink {
+                path: backup_dir.join(sub),
+                id: *id,
+            });
+            preflight_no_symlinks(&backup_dir.join(sub), &chain).await?;
         }
 
         if !confirm {
@@ -1682,10 +1688,13 @@ mod tests {
         // write) refuses and the create fails loudly; on code whose
         // destination chains skip the workspace identity the write
         // succeeds through the swapped name and the manifest lands in the
-        // relocated tree. A relocated manifest is only acceptable when
-        // the whole create had already finished before the swap.
+        // relocated tree. The swap trigger fires within microseconds of
+        // the child appearing while the create still has tens of
+        // milliseconds of work, so a successfully completed create whose
+        // manifest ended up in the relocated tree is the vulnerable
+        // signature, not a late-swap artifact.
         assert!(
-            !relocated_manifest || res.is_ok(),
+            !(res.is_ok() && relocated_manifest),
             "create wrote its manifest through the swapped workspace into the relocated tree"
         );
     }

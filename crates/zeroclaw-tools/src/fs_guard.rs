@@ -67,11 +67,13 @@ pub(crate) enum UnlinkOutcome {
 }
 
 /// Asynchronously re-verify a whole ancestor chain (read-side guards):
-/// every element must still be the same real directory. Used by walks
-/// that only read, so foreign data cannot be adopted into listings,
-/// counts, or hashes through a swapped component.
+/// every element must still be the same real directory. Verified
+/// innermost-first so the outermost link — whose relocation preserves
+/// every descendant identity — is checked last, closest to the read it
+/// guards. Used by walks that only read, so foreign data cannot be
+/// adopted into listings, counts, or hashes through a swapped component.
 pub(crate) async fn verify_chain(chain: &[DirLink]) -> anyhow::Result<()> {
-    for link in chain {
+    for link in chain.iter().rev() {
         let m = tokio::fs::symlink_metadata(&link.path).await?;
         anyhow::ensure!(
             m.is_dir() && !m.file_type().is_symlink() && file_id_of(&m) == link.id,
@@ -96,10 +98,16 @@ fn link_recheck(link: &DirLink) -> Result<(), String> {
     Ok(())
 }
 
-/// Re-check the whole ancestor chain (outermost first, immediate parent
-/// last). Runs as adjacent syscalls with the mutation that follows it.
+/// Re-check the whole ancestor chain, INNERMOST first, so the outermost
+/// link — the highest-value swap target, whose relocation leaves every
+/// descendant inode identity intact — is verified last, immediately
+/// before the mutation that follows. Each element's check-to-mutation
+/// window spans only the checks that follow it plus the mutation itself;
+/// for the outermost element that is a single adjacent syscall. A swap
+/// landing inside a window this small is the documented path-based
+/// residual and would need descriptor-relative operations to remove.
 fn chain_recheck(chain: &[DirLink]) -> Result<(), String> {
-    for link in chain {
+    for link in chain.iter().rev() {
         link_recheck(link)?;
     }
     Ok(())
