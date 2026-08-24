@@ -1,6 +1,6 @@
 use crate::fs_guard::{
     DirLink, FileId, file_id_of, guarded_copy, guarded_create_dir, guarded_remove_dir_all,
-    guarded_write,
+    guarded_write, verify_chain,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -221,6 +221,22 @@ impl BackupTool {
         }
     }
 
+    /// The read-side anchor chain `[workspace, backups root]` for list /
+    /// verify / restore. Both links are captured before anything under
+    /// the backups root is resolved, so an outside tree cannot be adopted
+    /// through a workspace or root swapped before the call, and the chain
+    /// re-verification below each read refuses swaps during it. A missing
+    /// workspace or backups root yields `None` ("no backups yet").
+    async fn anchored_read_root(&self) -> anyhow::Result<Option<Vec<DirLink>>> {
+        let Some(ws) = self.workspace_root_link().await? else {
+            return Ok(None);
+        };
+        let Some(root) = self.existing_backups_root().await? else {
+            return Ok(None);
+        };
+        Ok(Some(vec![ws, root]))
+    }
+
     /// Like [`Self::existing_backups_root`], but creates a missing root
     /// inside a blocking step guarded by the workspace-root chain, so the
     /// create path never mkdirs through an unverified name.
@@ -339,11 +355,12 @@ impl BackupTool {
     }
 
     async fn list_backup_dirs(&self) -> anyhow::Result<Vec<PathBuf>> {
-        let Some(dir) = self.existing_backups_root().await? else {
+        let Some(chain) = self.anchored_read_root().await? else {
             return Ok(Vec::new());
         };
+        let root = chain.last().cloned().expect("anchor chain has a root");
         let mut entries = Vec::new();
-        let mut rd = fs::read_dir(&dir.path).await?;
+        let mut rd = fs::read_dir(&root.path).await?;
         while let Some(e) = rd.next_entry().await? {
             // Non-following check: a symlink named `backup-*` must not
             // make an arbitrary target look like a backup.
@@ -353,9 +370,9 @@ impl BackupTool {
                 entries.push(e.path());
             }
         }
-        // The listing must describe the root it anchored on: a root
-        // swapped mid-listing must not hand back outside names.
-        verify_chain_unchanged(std::slice::from_ref(&dir)).await?;
+        // The listing must describe the root it anchored on: a workspace
+        // or root swapped mid-listing must not hand back outside names.
+        verify_chain(&chain).await?;
         entries.sort();
         entries.reverse(); // newest first
         Ok(entries)
@@ -363,9 +380,31 @@ impl BackupTool {
 
     /// List backups (newest first). Shared with the gateway operator surface.
     pub async fn cmd_list(&self) -> anyhow::Result<ToolResult> {
+        let Some(anchor) = self.anchored_read_root().await? else {
+            return Ok(ToolResult {
+                success: true,
+                output: serde_json::to_string_pretty(&Vec::<serde_json::Value>::new())?.into(),
+                error: None,
+            });
+        };
         let dirs = self.list_backup_dirs().await?;
         let mut items = Vec::new();
         for d in &dirs {
+            // Each entry is read under a chain extended to the entry
+            // itself, so a swapped workspace, root, or child cannot feed
+            // outside manifests or metadata into the listing.
+            let entry_meta = fs::symlink_metadata(d).await?;
+            anyhow::ensure!(
+                entry_meta.is_dir() && !entry_meta.file_type().is_symlink(),
+                "listed backup is not a real directory: {}",
+                d.display()
+            );
+            let mut chain = anchor.clone();
+            chain.push(DirLink {
+                path: d.clone(),
+                id: file_id_of(&entry_meta),
+            });
+            verify_chain(&chain).await?;
             let name = d
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -382,6 +421,7 @@ impl BackupTool {
                 }
                 _ => 0,
             };
+            verify_chain(&chain).await?;
             let meta = fs::symlink_metadata(d).await?;
             let created = meta
                 .created()
@@ -407,13 +447,14 @@ impl BackupTool {
         if !valid_backup_name(backup_name) {
             return Ok(invalid_backup_name(backup_name));
         }
-        let Some(root_link) = self.existing_backups_root().await? else {
+        let Some(anchor) = self.anchored_read_root().await? else {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
                 error: Some(format!("Backup not found: {backup_name}")),
             });
         };
+        let root_link = anchor.last().cloned().expect("anchor chain has a root");
         let backup_dir = root_link.path.join(backup_name);
         let backup_meta = match fs::symlink_metadata(&backup_dir).await {
             Ok(m) => m,
@@ -440,6 +481,15 @@ impl BackupTool {
                 error: Some(format!("Backup not found: {backup_name}")),
             });
         }
+        // Everything read below is pinned to the workspace, backups root,
+        // and this child — checked before the manifest is even opened, so
+        // an outside tree swapped in earlier cannot be read at all.
+        let mut read_chain = anchor;
+        read_chain.push(DirLink {
+            path: backup_dir.clone(),
+            id: backup_id,
+        });
+        verify_chain(&read_chain).await?;
         let manifest_path = backup_dir.join("manifest.json");
         let manifest_meta = fs::symlink_metadata(&manifest_path).await?;
         if manifest_meta.file_type().is_symlink() {
@@ -450,28 +500,11 @@ impl BackupTool {
         }
         let data = fs::read_to_string(&manifest_path).await?;
         let expected: HashMap<String, String> = serde_json::from_str(&data)?;
-        let read_chain = [
-            DirLink {
-                path: root_link.path.clone(),
-                id: root_link.id,
-            },
-            DirLink {
-                path: backup_dir.clone(),
-                id: backup_id,
-            },
-        ];
         let actual = compute_checksums(&backup_dir, &read_chain).await?;
         // The verify result must describe the tree it started from: if
-        // the backups root or the backup child was swapped during the
-        // read, refuse rather than report a verdict about foreign data.
-        for link in read_chain {
-            let m = fs::symlink_metadata(&link.path).await?;
-            anyhow::ensure!(
-                m.is_dir() && !m.file_type().is_symlink() && file_id_of(&m) == link.id,
-                "backup changed during verification: {}",
-                link.path.display()
-            );
-        }
+        // any component of the chain was swapped during the read, refuse
+        // rather than report a verdict about foreign data.
+        verify_chain(&read_chain).await?;
 
         let mut mismatches = Vec::new();
         for (path, expected_hash) in &expected {
@@ -530,17 +563,19 @@ impl BackupTool {
         if !valid_backup_name(backup_name) {
             return Ok(invalid_backup_name(backup_name));
         }
-        // Anchor the backups root BEFORE resolving the backup child, so
-        // the child identity cannot be adopted through a root swapped
-        // between an earlier check and this resolution; the root link
-        // rides the source chain of every copy below.
-        let Some(root_link) = self.existing_backups_root().await? else {
+        // Anchor the workspace and backups root BEFORE resolving the
+        // backup child, so the child identity cannot be adopted through a
+        // workspace or root swapped before the call or between an earlier
+        // check and this resolution; the full chain rides every read and
+        // copy below.
+        let Some(anchor) = self.anchored_read_root().await? else {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
                 error: Some(format!("Backup not found: {backup_name}")),
             });
         };
+        let root_link = anchor.last().cloned().expect("anchor chain has a root");
         let backup_dir = root_link.path.join(backup_name);
         let backup_meta = match fs::symlink_metadata(&backup_dir).await {
             Ok(m) => m,
@@ -567,6 +602,14 @@ impl BackupTool {
             });
         }
         let backup_id = file_id_of(&backup_meta);
+        // Everything read or copied below is pinned to the workspace, the
+        // backups root, and this child.
+        let mut src_anchor = anchor;
+        src_anchor.push(DirLink {
+            path: backup_dir.clone(),
+            id: backup_id,
+        });
+        verify_chain(&src_anchor).await?;
 
         // Collect restorable subdirectories (skip manifest.json). Symlink
         // entries are refused: a backup this tool created contains only
@@ -587,19 +630,13 @@ impl BackupTool {
                 restore_items.push(name);
             }
         }
+        verify_chain(&src_anchor).await?;
 
-        // Preflight the whole source tree before writing anything, so a
-        // nested symlink fails the restore up front instead of after some
-        // directories have already been overwritten.
-        for sub in &restore_items {
-            preflight_no_symlinks(&backup_dir.join(sub)).await?;
-        }
-
-        // Record the identity of the backup root and of each restorable
-        // subdirectory as observed now: after the dry-run gate the restore
-        // re-verifies them, so a backup swapped for a symlink or for a
-        // different directory in that window fails instead of copying
-        // from wherever the swapped name points.
+        // Record the identity of each restorable subdirectory as observed
+        // now: after the dry-run gate the restore re-verifies them, so a
+        // backup swapped for a symlink or for a different directory in
+        // that window fails instead of copying from wherever the swapped
+        // name points.
         let mut sub_ids: Vec<(String, FileId)> = Vec::with_capacity(restore_items.len());
         for sub in &restore_items {
             let m = fs::symlink_metadata(&backup_dir.join(sub)).await?;
@@ -610,22 +647,20 @@ impl BackupTool {
             sub_ids.push((sub.clone(), file_id_of(&m)));
         }
 
+        // Preflight the whole source tree before writing anything, so a
+        // nested symlink fails the restore up front instead of after some
+        // directories have already been overwritten. The preflight walks
+        // under the verified chain and verifies it at every step.
+        for sub in &restore_items {
+            preflight_no_symlinks(&backup_dir.join(sub), &src_anchor).await?;
+        }
+
         if !confirm {
             // The preview must describe the tree it just walked: re-check
-            // the root and child identities before publishing the names,
-            // so a swap mid-collection cannot feed outside-derived entries
-            // to the operator.
-            verify_chain_unchanged(&[
-                DirLink {
-                    path: root_link.path.clone(),
-                    id: root_link.id,
-                },
-                DirLink {
-                    path: backup_dir.clone(),
-                    id: backup_id,
-                },
-            ])
-            .await?;
+            // the whole chain before publishing the names, so a swap
+            // mid-collection cannot feed outside-derived entries to the
+            // operator.
+            verify_chain(&src_anchor).await?;
             return Ok(ToolResult {
                 success: true,
                 output: json!({
@@ -639,27 +674,14 @@ impl BackupTool {
             });
         }
 
-        let m = fs::symlink_metadata(&backup_dir).await?;
-        if !m.is_dir() || file_id_of(&m) != backup_id {
-            anyhow::bail!("backup changed while restore was starting: {backup_name}");
-        }
-        let m = fs::symlink_metadata(&root_link.path).await?;
-        if !m.is_dir() || file_id_of(&m) != root_link.id {
-            anyhow::bail!("backups root changed while restore was starting");
-        }
+        verify_chain(&src_anchor).await?;
         // The workspace root anchors the destination side of every copy;
-        // the verified backups root and backup child anchor the source
+        // the workspace, backups root, and backup child anchor the source
         // side. All chains are re-verified before every mutation inside
         // the copy walk, so a swapped ancestor anywhere between a jail
         // root and a copied file refuses the copy.
         let dst_base = vec![self.ensure_workspace_root().await?];
-        let src_base = vec![
-            root_link,
-            DirLink {
-                path: backup_dir.clone(),
-                id: backup_id,
-            },
-        ];
+        let src_base = src_anchor.clone();
         for (sub, id) in &sub_ids {
             // Re-verify each source immediately before its copy, not all
             // of them up front: earlier copies take time, and a name that
@@ -921,8 +943,11 @@ async fn recurse_entries(
 
 /// Refuse any symlink anywhere under `dir` (non-following traversal).
 /// Used as a preflight so destructive operations fail before partial
-/// writes rather than midway through them.
-async fn preflight_no_symlinks(dir: &Path) -> anyhow::Result<()> {
+/// writes rather than midway through them. The walk verifies `chain` at
+/// every step and extends it with each directory it descends into, so a
+/// component swapped mid-preflight cannot have its contents read.
+async fn preflight_no_symlinks(dir: &Path, chain: &[DirLink]) -> anyhow::Result<()> {
+    verify_chain(chain).await?;
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
         let file_type = entry.file_type().await?;
@@ -930,7 +955,18 @@ async fn preflight_no_symlinks(dir: &Path) -> anyhow::Result<()> {
             anyhow::bail!("refusing to follow symlink: {}", entry.path().display());
         }
         if file_type.is_dir() {
-            Box::pin(preflight_no_symlinks(&entry.path())).await?;
+            let m = fs::symlink_metadata(entry.path()).await?;
+            anyhow::ensure!(
+                m.is_dir() && !m.file_type().is_symlink(),
+                "entry changed while being walked: {}",
+                entry.path().display()
+            );
+            let mut child_chain = chain.to_vec();
+            child_chain.push(DirLink {
+                path: entry.path(),
+                id: file_id_of(&m),
+            });
+            Box::pin(preflight_no_symlinks(&entry.path(), &child_chain)).await?;
         }
     }
     Ok(())
@@ -954,25 +990,13 @@ async fn compute_checksums(
     Ok(map)
 }
 
-async fn verify_chain_unchanged(chain: &[DirLink]) -> anyhow::Result<()> {
-    for link in chain {
-        let m = fs::symlink_metadata(&link.path).await?;
-        anyhow::ensure!(
-            m.is_dir() && !m.file_type().is_symlink() && file_id_of(&m) == link.id,
-            "{} changed identity during the operation; refusing its data",
-            link.path.display()
-        );
-    }
-    Ok(())
-}
-
 async fn walk_and_hash(
     base: &Path,
     dir: &Path,
     chain: &[DirLink],
     map: &mut HashMap<String, String>,
 ) -> anyhow::Result<()> {
-    verify_chain_unchanged(chain).await?;
+    verify_chain(chain).await?;
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
         let path = entry.path();
@@ -981,7 +1005,22 @@ async fn walk_and_hash(
             anyhow::bail!("refusing to follow symlink: {}", path.display());
         }
         if file_type.is_dir() {
-            Box::pin(walk_and_hash(base, &path, chain, map)).await?;
+            // Extend the chain with the descended directory: a nested
+            // directory swapped for a symlink mid-walk must not have its
+            // target's contents hashed under this backup's name even
+            // though every ancestor identity still matches.
+            let m = fs::symlink_metadata(&path).await?;
+            anyhow::ensure!(
+                m.is_dir() && !m.file_type().is_symlink(),
+                "entry changed while being hashed: {}",
+                path.display()
+            );
+            let mut child_chain = chain.to_vec();
+            child_chain.push(DirLink {
+                path: path.clone(),
+                id: file_id_of(&m),
+            });
+            Box::pin(walk_and_hash(base, &path, &child_chain, map)).await?;
         } else {
             let rel = path
                 .strip_prefix(base)
@@ -991,7 +1030,7 @@ async fn walk_and_hash(
             if rel == "manifest.json" {
                 continue;
             }
-            verify_chain_unchanged(chain).await?;
+            verify_chain(chain).await?;
             let bytes = fs::read(&path).await?;
             let hash = hex::encode(Sha256::digest(&bytes));
             map.insert(rel, hash);
@@ -1638,12 +1677,15 @@ mod tests {
             })
             .map(|child| child.join("manifest.json").exists())
             .unwrap_or(false);
-        // On the fixed code the guarded manifest write refuses the swap
-        // and the create fails loudly; on code whose destination chains
-        // skip the workspace identity the write succeeds through the
-        // swapped name and the manifest lands in the relocated tree.
+        // On the fixed code the first destination-side guarded step after
+        // the swap (the chain-verified checksum walk or the manifest
+        // write) refuses and the create fails loudly; on code whose
+        // destination chains skip the workspace identity the write
+        // succeeds through the swapped name and the manifest lands in the
+        // relocated tree. A relocated manifest is only acceptable when
+        // the whole create had already finished before the swap.
         assert!(
-            !(res.is_ok() && relocated_manifest),
+            !relocated_manifest || res.is_ok(),
             "create wrote its manifest through the swapped workspace into the relocated tree"
         );
     }

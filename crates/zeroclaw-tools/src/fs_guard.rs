@@ -66,6 +66,22 @@ pub(crate) enum UnlinkOutcome {
     Vanished,
 }
 
+/// Asynchronously re-verify a whole ancestor chain (read-side guards):
+/// every element must still be the same real directory. Used by walks
+/// that only read, so foreign data cannot be adopted into listings,
+/// counts, or hashes through a swapped component.
+pub(crate) async fn verify_chain(chain: &[DirLink]) -> anyhow::Result<()> {
+    for link in chain {
+        let m = tokio::fs::symlink_metadata(&link.path).await?;
+        anyhow::ensure!(
+            m.is_dir() && !m.file_type().is_symlink() && file_id_of(&m) == link.id,
+            "{} changed identity during the operation; refusing its data",
+            link.path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Re-check one chain element: still a real directory, still the same
 /// object.
 fn link_recheck(link: &DirLink) -> Result<(), String> {

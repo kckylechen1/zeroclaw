@@ -1,4 +1,4 @@
-use crate::fs_guard::{DirLink, UnlinkOutcome, file_id_of, guarded_unlink};
+use crate::fs_guard::{DirLink, UnlinkOutcome, file_id_of, guarded_unlink, verify_chain};
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,27 @@ impl DataManagementTool {
         }
     }
 
+    /// The workspace-root chain anchor for read-only walks. A missing
+    /// workspace yields `None` (nothing to count); a symlinked one is
+    /// refused so foreign data cannot be adopted into counts or stats.
+    async fn read_anchor(&self) -> anyhow::Result<Option<Vec<DirLink>>> {
+        match fs::symlink_metadata(&self.workspace_dir).await {
+            Ok(m) => {
+                anyhow::ensure!(
+                    m.is_dir() && !m.file_type().is_symlink(),
+                    "workspace root is not a real directory: {}",
+                    self.workspace_dir.display()
+                );
+                Ok(Some(vec![DirLink {
+                    path: self.workspace_dir.clone(),
+                    id: file_id_of(&m),
+                }]))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Retention window status. Shared with the gateway operator surface
     /// (`/api/agents/{alias}/data-retention`); the model-visible `Tool`
     /// entry point and the operator API must stay behaviour-identical.
@@ -27,7 +48,10 @@ impl DataManagementTool {
         let cutoff = chrono::Utc::now()
             - chrono::Duration::days(i64::try_from(self.retention_days).unwrap_or(i64::MAX));
         let cutoff_ts = cutoff.timestamp().try_into().unwrap_or(0u64);
-        let (count, skipped) = count_files_older_than(&self.workspace_dir, cutoff_ts).await?;
+        let (count, skipped) = match self.read_anchor().await? {
+            Some(chain) => count_files_older_than(&self.workspace_dir, cutoff_ts, &chain).await?,
+            None => (0, 0),
+        };
 
         Ok(ToolResult {
             success: true,
@@ -87,7 +111,10 @@ impl DataManagementTool {
 
     /// Workspace storage statistics. Shared with the gateway operator surface.
     pub async fn cmd_stats(&self) -> anyhow::Result<ToolResult> {
-        let (total_files, total_bytes, breakdown, skipped) = dir_stats(&self.workspace_dir).await?;
+        let (total_files, total_bytes, breakdown, skipped) = match self.read_anchor().await? {
+            Some(chain) => dir_stats(&self.workspace_dir, &chain).await?,
+            None => (0, 0, serde_json::json!({}), 0),
+        };
         Ok(ToolResult {
             success: true,
             output: json!({
@@ -182,20 +209,17 @@ fn format_bytes(bytes: u64) -> String {
 
 /// Counts files older than the cutoff, plus how many symlinks were
 /// skipped so the operator sees the blind spot instead of guessing. All
-/// stats are non-following: a symlink never contributes foreign data.
-async fn count_files_older_than(dir: &Path, cutoff_epoch: u64) -> anyhow::Result<(usize, usize)> {
+/// stats are non-following and verified against the ancestor `chain`:
+/// a symlink never contributes foreign data, and a component swapped
+/// mid-count refuses the walk instead of counting through it.
+async fn count_files_older_than(
+    dir: &Path,
+    cutoff_epoch: u64,
+    chain: &[DirLink],
+) -> anyhow::Result<(usize, usize)> {
     let mut count = 0;
     let mut skipped = 0;
-    match fs::symlink_metadata(dir).await {
-        Ok(m) if m.is_dir() => {}
-        Ok(_) => {
-            // A symlinked or non-directory root is a blind spot, not a
-            // subtree to traverse through.
-            return Ok((0, 1));
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
-        Err(e) => return Err(e.into()),
-    }
+    verify_chain(chain).await?;
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
         let file_type = entry.file_type().await?;
@@ -207,12 +231,25 @@ async fn count_files_older_than(dir: &Path, cutoff_epoch: u64) -> anyhow::Result
         }
         let path = entry.path();
         if file_type.is_dir() {
-            let (c, s) = Box::pin(count_files_older_than(&path, cutoff_epoch)).await?;
+            let m = fs::symlink_metadata(&path).await?;
+            anyhow::ensure!(
+                m.is_dir() && !m.file_type().is_symlink(),
+                "entry changed while being counted: {}",
+                path.display()
+            );
+            let mut child_chain = chain.to_vec();
+            child_chain.push(DirLink {
+                path: path.clone(),
+                id: file_id_of(&m),
+            });
+            let (c, s) =
+                Box::pin(count_files_older_than(&path, cutoff_epoch, &child_chain)).await?;
             count += c;
             skipped += s;
         } else if file_type.is_file()
             && let Ok(meta) = fs::symlink_metadata(&path).await
         {
+            verify_chain(chain).await?;
             let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             let epoch = modified
                 .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -363,6 +400,11 @@ async fn purge_walk(
                 .as_secs();
             if epoch < cutoff_epoch {
                 if dry_run {
+                    // Dry-run counters describe the same tree the real
+                    // purge would delete: verify the chain so outside
+                    // files swapped in mid-walk are not reported as
+                    // deletable.
+                    verify_chain(chain).await?;
                     out.deleted += 1;
                     out.bytes += m.len();
                 } else {
@@ -397,21 +439,16 @@ async fn purge_walk(
     Ok(())
 }
 
-async fn dir_stats(root: &Path) -> anyhow::Result<(usize, u64, serde_json::Value, usize)> {
+async fn dir_stats(
+    root: &Path,
+    chain: &[DirLink],
+) -> anyhow::Result<(usize, u64, serde_json::Value, usize)> {
     let mut total_files = 0usize;
     let mut total_bytes = 0u64;
     let mut skipped = 0usize;
     let mut breakdown = serde_json::Map::new();
 
-    match fs::symlink_metadata(root).await {
-        Ok(m) if m.is_dir() => {}
-        Ok(_) => return Ok((0, 0, serde_json::Value::Object(breakdown), 1)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((0, 0, serde_json::Value::Object(breakdown), 0));
-        }
-        Err(e) => return Err(e.into()),
-    }
-
+    verify_chain(chain).await?;
     let mut rd = fs::read_dir(root).await?;
     while let Some(entry) = rd.next_entry().await? {
         let file_type = entry.file_type().await?;
@@ -424,7 +461,18 @@ async fn dir_stats(root: &Path) -> anyhow::Result<(usize, u64, serde_json::Value
         let path = entry.path();
         if file_type.is_dir() {
             let name = entry.file_name().to_string_lossy().to_string();
-            let (f, b, s) = count_dir_contents(&path).await?;
+            let m = fs::symlink_metadata(&path).await?;
+            anyhow::ensure!(
+                m.is_dir() && !m.file_type().is_symlink(),
+                "entry changed while being counted: {}",
+                path.display()
+            );
+            let mut child_chain = chain.to_vec();
+            child_chain.push(DirLink {
+                path: path.clone(),
+                id: file_id_of(&m),
+            });
+            let (f, b, s) = count_dir_contents(&path, &child_chain).await?;
             total_files += f;
             total_bytes += b;
             skipped += s;
@@ -435,6 +483,7 @@ async fn dir_stats(root: &Path) -> anyhow::Result<(usize, u64, serde_json::Value
         } else if file_type.is_file()
             && let Ok(meta) = fs::symlink_metadata(&path).await
         {
+            verify_chain(chain).await?;
             total_files += 1;
             total_bytes += meta.len();
         }
@@ -447,10 +496,11 @@ async fn dir_stats(root: &Path) -> anyhow::Result<(usize, u64, serde_json::Value
     ))
 }
 
-async fn count_dir_contents(dir: &Path) -> anyhow::Result<(usize, u64, usize)> {
+async fn count_dir_contents(dir: &Path, chain: &[DirLink]) -> anyhow::Result<(usize, u64, usize)> {
     let mut files = 0usize;
     let mut bytes = 0u64;
     let mut skipped = 0usize;
+    verify_chain(chain).await?;
     let mut rd = fs::read_dir(dir).await?;
     while let Some(entry) = rd.next_entry().await? {
         let file_type = entry.file_type().await?;
@@ -460,13 +510,25 @@ async fn count_dir_contents(dir: &Path) -> anyhow::Result<(usize, u64, usize)> {
         }
         let path = entry.path();
         if file_type.is_dir() {
-            let (f, b, s) = Box::pin(count_dir_contents(&path)).await?;
+            let m = fs::symlink_metadata(&path).await?;
+            anyhow::ensure!(
+                m.is_dir() && !m.file_type().is_symlink(),
+                "entry changed while being counted: {}",
+                path.display()
+            );
+            let mut child_chain = chain.to_vec();
+            child_chain.push(DirLink {
+                path: path.clone(),
+                id: file_id_of(&m),
+            });
+            let (f, b, s) = Box::pin(count_dir_contents(&path, &child_chain)).await?;
             files += f;
             bytes += b;
             skipped += s;
         } else if file_type.is_file()
             && let Ok(meta) = fs::symlink_metadata(&path).await
         {
+            verify_chain(chain).await?;
             files += 1;
             bytes += meta.len();
         }
