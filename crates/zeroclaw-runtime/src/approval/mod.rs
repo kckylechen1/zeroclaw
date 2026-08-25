@@ -9,7 +9,7 @@
 
 pub mod store;
 
-use crate::agent::turn::redact::scrub_credentials_value;
+use crate::agent::turn::redact::{scrub_credentials, scrub_credentials_value};
 use crate::security::AutonomyLevel;
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -1188,7 +1188,14 @@ pub fn summarize_args(args: &serde_json::Value) -> String {
                     "[redacted]".to_string()
                 } else {
                     match v {
-                        serde_json::Value::String(s) => truncate_for_summary(s, 80),
+                        // Plain strings can still carry inline credential
+                        // shapes (note: "token=..."); scrub before truncation
+                        // so truncation cannot cut the value below the
+                        // scrubber's match length and smuggle a prefix
+                        // through, matching the nested-value treatment.
+                        serde_json::Value::String(s) => {
+                            truncate_for_summary(&scrub_credentials(s), 80)
+                        }
                         // Nested objects/arrays are rendered to the operator
                         // (and persisted in the approval audit trail); run
                         // them through the rendering-boundary scrub so a
@@ -1545,6 +1552,23 @@ mod tests {
             !summary.contains("sk-test-raw-secret-material"),
             "nested credential under 'path' must not be echoed: {summary}"
         );
+    }
+
+    #[test]
+    pub fn summarize_args_redacts_inline_credential_in_plain_string_value() {
+        let args = serde_json::json!({
+            "note": "auth via token=aaaaaaaaaaaa99 then retry"
+        });
+        let summary = summarize_args(&args);
+        assert!(
+            !summary.contains("aaaaaaaaaaaa99"),
+            "inline credential inside a plain string must not be echoed: {summary}"
+        );
+        assert!(
+            summary.contains("token=[REDACTED]"),
+            "inline credential should show the full mask: {summary}"
+        );
+        assert!(summary.contains("then retry"));
     }
 
     #[test]

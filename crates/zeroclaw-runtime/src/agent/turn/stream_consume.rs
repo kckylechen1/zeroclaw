@@ -162,11 +162,16 @@ pub(crate) async fn consume_provider_streaming_response(
                     .push_back(id.clone());
                 if let Some(tx) = event_tx {
                     visible_event_output = true;
+                    // Same rendering-boundary contract as every other
+                    // ToolCall event: the UI-facing args are scrubbed, the
+                    // dispatch loop keeps the raw arguments.
                     let _ = tx
                         .send(TurnEvent::ToolCall {
                             id,
                             name,
-                            args: serde_json::from_str(&args).unwrap_or(serde_json::Value::Null),
+                            args: super::redact::scrub_credentials_value(
+                                serde_json::from_str(&args).unwrap_or(serde_json::Value::Null),
+                            ),
                         })
                         .await;
                 }

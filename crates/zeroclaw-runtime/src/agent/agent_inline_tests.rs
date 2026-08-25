@@ -3099,7 +3099,7 @@ impl ModelProvider for PreExecutedToolModelProvider {
             Ok(
                 zeroclaw_providers::traits::StreamEvent::PreExecutedToolCall {
                     name: "file_read".into(),
-                    args: "{\"path\":\"a.txt\"}".into(),
+                    args: "{\"path\":\"a.txt\",\"token\":\"abcdefgh123456\"}".into(),
                 },
             ),
             Ok(
@@ -3170,9 +3170,13 @@ async fn pre_executed_tool_results_keep_ids_when_calls_overlap() {
 
     let mut call_ids = HashMap::new();
     let mut result_ids = HashMap::new();
+    let mut file_read_args: Option<serde_json::Value> = None;
     while let Ok(event) = event_rx.try_recv() {
         match event {
-            TurnEvent::ToolCall { id, name, .. } => {
+            TurnEvent::ToolCall { id, name, args } => {
+                if name == "file_read" {
+                    file_read_args = Some(args);
+                }
                 call_ids.insert(name, id);
             }
             TurnEvent::ToolResult { id, name, .. } => {
@@ -3182,6 +3186,21 @@ async fn pre_executed_tool_results_keep_ids_when_calls_overlap() {
         }
     }
 
+    let rendered_args = file_read_args
+        .expect("file_read ToolCall event must carry args")
+        .to_string();
+    assert!(
+        !rendered_args.contains("abcdefgh123456"),
+        "pre-executed tool-call events must scrub credentials: {rendered_args}"
+    );
+    assert!(
+        rendered_args.contains("[REDACTED]"),
+        "pre-executed tool-call events must show the full mask: {rendered_args}"
+    );
+    assert!(
+        rendered_args.contains("a.txt"),
+        "non-sensitive sibling args must survive scrubbing: {rendered_args}"
+    );
     assert_eq!(call_ids.len(), 2, "expected two pre-executed tool calls");
     assert_eq!(
         result_ids.len(),
