@@ -174,6 +174,9 @@ pub async fn process_message(
             sop_engine,
             sop_audit,
             None,
+            // Gateway/WS and ACP turn seeding is a top-level origin: the
+            // turn's own lineage root, no inherited one.
+            None,
         );
         let skills = crate::skills::load_skills_for_agent_from_config(&config, agent_alias);
         let assembled = scoped::ScopedToolRegistry::assemble(scoped::ScopedAssembly {

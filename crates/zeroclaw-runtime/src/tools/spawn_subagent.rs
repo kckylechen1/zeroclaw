@@ -64,6 +64,14 @@ pub struct SpawnSubagentTool {
     /// any spawn work happens. Set by the agent loop from
     /// `AgentRunOverrides.is_subagent` at registry construction time.
     is_subagent_caller: bool,
+    /// Unified spawn lineage (SA-9): the lineage of the registry this
+    /// tool instance was built for. The child run receives
+    /// `lineage.child()` in its `AgentRunOverrides`, so a registry
+    /// rebuild inside the child cannot reset depth (SA-11) and the
+    /// `delegate ⇄ spawn_subagent` zig-zag is counted by ONE ledger
+    /// (SA-10). `None` (legacy unit-test constructors) behaves as a
+    /// depth-0 root, exactly like the pre-lineage depth field.
+    lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 }
 
 impl SpawnSubagentTool {
@@ -81,6 +89,7 @@ impl SpawnSubagentTool {
             parent_alias: parent_alias.into(),
             security,
             is_subagent_caller: false,
+            lineage: None,
         }
     }
 
@@ -91,6 +100,62 @@ impl SpawnSubagentTool {
     pub fn with_subagent_caller(mut self, is_subagent_caller: bool) -> Self {
         self.is_subagent_caller = is_subagent_caller;
         self
+    }
+
+    /// Carry the spawning context's lineage (SA-9). Set by
+    /// `all_tools_with_runtime` from the run's effective lineage.
+    #[must_use]
+    pub fn with_lineage(mut self, lineage: Option<zeroclaw_api::subagent_v1::LineageRef>) -> Self {
+        self.lineage = lineage;
+        self
+    }
+
+    /// The lineage of the child this tool would spawn: the tool's own
+    /// lineage advanced by one (SA-9/SA-10). This is the single
+    /// depth-advancing operation on the spawn site. The AMBIENT scope
+    /// wins when deeper: bounded-delegate children execute with the
+    /// parent's shared Arcs, and the ambient lineage names the context
+    /// those Arcs actually run in.
+    fn child_lineage(&self) -> zeroclaw_api::subagent_v1::LineageRef {
+        let own = self.lineage.clone().unwrap_or_else(|| {
+            zeroclaw_api::subagent_v1::LineageRef::new_root(
+                zeroclaw_api::subagent_v1::ParentRunRef::from_opaque(format!(
+                    "agent:{}",
+                    self.parent_alias
+                )),
+            )
+        });
+        match crate::subagent_v1::ambient_lineage() {
+            Some(ambient) if ambient.depth() > own.depth() => ambient.child(),
+            _ => own.child(),
+        }
+    }
+
+    /// Effective depth of the context this tool lives in, per the ONE
+    /// ledger (SA-9): max of its carried lineage and the ambient scope.
+    /// Without either (legacy unit-test constructors) the depth is 0,
+    /// matching the pre-lineage `depth` field on DelegateTool.
+    fn effective_depth(&self) -> u32 {
+        crate::subagent_v1::effective_depth_with_ambient(self.lineage.as_ref())
+    }
+
+    /// The delegation depth cap for this caller's agent, from the named
+    /// runtime profile (default 3) — the same cap source `DelegateTool`
+    /// uses, so both tools refuse at the same threshold regardless of
+    /// which fronts the spawn (SA-10).
+    fn lineage_depth_cap(&self) -> u32 {
+        let runtime_profile = self
+            .config
+            .agents
+            .get(&self.parent_alias)
+            .map(|agent| agent.runtime_profile.as_str())
+            .unwrap_or_default();
+        self.config
+            .runtime_profiles
+            .get(runtime_profile)
+            .map(|profile| profile.max_delegation_depth)
+            .filter(|&depth| depth > 0)
+            .unwrap_or(3)
     }
 
     /// The detached path: hand the child to the coordinator and return
@@ -164,7 +229,10 @@ impl SpawnSubagentTool {
             parent_prompt_id: None,
             resume_from: None,
             cwd: None,
-            overrides: ChildOverrides::default(),
+            // SA-9: the detached child carries the spawning context's
+            // lineage advanced by one, so the coordinator-hosted run
+            // rebuilds its registry under the same depth ledger.
+            overrides: ChildOverrides::with_lineage(Some(self.child_lineage())),
             // Detached: `coordinator.rs::handle_spawn` sets
             // `handle_only = request.run_in_background`, so this child never
             // gets a foreground budget and its spawning turn never blocks on
@@ -328,6 +396,25 @@ impl Tool for SpawnSubagentTool {
                     "spawn_subagent: a subagent may not spawn its own subagents (depth-1 cap)"
                         .into(),
                 ),
+            });
+        }
+
+        // Unified lineage cap (SA-9/SA-10): the same ledger
+        // `DelegateTool` counts against. A context whose lineage is at
+        // or beyond the configured cap refuses here regardless of which
+        // tool fronts the spawn — this closes the census zig-zag where
+        // a registry rebuild inside a child minted a fresh depth.
+        let cap = self.lineage_depth_cap();
+        if self.effective_depth() >= cap {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!(
+                    "spawn_subagent: lineage depth limit reached ({depth}/{cap}). \
+                     The unified spawn lineage counts every local spawn across \
+                     delegate and spawn_subagent; this context is at the cap.",
+                    depth = self.effective_depth(),
+                )),
             });
         }
 
@@ -497,12 +584,36 @@ impl Tool for SpawnSubagentTool {
             // the correct choice. The daemon heartbeat worker is the
             // only `mcp_registry` supplier.
             mcp_registry: None,
+            // SA-9/SA-10/SA-11: the child run carries the spawning
+            // context's lineage advanced by one — the registry built
+            // inside that run then inherits this depth, so no rebuild
+            // can reset the counter.
+            lineage: Some(self.child_lineage()),
         };
         let parent_alias = subagent_ctx.parent_alias.clone();
 
         let cp_task_id = run_id.clone();
+        // SA-26 retained-bookkeeping repair: legacy child-run rows carry a
+        // NON-NULL parent linkage. The unified lineage's root IS the
+        // spawning turn's identity (run.rs mints it from the session key),
+        // so `parent_id` is answerable here without the old "tool instance
+        // is shared across calls" gap: the lineage carried by this
+        // registry's construction names the turn that owns this spawn.
+        let parent_linkage = self
+            .lineage
+            .as_ref()
+            .map(|lineage| lineage.root_ref().as_str().to_string())
+            .unwrap_or_else(|| {
+                crate::agent::loop_::current_session_key().unwrap_or_else(|| {
+                    crate::agent::loop_::synthetic_session_key_for_run(&self.parent_alias)
+                })
+            });
         if let Some(cp) = crate::control_plane::control_plane() {
-            let _ = cp
+            // Accounted write (SA-26): a store failure is observed and
+            // logged, never silently discarded. Execution continues —
+            // supervision is best-effort on this legacy path — but no
+            // `Ok` path may swallow the error unseen.
+            if let Err(error) = cp
                 .store
                 .create(crate::control_plane::TaskRecord {
                     id: cp_task_id.clone(),
@@ -513,28 +624,7 @@ impl Tool for SpawnSubagentTool {
                     owner_boot_id: cp.boot_id.clone(),
                     heartbeat_at: None,
                     depth: u32::from(self.is_subagent_caller),
-                    // Same gap as `delegate.rs`'s background-delegation
-                    // producer: `SpawnSubagentTool` is constructed once per
-                    // registry build (`all_tools_with_runtime` in
-                    // `crates/zeroclaw-runtime/src/tools/mod.rs`) with no
-                    // concept of "the control-plane task id of the turn
-                    // currently running me". `is_subagent_caller` already
-                    // rules out a subagent spawning a subagent (the depth-1
-                    // cap refuses before this point), so every `execute()`
-                    // that reaches here belongs to a non-subagent turn — but
-                    // that turn can itself be a tracked task (e.g. a
-                    // background/parallel delegate's own sub-turn, which
-                    // *does* carry this shared tool instance into a Bounded
-                    // target's registry — `execute_agentic_with_admission`
-                    // only filters the "delegate" tool name, not
-                    // "spawn_subagent"). Because the tool instance is shared
-                    // across calls, a struct field cannot disambiguate which
-                    // task is calling; only ambient per-call context (e.g. a
-                    // task-local threaded through the tool-call loop, the way
-                    // `TOOL_LOOP_SESSION_KEY` already is) could. `None` is
-                    // correct for a genuinely top-level spawn and the best
-                    // available answer otherwise — see the dispatch report.
-                    parent_id: None,
+                    parent_id: Some(parent_linkage.clone()),
                     originator_route: None,
                     delivered: false,
                     idem_key: None,
@@ -543,7 +633,19 @@ impl Tool for SpawnSubagentTool {
                     started_at: chrono::Utc::now().to_rfc3339(),
                     finished_at: None,
                 })
-                .await;
+                .await
+            {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Write)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "task_id": cp_task_id,
+                            "error": format!("{error:#}"),
+                        })),
+                    "spawn_subagent: control-plane spawn-record write failed (accounted, not discarded)"
+                );
+            }
         }
 
         let run_result = Box::pin(scope!(
@@ -581,10 +683,24 @@ impl Tool for SpawnSubagentTool {
                     Some(format!("subagent run failed: {e}")),
                 ),
             };
-            let _ = cp
+            // Accounted write (SA-26): failure observed and logged, never
+            // silently discarded.
+            if let Err(write_error) = cp
                 .store
                 .update_status(&cp_task_id, status, output, error)
-                .await;
+                .await
+            {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Write)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "task_id": cp_task_id,
+                            "error": format!("{write_error:#}"),
+                        })),
+                    "spawn_subagent: control-plane finish-record write failed (accounted, not discarded)"
+                );
+            }
         }
 
         match run_result {

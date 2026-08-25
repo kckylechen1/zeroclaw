@@ -164,7 +164,11 @@ pub use verifiable_intent::VerifiableIntentTool;
 /// per-turn duplicate-call guard: launching several with the same prompt
 /// (redundancy, sampling, fan-out) is intentional, not an accidental
 /// repeat. Unioned with config-provided exemptions in the tool-call loop.
-pub const REENTRANT_AGENT_TOOLS: &[&str] = &[SpawnSubagentTool::NAME, DelegateTool::NAME];
+pub const REENTRANT_AGENT_TOOLS: &[&str] = &[
+    SpawnSubagentTool::NAME,
+    DelegateTool::NAME,
+    crate::subagent_v1::ReasoningSubagentTool::NAME,
+];
 
 use crate::platform::{NativeRuntime, RuntimeAdapter};
 use crate::security::{SecurityPolicy, create_sandbox};
@@ -551,6 +555,9 @@ pub fn all_tools(
         None,
         None,
         None,
+        // No runtime adapter / SOP / live-config here; and no lineage —
+        // callers of the non-runtime variant are top-level origins.
+        None,
     )
 }
 
@@ -599,6 +606,12 @@ pub fn all_tools_with_runtime(
     // channel daemon (so reloads take effect); `None` for one-shot / non-channel
     // callers, which fall back to a snapshot of `root_config`.
     live_config: Option<Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>>,
+    // Unified spawn lineage (SA-9): the lineage of the run this registry
+    // is being built for. Spawn-capable tools constructed here carry it,
+    // so depth survives registry rebuilds (SA-11) and is shared across
+    // `delegate`/`spawn_subagent` (SA-10). `None` for top-level origins
+    // (the run mints a root) and legacy test callers.
+    spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 ) -> AllToolsResult {
     let has_shell_access = runtime.has_shell_access();
     let persistent_writes = runtime.has_filesystem_access();
@@ -693,7 +706,16 @@ pub fn all_tools_with_runtime(
         )),
         Arc::new(
             SpawnSubagentTool::new(Arc::new(root_config.clone()), agent_alias, security.clone())
-                .with_subagent_caller(is_subagent_caller),
+                .with_subagent_caller(is_subagent_caller)
+                .with_lineage(spawn_lineage.clone()),
+        ),
+        Arc::new(
+            crate::subagent_v1::ReasoningSubagentTool::new(
+                Arc::new(root_config.clone()),
+                agent_alias,
+                security.clone(),
+            )
+            .with_lineage(spawn_lineage.clone()),
         ),
         Arc::new(SendMessageToPeerTool::new(
             Arc::new(root_config.clone()),
@@ -1486,6 +1508,7 @@ pub fn all_tools_with_runtime(
             security.clone(),
             provider_runtime_options.clone(),
         )
+        .with_lineage(spawn_lineage.clone())
         .with_parent_tools(Arc::clone(&parent_tools))
         .with_runtime(runtime.clone())
         .with_multimodal_config(root_config.multimodal.clone())
@@ -1989,6 +2012,7 @@ mod tests {
             Some(engine),
             None,
             None,
+            None,
         )
         .tools;
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
@@ -2126,6 +2150,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .tools;
             let tool = tools
@@ -2215,6 +2240,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .tools;
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
@@ -2278,6 +2304,7 @@ mod tests {
             Some(engine),
             None,
             None,
+            None,
         )
         .tools;
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
@@ -2335,6 +2362,7 @@ mod tests {
             Some(shared_engine.clone()),
             Some(shared_audit.clone()),
             None,
+            None,
         );
         let session_b = all_tools_with_runtime(
             Arc::new(Config::default()),
@@ -2357,6 +2385,7 @@ mod tests {
             None,
             Some(shared_engine.clone()),
             Some(shared_audit.clone()),
+            None,
             None,
         );
 
@@ -2484,6 +2513,7 @@ mod tests {
                 Some(shared_engine.clone()),
                 None,
                 None,
+                None,
             )
             .tools
         };
@@ -2576,6 +2606,7 @@ mod tests {
             &root_config,
             None,
             false,
+            None,
             None,
             None,
             None,
@@ -3036,6 +3067,7 @@ mod tests {
                 Some(sop_engine),
                 Some(sop_audit),
                 None,
+                None,
             )
             .tools
         };
@@ -3236,6 +3268,171 @@ mod tests {
         .tools;
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"delegate"));
+    }
+
+    // ── Unified lineage (SA-9/SA-10/SA-11): the GREEN side of the
+    // census zig-zag red→green pair. The RED evidence (master, where the
+    // rebuilt registry minted depth 0 and sailed past the depth gate) is
+    // captured verbatim in the PR body; these tests pin the closed
+    // behavior.
+
+    fn lineage_agents() -> HashMap<String, AliasedAgentConfig> {
+        let mut agents = HashMap::new();
+        for alias in ["parent-agent", "child-target"] {
+            agents.insert(
+                alias.to_string(),
+                AliasedAgentConfig {
+                    risk_profile: "default".into(),
+                    ..AliasedAgentConfig::default()
+                },
+            );
+        }
+        agents
+    }
+
+    fn lineage_registry_config() -> Config {
+        let mut config = Config::default();
+        let mut risk = zeroclaw_config::schema::RiskProfileConfig::default();
+        risk.delegation_policy.mode = zeroclaw_config::autonomy::DelegationMode::Allow;
+        config.risk_profiles.insert("default".to_string(), risk);
+        config.agents = lineage_agents();
+        config
+    }
+
+    #[tokio::test]
+    async fn registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth() {
+        // The census zig-zag GREEN half: a registry built for a context
+        // whose lineage is at the depth cap (exactly what
+        // `agent::run` builds for a `spawn_subagent` child spawned from
+        // a depth-3 parent) refuses at the depth gate — the ONE ledger
+        // survives the rebuild.
+        let tmp = TempDir::new().unwrap();
+        let cfg = lineage_registry_config();
+        let mut build_cfg = cfg.clone();
+        build_cfg.data_dir = tmp.path().join("data");
+        build_cfg.config_path = tmp.path().join("config.toml");
+        let security = Arc::new(SecurityPolicy::for_agent(&build_cfg, "parent-agent").unwrap());
+        let mem: Arc<dyn Memory> = Arc::from(
+            zeroclaw_memory::create_memory(&MemoryConfig::default(), tmp.path(), None).unwrap(),
+        );
+
+        let at_cap = zeroclaw_api::subagent_v1::LineageRef::new_root(
+            zeroclaw_api::subagent_v1::ParentRunRef::from_opaque("zigzag-root"),
+        )
+        .child()
+        .child()
+        .child(); // depth 3 = default cap
+
+        let built = all_tools_with_runtime(
+            Arc::new(build_cfg),
+            &security,
+            &cfg.risk_profiles.get("default").cloned().unwrap(),
+            "parent-agent",
+            Arc::new(NativeRuntime::new()),
+            mem,
+            None,
+            None,
+            &BrowserConfig::default(),
+            &zeroclaw_config::schema::HttpRequestConfig::default(),
+            &zeroclaw_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &cfg.agents,
+            None,
+            &lineage_registry_config(),
+            None,
+            true, // is_subagent_caller: registry belongs to a child run
+            None,
+            None,
+            None,
+            None,
+            Some(at_cap),
+        );
+
+        let rebuilt_delegate = built
+            .tools
+            .into_iter()
+            .find(|t| t.name() == "delegate")
+            .expect("rebuilt registry contains delegate");
+        let result = rebuilt_delegate
+            .execute(serde_json::json!({
+                "agent": "child-target",
+                "prompt": "probe",
+            }))
+            .await
+            .unwrap();
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("depth limit"),
+            "the rebuilt registry's delegate must refuse at the inherited lineage cap; got {:?}",
+            result.error
+        );
+
+        // Both tools front the same refusal (SA-10): spawn_subagent in
+        // the same rebuilt registry refuses too.
+        let tmp2 = TempDir::new().unwrap();
+        let mut build_cfg2 = lineage_registry_config();
+        build_cfg2.data_dir = tmp2.path().join("data");
+        build_cfg2.config_path = tmp2.path().join("config.toml");
+        let security2 = Arc::new(SecurityPolicy::for_agent(&build_cfg2, "parent-agent").unwrap());
+        let spawn_at_cap = SpawnSubagentTool::new(Arc::new(build_cfg2), "parent-agent", security2)
+            .with_lineage(Some(
+                zeroclaw_api::subagent_v1::LineageRef::new_root(
+                    zeroclaw_api::subagent_v1::ParentRunRef::from_opaque("zigzag-root"),
+                )
+                .child()
+                .child()
+                .child(),
+            ));
+        let result = spawn_at_cap
+            .execute(serde_json::json!({ "prompt": "probe" }))
+            .await
+            .unwrap();
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("lineage depth limit"),
+            "spawn_subagent must refuse at the same unified cap; got {:?}",
+            result.error
+        );
+    }
+
+    #[test]
+    fn zigzag_is_counted_by_one_ledger_across_both_tools() {
+        // SA-9/SA-10: the census chain `delegate → spawn_subagent →
+        // delegate` counted by ONE counter. The depth a rebuilt registry
+        // sees is exactly the spawning context's lineage advanced by
+        // one, however many tools the chain hopped through.
+        use zeroclaw_api::subagent_v1::{LineageRef, ParentRunRef};
+
+        let root = LineageRef::new_root(ParentRunRef::from_opaque("chain-root"));
+        assert_eq!(root.depth(), 0);
+
+        // delegate at root spawns; the child lineage is root.child().
+        let after_delegate = root.child();
+        assert_eq!(after_delegate.depth(), 1);
+
+        // The child's inherited spawn_subagent spawns again; that
+        // child's lineage is after_delegate.child().
+        let after_spawn = after_delegate.child();
+        assert_eq!(after_spawn.depth(), 2);
+
+        // The grandchild's rebuilt registry carries the same lineage —
+        // its delegate counts depth 2 against the cap (3), refuses at
+        // the NEXT hop, never resets:
+        let after_final_delegate = after_spawn.child();
+        assert_eq!(after_final_delegate.depth(), 3);
+        // ...and 3 >= cap is the refusal asserted behaviorally in
+        // `registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth`.
+        assert!(after_final_delegate.depth() >= 3);
+
+        // The ledger identity is the root run, shared across the whole
+        // chain (SA-11: rebuilds inherit, roots are typed transitions).
+        assert_eq!(root.root_ref(), after_final_delegate.root_ref());
     }
 
     #[test]

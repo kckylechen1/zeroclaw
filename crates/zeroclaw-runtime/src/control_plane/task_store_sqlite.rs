@@ -96,6 +96,17 @@ impl SqliteTaskStore {
         Ok(n as u64)
     }
 
+    /// Total row count across every agent. Read-only query (no schema
+    /// change): a path that must write nothing anywhere can be checked
+    /// in one count instead of per-name guesses (SA-26 discrimination).
+    pub fn count_all(&self) -> Result<u64> {
+        let conn = self.conn.lock();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .context("count all tasks")?;
+        Ok(n as u64)
+    }
+
     /// Admin enumeration — delete this agent's records (alias-delete cascade).
     pub fn delete_by_agent(&self, agent: &str) -> Result<u64> {
         let conn = self.conn.lock();

@@ -339,6 +339,14 @@ pub struct DelegateTool {
     provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions,
     /// Depth at which this tool instance lives in the delegation chain.
     depth: u32,
+    /// Unified spawn lineage (SA-9): the lineage of the registry this
+    /// tool was built for — the ONE depth authority that survives
+    /// registry rebuilds (SA-11) and is shared with `spawn_subagent`
+    /// (SA-10). When present it is authoritative for the depth checks;
+    /// the per-instance `depth` remains only as the legacy unit-test
+    /// fallback (`with_depth` constructors) and is never the sole
+    /// carrier on a production spawn path.
+    lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
     /// Parent tool registry for agentic sub-agents.
     parent_tools: Arc<RwLock<Vec<Arc<dyn Tool>>>>,
     /// Runtime adapter used to build target-owned registries for independent
@@ -476,6 +484,7 @@ impl DelegateTool {
             global_credential,
             provider_runtime_options,
             depth: 0,
+            lineage: None,
             parent_tools: Arc::new(RwLock::new(Vec::new())),
             runtime: None,
             multimodal_config: zeroclaw_config::schema::MultimodalConfig::default(),
@@ -497,6 +506,7 @@ impl DelegateTool {
     /// Create a DelegateTool for a sub-agent (with incremented depth).
     /// When sub-agents eventually get their own tool registry, construct
     /// their DelegateTool via this method with `depth: parent.depth + 1`.
+    #[allow(clippy::similar_names)]
     pub fn with_depth(
         agents: HashMap<String, AliasedAgentConfig>,
         global_credential: Option<String>,
@@ -525,6 +535,7 @@ impl DelegateTool {
             global_credential,
             provider_runtime_options,
             depth,
+            lineage: None,
             parent_tools: Arc::new(RwLock::new(Vec::new())),
             runtime: None,
             multimodal_config: zeroclaw_config::schema::MultimodalConfig::default(),
@@ -541,6 +552,56 @@ impl DelegateTool {
             #[cfg(test)]
             test_model_provider: None,
         }
+    }
+
+    /// Carry the spawning context's lineage (SA-9). Set by
+    /// `all_tools_with_runtime` from the run's effective lineage and by
+    /// every child-spawn site with the parent lineage advanced by one.
+    #[must_use]
+    pub fn with_lineage(mut self, lineage: Option<zeroclaw_api::subagent_v1::LineageRef>) -> Self {
+        self.lineage = lineage;
+        self
+    }
+
+    /// Effective depth per the ONE ledger (SA-9): the lineage depth when
+    /// threaded, otherwise the legacy per-instance depth (unit-test
+    /// constructors). Never lower than either, nor than the ambient
+    /// scope (a shared Arc executing in a deeper context must not make
+    /// that context behave shallower).
+    fn effective_depth(&self) -> u32 {
+        let carried = self
+            .lineage
+            .as_ref()
+            .map_or(self.depth, |lineage| self.depth.max(lineage.depth()));
+        carried.max(crate::subagent_v1::effective_depth_with_ambient(None))
+    }
+
+    /// The lineage of a context spawned from this one (SA-9/SA-10): the
+    /// only depth-advancing operation at every child spawn site.
+    fn child_lineage(&self) -> Option<zeroclaw_api::subagent_v1::LineageRef> {
+        self.lineage.as_ref().map(|lineage| lineage.child())
+    }
+
+    /// The lineage the bounded sub-loop's AMBIENT scope carries. ALWAYS
+    /// at least depth 1: the sub-loop IS a child context even when this
+    /// tool carries no lineage (gateway/channel registries legitimately
+    /// build `lineage: None`), so the fallback mints a root and
+    /// advances one — a shared-Arc spawn tool executing under this
+    /// scope can never behave as a depth-0 root.
+    pub(crate) fn bounded_scope_lineage(&self) -> zeroclaw_api::subagent_v1::LineageRef {
+        self.child_lineage().unwrap_or_else(|| {
+            zeroclaw_api::subagent_v1::LineageRef::new_root(
+                zeroclaw_api::subagent_v1::ParentRunRef::from_opaque(format!(
+                    "agent:{}",
+                    if self.caller_alias.is_empty() {
+                        "unknown-caller"
+                    } else {
+                        &self.caller_alias
+                    }
+                )),
+            )
+            .child()
+        })
     }
 
     /// Attach parent tools used to build sub-agent allowlist registries.
@@ -1031,6 +1092,11 @@ impl DelegateTool {
             None,
             None,
             None,
+            // SA-11: the independent target's registry is built with the
+            // CHILD lineage (this delegating context advanced by one), so
+            // the target's own DelegateTool/spawn_subagent inherit the
+            // same depth ledger instead of minting depth 0.
+            self.child_lineage(),
         );
 
         let target_workspace = config.agent_workspace_dir(agent_name);
@@ -1550,15 +1616,19 @@ impl DelegateTool {
             self.resolve_brain(&agent_config.model_provider);
         let agentic = self.resolve_agentic(&agent_config.runtime_profile);
 
-        // Check recursion depth (immutable — set at construction, incremented for sub-agents)
-        if self.depth >= max_depth {
+        // Check recursion depth against the ONE ledger (SA-9): the
+        // unified lineage when threaded (production registries), the
+        // legacy per-instance depth otherwise (unit-test constructors).
+        // Both `delegate` and `spawn_subagent` refuse at this threshold,
+        // so the cross-tool zig-zag cannot reset it (SA-10/SA-11).
+        if self.effective_depth() >= max_depth {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
                 error: Some(format!(
                     "Delegation depth limit reached ({depth}/{max}). \
                      Cannot delegate further to prevent infinite loops.",
-                    depth = self.depth,
+                    depth = self.effective_depth(),
                     max = max_depth
                 )),
             });
@@ -1724,13 +1794,13 @@ impl DelegateTool {
         };
 
         let max_depth = self.resolve_max_depth(&agent_config.runtime_profile);
-        if self.depth >= max_depth {
+        if self.effective_depth() >= max_depth {
             return Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
                 error: Some(format!(
                     "Delegation depth limit reached ({depth}/{max}).",
-                    depth = self.depth,
+                    depth = self.effective_depth(),
                     max = max_depth
                 )),
             });
@@ -1798,6 +1868,10 @@ impl DelegateTool {
 
         let cancel_token = zeroclaw_coordinator::CancelToken::new();
         let hosted_tx = crate::subagent_host::park_hosted_child(task_id.clone());
+        let mut child_overrides = ChildOverrides::hosted_execution(Some(self.depth + 1));
+        // SA-9: the hosted child's own delegation tooling (the inner
+        // `DelegateTool` below) counts against the same ledger.
+        child_overrides.lineage = self.child_lineage();
         let request = ChildRequest {
             child_id: task_id.clone(),
             prompt: full_prompt.clone(),
@@ -1808,7 +1882,7 @@ impl DelegateTool {
             parent_prompt_id: None,
             resume_from: None,
             cwd: None,
-            overrides: ChildOverrides::hosted_execution(Some(self.depth + 1)),
+            overrides: child_overrides,
             run_in_background: true,
             surface_completion: true,
             await_to_completion: false,
@@ -1880,6 +1954,7 @@ impl DelegateTool {
         let global_credential = self.global_credential.clone();
         let provider_runtime_options = self.provider_runtime_options.clone();
         let depth = self.depth + 1;
+        let lineage = self.child_lineage();
         let parent_tools = Arc::clone(&self.parent_tools);
         let runtime = self.runtime.clone();
         let multimodal_config = self.multimodal_config.clone();
@@ -1907,6 +1982,7 @@ impl DelegateTool {
                     global_credential,
                     provider_runtime_options,
                     depth,
+                    lineage,
                     parent_tools,
                     runtime,
                     multimodal_config,
@@ -2061,6 +2137,7 @@ impl DelegateTool {
             // leaving the `>= max_depth` check inert (see the background path above).
             // Behavior change: deep parallel re-delegation now saturates at `max_delegation_depth`.
             let depth = self.depth + 1;
+            let lineage = self.child_lineage();
             let parent_tools = Arc::clone(&self.parent_tools);
             let runtime = self.runtime.clone();
             let multimodal_config = self.multimodal_config.clone();
@@ -2091,6 +2168,7 @@ impl DelegateTool {
                         global_credential,
                         provider_runtime_options,
                         depth,
+                        lineage,
                         parent_tools,
                         runtime,
                         multimodal_config,
@@ -2882,74 +2960,87 @@ impl DelegateTool {
         let turn_id = uuid::Uuid::new_v4().to_string();
         let result = tokio::time::timeout(
             Duration::from_secs(agentic_timeout_secs),
-            run_tool_call_loop(ToolLoop {
-                sop_reassembly: None,
-                exec: ResolvedAgentExecution::resolve(
-                    ResolvedModelAccess {
-                        model_provider,
-                        provider_name: provider_type,
-                        model,
-                        temperature,
-                    },
-                    ResolvedIo {
-                        tools_registry: &sub_tools,
-                        observer: &noop_observer,
-                        silent: true,
-                        approval: None,
-                        multimodal_config: &self.multimodal_config,
-                        // Full config so the delegated sub-agent's vision route
-                        // resolves the configured `vision_model_provider`'s alias
-                        // options (the `vision` override, endpoint URI, credentials),
-                        // exactly as the parent turn does. `None` only on the
-                        // configless test builder (`root_config` unset).
-                        config: self.root_config.as_deref(),
-                        hooks: None,
-                        // Thread the target's deferred-MCP activated set so `tool_search`
-                        // can activate the target's deferred tools mid-turn (Some only for
-                        // an independent target with granted deferred-MCP bundles).
-                        activated_tools: sub_activated.as_ref(),
-                        model_switch_callback: None,
-                        // delegate subagents don't support approval
-                        receipt_generator,
-                    },
-                    ResolvedRuntimeKnobs {
-                        max_tool_iterations: loop_runtime.max_tool_iterations,
-                        excluded_tools: &[],
-                        dedup_exempt_tools: tool_policy.excluded_tools.as_deref().unwrap_or(&[]),
-                        pacing: &zeroclaw_config::schema::PacingConfig::default(),
-                        strict_tool_parsing: loop_runtime.strict_tool_parsing,
-                        parallel_tools: loop_runtime.parallel_tools,
-                        max_tool_result_chars: loop_runtime.max_tool_result_chars,
-                        // Keep delegate subagent context pruning aligned with top-level
-                        // agents instead of preserving the old disabled-by-zero path.
-                        context_token_budget: loop_runtime.max_context_tokens,
-                        knobs: &LoopKnobs::default(),
-                    },
-                ),
-                history: &mut history,
-                channel_name: "delegate",
-                channel_reply_target: None,
-                cancellation_token: Some(self.cancellation_token.child_token()),
-                on_delta: None,
-                shared_budget: None,
-                // TODO thread from parent in future
-                channel: None,
-                collected_receipts,
-                event_tx: None,
-                steering: None,
-                new_messages_out: None,
-                image_cache: None,
-                // Phase 1: stamp Internal/Trusted. Per-transport
-                // stamping lands in a later phase.
-                memory: None,
-                ingress: zeroclaw_api::ingress::IngressContext::sub_turn(),
-                agent_alias: Some(agent_name),
-                parent_agent_alias: None,
-                turn_id: &turn_id,
-            })
-            .instrument(::zeroclaw_log::attribution_span!(
-                &crate::agent::AgentAttribution(agent_name)
-            )),
+            // SA-9 ambient lineage: the bounded child executes with the
+            // parent's SHARED tool Arcs; scoping the child's lineage
+            // around this tool-call loop lets spawn-capable inherited
+            // tools observe the CHILD's depth (the unified ledger never
+            // allows a shared Arc to make a deeper context behave
+            // shallower). The independent branch's tools already carry
+            // this same lineage from their own registry build.
+            crate::subagent_v1::AMBIENT_SPAWN_LINEAGE.scope(
+                self.bounded_scope_lineage(),
+                run_tool_call_loop(ToolLoop {
+                    sop_reassembly: None,
+                    exec: ResolvedAgentExecution::resolve(
+                        ResolvedModelAccess {
+                            model_provider,
+                            provider_name: provider_type,
+                            model,
+                            temperature,
+                        },
+                        ResolvedIo {
+                            tools_registry: &sub_tools,
+                            observer: &noop_observer,
+                            silent: true,
+                            approval: None,
+                            multimodal_config: &self.multimodal_config,
+                            // Full config so the delegated sub-agent's vision route
+                            // resolves the configured `vision_model_provider`'s alias
+                            // options (the `vision` override, endpoint URI, credentials),
+                            // exactly as the parent turn does. `None` only on the
+                            // configless test builder (`root_config` unset).
+                            config: self.root_config.as_deref(),
+                            hooks: None,
+                            // Thread the target's deferred-MCP activated set so `tool_search`
+                            // can activate the target's deferred tools mid-turn (Some only for
+                            // an independent target with granted deferred-MCP bundles).
+                            activated_tools: sub_activated.as_ref(),
+                            model_switch_callback: None,
+                            // delegate subagents don't support approval
+                            receipt_generator,
+                        },
+                        ResolvedRuntimeKnobs {
+                            max_tool_iterations: loop_runtime.max_tool_iterations,
+                            excluded_tools: &[],
+                            dedup_exempt_tools: tool_policy
+                                .excluded_tools
+                                .as_deref()
+                                .unwrap_or(&[]),
+                            pacing: &zeroclaw_config::schema::PacingConfig::default(),
+                            strict_tool_parsing: loop_runtime.strict_tool_parsing,
+                            parallel_tools: loop_runtime.parallel_tools,
+                            max_tool_result_chars: loop_runtime.max_tool_result_chars,
+                            // Keep delegate subagent context pruning aligned with top-level
+                            // agents instead of preserving the old disabled-by-zero path.
+                            context_token_budget: loop_runtime.max_context_tokens,
+                            knobs: &LoopKnobs::default(),
+                        },
+                    ),
+                    history: &mut history,
+                    channel_name: "delegate",
+                    channel_reply_target: None,
+                    cancellation_token: Some(self.cancellation_token.child_token()),
+                    on_delta: None,
+                    shared_budget: None,
+                    // TODO thread from parent in future
+                    channel: None,
+                    collected_receipts,
+                    event_tx: None,
+                    steering: None,
+                    new_messages_out: None,
+                    image_cache: None,
+                    // Phase 1: stamp Internal/Trusted. Per-transport
+                    // stamping lands in a later phase.
+                    memory: None,
+                    ingress: zeroclaw_api::ingress::IngressContext::sub_turn(),
+                    agent_alias: Some(agent_name),
+                    parent_agent_alias: None,
+                    turn_id: &turn_id,
+                })
+                .instrument(::zeroclaw_log::attribution_span!(
+                    &crate::agent::AgentAttribution(agent_name)
+                )),
+            ),
         )
         .await;
 

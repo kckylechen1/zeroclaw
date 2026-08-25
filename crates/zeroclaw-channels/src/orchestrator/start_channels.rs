@@ -278,6 +278,9 @@ pub async fn start_channels(
             sop_engine.clone(),
             sop_audit.clone(),
             Some(Arc::clone(&config_arc)),
+            // Channel turns are top-level origins: the turn mints its own
+            // lineage root; no inherited lineage crosses this boundary.
+            None,
         );
         // Route the per-agent tool registry through the one gated seam - see
         // `assemble_channel_agent_tools` for the knobs and why. `mut` because the

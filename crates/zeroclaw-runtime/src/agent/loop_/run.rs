@@ -112,6 +112,9 @@ pub async fn run(
     // `claim_child_announcements_context`'s ordering rules exist to prevent.
     let __zc_session_key_scoped = session_key_is_scoped();
     let __zc_synthetic_session_key = synthetic_session_key_for_run(agent_alias);
+    // Root-lineage fallback owned by the async block below without moving
+    // `__zc_synthetic_session_key` (still needed after the block).
+    let __zc_lineage_root_fallback = __zc_synthetic_session_key.clone();
     let __zc_alias = agent_alias.to_string();
     let __zc_attribution_span =
         ::zeroclaw_log::attribution_span!(&crate::agent::AgentAttribution(__zc_alias.as_str()));
@@ -162,6 +165,21 @@ pub async fn run(
         let is_subagent_caller = overrides.is_subagent;
         let suppress_memory_inject = overrides.suppress_memory_inject;
         let memory_free = overrides.memory_free;
+        // Unified spawn lineage (SA-9/SA-11): the run's effective lineage
+        // is the spawning context's lineage, or a fresh root minted from
+        // this run's session key when nobody passed one (top-level turn,
+        // cron job — a typed root transition, never a silent reset).
+        // This value is what the registry below is built with, so a
+        // registry rebuild inside a child inherits the child's lineage
+        // and depth can never reset across a rebuild.
+        let effective_lineage = overrides.lineage.clone().unwrap_or_else(|| {
+            zeroclaw_api::subagent_v1::LineageRef::new_root(
+                zeroclaw_api::subagent_v1::ParentRunRef::from_opaque(
+                    crate::agent::loop_::current_session_key()
+                        .unwrap_or_else(|| __zc_lineage_root_fallback.clone()),
+                ),
+            )
+        });
         let security = match overrides.security {
             Some(sec) => sec,
             None => Arc::new(SecurityPolicy::for_agent(&config, agent_alias)?),
@@ -256,6 +274,7 @@ pub async fn run(
             sop_engine,
             sop_audit,
             None,
+            Some(effective_lineage.clone()),
         );
         let skills = crate::skills::load_skills_for_agent_from_config(&config, agent_alias);
         // Route the per-agent tool registry through the one gated seam
