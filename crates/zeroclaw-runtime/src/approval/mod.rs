@@ -1170,7 +1170,14 @@ pub fn summarize_args(args: &serde_json::Value) -> String {
                     "[redacted]".to_string()
                 } else {
                     match v {
-                        serde_json::Value::String(s) => truncate_for_summary(s, 80),
+                        // Same scrub-before-truncate treatment as the general
+                        // loop below: a signed or tokenized path
+                        // (`https://host/file?token=...`) is still a render
+                        // surface, and truncating first could cut the value
+                        // below the scrubber's match length.
+                        serde_json::Value::String(s) => {
+                            truncate_for_summary(&scrub_credentials(s), 80)
+                        }
                         other => {
                             let s = scrub_credentials_value(other.clone()).to_string();
                             truncate_for_summary(&s, 80)
@@ -1569,6 +1576,23 @@ mod tests {
             "inline credential should show the full mask: {summary}"
         );
         assert!(summary.contains("then retry"));
+    }
+
+    #[test]
+    pub fn summarize_args_redacts_inline_credential_in_string_path_value() {
+        let args = serde_json::json!({
+            "path": "https://internal.host/fetch?token=aaaaaaaaaaaa99&mode=raw"
+        });
+        let summary = summarize_args(&args);
+        assert!(
+            !summary.contains("aaaaaaaaaaaa99"),
+            "inline credential inside a string path must not be echoed: {summary}"
+        );
+        assert!(
+            summary.contains("token=[REDACTED]"),
+            "inline credential in a path should show the full mask: {summary}"
+        );
+        assert!(summary.contains("internal.host/fetch"));
     }
 
     #[test]

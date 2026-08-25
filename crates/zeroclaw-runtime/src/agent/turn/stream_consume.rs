@@ -183,7 +183,16 @@ pub(crate) async fn consume_provider_streaming_response(
                     .unwrap_or_else(|| Uuid::new_v4().to_string());
                 if let Some(tx) = event_tx {
                     visible_event_output = true;
-                    let _ = tx.send(TurnEvent::ToolResult { id, name, output }).await;
+                    // Same rendering-boundary contract as ordinary tool
+                    // results: UI-facing output is scrubbed, the dispatch
+                    // loop keeps the raw result.
+                    let _ = tx
+                        .send(TurnEvent::ToolResult {
+                            id,
+                            name,
+                            output: super::redact::scrub_credentials(&output),
+                        })
+                        .await;
                 }
             }
             StreamEvent::TextDelta(chunk) => {
