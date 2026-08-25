@@ -4,7 +4,6 @@
 //! parent and stays inside the parent's permissions envelope.
 
 use anyhow::{Context, Result};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use zeroclaw_config::policy::SecurityPolicy;
@@ -16,7 +15,6 @@ pub struct SubAgentOverrides {
     /// subset of the parent via
     /// [`SecurityPolicy::ensure_no_escalation_beyond`].
     pub policy: Option<SecurityPolicy>,
-    pub allowed_agent_aliases: Option<HashSet<String>>,
 }
 
 /// Constructed SubAgent context: bound parent identity, validated
@@ -29,17 +27,21 @@ pub struct SubAgentContext {
     /// `None`; otherwise a narrowed copy that passed
     /// [`SecurityPolicy::ensure_no_escalation_beyond`].
     pub policy: Arc<SecurityPolicy>,
-    pub allowed_agent_aliases: HashSet<String>,
 }
 
 /// Builder for a SubAgent spawn. The caller resolves a parent agent
 /// from the loaded config; [`Self::build`] applies any narrowing
 /// overrides and validates the result.
+///
+/// The former `allowed_agent_aliases` narrowing machinery had no
+/// production consumer (every call site passed `SubAgentOverrides::
+/// default()`) and is deleted per the frozen contract's SA-19 grep
+/// check: exclusion is a first-class `ContextBundleV1` field on the V1
+/// path, not dead narrowing state here.
 #[derive(Debug)]
 pub struct SubAgentSpawn {
     pub parent_alias: String,
     pub parent_policy: Arc<SecurityPolicy>,
-    pub parent_allowed_agent_aliases: HashSet<String>,
 }
 
 impl SubAgentSpawn {
@@ -64,23 +66,14 @@ impl SubAgentSpawn {
         agent_alias: &str,
         parent_policy: Arc<SecurityPolicy>,
     ) -> Result<Self> {
-        let agent = config
+        config
             .agents
             .get(agent_alias)
             .with_context(|| format!("no agent configured under alias {agent_alias:?}"))?;
 
-        let mut parent_allowed_agent_aliases: HashSet<String> = agent
-            .workspace
-            .read_memory_from
-            .iter()
-            .map(|alias| alias.as_str().to_string())
-            .collect();
-        parent_allowed_agent_aliases.insert(agent_alias.to_string());
-
         Ok(Self {
             parent_alias: agent_alias.to_string(),
             parent_policy,
-            parent_allowed_agent_aliases,
         })
     }
 
@@ -108,26 +101,9 @@ impl SubAgentSpawn {
             self.parent_policy.clone()
         };
 
-        let allowed_agent_aliases = if let Some(child_allowed) = overrides.allowed_agent_aliases {
-            for alias in &child_allowed {
-                if !self.parent_allowed_agent_aliases.contains(alias) {
-                    anyhow::bail!(
-                        "subagent allowlist override contains alias {alias:?} not present on \
-                         parent's memory allowlist; SubAgent overrides may only narrow"
-                    );
-                }
-            }
-            let mut resolved = child_allowed;
-            resolved.insert(self.parent_alias.clone());
-            resolved
-        } else {
-            self.parent_allowed_agent_aliases
-        };
-
         Ok(SubAgentContext {
             parent_alias: self.parent_alias,
             policy,
-            allowed_agent_aliases,
         })
     }
 }
@@ -161,10 +137,6 @@ mod tests {
             .build(SubAgentOverrides::default())
             .expect("inherits-verbatim build must succeed");
         assert_eq!(ctx.parent_alias, "alpha");
-        assert!(
-            ctx.allowed_agent_aliases.contains("alpha"),
-            "an agent always sees its own rows"
-        );
     }
 
     #[test]
@@ -182,11 +154,9 @@ mod tests {
         let config = config_with_agent("alpha");
         let spawn = SubAgentSpawn::for_agent(&config, "alpha").unwrap();
         let parent_policy = spawn.parent_policy.clone();
-        let parent_allowlist = spawn.parent_allowed_agent_aliases.clone();
 
         let ctx = spawn.build(SubAgentOverrides::default()).unwrap();
         assert!(Arc::ptr_eq(&ctx.policy, &parent_policy));
-        assert_eq!(ctx.allowed_agent_aliases, parent_allowlist);
     }
 
     #[test]
@@ -201,49 +171,12 @@ mod tests {
         let err = spawn
             .build(SubAgentOverrides {
                 policy: Some(child_policy),
-                ..SubAgentOverrides::default()
             })
             .expect_err("escalating override must be rejected");
         assert!(
             err.to_string().contains("/secrets"),
             "expected the escalating path in the error chain, got: {err}"
         );
-    }
-
-    #[test]
-    fn build_rejects_allowlist_override_with_alias_not_on_parent() {
-        let config = config_with_agent("alpha");
-        let spawn = SubAgentSpawn::for_agent(&config, "alpha").unwrap();
-
-        let mut rogue = HashSet::new();
-        rogue.insert("rogue-agent".to_string());
-
-        let err = spawn
-            .build(SubAgentOverrides {
-                allowed_agent_aliases: Some(rogue),
-                ..SubAgentOverrides::default()
-            })
-            .expect_err("allowlist override with foreign alias must be rejected");
-        assert!(
-            err.to_string().contains("rogue-agent"),
-            "expected the rogue alias in the error chain, got: {err}"
-        );
-    }
-
-    #[test]
-    fn build_accepts_narrowed_allowlist_subset() {
-        let config = config_with_agent("alpha");
-        let spawn = SubAgentSpawn::for_agent(&config, "alpha").unwrap();
-
-        // Empty subset is still allowed; the bound parent alias is added back.
-        let ctx = spawn
-            .build(SubAgentOverrides {
-                allowed_agent_aliases: Some(HashSet::new()),
-                ..SubAgentOverrides::default()
-            })
-            .expect("narrowing to {} is a valid subset");
-        assert_eq!(ctx.allowed_agent_aliases.len(), 1);
-        assert!(ctx.allowed_agent_aliases.contains("alpha"));
     }
 
     #[test]
@@ -273,7 +206,6 @@ mod tests {
         let ctx = spawn
             .build(SubAgentOverrides {
                 policy: Some(child_policy),
-                ..SubAgentOverrides::default()
             })
             .expect("inheriting policy as a subset must succeed");
 

@@ -581,6 +581,12 @@ impl ChildRunner for NativeChildRunner {
                 // has no cross-turn reuse contract, so the per-call
                 // `connect_all` path is the correct one.
                 mcp_registry: None,
+                // SA-9/SA-11: the spawning context threaded the child's
+                // lineage through `ChildOverrides`; the registry built for
+                // this run then inherits the same depth ledger and no
+                // rebuild can reset it. `None` (spawner did not thread
+                // one) lets the run mint its own root below.
+                lineage: request.overrides.lineage.clone(),
             };
 
             // `record_tool_loop_cost_usage` prefers a caller-scoped

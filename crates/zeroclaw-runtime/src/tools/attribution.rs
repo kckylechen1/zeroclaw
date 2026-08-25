@@ -1,6 +1,7 @@
 use zeroclaw_api::attribution::{Attributable, Role, ToolKind};
 use zeroclaw_api::tool_attribution;
 
+use crate::subagent_v1::ReasoningSubagentTool;
 use crate::tools::ArcToolRef;
 use crate::tools::cron_add::CronAddTool;
 use crate::tools::cron_list::CronListTool;
@@ -53,6 +54,7 @@ tool_attribution!(SopExecuteTool, ToolKind::SopExecute);
 tool_attribution!(SopListTool, ToolKind::SopList);
 tool_attribution!(SopStatusTool, ToolKind::SopStatus);
 tool_attribution!(SpawnSubagentTool, ToolKind::SpawnSubagent);
+tool_attribution!(ReasoningSubagentTool, ToolKind::SpawnSubagent);
 tool_attribution!(VerifiableIntentTool, ToolKind::Plugin);
 
 impl Attributable for ArcToolRef {

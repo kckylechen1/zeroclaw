@@ -93,12 +93,29 @@ pub struct ChildOverrides {
     /// Groups children belonging to one repeating unit of work, so a host can
     /// ask whether that unit still has anything in flight.
     pub loop_task_id: Option<String>,
+    /// Unified spawn lineage (SA-9): the CHILD's lineage (parent lineage
+    /// advanced by one), so a native runner's registry rebuild inherits
+    /// the spawning context's depth instead of minting a fresh ledger
+    /// (SA-11). `None` means the spawner did not thread a lineage and
+    /// the child run resolves its own root.
+    pub lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
     /// See [`Self::hosted_execution`]. Private so only that constructor can
     /// turn hosted execution on; other crates read it through [`Self::hosted_run`].
     hosted_run: bool,
 }
 
 impl ChildOverrides {
+    /// Overrides carrying the unified spawn lineage (SA-9): the CHILD's
+    /// lineage (parent advanced by one), so a native runner's registry
+    /// rebuild inherits the spawning context's depth (SA-11).
+    #[must_use]
+    pub fn with_lineage(lineage: Option<zeroclaw_api::subagent_v1::LineageRef>) -> Self {
+        Self {
+            lineage,
+            ..Self::default()
+        }
+    }
+
     /// Hosted execution: the coordinator admits, persists, queries, and
     /// cancels, but the runner does not start a native agent turn. The host
     /// delivers the [`ChildResult`] (background `delegate` parks a oneshot

@@ -1467,6 +1467,12 @@ pub(crate) async fn assemble_owned_execution(
         Some(sop_engine),
         sop_audit,
         None,
+        // Headless SOP driver: a top-level origin UNLESS it is executing
+        // inside a deeper context — a delegated SOP step running under a
+        // bounded sub-loop inherits that ambient lineage (SA-11: no
+        // rebuild mints a fresh root); a true top-level driver has no
+        // ambient scope and stays a root.
+        crate::subagent_v1::ambient_lineage(),
     );
     let skills = crate::skills::load_skills_for_agent_from_config(config, alias);
     // The same gated seam run(), process_message, and independent delegation use:

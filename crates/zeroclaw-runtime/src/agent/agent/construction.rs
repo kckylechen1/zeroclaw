@@ -309,6 +309,9 @@ impl Agent {
             sop_engine,
             sop_audit,
             None,
+            // Daemon direct-turn construction is a top-level origin: no
+            // inherited lineage; the run mints its own root.
+            None,
         );
         // Skills are loaded here and handed to `assemble`, which owns skill
         // registration and resolves builtin/MCP elevation against the pre-filter

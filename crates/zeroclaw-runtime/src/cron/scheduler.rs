@@ -1012,6 +1012,10 @@ async fn run_agent_job_with_timeout(
         // `agent::run` is the correct choice. The daemon heartbeat
         // worker is the only `mcp_registry` supplier.
         mcp_registry: None,
+        // SA-10: a cron `JobType::Agent` run is a FRESH ROOT, not a
+        // continuation of any interactive parent's ledger — a typed
+        // root transition (the run mints its own lineage).
+        lineage: None,
     };
     let run_result = match job.session_target {
         SessionTarget::Main | SessionTarget::Isolated => {
