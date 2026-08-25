@@ -1,0 +1,125 @@
+{
+  "_header": [
+    "Retired-surface registry: the single source consumed by scripts/ci/retired_docs_gate.sh.",
+    "",
+    "RULE: any PR that removes, renames, demotes, sunsets, or deprecates a",
+    "model-visible route, tool, profile, config key, env override, or code path",
+    "MUST add an entry here in the same PR. The gate scans active documentation",
+    "for teaching references to these terms and fails CI on them; historical",
+    "mentions that explicitly describe the term as removed/deprecated/legacy",
+    "pass (see the gate script header for the discriminator and its limits).",
+    "",
+    "Entry fields:",
+    "  term          exact identifier as active docs would teach it (tool name,",
+    "                action string, config key, env prefix, or source path)",
+    "  kind          tool | op | config-key | env-prefix | code-path",
+    "  retired_in    the PR that retired it",
+    "  notes         why it was retired and where the replacement lives",
+    "  match_regex   optional refinement used instead of the default match when",
+    "                the bare term collides with ordinary words or file",
+    "                basenames; defaults: word-bounded exact match for",
+    "                tool/op/config-key/code-path, prefix match for env-prefix",
+    "  allowed_globs optional repo-relative globs that are never flagged for",
+    "                this term (explicit bounded historical exemptions)"
+  ],
+  "retired": [
+    {
+      "term": "model_routing_config",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; routing and provider config belong to the gateway operator config API."
+    },
+    {
+      "term": "model_switch",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; runtime model switching is the channel /model command."
+    },
+    {
+      "term": "proxy_config",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; proxy configuration belongs to the operator config API with startup/reload application."
+    },
+    {
+      "term": "security_ops",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; default-off diagnostics with no operator surface. The term is also a source-file basename, so only the bare code-span form is matched; path references to the compiled module are not tool references.",
+      "match_regex": "`security_ops`"
+    },
+    {
+      "term": "backup",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; backups are operator-only via the gateway operator API. The bare word is ordinary English (server-side backup, backup model), so only the code-span or 'backup tool' forms are matched.",
+      "match_regex": "`backup`|\\bbackup tool\\b"
+    },
+    {
+      "term": "data_management",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; data retention is operator-only via the gateway operator API."
+    },
+    {
+      "term": "apply_env",
+      "kind": "op",
+      "retired_in": "PR #228",
+      "notes": "proxy_config action string deleted outright; restart application replaces live process-env mutation."
+    },
+    {
+      "term": "clear_env",
+      "kind": "op",
+      "retired_in": "PR #228",
+      "notes": "proxy_config action string deleted outright; restart application replaces live process-env manipulation."
+    },
+    {
+      "term": "pairing_dashboard",
+      "kind": "config-key",
+      "retired_in": "PR #229",
+      "notes": "The gateway.pairing_dashboard schema is removed; file-section and env tombstones warn and ignore. Docs must not teach the section."
+    },
+    {
+      "term": "ZEROCLAW_gateway__pairing_dashboard__",
+      "kind": "env-prefix",
+      "retired_in": "PR #229",
+      "notes": "Env override prefix tombstoned (warn + ignore); docs must not teach setting these variables."
+    },
+    {
+      "term": "gated_actions",
+      "kind": "config-key",
+      "retired_in": "PR #226",
+      "notes": "Deprecated-but-parsed security.otp knob with no runtime consumer; docs may only present it as a deprecated no-op, never as a working boundary."
+    },
+    {
+      "term": "gated_domains",
+      "kind": "config-key",
+      "retired_in": "PR #226",
+      "notes": "Deprecated-but-parsed security.otp knob with no runtime consumer; docs may only present it as a deprecated no-op, never as a working boundary."
+    },
+    {
+      "term": "gated_domain_categories",
+      "kind": "config-key",
+      "retired_in": "PR #226",
+      "notes": "Deprecated-but-parsed security.otp knob with no runtime consumer; docs may only present it as a deprecated no-op, never as a working boundary."
+    },
+    {
+      "term": "challenge_max_attempts",
+      "kind": "config-key",
+      "retired_in": "PR #226",
+      "notes": "Deprecated-but-parsed security.otp knob with no runtime consumer; docs may only present it as a deprecated no-op, never as a working boundary."
+    },
+    {
+      "term": "glm.rs",
+      "kind": "code-path",
+      "retired_in": "PR #222",
+      "notes": "Uncompiled provider module deleted; live GLM access runs through the compatible-provider surface. Docs must not teach the module path."
+    },
+    {
+      "term": "platform/wasm.rs",
+      "kind": "code-path",
+      "retired_in": "PR #222",
+      "notes": "Triple-dead runtime platform module deleted; WASM support lives in the zeroclaw-plugins host bridge. Docs must not teach the module path."
+    }
+  ]
+}
