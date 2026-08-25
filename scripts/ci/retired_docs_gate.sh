@@ -6,15 +6,28 @@
 # single retired-term registry; retiring PRs add entries there in the same PR.
 #
 # Scanned surfaces (active documentation, from `git ls-files`):
-#   - all tracked Markdown (.md/.mdx), i.e. READMEs, docs/, SKILL/agent/
-#     operator instruction files, examples and quickstarts; excluding paths
-#     with a `tests` or `fixtures` component (test data) and the
-#     docs/book/po translation submodule
-#   - tracked TOML under docs/ (config templates and examples)
+#   - all tracked Markdown (.md/.mdx): READMEs, docs/, SKILL/agent/operator
+#     instruction files, examples and quickstarts; excluding paths with a
+#     `tests` or `fixtures` component (test data) and the docs/book/po
+#     translation submodule
+#   - tracked user-directed TOML (config templates and examples): everything
+#     not under crates/, vendor/, firmware/, apps/, fuzz/, xtask/, tools/,
+#     .cargo/, dev/ci/, docs/book/po/, not a tests/fixtures path, not a
+#     Cargo.toml / rust-toolchain.toml / root tool-config file (build
+#     tooling is not documentation)
 #   - tracked English Fluent catalogues (**/locales/en/*.ftl: runtime help
 #     text source of truth; non-English locales are generated and skipped)
 # Not scanned: source code, CI YAML, test fixtures, book theme JS/CSS,
 # binaries. Help text that lives in code is out of reach for a docs lint.
+#
+# Matching: each registry entry matches by kind (word-bounded identifier by
+# default; env-prefix entries match as a prefix so suffixed variables hit).
+# Entries may override with `match_regex` for terms that collide with
+# ordinary words or file basenames. In Fluent files, every entry
+# additionally matches its `tool-<hyphenated-term>` key form (the tool-
+# description key convention), so `tool-proxy-config = ...` is caught even
+# though the hyphenated spelling differs from the registry term; unrelated
+# hyphenated keys (channel-runtime-*, app-prefixed *) do not match.
 #
 # Discriminator (deterministic, line-based; deliberately conservative in the
 # pass direction — this is a tripwire, not a proof):
@@ -29,8 +42,13 @@
 # superseded/replaced/obsolete/migrat*/historical/formerly/withdrawn/
 # (not|never) enforced. Whole files whose basename starts with CHANGELOG are
 # exempt (changelog context). Per-term `allowed_globs` in the registry exempt
-# explicit paths; per-term `match_regex` narrows terms that collide with
-# ordinary words or file basenames.
+# explicit paths; globs must be path-shaped (contain "/") and carry at least
+# one non-wildcard character, so a blanket "*" exemption cannot be declared.
+#
+# Replacement teaching: an entry with a `replacement` string additionally
+# requires that at least one scanned file teaches the replacement (contains
+# the string); a rename whose replacement vanished from every active doc
+# fails the gate even when the old name is fully gone.
 #
 # Known limits, stated honestly:
 #   - vocabulary on an unrelated line can excuse a nearby teaching reference
@@ -38,15 +56,22 @@
 #     excuse everything below it until the next heading (false pass);
 #   - vocabulary-free teaching references to ambiguous terms outside their
 #     match_regex forms are invisible (false pass);
-#   - a Markdown heading resets section context, so context never leaks
-#     across sections; TOML/FTL files get window context only.
-# Prefering false pass over false fail is the chosen trade: legitimate
+#   - bare prose variants (spelled-out or differently cased names) and
+#     non-Fluent transformed spellings are invisible;
+#   - the replacement check proves presence of the string somewhere in
+#     active docs, not that it is taught well;
+#   - a Markdown heading resets section context; TOML/FTL files get window
+#     context only (comments more than 3 lines away do not excuse a hit).
+# Preferring false pass over false fail is the chosen trade: legitimate
 # historical mentions must not storm, and the registry keeps the drift class
-# visible for the terms that matter.
+# visible for the terms that matter. The registry is the declared
+# contraction metadata: a contraction PR that omits its entry defeats this
+# gate by review, not by mechanism.
 #
 # Override: RETIRED_SURFACES_FILE points at an alternative registry (used by
 # the self-test). Exit status: 0 = clean, 1 = teaching references found,
-# 2 = fatal (bad registry, Git failure, outside a work tree).
+# 2 = fatal (missing python3, bad registry, Git failure, outside a work
+# tree).
 
 set -euo pipefail
 
@@ -55,6 +80,11 @@ if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     exit 2
 fi
 cd "$repo_root"
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "FATAL: python3 is required by the retired-docs gate." >&2
+    exit 2
+fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 registry="${RETIRED_SURFACES_FILE:-${script_dir}/retired_surfaces.json}"
@@ -74,6 +104,13 @@ import sys
 registry_path = sys.argv[1]
 
 KINDS = {"tool", "op", "config-key", "env-prefix", "code-path"}
+ROOT_TOOL_CONFIGS = {
+    "Cargo.toml", "clippy.toml", "deny.toml", "locales.toml",
+    "release-plz.toml", "rust-toolchain.toml", "rustfmt.toml", "taplo.toml",
+}
+BUILD_BASENAMES = {"Cargo.toml", "rust-toolchain.toml"}
+NONDOC_TREES = ("crates/", "vendor/", "firmware/", "apps/", "fuzz/",
+                "xtask/", "tools/", ".cargo/", "dev/ci/")
 HISTORICAL = re.compile(
     r"remov\w*|deprecat\w*|retir\w*|delet\w*|legacy|sunset\w*|unsupported"
     r"|no longer|superseded|replaced|obsolete|migrat\w*|historical|formerly"
@@ -100,6 +137,9 @@ if not isinstance(doc, dict) or not isinstance(doc.get("retired"), list):
 if not doc["retired"]:
     fatal("registry 'retired' list must not be empty")
 
+def is_wildcard_only(glob):
+    return not re.search(r"[^*?]", glob)
+
 entries = []
 seen_terms = set()
 for raw in doc["retired"]:
@@ -111,7 +151,7 @@ for raw in doc["retired"]:
     notes = raw.get("notes")
     if not isinstance(term, str) or not term:
         fatal(f"entry with invalid 'term': {raw!r}")
-    if kind not in KINDS:
+    if not isinstance(kind, str) or kind not in KINDS:
         fatal(f"entry {term!r}: 'kind' must be one of {sorted(KINDS)}, got {kind!r}")
     if not isinstance(retired_in, str) or not retired_in.strip():
         fatal(f"entry {term!r}: 'retired_in' must be a non-empty string")
@@ -135,14 +175,39 @@ for raw in doc["retired"]:
         matcher = re.compile(pattern)
     except re.error as exc:
         fatal(f"entry {term!r}: match pattern does not compile ({pattern!r}): {exc}")
+    try:
+        ftl_matcher = re.compile(
+            r"^tool-" + re.escape(term.replace("_", "-")) + r"\b"
+        )
+    except re.error as exc:
+        fatal(f"entry {term!r}: Fluent key pattern does not compile: {exc}")
 
     globs = raw.get("allowed_globs", [])
     if not isinstance(globs, list) or any(
         not isinstance(g, str) or not g for g in globs
     ):
         fatal(f"entry {term!r}: 'allowed_globs' must be a list of non-empty strings")
+    for glob in globs:
+        if "/" not in glob or is_wildcard_only(glob):
+            fatal(
+                f"entry {term!r}: allowed_glob {glob!r} must be path-shaped "
+                "(contain '/') and carry at least one non-wildcard character"
+            )
 
-    entries.append({"term": term, "kind": kind, "matcher": matcher, "globs": globs})
+    replacement = raw.get("replacement")
+    if replacement is not None and (
+        not isinstance(replacement, str) or not replacement.strip()
+    ):
+        fatal(f"entry {term!r}: 'replacement' must be a non-empty string")
+
+    entries.append({
+        "term": term,
+        "kind": kind,
+        "matcher": matcher,
+        "ftl_matcher": ftl_matcher,
+        "globs": globs,
+        "replacement": replacement,
+    })
 
 proc = subprocess.run(
     ["git", "ls-files", "-z"], capture_output=True, check=False
@@ -159,7 +224,13 @@ def scanned(path):
         return False
     if path.endswith((".md", ".mdx")):
         return True
-    if path.startswith("docs/") and path.endswith(".toml"):
+    if path.endswith(".toml"):
+        if parts[-1] in BUILD_BASENAMES:
+            return False
+        if path in ROOT_TOOL_CONFIGS:
+            return False
+        if any(path.startswith(t) for t in NONDOC_TREES):
+            return False
         return True
     if "/locales/en/" in f"/{path}" and path.endswith(".ftl"):
         return True
@@ -168,16 +239,20 @@ def scanned(path):
 targets = [p for p in paths if scanned(p)]
 
 violations = []
+file_texts = {}
 for path in targets:
     is_markdown = path.endswith((".md", ".mdx"))
+    is_ftl = path.endswith(".ftl")
     changelog = path.rsplit("/", 1)[-1].lower().startswith("changelog")
     if changelog:
         continue
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
-            lines = fh.read().splitlines()
+            content = fh.read()
     except OSError:
         continue
+    file_texts[path] = content
+    lines = content.splitlines()
 
     active = [e for e in entries if not any(
         fnmatch.fnmatch(path, g) for g in e["globs"]
@@ -197,21 +272,41 @@ for path in targets:
             continue
 
         for entry in active:
-            if entry["matcher"].search(line):
-                window = lines[max(0, n - 1 - WINDOW): n + WINDOW]
-                in_section = lines[heading_line - 1: n - 1] if heading_line else []
-                historical = (
-                    HISTORICAL.search(line)
-                    or any(HISTORICAL.search(w) for w in window)
-                    or any(HISTORICAL.search(s) for s in in_section)
+            matched = entry["matcher"].search(line) or (
+                is_ftl and bool(entry["ftl_matcher"].search(line))
+            )
+            if not matched:
+                continue
+            window = lines[max(0, n - 1 - WINDOW): n + WINDOW]
+            in_section = lines[heading_line - 1: n - 1] if heading_line else []
+            historical = (
+                HISTORICAL.search(line)
+                or any(HISTORICAL.search(w) for w in window)
+                or any(HISTORICAL.search(s) for s in in_section)
+            )
+            if not historical:
+                text = line.strip()
+                if len(text) > 160:
+                    text = text[:157] + "..."
+                violations.append(
+                    (path, n, entry["kind"], entry["term"], text)
                 )
-                if not historical:
-                    text = line.strip()
-                    if len(text) > 160:
-                        text = text[:157] + "..."
-                    violations.append(
-                        (path, n, entry["kind"], entry["term"], text)
-                    )
+
+for entry in entries:
+    replacement = entry["replacement"]
+    if replacement is None:
+        continue
+    if not any(replacement in text for text in file_texts.values()):
+        violations.append(
+            (
+                "scripts/ci/retired_surfaces.json",
+                0,
+                entry["kind"],
+                entry["term"],
+                f"renamed surface: no active doc teaches the replacement "
+                f"{replacement!r}",
+            )
+        )
 
 if not violations:
     print(f"retired-docs gate: {len(targets)} active doc file(s) scanned, "
@@ -221,7 +316,8 @@ if not violations:
 print("FAIL: active documentation still teaches retired surfaces:")
 shown = violations[:MAX_REPORT]
 for path, n, kind, term, text in shown:
-    print(f"  {path}:{n}: [{kind}] {term}: {text}")
+    where = f"{path}:{n}" if n else path
+    print(f"  {where}: [{kind}] {term}: {text}")
 if len(violations) > MAX_REPORT:
     print(f"  ... and {len(violations) - MAX_REPORT} more")
 print(f"{len(violations)} teaching reference(s) to retired surfaces. "

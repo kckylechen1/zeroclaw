@@ -1,4 +1,3 @@
-tool-backup = 创建、列出、验证和恢复工作区备份
 tool-browser = 使用可插拔后端（agent-browser、rust-native、computer_use）进行网页/浏览器自动化。支持 DOM 操作以及通过 computer-use 边车进行的可选系统级操作（mouse_move、mouse_click、mouse_drag、key_type、key_press、screen_capture）。使用 'snapshot' 将交互元素映射到引用（@e1、@e2）。对 open 操作强制执行 browser.allowed_domains。
 tool-browser-delegate = 将基于浏览器的任务委托给具备浏览器能力的 CLI，用于与 Teams、Outlook、Jira、Confluence 等 Web 应用进行交互
 tool-browser-open = 在系统浏览器中打开经批准的 HTTPS URL。安全约束：仅限允许列表中的域名，不允许本地/私有主机，不允许抓取。
@@ -34,7 +33,6 @@ tool-cron-remove = 按 id 移除一个 cron 任务
 tool-cron-run = 立即强制运行一个 cron 任务并记录运行历史
 tool-cron-runs = 列出某个 cron 任务的近期运行历史
 tool-cron-update = 修补现有的 cron 任务（schedule、command、prompt、enabled、delivery、model 等）
-tool-data-management = 工作区数据保留、清除和存储统计
 tool-delegate = 将子任务委托给专门的 agent。适用场景：某项任务受益于不同的模型（例如快速摘要、深度推理、代码生成）。默认情况下子 agent 运行单个提示词；当 agentic=true 时，它可以通过经过筛选的工具调用循环进行迭代。
 tool-file-edit = 通过将精确匹配的字符串替换为新内容来编辑文件
 tool-file-download = 从配置的远程端点下载文件并将其写入代理的工作区。提供要获取的文档标识符和工作区相对目标路径；端点 URL 由主机配置固定，永远不受模型控制。字节直接流式写入磁盘，不会加载到模型上下文中。返回 HTTP 状态、写入的字节数和目标路径。
@@ -90,14 +88,11 @@ tool-memory-forget = 按 key 移除一条记忆。用于删除过时的事实或
 tool-memory-recall = 在长期记忆中搜索相关的事实、偏好或上下文。返回按相关性排序的评分结果。省略查询或传入裸 * 以返回近期记忆。
 tool-memory-store = 在长期记忆中存储事实、偏好或备注。使用类别 'core' 表示永久性事实，'daily' 表示会话备注，'conversation' 表示聊天上下文，或自定义类别名称。
 tool-microsoft365 = Microsoft 365 集成：通过 Microsoft Graph API 管理 Outlook 邮件、Teams 消息、Calendar 事件、OneDrive 文件和 SharePoint 搜索
-tool-model-routing-config = 管理默认模型设置、基于场景的提供商/模型路由、分类规则和别名 agent 配置
 tool-notion = 与 Notion 交互：查询数据库、读取/创建/更新页面，以及搜索工作区。
 tool-project-intel = 项目交付智能：生成状态报告、检测风险、起草客户更新、总结冲刺，以及估算工作量。只读分析工具。
-tool-proxy-config = 管理 ZeroClaw 代理设置（范围：environment | zeroclaw | services），包括运行时和进程环境变量应用
 tool-pushover = 向你的设备发送 Pushover 通知。需要 .env 文件中的 PUSHOVER_TOKEN 和 PUSHOVER_USER_KEY。
 tool-schedule = 管理仅限 shell 的定时任务。操作：create/add/once/list/get/cancel/remove/pause/resume。警告：此工具创建的 shell 任务输出仅被记录，不会投递到任何频道。要向 Discord/Telegram/Slack/Matrix 发送定时消息，请使用 cron_add 工具，并设置 job_type='agent' 和如 {"{"}"mode":"announce","channel":"discord","to":"<channel_id>"{"}"} 的 delivery 配置。
 tool-screenshot = 捕获当前屏幕的截图。返回文件路径和 base64 编码的 PNG 数据。
-tool-security-ops = 用于托管网络安全服务的安全运营工具。操作：triage_alert（对告警分类/排序）、run_playbook（执行事件响应步骤）、parse_vulnerability（解析扫描结果）、generate_report（创建安全态势报告）、list_playbooks（列出可用 playbook）、alert_stats（汇总告警指标）。
 tool-shell = 在工作区目录中执行 shell 命令
 tool-sop-advance = 报告当前 SOP 步骤的结果并推进到下一步。提供 run_id、步骤是成功还是失败，以及简要的输出摘要。
 tool-sop-approve = 批准一个正在等待操作员审批的待处理 SOP 步骤。返回要执行的步骤指令。使用 sop_status 查看哪些运行正在等待。

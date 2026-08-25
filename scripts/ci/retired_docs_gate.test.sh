@@ -2,8 +2,8 @@
 
 # Fixture tests for retired_docs_gate.sh: each planted teaching reference to
 # a retired surface must fire with file/line/term diagnostics; each
-# historical, exempted, or out-of-scope context must pass; and a broken
-# registry must be FATAL rather than a silent pass.
+# historical, exempted, or out-of-scope context must pass; a broken registry
+# or missing python3 must be FATAL rather than a silent pass.
 
 set -euo pipefail
 
@@ -45,12 +45,29 @@ run_gate() {
     set -e
 }
 
+run_gate_with() {
+    local reg="$1"
+    set +e
+    GATE_OUT="$(RETIRED_SURFACES_FILE="$reg" bash "$gate" 2>&1)"
+    GATE_STATUS=$?
+    set -e
+}
+
 plant() {
     mkdir -p "$(dirname "$1")"
     printf '%s\n' "$2" >"$1"
     git add "$1"
     run_gate
     git rm -qf "$1"
+}
+
+plant_with() {
+    local reg="$1" path="$2" content="$3"
+    mkdir -p "$(dirname "$path")"
+    printf '%s\n' "$content" >"$path"
+    git add "$path"
+    run_gate_with "$reg"
+    git rm -qf "$path"
 }
 
 expect_fail() {
@@ -89,6 +106,9 @@ expect_fail "tool taught in guide docs" "frob_tool" "docs/book/src/guide.md" \
 expect_fail "config section taught in a docs TOML template" "frob_dashboard" "docs/example.toml" \
     $'[gateway.frob_dashboard]\nenabled = true'
 
+expect_fail "config section taught in a deploy TOML template outside docs" "frob_dashboard" "scripts/deploy.toml" \
+    $'[gateway.frob_dashboard]\nenabled = true'
+
 expect_fail "env override taught with key suffix (prefix match)" "ZEROCLAW_gateway__frob__" "docs/book/src/env.md" \
     'Set ZEROCLAW_gateway__frob__code_length = 9 before boot.'
 
@@ -97,6 +117,12 @@ expect_fail "deprecated knob taught as working behavior" "frob_gate" "README.md"
 
 expect_fail "help text taught in English Fluent catalogue" "frob_tool" "crates/x/locales/en/cli.ftl" \
     'frob-help = Use frob_tool to frob.'
+
+expect_fail "Fluent tool-description key form caught despite hyphens" "frob_tool" "crates/x/locales/en/tools.ftl" \
+    'tool-frob-tool = Use this to frob the widget.'
+
+expect_fail "Fluent tool key form caught for match_regex-refined term" "backup_frob" "crates/x/locales/en/tools2.ftl" \
+    'tool-backup-frob = Archives state nightly.'
 
 expect_fail "op action string taught" "frob_env" "docs/book/src/ops.md" \
     'Call the widget tool with action `frob_env` to apply.'
@@ -107,11 +133,19 @@ expect_fail "code-span form of an ambiguous term taught" "backup_frob" "docs/boo
 expect_fail "bare-word phrase form of an ambiguous term taught" "backup_frob" "docs/book/src/backup2.md" \
     'The backup_frob tool archives state nightly.'
 
-# ── collision refinement: ordinary-word use of an ambiguous term ────────
+# ── collision refinement and hyphen specificity ─────────────────────────
 
 expect_pass "bare-word use of ambiguous term outside its match forms" \
     "docs/book/src/archives.md" \
     'The backup_frob directory holds archives.'
+
+expect_pass "unrelated hyphenated Fluent key does not match" \
+    "crates/x/locales/en/app.ftl" \
+    'zc-frob-tool-applying = Applying frob change...'
+
+expect_pass "command-path Fluent key does not match" \
+    "crates/x/locales/en/chan.ftl" \
+    'channel-runtime-frob-tool-hint = Switch with /frob command.'
 
 # ── historical context must pass ────────────────────────────────────────
 
@@ -147,11 +181,51 @@ expect_pass "test-fixture instruction files are out of scope" \
 
 expect_pass "non-English generated locales are out of scope" \
     "crates/x/locales/es/cli.ftl" \
-    'frob-help = Usa frob_tool.'
+    'tool-frob-tool = Usa esto para frob.'
 
 expect_pass "source code is out of scope" \
     "crates/x/src/lib.rs" \
     'pub const TOOL: &str = "frob_tool";'
+
+expect_pass "root tool-config TOML is out of scope" \
+    "taplo.toml" \
+    $'[gateway.frob_dashboard]\nenabled = true'
+
+expect_pass "Cargo.toml anywhere is out of scope" \
+    "demo/Cargo.toml" \
+    '[gateway.frob_dashboard]'
+
+# ── replacement teaching (rename contract) ──────────────────────────────
+
+repl_registry="${tmp}/fixture_registry_repl.json"
+cat >"$repl_registry" <<'JSON'
+{
+  "retired": [
+    {"term": "frob_tool", "kind": "tool", "retired_in": "PR 9001",
+     "notes": "fixture rename", "replacement": "widget-frobber"}
+  ]
+}
+JSON
+
+plant_with "$repl_registry" "docs/book/src/repl.md" \
+    'The frob surface moved; see the operator docs.'
+if [ "$GATE_STATUS" -ne 1 ] || ! grep -qF "no active doc teaches the replacement" <<<"$GATE_OUT"; then
+    echo "RENAME WITHOUT REPLACEMENT TEACHING NOT CAUGHT (status ${GATE_STATUS})"
+    grep -E '^(FAIL|  )' <<<"$GATE_OUT" || true
+    fail_count=$((fail_count + 1))
+else
+    pass_count=$((pass_count + 1))
+fi
+
+plant_with "$repl_registry" "docs/book/src/repl.md" \
+    'The frob surface moved; run `widget-frobber` instead.'
+if [ "$GATE_STATUS" -ne 0 ]; then
+    echo "REPLACEMENT TEACHING FALSE POSITIVE"
+    grep -E '^(FAIL|  )' <<<"$GATE_OUT" || true
+    fail_count=$((fail_count + 1))
+else
+    pass_count=$((pass_count + 1))
+fi
 
 # ── registry integrity: broken registries are FATAL, never silent ──────
 
@@ -178,9 +252,14 @@ fatal_registry_case() {
 fatal_registry_case "invalid JSON" '{"retired": ['
 fatal_registry_case "empty retired list" '{"retired": []}'
 fatal_registry_case "unknown kind" '{"retired": [{"term": "x", "kind": "vibes", "retired_in": "PR 1", "notes": "n"}]}'
+fatal_registry_case "non-string kind" '{"retired": [{"term": "x", "kind": [], "retired_in": "PR 1", "notes": "n"}]}'
+fatal_registry_case "non-string term" '{"retired": [{"term": [], "kind": "tool", "retired_in": "PR 1", "notes": "n"}]}'
 fatal_registry_case "missing notes" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1"}]}'
 fatal_registry_case "non-compiling match_regex" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "match_regex": "(unclosed"}]}'
 fatal_registry_case "duplicate term" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n"}, {"term": "x", "kind": "op", "retired_in": "PR 1", "notes": "n"}]}'
+fatal_registry_case "blanket allowed_glob" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "allowed_globs": ["*"]}]}'
+fatal_registry_case "pathless allowed_glob" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "allowed_globs": ["legacy-*.md"]}]}'
+fatal_registry_case "empty replacement string" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "replacement": " "}]}'
 
 set +e
 missing_out="$(RETIRED_SURFACES_FILE="${tmp}/does-not-exist.json" bash "$gate" 2>&1)"
@@ -188,6 +267,24 @@ missing_status=$?
 set -e
 if [ "$missing_status" -ne 2 ] || ! grep -qF "FATAL" <<<"$missing_out"; then
     echo "MISSING REGISTRY NOT FATAL (status ${missing_status})"
+    fail_count=$((fail_count + 1))
+else
+    pass_count=$((pass_count + 1))
+fi
+
+# ── fatal path: python3 unavailable ─────────────────────────────────────
+
+nopy_bin="${tmp}/nopybin"
+mkdir -p "$nopy_bin"
+ln -s "$(command -v bash)" "${nopy_bin}/bash"
+ln -s "$(command -v git)" "${nopy_bin}/git"
+ln -s "$(command -v dirname)" "${nopy_bin}/dirname"
+set +e
+out="$(PATH="$nopy_bin" bash "$gate" 2>&1)"
+status=$?
+set -e
+if [ "$status" -ne 2 ] || ! grep -qF "FATAL" <<<"$out"; then
+    echo "MISSING PYTHON3 NOT FATAL (status ${status})"
     fail_count=$((fail_count + 1))
 else
     pass_count=$((pass_count + 1))
@@ -211,31 +308,46 @@ else
     pass_count=$((pass_count + 1))
 fi
 
-# ── real registry integrity: parses, scans clean, corpus seeded ─────────
+# ── real registry integrity: shape, kinds, patterns, seeded corpus ──────
+# The real registry is validated structurally here (the gate validates it
+# again on every run); a small canary list guards against accidental
+# truncation of the seeded corpus.
 
-set +e
-out="$(RETIRED_SURFACES_FILE="$real_registry" bash "$gate" 2>&1)"
-status=$?
-set -e
-if [ "$status" -ne 0 ]; then
-    echo "REAL REGISTRY DOES NOT RUN CLEAN IN EMPTY REPO (status ${status})"
-    echo "$out"
-    fail_count=$((fail_count + 1))
-else
+real_check="${tmp}/real_check.out"
+if python3 - "$real_registry" <<'PY' >"$real_check" 2>&1
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    doc = json.load(fh)
+entries = doc["retired"]
+kinds = {"tool", "op", "config-key", "env-prefix", "code-path"}
+assert len(entries) >= 16, f"corpus shrank: {len(entries)} entries"
+assert {e["kind"] for e in entries} == kinds, "kind coverage shrank"
+for e in entries:
+    assert e["kind"] in kinds, e
+    for field in ("term", "retired_in", "notes"):
+        assert isinstance(e[field], str) and e[field].strip(), (e["term"], field)
+    if "match_regex" in e:
+        re.compile(e["match_regex"])
+    for g in e.get("allowed_globs", []):
+        assert "/" in g and re.search(r"[^*?]", g), (e["term"], g)
+    if "replacement" in e:
+        assert e["replacement"].strip(), e["term"]
+canary = {"model_switch", "pairing_dashboard", "glm.rs"}
+terms = {e["term"] for e in entries}
+assert canary <= terms, f"canary terms missing: {canary - terms}"
+print("real registry structurally valid")
+PY
+then
     pass_count=$((pass_count + 1))
+else
+    echo "REAL REGISTRY INTEGRITY CHECK FAILED"
+    cat "$real_check"
+    fail_count=$((fail_count + 1))
 fi
 
-seeded_count=0
-for seeded in model_switch model_routing_config proxy_config security_ops backup data_management apply_env clear_env pairing_dashboard ZEROCLAW_gateway__pairing_dashboard__ gated_actions gated_domains gated_domain_categories challenge_max_attempts glm.rs "platform/wasm.rs"; do
-    if ! grep -qF "\"term\": \"${seeded}\"" "$real_registry"; then
-        echo "SEEDED TERM MISSING FROM REAL REGISTRY: ${seeded}"
-        fail_count=$((fail_count + 1))
-    else
-        pass_count=$((pass_count + 1))
-        seeded_count=$((seeded_count + 1))
-    fi
-done
-
 echo
-echo "${pass_count} passed, ${fail_count} failed (seeded corpus terms verified: ${seeded_count})"
+echo "${pass_count} passed, ${fail_count} failed"
 [ "$fail_count" -eq 0 ]

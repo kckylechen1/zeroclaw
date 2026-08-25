@@ -18,28 +18,38 @@
     "  match_regex   optional refinement used instead of the default match when",
     "                the bare term collides with ordinary words or file",
     "                basenames; defaults: word-bounded exact match for",
-    "                tool/op/config-key/code-path, prefix match for env-prefix",
+    "                tool/op/config-key/code-path, prefix match for env-prefix.",
+    "                In Fluent files the tool-<hyphenated-term> key form is",
+    "                always matched on top of this",
     "  allowed_globs optional repo-relative globs that are never flagged for",
-    "                this term (explicit bounded historical exemptions)"
+    "                this term (explicit bounded historical exemptions); each",
+    "                glob must be path-shaped (contain '/') and carry at least",
+    "                one non-wildcard character",
+    "  replacement   optional replacement surface string; when present, some",
+    "                active doc must teach it (contain the string) or the gate",
+    "                fails - a rename may not merely erase the old name"
   ],
   "retired": [
     {
       "term": "model_routing_config",
       "kind": "tool",
       "retired_in": "PR #228",
-      "notes": "Removed from the ordinary model-visible registry; routing and provider config belong to the gateway operator config API."
+      "notes": "Removed from the ordinary model-visible registry; routing and provider config belong to the gateway operator config API.",
+      "replacement": "/api/config"
     },
     {
       "term": "model_switch",
       "kind": "tool",
       "retired_in": "PR #228",
-      "notes": "Removed from the ordinary model-visible registry; runtime model switching is the channel /model command."
+      "notes": "Removed from the ordinary model-visible registry; runtime model switching is the channel /model command.",
+      "replacement": "/model"
     },
     {
       "term": "proxy_config",
       "kind": "tool",
       "retired_in": "PR #228",
-      "notes": "Removed from the ordinary model-visible registry; proxy configuration belongs to the operator config API with startup/reload application."
+      "notes": "Removed from the ordinary model-visible registry; proxy configuration belongs to the operator config API with startup/reload application.",
+      "replacement": "/api/config/proxy"
     },
     {
       "term": "security_ops",
@@ -53,13 +63,15 @@
       "kind": "tool",
       "retired_in": "PR #228",
       "notes": "Removed from the ordinary model-visible registry; backups are operator-only via the gateway operator API. The bare word is ordinary English (server-side backup, backup model), so only the code-span or 'backup tool' forms are matched.",
-      "match_regex": "`backup`|\\bbackup tool\\b"
+      "match_regex": "`backup`|\\bbackup tool\\b",
+      "replacement": "/api/agents/<alias>/backup"
     },
     {
       "term": "data_management",
       "kind": "tool",
       "retired_in": "PR #228",
-      "notes": "Removed from the ordinary model-visible registry; data retention is operator-only via the gateway operator API."
+      "notes": "Removed from the ordinary model-visible registry; data retention is operator-only via the gateway operator API.",
+      "replacement": "data-retention"
     },
     {
       "term": "apply_env",
