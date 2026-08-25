@@ -234,6 +234,37 @@ else
     pass_count=$((pass_count + 1))
 fi
 
+# ── allowed_globs are pathname-aware, never recursive ───────────────────
+
+glob_registry="${tmp}/fixture_registry_glob.json"
+cat >"$glob_registry" <<'JSON'
+{
+  "retired": [
+    {"term": "frob_gate", "kind": "config-key", "retired_in": "PR 9001",
+     "notes": "fixture glob knob", "allowed_globs": ["docs/*.md"]}
+  ]
+}
+JSON
+
+plant_with "$glob_registry" "docs/flat.md" \
+    'Use frob_gate today.'
+if [ "$GATE_STATUS" -ne 0 ]; then
+    echo "DIRECT-CHILD GLOB EXEMPTION NOT HONORED"
+    grep -E '^(FAIL|  )' <<<"$GATE_OUT" || true
+    fail_count=$((fail_count + 1))
+else
+    pass_count=$((pass_count + 1))
+fi
+
+plant_with "$glob_registry" "docs/nested/deep.md" \
+    'Use frob_gate today.'
+if [ "$GATE_STATUS" -ne 1 ]; then
+    echo "GLOB EXEMPTION ESCAPES ITS DIRECTORY (wanted exit 1, got ${GATE_STATUS})"
+    fail_count=$((fail_count + 1))
+else
+    pass_count=$((pass_count + 1))
+fi
+
 # ── registry integrity: broken registries are FATAL, never silent ──────
 
 fatal_registry_case() {
@@ -268,6 +299,7 @@ fatal_registry_case "blanket allowed_glob" '{"retired": [{"term": "x", "kind": "
 fatal_registry_case "pathless allowed_glob" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "allowed_globs": ["legacy-*.md"]}]}'
 fatal_registry_case "path-shaped blanket allowed_glob" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "allowed_globs": ["**/**"]}]}'
 fatal_registry_case "whole-tree allowed_glob" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "allowed_globs": ["docs/**"]}]}'
+fatal_registry_case "bracket-class dir components" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "allowed_globs": ["[a-z]*/[a-z]*"]}]}'
 fatal_registry_case "empty replacement string" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "replacement": " "}]}'
 fatal_registry_case "vacuously short replacement" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "replacement": "a"}]}'
 fatal_registry_case "whitespace replacement" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "replacement": "ab cd"}]}'
@@ -344,7 +376,9 @@ for e in entries:
         re.compile(e["match_regex"])
     for g in e.get("allowed_globs", []):
         assert "/" in g, (e["term"], g)
-        assert all(re.search(r"[^*?]", part) for part in g.split("/")), (e["term"], g)
+        parts = g.split("/")
+        assert all(re.search(r"[^*?]", part) for part in parts), (e["term"], g)
+        assert not any(re.search(r"[*?\[\]]", part) for part in parts[:-1]), (e["term"], g)
     if "replacement" in e:
         assert len(e["replacement"].strip()) >= 4, e["term"]
         assert not any(ch.isspace() for ch in e["replacement"]), e["term"]

@@ -43,9 +43,11 @@
 # superseded/replaced/obsolete/migrat*/historical/formerly/withdrawn/
 # (not|never) enforced. Whole files whose basename starts with CHANGELOG are
 # exempt (changelog context). Per-term `allowed_globs` in the registry exempt
-# explicit paths; every path component of a glob must carry at least one
-# non-wildcard character, so blanket exemptions ("*", "**/**", "docs/**")
-# cannot be declared.
+# explicit paths; matching is pathname-aware (directory components must be
+# literal, wildcards may appear only in the basename, so "docs/*.md" exempts
+# files directly under docs/ and never nested subtrees) and every path
+# component must carry at least one non-wildcard character, so blanket
+# exemptions ("*", "**/**", "docs/**") cannot be declared.
 #
 # Replacement teaching: an entry with a `replacement` string additionally
 # requires that at least one scanned file teaches the replacement (contains
@@ -146,6 +148,21 @@ def is_wildcard_only(glob):
     # so a blanket "**/**" (or "*") cannot be declared as an exemption.
     return any(not re.search(r"[^*?/]", part) for part in glob.split("/"))
 
+def wildcard_in_dir_component(glob):
+    # fnmatch wildcards span "/" (they are regex-based), so wildcards are
+    # only safe in the final basename component; directory components must
+    # be literal to keep an exemption inside one directory.
+    parts = glob.split("/")
+    return any(re.search(r"[*?\[\]]", part) for part in parts[:-1])
+
+def glob_matches(path, glob):
+    # Pathname-aware match: the directory part must be an exact literal
+    # prefix and only the basename may carry wildcards, so "docs/*.md"
+    # exempts files directly under docs/ and never nested subtrees.
+    glob_dir, _, glob_base = glob.rpartition("/")
+    path_dir, _, path_base = path.rpartition("/")
+    return path_dir == glob_dir and fnmatch.fnmatchcase(path_base, glob_base)
+
 entries = []
 seen_terms = set()
 for raw in doc["retired"]:
@@ -194,11 +211,11 @@ for raw in doc["retired"]:
     ):
         fatal(f"entry {term!r}: 'allowed_globs' must be a list of non-empty strings")
     for glob in globs:
-        if "/" not in glob or is_wildcard_only(glob):
+        if "/" not in glob or is_wildcard_only(glob) or wildcard_in_dir_component(glob):
             fatal(
                 f"entry {term!r}: allowed_glob {glob!r} must be path-shaped "
-                "(contain '/') with at least one non-wildcard character in "
-                "every path component"
+                "(contain '/') with literal directory components and at "
+                "least one non-wildcard character in every path component"
             )
 
     replacement = raw.get("replacement")
@@ -268,7 +285,7 @@ for path in targets:
     lines = content.splitlines()
 
     active = [e for e in entries if not any(
-        fnmatch.fnmatch(path, g) for g in e["globs"]
+        glob_matches(path, g) for g in e["globs"]
     )]
     if not active:
         continue
