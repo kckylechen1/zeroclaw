@@ -12,42 +12,28 @@ static SENSITIVE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 pub fn scrub_credentials(input: &str) -> String {
     SENSITIVE_KV_REGEX
         .replace_all(input, |caps: &regex::Captures| {
-            let full_match = &caps[0];
-            let key = &caps[1];
-            let val = caps
+            // Full mask, no value prefix: the first characters of a secret
+            // are themselves secret, so nothing of the captured value may
+            // survive. Only the captured value's byte span is swapped for
+            // the mask; the key, its optional quote, the separator, and any
+            // value quotes stay byte-for-byte as matched — reconstructing
+            // them with format! historically doubled quotes in JSON-shaped
+            // text. No slicing of the value means multi-byte UTF-8 needs no
+            // special case.
+            let whole = caps.get(0).expect("group 0 is the whole match");
+            let value = caps
                 .get(2)
                 .or(caps.get(3))
                 .or(caps.get(4))
-                .map(|m| m.as_str())
-                .unwrap_or("");
-
-            // Preserve first 4 chars for context, then redact.
-            // Use char_indices to find the byte offset of the 4th character
-            // so we never slice in the middle of a multi-byte UTF-8 sequence.
-            let prefix = if val.len() > 4 {
-                val.char_indices()
-                    .nth(4)
-                    .map(|(byte_idx, _)| &val[..byte_idx])
-                    .unwrap_or(val)
-            } else {
-                ""
-            };
-
-            if full_match.contains(':') {
-                if full_match.contains('"') {
-                    format!("\"{}\": \"{}*[REDACTED]\"", key, prefix)
-                } else {
-                    format!("{}: {}*[REDACTED]", key, prefix)
-                }
-            } else if full_match.contains('=') {
-                if full_match.contains('"') {
-                    format!("{}=\"{}*[REDACTED]\"", key, prefix)
-                } else {
-                    format!("{}={}*[REDACTED]", key, prefix)
-                }
-            } else {
-                format!("{}: {}*[REDACTED]", key, prefix)
-            }
+                .expect("the value alternation always participates");
+            let value_start = value.start() - whole.start();
+            let value_end = value.end() - whole.start();
+            let matched = whole.as_str();
+            format!(
+                "{}[REDACTED]{}",
+                &matched[..value_start],
+                &matched[value_end..]
+            )
         })
         .to_string()
 }
@@ -96,25 +82,15 @@ pub fn scrub_credentials_value(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// Redact a value sitting under a credential-named key. String values keep a
-/// short prefix for context; non-string values (arrays, objects, numbers) are
-/// redacted wholesale — everything under a credential-named key is credential
-/// material, and structural recursion would let a composite shape (e.g.
-/// `api_key: ["raw-secret"]`) resurface the secret through a non-sensitive
-/// child key.
-fn redact_credential_leaf(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::String(s) => {
-            let prefix = s
-                .char_indices()
-                .nth(4)
-                .map(|(byte_idx, _)| &s[..byte_idx])
-                .filter(|_| s.chars().count() > 4)
-                .unwrap_or("");
-            serde_json::Value::String(format!("{prefix}*[REDACTED]"))
-        }
-        _ => serde_json::Value::String("*[REDACTED]".to_string()),
-    }
+/// Redact a value sitting under a credential-named key. Every value — string
+/// or not — collapses to the full mask with no prefix: the first characters of
+/// a secret are themselves secret. Non-string values (arrays, objects,
+/// numbers) are redacted wholesale — everything under a credential-named key
+/// is credential material, and structural recursion would let a composite
+/// shape (e.g. `api_key: ["raw-secret"]`) resurface the secret through a
+/// non-sensitive child key.
+fn redact_credential_leaf(_value: serde_json::Value) -> serde_json::Value {
+    serde_json::Value::String("[REDACTED]".to_string())
 }
 
 /// Serialize a JSON value for a log/render surface with credentials redacted.
@@ -137,7 +113,7 @@ mod tests {
         });
         let out = scrub_credentials_value(input);
         let token = out["body"]["access_token"].as_str().unwrap();
-        assert!(token.contains("[REDACTED]"));
+        assert_eq!(token, "[REDACTED]");
         assert!(!token.contains("abcdef0123456789"));
         assert_eq!(out["body"]["status"], "ok");
         assert_eq!(out["count"], 3);
@@ -221,7 +197,8 @@ mod tests {
         let input = "token=QWxh+GRpbjpvcGVu/IHNlc2FtZQ== next=public";
         let scrubbed = scrub_credentials(input);
 
-        assert_eq!(scrubbed, "token=QWxh*[REDACTED] next=public");
+        assert_eq!(scrubbed, "token=[REDACTED] next=public");
+        assert!(!scrubbed.contains("QWxh"));
         assert!(!scrubbed.contains("IHNlc2FtZQ"));
         assert!(!scrubbed.contains("=="));
     }
@@ -231,7 +208,8 @@ mod tests {
         let input = r#"secret="QWxhZGRpbjpvcGVu/IHNlc2FtZQ==""#;
         let scrubbed = scrub_credentials(input);
 
-        assert_eq!(scrubbed, r#"secret="QWxh*[REDACTED]""#);
+        assert_eq!(scrubbed, r#"secret="[REDACTED]""#);
+        assert!(!scrubbed.contains("QWxh"));
         assert!(!scrubbed.contains("IHNlc2FtZQ"));
         assert!(!scrubbed.contains("=="));
     }
