@@ -5,7 +5,6 @@
 #
 # Literal { and } in values must be escaped as {"{"}  and  {"}"} respectively.
 
-tool-backup = Create, list, verify, and restore workspace backups
 
 tool-browser = Web/browser automation with pluggable backends (agent-browser, rust-native, computer_use). Supports DOM actions plus optional OS-level actions (mouse_move, mouse_click, mouse_drag, key_type, key_press, screen_capture) through a computer-use sidecar. Use 'snapshot' to map interactive elements to refs (@e1, @e2). Enforces browser.allowed_domains for open actions.
 
@@ -56,7 +55,6 @@ tool-cron-runs = List recent run history for a cron job
 
 tool-cron-update = Patch an existing cron job (schedule, command, prompt, enabled, delivery, model, etc.)
 
-tool-data-management = Workspace data retention, purge, and storage statistics
 
 tool-delegate = Delegate a subtask to a specialized agent. Use when: a task benefits from a different model (e.g. fast summarization, deep reasoning, code generation). The sub-agent runs a single prompt by default; with agentic=true it can iterate with a filtered tool-call loop.
 
@@ -135,14 +133,12 @@ tool-memory-store = Store a fact, preference, or note in long-term memory. Use c
 
 tool-microsoft365 = Microsoft 365 integration: manage Outlook mail, Teams messages, Calendar events, OneDrive files, and SharePoint search via Microsoft Graph API
 
-tool-model-routing-config = Manage default model settings, scenario-based provider/model routes, classification rules, and aliased agent profiles
 
 tool-notion = Interact with Notion: query databases, read/create/update pages, and search the workspace.
 
 
 tool-project-intel = Project delivery intelligence: generate status reports, detect risks, draft client updates, summarize sprints, and estimate effort. Read-only analysis tool.
 
-tool-proxy-config = Manage ZeroClaw proxy settings (scope: environment | zeroclaw | services), including runtime and process env application
 
 tool-pushover = Send a Pushover notification to your device. Requires PUSHOVER_TOKEN and PUSHOVER_USER_KEY in .env file.
 
@@ -164,7 +160,6 @@ tool-browser-screenshot-error-sidecar-empty-png = computer-use sidecar returned 
 tool-browser-screenshot-error-sidecar-not-png = computer-use sidecar returned a non-PNG screenshot payload
 tool-browser-screenshot-error-sidecar-non-json-success = computer-use sidecar returned a non-JSON success response for a path-bearing screenshot; the requested file was not written
 
-tool-security-ops = Security operations tool for managed cybersecurity services. Actions: triage_alert (classify/prioritize alerts), run_playbook (execute incident response steps), parse_vulnerability (parse scan results), generate_report (create security posture reports), list_playbooks (list available playbooks), alert_stats (summarize alert metrics).
 
 tool-shell = Execute a shell command in the workspace directory
 

@@ -1,4 +1,3 @@
-tool-backup = Crear, listar, verificar y restaurar copias de seguridad del espacio de trabajo
 tool-browser = Automatización web/navegador con backends conectables (agent-browser, rust-native, computer_use). Admite acciones DOM más acciones opcionales a nivel de SO (mouse_move, mouse_click, mouse_drag, key_type, key_press, screen_capture) a través de un sidecar de uso de computadora. Use 'snapshot' para mapear elementos interactivos a refs (@e1, @e2). Aplica browser.allowed_domains para acciones de apertura.
 tool-browser-delegate = Delegar tareas basadas en navegador a una CLI con capacidad de navegador para interactuar con aplicaciones web como Teams, Outlook, Jira, Confluence
 tool-browser-open = Abrir una URL HTTPS aprobada en el navegador del sistema. Restricciones de seguridad: solo dominios de la lista de permitidos, sin hosts locales/privados, sin scraping.
@@ -34,7 +33,6 @@ tool-cron-remove = Eliminar un trabajo cron por id
 tool-cron-run = Forzar la ejecución de un trabajo cron inmediatamente y registrar el historial de ejecuciones
 tool-cron-runs = Listar el historial de ejecuciones recientes de un trabajo cron
 tool-cron-update = Parchear un trabajo cron existente (programación, comando, prompt, habilitado, entrega, modelo, etc.)
-tool-data-management = Retención, purga y estadísticas de almacenamiento de datos del espacio de trabajo
 tool-delegate = Delegar una subtarea a un agente especializado. Use cuando: una tarea se beneficia de un modelo diferente (p. ej. resumen rápido, razonamiento profundo, generación de código). El subagente ejecuta un único prompt de forma predeterminada; con agentic=true puede iterar con un bucle de llamadas a herramientas filtrado.
 tool-file-edit = Editar un archivo reemplazando una coincidencia exacta de cadena con nuevo contenido
 tool-file-download = Descarga un archivo desde el endpoint remoto configurado y lo escribe en el espacio de trabajo del agente. Proporciona el identificador del documento que se va a obtener y una ruta de destino relativa al espacio de trabajo; la URL del endpoint está fijada por la configuración del host y nunca es controlada por el modelo. Los bytes se transmiten directamente al disco y no se cargan en el contexto del modelo. Devuelve el estado HTTP, el número de bytes escritos y la ruta de destino.
@@ -90,14 +88,11 @@ tool-memory-forget = Eliminar una memoria por clave. Use para borrar datos obsol
 tool-memory-recall = Buscar en la memoria a largo plazo hechos, preferencias o contexto relevantes. Devuelve resultados puntuados clasificados por relevancia. Omita la consulta o pase un * solo para devolver memorias recientes.
 tool-memory-store = Almacenar un hecho, preferencia o nota en la memoria a largo plazo. Use la categoría 'core' para hechos permanentes, 'daily' para notas de sesión, 'conversation' para contexto de chat, o un nombre de categoría personalizado.
 tool-microsoft365 = Integración de Microsoft 365: gestionar correo de Outlook, mensajes de Teams, eventos de Calendar, archivos de OneDrive y búsqueda en SharePoint a través de la API de Microsoft Graph
-tool-model-routing-config = Gestionar la configuración del modelo predeterminado, rutas de proveedor/modelo basadas en escenarios, reglas de clasificación y perfiles de agente con alias
 tool-notion = Interactuar con Notion: consultar bases de datos, leer/crear/actualizar páginas y buscar en el espacio de trabajo.
 tool-project-intel = Inteligencia de entrega de proyectos: generar informes de estado, detectar riesgos, redactar actualizaciones para clientes, resumir sprints y estimar esfuerzo. Herramienta de análisis de solo lectura.
-tool-proxy-config = Gestionar la configuración del proxy de ZeroClaw (scope: environment | zeroclaw | services), incluida la aplicación del entorno de tiempo de ejecución y de proceso
 tool-pushover = Enviar una notificación de Pushover a tu dispositivo. Requiere PUSHOVER_TOKEN y PUSHOVER_USER_KEY en el archivo .env.
 tool-schedule = Gestionar tareas programadas solo de shell. Acciones: create/add/once/list/get/cancel/remove/pause/resume. ADVERTENCIA: Esta herramienta crea trabajos de shell cuya salida solo se registra, NO se entrega a ningún canal. Para enviar un mensaje programado a Discord/Telegram/Slack/Matrix, use la herramienta cron_add con job_type='agent' y una configuración de entrega como {"{"}"mode":"announce","channel":"discord","to":"<channel_id>"{"}"}.
 tool-screenshot = Capturar una captura de pantalla de la pantalla actual. Devuelve la ruta del archivo y los datos PNG codificados en base64.
-tool-security-ops = Herramienta de operaciones de seguridad para servicios gestionados de ciberseguridad. Acciones: triage_alert (clasificar/priorizar alertas), run_playbook (ejecutar pasos de respuesta a incidentes), parse_vulnerability (analizar resultados de escaneo), generate_report (crear informes de postura de seguridad), list_playbooks (listar playbooks disponibles), alert_stats (resumir métricas de alertas).
 tool-shell = Ejecutar un comando de shell en el directorio del espacio de trabajo
 tool-sop-advance = Informar el resultado del paso SOP actual y avanzar al siguiente paso. Proporcione el run_id, si el paso tuvo éxito o falló, y un breve resumen de la salida.
 tool-sop-approve = Aprobar un paso SOP pendiente que está esperando la aprobación del operador. Devuelve la instrucción del paso a ejecutar. Use sop_status para ver qué ejecuciones están esperando.

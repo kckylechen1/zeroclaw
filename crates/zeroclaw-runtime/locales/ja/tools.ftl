@@ -1,4 +1,3 @@
-tool-backup = ワークスペースバックアップの作成、一覧表示、検証、復元
 tool-browser = プラグイン可能なバックエンド（agent-browser、rust-native、computer_use）を使用したWeb/ブラウザオートメーション。DOMアクションに加えて、オプションのOSレベルアクション（mouse_move、mouse_click、mouse_drag、key_type、key_press、screen_capture）をコンピュータユースサイドカー経由でサポート。'snapshot'を使用して対話的要素をref（@e1、@e2）にマップします。openアクション向けにbrowser.allowed_domainsを強制します。
 tool-browser-delegate = ブラウザ対応CLIへのブラウザベースのタスクの委譲。Teams、Outlook、Jira、Confluenceなどのウェブアプリケーションと相互作用するため
 tool-browser-open = 承認されたHTTPS URLをシステムブラウザで開く。セキュリティ制約：許可リストのみのドメイン、ローカル/プライベートホストなし、スクレイピングなし。
@@ -34,7 +33,6 @@ tool-cron-remove = IDでcronジョブを削除
 tool-cron-run = cronジョブを即座に強制実行し、実行履歴を記録
 tool-cron-runs = cronジョブの最近の実行履歴を一覧表示
 tool-cron-update = 既存のcronジョブにパッチを適用（スケジュール、コマンド、プロンプト、有効、配信、モデル等）
-tool-data-management = ワークスペースデータ保持、削除、ストレージ統計
 tool-delegate = 特殊なエージェントへの小タスクの委譲。用途：異なるモデルから利益を得られるタスク（例：高速要約、深い推論、コード生成）。サブエージェントはデフォルトで単一のプロンプトを実行します。agentic=trueでは、フィルタ済みツール呼び出しループで反復できます。
 tool-file-edit = 完全一致する文字列を新しいコンテンツに置き換えてファイルを編集
 tool-file-download = 設定済みのリモートエンドポイントからファイルをダウンロードし、エージェントのワークスペースに書き込みます。取得するドキュメントの識別子とワークスペース相対の宛先パスを指定します。エンドポイントURLはホスト設定で固定されており、モデルが制御することはありません。バイトは直接ディスクにストリーミングされ、モデルのコンテキストには読み込まれません。HTTPステータス、書き込まれたバイト数、宛先パスを返します。
@@ -90,14 +88,11 @@ tool-memory-forget = キーでメモリを削除します。古い情報や機�
 tool-memory-recall = 長期記憶で関連する情報、好み、またはコンテキストを検索します。関連性でランク付けされたスコア結果を返します。クエリを省略するか * のみを指定すると、最近の記憶を返します。
 tool-memory-store = 事実、好み、またはノートを長期記憶に保存します。永続的な事実にはカテゴリ「core」を、セッションノートには「daily」、チャットコンテキストには「conversation」、またはカスタムカテゴリ名を使用します。
 tool-microsoft365 = Microsoft 365統合：Microsoft Graph APIを経由してOutlookメール、Teamsメッセージ、カレンダーイベント、OneDriveファイル、SharePoint検索を管理
-tool-model-routing-config = デフォルトモデル設定、シナリオベースのプロバイダー/モデルルート、分類ルール、委譲サブエージェントプロフィールを管理
 tool-notion = Notionと相互作用：データベースをクエリ、ページを読み込み/作成/更新、ワークスペースを検索。
 tool-project-intel = プロジェクト配信インテリジェンス：ステータスレポートを生成、リスクを検出、クライアント更新をドラフト、スプリントを要約、作業量を推定。読み取り専用分析ツール。
-tool-proxy-config = ZeroClawプロキシ設定を管理（スコープ：environment | zeroclaw | services）。ランタイムおよびプロセス環境アプリケーション含む
 tool-pushover = Pushover通知をデバイスに送信します。.envファイルにPUSHOVER_TOKENおよびPUSHOVER_USER_KEYが必要。
 tool-schedule = スケジュール済みシェルのみのタスクを管理します。アクション：create/add/once/list/get/cancel/remove/pause/resume。警告：このツールは、出力がログに記録されるのみで、チャネルに配信されないシェルジョブを作成します。Discord/Telegram/Slack/Matrixにスケジュール済みメッセージを送信するには、job_type='agent'とdelivery配信設定（例：{"{"}"mode":"announce","channel":"discord","to":"<channel_id>"{"}"}）付きのcron_addツールを使用してください。
 tool-screenshot = 現在の画面のスクリーンショットをキャプチャします。ファイルパスと基数64エンコード済みPNGデータを返します。
-tool-security-ops = 管理型サイバーセキュリティサービス向けセキュリティ操作ツール。アクション：triage_alert（アラートの分類/優先順位付け）、run_playbook（インシデント対応ステップの実行）、parse_vulnerability（スキャン結果の解析）、generate_report（セキュリティ態勢レポートの作成）、list_playbooks（利用可能なプレイブックをリスト）、alert_stats（アラートメトリクスを要約）。
 tool-shell = ワークスペースディレクトリ内でシェルコマンドを実行
 tool-sop-advance = 現在のSOPステップの結果を報告し、次のステップに進む。run_id、ステップが成功したか失敗したか、簡潔な出力要約を指定します。
 tool-sop-approve = オペレータ承認を待つ保留中のSOPステップを承認します。実行するステップ命令を返します。sop_statusを使用して、どの実行が待機中かを確認します。
