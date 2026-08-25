@@ -25,8 +25,12 @@ test:
 test-lib:
     cargo test --lib
 
+# Verify the active cargo/rustc match the rust-toolchain.toml pin
+toolchain:
+    ./scripts/ci/toolchain_gate.sh
+
 # Run the full CI quality gate locally
-ci: fmt-check lint test
+ci: toolchain fmt-check lint test
     @echo "✅ All CI checks passed!"
 
 # Build in release mode

@@ -183,8 +183,13 @@ jobs:
           curl -sSL "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_BIN_VERSION}/mdbook-${MDBOOK_BIN_VERSION}-aarch64-unknown-linux-musl.tar.gz" \
             | tar -xz -C /usr/local/bin
 
-      - name: Install Rust stable toolchain
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          # Matches the repository rust-toolchain.toml pin, which takes
+          # precedence over the rustup default for in-repo cargo runs; setting
+          # it explicitly avoids a mid-job rustup auto-download.
+          toolchain: 1.96.1
 
       - name: Rust build cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1

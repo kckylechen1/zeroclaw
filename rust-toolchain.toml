@@ -1,0 +1,6 @@
+# Canonical Rust toolchain pin. The setup-time guard
+# (scripts/ci/toolchain_gate.sh) derives the expected version from this file —
+# bump the channel here and nowhere else. Container images pin their toolchains
+# by base-image digest instead and do not consume this file.
+[toolchain]
+channel = "1.96.1"

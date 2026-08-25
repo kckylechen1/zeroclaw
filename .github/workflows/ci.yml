@@ -42,6 +42,10 @@ jobs:
         with:
           toolchain: 1.96.1
           components: rustfmt
+      - name: Toolchain pin guard (self-test + active check)
+        run: |
+          bash scripts/ci/toolchain_gate.test.sh
+          bash scripts/ci/toolchain_gate.sh
       - name: Check formatting
         run: cargo fmt --all -- --check
 
