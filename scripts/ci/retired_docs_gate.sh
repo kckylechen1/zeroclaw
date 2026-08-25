@@ -11,10 +11,11 @@
 #     `tests` or `fixtures` component (test data) and the docs/book/po
 #     translation submodule
 #   - tracked user-directed TOML (config templates and examples): everything
-#     not under crates/, vendor/, firmware/, apps/, fuzz/, xtask/, tools/,
-#     .cargo/, dev/ci/, docs/book/po/, not a tests/fixtures path, not a
-#     Cargo.toml / rust-toolchain.toml / root tool-config file (build
-#     tooling is not documentation)
+#     not under vendor/, firmware/, apps/, fuzz/, xtask/, tools/, .cargo/,
+#     dev/ci/, docs/book/po/, not a tests/fixtures path, not a Cargo.toml /
+#     rust-toolchain.toml / book.toml / root tool-config file (build tooling
+#     is not documentation); user templates that happen to live under
+#     crates/ (e.g. robot-kit) are scanned
 #   - tracked English Fluent catalogues (**/locales/en/*.ftl: runtime help
 #     text source of truth; non-English locales are generated and skipped)
 # Not scanned: source code, CI YAML, test fixtures, book theme JS/CSS,
@@ -42,13 +43,16 @@
 # superseded/replaced/obsolete/migrat*/historical/formerly/withdrawn/
 # (not|never) enforced. Whole files whose basename starts with CHANGELOG are
 # exempt (changelog context). Per-term `allowed_globs` in the registry exempt
-# explicit paths; globs must be path-shaped (contain "/") and carry at least
-# one non-wildcard character, so a blanket "*" exemption cannot be declared.
+# explicit paths; every path component of a glob must carry at least one
+# non-wildcard character, so blanket exemptions ("*", "**/**", "docs/**")
+# cannot be declared.
 #
 # Replacement teaching: an entry with a `replacement` string additionally
 # requires that at least one scanned file teaches the replacement (contains
 # the string); a rename whose replacement vanished from every active doc
-# fails the gate even when the old name is fully gone.
+# fails the gate even when the old name is fully gone. Replacement strings
+# must be at least 4 characters with no whitespace, so a vacuous one-letter
+# replacement cannot satisfy the contract by occurring everywhere.
 #
 # Known limits, stated honestly:
 #   - vocabulary on an unrelated line can excuse a nearby teaching reference
@@ -108,8 +112,8 @@ ROOT_TOOL_CONFIGS = {
     "Cargo.toml", "clippy.toml", "deny.toml", "locales.toml",
     "release-plz.toml", "rust-toolchain.toml", "rustfmt.toml", "taplo.toml",
 }
-BUILD_BASENAMES = {"Cargo.toml", "rust-toolchain.toml"}
-NONDOC_TREES = ("crates/", "vendor/", "firmware/", "apps/", "fuzz/",
+BUILD_BASENAMES = {"Cargo.toml", "rust-toolchain.toml", "book.toml"}
+NONDOC_TREES = ("vendor/", "firmware/", "apps/", "fuzz/",
                 "xtask/", "tools/", ".cargo/", "dev/ci/")
 HISTORICAL = re.compile(
     r"remov\w*|deprecat\w*|retir\w*|delet\w*|legacy|sunset\w*|unsupported"
@@ -138,7 +142,9 @@ if not doc["retired"]:
     fatal("registry 'retired' list must not be empty")
 
 def is_wildcard_only(glob):
-    return not re.search(r"[^*?]", glob)
+    # Every path component must carry at least one non-wildcard character,
+    # so a blanket "**/**" (or "*") cannot be declared as an exemption.
+    return any(not re.search(r"[^*?/]", part) for part in glob.split("/"))
 
 entries = []
 seen_terms = set()
@@ -191,14 +197,21 @@ for raw in doc["retired"]:
         if "/" not in glob or is_wildcard_only(glob):
             fatal(
                 f"entry {term!r}: allowed_glob {glob!r} must be path-shaped "
-                "(contain '/') and carry at least one non-wildcard character"
+                "(contain '/') with at least one non-wildcard character in "
+                "every path component"
             )
 
     replacement = raw.get("replacement")
     if replacement is not None and (
-        not isinstance(replacement, str) or not replacement.strip()
+        not isinstance(replacement, str)
+        or len(replacement.strip()) < 4
+        or any(ch.isspace() for ch in replacement)
     ):
-        fatal(f"entry {term!r}: 'replacement' must be a non-empty string")
+        fatal(
+            f"entry {term!r}: 'replacement' must be a string of at least 4 "
+            "non-whitespace-only characters containing no whitespace (a "
+            "trivially vacuous replacement teaches nothing)"
+        )
 
     entries.append({
         "term": term,

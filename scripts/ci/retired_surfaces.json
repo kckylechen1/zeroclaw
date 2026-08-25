@@ -23,11 +23,13 @@
     "                always matched on top of this",
     "  allowed_globs optional repo-relative globs that are never flagged for",
     "                this term (explicit bounded historical exemptions); each",
-    "                glob must be path-shaped (contain '/') and carry at least",
-    "                one non-wildcard character",
-    "  replacement   optional replacement surface string; when present, some",
-    "                active doc must teach it (contain the string) or the gate",
-    "                fails - a rename may not merely erase the old name"
+    "                glob must be path-shaped (contain '/') with at least one",
+    "                non-wildcard character in every path component, so",
+    "                blanket exemptions cannot be declared",
+    "  replacement   optional replacement surface string (>= 4 characters,",
+    "                no whitespace); when present, some active doc must teach",
+    "                it (contain the string) or the gate fails - a rename may",
+    "                not merely erase the old name"
   ],
   "retired": [
     {

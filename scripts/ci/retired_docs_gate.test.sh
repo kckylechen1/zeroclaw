@@ -109,6 +109,9 @@ expect_fail "config section taught in a docs TOML template" "frob_dashboard" "do
 expect_fail "config section taught in a deploy TOML template outside docs" "frob_dashboard" "scripts/deploy.toml" \
     $'[gateway.frob_dashboard]\nenabled = true'
 
+expect_fail "config section taught in a user template under crates" "frob_dashboard" "crates/robot-kit/robot.toml" \
+    $'[gateway.frob_dashboard]\nenabled = true'
+
 expect_fail "env override taught with key suffix (prefix match)" "ZEROCLAW_gateway__frob__" "docs/book/src/env.md" \
     'Set ZEROCLAW_gateway__frob__code_length = 9 before boot.'
 
@@ -195,6 +198,10 @@ expect_pass "Cargo.toml anywhere is out of scope" \
     "demo/Cargo.toml" \
     '[gateway.frob_dashboard]'
 
+expect_pass "mdBook build config book.toml is out of scope" \
+    "docs/book/book.toml" \
+    '[gateway.frob_dashboard]'
+
 # ── replacement teaching (rename contract) ──────────────────────────────
 
 repl_registry="${tmp}/fixture_registry_repl.json"
@@ -259,7 +266,11 @@ fatal_registry_case "non-compiling match_regex" '{"retired": [{"term": "x", "kin
 fatal_registry_case "duplicate term" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n"}, {"term": "x", "kind": "op", "retired_in": "PR 1", "notes": "n"}]}'
 fatal_registry_case "blanket allowed_glob" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "allowed_globs": ["*"]}]}'
 fatal_registry_case "pathless allowed_glob" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "allowed_globs": ["legacy-*.md"]}]}'
+fatal_registry_case "path-shaped blanket allowed_glob" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "allowed_globs": ["**/**"]}]}'
+fatal_registry_case "whole-tree allowed_glob" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "allowed_globs": ["docs/**"]}]}'
 fatal_registry_case "empty replacement string" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "replacement": " "}]}'
+fatal_registry_case "vacuously short replacement" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "replacement": "a"}]}'
+fatal_registry_case "whitespace replacement" '{"retired": [{"term": "x", "kind": "tool", "retired_in": "PR 1", "notes": "n", "replacement": "ab cd"}]}'
 
 set +e
 missing_out="$(RETIRED_SURFACES_FILE="${tmp}/does-not-exist.json" bash "$gate" 2>&1)"
@@ -332,9 +343,11 @@ for e in entries:
     if "match_regex" in e:
         re.compile(e["match_regex"])
     for g in e.get("allowed_globs", []):
-        assert "/" in g and re.search(r"[^*?]", g), (e["term"], g)
+        assert "/" in g, (e["term"], g)
+        assert all(re.search(r"[^*?]", part) for part in g.split("/")), (e["term"], g)
     if "replacement" in e:
-        assert e["replacement"].strip(), e["term"]
+        assert len(e["replacement"].strip()) >= 4, e["term"]
+        assert not any(ch.isspace() for ch in e["replacement"]), e["term"]
 canary = {"model_switch", "pairing_dashboard", "glm.rs"}
 terms = {e["term"] for e in entries}
 assert canary <= terms, f"canary terms missing: {canary - terms}"
