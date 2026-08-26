@@ -57,7 +57,7 @@
       "store": "whatsapp channel store",
       "role": "store",
       "basis": "channel-internal client state",
-      "signals": 54
+      "signals": 55
     },
     {
       "path": "crates/zeroclaw-config/src/cost/tracker.rs",
@@ -204,7 +204,7 @@
       "store": "user_model.db",
       "role": "store",
       "basis": "#205 keeper: append-only user-model review receipts",
-      "signals": 33
+      "signals": 34
     },
     {
       "path": "crates/zeroclaw-memory/src/conflict.rs",
@@ -274,7 +274,7 @@
       "store": "memory/brain.db",
       "role": "store",
       "basis": "personal-memory main store (tachi#1630/#49 ZeroClaw-canonical side)",
-      "signals": 41
+      "signals": 42
     },
     {
       "path": "crates/zeroclaw-memory/src/tachi_governance.rs",
@@ -330,14 +330,14 @@
       "store": "control_plane.db",
       "role": "store",
       "basis": "#205 annex row 1: tasks/goal_tasks/continuation tables; migrate-delete under #197; NO new writers (TB-22 no-regrowth seam law)",
-      "signals": 16
+      "signals": 19
     },
     {
       "path": "crates/zeroclaw-runtime/src/control_plane/task_store_sqlite/goal.rs",
       "store": "control_plane.db",
       "role": "store",
       "basis": "#205 annex row 1 (goal tables); same freeze-no-growth law",
-      "signals": 22
+      "signals": 26
     },
     {
       "path": "crates/zeroclaw-runtime/src/cron/scheduler.rs",
@@ -351,7 +351,7 @@
       "store": "cron/jobs.db",
       "role": "store",
       "basis": "#205 annex row 5: schedule definitions stay; cron_runs keeps delivery facts only, never worker truth",
-      "signals": 18
+      "signals": 19
     },
     {
       "path": "crates/zeroclaw-runtime/src/doctor/mod.rs",

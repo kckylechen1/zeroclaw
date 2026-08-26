@@ -90,24 +90,25 @@ trap 'rm -rf "$tmp_dir"' EXIT
         "$scan_root/apps" -g 'Cargo.toml' 2>/dev/null || true
 } | sed -E "s#^$scan_root/##" | sed -E 's#^((crates|apps)/[^/]+)/Cargo.toml$#\1#' | sort -u >"$tmp_dir/detected_crates"
 
-# Signal counts: per detected file, the number of matching LINES across
-# every detection pattern. The manifest pins an exact count per file, so
+# Signal counts: per detected file, the number of matching OCCURRENCES
+# (not lines — two signals on one line count twice) across every
+# detection pattern. The manifest pins an exact count per file, so
 # IN-PLACE growth — a new table, connection site, or OpenOptions write
 # inside an already-listed file — trips the gate exactly like a new file
 # would (TB-22 no-new-writer-path law).
 count_signals() {
     local file="$1" total=0 c
-    c=$(rg -c --no-messages -i -U \
+    c=$(rg -o --no-messages -i -U \
         'create[[:space:]]+table|alter[[:space:]]+table|create[[:space:]]*/\*[^*]*\*/[[:space:]]*table' \
-        "$file" 2>/dev/null || true)
-    [[ -n "$c" ]] && total=$((total + c))
-    c=$(rg -c --no-messages 'Connection::open' "$file" 2>/dev/null || true)
-    [[ -n "$c" ]] && total=$((total + c))
-    c=$(rg -c --no-messages -w -e 'rusqlite' -e 'sled' -e 'redb' -e 'rocksdb' \
-        "$file" 2>/dev/null || true)
-    [[ -n "$c" ]] && total=$((total + c))
-    c=$(rg -c --no-messages 'OpenOptions' "$file" 2>/dev/null || true)
-    [[ -n "$c" ]] && total=$((total + c))
+        "$file" 2>/dev/null | wc -l)
+    total=$((total + c))
+    c=$(rg -o --no-messages 'Connection::open' "$file" 2>/dev/null | wc -l)
+    total=$((total + c))
+    c=$(rg -o --no-messages -w -e 'rusqlite' -e 'sled' -e 'redb' -e 'rocksdb' \
+        "$file" 2>/dev/null | wc -l)
+    total=$((total + c))
+    c=$(rg -o --no-messages 'OpenOptions' "$file" 2>/dev/null | wc -l)
+    total=$((total + c))
     printf '%s' "$total"
 }
 
