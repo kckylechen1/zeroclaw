@@ -475,6 +475,34 @@ fn a_hand_built_intent_with_a_smuggled_schema_field_fails_the_scan() {
         ) -> Result<super::client::ResultProjectionView, BridgeQueryError> {
             Err(BridgeQueryError::Unavailable)
         }
+
+        async fn intervene(
+            &self,
+            _task_ref: &zeroclaw_api::taskintent::TaskRef,
+            _intervention: &zeroclaw_api::taskintent::InterventionV1,
+            _requester: &zeroclaw_api::taskintent::RequesterRef,
+            _request_id: &zeroclaw_api::taskintent::RequestId,
+            _expected_task_revision: Option<u64>,
+        ) -> Result<
+            zeroclaw_api::taskintent::InterventionReceipt,
+            zeroclaw_api::taskintent::InterventionError,
+        > {
+            Err(zeroclaw_api::taskintent::InterventionError::Unavailable)
+        }
+
+        async fn request_stop(
+            &self,
+            _task_ref: &zeroclaw_api::taskintent::TaskRef,
+            _mode: zeroclaw_api::taskintent::StopMode,
+            _requester: &zeroclaw_api::taskintent::RequesterRef,
+            _request_id: &zeroclaw_api::taskintent::RequestId,
+            _expected_task_revision: Option<u64>,
+        ) -> Result<
+            zeroclaw_api::taskintent::StopReceipt,
+            zeroclaw_api::taskintent::InterventionError,
+        > {
+            Err(zeroclaw_api::taskintent::InterventionError::Unavailable)
+        }
     }
     tokio_rt().block_on(async {
         let client = TachiBridgeClient::new(Arc::new(NoCalls));
@@ -579,6 +607,47 @@ impl TachiTaskBridge for SubmitSpy {
         result_revision: Option<u64>,
     ) -> Result<super::client::ResultProjectionView, super::client::BridgeQueryError> {
         self.inner.collect(task_ref, result_revision).await
+    }
+    async fn intervene(
+        &self,
+        task_ref: &zeroclaw_api::taskintent::TaskRef,
+        intervention: &zeroclaw_api::taskintent::InterventionV1,
+        requester: &zeroclaw_api::taskintent::RequesterRef,
+        request_id: &zeroclaw_api::taskintent::RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<
+        zeroclaw_api::taskintent::InterventionReceipt,
+        zeroclaw_api::taskintent::InterventionError,
+    > {
+        self.inner
+            .intervene(
+                task_ref,
+                intervention,
+                requester,
+                request_id,
+                expected_task_revision,
+            )
+            .await
+    }
+
+    async fn request_stop(
+        &self,
+        task_ref: &zeroclaw_api::taskintent::TaskRef,
+        mode: zeroclaw_api::taskintent::StopMode,
+        requester: &zeroclaw_api::taskintent::RequesterRef,
+        request_id: &zeroclaw_api::taskintent::RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<zeroclaw_api::taskintent::StopReceipt, zeroclaw_api::taskintent::InterventionError>
+    {
+        self.inner
+            .request_stop(
+                task_ref,
+                mode,
+                requester,
+                request_id,
+                expected_task_revision,
+            )
+            .await
     }
 }
 
@@ -1135,6 +1204,33 @@ fn watch_cursor_never_regresses_on_a_stale_out_of_order_response() {
         ) -> Result<super::client::ResultProjectionView, super::client::BridgeQueryError> {
             Err(super::client::BridgeQueryError::Unavailable)
         }
+        async fn intervene(
+            &self,
+            _task_ref: &zeroclaw_api::taskintent::TaskRef,
+            _intervention: &zeroclaw_api::taskintent::InterventionV1,
+            _requester: &zeroclaw_api::taskintent::RequesterRef,
+            _request_id: &zeroclaw_api::taskintent::RequestId,
+            _expected_task_revision: Option<u64>,
+        ) -> Result<
+            zeroclaw_api::taskintent::InterventionReceipt,
+            zeroclaw_api::taskintent::InterventionError,
+        > {
+            Err(zeroclaw_api::taskintent::InterventionError::Unavailable)
+        }
+
+        async fn request_stop(
+            &self,
+            _task_ref: &zeroclaw_api::taskintent::TaskRef,
+            _mode: zeroclaw_api::taskintent::StopMode,
+            _requester: &zeroclaw_api::taskintent::RequesterRef,
+            _request_id: &zeroclaw_api::taskintent::RequestId,
+            _expected_task_revision: Option<u64>,
+        ) -> Result<
+            zeroclaw_api::taskintent::StopReceipt,
+            zeroclaw_api::taskintent::InterventionError,
+        > {
+            Err(zeroclaw_api::taskintent::InterventionError::Unavailable)
+        }
     }
 
     fn page_with(
@@ -1406,10 +1502,12 @@ fn module_source_scans_hold() {
 }
 
 #[test]
-fn client_surface_is_exactly_submit_get_watch_collect() {
-    // Owner scope limit: no intervene/request_stop client surface. The
-    // port trait's method set is asserted textually so a future op
-    // addition shows up as a deliberate diff against this pin.
+fn client_surface_is_exactly_six_owner_scoped_ops() {
+    // Owner scope (vertical V3): submit / get / watch / collect (V2b)
+    // plus intervene / request_stop (TB-11/TB-12). The port trait's
+    // method set is asserted textually so a future op addition shows up
+    // as a deliberate diff against this pin — still no spawn, no local
+    // execution, no delivery surface.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let source = std::fs::read_to_string(format!("{manifest_dir}/src/tachi_bridge/client.rs"))
         .expect("client source");
@@ -1425,13 +1523,15 @@ fn client_surface_is_exactly_submit_get_watch_collect() {
         "async fn get",
         "async fn watch",
         "async fn collect",
+        "async fn intervene",
+        "async fn request_stop",
     ] {
         assert!(trait_body.contains(op), "port must expose {op}");
     }
-    for banned in ["intervene", "request_stop", "fn spawn", "fn cancel"] {
+    for banned in ["fn spawn", "fn cancel", "fn deliver", "fn execute"] {
         assert!(
             !trait_body.contains(banned),
-            "port must not expose {banned} (owner scope: V3 leaf)"
+            "port must not expose {banned} (owner scope)"
         );
     }
 }

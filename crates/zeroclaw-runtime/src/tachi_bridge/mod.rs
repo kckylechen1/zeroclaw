@@ -47,17 +47,20 @@ pub mod compose;
 /// (tuple bindings, fact log, counters) and must never be constructible
 /// from production code, where it would be exactly the second task
 /// ledger the freeze forbids. The live host is a transport-backed
-/// implementation of the same port, not this module.
+/// implementation of the same port, not this module. `pub(crate)` under
+/// `cfg(test)` so sibling crates' test modules (supervisor_v1) can bind
+/// to it; it never exists in production builds.
 #[cfg(test)]
-mod in_memory;
+pub(crate) mod in_memory;
 
 #[cfg(test)]
 mod tests;
 
 pub use client::{
     BridgeQueryError, ProjectedAdjudicationState, ProjectedDeliveryState, ProjectedExecutionState,
-    ResultProjectionView, SubmitReceipt, SubmitRejection, SubmitTransportError, TachiBridgeClient,
-    TachiTaskBridge, TaskEventPageView, TaskEventView, TaskSnapshotView, VerificationSummaryView,
+    ResultProjectionView, SubmitReceipt, SubmitRejection, SubmitTransportError,
+    SupervisorIntervention, SupervisorInterventionError, TachiBridgeClient, TachiTaskBridge,
+    TaskEventPageView, TaskEventView, TaskSnapshotView, VerificationSummaryView,
 };
 pub use compose::{
     ComposeError, ComposeRejection, ForbiddenCategory, RequesterBridgePolicy,

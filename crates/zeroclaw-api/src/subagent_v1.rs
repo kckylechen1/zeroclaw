@@ -250,7 +250,7 @@ pub struct SubAgentToolPolicyV1 {
 /// The typed Tachi authority set a Supervisor profile may enumerate
 /// (SA-29). A request is never a lifecycle transition. V1 admits
 /// Supervisor profiles with this constraint but runs none of them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SupervisorAuthority {
     ObserveTask,
@@ -745,14 +745,49 @@ pub enum ParentActionKind {
     ReviewCandidate,
     /// Nothing further; informational.
     Note,
+    /// Submit a Tachi task intent on the child's behalf (vertical V3,
+    /// SA-29's role-exclusive law): the Supervisor holds no submit
+    /// operation, so implementation work it needs is requested as a
+    /// typed action and the PARENT performs the initial `submit` through
+    /// the #205 bridge surface. The payload carries everything the
+    /// Parent needs — the composed intent and the TB-7 request id.
+    SubmitTaskIntent,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+impl ParentActionKind {
+    /// Whether this action kind requires the `task_intent_request`
+    /// payload on a [`RequestedParentAction`].
+    #[must_use]
+    pub fn requires_task_intent_payload(self) -> bool {
+        matches!(self, Self::SubmitTaskIntent)
+    }
+}
+
+/// The typed payload of a [`ParentActionKind::SubmitTaskIntent`] action:
+/// the fully composed [`TaskIntentV1`] plus the TB-7 request id the
+/// Parent must submit it under (same tuple on replay — RULING-205 §2).
+/// Content, never authority: handing this to the Parent does not submit
+/// anything; the Parent's own admitted policy governs the actual submit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskIntentSubmitRequest {
+    /// The composed intent (built through the production composer).
+    pub intent: crate::taskintent::TaskIntentV1,
+    /// The idempotency request id for the submit.
+    pub request_id: crate::taskintent::RequestId,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestedParentAction {
     pub action: ParentActionKind,
     /// What the action concerns, by typed reference (no authority effect).
     pub subject_ref: String,
+    /// The typed submit payload, present iff `action` is
+    /// `submit_task_intent` (SA-21/SA-25: the child REQUESTS; the Parent
+    /// submits). Absent for every other action kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_intent_request: Option<TaskIntentSubmitRequest>,
 }
 
 /// Kind of a proposed candidate. KP-18 active-authority kinds can reach
@@ -792,6 +827,23 @@ impl ProposedCandidateKind {
     }
 }
 
+/// Provenance of a proposed candidate (the P2-caveat carrier, mandatory
+/// for KP-18 active-authority kinds from vertical V3 on): what produced
+/// it, from which task/evidence truth, and how. Content only — routing
+/// substance for the reviewed promotion path, never authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateProvenance {
+    /// Task refs whose work produced the candidate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_task_refs: Vec<String>,
+    /// Evidence refs backing the candidate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<String>,
+    /// How the candidate was derived (bounded derivation statement).
+    pub derivation: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProposedCandidate {
@@ -800,6 +852,27 @@ pub struct ProposedCandidate {
     /// Digest of the proposed content — the payload itself is not carried
     /// as raw authority-bearing text.
     pub content_digest: String,
+    /// Where the proposed payload lives (an evidence pointer the review
+    /// path can resolve). MANDATORY for KP-18 active-authority kinds from
+    /// vertical V3 on: a digest-only KP-18 candidate says a candidate
+    /// exists but not WHAT it changes, and cannot be routed into the
+    /// reviewed promotion path (P2 caveat on the V1 conformance record).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_ref: Option<String>,
+    /// Provenance (source tasks, evidence, derivation). MANDATORY for
+    /// KP-18 active-authority kinds from vertical V3 on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<CandidateProvenance>,
+}
+
+impl ProposedCandidate {
+    /// Whether this candidate carries the substance the reviewed
+    /// promotion path needs: a payload reference AND provenance (P2
+    /// caveat law). Ordinary-memory candidates remain digest-only.
+    #[must_use]
+    pub fn is_substantiated(&self) -> bool {
+        self.payload_ref.is_some() && self.provenance.is_some()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -825,7 +898,7 @@ pub struct SubAgentUsage {
 /// `deny_unknown_fields` means a chain-of-thought field (or any other
 /// smuggled extra) fails to deserialize — report hygiene is structural
 /// (SA-22).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubAgentReportV1 {
     pub run_ref: SubAgentRunRef,
@@ -851,7 +924,7 @@ pub struct SubAgentReportV1 {
 /// What travels on the report channel: typed mid-run events and the
 /// single terminal report (SA-21/SA-25). The report is boxed to keep
 /// the channel's per-message footprint small.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ReportChannelMessage {
     Event(SubAgentMidRunRequest),
