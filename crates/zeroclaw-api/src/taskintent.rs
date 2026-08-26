@@ -805,12 +805,12 @@ pub struct StopReceipt {
 }
 
 /// Typed intervention receipt envelope (TB-11). The stop variants carry
-/// exactly the [`StopReceipt`] of TB-12. Externally tagged, mirroring
-/// the tachi host's serde shape (`{"context_provided": {...}}`,
-/// `{"stop": {...}}`) — the stage-B live pair depends on the shapes
-/// matching.
+/// exactly the [`StopReceipt`] of TB-12. Externally tagged with the
+/// tachi host's EXACT serde shape — the host's enum carries no
+/// `rename_all`, so variant tags travel PascalCase
+/// (`{"CorrectionRequested": {...}}`, `{"Stop": {...}}`); the stage-B
+/// live pair depends on the shapes matching byte-for-byte.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum InterventionReceipt {
     /// Additional context was forwarded.
     ContextProvided {
