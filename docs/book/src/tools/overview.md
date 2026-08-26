@@ -34,7 +34,7 @@ A minimal build ships with:
 | `ask_user` | Send a question to the active channel and wait for a reply. Supports optional `choices` for structured responses (inline keyboard on Telegram, numbered list on CLI). On ACP, `choices` are required: free-form ask awaits the ACP elicitation RFD. Parameters: `question` (required), `choices` (optional list), `timeout_secs` (default 600). |
 | `escalate_to_human` | Send a structured escalation message with urgency routing. `high` / `critical` urgency additionally notifies any channels listed in `[escalation] alert_channels`. Parameters: `summary` (required), `context` (optional), `urgency` (`low`/`medium`/`high`/`critical`, default `medium`), `wait_for_response` (bool, default false), `timeout_secs` (default 600). On ACP, `wait_for_response: true` fails immediately if the channel cannot receive free-form replies (awaits ACP elicitation RFD). |
 
-Registered alongside the built-ins under `full`/`legacy` composition (the minimal composition assembles its own curated set — see [Install-wide composition](#install-wide-composition)):
+Registered alongside the built-ins under `full`/`legacy` composition (the minimal composition assembles its own curated set; see [Install-wide composition](#install-wide-composition)):
 
 | Tool | Notes |
 |---|---|
