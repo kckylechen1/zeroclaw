@@ -1097,13 +1097,18 @@ impl ContextBundleV1 {
     /// The admitted-bundle boundary (SA-14/SA-15): the FIRST privacy
     /// boundary a bundle crosses on its way to a child run. Verifies
     /// the pinned digest (SA-18) and REJECTS — never silently filters —
-    /// any source ref derived from `PrivateDyad` or `AgentSoul`: those
+    /// any source ref LABELED `PrivateDyad` or `AgentSoul`: those
     /// partitions have no variant in [`AdmittedPartition`], so the
     /// returned [`AdmittedContextBundleV1`] cannot express them at any
     /// later stage. Child execution accepts only the admitted type;
     /// the raw-side projection redaction remains as defense-in-depth
     /// (documented on [`ContextBundleV1::projection`]), not as the
-    /// first boundary.
+    /// first boundary. Scope, stated exactly: admission is a boundary
+    /// over partition NAMES and mint-provenance (the admitted value can
+    /// only be minted here), not over label-honesty — whether a
+    /// `user_model`-labeled content digest was truly derived from
+    /// public content is a property of the raw bundle's author
+    /// (the capture path), which no carrier type can attest.
     pub fn admit(&self) -> Result<AdmittedContextBundleV1, BundleAdmissionError> {
         self.verify_digest()?;
         let mut source_refs = Vec::with_capacity(self.source_refs.len());
@@ -1512,18 +1517,21 @@ mod tests {
         // AND carries a forbidden ref refuses on the DIGEST first — the
         // boundary never discloses the private-derived ref's existence
         // through the partition error when the digest already fails.
-        let mut both = sample_bundle();
-        both.source_refs.push(BundleSourceRef {
-            ref_id: "secret-both".into(),
-            partition: SourcePartition::PrivateDyad,
-            content_digest: "cc".into(),
-        });
-        both.digest = both.compute_digest();
-        both.objective_context = "smuggled too".into(); // digest now stale
-        assert!(matches!(
-            both.admit(),
-            Err(BundleAdmissionError::Digest { .. })
-        ));
+        // Both forbidden partitions are covered.
+        for forbidden in [SourcePartition::PrivateDyad, SourcePartition::AgentSoul] {
+            let mut both = sample_bundle();
+            both.source_refs.push(BundleSourceRef {
+                ref_id: "secret-both".into(),
+                partition: forbidden,
+                content_digest: "cc".into(),
+            });
+            both.digest = both.compute_digest();
+            both.objective_context = "smuggled too".into(); // digest now stale
+            assert!(matches!(
+                both.admit(),
+                Err(BundleAdmissionError::Digest { .. })
+            ));
+        }
         // The clean bundle admits.
         assert!(sample_bundle().admit().is_ok());
     }
