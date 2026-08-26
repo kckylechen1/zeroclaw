@@ -34,15 +34,15 @@ A minimal build ships with:
 | `ask_user` | Send a question to the active channel and wait for a reply. Supports optional `choices` for structured responses (inline keyboard on Telegram, numbered list on CLI). On ACP, `choices` are required: free-form ask awaits the ACP elicitation RFD. Parameters: `question` (required), `choices` (optional list), `timeout_secs` (default 600). |
 | `escalate_to_human` | Send a structured escalation message with urgency routing. `high` / `critical` urgency additionally notifies any channels listed in `[escalation] alert_channels`. Parameters: `summary` (required), `context` (optional), `urgency` (`low`/`medium`/`high`/`critical`, default `medium`), `wait_for_response` (bool, default false), `timeout_secs` (default 600). On ACP, `wait_for_response: true` fails immediately if the channel cannot receive free-form replies (awaits ACP elicitation RFD). |
 
-Always registered alongside the built-ins:
+Registered alongside the built-ins under `full`/`legacy` composition (the minimal composition assembles its own curated set — see [Install-wide composition](#install-wide-composition)):
 
 | Tool | Notes |
 |---|---|
 | `cron_*` | Manage scheduled jobs: `cron_add`, `cron_list`, `cron_remove`, `cron_update`, `cron_run`, `cron_runs` |
 | `schedule` | Shell-only one-shot/recurring scheduling |
 | `memory_forget`, `memory_export`, `memory_purge` | Long-term memory management |
-| `spawn_subagent`, `delegate` | Run a subtask in a child agent (legacy entry points; full composition only) |
-| `reasoning_subagent` | V1 SubAgent entry point: one bounded, contract-admitted ReasoningSubAgent run returning a structured report |
+| `spawn_subagent`, `delegate` | Run a subtask in a child agent (legacy entry points, tracked as migration debt) |
+| `reasoning_subagent` | V1 SubAgent entry point: one bounded, contract-admitted ReasoningSubAgent run returning a structured report. Also the SubAgent entry point of the minimal composition. |
 
 Conditionally registered:
 

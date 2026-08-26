@@ -93,7 +93,7 @@ With Ollama, this is a no-text-fallback profile: authorized tools remain configu
 
 ## Cost tiering: heavy model when needed, fast model otherwise
 
-Run two agents and route channels to the appropriate tier. The `delegate` tool lets one agent hand off to another mid-conversation. [Delegation](../agents/delegation.md) is gated: the caller's risk profile must set `delegation_policy mode = "allow"`, and the target must be reachable from the caller (a same-profile peer, or an explicit entry in the caller's `delegates` list). The frontline and heavy agents below run on the *same* `trusted` risk profile, so they reach each other as same-profile peers; they differ in model and runtime profile (iteration budget), not in trust surface.
+Run two agents and route channels to the appropriate tier. The `delegate` tool lets one agent hand off to another mid-conversation. [Delegation](../agents/delegation.md) is gated: the caller's risk profile must set `delegation_policy mode = "allow"`, and the target must be reachable from the caller (a same-profile peer, or an explicit entry in the caller's `delegates` list). `delegate` is a full/legacy-composition surface that additionally requires other configured agents to register — it is absent from `composition = "minimal"` installs. The frontline and heavy agents below run on the *same* `trusted` risk profile, so they reach each other as same-profile peers; they differ in model and runtime profile (iteration budget), not in trust surface.
 
 The frontline agent handles every inbound message on Haiku. When it needs deeper reasoning, it calls the `delegate` tool with `agent = "heavy"`; because both agents share the `trusted` risk profile and that profile allows delegation, the heavier agent picks up the sub-task on Opus.
 

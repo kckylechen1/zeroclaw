@@ -13,7 +13,7 @@ Two tools sit nearby. They are not interchangeable.
 
 This page documents `spawn_subagent` end to end. `delegate` lives at `crates/zeroclaw-runtime/src/tools/delegate.rs` and is a separate surface.
 
-Both `spawn_subagent` and `delegate` are full/legacy-composition surfaces: they are registered whenever `composition = "full"` (the default for pre-existing configs) and remain available as legacy migration debt. Fresh installs on `composition = "minimal"` front the V1 `reasoning_subagent` tool as the SubAgent entry point instead (see the [Tools overview](../tools/overview.md)).
+Both `spawn_subagent` and `delegate` are full/legacy-composition surfaces: they are available whenever `composition = "full"` (the default for pre-existing configs) and remain available as legacy migration debt. `delegate` additionally registers only when other agents are configured. Fresh installs on `composition = "minimal"` front the V1 `reasoning_subagent` tool as the SubAgent entry point instead (see the [Tools overview](../tools/overview.md)).
 
 ## How a SubAgent is instantiated
 
