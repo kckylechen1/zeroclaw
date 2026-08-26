@@ -272,7 +272,7 @@ fn forbidden_payloads_are_rejected_over_every_text_bearing_field() {
 
 #[test]
 fn watershed_dimensions_are_rejected_as_prose_anywhere_in_text() {
-    // Row 4 discrimination list, PROSE form (codex round finding): the
+    // Row 4 discrimination list, PROSE form: the
     // banned dimensions must be rejected even when the text is not
     // shaped like a command or a path — a vendor name as backend prose,
     // a worktree as a relative path, a cwd/tmux/sandbox mention, or a
@@ -368,7 +368,7 @@ fn watershed_dimensions_are_rejected_as_prose_anywhere_in_text() {
 
 #[test]
 fn watershed_vendor_list_covers_every_canonical_provider_slot() {
-    // Drift guard (codex round 6): every model-provider slot declared by
+    // Drift guard: every model-provider slot declared by
     // zeroclaw-config must be rejected as prose. When a new provider is
     // added upstream, this test fails until the watershed list covers
     // it — vendor coverage is data-driven, not memory-driven.
@@ -439,7 +439,7 @@ fn watershed_vendor_list_covers_every_canonical_provider_slot() {
 
 #[test]
 fn a_hand_built_intent_with_a_smuggled_schema_field_fails_the_scan() {
-    // Codex round 6: `TaskIntentV1.schema` is a public String; a
+    // `TaskIntentV1.schema` is a public String; a
     // programmatically constructed intent could carry forbidden text
     // there. The client's before-transport scan must reject a non-tag
     // schema fail-closed — including via `TachiBridgeClient::submit`,

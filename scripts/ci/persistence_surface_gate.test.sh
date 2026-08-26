@@ -126,7 +126,7 @@ expect_fail "unlisted embedded-store crate" "$tmp_root/crate-drift" "UNLISTED ST
 
 # Stale store-crate entry: manifest lists a crate that no longer
 # declares the dependency — reintroduction must not hide behind the
-# stale entry (round-8 finding).
+# stale entry.
 mkdir -p "$tmp_root/stale-crate/crates/fixture-crate/src" "$tmp_root/stale-crate/crates/retired-db/src"
 cp "$tmp_root/clean/crates/fixture-crate/src/store.rs" "$tmp_root/stale-crate/crates/fixture-crate/src/store.rs"
 cp "$tmp_root/clean/crates/fixture-crate/Cargo.toml" "$tmp_root/stale-crate/crates/fixture-crate/Cargo.toml"
@@ -150,7 +150,7 @@ cat >"$tmp_root/stale-crate/manifest.json" <<JSON
 JSON
 expect_fail "stale store-crate entry" "$tmp_root/stale-crate" "STALE STORE CRATE ENTRY" || status=1
 
-# Evasion modes (codex round 2): each tree smuggles ONE shape the
+# Evasion modes: each tree smuggles ONE shape the
 # original patterns missed; each must fail independently.
 base_manifest() {
     cat <<JSON
