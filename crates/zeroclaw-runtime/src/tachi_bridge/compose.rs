@@ -1,5 +1,5 @@
-//! Parent-side intent composition and encode-side admission (zeroclaw
-//! #234; #205 TB-3/TB-4/TB-5).
+//! Parent-side intent composition and encode-side admission (vertical
+//! V2b; contract law TB-3/TB-4/TB-5).
 //!
 //! The task-specific expression surface is EXACTLY five values
 //! ([`TaskIntentInputs`]): objective, capability_request, constraints,
@@ -24,11 +24,11 @@ use zeroclaw_api::taskintent::{
 };
 
 // ─────────────────────────────────────────────────────────────────────────
-// The five-value task-specific surface (ticket #234 row 2)
+// The five-value task-specific surface (DoD row 2)
 // ─────────────────────────────────────────────────────────────────────────
 
 /// The task-specific expression surface — EXACTLY the five owner-listed
-/// values of ticket #234: objective, capability_request, constraints,
+/// values of the watershed ticket: objective, capability_request, constraints,
 /// expected_artifacts, evaluation_requirement. Nothing else on the wire
 /// originates from task-specific input.
 #[derive(Debug, Clone, PartialEq)]

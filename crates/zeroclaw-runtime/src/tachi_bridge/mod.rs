@@ -1,5 +1,6 @@
-//! Tachi TaskIntent bridge — the ZeroClaw CLIENT half (zeroclaw #234,
-//! vertical V2b; frozen contract #205 rev 3; host half = tachi#1840).
+//! Tachi TaskIntent bridge — the ZeroClaw CLIENT half (vertical V2b of
+//! the gated-open program; frozen contract rev 3; host half = the tachi
+//! TaskIntent bridge, vertical V2a).
 //!
 //! ```text
 //! Parent
@@ -15,7 +16,7 @@
 //! Authority boundaries encoded here:
 //!
 //! - **The Parent-side expression surface is exactly five values**
-//!   (ticket #234 row 2): objective, `capability_request`, constraints,
+//!   (DoD row 2): objective, `capability_request`, constraints,
 //!   expected_artifacts, evaluation_requirement ([`compose`]). The
 //!   authority-bearing subset (`capability_request`, `workspace_source`,
 //!   `routing_preference`, `approval_requirement`) is filled from the
@@ -35,7 +36,7 @@
 //!   test below).
 //! - **Scope (owner-specified)**: submit / get / watch / collect ONLY.
 //!   No intervene/request_stop surface exists on this client (V3 leaf);
-//!   no requester-restart delivery (tachi#1679 not landed).
+//!   no requester-restart delivery (tachi durable delivery not landed).
 
 pub mod client;
 pub mod compose;

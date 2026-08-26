@@ -1,7 +1,7 @@
 //! The bridge client seam: the transport port trait, the read views, the
 //! three per-dimension state mapping tables (TB-16), and the client-side
-//! TB-7/TB-20 laws (zeroclaw #234; #205 TB-5b/TB-7/TB-8/TB-9/TB-13/
-//! TB-16/TB-20).
+//! TB-7/TB-20 laws (vertical V2b; contract clauses TB-5b/TB-7/TB-8/
+//! TB-9/TB-13/TB-16/TB-20).
 //!
 //! The port trait [`TachiTaskBridge`] is the **transport-binding point**:
 //! production transports (the tachi MCP facade, when tachi wires one, or
@@ -30,7 +30,7 @@ use super::compose::ComposeRejection;
 // TB-16: three per-dimension mapping tables
 // ─────────────────────────────────────────────────────────────────────────
 
-/// The bridge's execution-dimension wire labels (tachi#1679 ~13-state
+/// The bridge's execution-dimension wire labels (the ~13-state
 /// task-level execution vocabulary, snake_case wire form). This table is
 /// the ONLY admitted label set for the execution dimension.
 pub const EXECUTION_STATE_LABELS: &[&str] = &[

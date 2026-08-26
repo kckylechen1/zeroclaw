@@ -3,7 +3,7 @@
 //! transport for TB-20 outage tests.
 //!
 //! [`InMemoryTachiTaskBridge`] is a faithful miniature of the tachi
-//! `TaskIntentBridge` semantics (tachi#1840) for the four in-scope ops —
+//! `TaskIntentBridge` semantics (host vertical V2a) for the four in-scope ops —
 //! same tuple law, same replay rule, same revision folding — carried in
 //! process memory only. It owns NO DDL and writes NO durable state
 //! (TB-1/TB-22). It is the Stage-B binding point's stand-in until the
@@ -184,7 +184,7 @@ impl InMemoryTachiTaskBridge {
         provenance: &str,
     ) {
         // Each observation is a DISTINCT canonical outcome row (a new
-        // result revision, tachi#1679 `result_revised`), so the event id
+        // result revision, a revised result), so the event id
         // is unique per observation — unlike the idempotent dimension
         // facts above, which share one id per (task, label).
         let event_id = {

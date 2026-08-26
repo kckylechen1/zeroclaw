@@ -1,8 +1,8 @@
-//! Stage-A suites for the Tachi bridge client vertical (zeroclaw #234).
+//! Stage-A suites for the Tachi bridge client vertical (V2b).
 //!
 //! Each suite names the ticket DoD row / contract clause it proves.
 //! Stage-B (the live end-to-end run) lives outside this file — see the
-//! PR body evidence section and the #234 ledger.
+//! PR body evidence section and the leaf ledger on the tracker.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

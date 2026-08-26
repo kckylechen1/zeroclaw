@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Persistence-surface manifest gate (TB-22, zeroclaw #205 rev 3 —
-# owner-ratified no-new-ledgers law; ticket #234 row 11).
+# Persistence-surface manifest gate (TB-22, frozen contract rev 3 —
+# owner-ratified no-new-ledgers law; vertical V2b DoD row 11).
 #
 # Freeze-no-growth: no new durable task/attempt/workspace/eval/approval/
 # delivery store, and no new WRITER PATH to any annex table. Enforcement
