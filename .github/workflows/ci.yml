@@ -99,6 +99,11 @@ jobs:
           bash scripts/ci/retired_docs_gate.sh
       - name: Persistence-surface manifest gate (TB-22 no new durable stores)
         run: |
+          # The gate scans with ripgrep; hosted runners do not ship it.
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+          fi
+          rg --version
           bash scripts/ci/persistence_surface_gate.test.sh
           bash scripts/ci/persistence_surface_gate.sh
 
