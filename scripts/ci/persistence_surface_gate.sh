@@ -187,6 +187,12 @@ for crate in sorted(detected_crates - listed_crates):
         "but is not in the manifest store_crates list (TB-22: a new durable "
         "store crate needs a PR-visible manifest change citing an exemption)."
     )
+for crate in sorted(listed_crates - detected_crates):
+    problems.append(
+        f"STALE STORE CRATE ENTRY: {crate} is listed in store_crates but no "
+        "longer declares an embedded-store dependency; prune it so later "
+        "reintroduction cannot hide behind a stale entry."
+    )
 
 if problems:
     print("persistence-surface gate: DRIFT FOUND (TB-22) - refusing.")
