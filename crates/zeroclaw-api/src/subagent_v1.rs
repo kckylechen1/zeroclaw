@@ -208,7 +208,10 @@ pub struct SubAgentBudgetV1 {
     /// over counted usage; never silently ignored (SA-27).
     pub max_tokens: u64,
     /// Maximum number of billable actions (model calls and tool events).
-    /// Enforced; shared with the parent meter (SA-8).
+    /// Enforced within ONE run: the meter is minted per run identity and
+    /// shared between parent-side spawn admission and child execution
+    /// (SA-8's sharing scope); it is discarded at the run's terminal.
+    /// Aggregate cross-run quotas are a separate concept.
     pub max_actions: u32,
 }
 

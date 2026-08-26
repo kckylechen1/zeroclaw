@@ -729,8 +729,12 @@ async fn time_ceiling_enforces() {
 
 #[tokio::test]
 async fn action_ceiling_blocks_further_spawns_shared_meter() {
-    // SA-8: the meter is SHARED with the parent — a child exhausting
-    // the action budget blocks further parent spawns.
+    // SA-8 sharing scope, via the EXPLICIT host-shared seam
+    // (`meter_override`): a host that hands one meter to several spawns
+    // sees child consumption count against it and exhaustion block
+    // further spawns through that shared meter. (The production default
+    // is per-run meters by owner ruling — see
+    // `budget_meter_is_fresh_per_run_not_process_cached`.)
     let mut profile = test_profile();
     profile.budget.max_actions = 1;
     let meter = Arc::new(SubAgentBudgetMeter::new(profile.budget));
@@ -770,15 +774,31 @@ async fn budget_meter_is_fresh_per_run_not_process_cached() {
     // exhausted; the parent must wait for the time window to reset" —
     // a reset window that does not exist. After the fix there is NO
     // meter storage on the tool at all (compile-level: the field is
-    // gone), so cross-run reuse is unrepresentable; each production
-    // run mints a fresh meter and both runs below Complete.
+    // gone), so cross-run reuse is unrepresentable.
+    //
+    // BEHAVIORAL discriminator (no clock injection needed): admit a
+    // max_actions = 1 profile revision, then run two PRODUCTION-path
+    // spawns (no meter override). Under ANY cache keyed by
+    // profile/revision the first run consumes the single action and the
+    // second is refused; with per-run meters both Complete. On the
+    // pre-fix code this test is red.
+    let mut narrow = test_profile();
+    narrow.profile_id = DEFAULT_REASONING_PROFILE_ID.to_string();
+    narrow.revision = 2; // must increase over the admitted default (1)
+    narrow.budget.max_actions = 1;
+    narrow.digest = narrow.compute_digest();
     let tool = reasoning_tool().with_model_resolver(StubResolver::json(ok_report_body("ok")));
+    tool.registry
+        .lock()
+        .admit(narrow)
+        .expect("revision 2 admits");
+
     let first = tool.run_child("first objective").await.expect("first run");
     assert_eq!(first.status, SubAgentTerminalFact::Completed);
     let second = tool
         .run_child("second objective")
         .await
-        .expect("second run");
+        .expect("second run must mint a fresh meter, not inherit run 1's actions");
     assert_eq!(second.status, SubAgentTerminalFact::Completed);
 }
 
