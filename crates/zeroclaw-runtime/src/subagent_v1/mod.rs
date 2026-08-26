@@ -264,9 +264,15 @@ impl ModelAccessResolver for ConfigModelAccessResolver {
 // Budget meter (SA-8/SA-27)
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Shared read-accounting meter (SA-8): the SAME `Arc` is held by the
-/// Parent-side spawner and the child run, so child consumption counts
-/// against the parent's budget and exhaustion blocks further spawns.
+/// Shared read-accounting meter (SA-8), scoped to ONE run: the SAME
+/// `Arc` is held by the parent-side spawn admission and the child run,
+/// so child consumption counts against that run's budget and
+/// exhaustion terminates the run. The meter is minted fresh per
+/// `SubAgentRunRef` and discarded at the run's terminal — it is
+/// single-run state, NEVER process-lifetime quota: a run's 120s time
+/// ceiling must not moonlight as an aggregate. Aggregate quotas
+/// (per-ParentRun spawn counts, hourly token caps) are a separate
+/// future `ParentRunQuota`/`RateBudget` concept, out of scope here.
 pub struct SubAgentBudgetMeter {
     budget: SubAgentBudgetV1,
     state: Mutex<MeterState>,
@@ -283,13 +289,24 @@ struct MeterState {
 impl SubAgentBudgetMeter {
     #[must_use]
     pub fn new(budget: SubAgentBudgetV1) -> Self {
+        Self::new_with_start(budget, std::time::Instant::now())
+    }
+
+    /// Constructor with an injected start instant: hosts and tests
+    /// advance the meter's clock deterministically instead of sleeping.
+    /// The meter is SINGLE-RUN state (see [`ReasoningSubagentTool`]):
+    /// whatever start it gets, it is discarded at the run's terminal —
+    /// no cross-run reuse exists to carry a backdated clock into
+    /// another run.
+    #[must_use]
+    pub fn new_with_start(budget: SubAgentBudgetV1, started_at: std::time::Instant) -> Self {
         Self {
             budget,
             state: Mutex::new(MeterState {
                 actions_used: 0,
                 tokens_in: 0,
                 tokens_out: 0,
-                started_at: std::time::Instant::now(),
+                started_at,
             }),
         }
     }
@@ -1648,7 +1665,6 @@ pub struct ReasoningSubagentTool {
     security: Arc<zeroclaw_config::policy::SecurityPolicy>,
     lineage: Option<LineageRef>,
     registry: Mutex<SubAgentProfileRegistry>,
-    meters: Mutex<HashMap<(String, u32), Arc<SubAgentBudgetMeter>>>,
     review_queue: Arc<SubAgentCandidateReviewQueue>,
     /// Host-side model-resolver override. When set, the host resolves
     /// the child's bounded completions through this resolver instead of
@@ -1672,7 +1688,6 @@ impl ReasoningSubagentTool {
             security,
             lineage: None,
             registry: Mutex::new(SubAgentProfileRegistry::with_default_reasoning_profile()),
-            meters: Mutex::new(HashMap::new()),
             review_queue: Arc::new(SubAgentCandidateReviewQueue::new()),
             model_resolver_override: None,
         }
@@ -1744,28 +1759,31 @@ impl ReasoningSubagentTool {
             (profile, vref)
         };
 
-        // SA-8: the shared budget meter for this profile revision —
-        // child consumption counts against the parent's budget and
-        // exhaustion blocks further spawns. Checked BEFORE any binding
-        // resolution: an exhausted parent budget refuses the spawn
-        // outright.
+        // SA-8, per-run scope: a FRESH meter is minted for THIS run and
+        // shared between this parent-side admission and the child
+        // execution (the same `Arc` crosses the SA-6 boundary as the
+        // budget input); it is discarded at the run's terminal. There
+        // is deliberately NO process-lifetime meter cache keyed by
+        // profile/revision: the previous cache held one non-resetting
+        // `Instant::now()` start for the tool's whole lifetime, so the
+        // first run consumed the 120s window and every later turn was
+        // permanently rejected until restart — a single-run ceiling
+        // moonlighting as aggregate quota. Aggregate quotas
+        // (per-ParentRun spawn counts, hourly token caps) are a
+        // separate future `ParentRunQuota`/`RateBudget` concept and
+        // must never be implemented by stretching a single-run meter.
+        // Hosts that DO want to share one meter across spawns use
+        // `meter_override` explicitly (that is also the SA-8 sharing
+        // seam the action-ceiling test proves).
         let meter = match meter_override {
             Some(meter) => meter,
-            None => {
-                let mut meters = self.meters.lock();
-                let meter = Arc::clone(
-                    meters
-                        .entry((profile.profile_id.clone(), profile.revision))
-                        .or_insert_with(|| Arc::new(SubAgentBudgetMeter::new(profile.budget))),
-                );
-                drop(meters);
-                meter
-            }
+            None => Arc::new(SubAgentBudgetMeter::new(profile.budget)),
         };
         if meter.exhausted() {
             return Err(
-                "reasoning_subagent: the shared budget meter for this profile is \
-                 exhausted; the parent must wait for the time window to reset"
+                "reasoning_subagent: the budget meter for this run is exhausted before \
+                 start (shared-override meters only); a fresh production run mints a \
+                 fresh meter"
                     .to_string(),
             );
         }
