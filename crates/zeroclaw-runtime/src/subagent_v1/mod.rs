@@ -889,7 +889,7 @@ impl SubAgentRunV1 {
                     revision: self.profile.revision,
                     digest: self.pinned_digest.clone(),
                 },
-                context_bundle_ref: bundle.bundle_id.clone(),
+                context_bundle_ref: bundle.bundle_id().to_string(),
                 status,
                 summary,
                 findings: Vec::new(),
@@ -1308,8 +1308,8 @@ impl SubAgentExecutionContextV1 {
     pub fn inventory(&self) -> ContextInventory {
         ContextInventory {
             objective_bytes: self.objective.as_str().len(),
-            bundle_id: self.bundle.bundle_id.clone(),
-            bundle_digest: self.bundle.digest.clone(),
+            bundle_id: self.bundle.bundle_id().to_string(),
+            bundle_digest: self.bundle.digest().to_string(),
             capability_names: self
                 .capabilities
                 .names()

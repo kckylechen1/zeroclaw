@@ -561,11 +561,16 @@ impl TryFrom<SourcePartition> for AdmittedPartition {
 /// [`BundleSourceRef`] but the partition is the closed
 /// [`AdmittedPartition`]: a Private-Dyad- or AgentSoul-derived ref is
 /// unrepresentable here, not merely filtered later.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Fields are private and there is no `Deserialize`: an admitted ref is
+/// minted only inside [`ContextBundleV1::admit`] (the exhaustive
+/// conversion), so out-of-crate code can neither construct one nor
+/// deserialize one around the boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AdmittedSourceRef {
-    pub ref_id: String,
-    pub partition: AdmittedPartition,
-    pub content_digest: String,
+    ref_id: String,
+    partition: AdmittedPartition,
+    content_digest: String,
 }
 
 /// Why a bundle was refused at the admitted-bundle boundary.
@@ -600,24 +605,49 @@ impl From<DigestMismatchError> for BundleAdmissionError {
 /// bundle's digest — admission adds no content and removes none (it
 /// rejects rather than filters), so mid-run mutation of an admitted
 /// bundle is caught by the same digest law (SA-18).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Fields are private and there is no `Deserialize`: the only mint is
+/// `admit()` inside this crate. Out-of-crate code (including the
+/// runtime) can hold, read (accessors), digest-verify, and project an
+/// admitted bundle, but cannot construct or deserialize one around the
+/// boundary. `Serialize` stays for canonical digest computation.
+/// Provenance limit, stated honestly: a partition LABEL is honest only
+/// as far as the code that minted the raw bundle; no type can prove a
+/// `user_model`-labeled digest was not derived from private content —
+/// that is a capture-path property (the parent-side builder), not a
+/// carrier property.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AdmittedContextBundleV1 {
-    pub bundle_id: String,
-    pub revision: u32,
-    pub digest: String,
-    pub parent_ref: ParentRunRef,
-    pub objective_context: String,
+    bundle_id: String,
+    revision: u32,
+    digest: String,
+    parent_ref: ParentRunRef,
+    objective_context: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub source_refs: Vec<AdmittedSourceRef>,
+    source_refs: Vec<AdmittedSourceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub applicable_user_model: Vec<ProjectedFactRef>,
+    applicable_user_model: Vec<ProjectedFactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skill_refs: Vec<String>,
+    skill_refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub procedure_refs: Vec<String>,
+    procedure_refs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub explicit_exclusions: Vec<ContextClassV1>,
-    pub redaction_policy: BundleRedactionPolicy,
+    explicit_exclusions: Vec<ContextClassV1>,
+    redaction_policy: BundleRedactionPolicy,
+}
+
+impl AdmittedContextBundleV1 {
+    /// The admitted bundle's id (SA-18 field).
+    #[must_use]
+    pub fn bundle_id(&self) -> &str {
+        &self.bundle_id
+    }
+
+    /// The pinned digest (equals the raw bundle's digest at admission).
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1478,6 +1508,22 @@ mod tests {
             bad_digest.admit(),
             Err(BundleAdmissionError::Digest { .. })
         ));
+        // Ordering discrimination: a bundle that is BOTH digest-stale
+        // AND carries a forbidden ref refuses on the DIGEST first — the
+        // boundary never discloses the private-derived ref's existence
+        // through the partition error when the digest already fails.
+        let mut both = sample_bundle();
+        both.source_refs.push(BundleSourceRef {
+            ref_id: "secret-both".into(),
+            partition: SourcePartition::PrivateDyad,
+            content_digest: "cc".into(),
+        });
+        both.digest = both.compute_digest();
+        both.objective_context = "smuggled too".into(); // digest now stale
+        assert!(matches!(
+            both.admit(),
+            Err(BundleAdmissionError::Digest { .. })
+        ));
         // The clean bundle admits.
         assert!(sample_bundle().admit().is_ok());
     }
@@ -1521,6 +1567,9 @@ mod tests {
     // SA-18 on the admitted type: admission preserves the pinned digest
     // exactly (admission adds and removes nothing), and mid-run
     // mutation of an admitted bundle is caught by the same digest law.
+    // Isomorphism covers BOTH admissible partitions — the wire token of
+    // every AdmittedPartition variant matches the raw enum's, so the
+    // canonical digest is partition-for-partition identical.
     #[test]
     fn admitted_bundle_digest_equals_raw_and_pins_content() {
         let raw = sample_bundle();
@@ -1541,6 +1590,29 @@ mod tests {
         assert_eq!(
             admitted.source_refs[0].partition.as_source_partition(),
             raw.source_refs[0].partition
+        );
+
+        // SharedLexicon coverage: a bundle whose refs use the OTHER
+        // admissible partition still digest-matches after admission.
+        let mut lexicon = sample_bundle();
+        lexicon.source_refs.push(BundleSourceRef {
+            ref_id: "lex-iso".into(),
+            partition: SourcePartition::SharedLexicon,
+            content_digest: "ll".into(),
+        });
+        lexicon.digest = lexicon.compute_digest();
+        let admitted_lexicon = lexicon.admit().unwrap();
+        assert_eq!(admitted_lexicon.digest, lexicon.digest);
+        assert_eq!(admitted_lexicon.compute_digest(), lexicon.compute_digest());
+        admitted_lexicon.verify_digest().unwrap();
+        // Wire-token equality per partition pair.
+        assert_eq!(
+            serde_json::to_value(AdmittedPartition::UserModel).unwrap(),
+            serde_json::to_value(SourcePartition::UserModel).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(AdmittedPartition::SharedLexicon).unwrap(),
+            serde_json::to_value(SourcePartition::SharedLexicon).unwrap()
         );
     }
 

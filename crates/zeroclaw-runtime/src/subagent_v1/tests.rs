@@ -622,33 +622,37 @@ async fn every_terminal_path_returns_a_structured_report() {
 }
 
 #[tokio::test]
-async fn digest_mutated_bundle_refused_midrun() {
-    // SA-18: admission pins the digest; a mutated bundle fails closed.
-    // (The pre-admission half — a raw bundle whose pinned digest no
-    // longer matches its content — is refused by admit() itself; see
-    // admission tests in the api crate. This is the POST-admission
-    // mutation half: the admitted bundle is mutated mid-run without a
-    // recomputed digest.)
+async fn digest_law_survives_the_boundary_migration() {
+    // SA-18 digest law after the admitted-bundle migration: the raw
+    // pre-admission half (stale pinned digest) is refused by admit()
+    // BEFORE any run exists, and the post-admission mutation half is
+    // covered in the api crate (in-module mutation + verify_digest);
+    // outside this crate the admitted type's fields are private, so a
+    // mid-run mutation is unrepresentable without the crate's own
+    // cooperation. Here: a digest-invalid raw bundle cannot produce a
+    // child run at all, and a valid one still executes.
+    let mut stale = sample_bundle();
+    stale.objective_context = "smuggled context".into(); // digest NOT recomputed
+    let refusal = stale
+        .admit()
+        .expect_err("stale-digest bundle must be refused at admission");
+    assert!(
+        matches!(
+            refusal,
+            zeroclaw_api::subagent_v1::BundleAdmissionError::Digest { .. }
+        ),
+        "admission must fail closed on the digest first: {refusal}"
+    );
+
     let run = admitted_run(StubResolver::json(ok_report_body("ok")));
-    let mut mutated = sample_bundle().admit().expect("clean test bundle admits");
-    mutated.objective_context = "smuggled context".into();
-    // digest NOT recomputed — this is the mid-run mutation case.
-    let (tx, _rx) = tokio::sync::mpsc::channel(16);
-    let ctx = SubAgentExecutionContextV1::new(
-        ObjectiveV1::new("Produce the analysis.").unwrap(),
-        mutated,
+    let (ctx, _rx) = build_ctx(
+        sample_bundle(),
         ChildToolSet::from_profile(&test_profile()).unwrap(),
-        ReportChannelHandle::new(tx),
         root_lineage().child(),
         default_meter(),
     );
     let report = run.execute(ctx).await;
-    assert_eq!(report.status, SubAgentTerminalFact::Failed);
-    assert!(
-        report.summary.contains("digest refused"),
-        "{}",
-        report.summary
-    );
+    assert_eq!(report.status, SubAgentTerminalFact::Completed);
 }
 
 #[tokio::test]
@@ -1605,22 +1609,45 @@ fn review_queue_is_run_scoped_and_refuses_duplicate_ids() {
 #[tokio::test]
 async fn early_failure_terminal_reports_reach_the_channel() {
     // SA-21: EVERY terminal path sends the report — including the
-    // early failures (digest refusal, policy refusal) that return
-    // before the bounded unit runs.
-    let run = admitted_run(StubResolver::json(ok_report_body("unused")));
-    let mut mutated = sample_bundle().admit().expect("clean test bundle admits");
-    mutated.objective_context = "smuggled".into(); // digest NOT recomputed
-    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-    let ctx = SubAgentExecutionContextV1::new(
-        ObjectiveV1::new("Produce the analysis.").unwrap(),
-        mutated,
+    // early failures that return before the bounded unit runs. The
+    // digest-refusal half now happens pre-run at admit() (no run, no
+    // channel to speak of); the surviving run-level early failure is
+    // the PROFILE POLICY refusal, driven here with a SharedLexicon ref
+    // the admitted profile does not permit.
+    let mut narrow_profile = test_profile();
+    narrow_profile.privacy_policy.permitted_partitions = vec![SourcePartition::UserModel];
+    narrow_profile.digest = narrow_profile.compute_digest();
+    let mut registry = SubAgentProfileRegistry::new();
+    registry.admit(narrow_profile).unwrap();
+    let vref = registry.latest_ref(DEFAULT_REASONING_PROFILE_ID).unwrap();
+    let run = SubAgentRunV1::from_admitted_profile(
+        &registry,
+        &vref,
+        &root_lineage(),
+        stub_binding(StubResolver::json(ok_report_body("unused"))),
+    )
+    .unwrap();
+
+    let mut lexicon_bundle = sample_bundle();
+    lexicon_bundle.source_refs.push(BundleSourceRef {
+        ref_id: "lex-1".into(),
+        partition: SourcePartition::SharedLexicon,
+        content_digest: "l".into(),
+    });
+    lexicon_bundle.digest = lexicon_bundle.compute_digest();
+    let (ctx, mut rx) = build_ctx(
+        lexicon_bundle,
         ChildToolSet::from_profile(&test_profile()).unwrap(),
-        ReportChannelHandle::new(tx),
         root_lineage().child(),
         default_meter(),
     );
     let report = run.execute(ctx).await;
     assert_eq!(report.status, SubAgentTerminalFact::Failed);
+    assert!(
+        report.summary.contains("shared_lexicon"),
+        "the refusal must name the partition: {}",
+        report.summary
+    );
     match rx.recv().await.expect("terminal report on the channel") {
         ReportChannelMessage::Report(sent) => {
             assert_eq!(sent.status, SubAgentTerminalFact::Failed);
