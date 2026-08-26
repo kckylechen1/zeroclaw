@@ -66,16 +66,15 @@ enum FactDetail {
     },
 }
 
-/// Real SHA-256 lower-hex digest over a canonical fact identity — the
-/// `TaskEventView::payload_digest` contract is an actual hex digest, not
-/// a label.
-fn fact_digest(parts: &[&str]) -> String {
-    let mut hasher = Sha256::new();
-    for part in parts {
-        hasher.update(part.as_bytes());
-        hasher.update(b"\x1f");
-    }
-    let bytes = hasher.finalize();
+/// SHA-256 lower-hex over the CANONICAL JSON of the typed payload
+/// (keys sorted recursively — the shared canonical-JSON rule), matching
+/// the `TaskEventView::payload_digest` contract: the digest covers the
+/// payload CONTENT, not the event identity. Two ingests of identical
+/// payload content therefore share a digest while remaining distinct
+/// facts by event id.
+fn fact_digest(payload: &serde_json::Value) -> String {
+    let canonical = zeroclaw_api::taskintent::canonical_json(payload).to_string();
+    let bytes = Sha256::digest(canonical.as_bytes());
     let mut out = String::with_capacity(2 * bytes.len());
     for byte in bytes {
         out.push_str(&format!("{byte:02x}"));
@@ -174,12 +173,10 @@ impl InMemoryTachiTaskBridge {
             InMemoryFact {
                 event_id: format!("exec-{label}-{}-{occurrence}", task_ref.as_wire()),
                 kind: "execution".to_string(),
-                payload_digest: fact_digest(&[
-                    "execution",
-                    task_ref.as_wire(),
-                    label,
-                    &occurrence.to_string(),
-                ]),
+                payload_digest: fact_digest(&serde_json::json!({
+                    "kind": "execution",
+                    "label": label,
+                })),
                 detail: FactDetail::Execution {
                     label: label.to_string(),
                 },
@@ -206,12 +203,10 @@ impl InMemoryTachiTaskBridge {
             InMemoryFact {
                 event_id: format!("adj-{label}-{}-{occurrence}", task_ref.as_wire()),
                 kind: "adjudication".to_string(),
-                payload_digest: fact_digest(&[
-                    "adjudication",
-                    task_ref.as_wire(),
-                    label,
-                    &occurrence.to_string(),
-                ]),
+                payload_digest: fact_digest(&serde_json::json!({
+                    "kind": "adjudication",
+                    "label": label,
+                })),
                 detail: FactDetail::Adjudication {
                     label: label.to_string(),
                 },
@@ -261,12 +256,16 @@ impl InMemoryTachiTaskBridge {
             InMemoryFact {
                 event_id: event_id.clone(),
                 kind: "outcome_observed".to_string(),
-                payload_digest: fact_digest(&[
-                    "outcome",
-                    task_ref.as_wire(),
-                    event_id.as_str(),
-                    reported_outcome,
-                ]),
+                payload_digest: fact_digest(&serde_json::json!({
+                    "kind": "outcome_observed",
+                    "attempt": attempt.as_wire(),
+                    "reported_outcome": reported_outcome,
+                    "canonical_artifact_ref": canonical_artifact_ref,
+                    "evidence_refs": evidence_refs,
+                    "verification_present": verification_present,
+                    "diff_present": diff_present,
+                    "provenance": provenance,
+                })),
                 detail: FactDetail::OutcomeObserved {
                     attempt,
                     reported_outcome: reported_outcome.to_string(),
@@ -480,7 +479,10 @@ impl TachiTaskBridge for InMemoryTachiTaskBridge {
             InMemoryFact {
                 event_id: format!("submitted-{}", task_ref.as_wire()),
                 kind: "task_submitted".to_string(),
-                payload_digest: fact_digest(&["task_submitted", task_ref.as_wire(), &digest]),
+                payload_digest: fact_digest(&serde_json::json!({
+                    "kind": "task_submitted",
+                    "intent_digest": digest,
+                })),
                 detail: FactDetail::TaskSubmitted { digest },
             },
         );

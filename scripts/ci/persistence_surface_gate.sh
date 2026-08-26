@@ -55,7 +55,8 @@ trap 'rm -rf "$tmp_dir"' EXIT
 # Detected surface: union of DDL and connection-open sites under the
 # workspace source trees, plus crates declaring rusqlite.
 {
-    rg -l --no-messages -i 'create[[:space:]]+table|alter[[:space:]]+table' \
+    rg -l --no-messages -i -U \
+        'create[[:space:]]+table|alter[[:space:]]+table|create[[:space:]]*/\*[^*]*\*/[[:space:]]*table' \
         "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
     rg -l --no-messages 'Connection::open' \
         "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
@@ -63,8 +64,14 @@ trap 'rm -rf "$tmp_dir"' EXIT
 } | sed -E "s#^$scan_root/##" | sort -u >"$tmp_dir/detected_files"
 
 {
-    rg -l --no-messages '^(rusqlite|sled|redb|rocksdb)' "$scan_root/crates" -g 'Cargo.toml' 2>/dev/null || true
-    rg -l --no-messages '^(rusqlite|sled|redb|rocksdb)' "$scan_root/apps" -g 'Cargo.toml' 2>/dev/null || true
+    rg -l --no-messages \
+        -e "^[[:space:]]*(rusqlite|sled|redb|rocksdb)[[:space:]]*=" \
+        -e "^\\[[^]]*dependencies\\.(rusqlite|sled|redb|rocksdb)\\]" \
+        "$scan_root/crates" -g 'Cargo.toml' 2>/dev/null || true
+    rg -l --no-messages \
+        -e "^[[:space:]]*(rusqlite|sled|redb|rocksdb)[[:space:]]*=" \
+        -e "^\\[[^]]*dependencies\\.(rusqlite|sled|redb|rocksdb)\\]" \
+        "$scan_root/apps" -g 'Cargo.toml' 2>/dev/null || true
 } | sed -E "s#^$scan_root/##" | sed -E 's#^((crates|apps)/[^/]+)/Cargo.toml$#\1#' | sort -u >"$tmp_dir/detected_crates"
 
 python3 - "$manifest" "$tmp_dir/detected_files" "$tmp_dir/detected_crates" <<'PYEOF'

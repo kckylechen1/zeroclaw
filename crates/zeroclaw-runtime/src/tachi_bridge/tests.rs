@@ -796,6 +796,137 @@ fn observing_an_outcome_for_an_unadmitted_task_ref_is_refused() {
     );
 }
 
+#[test]
+fn payload_digest_is_the_canonical_json_sha256_of_the_payload() {
+    // The digest contract is content, not identity: recompute the
+    // expected SHA-256 over the canonical JSON of a known payload and
+    // assert the event carries exactly that (lowercase hex).
+    tokio_rt().block_on(async {
+        let host = Arc::new(InMemoryTachiTaskBridge::new());
+        let client = TachiBridgeClient::new(host.clone());
+        let task_ref = admit(&client, "digest contract task", 1).await;
+        host.ingest_execution(&task_ref, "running");
+        let page = host.watch(&task_ref, 0, 100).await.expect("page");
+        let event = page
+            .events
+            .iter()
+            .find(|e| e.kind == "execution")
+            .expect("execution event");
+        let expected_payload = serde_json::json!({"kind": "execution", "label": "running"});
+        let canonical =
+            zeroclaw_api::taskintent::canonical_json(&expected_payload).to_string();
+        use sha2::Digest as _;
+        let expected = sha2::Sha256::digest(canonical.as_bytes());
+        let hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(event.payload_digest, hex);
+        // And content sensitivity: a different payload yields a different digest.
+        host.ingest_execution(&task_ref, "failed");
+        let page2 = host.watch(&task_ref, 0, 100).await.expect("page");
+        let failed = page2
+            .events
+            .iter()
+            .find(|e| e.kind == "execution" && e.payload_digest != event.payload_digest)
+            .expect("failed fact carries a different payload digest");
+        assert_ne!(failed.payload_digest, event.payload_digest);
+    });
+}
+
+#[test]
+fn watch_cursor_never_regresses_on_a_stale_out_of_order_response() {
+    // A scripted transport returns an OLDER page after a newer one (the
+    // slow-response race): the cursor must keep the higher sequence.
+    struct ScriptedWatch {
+        pages: std::sync::Mutex<std::collections::VecDeque<
+            Result<super::client::TaskEventPageView, super::client::BridgeQueryError>,
+        >>,
+    }
+
+    #[async_trait::async_trait]
+    impl TachiTaskBridge for ScriptedWatch {
+        async fn submit(
+            &self,
+            _intent: &zeroclaw_api::taskintent::TaskIntentV1,
+            _request_id: &RequestId,
+        ) -> Result<SubmitReceipt, super::client::SubmitTransportError> {
+            Err(super::client::SubmitTransportError)
+        }
+
+        async fn get(
+            &self,
+            _task_ref: &zeroclaw_api::taskintent::TaskRef,
+        ) -> Result<super::client::TaskSnapshotView, super::client::BridgeQueryError> {
+            Err(super::client::BridgeQueryError::Unavailable)
+        }
+
+        async fn watch(
+            &self,
+            task_ref: &zeroclaw_api::taskintent::TaskRef,
+            _after_seq: u64,
+            _limit: usize,
+        ) -> Result<super::client::TaskEventPageView, super::client::BridgeQueryError> {
+            self.pages
+                .lock()
+                .expect("pages lock")
+                .pop_front()
+                .unwrap_or(Err(super::client::BridgeQueryError::Unavailable))
+                .map(|mut page| {
+                    page.task_ref = task_ref.clone();
+                    page
+                })
+        }
+
+        async fn collect(
+            &self,
+            _task_ref: &zeroclaw_api::taskintent::TaskRef,
+            _result_revision: Option<u64>,
+        ) -> Result<super::client::ResultProjectionView, super::client::BridgeQueryError> {
+            Err(super::client::BridgeQueryError::Unavailable)
+        }
+    }
+
+    fn page_with(seqs: &[u64]) -> Result<super::client::TaskEventPageView, super::client::BridgeQueryError> {
+        Ok(super::client::TaskEventPageView {
+            task_ref: serde_json::from_value(serde_json::Value::String("task:x".to_string()))
+                .expect("wire-shaped"),
+            events: seqs
+                .iter()
+                .map(|seq| super::client::TaskEventView {
+                    seq: *seq,
+                    event_id: format!("evt-{seq}"),
+                    source: "bridge".to_string(),
+                    source_revision: seq.to_string(),
+                    occurred_at: "t".to_string(),
+                    recorded_at: "t".to_string(),
+                    payload_digest: "0".repeat(64),
+                    visibility: "internal".to_string(),
+                    kind: "execution".to_string(),
+                })
+                .collect(),
+            has_more: false,
+        })
+    }
+
+    tokio_rt().block_on(async {
+        let scripted = Arc::new(ScriptedWatch {
+            pages: std::sync::Mutex::new(
+                [page_with(&[1, 2, 3]), page_with(&[1])]
+                    .into_iter()
+                    .collect(),
+            ),
+        });
+        let client = TachiBridgeClient::new(scripted);
+        let task_ref: zeroclaw_api::taskintent::TaskRef =
+            serde_json::from_value(serde_json::Value::String("task:x".to_string()))
+                .expect("wire-shaped");
+        // Newer page first: cursor advances to 3.
+        client.watch_new_events(&task_ref, 10).await.expect("page");
+        assert_eq!(client.cursor(&task_ref), 3);
+        // Stale slower response with an older page: cursor stays at 3.
+        client.watch_new_events(&task_ref, 10).await.expect("page");
+        assert_eq!(client.cursor(&task_ref), 3, "cursor must not regress");
+    });
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Row 10: collect is artifact-first (TB-13)
 // ─────────────────────────────────────────────────────────────────────────
