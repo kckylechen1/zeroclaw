@@ -113,10 +113,12 @@ jobs:
     name: Lint
     needs: [fmt]
     runs-on: ubuntu-latest
-    # 20 (not 15): a cold rust-cache after any Cargo.lock change puts a full
+    # 25 (not 20): a cold rust-cache after any Cargo.lock change puts a full
     # workspace clippy at 14-15m on hosted runners, which made the old 15m
-    # ceiling a coin flip for every PR.
-    timeout-minutes: 20
+    # ceiling a coin flip for every PR; observed runs with a lock change
+    # plus the persistence-gate ripgrep install have exceeded 20m and been
+    # cancelled mid-clippy, so the ceiling moves again by the same logic.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
