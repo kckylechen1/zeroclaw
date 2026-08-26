@@ -10,7 +10,7 @@ use std::sync::Arc;
 use zeroclaw_api::taskintent::{
     ArtifactClass, ArtifactExpectation, BoundedText, Capability, CapabilityRequest,
     EvaluationRequirement, IndependenceClass, ParentRunRef, PrivacyClass, RequestId, RequesterRef,
-    RoutingPreference, SourceKind, SourceRef, TaskConstraint, WorkspaceSourceRef,
+    RoutingPreference, SourceKind, SourceRef, SubAgentRunRef, TaskConstraint, WorkspaceSourceRef,
 };
 
 use super::client::{
@@ -270,15 +270,78 @@ fn forbidden_payloads_are_rejected_over_every_text_bearing_field() {
     }
 }
 
+/// Transport wrapper that COUNTS port.submit calls — the discrimination
+/// instrument for the client fail-closed law: a client-side rejection
+/// must mean ZERO transport calls, independent of what the host would
+/// have rejected on its own (zero host state alone was
+/// non-discriminating because the host scans too).
+struct SubmitSpy {
+    inner: Arc<dyn TachiTaskBridge>,
+    submit_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl SubmitSpy {
+    fn new(inner: Arc<dyn TachiTaskBridge>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            submit_calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn submit_calls(&self) -> usize {
+        self.submit_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl TachiTaskBridge for SubmitSpy {
+    async fn submit(
+        &self,
+        intent: &zeroclaw_api::taskintent::TaskIntentV1,
+        request_id: &RequestId,
+    ) -> Result<SubmitReceipt, super::client::SubmitTransportError> {
+        self.submit_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.submit(intent, request_id).await
+    }
+
+    async fn get(
+        &self,
+        task_ref: &zeroclaw_api::taskintent::TaskRef,
+    ) -> Result<super::client::TaskSnapshotView, super::client::BridgeQueryError> {
+        self.inner.get(task_ref).await
+    }
+
+    async fn watch(
+        &self,
+        task_ref: &zeroclaw_api::taskintent::TaskRef,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<super::client::TaskEventPageView, super::client::BridgeQueryError> {
+        self.inner.watch(task_ref, after_seq, limit).await
+    }
+
+    async fn collect(
+        &self,
+        task_ref: &zeroclaw_api::taskintent::TaskRef,
+        result_revision: Option<u64>,
+    ) -> Result<super::client::ResultProjectionView, super::client::BridgeQueryError> {
+        self.inner.collect(task_ref, result_revision).await
+    }
+}
+
 #[test]
 fn client_submit_fails_closed_on_a_raw_constructed_forbidden_intent() {
-    // Codex round-1 finding: the client must not be a bypass — a
+    // The client must not be a bypass — a
     // programmatically constructed intent that never went through
     // compose still hits the encode-side admission scan before any
     // transport is touched (fail closed locally, never fail open).
+    // The proof is a SPY on the port, not host state —
+    // the host double would have rejected the payload on its own, so
+    // only a zero submit-call count discriminates the CLIENT law.
     tokio_rt().block_on(async {
-        let host = Arc::new(InMemoryTachiTaskBridge::new());
-        let client = TachiBridgeClient::new(host.clone());
+        let spy = SubmitSpy::new(Arc::new(InMemoryTachiTaskBridge::new()));
+        let client = TachiBridgeClient::new(spy.clone());
         let mut intent = compose("clean").expect("clean base");
         intent.objective = BoundedText::new("ssh build-host 'cargo build'").expect("bounded");
         let receipt = client.submit(&intent, &request_id(1)).await.expect("typed");
@@ -286,16 +349,84 @@ fn client_submit_fails_closed_on_a_raw_constructed_forbidden_intent() {
             panic!("raw forbidden intent must be rejected client-side: {receipt:?}")
         };
         assert!(reason.contains("cli/shell command text"), "got: {reason}");
-        // Nothing reached the host: zero bindings, zero tasks.
-        assert_eq!(host.binding_count(), 0);
-        assert_eq!(host.task_count(), 0);
+        assert_eq!(spy.submit_calls(), 0, "transport never touched");
         // The reconciling path enforces the same fail-closed law.
         let again = client
             .submit_reconciling(&intent, &request_id(1))
             .await
             .expect("typed");
         assert!(matches!(again, SubmitReceipt::Rejected { .. }));
-        assert_eq!(host.binding_count(), 0);
+        assert_eq!(spy.submit_calls(), 0, "transport still never touched");
+    });
+}
+
+#[test]
+fn client_rejects_forbidden_content_in_requester_authored_refs() {
+    // The mirrored host law scans BoundedText
+    // fields only; the CLIENT layer additionally fail-closes on the ref
+    // values ZeroClaw itself authors — a lineage ref or requester claim
+    // carrying credential/command/caller-minted content never reaches a
+    // transport. Proven with the spy (zero port.submit calls).
+    tokio_rt().block_on(async move {
+        for (field, mutate) in [
+            (
+                "parent_ref",
+                Box::new(|intent: &mut zeroclaw_api::taskintent::TaskIntentV1| {
+                    intent.parent_ref =
+                        Some(ParentRunRef::own("ghp_0123456789abcdef").expect("bounded"));
+                }) as Box<dyn Fn(&mut zeroclaw_api::taskintent::TaskIntentV1)>,
+            ),
+            (
+                "parent_ref",
+                Box::new(|intent: &mut zeroclaw_api::taskintent::TaskIntentV1| {
+                    // A caller-minted task id smuggled into a lineage body.
+                    intent.parent_ref = Some(ParentRunRef::own("task:forged").expect("bounded"));
+                }),
+            ),
+            (
+                "supervisor_ref",
+                Box::new(|intent: &mut zeroclaw_api::taskintent::TaskIntentV1| {
+                    intent.supervisor_ref =
+                        Some(SubAgentRunRef::own("ssh build-host").expect("bounded"));
+                }),
+            ),
+            (
+                "requester",
+                Box::new(|intent: &mut zeroclaw_api::taskintent::TaskIntentV1| {
+                    intent.requester = RequesterRef::claim("codex --full-auto").expect("bounded");
+                }),
+            ),
+        ] {
+            let spy = SubmitSpy::new(Arc::new(InMemoryTachiTaskBridge::new()));
+            let client = TachiBridgeClient::new(spy.clone());
+            let mut intent = compose("clean").expect("clean base");
+            mutate(&mut intent);
+            let receipt = client.submit(&intent, &request_id(1)).await.expect("typed");
+            let SubmitReceipt::Rejected { reason } = receipt else {
+                panic!("forbidden {field} must be rejected client-side: {receipt:?}");
+            };
+            assert!(
+                reason.contains("intent rejected:"),
+                "typed rejection naming the category, got: {reason}"
+            );
+            assert_eq!(spy.submit_calls(), 0, "{field}: transport never touched");
+        }
+        // A clean retry lineage (a decoded prior TaskRef) still submits.
+        let host = Arc::new(InMemoryTachiTaskBridge::new());
+        let client = TachiBridgeClient::new(host.clone());
+        let first = compose("first submission").expect("clean");
+        let SubmitReceipt::Admitted { task_ref, .. } =
+            client.submit(&first, &request_id(1)).await.expect("ok")
+        else {
+            unreachable!()
+        };
+        let mut retry = compose("deliberate retry").expect("clean");
+        retry.retry_of = Some(task_ref.clone());
+        let receipt = client.submit(&retry, &request_id(2)).await.expect("typed");
+        assert!(
+            matches!(receipt, SubmitReceipt::Admitted { .. }),
+            "clean retry lineage must pass the ref scan: {receipt:?}"
+        );
     });
 }
 
@@ -455,11 +586,27 @@ fn watch_backfill_replays_exactly_the_missed_events() {
         let replay = client.watch_new_events(&task_ref, 10).await.expect("page");
         assert_eq!(replay.events.len(), 1);
         assert_eq!(replay.events[0].seq, 4);
-        // Deterministic suppression: re-ingesting the SAME fact (same
-        // event id) does not produce a new event.
-        host.ingest_execution(&task_ref, "completed");
-        let after_dup = client.watch_new_events(&task_ref, 10).await.expect("page");
-        assert!(after_dup.events.is_empty(), "duplicate suppressed");
+        // Deterministic duplicate suppression at the WATCH layer (TB-9):
+        // replaying a watch from the SAME cursor never re-delivers an
+        // event the cursor already covers, and event ids are unique per
+        // canonical fact (occurrence-unique), so a page can never carry
+        // the same (seq, event_id) twice.
+        let same_cursor = client.watch_new_events(&task_ref, 10).await.expect("page");
+        assert!(
+            same_cursor.events.is_empty(),
+            "nothing new: the cursor already covers seq 1..=4"
+        );
+        let mut seen: Vec<(u64, String)> = Vec::new();
+        let full = host.watch(&task_ref, 0, 100).await.expect("page");
+        assert!(!full.has_more);
+        seen.extend(full.events.iter().map(|e| (e.seq, e.event_id.clone())));
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            4,
+            "no duplicate (seq, event_id) pairs: {seen:?}"
+        );
         // 8-field binding present on every event.
         for event in page.events {
             assert!(!event.event_id.is_empty());
@@ -478,6 +625,92 @@ fn watch_backfill_replays_exactly_the_missed_events() {
         assert!(paged.has_more);
         assert_eq!(paged.events.len(), 2);
     });
+}
+
+#[test]
+fn repeated_transitions_are_distinct_facts_and_fold_in_order() {
+    // Host-double discipline: each ingest is a DISTINCT
+    // canonical fact — `running → failed → running` must fold to
+    // `running` (not collapse to `failed`), and a second
+    // outcome/adjudication cycle must leave the second outcome with the
+    // second adjudication's state (not a stale one).
+    tokio_rt().block_on(async {
+        let host = Arc::new(InMemoryTachiTaskBridge::new());
+        let client = TachiBridgeClient::new(host.clone());
+        let task_ref = admit(&client, "repeated transitions", 1).await;
+        host.ingest_execution(&task_ref, "running");
+        host.ingest_execution(&task_ref, "failed");
+        host.ingest_execution(&task_ref, "running");
+        let snapshot = client.get(&task_ref).await.expect("snapshot");
+        assert_eq!(snapshot.execution.label(), "running");
+        // Outcome → accepted → new outcome: the latest revision carries
+        // the latest outcome with an adjudication that applies to IT.
+        let attempt: zeroclaw_api::taskintent::AttemptRef =
+            serde_json::from_value(serde_json::Value::String("attempt:inmem-01".to_string()))
+                .expect("wire-shaped attempt ref");
+        host.observe_outcome(
+            &task_ref,
+            attempt.clone(),
+            "success",
+            Some("artifact:rev-1".to_string()),
+            vec!["artifact:rev-1".to_string()],
+            true,
+            true,
+            "vendor=x;basis=observed",
+        );
+        host.ingest_adjudication(&task_ref, "accepted");
+        host.observe_outcome(
+            &task_ref,
+            attempt,
+            "success",
+            Some("artifact:rev-2".to_string()),
+            vec!["artifact:rev-2".to_string()],
+            true,
+            true,
+            "vendor=x;basis=observed",
+        );
+        // No adjudication after the second outcome yet: it is unreviewed.
+        let latest = client.collect_latest(&task_ref).await.expect("latest");
+        assert_eq!(latest.result_revision, 3);
+        assert_eq!(latest.adjudication.label(), "unreviewed");
+        assert_eq!(
+            latest.canonical_artifact_ref.as_deref(),
+            Some("artifact:rev-2")
+        );
+        // Pinning the first revision still yields the first outcome with
+        // its own adjudication state at the time.
+        let first = client.collect_pinned(&task_ref, 1).await.expect("pinned");
+        assert_eq!(
+            first.canonical_artifact_ref.as_deref(),
+            Some("artifact:rev-1")
+        );
+    });
+}
+
+#[test]
+#[should_panic(expected = "admitted tasks only")]
+fn ingesting_facts_for_an_unadmitted_task_ref_is_refused() {
+    // Host-double discipline: the ingest drivers accept
+    // only refs the double itself admitted via submit. A fabricated
+    // future ref (`task:inmem-00000001` is predictable) cannot pre-seed
+    // a result log before admission.
+    let host = InMemoryTachiTaskBridge::new();
+    let fabricated: zeroclaw_api::taskintent::TaskRef =
+        serde_json::from_value(serde_json::Value::String("task:inmem-00000001".to_string()))
+            .expect("wire-shaped fabricated ref");
+    let attempt: zeroclaw_api::taskintent::AttemptRef =
+        serde_json::from_value(serde_json::Value::String("attempt:inmem-01".to_string()))
+            .expect("wire-shaped attempt ref");
+    host.observe_outcome(
+        &fabricated,
+        attempt,
+        "success",
+        None,
+        Vec::new(),
+        false,
+        false,
+        "vendor=attacker;basis=fabricated",
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────

@@ -23,7 +23,8 @@
 //!   requester's own admitted policy, independent of bundle/guidance
 //!   content (TB-4 seam law).
 //! - **ZeroClaw never names an implementation** (TB-1/TB-4/TB-5): the
-//!   wire admits no execution detail under any name, the capability
+//!   wire admits no execution-detail FIELD under any name (schema
+//!   admission), the capability
 //!   vocabulary is a closed enum, and the encode-side admission scan
 //!   rejects forbidden content per category before anything is sent.
 //! - **No second task ledger** (TB-1/TB-22): this module owns no DDL,
@@ -52,6 +53,7 @@ pub use client::{
 };
 pub use compose::{
     ComposeError, ComposeRejection, ForbiddenCategory, RequesterBridgePolicy,
-    StructuralIntentContext, TaskIntentInputs, compose_intent, scan_intent, scan_text,
+    StructuralIntentContext, TaskIntentInputs, compose_intent, scan_client_authored_refs,
+    scan_intent, scan_text,
 };
 pub use in_memory::{AmbiguousSubmitOnce, InMemoryTachiTaskBridge, UnavailableTachiTaskBridge};

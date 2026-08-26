@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use zeroclaw_api::taskintent::{AttemptRef, RequestId, TaskIntentV1, TaskRef};
 
-use super::compose::{ComposeRejection, scan_intent};
+use super::compose::{ComposeRejection, scan_client_authored_refs, scan_intent};
 
 // ─────────────────────────────────────────────────────────────────────────
 // TB-16: three per-dimension mapping tables
@@ -309,6 +309,11 @@ pub enum BridgeQueryError {
 /// derive lifecycle state through the bridge's own TB-16 mapping tables,
 /// and never fall back to local execution. The ZeroClaw side constructs
 /// no refs and executes no work through this seam.
+///
+/// **This trait is for transport IMPLEMENTORS, not callers.** Calling
+/// `submit` on a port directly bypasses the encode-side admission law;
+/// route submissions through [`TachiBridgeClient`], which always runs
+/// the fail-closed scan first.
 #[async_trait]
 pub trait TachiTaskBridge: Send + Sync {
     /// `submit(TaskIntentV1, RequestId)` (TB-5b/TB-6/TB-7).
@@ -378,7 +383,8 @@ impl TachiBridgeClient {
         intent: &TaskIntentV1,
         request_id: &RequestId,
     ) -> Result<SubmitReceipt, SubmitTransportError> {
-        if let Err(rejection) = scan_intent(intent) {
+        if let Err(rejection) = scan_intent(intent).and_then(|()| scan_client_authored_refs(intent))
+        {
             return Ok(SubmitReceipt::Rejected {
                 reason: rejection.to_string(),
             });
@@ -399,7 +405,8 @@ impl TachiBridgeClient {
         intent: &TaskIntentV1,
         request_id: &RequestId,
     ) -> Result<SubmitReceipt, SubmitTransportError> {
-        if let Err(rejection) = scan_intent(intent) {
+        if let Err(rejection) = scan_intent(intent).and_then(|()| scan_client_authored_refs(intent))
+        {
             return Ok(SubmitReceipt::Rejected {
                 reason: rejection.to_string(),
             });

@@ -19,8 +19,9 @@ use std::collections::BTreeSet;
 
 use zeroclaw_api::taskintent::{
     ApprovalRequirement, ArtifactExpectation, AttemptRef, BoundedText, Capability,
-    CapabilityRequest, EvaluationRequirement, PrivacyClass, RoutingPreference, SCHEMA_TAG,
-    SourceRef, TaskConstraint, TaskIntentV1, TaskRef, Timestamp, WorkspaceSourceRef,
+    CapabilityRequest, EvaluationRequirement, ParentRunRef, PrivacyClass, RoutingPreference,
+    SCHEMA_TAG, SourceRef, SubAgentRunRef, TaskConstraint, TaskIntentV1, TaskRef, Timestamp,
+    WorkspaceSourceRef,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -233,7 +234,12 @@ const PRIVATE_DYAD_MARKERS: &[&str] = &["private dyad", "private_dyad", "private
 /// Scan one text-bearing value against every forbidden category. Returns
 /// the first match by category order (same order as the host).
 pub fn scan_text(field: &'static str, value: &BoundedText) -> Result<(), ComposeRejection> {
-    let text = value.as_str();
+    scan_str(field, value.as_str())
+}
+
+/// Category scan over a raw string (shared engine for [`scan_text`] and
+/// the ref-wire hardening below).
+fn scan_str(field: &'static str, text: &str) -> Result<(), ComposeRejection> {
     let lower = text.to_ascii_lowercase();
 
     for marker in CREDENTIAL_MARKERS {
@@ -289,4 +295,52 @@ pub fn scan_intent(intent: &TaskIntentV1) -> Result<(), ComposeRejection> {
 
 fn forbid(category: ForbiddenCategory, field: &'static str) -> ComposeRejection {
     ComposeRejection::ForbiddenContent { category, field }
+}
+
+/// ZeroClaw-side hardening BEYOND the mirrored host law: scan the wire
+/// values of every ref the requester authors or carries — `requester`,
+/// `parent_ref`, `supervisor_ref`, and `retry_of` — against the same five
+/// forbidden categories, applied to the ref BODY (the wire value minus the
+/// ref's own namespace prefix, so a legitimate `task:`-namespaced
+/// `retry_of` body is not itself a caller-minted-ref hit).
+///
+/// The tachi host admission law scans the intent's `BoundedText` fields
+/// only (that law is mirrored byte-for-byte by [`scan_intent`] and stays
+/// authoritative host-side); this function is the CLIENT's fail-closed
+/// layer over the fields ZeroClaw itself authors — a lineage ref or
+/// requester claim carrying credential/command/worktree/private-dyad
+/// content, or a caller-minted `task:`/`attempt:` body inside a lineage
+/// ref, never reaches a transport.
+pub fn scan_client_authored_refs(intent: &TaskIntentV1) -> Result<(), ComposeRejection> {
+    scan_str("requester", &intent.requester.to_string())?;
+    if let Some(parent) = &intent.parent_ref {
+        scan_str(
+            "parent_ref",
+            parent
+                .as_wire()
+                .strip_prefix(ParentRunRef::WIRE_PREFIX)
+                .unwrap_or(parent.as_wire()),
+        )?;
+    }
+    if let Some(supervisor) = &intent.supervisor_ref {
+        scan_str(
+            "supervisor_ref",
+            supervisor
+                .as_wire()
+                .strip_prefix(SubAgentRunRef::WIRE_PREFIX)
+                .unwrap_or(supervisor.as_wire()),
+        )?;
+    }
+    if let Some(prior) = &intent.retry_of {
+        // A decoded prior TaskRef legitimately carries the `task:`
+        // namespace — strip it and scan the body only.
+        scan_str(
+            "retry_of",
+            prior
+                .as_wire()
+                .strip_prefix(TaskRef::WIRE_PREFIX)
+                .unwrap_or(prior.as_wire()),
+        )?;
+    }
+    Ok(())
 }

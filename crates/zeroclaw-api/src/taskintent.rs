@@ -45,11 +45,14 @@
 //!   what make placement impossible.
 //! - **`TaskRef`/`AttemptRef` are decode-only here** (TB-6): Tachi mints
 //!   them; the ZeroClaw side has NO public constructor, no `mint`, and
-//!   no `From<String>` — the only way one enters this process is by
-//!   DESERIALIZING a Tachi-sent wire value (that is how transport
-//!   receipts arrive). A caller cannot mint an id through any API; an
-//!   id it writes by hand into raw JSON is not authority and the host
-//!   rejects foreign lineage at admission.
+//!   no `From<String>` — there is no constructor API, so no code path
+//!   MINTS a ref value; the only way one enters this process is by
+//!   DESERIALIZING a wire value (that is how transport receipts
+//!   arrive). A value hand-written into raw JSON therefore still
+//!   enters as a decoded value — it is not authority: the host
+//!   validates retry lineage at admission and rejects foreign ids, and
+//!   ZeroClaw treats refs it did not receive from a receipt as
+//!   untrusted input.
 //! - **`ParentRunRef`/`SubAgentRunRef` constructors force their own
 //!   namespace** (`parent:`/`subrun:`) and length-cap the body exactly
 //!   like the decode path: ZeroClaw names its own run lineage but can
@@ -88,8 +91,10 @@ pub const GOLDEN_DIGEST_SHA256: &str =
 /// cross-repo golden pair; byte-identical to the tachi-side copy).
 pub const GOLDEN_TASK_INTENT_V1: &str = include_str!("taskintent/golden/task-intent.v1.json");
 
-/// Byte cap for any single ref value on the wire. Refs are opaque bounded
-/// identifiers, never content carriers (TB-4 forbids oversized payloads).
+/// Byte cap for the BODY of a ref wire value (the value minus its
+/// namespace prefix). Refs are opaque bounded identifiers, never content
+/// carriers (TB-4 forbids oversized payloads); the full wire value may
+/// exceed this constant by the prefix length.
 pub const REF_VALUE_MAX: usize = 256;
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -984,7 +989,7 @@ mod tests {
 
     #[test]
     fn own_namespace_ref_constructors_enforce_the_wire_length_cap() {
-        // Codex round-1 finding: the construction path must enforce the
+        // The construction path must enforce the
         // same body cap as the decode path, so a constructed ref can
         // never be oversize (or empty) on the wire.
         assert!(ParentRunRef::own("run-1").is_ok());

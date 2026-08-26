@@ -95,14 +95,6 @@ impl HostState {
             .facts
             .entry(task_ref.as_wire().to_string())
             .or_default();
-        // TB-9: duplicate delivery of a known event id is deterministically
-        // suppressed — the fact keeps its original seq.
-        if let Some((seq, _)) = log
-            .iter()
-            .find(|(_, existing)| existing.event_id == fact.event_id)
-        {
-            return *seq;
-        }
         let seq = log.len() as u64 + 1;
         log.push((seq, fact));
         seq
@@ -140,18 +132,31 @@ impl InMemoryTachiTaskBridge {
     }
 
     /// Test/harness driver: ingest an execution-dimension fact (wire
-    /// label must be in the execution mapping table).
+    /// label must be in the execution mapping table). Every ingest is a
+    /// DISTINCT canonical fact (mirroring how tachi ingests real
+    /// transitions with their own source identities): a repeated label
+    /// is a new transition, and event ids are occurrence-unique — the
+    /// event id embeds the number of prior facts so `running → failed →
+    /// running` folds correctly instead of collapsing. Refuses task
+    /// refs this double never admitted (only `submit` mints tasks;
+    /// pre-seeding an unadmitted ref's log is not ingestion).
     pub fn ingest_execution(&self, task_ref: &TaskRef, label: &str) {
         assert!(
             ProjectedExecutionState::project(label).is_some(),
             "unknown execution label {label}"
         );
-        self.state.lock().append(
+        let mut state = self.state.lock();
+        assert!(
+            state.has_task_submitted(task_ref),
+            "execution facts attach to admitted tasks only (host-double discipline)"
+        );
+        let occurrence = state.facts.get(task_ref.as_wire()).map_or(0, Vec::len);
+        state.append(
             task_ref,
             InMemoryFact {
-                event_id: format!("exec-{label}-{}", task_ref.as_wire()),
+                event_id: format!("exec-{label}-{}-{occurrence}", task_ref.as_wire()),
                 kind: "execution".to_string(),
-                payload_digest: format!("sha256:{label}"),
+                payload_digest: format!("sha256:{label}:{occurrence}"),
                 detail: FactDetail::Execution {
                     label: label.to_string(),
                 },
@@ -159,18 +164,26 @@ impl InMemoryTachiTaskBridge {
         );
     }
 
-    /// Test/harness driver: ingest an adjudication-dimension fact.
+    /// Test/harness driver: ingest an adjudication-dimension fact. Same
+    /// laws as [`Self::ingest_execution`]: admitted tasks only, each
+    /// ingest is a distinct fact, occurrence-unique event id.
     pub fn ingest_adjudication(&self, task_ref: &TaskRef, label: &str) {
         assert!(
             ProjectedAdjudicationState::project(label).is_some(),
             "unknown adjudication label {label}"
         );
-        self.state.lock().append(
+        let mut state = self.state.lock();
+        assert!(
+            state.has_task_submitted(task_ref),
+            "adjudication facts attach to admitted tasks only (host-double discipline)"
+        );
+        let occurrence = state.facts.get(task_ref.as_wire()).map_or(0, Vec::len);
+        state.append(
             task_ref,
             InMemoryFact {
-                event_id: format!("adj-{label}-{}", task_ref.as_wire()),
+                event_id: format!("adj-{label}-{}-{occurrence}", task_ref.as_wire()),
                 kind: "adjudication".to_string(),
-                payload_digest: format!("sha256:{label}"),
+                payload_digest: format!("sha256:{label}:{occurrence}"),
                 detail: FactDetail::Adjudication {
                     label: label.to_string(),
                 },
@@ -195,13 +208,19 @@ impl InMemoryTachiTaskBridge {
     ) {
         // Each observation is a DISTINCT canonical outcome row (a new
         // result revision, a revised result), so the event id is unique
-        // per observation — unlike the idempotent dimension facts above,
-        // which share one id per (task, label). The id computation and
+        // per observation — exactly like every other ingest, where each
+        // call is a distinct canonical fact. The id computation and
         // the append happen under ONE lock scope: computing the id, then
         // releasing the lock before appending would let two concurrent
         // observations pick the same id and silently suppress one
-        // revision.
+        // revision. Admitted tasks only — same host-double discipline
+        // as the dimension ingest drivers (pre-seeding an unadmitted
+        // ref's log is not observation).
         let mut state = self.state.lock();
+        assert!(
+            state.has_task_submitted(task_ref),
+            "outcome facts attach to admitted tasks only (host-double discipline)"
+        );
         let existing = state.facts.get(task_ref.as_wire()).map_or(0, Vec::len);
         let event_id = format!(
             "outcome-{}-{}-rev{}",
