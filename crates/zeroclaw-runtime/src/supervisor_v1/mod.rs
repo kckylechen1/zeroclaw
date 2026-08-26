@@ -59,7 +59,10 @@
 //!   across a proposal).
 //! - **Nothing durable** (SA-26/TB-22): every field of the session is
 //!   run-scoped; this module owns no DDL, opens no database, and writes
-//!   no files (integration test mirrors `subagent_v1`'s).
+//!   no files (integration test mirrors `subagent_v1`'s). Structured
+//!   ERROR logging rides the pre-existing `zeroclaw-log` surface
+//!   (operator-gated persistence) — that is observability, not a task
+//!   ledger; no new store and no new writer path to any annex table.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -84,41 +87,231 @@ use crate::tachi_bridge::{
 #[cfg(test)]
 mod tests;
 
+/// What the session OBSERVED about a completed task result (from a
+/// collected `ResultProjectionV1`): receipt-bound facts used to
+/// corroborate independence claims. The provenance fields ride the
+/// TB-13 projection (observation only — provenance is readable, never
+/// placement authority).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultObservation {
+    /// The Tachi-minted result revision the observation is bound to.
+    pub result_revision: u64,
+    /// The vendor token parsed from the projection's provenance (empty
+    /// when the projection carried none).
+    pub provenance_vendor: String,
+    /// The model token parsed from the projection's provenance (empty
+    /// when absent).
+    pub provenance_model: String,
+    /// The worker's terminal classification — an observed fact, never
+    /// the verdict (TB-13/TB-18).
+    pub terminal_classification: String,
+}
+
+impl ResultObservation {
+    /// Derive an observation from a collected projection.
+    #[must_use]
+    pub fn from_projection(projection: &ResultProjectionView) -> Self {
+        let (vendor, model) = parse_provenance(&projection.provenance);
+        Self {
+            result_revision: projection.result_revision,
+            provenance_vendor: vendor,
+            provenance_model: model,
+            terminal_classification: projection.terminal_classification.clone(),
+        }
+    }
+}
+
+/// Parse `vendor=…; model=…; basis=…` provenance into its tokens.
+fn parse_provenance(provenance: &str) -> (String, String) {
+    let mut vendor = String::new();
+    let mut model = String::new();
+    for part in provenance.split(';') {
+        let part = part.trim();
+        if let Some(value) = part.strip_prefix("vendor=") {
+            vendor = value.trim().to_string();
+        } else if let Some(value) = part.strip_prefix("model=") {
+            model = value.trim().trim_matches('"').to_string();
+        }
+    }
+    (vendor, model)
+}
+
 /// Run-scoped record of one independent-review task (TB-17): the review's
 /// OWN task identity, what it reviews, its recorded independence class,
-/// and its context lineage. The ONLY constructor is
-/// [`SupervisorSessionV1::request_independent_review`] — there is no
-/// other way to spell review lineage, so a continuation (or a
-/// same-session follow-up) can never masquerade as one.
+/// its context lineage, and — only after the session observes the
+/// review's completed result — the receipt-bound observation that
+/// corroborates the claim. The ONLY production constructor is
+/// [`SupervisorSessionV1::request_independent_review`] (the fields are
+/// private); a continuation (or a same-session follow-up) can never
+/// masquerade as one, and a hand-built record cannot exist outside the
+/// test seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewLineageRecord {
-    /// The review task's Tachi-minted identity.
-    pub review_task: TaskRef,
-    /// The task being reviewed.
-    pub review_of: TaskRef,
-    /// The review's recorded independence class (TB-17: recorded
-    /// explicitly, never assumed from harness identity).
-    pub independence_class: IndependenceClass,
-    /// The review task's context bundle ref (fresh lineage).
-    pub context_bundle_ref: String,
-    /// The implementation task's context bundle ref — carried so lineage
-    /// distinctness is checkable from the record itself.
-    pub implementation_bundle_ref: String,
-    /// The TB-7 request id the review was submitted under.
-    pub request_id: String,
+    review_task: TaskRef,
+    review_of: TaskRef,
+    independence_class: IndependenceClass,
+    context_bundle_ref: String,
+    implementation_bundle_ref: String,
+    request_id: String,
+    observed: Option<ResultObservation>,
 }
 
 impl ReviewLineageRecord {
-    /// Whether this review satisfies an independence-marked requirement:
-    /// the recorded class must satisfy the requirement under the frozen
-    /// TB-17 law AND the context lineage must be distinct from the
-    /// implementation task's (a review sharing the implementation's
-    /// context bundle is not independent, whatever its class label
-    /// says).
+    /// The review task's Tachi-minted identity.
     #[must_use]
-    pub fn satisfies(&self, required: IndependenceClass) -> bool {
-        self.context_bundle_ref != self.implementation_bundle_ref
-            && self.independence_class.satisfies_requirement(required)
+    pub fn review_task(&self) -> &TaskRef {
+        &self.review_task
+    }
+
+    /// The task being reviewed.
+    #[must_use]
+    pub fn review_of(&self) -> &TaskRef {
+        &self.review_of
+    }
+
+    /// The review's recorded independence class (TB-17: recorded
+    /// explicitly, never assumed from harness identity).
+    #[must_use]
+    pub fn independence_class(&self) -> IndependenceClass {
+        self.independence_class
+    }
+
+    /// The review task's context bundle ref (fresh lineage).
+    #[must_use]
+    pub fn context_bundle_ref(&self) -> &str {
+        &self.context_bundle_ref
+    }
+
+    /// The implementation task's context bundle ref.
+    #[must_use]
+    pub fn implementation_bundle_ref(&self) -> &str {
+        &self.implementation_bundle_ref
+    }
+
+    /// The TB-7 request id the review was submitted under.
+    #[must_use]
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    /// The observed completed-result facts, once the session has
+    /// collected the review's projection (`None` until then).
+    #[must_use]
+    pub fn observed(&self) -> Option<&ResultObservation> {
+        self.observed.as_ref()
+    }
+
+    /// Whether this review satisfies an independence-marked requirement.
+    /// The gate is CONJUNCTIVE and fail-closed:
+    ///
+    /// 1. the review's result must have been OBSERVED (a collected
+    ///    projection — admission alone is not a completed review);
+    /// 2. the review task must be a DISTINCT task from the one reviewed;
+    /// 3. the context lineage must be distinct from the implementation
+    ///    task's;
+    /// 4. the recorded class must satisfy the requirement under the
+    ///    frozen TB-17 law;
+    /// 5. vendor/model corroboration: a `fresh_context_cross_vendor`
+    ///    requirement additionally requires BOTH observed provenances
+    ///    with DIFFERENT vendors; `fresh_context_cross_model_same_vendor`
+    ///    requires the SAME vendor and a DIFFERENT model (the recorded
+    ///    class label alone never suffices). `fresh_context_same_harness`
+    ///    and `human_review` corroborate on lineage + completion (their
+    ///    distinguishing dimension is not machine-observable from the
+    ///    projection).
+    #[must_use]
+    pub fn satisfies(
+        &self,
+        required: IndependenceClass,
+        implementation_observed: Option<&ResultObservation>,
+    ) -> bool {
+        let Some(review_observed) = self.observed.as_ref() else {
+            return false;
+        };
+        if self.review_task == self.review_of
+            || self.context_bundle_ref == self.implementation_bundle_ref
+        {
+            return false;
+        }
+        if !self.independence_class.satisfies_requirement(required) {
+            return false;
+        }
+        match required {
+            IndependenceClass::FreshContextCrossVendor => match implementation_observed {
+                Some(implementation)
+                    if !implementation.provenance_vendor.is_empty()
+                        && !review_observed.provenance_vendor.is_empty() =>
+                {
+                    implementation.provenance_vendor != review_observed.provenance_vendor
+                }
+                // Missing provenance cannot corroborate a cross-vendor
+                // claim — fail closed.
+                _ => false,
+            },
+            IndependenceClass::FreshContextCrossModelSameVendor => match implementation_observed {
+                Some(implementation)
+                    if !implementation.provenance_vendor.is_empty()
+                        && !review_observed.provenance_vendor.is_empty() =>
+                {
+                    implementation.provenance_vendor == review_observed.provenance_vendor
+                        && !implementation.provenance_model.is_empty()
+                        && !review_observed.provenance_model.is_empty()
+                        && implementation.provenance_model != review_observed.provenance_model
+                }
+                _ => false,
+            },
+            _ => true,
+        }
+    }
+
+    /// The production mint — crate-private: only the supervisor session
+    /// constructs records.
+    fn mint(
+        review_task: TaskRef,
+        review_of: TaskRef,
+        independence_class: IndependenceClass,
+        context_bundle_ref: String,
+        implementation_bundle_ref: String,
+        request_id: String,
+    ) -> Self {
+        Self {
+            review_task,
+            review_of,
+            independence_class,
+            context_bundle_ref,
+            implementation_bundle_ref,
+            request_id,
+            observed: None,
+        }
+    }
+
+    /// Attach the observed completed-result facts (session-internal).
+    fn note_observation(&mut self, observation: ResultObservation) {
+        self.observed = Some(observation);
+    }
+
+    /// Test-only forge seam: the red-team constructor used to prove the
+    /// `satisfies` guard refuses forged lineage (equal tasks, collapsed
+    /// bundles). NEVER available in production builds.
+    #[cfg(test)]
+    pub(crate) fn forge_for_test(
+        review_task: TaskRef,
+        review_of: TaskRef,
+        independence_class: IndependenceClass,
+        context_bundle_ref: String,
+        implementation_bundle_ref: String,
+        request_id: String,
+        observed: Option<ResultObservation>,
+    ) -> Self {
+        Self {
+            review_task,
+            review_of,
+            independence_class,
+            context_bundle_ref,
+            implementation_bundle_ref,
+            request_id,
+            observed,
+        }
     }
 }
 
@@ -230,6 +423,20 @@ pub enum SupervisorFlowError {
     },
     #[error("intervention failed: {0}")]
     Intervention(#[from] SupervisorInterventionError),
+    #[error(
+        "attached task {task_ref} carries intent digest {actual}, not the planned intent's          {expected} — the session supervises only the task the PARENT submitted from the          planned intent (SA-29)"
+    )]
+    AttachedTaskDigestMismatch {
+        task_ref: TaskRef,
+        expected: String,
+        actual: String,
+    },
+    #[error(
+        "an ambiguous review submission is pending (same (requester, request_id) tuple must be          replayed per TB-7 rule 4); resolve it before requesting another review"
+    )]
+    AmbiguousReviewPending,
+    #[error("review task {task_ref} is not one of this session's review lineages")]
+    UnknownReviewTask { task_ref: TaskRef },
 }
 
 /// The supervisor session. Constructed ONLY from an admitted
@@ -251,6 +458,11 @@ pub struct SupervisorSessionV1 {
     implementation_task: Option<TaskRef>,
     implementation_bundle_ref: Option<String>,
     implementation_intent_digest: Option<String>,
+    implementation_observation: Option<ResultObservation>,
+    /// The pending ambiguous review submission (TB-7 rule 4): when a
+    /// review submit's response was lost, the SAME `(intent,
+    /// request_id)` tuple is retained and replayed — never a new id.
+    pending_review_submit: Option<(zeroclaw_api::taskintent::TaskIntentV1, RequestId)>,
     reviews: Vec<ReviewLineageRecord>,
     proposals: Vec<JudgmentProposalV1>,
     meter: Arc<SubAgentBudgetMeter>,
@@ -320,6 +532,8 @@ impl SupervisorSessionV1 {
             implementation_task: None,
             implementation_bundle_ref: None,
             implementation_intent_digest: None,
+            implementation_observation: None,
+            pending_review_submit: None,
             reviews: Vec::new(),
             proposals: Vec::new(),
             meter: Arc::new(SubAgentBudgetMeter::new(
@@ -466,8 +680,12 @@ impl SupervisorSessionV1 {
 
     /// The Parent hands the Tachi-minted implementation TaskRef back to
     /// the session for supervision (the second half of the SA-29
-    /// role-exclusive law).
-    pub fn attach_implementation_task(
+    /// role-exclusive law). The attachment is RECEIPT-BOUND: the bridge's
+    /// snapshot of the task must carry EXACTLY the planned intent's
+    /// canonical digest — a syntactically valid but unrelated TaskRef is
+    /// refused, so the session can only ever supervise the task the
+    /// Parent actually submitted from the planned intent.
+    pub async fn attach_implementation_task(
         &mut self,
         task_ref: TaskRef,
     ) -> Result<(), SupervisorFlowError> {
@@ -475,6 +693,24 @@ impl SupervisorSessionV1 {
             return Err(SupervisorFlowError::WrongPhase {
                 phase: self.phase,
                 reason: "the implementation task attaches after one planned intent",
+            });
+        }
+        let expected = self
+            .implementation_intent_digest
+            .clone()
+            .unwrap_or_default();
+        self.record_action("attach verification")?;
+        let snapshot = self.client.get(&task_ref).await.map_err(|error| {
+            SupervisorFlowError::ObserveFailed {
+                task_ref: task_ref.clone(),
+                error,
+            }
+        })?;
+        if snapshot.intent_digest != expected {
+            return Err(SupervisorFlowError::AttachedTaskDigestMismatch {
+                task_ref,
+                expected,
+                actual: snapshot.intent_digest,
             });
         }
         self.implementation_task = Some(task_ref);
@@ -506,19 +742,50 @@ impl SupervisorSessionV1 {
     }
 
     /// `ReadResultRefs` (SA-29): the artifact/evidence-first result
-    /// projection (TB-13).
+    /// projection (TB-13). When the collected task is the implementation
+    /// task, its receipt-bound observation (result revision, provenance
+    /// tokens, terminal classification) is recorded for independence
+    /// corroboration.
     pub async fn collect_result(
         &mut self,
         task_ref: &TaskRef,
     ) -> Result<ResultProjectionView, SupervisorFlowError> {
         self.require(SupervisorAuthority::ReadResultRefs)?;
         self.record_action("collect")?;
-        self.client.collect_latest(task_ref).await.map_err(|error| {
-            SupervisorFlowError::CollectFailed {
+        let projection = self
+            .client
+            .collect_latest(task_ref)
+            .await
+            .map_err(|error| SupervisorFlowError::CollectFailed {
                 task_ref: task_ref.clone(),
                 error,
-            }
-        })
+            })?;
+        if self.implementation_task.as_ref() == Some(task_ref) {
+            self.implementation_observation = Some(ResultObservation::from_projection(&projection));
+        }
+        Ok(projection)
+    }
+
+    /// Record the observed completed-result facts for one of this
+    /// session's review lineages (from a projection already collected
+    /// through [`Self::collect_result`]). Until this is called, the
+    /// review record CANNOT satisfy any independence-marked requirement:
+    /// task admission alone is not a completed review.
+    pub fn note_review_observation(
+        &mut self,
+        review_task: &TaskRef,
+        projection: &ResultProjectionView,
+    ) -> Result<(), SupervisorFlowError> {
+        let observation = ResultObservation::from_projection(projection);
+        let record = self
+            .reviews
+            .iter_mut()
+            .find(|record| record.review_task == *review_task)
+            .ok_or_else(|| SupervisorFlowError::UnknownReviewTask {
+                task_ref: review_task.clone(),
+            })?;
+        record.note_observation(observation);
+        Ok(())
     }
 
     /// `RequestIndependentReview` (SA-29/TB-11/TB-17): maps to a NEW
@@ -550,6 +817,39 @@ impl SupervisorSessionV1 {
         objective: &str,
     ) -> Result<ReviewLineageRecord, SupervisorFlowError> {
         self.require(SupervisorAuthority::RequestIndependentReview)?;
+        // TB-7 rule 4 replay law: an ambiguous review submission MUST be
+        // resolved with the SAME tuple before a new review is created —
+        // this branch replays the retained (intent, request_id)
+        // verbatim.
+        if let Some((intent, request_id)) = self.pending_review_submit.clone() {
+            let review_of = self.implementation_task_ref()?;
+            let implementation_bundle = self
+                .implementation_bundle_ref
+                .clone()
+                .unwrap_or_else(|| "unknown-impl-bundle".to_string());
+            let bundle_ref = String::from(intent.context_bundle_ref.as_str());
+            let required_class = intent.evaluation_requirement.independence;
+            self.record_action("review submit replay")?;
+            return match self.client.submit_reconciling(&intent, &request_id).await {
+                Ok(SubmitReceipt::Admitted { task_ref, .. }) => {
+                    self.pending_review_submit = None;
+                    let record = ReviewLineageRecord::mint(
+                        task_ref,
+                        review_of,
+                        required_class,
+                        bundle_ref,
+                        implementation_bundle,
+                        request_id.to_string(),
+                    );
+                    self.reviews.push(record.clone());
+                    Ok(record)
+                }
+                Ok(other) => Err(SupervisorFlowError::ReviewSubmitRefused { receipt: other }),
+                Err(_) => Err(SupervisorFlowError::ReviewSubmitRefused {
+                    receipt: SubmitReceipt::Unavailable,
+                }),
+            };
+        }
         if !required_class.is_independence_marked() {
             return Err(SupervisorFlowError::ClassNotIndependenceMarked {
                 class: required_class,
@@ -617,32 +917,40 @@ impl SupervisorSessionV1 {
             retry_of: None,
         };
         let intent = compose_intent(&inputs, &review_policy, &context)?;
+        // TB-7 rule 4, structurally: the submit goes through the
+        // reconciling path, and on a lost response the EXACT
+        // `(intent, request_id)` tuple is retained as pending — the next
+        // call REPLAYS it (never a new id, never a second task).
         self.record_action("review submit")?;
-        let receipt = self.client.submit(&intent, &request_id).await;
+        let receipt = self.client.submit_reconciling(&intent, &request_id).await;
         match receipt {
             Ok(SubmitReceipt::Admitted {
                 task_ref,
                 replayed: _,
             }) => {
-                let record = ReviewLineageRecord {
-                    review_task: task_ref,
+                self.pending_review_submit = None;
+                let record = ReviewLineageRecord::mint(
+                    task_ref,
                     review_of,
-                    independence_class: required_class,
-                    context_bundle_ref: bundle_ref,
-                    implementation_bundle_ref: implementation_bundle,
-                    request_id: request_id.to_string(),
-                };
+                    required_class,
+                    bundle_ref,
+                    implementation_bundle,
+                    request_id.to_string(),
+                );
                 self.reviews.push(record.clone());
                 Ok(record)
             }
             Ok(other) => Err(SupervisorFlowError::ReviewSubmitRefused { receipt: other }),
-            // TB-7 rule 4: replay the SAME tuple — never a new id. The
-            // reconciling submit does that internally; a hard transport
-            // error surfaces as a refused submission (fail closed, no
-            // local fallback).
-            Err(_) => Err(SupervisorFlowError::ReviewSubmitRefused {
-                receipt: SubmitReceipt::Unavailable,
-            }),
+            // The response was lost after possible host commit: retain
+            // the SAME tuple for replay. A retry of this method replays
+            // it verbatim (see the pending check at the top); no new
+            // request id is ever minted for this submission.
+            Err(_) => {
+                self.pending_review_submit = Some((intent, request_id));
+                Err(SupervisorFlowError::ReviewSubmitRefused {
+                    receipt: SubmitReceipt::Unavailable,
+                })
+            }
         }
     }
 
@@ -653,19 +961,25 @@ impl SupervisorSessionV1 {
     }
 
     /// Whether the latest review satisfies the given independence-marked
-    /// requirement (the acceptance gate the Parent consults).
+    /// requirement (the acceptance gate the Parent consults): the
+    /// completed-review observation and vendor/model corroboration are
+    /// part of the gate, not just the recorded class label.
     #[must_use]
     pub fn latest_review_satisfies(&self, required: IndependenceClass) -> bool {
-        self.reviews
-            .last()
-            .is_some_and(|record| record.satisfies(required))
+        self.reviews.last().is_some_and(|record| {
+            record.satisfies(required, self.implementation_observation.as_ref())
+        })
     }
 
     /// A session intervention on the implementation task, gated by the
     /// granted authority set (`RequestCorrection` / `RequestContinuation`
     /// / `ProvideContext` / `RequestUserInput` / the two stop requests —
-    /// SA-29; `RequestPause`/`RequestResume`/`Escalate` are structurally
-    /// unrepresentable in [`SupervisorIntervention`]).
+    /// SA-29). Scope, stated exactly: `RequestPause`/`RequestResume`/
+    /// `Escalate` are unrepresentable in [`SupervisorIntervention`] — no
+    /// SUPERVISOR surface can produce them. The raw bridge client's
+    /// `intervene` serves the PARENT too (the parent owns the task and
+    /// its lifecycle vocabulary); it is not, and cannot be, reachable
+    /// from this session.
     pub async fn intervene_on_implementation(
         &mut self,
         op: SupervisorIntervention,
@@ -691,9 +1005,11 @@ impl SupervisorSessionV1 {
     /// is the ADJUDICATION dimension of the collected projection and
     /// nothing else — the worker's terminal classification rides along
     /// as an observed fact, explicitly not the verdict (TB-13/TB-18).
-    /// This method performs NO bridge write: a proposal is not a
-    /// lifecycle transition, and canonical adjudication state stays
-    /// Tachi's (KP-21).
+    /// Bridge-scope precision: this method performs NO bridge WRITE —
+    /// its only bridge op is the `collect` read (metered per SA-27). It
+    /// does mutate run-scoped session state (the recorded proposal), and
+    /// a proposal is not a lifecycle transition: canonical adjudication
+    /// state stays Tachi's (KP-21).
     pub async fn propose_judgment(
         &mut self,
         task_ref: &TaskRef,

@@ -1716,6 +1716,7 @@ impl SubAgentCandidateReviewQueue {
             candidate_id: candidate_id.to_string(),
             kind: entry.candidate.kind,
             routed_to: "reviewed_promotion_path".to_string(),
+            content_digest: entry.candidate.content_digest.clone(),
             payload_ref: entry.candidate.payload_ref.clone(),
             provenance: entry.candidate.provenance.clone(),
         })
@@ -1767,6 +1768,9 @@ pub struct CandidateRoutingRecord {
     pub candidate_id: String,
     pub kind: zeroclaw_api::subagent_v1::ProposedCandidateKind,
     pub routed_to: String,
+    /// The candidate's content digest — carried so the reviewed path can
+    /// bind the routed payload to the proposed content.
+    pub content_digest: String,
     pub payload_ref: Option<String>,
     pub provenance: Option<zeroclaw_api::subagent_v1::CandidateProvenance>,
 }

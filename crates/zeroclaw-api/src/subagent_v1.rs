@@ -867,11 +867,23 @@ pub struct ProposedCandidate {
 
 impl ProposedCandidate {
     /// Whether this candidate carries the substance the reviewed
-    /// promotion path needs: a payload reference AND provenance (P2
-    /// caveat law). Ordinary-memory candidates remain digest-only.
+    /// promotion path needs: a NON-EMPTY payload reference AND a
+    /// provenance with a non-empty derivation and at least one evidence
+    /// ref (P2 caveat law; strictly checked — an empty-string payload
+    /// ref does not substantiate anything). Ordinary-memory candidates
+    /// remain digest-only.
     #[must_use]
     pub fn is_substantiated(&self) -> bool {
-        self.payload_ref.is_some() && self.provenance.is_some()
+        self.payload_ref
+            .as_deref()
+            .is_some_and(|r| !r.trim().is_empty())
+            && self.provenance.as_ref().is_some_and(|provenance| {
+                !provenance.derivation.trim().is_empty()
+                    && provenance
+                        .evidence_refs
+                        .iter()
+                        .any(|r| !r.trim().is_empty())
+            })
     }
 }
 

@@ -176,11 +176,17 @@ async fn supervisor_session_writes_no_control_plane_rows() {
     let stray: zeroclaw_api::taskintent::TaskRef =
         serde_json::from_value(serde_json::json!("task:down-bridge-never-minted-one"))
             .expect("wire-shaped ref");
-    // Attach + exercise the observation/review/judgment surfaces: all
-    // typed failures, none durable.
-    supervisor
-        .attach_implementation_task(stray.clone())
-        .expect("attach");
+    // Attach (receipt-bound digest verification) against the DOWN
+    // bridge: fails typed — the session cannot supervise a task whose
+    // intent digest it cannot verify. Then exercise the remaining
+    // surfaces: all typed failures, none durable.
+    assert!(
+        supervisor
+            .attach_implementation_task(stray.clone())
+            .await
+            .is_err(),
+        "attach verification against a down bridge fails typed"
+    );
     assert!(supervisor.observe(&stray).await.is_err());
     assert!(supervisor.collect_result(&stray).await.is_err());
     assert!(
