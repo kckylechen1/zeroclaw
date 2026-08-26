@@ -79,12 +79,10 @@ enum FactDetail {
     },
     /// A stop was requested/forwarded (TB-12 multi-stage fact; the double
     /// never confirms — `cancelled` requires authoritative owner
-    /// confirmation, which only a real owner can produce).
-    StopRequested {
-        mode: StopMode,
-        reason: String,
-        stop_id: String,
-    },
+    /// confirmation, which only a real owner can produce). The reason
+    /// rides the fact's payload digest only — the stop identity law
+    /// excludes it, so no later stage needs it.
+    StopRequested { mode: StopMode, stop_id: String },
 }
 
 /// SHA-256 lower-hex over the CANONICAL JSON of the typed payload
@@ -620,16 +618,34 @@ impl TachiTaskBridge for InMemoryTachiTaskBridge {
         let events = missed
             .into_iter()
             .take(limit)
-            .map(|(seq, fact)| TaskEventView {
-                seq,
-                event_id: fact.event_id.clone(),
-                source: "bridge".to_string(),
-                source_revision: seq.to_string(),
-                occurred_at: format!("t{seq}"),
-                recorded_at: format!("t{seq}"),
-                payload_digest: fact.payload_digest.clone(),
-                visibility: "internal".to_string(),
-                kind: fact.kind.clone(),
+            .map(|(seq, fact)| {
+                // The payload-detail token rides the kind label so the
+                // operation/mode of intervention and stop facts is
+                // observable from the watch view (not just the id).
+                let (kind, source_revision) = match &fact.detail {
+                    FactDetail::InterventionForwarded {
+                        operation,
+                        intervention_id,
+                    } => (
+                        format!("intervention_forwarded_{}", op_token(operation)),
+                        intervention_id.clone(),
+                    ),
+                    FactDetail::StopRequested { mode, stop_id, .. } => {
+                        (format!("stop_requested_{}", mode.as_str()), stop_id.clone())
+                    }
+                    _ => (fact.kind.clone(), seq.to_string()),
+                };
+                TaskEventView {
+                    seq,
+                    event_id: fact.event_id.clone(),
+                    source: "bridge".to_string(),
+                    source_revision,
+                    occurred_at: format!("t{seq}"),
+                    recorded_at: format!("t{seq}"),
+                    payload_digest: fact.payload_digest.clone(),
+                    visibility: "internal".to_string(),
+                    kind,
+                }
             })
             .collect();
         Ok(TaskEventPageView {
@@ -728,14 +744,7 @@ impl TachiTaskBridge for InMemoryTachiTaskBridge {
         }
         // Revision-bound, never best-effort (TB-11).
         let revision = state.facts.get(task_ref.as_wire()).map_or(0, Vec::len) as u64;
-        if let Some(expected) = expected_task_revision {
-            if expected != revision {
-                return Err(InterventionError::RevisionConflict {
-                    expected,
-                    actual: revision,
-                });
-            }
-        }
+        Self::revision_check(expected_task_revision, revision)?;
         // TB-7 rule 6 tuple law (mirrored from the host): bind first,
         // forward second; same tuple + same digest replays the same
         // receipt.
@@ -836,6 +845,20 @@ impl TachiTaskBridge for InMemoryTachiTaskBridge {
 }
 
 impl InMemoryTachiTaskBridge {
+    /// The shared TB-11 revision-bound check (never best-effort).
+    fn revision_check(
+        expected_task_revision: Option<u64>,
+        revision: u64,
+    ) -> Result<(), InterventionError> {
+        match expected_task_revision {
+            Some(expected) if expected != revision => Err(InterventionError::RevisionConflict {
+                expected,
+                actual: revision,
+            }),
+            _ => Ok(()),
+        }
+    }
+
     /// The shared stop path (TB-11 single stop authority): bind the
     /// `(requester, request_id)` tuple against the stop digest
     /// `{task, mode}`, append the multi-stage stop fact, forward to the
@@ -877,14 +900,7 @@ impl InMemoryTachiTaskBridge {
             });
         }
         let revision = state.facts.get(task_ref.as_wire()).map_or(0, Vec::len) as u64;
-        if let Some(expected) = expected_task_revision {
-            if expected != revision {
-                return Err(InterventionError::RevisionConflict {
-                    expected,
-                    actual: revision,
-                });
-            }
-        }
+        Self::revision_check(expected_task_revision, revision)?;
         let digest = fact_digest(&serde_json::json!({
             "task": task_ref.as_wire(),
             "mode": mode.as_str(),
@@ -919,11 +935,11 @@ impl InMemoryTachiTaskBridge {
                 payload_digest: fact_digest(&serde_json::json!({
                     "kind": "stop_requested",
                     "mode": mode.as_str(),
+                    "reason": reason,
                     "stop_id": stop_id,
                 })),
                 detail: FactDetail::StopRequested {
                     mode,
-                    reason: reason.to_string(),
                     stop_id: stop_id.clone(),
                 },
             },
@@ -1104,4 +1120,12 @@ impl TachiTaskBridge for AmbiguousSubmitOnce {
             )
             .await
     }
+}
+
+/// Snake-case token for an intervention discriminant (watch-kind labels).
+fn op_token(op: &InterventionStatic) -> String {
+    serde_json::to_value(op)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{op:?}"))
 }

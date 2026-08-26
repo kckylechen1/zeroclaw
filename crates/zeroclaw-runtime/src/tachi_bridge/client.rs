@@ -528,9 +528,7 @@ impl TachiBridgeClient {
         request_id: &RequestId,
         expected_task_revision: Option<u64>,
     ) -> Result<InterventionReceipt, InterventionError> {
-        if let Err(rejection) = scan_intervention_texts(intervention) {
-            return Err(rejection);
-        }
+        scan_intervention_texts(intervention)?;
         self.port
             .intervene(
                 task_ref,
