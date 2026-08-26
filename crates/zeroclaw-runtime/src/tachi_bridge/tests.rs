@@ -1,0 +1,706 @@
+//! Stage-A suites for the Tachi bridge client vertical (zeroclaw #234).
+//!
+//! Each suite names the ticket DoD row / contract clause it proves.
+//! Stage-B (the live end-to-end run) lives outside this file — see the
+//! PR body evidence section and the #234 ledger.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use zeroclaw_api::taskintent::{
+    ArtifactClass, ArtifactExpectation, BoundedText, Capability, CapabilityRequest,
+    EvaluationRequirement, IndependenceClass, ParentRunRef, PrivacyClass, RequestId, RequesterRef,
+    RoutingPreference, SourceKind, SourceRef, TaskConstraint, WorkspaceSourceRef,
+};
+
+use super::client::{
+    BridgeQueryError, ProjectedAdjudicationState, ProjectedDeliveryState, ProjectedExecutionState,
+    SubmitReceipt, TachiBridgeClient, TachiTaskBridge,
+};
+use super::compose::{
+    ComposeRejection, ForbiddenCategory, RequesterBridgePolicy, StructuralIntentContext,
+    TaskIntentInputs, compose_intent,
+};
+use super::in_memory::{AmbiguousSubmitOnce, InMemoryTachiTaskBridge, UnavailableTachiTaskBridge};
+
+// ─────────────────────────────────────────────────────────────────────────
+// Fixtures
+// ─────────────────────────────────────────────────────────────────────────
+
+fn repository_implementation_policy() -> RequesterBridgePolicy {
+    RequesterBridgePolicy {
+        admitted_capabilities: BTreeSet::from([Capability::RepositoryImplementation]),
+        workspace_source: Some(WorkspaceSourceRef {
+            repo: BoundedText::new("kckylechen1/zeroclaw").expect("bounded"),
+            git_ref: Some(BoundedText::new("master").expect("bounded")),
+        }),
+        routing_preference: Some(RoutingPreference::PreferTachiManaged),
+        approval_requirement: zeroclaw_api::taskintent::ApprovalRequirement::NotRequired,
+        privacy_class: PrivacyClass::Internal,
+    }
+}
+
+fn acceptance_inputs(objective: &str) -> TaskIntentInputs {
+    TaskIntentInputs {
+        objective: BoundedText::new(objective).expect("bounded"),
+        capability_request: CapabilityRequest {
+            capability: Capability::RepositoryImplementation,
+        },
+        constraints: vec![TaskConstraint {
+            description: BoundedText::new("no new ledgers; refs, not relay prose")
+                .expect("bounded"),
+        }],
+        expected_artifacts: vec![
+            ArtifactExpectation {
+                artifact_class: ArtifactClass::Diff,
+                description: BoundedText::new("repository diff implementing the objective")
+                    .expect("bounded"),
+                required: true,
+            },
+            ArtifactExpectation {
+                artifact_class: ArtifactClass::VerificationLog,
+                description: BoundedText::new("verification ran and passed").expect("bounded"),
+                required: true,
+            },
+        ],
+        evaluation_requirement: EvaluationRequirement {
+            independence: IndependenceClass::FreshContextCrossVendor,
+        },
+    }
+}
+
+fn structural_context(bundle: &str) -> StructuralIntentContext {
+    StructuralIntentContext {
+        requester: RequesterRef::claim("zeroclaw-parent-v2b").expect("bounded"),
+        parent_ref: Some(ParentRunRef::own("run-1")),
+        supervisor_ref: None,
+        context_bundle_ref: BoundedText::new(bundle).expect("bounded"),
+        source_refs: vec![SourceRef {
+            kind: SourceKind::Issue,
+            locator: BoundedText::new("kckylechen1/zeroclaw#234").expect("bounded"),
+        }],
+        expiry: None,
+        retry_of: None,
+    }
+}
+
+fn compose(objective: &str) -> Result<zeroclaw_api::taskintent::TaskIntentV1, ComposeRejection> {
+    compose_intent(
+        &acceptance_inputs(objective),
+        &repository_implementation_policy(),
+        &structural_context("bundle-7f3a"),
+    )
+}
+
+fn request_id(n: u64) -> RequestId {
+    RequestId::new(format!("req-{n}")).expect("bounded")
+}
+
+async fn admit(
+    client: &TachiBridgeClient,
+    objective: &str,
+    n: u64,
+) -> zeroclaw_api::taskintent::TaskRef {
+    let intent = compose(objective).expect("clean intent");
+    match client.submit(&intent, &request_id(n)).await {
+        Ok(SubmitReceipt::Admitted { task_ref, .. }) => task_ref,
+        other => panic!("expected Admitted, got {other:?}"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Row 2/3: five-value surface, policy-filled authority, golden digest
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn compose_fills_authority_bearing_fields_from_policy_only() {
+    // Row 2: the authority-bearing subset is set from the requester's own
+    // admitted policy — never from task input or bundle content.
+    let intent = compose("implement the watershed slice").expect("clean intent");
+    let policy = repository_implementation_policy();
+    assert_eq!(
+        intent.capability_request.capability,
+        Capability::RepositoryImplementation
+    );
+    assert_eq!(intent.workspace_source, policy.workspace_source);
+    assert_eq!(intent.routing_preference, policy.routing_preference);
+    assert_eq!(intent.approval_requirement, policy.approval_requirement);
+    assert_eq!(intent.privacy_class, policy.privacy_class);
+    // The five task-specific values land verbatim.
+    assert_eq!(intent.objective.as_str(), "implement the watershed slice");
+    assert_eq!(intent.constraints.len(), 1);
+    assert_eq!(intent.expected_artifacts.len(), 2);
+    assert_eq!(
+        intent.evaluation_requirement.independence,
+        IndependenceClass::FreshContextCrossVendor
+    );
+    // Structural fields come from context, not policy or input.
+    assert_eq!(intent.requester.to_string(), "zeroclaw-parent-v2b");
+    assert_eq!(
+        intent.parent_ref.as_ref().map(ParentRunRef::as_wire),
+        Some("parent:run-1")
+    );
+    assert!(intent.retry_of.is_none());
+}
+
+#[test]
+fn compose_rejects_capability_outside_requester_authority() {
+    // TB-5 intersection law, encode-side pre-flight: a capability the
+    // requester's policy does not admit is refused before any transport.
+    let mut inputs = acceptance_inputs("investigate instead");
+    inputs.capability_request = CapabilityRequest {
+        capability: Capability::ReadOnlyInvestigation,
+    };
+    let rejection = compose_intent(
+        &inputs,
+        &repository_implementation_policy(),
+        &structural_context("bundle-7f3a"),
+    )
+    .unwrap_err();
+    assert_eq!(rejection, ComposeRejection::CapabilityNotAdmitted);
+}
+
+#[test]
+fn differing_bundle_content_yields_identical_admission_decision() {
+    // Row 5 / TB-4 seam law: an intent whose ONLY difference is
+    // ContextBundle content yields an IDENTICAL admission decision on
+    // every authority-bearing field.
+    let a = compose_intent(
+        &acceptance_inputs("same objective"),
+        &repository_implementation_policy(),
+        &structural_context("bundle-aaa"),
+    )
+    .expect("admits");
+    let b = compose_intent(
+        &acceptance_inputs("same objective"),
+        &repository_implementation_policy(),
+        &structural_context("bundle-zzz"),
+    )
+    .expect("admits");
+    // Identical admission decision (both admit), and the authority-bearing
+    // fields are byte-identical.
+    assert_eq!(a.capability_request, b.capability_request);
+    assert_eq!(a.workspace_source, b.workspace_source);
+    assert_eq!(a.routing_preference, b.routing_preference);
+    assert_eq!(a.approval_requirement, b.approval_requirement);
+    // ...while the digests differ (content difference is content).
+    assert_ne!(a.canonical_digest(), b.canonical_digest());
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Row 4: per-category forbidden-content rejection (encode side)
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn forbidden_payloads_are_rejected_over_every_text_bearing_field() {
+    // Row 4 / TB-4: per-category payloads fail compose with a typed
+    // rejection naming the category and field, over every text-bearing
+    // field (objective, constraint text, artifact description).
+    let cases: &[(ForbiddenCategory, &str, &str)] = &[
+        (
+            ForbiddenCategory::Credential,
+            "push using ghp_0123456789abcdef",
+            "objective",
+        ),
+        (
+            ForbiddenCategory::Command,
+            "ssh host 'cargo test'",
+            "objective",
+        ),
+        (
+            ForbiddenCategory::WorktreePath,
+            "run in /Users/dev/repo/worktrees/wt-1",
+            "objective",
+        ),
+        (
+            ForbiddenCategory::PrivateDyad,
+            "see private dyad notes for details",
+            "objective",
+        ),
+        (
+            ForbiddenCategory::CallerMintedRef,
+            "continue task:abc123 after the restart",
+            "objective",
+        ),
+        (
+            ForbiddenCategory::Command,
+            "tmux attach -t main",
+            "constraint",
+        ),
+        (
+            ForbiddenCategory::Credential,
+            "token sk-ant-aaaa",
+            "artifact",
+        ),
+        (
+            ForbiddenCategory::Command,
+            "codex exec --full-auto",
+            "constraint",
+        ),
+    ];
+    for (category, payload, placement) in cases {
+        let mut inputs = acceptance_inputs("clean objective");
+        match *placement {
+            "constraint" => {
+                inputs.constraints = vec![TaskConstraint {
+                    description: BoundedText::new(*payload).expect("bounded"),
+                }];
+            }
+            "artifact" => {
+                inputs.expected_artifacts = vec![ArtifactExpectation {
+                    artifact_class: ArtifactClass::Report,
+                    description: BoundedText::new(*payload).expect("bounded"),
+                    required: true,
+                }];
+            }
+            _ => {
+                inputs.objective = BoundedText::new(*payload).expect("bounded");
+            }
+        }
+        let rejection = compose_intent(
+            &inputs,
+            &repository_implementation_policy(),
+            &structural_context("bundle-7f3a"),
+        )
+        .unwrap_err();
+        let ComposeRejection::ForbiddenContent { category: hit, .. } = rejection else {
+            panic!("expected ForbiddenContent for {payload:?}, got {rejection:?}");
+        };
+        assert_eq!(&hit, category, "payload {payload:?} placement {placement}");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Row 7: TB-7 idempotency client behavior (in-process law)
+// ─────────────────────────────────────────────────────────────────────────
+
+fn tokio_rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+}
+
+#[test]
+fn same_tuple_and_digest_replays_to_the_same_task_ref() {
+    tokio_rt().block_on(async {
+        let host = Arc::new(InMemoryTachiTaskBridge::new());
+        let client = TachiBridgeClient::new(host.clone());
+        let intent = compose("one real repository task").expect("clean");
+        let first = client.submit(&intent, &request_id(1)).await.expect("ok");
+        let SubmitReceipt::Admitted {
+            task_ref,
+            replayed: false,
+        } = first
+        else {
+            panic!("first submit admits: {first:?}");
+        };
+        // Owner vertical test 1: same (requester, request_id) + same
+        // digest CANNOT double-start.
+        let second = client.submit(&intent, &request_id(1)).await.expect("ok");
+        let SubmitReceipt::Admitted {
+            task_ref: replayed_ref,
+            replayed: true,
+        } = second
+        else {
+            panic!("duplicate replays: {second:?}")
+        };
+        assert_eq!(task_ref, replayed_ref);
+        assert_eq!(host.task_count(), 1, "no second worker may start");
+        assert_eq!(host.binding_count(), 1);
+    });
+}
+
+#[test]
+fn same_tuple_with_different_digest_is_a_typed_conflict_with_zero_spawns() {
+    tokio_rt().block_on(async {
+        let host = Arc::new(InMemoryTachiTaskBridge::new());
+        let client = TachiBridgeClient::new(host.clone());
+        let a = compose("objective A").expect("clean");
+        let b = compose("objective B").expect("clean");
+        assert!(matches!(
+            client.submit(&a, &request_id(1)).await,
+            Ok(SubmitReceipt::Admitted { .. })
+        ));
+        let tasks_before = host.task_count();
+        // Owner vertical test 2: same request_id, different digest.
+        let outcome = client.submit(&b, &request_id(1)).await.expect("ok");
+        let SubmitReceipt::RequestIdConflict {
+            bound_digest,
+            submitted_digest,
+        } = outcome
+        else {
+            panic!("expected RequestIdConflict, got {outcome:?}");
+        };
+        assert_ne!(bound_digest, submitted_digest);
+        assert_eq!(host.task_count(), tasks_before, "zero new execution");
+    });
+}
+
+#[test]
+fn ambiguous_submit_replays_the_same_request_id_and_reconciles_one_task() {
+    // TB-7 rule 4 (owner vertical test 1b): after an ambiguous submit —
+    // the response was lost AFTER the host committed — ZeroClaw replays
+    // the SAME request id; it never invents a new one, and the replay
+    // reconciles to exactly one task.
+    tokio_rt().block_on(async {
+        let host = Arc::new(InMemoryTachiTaskBridge::new());
+        let flaky = Arc::new(AmbiguousSubmitOnce::new(host.clone()));
+        let client = TachiBridgeClient::new(flaky);
+        let intent = compose("ambiguous then reconciled").expect("clean");
+        let outcome = client
+            .submit_reconciling(&intent, &request_id(7))
+            .await
+            .expect("reconciles within the bounded attempts");
+        let SubmitReceipt::Admitted {
+            task_ref,
+            replayed: true,
+        } = outcome
+        else {
+            panic!("replay reconciles: {outcome:?}");
+        };
+        // Exactly one tuple, exactly one task — the replay reused the id.
+        assert_eq!(host.binding_count(), 1);
+        assert_eq!(host.task_count(), 1);
+        // And the reconciled task is observable.
+        let snapshot = client.get(&task_ref).await.expect("exists");
+        assert_eq!(snapshot.task_ref, task_ref);
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Row 8/9: snapshot mapping tables (TB-8/TB-16) and watch backfill (TB-9)
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_lifecycle_state_derives_from_the_three_mapping_tables() {
+    tokio_rt().block_on(async {
+        let host = Arc::new(InMemoryTachiTaskBridge::new());
+        let client = TachiBridgeClient::new(host.clone());
+        let task_ref = admit(&client, "mapping-table task", 1).await;
+        // Before any execution fact: queued / unreviewed / not_ready.
+        let snapshot = client.get(&task_ref).await.expect("snapshot");
+        assert_eq!(snapshot.execution.label(), "queued");
+        assert_eq!(snapshot.adjudication.label(), "unreviewed");
+        assert_eq!(snapshot.delivery.label(), "not_ready");
+        assert_eq!(snapshot.execution.to_string(), "exec:queued");
+        // Cross-dimension law (TB-16): an adjudication transition never
+        // changes the projected execution state, and a delivery-ready
+        // projection never changes adjudication.
+        host.ingest_execution(&task_ref, "running");
+        let running = client.get(&task_ref).await.expect("snapshot");
+        assert_eq!(running.execution.label(), "running");
+        assert_eq!(running.adjudication.label(), "unreviewed");
+        assert_eq!(running.delivery.label(), "not_ready");
+        host.ingest_adjudication(&task_ref, "accepted");
+        let adjudicated = client.get(&task_ref).await.expect("snapshot");
+        assert_eq!(adjudicated.adjudication.label(), "accepted");
+        assert_eq!(adjudicated.execution.label(), "running");
+        // Unknown dimension labels are not projectable (no local enum can
+        // mint a state outside the tables).
+        assert!(ProjectedExecutionState::project("done").is_none());
+        assert!(ProjectedAdjudicationState::project("queued").is_none());
+        assert!(ProjectedDeliveryState::project("running").is_none());
+    });
+}
+
+#[test]
+fn watch_backfill_replays_exactly_the_missed_events() {
+    // Row 9 / TB-9 + owner vertical test 3: reconnect from the last-seen
+    // cursor replays exactly the missed events; duplicates are
+    // suppressed; watching never creates tasks.
+    tokio_rt().block_on(async {
+        let host = Arc::new(InMemoryTachiTaskBridge::new());
+        let client = TachiBridgeClient::new(host.clone());
+        let task_ref = admit(&client, "watch backfill task", 1).await;
+        host.ingest_execution(&task_ref, "running");
+        host.ingest_execution(&task_ref, "submitted");
+        // First watch: full backfill from 0.
+        let page = client.watch_new_events(&task_ref, 10).await.expect("page");
+        assert_eq!(page.events.len(), 3, "submitted + 2 execution facts");
+        let cursor = client.cursor(&task_ref);
+        assert_eq!(cursor, 3);
+        // More events land while "disconnected".
+        host.ingest_execution(&task_ref, "completed");
+        // Reconnect from the last-seen cursor: exactly the missed events.
+        let replay = client.watch_new_events(&task_ref, 10).await.expect("page");
+        assert_eq!(replay.events.len(), 1);
+        assert_eq!(replay.events[0].seq, 4);
+        // Deterministic suppression: re-ingesting the SAME fact (same
+        // event id) does not produce a new event.
+        host.ingest_execution(&task_ref, "completed");
+        let after_dup = client.watch_new_events(&task_ref, 10).await.expect("page");
+        assert!(after_dup.events.is_empty(), "duplicate suppressed");
+        // 8-field binding present on every event.
+        for event in page.events {
+            assert!(!event.event_id.is_empty());
+            assert!(!event.source.is_empty());
+            assert!(!event.source_revision.is_empty());
+            assert!(!event.occurred_at.is_empty());
+            assert!(!event.recorded_at.is_empty());
+            assert!(!event.payload_digest.is_empty());
+            assert!(!event.visibility.is_empty());
+            assert!(!event.kind.is_empty());
+        }
+        // Watching never creates tasks.
+        assert_eq!(host.task_count(), 1);
+        // Paging: limit respects has_more (direct port call).
+        let paged = host.watch(&task_ref, 0, 2).await.expect("page");
+        assert!(paged.has_more);
+        assert_eq!(paged.events.len(), 2);
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Row 10: collect is artifact-first (TB-13)
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn worker_success_without_required_artifact_is_not_contract_success() {
+    // Owner vertical test 7: a worker `success` without the required
+    // artifact/evidence does not satisfy the contract, regardless of
+    // worker prose.
+    tokio_rt().block_on(async {
+        let host = Arc::new(InMemoryTachiTaskBridge::new());
+        let client = TachiBridgeClient::new(host.clone());
+        let task_ref = admit(&client, "artifact-first task", 1).await;
+        let attempt: zeroclaw_api::taskintent::AttemptRef =
+            serde_json::from_value(serde_json::Value::String("attempt:inmem-01".to_string()))
+                .expect("wire-shaped attempt ref");
+        // Worker reports success with NO diff and NO verification.
+        host.observe_outcome(
+            &task_ref,
+            attempt,
+            "success",
+            None,
+            Vec::new(),
+            false,
+            false,
+            "vendor=unknown;basis=reported",
+        );
+        let result = client.collect_latest(&task_ref).await.expect("projection");
+        assert_eq!(result.terminal_classification, "success");
+        assert_eq!(
+            result.contract_violations.len(),
+            2,
+            "diff + verification_log both missing"
+        );
+        assert!(
+            result
+                .contract_violations
+                .iter()
+                .any(|v| v.artifact_class == "diff")
+        );
+        assert!(
+            result
+                .contract_violations
+                .iter()
+                .any(|v| v.artifact_class == "verification_log")
+        );
+        // Same worker prose WITH the required evidence: no violations.
+        let task_ref2 = admit(&client, "artifact-first task with evidence", 2).await;
+        let attempt2: zeroclaw_api::taskintent::AttemptRef =
+            serde_json::from_value(serde_json::Value::String("attempt:inmem-02".to_string()))
+                .expect("wire-shaped attempt ref");
+        host.observe_outcome(
+            &task_ref2,
+            attempt2,
+            "success",
+            Some("artifact:diff-1".to_string()),
+            vec!["artifact:diff-1".to_string(), "evidence:log-1".to_string()],
+            true,
+            true,
+            "vendor=x;basis=observed",
+        );
+        let ok = client.collect_latest(&task_ref2).await.expect("projection");
+        assert!(ok.contract_violations.is_empty());
+        assert_eq!(ok.verification.evidence_ref_count, 2);
+    });
+}
+
+#[test]
+fn result_revisions_are_newer_wins_and_pinned_exact_or_typed_not_found() {
+    tokio_rt().block_on(async {
+        let host = Arc::new(InMemoryTachiTaskBridge::new());
+        let client = TachiBridgeClient::new(host.clone());
+        let task_ref = admit(&client, "revisioned task", 1).await;
+        let attempt: zeroclaw_api::taskintent::AttemptRef =
+            serde_json::from_value(serde_json::Value::String("attempt:inmem-01".to_string()))
+                .expect("wire-shaped attempt ref");
+        host.observe_outcome(
+            &task_ref,
+            attempt.clone(),
+            "success",
+            Some("artifact:rev-1".to_string()),
+            vec!["artifact:rev-1".to_string()],
+            true,
+            true,
+            "vendor=x;basis=observed",
+        );
+        host.observe_outcome(
+            &task_ref,
+            attempt,
+            "success",
+            Some("artifact:rev-2".to_string()),
+            vec!["artifact:rev-2".to_string()],
+            true,
+            true,
+            "vendor=x;basis=observed",
+        );
+        // Default: newer wins.
+        let latest = client.collect_latest(&task_ref).await.expect("latest");
+        assert_eq!(latest.result_revision, 2);
+        assert_eq!(
+            latest.canonical_artifact_ref.as_deref(),
+            Some("artifact:rev-2")
+        );
+        // Pinned: exact revision.
+        let pinned = client.collect_pinned(&task_ref, 1).await.expect("pinned");
+        assert_eq!(pinned.result_revision, 1);
+        assert_eq!(
+            pinned.canonical_artifact_ref.as_deref(),
+            Some("artifact:rev-1")
+        );
+        // Bogus pin: typed not_found.
+        assert_eq!(
+            client.collect_pinned(&task_ref, 99).await.unwrap_err(),
+            BridgeQueryError::ResultRevisionNotFound
+        );
+        // No result yet: typed NotReady.
+        let task_ref2 = admit(&client, "no result task", 2).await;
+        assert_eq!(
+            client.collect_latest(&task_ref2).await.unwrap_err(),
+            BridgeQueryError::NotReady
+        );
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Row 12: TB-20 outage fails closed; positive control stays structural
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn tachi_outage_fails_closed_with_zero_local_execution() {
+    // Row 12 / TB-20: with the transport down, the repository-work
+    // request returns typed `Unavailable`; the client has no local
+    // execution path (proven structurally below and by the module source
+    // scan in `module_source_scans_hold`).
+    tokio_rt().block_on(async {
+        let client = TachiBridgeClient::new(Arc::new(UnavailableTachiTaskBridge));
+        let intent = compose("repository work during outage").expect("clean");
+        assert_eq!(
+            client.submit(&intent, &request_id(1)).await,
+            Ok(SubmitReceipt::Unavailable)
+        );
+        assert_eq!(
+            client.submit_reconciling(&intent, &request_id(1)).await,
+            Ok(SubmitReceipt::Unavailable)
+        );
+        // get/watch/collect also fail typed, never silently succeed.
+        let bogus = serde_json::from_value(serde_json::Value::String("task:none".to_string()))
+            .expect("wire-shaped ref");
+        assert_eq!(
+            client.get(&bogus).await.unwrap_err(),
+            BridgeQueryError::Unavailable
+        );
+        assert_eq!(
+            client.watch_new_events(&bogus, 10).await.unwrap_err(),
+            BridgeQueryError::Unavailable
+        );
+        assert_eq!(
+            client.collect_latest(&bogus).await.unwrap_err(),
+            BridgeQueryError::Unavailable
+        );
+    });
+}
+
+#[test]
+fn module_source_scans_hold() {
+    // Row 12 structural halves + TB-23 item 4:
+    // (a) the bridge client module contains no process/command execution
+    //     capability (TB-20: there is nothing to fall back TO);
+    // (b) it imports nothing from zeroclaw-eval;
+    // (c) the local-chat/agent path does not reference the bridge (the
+    //     positive control: ordinary local chat cannot depend on Tachi
+    //     availability because nothing in the agent path names it).
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let module_files = [
+        "tachi_bridge/mod.rs",
+        "tachi_bridge/compose.rs",
+        "tachi_bridge/client.rs",
+        "tachi_bridge/in_memory.rs",
+    ];
+    for file in module_files {
+        let source = std::fs::read_to_string(format!("{manifest_dir}/src/{file}"))
+            .unwrap_or_else(|error| panic!("read {file}: {error}"));
+        for banned in [
+            "std::process",
+            "tokio::process",
+            "process::Command",
+            "zeroclaw_eval",
+        ] {
+            assert!(
+                !source.contains(banned),
+                "{file} must not contain {banned} (TB-20/TB-23)"
+            );
+        }
+    }
+    // (c) scan the agent module tree for references to the bridge.
+    let agent_dir = format!("{manifest_dir}/src/agent");
+    let mut scanned = 0;
+    let mut stack: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(agent_dir)];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("read dir {}: {error}", dir.display()));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                scanned += 1;
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                assert!(
+                    !source.contains("tachi_bridge"),
+                    "{} must not reference the tachi bridge (TB-20 positive control)",
+                    path.display()
+                );
+            }
+        }
+    }
+    assert!(
+        scanned > 10,
+        "agent tree scan must actually cover sources ({scanned})"
+    );
+}
+
+#[test]
+fn client_surface_is_exactly_submit_get_watch_collect() {
+    // Owner scope limit: no intervene/request_stop client surface. The
+    // port trait's method set is asserted textually so a future op
+    // addition shows up as a deliberate diff against this pin.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let source = std::fs::read_to_string(format!("{manifest_dir}/src/tachi_bridge/client.rs"))
+        .expect("client source");
+    let trait_body = source
+        .split("pub trait TachiTaskBridge")
+        .nth(1)
+        .expect("trait present")
+        .split('}')
+        .next()
+        .expect("trait body");
+    for op in [
+        "async fn submit",
+        "async fn get",
+        "async fn watch",
+        "async fn collect",
+    ] {
+        assert!(trait_body.contains(op), "port must expose {op}");
+    }
+    for banned in ["intervene", "request_stop", "fn spawn", "fn cancel"] {
+        assert!(
+            !trait_body.contains(banned),
+            "port must not expose {banned} (owner scope: V3 leaf)"
+        );
+    }
+}

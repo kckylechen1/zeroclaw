@@ -97,6 +97,10 @@ jobs:
         run: |
           bash scripts/ci/retired_docs_gate.test.sh
           bash scripts/ci/retired_docs_gate.sh
+      - name: Persistence-surface manifest gate (TB-22 no new durable stores)
+        run: |
+          bash scripts/ci/persistence_surface_gate.test.sh
+          bash scripts/ci/persistence_surface_gate.sh
 
   # ── Post-format required quality gate ─────────────────────────────────────
 

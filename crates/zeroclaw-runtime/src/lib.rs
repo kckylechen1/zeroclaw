@@ -42,6 +42,7 @@ pub mod sop;
 pub mod subagent;
 pub mod subagent_host;
 pub mod subagent_v1;
+pub mod tachi_bridge;
 pub mod tools;
 pub mod trust;
 pub mod tunnel;
