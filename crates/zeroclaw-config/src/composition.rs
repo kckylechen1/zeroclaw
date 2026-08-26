@@ -52,8 +52,9 @@ pub const MINIMAL_TOOL_MEMBERSHIP: &[&str] = &[
     "web_fetch",
     // bounded interaction / ask-user behavior
     "ask_user",
-    // reasoning/supervisor SubAgent entry point
-    "spawn_subagent",
+    // reasoning/supervisor SubAgent entry point (V1; the legacy
+    // `spawn_subagent` stays registered under `full`/`legacy` composition)
+    "reasoning_subagent",
     // attention/scheduling semantics
     "schedule",
 ];
@@ -172,7 +173,10 @@ mod tests {
         };
         assert_eq!(deduped_len, MINIMAL_TOOL_MEMBERSHIP.len());
         assert!(is_minimal_member("file_read"));
-        assert!(is_minimal_member("spawn_subagent"));
+        // The minimal composition fronts the V1 SubAgent entrypoint; the
+        // legacy `spawn_subagent` stays a full/legacy-composition member.
+        assert!(is_minimal_member("reasoning_subagent"));
+        assert!(!is_minimal_member("spawn_subagent"));
         assert!(!is_minimal_member("model_routing_config"));
         assert!(!is_minimal_member("claude_code"));
         assert!(!is_minimal_member("delegate"));

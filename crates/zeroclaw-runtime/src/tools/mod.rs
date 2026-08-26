@@ -2887,12 +2887,19 @@ mod tests {
             "glob_search",
             "content_search",
             "schedule",
+            "reasoning_subagent",
         ] {
             assert!(
                 names.contains(&member),
                 "minimal profile must keep {member}, got: {names:?}"
             );
         }
+        // The minimal composition fronts the V1 entrypoint; the legacy
+        // `spawn_subagent` belongs to full/legacy composition only.
+        assert!(
+            !names.contains(&"spawn_subagent"),
+            "minimal profile must drop the legacy spawn_subagent; got: {names:?}"
+        );
         // Fail-closed totality: nothing outside the membership table may be
         // assembled under minimal, whatever flags enabled it.
         for name in &names {
@@ -2956,6 +2963,16 @@ mod tests {
         // retired operator/admin tools, which no composition may re-admit.
         assert!(!names.contains(&"model_routing_config"));
         assert!(!names.contains(&"proxy_config"));
+        // The legacy spawn entrypoint survives the minimal-membership swap:
+        // it is full/legacy-composition debt, not a retired tool.
+        assert!(
+            names.contains(&"spawn_subagent"),
+            "full composition must keep the legacy spawn_subagent; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"reasoning_subagent"),
+            "full composition must carry the V1 reasoning_subagent; got: {names:?}"
+        );
         // The pushover tool only exists when the SaaS family is compiled in.
         #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
