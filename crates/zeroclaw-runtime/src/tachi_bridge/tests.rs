@@ -292,6 +292,14 @@ fn watershed_dimensions_are_rejected_as_prose_anywhere_in_text() {
             "prefer deepseek over the default",
             ForbiddenCategory::ExecutionDetail,
         ),
+        (
+            "Use Zhipu as the backend",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        (
+            "invoke with (--full-auto) enabled",
+            ForbiddenCategory::ExecutionDetail,
+        ),
         // Worktree/placement vocabulary (TB-4).
         (
             "do the work in a worktree ../feature-v2b",

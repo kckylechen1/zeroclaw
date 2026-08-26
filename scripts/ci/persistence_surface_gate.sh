@@ -22,11 +22,16 @@
 #   5. every crate declaring an embedded-store dependency (rusqlite,
 #      sled, redb, rocksdb).
 #
+# Additionally, each manifest entry pins an exact per-file SIGNAL COUNT
+# (matching lines across all patterns), so in-place growth — a new
+# table, connection site, or write path inside an already-listed file —
+# trips the gate exactly like a new file would (TB-22 no-new-writer-path).
+#
 # Detection is signature-based, not semantic: a determined author can
 # still evade it (constructed DDL fragments, file writes without
-# OpenOptions in fresh code paths). The gate's contract is drift
-# VISIBILITY plus a PR-visible manifest change - human review stays the
-# authority.
+# OpenOptions in fresh code paths, novel vendor-free ledger shapes). The
+# gate's contract is drift VISIBILITY plus a PR-visible manifest change
+# - human review stays the authority.
 #
 # Exit status: 0 = surface matches the manifest; 1 = drift found (a
 # PR-visible manifest change citing a TB-22 exemption is required);
@@ -85,15 +90,47 @@ trap 'rm -rf "$tmp_dir"' EXIT
         "$scan_root/apps" -g 'Cargo.toml' 2>/dev/null || true
 } | sed -E "s#^$scan_root/##" | sed -E 's#^((crates|apps)/[^/]+)/Cargo.toml$#\1#' | sort -u >"$tmp_dir/detected_crates"
 
-python3 - "$manifest" "$tmp_dir/detected_files" "$tmp_dir/detected_crates" <<'PYEOF'
+# Signal counts: per detected file, the number of matching LINES across
+# every detection pattern. The manifest pins an exact count per file, so
+# IN-PLACE growth — a new table, connection site, or OpenOptions write
+# inside an already-listed file — trips the gate exactly like a new file
+# would (TB-22 no-new-writer-path law).
+count_signals() {
+    local file="$1" total=0 c
+    c=$(rg -c --no-messages -i -U \
+        'create[[:space:]]+table|alter[[:space:]]+table|create[[:space:]]*/\*[^*]*\*/[[:space:]]*table' \
+        "$file" 2>/dev/null || true)
+    [[ -n "$c" ]] && total=$((total + c))
+    c=$(rg -c --no-messages 'Connection::open' "$file" 2>/dev/null || true)
+    [[ -n "$c" ]] && total=$((total + c))
+    c=$(rg -c --no-messages -w -e 'rusqlite' -e 'sled' -e 'redb' -e 'rocksdb' \
+        "$file" 2>/dev/null || true)
+    [[ -n "$c" ]] && total=$((total + c))
+    c=$(rg -c --no-messages 'OpenOptions' "$file" 2>/dev/null || true)
+    [[ -n "$c" ]] && total=$((total + c))
+    printf '%s' "$total"
+}
+
+: >"$tmp_dir/detected_signals"
+while IFS= read -r rel; do
+    printf '%s\t%s\n' "$rel" "$(count_signals "$scan_root/$rel")" >>"$tmp_dir/detected_signals"
+done <"$tmp_dir/detected_files"
+
+python3 - "$manifest" "$tmp_dir/detected_files" "$tmp_dir/detected_crates" "$tmp_dir/detected_signals" <<'PYEOF'
 import json
 import sys
 
-manifest_path, detected_files_path, detected_crates_path = sys.argv[1:4]
+manifest_path, detected_files_path, detected_crates_path, detected_signals_path = sys.argv[1:5]
 with open(detected_files_path, encoding="utf-8") as fh:
     detected_files = {line.strip() for line in fh if line.strip()}
 with open(detected_crates_path, encoding="utf-8") as fh:
     detected_crates = {line.strip() for line in fh if line.strip()}
+detected_signals = {}
+with open(detected_signals_path, encoding="utf-8") as fh:
+    for line in fh:
+        if line.strip():
+            rel, _, count = line.rstrip("\n").partition("\t")
+            detected_signals[rel] = int(count)
 
 with open(manifest_path, encoding="utf-8") as fh:
     manifest = json.load(fh)
@@ -114,6 +151,23 @@ for path in sorted(listed_files - detected_files):
         f"STALE MANIFEST ENTRY: {path} is listed but no longer matches the "
         "detection scan; prune it so the manifest stays trustworthy."
     )
+for entry in manifest["files"]:
+    path = entry["path"]
+    if path not in detected_files:
+        continue  # already reported as stale above
+    if "signals" not in entry:
+        problems.append(
+            f"MANIFEST ENTRY MISSING SIGNALS: {path} has no `signals` count; "
+            "pin the detected signal count so in-place growth trips the gate."
+        )
+    elif entry["signals"] != detected_signals[path]:
+        problems.append(
+            f"SIGNAL-COUNT DRIFT: {path} manifests signals={entry['signals']} "
+            f"but the scan detects {detected_signals[path]}. TB-22 "
+            "freeze-no-growth also means no new WRITER PATH inside an "
+            "already-listed file: justify the growth with a TB-22 exemption "
+            "in the manifest change, or remove it."
+        )
 for crate in sorted(detected_crates - listed_crates):
     problems.append(
         f"UNLISTED STORE CRATE: {crate} declares an embedded-store dependency "

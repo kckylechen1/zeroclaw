@@ -248,15 +248,22 @@ const PRIVATE_DYAD_MARKERS: &[&str] = &["private dyad", "private_dyad", "private
 /// value (vertical V2b discrimination list: glm/codex/any model or
 /// vendor name, TB-5). Matched on word boundaries over the lowercased
 /// text so `Use Anthropic Claude as the backend` is rejected even though
-/// it is not shaped like a command.
+/// it is not shaped like a command. The list covers the known vendor
+/// family and its common aliases; a NOVEL vendor name not yet listed is
+/// the residual class — the authoritative rejection is the tachi host
+/// admission, and list extension is a one-line PR.
 const WATERSHED_VENDOR_TOKENS: &[&str] = &[
     "glm",
+    "zhipu",
+    "bigmodel",
+    "chatglm",
     "codex",
     "claude",
     "anthropic",
     "openai",
     "chatgpt",
     "gpt",
+    "o1",
     "gemini",
     "deepseek",
     "qwen",
@@ -265,6 +272,20 @@ const WATERSHED_VENDOR_TOKENS: &[&str] = &[
     "llama",
     "mistral",
     "grok",
+    "xai",
+    "minimax",
+    "ernie",
+    "baichuan",
+    "hunyuan",
+    "doubao",
+    "cohere",
+    "perplexity",
+    "fireworks",
+    "openrouter",
+    "ollama",
+    "vllm",
+    "groq",
+    "bedrock",
     "aider",
     "opencode",
     "copilot",
@@ -340,11 +361,17 @@ fn scan_str(field: &'static str, text: &str) -> Result<(), ComposeRejection> {
     if lower.contains("../") || lower.contains(" ./") || lower.contains(" ~/") {
         return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
     }
-    // CLI flags as standalone tokens (`--fast`, `-rf`): whitespace-
-    // delimited tokens that begin with `-` followed by a letter/digit.
+    // CLI flags (`--fast`, `-rf`, including parenthesized/quoted forms
+    // like `(--full-auto)`): any `--` run in the text is flag-shaped;
+    // beyond that, whitespace tokens with leading punctuation stripped
+    // that begin with `-` followed by a letter/digit are flag-shaped.
+    if lower.contains("--") {
+        return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
+    }
     for token in lower.split_whitespace() {
-        let stripped = token.trim_start_matches('-');
-        if stripped.len() != token.len()
+        let trimmed = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+        let stripped = trimmed.trim_start_matches('-');
+        if stripped.len() != trimmed.len()
             && stripped.chars().next().is_some_and(char::is_alphanumeric)
         {
             return Err(forbid(ForbiddenCategory::ExecutionDetail, field));

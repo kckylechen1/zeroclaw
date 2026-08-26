@@ -56,8 +56,8 @@ SQL
   "exemptions": [],
   "store_crates": ["crates/fixture-crate"],
   "files": [
-    {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture"},
-    {"path":"crates/other-crate/migrations/001_smuggled.sql","store":"pending_results.db","role":"store","basis":"fixture"}$smuggled_entry
+    {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture","signals":1},
+    {"path":"crates/other-crate/migrations/001_smuggled.sql","store":"pending_results.db","role":"store","basis":"fixture","signals":1}$smuggled_entry
   ]
 }
 JSON
@@ -118,7 +118,7 @@ cat >"$tmp_root/crate-drift/manifest.json" <<JSON
   "exemptions": [],
   "store_crates": ["crates/fixture-crate"],
   "files": [
-    {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture"}
+    {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture","signals":1}
   ]
 }
 JSON
@@ -134,7 +134,7 @@ base_manifest() {
   "exemptions": [],
   "store_crates": ["crates/fixture-crate"],
   "files": [
-    {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture"}
+    {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture","signals":1}
   ]
 }
 JSON
@@ -174,6 +174,18 @@ schema v2:
 CREATE TABLE pending_results (id TEXT PRIMARY KEY, payload TEXT)
 TXT
 expect_fail "DDL in .txt sidecar" "$tmp_root/txtddl" "UNLISTED PERSISTENCE-SURFACE FILE" || status=1
+
+# (d) in-place growth inside an already-listed file: same file set, one
+#     MORE table than the manifest pins — membership alone would pass;
+#     the signal count must trip it.
+evasion_tree "$tmp_root/growth"
+cat >>"$tmp_root/growth/crates/fixture-crate/src/store.rs" <<'RS'
+
+pub fn ddl2() -> &'static str {
+    "CREATE TABLE IF NOT EXISTS second_table (id INTEGER PRIMARY KEY)"
+}
+RS
+expect_fail "in-place ledger growth in listed file" "$tmp_root/growth" "SIGNAL-COUNT DRIFT" || status=1
 
 # Control: the evasion-tree base alone stays clean (the fixture's own
 # DDL store is listed).
