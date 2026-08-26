@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use zeroclaw_api::taskintent::{AttemptRef, RequestId, TaskIntentV1, TaskRef};
 
-use super::compose::ComposeRejection;
+use super::compose::{ComposeRejection, scan_intent};
 
 // ─────────────────────────────────────────────────────────────────────────
 // TB-16: three per-dimension mapping tables
@@ -367,13 +367,22 @@ impl TachiBridgeClient {
         }
     }
 
-    /// Submit once. Encode-side admission should have run at compose
-    /// time; the typed host receipts pass through unchanged.
+    /// Submit once. The encode-side admission scan ALWAYS runs here —
+    /// even for a programmatically constructed intent that bypassed
+    /// [`super::compose::compose_intent`] — so no submit path can carry
+    /// forbidden content to a transport (TB-4; fail closed locally,
+    /// never fail open). The typed host receipts pass through otherwise
+    /// unchanged.
     pub async fn submit(
         &self,
         intent: &TaskIntentV1,
         request_id: &RequestId,
     ) -> Result<SubmitReceipt, SubmitTransportError> {
+        if let Err(rejection) = scan_intent(intent) {
+            return Ok(SubmitReceipt::Rejected {
+                reason: rejection.to_string(),
+            });
+        }
         self.port.submit(intent, request_id).await
     }
 
@@ -390,6 +399,11 @@ impl TachiBridgeClient {
         intent: &TaskIntentV1,
         request_id: &RequestId,
     ) -> Result<SubmitReceipt, SubmitTransportError> {
+        if let Err(rejection) = scan_intent(intent) {
+            return Ok(SubmitReceipt::Rejected {
+                reason: rejection.to_string(),
+            });
+        }
         let mut last_err = None;
         for _ in 0..SUBMIT_RECONCILE_ATTEMPTS {
             match self.port.submit(intent, request_id).await {

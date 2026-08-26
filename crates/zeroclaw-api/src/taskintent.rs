@@ -21,26 +21,39 @@
 //!
 //! Watershed discrimination, enforced structurally on this side:
 //!
-//! - **No execution detail is representable** (TB-1/TB-4). There is no
-//!   `command`/`env`/`cwd`/`path`/`model`/`backend`-shaped field at any
-//!   depth, and every struct on the wire is `deny_unknown_fields`, so a
-//!   smuggled field fails deserialization instead of being silently
-//!   carried. Every text-bearing value is a bounded [`BoundedText`];
-//!   every selector is a closed enum.
+//! - **No execution detail is representable as a FIELD** (TB-1/TB-4).
+//!   There is no `command`/`env`/`cwd`/`path`/`model`/`backend`-shaped
+//!   field at any depth, and every struct on the wire is
+//!   `deny_unknown_fields`, so a smuggled field fails deserialization
+//!   instead of being silently carried. Every free-text value is a
+//!   bounded [`BoundedText`]; every selector is a closed enum.
 //! - **`Capability` is a closed enum** (DECISION TB-5/A, carrier picked
 //!   as option (a) by the tachi host bridge; this leaf admits
 //!   [`Capability::RepositoryImplementation`] into the catalog per
 //!   the watershed ticket). No variant can name a vendor, model, CLI, or tool:
 //!   `glm`, `codex`, CLI flags, and friends are not representable in
 //!   `capability_request` — they fail enum deserialization.
+//! - **Content-level rejection is per the five frozen TB-4 categories**
+//!   (credential-shaped, command-lead-token, worktree-path,
+//!   private-dyad, caller-minted-ref), mirrored marker-for-marker from
+//!   the tachi host admission law so the two sides cannot drift. This
+//!   scan covers every `BoundedText` field of the intent; the typed refs
+//!   are namespace- and length-enforced instead (they carry no free
+//!   text). The scan is category-law, not a prose ban: text that merely
+//!   MENTIONS a vendor inside an otherwise-clean objective is admitted
+//!   by the frozen law on BOTH sides — the structural bans above are
+//!   what make placement impossible.
 //! - **`TaskRef`/`AttemptRef` are decode-only here** (TB-6): Tachi mints
-//!   them; the ZeroClaw side has NO public constructor, no `mint`, and no
-//!   `From<String>` — a caller-minted task id is unrepresentable in this
-//!   process, not merely discouraged.
+//!   them; the ZeroClaw side has NO public constructor, no `mint`, and
+//!   no `From<String>` — the only way one enters this process is by
+//!   DESERIALIZING a Tachi-sent wire value (that is how transport
+//!   receipts arrive). A caller cannot mint an id through any API; an
+//!   id it writes by hand into raw JSON is not authority and the host
+//!   rejects foreign lineage at admission.
 //! - **`ParentRunRef`/`SubAgentRunRef` constructors force their own
-//!   namespace** (`parent:`/`subrun:`): ZeroClaw names its own run
-//!   lineage but can never fabricate a `task:`/`attempt:` value through
-//!   them.
+//!   namespace** (`parent:`/`subrun:`) and length-cap the body exactly
+//!   like the decode path: ZeroClaw names its own run lineage but can
+//!   never fabricate a `task:`/`attempt:` value through them.
 //!
 //! Digest: [`TaskIntentV1::canonical_digest`] implements the identical
 //! rule to tachi's `memcore::canonical_digest::canonical_json_digest_hex`
@@ -193,7 +206,9 @@ macro_rules! decode_only_ref {
 decode_only_ref!(
     /// A Tachi-minted durable task identity (TB-6: minted by Tachi only,
     /// after admission; caller-provided task ids are not authority). The
-    /// ZeroClaw side is decode-only — this process cannot construct one.
+    /// ZeroClaw side is decode-only: no constructor API exists, so a
+    /// value enters this process only by deserializing a Tachi-sent
+    /// wire value.
     TaskRef,
     "task:"
 );
@@ -246,9 +261,15 @@ macro_rules! own_namespace_ref {
 
             /// Name this side's own run lineage. The namespace prefix is
             /// forced: the value always serializes inside this ref's own
-            /// namespace, whatever the opaque id contains.
-            pub fn own(opaque_id: impl fmt::Display) -> Self {
-                Self(format!("{}{}", Self::WIRE_PREFIX, opaque_id))
+            /// namespace, whatever the opaque id contains. The body is
+            /// length-capped exactly like the decode path, so a
+            /// constructed value can never be oversize on the wire.
+            pub fn own(opaque_id: impl fmt::Display) -> Result<Self, RefError> {
+                let body = opaque_id.to_string();
+                if body.is_empty() || body.len() > REF_VALUE_MAX {
+                    return Err(RefError::InvalidLength);
+                }
+                Ok(Self(format!("{}{}", Self::WIRE_PREFIX, body)))
             }
 
             /// The namespaced wire form, e.g. `"parent:…"`.
@@ -925,11 +946,11 @@ mod tests {
         // namespace: whatever opaque id they wrap, the wire value stays
         // inside parent:/subrun: and can never become a task:/attempt:
         // value (TB-6).
-        let parent = ParentRunRef::own("task:abc123");
+        let parent = ParentRunRef::own("task:abc123").expect("bounded");
         assert_eq!(parent.as_wire(), "parent:task:abc123");
         assert!(parent.as_wire().starts_with(ParentRunRef::WIRE_PREFIX));
         assert!(!parent.as_wire().starts_with(TaskRef::WIRE_PREFIX));
-        let subrun = SubAgentRunRef::own("attempt:xyz");
+        let subrun = SubAgentRunRef::own("attempt:xyz").expect("bounded");
         assert_eq!(subrun.as_wire(), "subrun:attempt:xyz");
         // Wire round-trip requires the own namespace too.
         assert!(serde_json::from_value::<ParentRunRef>(Value::String("task:abc".into())).is_err());
@@ -959,6 +980,18 @@ mod tests {
             prefixes.len(),
             "wire namespaces must be distinct"
         );
+    }
+
+    #[test]
+    fn own_namespace_ref_constructors_enforce_the_wire_length_cap() {
+        // Codex round-1 finding: the construction path must enforce the
+        // same body cap as the decode path, so a constructed ref can
+        // never be oversize (or empty) on the wire.
+        assert!(ParentRunRef::own("run-1").is_ok());
+        assert!(ParentRunRef::own("").is_err());
+        assert!(ParentRunRef::own("x".repeat(REF_VALUE_MAX + 1)).is_err());
+        assert!(ParentRunRef::own("x".repeat(REF_VALUE_MAX)).is_ok());
+        assert!(SubAgentRunRef::own("x".repeat(REF_VALUE_MAX + 1)).is_err());
     }
 
     #[test]

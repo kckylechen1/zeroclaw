@@ -38,9 +38,13 @@ rusqlite = "0.37"
 TOML
     if [[ "$kind" == "drift" ]]; then
         cat >"$root/crates/other-crate/src/smuggled.rs" <<'RS'
-pub const DDL: &str = "CREATE TABLE task_ledger (id TEXT)";
+pub const DDL: &str = "create table task_ledger (id TEXT)";  // lowercase evasion
 RS
     fi
+    mkdir -p "$root/crates/other-crate/migrations"
+    cat >"$root/crates/other-crate/migrations/001_smuggled.sql" <<'SQL'
+CREATE TABLE IF NOT EXISTS pending_results (id TEXT PRIMARY KEY);
+SQL
     local smuggled_entry=""
     if [[ "$kind" == "stale" ]]; then
         smuggled_entry=',{"path":"crates/other-crate/src/smuggled.rs","store":"x","role":"store","basis":"stale fixture"}'
@@ -50,9 +54,10 @@ RS
   "version": 1,
   "law": "fixture",
   "exemptions": [],
-  "sqlite_crates": ["fixture-crate"],
+  "store_crates": ["fixture-crate"],
   "files": [
-    {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture"}$smuggled_entry
+    {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture"},
+    {"path":"crates/other-crate/migrations/001_smuggled.sql","store":"pending_results.db","role":"store","basis":"fixture"}$smuggled_entry
   ]
 }
 JSON
@@ -111,13 +116,13 @@ cat >"$tmp_root/crate-drift/manifest.json" <<JSON
   "version": 1,
   "law": "fixture",
   "exemptions": [],
-  "sqlite_crates": ["fixture-crate"],
+  "store_crates": ["fixture-crate"],
   "files": [
     {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture"}
   ]
 }
 JSON
-expect_fail "unlisted sqlite crate" "$tmp_root/crate-drift" "UNLISTED SQLITE CRATE" || status=1
+expect_fail "unlisted embedded-store crate" "$tmp_root/crate-drift" "UNLISTED STORE CRATE" || status=1
 
 if (( status != 0 )); then
     echo "persistence-surface gate self-test: FAILED" >&2

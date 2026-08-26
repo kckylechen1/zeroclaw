@@ -2,6 +2,16 @@
 //! that mirrors the tachi host bridge law, and the always-unavailable
 //! transport for TB-20 outage tests.
 //!
+//! [`InMemoryTachiTaskBridge`] is a TEST DOUBLE and binding-point
+//! stand-in, never a production transport: its task/result state is
+//! process-lifetime only (it dies with the process — deliberately NOT a
+//! durable store; TB-22), and its submit path mirrors the tachi host's
+//! ordering exactly, including the frozen order where a malformed or
+//! forbidden payload is REJECTED before the TB-7 tuple is consulted (a
+//! reused tuple carrying a different malformed digest answers
+//! `Rejected`, matching the host bridge's admission-before-binding
+//! order).
+//!
 //! [`InMemoryTachiTaskBridge`] is a faithful miniature of the tachi
 //! `TaskIntentBridge` semantics (host vertical V2a) for the four in-scope ops —
 //! same tuple law, same replay rule, same revision folding — carried in
@@ -184,20 +194,22 @@ impl InMemoryTachiTaskBridge {
         provenance: &str,
     ) {
         // Each observation is a DISTINCT canonical outcome row (a new
-        // result revision, a revised result), so the event id
-        // is unique per observation — unlike the idempotent dimension
-        // facts above, which share one id per (task, label).
-        let event_id = {
-            let state = self.state.lock();
-            let existing = state.facts.get(task_ref.as_wire()).map_or(0, Vec::len);
-            format!(
-                "outcome-{}-{}-rev{}",
-                attempt.as_wire(),
-                task_ref.as_wire(),
-                existing + 1
-            )
-        };
-        self.state.lock().append(
+        // result revision, a revised result), so the event id is unique
+        // per observation — unlike the idempotent dimension facts above,
+        // which share one id per (task, label). The id computation and
+        // the append happen under ONE lock scope: computing the id, then
+        // releasing the lock before appending would let two concurrent
+        // observations pick the same id and silently suppress one
+        // revision.
+        let mut state = self.state.lock();
+        let existing = state.facts.get(task_ref.as_wire()).map_or(0, Vec::len);
+        let event_id = format!(
+            "outcome-{}-{}-rev{}",
+            attempt.as_wire(),
+            task_ref.as_wire(),
+            existing + 1
+        );
+        state.append(
             task_ref,
             InMemoryFact {
                 event_id,

@@ -8,12 +8,19 @@
 # is a checked-in manifest (`persistence_surface.json`) enumerating the
 # codebase's detected persistence surface:
 #
-#   1. every source file containing sqlite DDL (CREATE TABLE / ALTER
-#      TABLE, including inside test blocks and string literals — drift
-#      is what this gate flags; judgment happens in the PR that updates
-#      the manifest);
-#   2. every source file opening a rusqlite connection;
-#   3. every crate declaring the rusqlite dependency.
+#   1. every source file containing sqlite DDL (case-insensitive
+#      CREATE/ALTER TABLE, including inside test blocks and string
+#      literals - drift is what this gate flags; judgment happens in the
+#      PR that updates the manifest);
+#   2. every .sql file containing DDL;
+#   3. every source file opening a rusqlite connection;
+#   4. every crate declaring an embedded-store dependency (rusqlite,
+#      sled, redb, rocksdb).
+#
+# Detection is signature-based, not semantic: constructed DDL strings or
+# a hand-rolled file store can evade it. The gate's contract is drift
+# VISIBILITY plus a PR-visible manifest change - human review stays the
+# authority.
 #
 # Exit status: 0 = surface matches the manifest; 1 = drift found (a
 # PR-visible manifest change citing a TB-22 exemption is required);
@@ -48,13 +55,14 @@ trap 'rm -rf "$tmp_dir"' EXIT
 # Detected surface: union of DDL and connection-open sites under the
 # workspace source trees, plus crates declaring rusqlite.
 {
-    rg -l --no-messages 'CREATE TABLE|ALTER TABLE' \
+    rg -l --no-messages -i 'create[[:space:]]+table|alter[[:space:]]+table' \
         "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
     rg -l --no-messages 'Connection::open' \
         "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
+    rg -l --no-messages --glob '*.sql' . "$scan_root/crates" 2>/dev/null || true
 } | sed -E "s#^$scan_root/##" | sort -u >"$tmp_dir/detected_files"
 
-rg -l --no-messages '^rusqlite' "$scan_root/crates" -g 'Cargo.toml' 2>/dev/null |
+rg -l --no-messages '^(rusqlite|sled|redb|rocksdb)' "$scan_root/crates" -g 'Cargo.toml' 2>/dev/null |
     sed -E 's#.*/crates/([^/]+)/Cargo.toml$#\1#' | sort -u >"$tmp_dir/detected_crates" || true
 
 python3 - "$manifest" "$tmp_dir/detected_files" "$tmp_dir/detected_crates" <<'PYEOF'
@@ -71,7 +79,7 @@ with open(manifest_path, encoding="utf-8") as fh:
     manifest = json.load(fh)
 
 listed_files = {entry["path"] for entry in manifest["files"]}
-listed_crates = set(manifest["sqlite_crates"])
+listed_crates = set(manifest["store_crates"])
 
 problems = []
 for path in sorted(detected_files - listed_files):
@@ -88,9 +96,9 @@ for path in sorted(listed_files - detected_files):
     )
 for crate in sorted(detected_crates - listed_crates):
     problems.append(
-        f"UNLISTED SQLITE CRATE: {crate} declares rusqlite but is not in the "
-        "manifest sqlite_crates list (TB-22: a new durable store crate needs "
-        "a PR-visible manifest change citing an exemption)."
+        f"UNLISTED STORE CRATE: {crate} declares an embedded-store dependency "
+        "but is not in the manifest store_crates list (TB-22: a new durable "
+        "store crate needs a PR-visible manifest change citing an exemption)."
     )
 
 if problems:
@@ -101,6 +109,6 @@ if problems:
 
 print(
     f"persistence-surface gate: clean "
-    f"({len(listed_files)} listed files, {len(listed_crates)} sqlite crates)."
+    f"({len(listed_files)} listed files, {len(listed_crates)} store crates)."
 )
 PYEOF

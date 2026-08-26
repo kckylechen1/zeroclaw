@@ -1,15 +1,7 @@
 {
   "version": 1,
-  "law": "TB-22 (zeroclaw #205 rev 3, owner-ratified): from ratification no new durable task/attempt/workspace/eval/approval/delivery store is added to ZeroClaw, and no annex table gains new writers. Freeze-no-growth also means no new WRITER PATH to any annex table. Enforcement: this checked-in manifest enumerates the codebase's durable persistence surface (sqlite DDL + connection sites + rusqlite crates); CI diffs the manifest against the detected surface; ANY drift (new file, removed file, new sqlite crate) fails this gate and requires a PR-visible manifest change citing a TB-22 exemption. The only standing exemptions per the contract: TB-19 watch cursors and the TB-7 outstanding-tuple journal (neither exists yet; neither is granted here).",
+  "law": "TB-22 (frozen contract rev 3, owner-ratified): from ratification no new durable task/attempt/workspace/eval/approval/delivery store is added to ZeroClaw, and no annex table gains new writers. Freeze-no-growth also means no new WRITER PATH to any annex table. Enforcement: this checked-in manifest enumerates the codebase's detected persistence surface (case-insensitive sqlite DDL incl. .sql files, rusqlite connection sites, embedded-store crate deps); CI diffs the manifest against the detected surface; ANY drift (new file, removed file, new store crate) fails this gate and requires a PR-visible manifest change citing a TB-22 exemption. Detection is signature-based, not semantic: constructed DDL strings or a hand-rolled file store can still evade it - the gate's contract is drift VISIBILITY plus a PR-visible manifest change, with human review as the authority, not impossibility. The only standing exemptions per the contract: TB-19 watch cursors and the TB-7 outstanding-tuple journal (neither exists yet; neither is granted here).",
   "exemptions": [],
-  "sqlite_crates": [
-    "zeroclaw-channels",
-    "zeroclaw-config",
-    "zeroclaw-gateway",
-    "zeroclaw-infra",
-    "zeroclaw-memory",
-    "zeroclaw-runtime"
-  ],
   "files": [
     {
       "path": "crates/zeroclaw-runtime/src/control_plane/task_store_sqlite.rs",
@@ -221,5 +213,13 @@
       "role": "test",
       "basis": "integration test fixtures"
     }
+  ],
+  "store_crates": [
+    "zeroclaw-channels",
+    "zeroclaw-config",
+    "zeroclaw-gateway",
+    "zeroclaw-infra",
+    "zeroclaw-memory",
+    "zeroclaw-runtime"
   ]
 }

@@ -72,7 +72,7 @@ fn acceptance_inputs(objective: &str) -> TaskIntentInputs {
 fn structural_context(bundle: &str) -> StructuralIntentContext {
     StructuralIntentContext {
         requester: RequesterRef::claim("zeroclaw-parent-v2b").expect("bounded"),
-        parent_ref: Some(ParentRunRef::own("run-1")),
+        parent_ref: Some(ParentRunRef::own("run-1").expect("bounded lineage id")),
         supervisor_ref: None,
         context_bundle_ref: BoundedText::new(bundle).expect("bounded"),
         source_refs: vec![SourceRef {
@@ -268,6 +268,35 @@ fn forbidden_payloads_are_rejected_over_every_text_bearing_field() {
         };
         assert_eq!(&hit, category, "payload {payload:?} placement {placement}");
     }
+}
+
+#[test]
+fn client_submit_fails_closed_on_a_raw_constructed_forbidden_intent() {
+    // Codex round-1 finding: the client must not be a bypass — a
+    // programmatically constructed intent that never went through
+    // compose still hits the encode-side admission scan before any
+    // transport is touched (fail closed locally, never fail open).
+    tokio_rt().block_on(async {
+        let host = Arc::new(InMemoryTachiTaskBridge::new());
+        let client = TachiBridgeClient::new(host.clone());
+        let mut intent = compose("clean").expect("clean base");
+        intent.objective = BoundedText::new("ssh build-host 'cargo build'").expect("bounded");
+        let receipt = client.submit(&intent, &request_id(1)).await.expect("typed");
+        let SubmitReceipt::Rejected { reason } = receipt else {
+            panic!("raw forbidden intent must be rejected client-side: {receipt:?}")
+        };
+        assert!(reason.contains("cli/shell command text"), "got: {reason}");
+        // Nothing reached the host: zero bindings, zero tasks.
+        assert_eq!(host.binding_count(), 0);
+        assert_eq!(host.task_count(), 0);
+        // The reconciling path enforces the same fail-closed law.
+        let again = client
+            .submit_reconciling(&intent, &request_id(1))
+            .await
+            .expect("typed");
+        assert!(matches!(again, SubmitReceipt::Rejected { .. }));
+        assert_eq!(host.binding_count(), 0);
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────
