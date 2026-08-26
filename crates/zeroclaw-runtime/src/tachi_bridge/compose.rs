@@ -107,6 +107,11 @@ pub enum ComposeRejection {
     /// set (TB-5 intersection law; checked before any transport call).
     #[error("intent rejected: capability not admitted for requester")]
     CapabilityNotAdmitted,
+    /// The intent's `schema` field is not the frozen `task-intent.v1`
+    /// tag — only [`compose_intent`] builds conforming intents; any
+    /// other construction fails the scan fail-closed.
+    #[error("intent rejected: schema tag mismatch")]
+    SchemaTagMismatch,
 }
 
 /// TB-4 forbidden-content categories (mirrors the tachi host's
@@ -248,55 +253,148 @@ const PRIVATE_DYAD_MARKERS: &[&str] = &["private dyad", "private_dyad", "private
 /// value (vertical V2b discrimination list: glm/codex/any model or
 /// vendor name, TB-5). Matched on word boundaries over the lowercased
 /// text so `Use Anthropic Claude as the backend` is rejected even though
-/// it is not shaped like a command. The list covers the known vendor
-/// family and its common aliases; a NOVEL vendor name not yet listed is
-/// the residual class — the authoritative rejection is the tachi host
-/// admission, and list extension is a one-line PR.
-const WATERSHED_VENDOR_TOKENS: &[&str] = &[
+/// it is not shaped like a command.
+///
+/// Coverage law: every canonical model-provider slot declared by
+/// `zeroclaw_config::for_each_model_provider_slot!` must be covered
+/// here (word tokens and/or [`WATERSHED_VENDOR_PHRASES`]) — the
+/// drift-guard test in `tests.rs` enforces it, so a new provider added
+/// upstream fails this crate's tests until the watershed list catches
+/// up. Beyond the canonical slots, the list carries the known harness
+/// CLI and vendor-alias family. A NOVEL vendor name not yet listed is
+/// the documented residual class — the authoritative rejection is the
+/// tachi host admission, and list extension is a one-line PR.
+///
+/// `together` is deliberately included despite being a common English
+/// word: it is a canonical provider id (together.ai), and the
+/// fail-closed direction (rejecting prose like `run these together`) is
+/// the contract-correct side of the trade.
+pub(crate) const WATERSHED_VENDOR_TOKENS: &[&str] = &[
+    // Canonical zeroclaw-config model-provider slots.
+    "openai",
+    "azure",
+    "anthropic",
+    "moonshot",
+    "qwen",
     "glm",
+    "minimax",
+    "zai",
+    "doubao",
+    "yi",
+    "hunyuan",
+    "qianfan",
+    "baichuan",
+    "openrouter",
+    "ollama",
+    "gemini",
+    "bedrock",
+    "telnyx",
+    "together",
+    "fireworks",
+    "groq",
+    "mistral",
+    "deepseek",
+    "cohere",
+    "perplexity",
+    "xai",
+    "cerebras",
+    "sambanova",
+    "hyperbolic",
+    "deepinfra",
+    "huggingface",
+    "ai21",
+    "reka",
+    "baseten",
+    "nscale",
+    "anyscale",
+    "nebius",
+    "friendli",
+    "stepfun",
+    "aihubmix",
+    "siliconflow",
+    "astrai",
+    "avian",
+    "deepmyst",
+    "venice",
+    "nearai",
+    "novita",
+    "nvidia",
+    "vercel",
+    "cloudflare",
+    "ovh",
+    "copilot",
+    "lmstudio",
+    "llamacpp",
+    "sglang",
+    "vllm",
+    "osaurus",
+    "litellm",
+    "lepton",
+    "github",
+    "featherless",
+    "arcee",
+    // Known alias / harness-CLI family beyond the canonical slots.
     "zhipu",
     "bigmodel",
     "chatglm",
+    "ernie",
     "codex",
     "claude",
-    "anthropic",
-    "openai",
     "chatgpt",
     "gpt",
     "o1",
-    "gemini",
-    "deepseek",
-    "qwen",
     "kimi",
-    "moonshot",
     "llama",
-    "mistral",
     "grok",
-    "xai",
-    "minimax",
-    "ernie",
-    "baichuan",
-    "hunyuan",
-    "doubao",
-    "cohere",
-    "perplexity",
-    "fireworks",
-    "openrouter",
-    "ollama",
-    "vllm",
-    "groq",
-    "bedrock",
     "aider",
     "opencode",
-    "copilot",
     "cursor",
+];
+
+/// Underscore canonical ids whose word tokens are ordinary words
+/// (`atomic_chat` → `atomic` + `chat`); matched as substrings so the id
+/// form is rejected without banning the ordinary words.
+pub(crate) const WATERSHED_VENDOR_PHRASES: &[&str] = &[
+    "atomic_chat",
+    "gemini_cli",
+    "github_models",
+    "lambda_ai",
+    "kilocli",
+];
+
+/// Canonical provider slots DELIBERATELY NOT covered by the watershed
+/// lists because the id is an ordinary dictionary word whose prose use
+/// is legitimate in objectives — banning it would reject clean intents
+/// wholesale. Each entry is a conscious, documented exemption; naming
+/// that vendor in prose still falls to the tachi host admission law
+/// (authoritative) and to human review. The drift-guard test forces
+/// every NEW upstream provider slot to be covered OR added here with a
+/// reason — silent gaps fail the build.
+pub(crate) const WATERSHED_VENDOR_EXEMPTIONS: &[(&str, &str)] = &[
+    (
+        "manifest",
+        "ordinary word (the persistence manifest); naming falls to host admission",
+    ),
+    ("morph", "ordinary verb; naming falls to host admission"),
+    ("inception", "ordinary word; naming falls to host admission"),
+    (
+        "synthetic",
+        "ordinary adjective; naming falls to host admission",
+    ),
+    (
+        "custom",
+        "ordinary adjective; naming falls to host admission",
+    ),
+    ("kilo", "ordinary unit word; naming falls to host admission"),
+    ("upstage", "ordinary verb; naming falls to host admission"),
 ];
 
 /// Execution-placement tokens banned ANYWHERE in a text-bearing value
 /// (vertical V2b discrimination list: worktree, tmux/SSH, sandbox flags,
 /// cwd — TB-4/TB-1). Word-boundary matched; `working directory` is
 /// phrase-matched because it is two words.
-const WATERSHED_PLACEMENT_TOKENS: &[&str] = &["worktree", "tmux", "ssh", "sandbox", "cwd"];
+pub(crate) const WATERSHED_PLACEMENT_TOKENS: &[&str] =
+    &["worktree", "tmux", "ssh", "sandbox", "cwd"];
 const WATERSHED_PLACEMENT_PHRASES: &[&str] = &["working directory"];
 
 /// Scan one text-bearing value against every forbidden category. Returns
@@ -351,6 +449,11 @@ fn scan_str(field: &'static str, text: &str) -> Result<(), ComposeRejection> {
             return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
         }
     }
+    for phrase in WATERSHED_VENDOR_PHRASES {
+        if lower.contains(phrase) {
+            return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
+        }
+    }
     for phrase in WATERSHED_PLACEMENT_PHRASES {
         if lower.contains(phrase) {
             return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
@@ -381,8 +484,15 @@ fn scan_str(field: &'static str, text: &str) -> Result<(), ComposeRejection> {
 }
 
 /// Scan EVERY text-bearing value of an intent (TB-4: "over every
-/// text-bearing value").
+/// text-bearing value") and pin the schema tag. The schema field is a
+/// public `String` on the wire type — a programmatically constructed
+/// intent could carry arbitrary text there, so the scan enforces the
+/// constant tag instead of trusting construction (fail closed for any
+/// intent that bypassed [`compose_intent`]).
 pub fn scan_intent(intent: &TaskIntentV1) -> Result<(), ComposeRejection> {
+    if intent.schema != SCHEMA_TAG {
+        return Err(ComposeRejection::SchemaTagMismatch);
+    }
     scan_text("objective", &intent.objective)?;
     scan_text("context_bundle_ref", &intent.context_bundle_ref)?;
     for source in &intent.source_refs {

@@ -366,6 +366,135 @@ fn watershed_dimensions_are_rejected_as_prose_anywhere_in_text() {
     );
 }
 
+#[test]
+fn watershed_vendor_list_covers_every_canonical_provider_slot() {
+    // Drift guard (codex round 6): every model-provider slot declared by
+    // zeroclaw-config must be rejected as prose. When a new provider is
+    // added upstream, this test fails until the watershed list covers
+    // it — vendor coverage is data-driven, not memory-driven.
+    macro_rules! collect_provider_ids {
+        ($(($field:ident, $type_str:literal, $cfg_ty:ty)),+ $(,)?) => {
+            vec![$($type_str),+]
+        };
+    }
+    let provider_ids: Vec<&str> =
+        zeroclaw_config::for_each_model_provider_slot!(collect_provider_ids);
+    assert!(!provider_ids.is_empty(), "collector macro ran");
+    let mut uncovered: Vec<&str> = Vec::new();
+    for id in &provider_ids {
+        let exempt = super::compose::WATERSHED_VENDOR_EXEMPTIONS
+            .iter()
+            .any(|(exempt_id, _reason)| exempt_id == id);
+        let covered = id
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .all(|token| {
+                super::compose::WATERSHED_VENDOR_TOKENS.contains(&token)
+                    || super::compose::WATERSHED_PLACEMENT_TOKENS.contains(&token)
+            })
+            || super::compose::WATERSHED_VENDOR_PHRASES.contains(id);
+        if !covered && !exempt {
+            uncovered.push(id);
+        }
+    }
+    assert!(
+        uncovered.is_empty(),
+        "canonical provider ids not covered (and not exempted with a reason) by the \
+         watershed vendor lists: {uncovered:?}"
+    );
+    // And every NON-EXEMPT id actually rejects as prose.
+    for id in &provider_ids {
+        let exempt = super::compose::WATERSHED_VENDOR_EXEMPTIONS
+            .iter()
+            .any(|(exempt_id, _reason)| exempt_id == id);
+        if exempt {
+            continue;
+        }
+        let mut inputs = acceptance_inputs("clean objective");
+        inputs.objective = BoundedText::new(*id).expect("bounded");
+        let rejection = compose_intent(
+            &inputs,
+            &repository_implementation_policy(),
+            &structural_context("bundle-7f3a"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                rejection,
+                ComposeRejection::ForbiddenContent {
+                    category: ForbiddenCategory::ExecutionDetail,
+                    ..
+                }
+            ) || matches!(
+                rejection,
+                ComposeRejection::ForbiddenContent {
+                    category: ForbiddenCategory::Command,
+                    ..
+                }
+            ),
+            "provider id {id:?} must reject as ExecutionDetail or Command prose, got {rejection:?}"
+        );
+    }
+}
+
+#[test]
+fn a_hand_built_intent_with_a_smuggled_schema_field_fails_the_scan() {
+    // Codex round 6: `TaskIntentV1.schema` is a public String; a
+    // programmatically constructed intent could carry forbidden text
+    // there. The client's before-transport scan must reject a non-tag
+    // schema fail-closed — including via `TachiBridgeClient::submit`,
+    // with ZERO transport calls.
+    struct NoCalls;
+    #[async_trait::async_trait]
+    impl TachiTaskBridge for NoCalls {
+        async fn submit(
+            &self,
+            _intent: &zeroclaw_api::taskintent::TaskIntentV1,
+            _request_id: &RequestId,
+        ) -> Result<SubmitReceipt, super::client::SubmitTransportError> {
+            panic!("smuggled-schema intent must never reach the transport");
+        }
+        async fn get(
+            &self,
+            _task_ref: &zeroclaw_api::taskintent::TaskRef,
+        ) -> Result<super::client::TaskSnapshotView, BridgeQueryError> {
+            Err(BridgeQueryError::Unavailable)
+        }
+        async fn watch(
+            &self,
+            _task_ref: &zeroclaw_api::taskintent::TaskRef,
+            _after_seq: u64,
+            _limit: usize,
+        ) -> Result<super::client::TaskEventPageView, BridgeQueryError> {
+            Err(BridgeQueryError::Unavailable)
+        }
+        async fn collect(
+            &self,
+            _task_ref: &zeroclaw_api::taskintent::TaskRef,
+            _result_revision: Option<u64>,
+        ) -> Result<super::client::ResultProjectionView, BridgeQueryError> {
+            Err(BridgeQueryError::Unavailable)
+        }
+    }
+    tokio_rt().block_on(async {
+        let client = TachiBridgeClient::new(Arc::new(NoCalls));
+        let mut intent = compose("a perfectly clean objective about the digest contract")
+            .expect("clean intent composes");
+        intent.schema = "azure --full-auto".to_string();
+        assert_eq!(
+            client.submit(&intent, &request_id(1)).await,
+            Ok(SubmitReceipt::Rejected {
+                reason: ComposeRejection::SchemaTagMismatch.to_string()
+            })
+        );
+        // Direct scan agrees.
+        assert_eq!(
+            super::compose::scan_intent(&intent),
+            Err(ComposeRejection::SchemaTagMismatch)
+        );
+    });
+}
+
 /// Transport wrapper that COUNTS port.submit calls — the discrimination
 /// instrument for the client fail-closed law: a client-side rejection
 /// must mean ZERO transport calls, independent of what the host would
