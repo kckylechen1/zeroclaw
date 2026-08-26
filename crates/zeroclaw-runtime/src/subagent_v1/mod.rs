@@ -6,6 +6,9 @@
 //! Parent
 //!   → SubAgentProfileV1     admitted, immutable                     (SA-3/SA-4)
 //!   → ContextBundleV1       digest-bound content snapshot           (SA-18/SA-19)
+//!   → admit()               the FIRST privacy boundary: Private     (SA-14/SA-15)
+//!                           Dyad / AgentSoul refs rejected, the
+//!                           AdmittedContextBundleV1 cannot express them
 //!   → lineage_ref           the ONE depth authority                 (SA-9)
 //!   → ReasoningSubAgent     run-scoped principal                    (SA-13)
 //!   → SubAgentReportV1      the ONLY child→parent result channel    (SA-21)
@@ -33,10 +36,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use zeroclaw_api::subagent_v1::{
-    BundleRedactionPolicy, ContextBundleV1, ContextClassV1, Finding, LineageRef, ModelPolicyV1,
-    ParentRunRef, ProposedCandidate, Recommendation, ReportChannelMessage, SubAgentBudgetV1,
-    SubAgentProfileV1, SubAgentReportV1, SubAgentRoleV1, SubAgentRunRef, SubAgentTerminalFact,
-    SubAgentToolNameV1, SubAgentToolPolicyV1, SubAgentUsage, VersionedProfileRef,
+    AdmittedContextBundleV1, BundleRedactionPolicy, ContextBundleV1, ContextClassV1, Finding,
+    LineageRef, ModelPolicyV1, ParentRunRef, ProposedCandidate, Recommendation,
+    ReportChannelMessage, SubAgentBudgetV1, SubAgentProfileV1, SubAgentReportV1, SubAgentRoleV1,
+    SubAgentRunRef, SubAgentTerminalFact, SubAgentToolNameV1, SubAgentToolPolicyV1, SubAgentUsage,
+    VersionedProfileRef,
 };
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::schema::Config;
@@ -885,7 +889,7 @@ impl SubAgentRunV1 {
                     revision: self.profile.revision,
                     digest: self.pinned_digest.clone(),
                 },
-                context_bundle_ref: bundle.bundle_id.clone(),
+                context_bundle_ref: bundle.bundle_id().to_string(),
                 status,
                 summary,
                 findings: Vec::new(),
@@ -957,15 +961,17 @@ impl SubAgentRunV1 {
             .await;
         }
 
-        // SA-5/SA-14/SA-15/SA-18/SA-19: the policy-enforced projection.
-        // The bundle meets the admitted profile HERE: classes not in
+        // SA-5/SA-14/SA-15/SA-18/SA-19: the policy-enforced projection
+        // over the ADMITTED bundle. Admission (the FIRST privacy
+        // boundary) already rejected Private-Dyad/AgentSoul-derived refs
+        // before the run could hold the bundle; what meets the profile
+        // HERE is narrowing only: classes not in
         // `context_policy.allowed_classes` are dropped, source refs on
         // partitions not in `privacy_policy.permitted_partitions` are
-        // REFUSED with a typed error (AgentSoul unconditionally — no v1
-        // profile can permit it), PrivateDyad content is REDACTED
-        // (SA-14.3 existence-blindness), and the projection size
-        // ceiling enforces. A bundle is content, never authority
-        // (SA-18): this filter can only narrow, never widen.
+        // REFUSED with a typed error, and the projection size ceiling
+        // enforces. Raw-side projection redaction remains as
+        // defense-in-depth elsewhere; a bundle is content, never
+        // authority (SA-18): this filter can only narrow, never widen.
         let projection = match bundle.projection_with_policy(
             &self.profile.context_policy.allowed_classes,
             &self.profile.privacy_policy.permitted_partitions,
@@ -1257,13 +1263,16 @@ impl ReportChannelHandle {
 }
 
 /// The execution context: EXACTLY the six SA-6 inputs — objective,
-/// bundle, capability list (materialized from the admitted profile),
-/// structured-report channel, lineage ref, shared budget meter — and
-/// nothing else. No `Config`, no tool registry, no channel map, no
-/// memory backend (compile-level signature test in this module's tests).
+/// ADMITTED bundle (the SA-14/SA-15 structural boundary: child
+/// execution accepts only [`AdmittedContextBundleV1`], whose partition
+/// enum cannot express Private Dyad or Agent Soul), capability list
+/// (materialized from the admitted profile), structured-report
+/// channel, lineage ref, shared budget meter — and nothing else. No
+/// `Config`, no tool registry, no channel map, no memory backend
+/// (compile-level signature test in this module's tests).
 pub struct SubAgentExecutionContextV1 {
     objective: ObjectiveV1,
-    bundle: ContextBundleV1,
+    bundle: AdmittedContextBundleV1,
     capabilities: ChildToolSet,
     report_channel: ReportChannelHandle,
     lineage: LineageRef,
@@ -1274,7 +1283,7 @@ impl SubAgentExecutionContextV1 {
     #[must_use]
     pub fn new(
         objective: ObjectiveV1,
-        bundle: ContextBundleV1,
+        bundle: AdmittedContextBundleV1,
         capabilities: ChildToolSet,
         report_channel: ReportChannelHandle,
         lineage: LineageRef,
@@ -1299,8 +1308,8 @@ impl SubAgentExecutionContextV1 {
     pub fn inventory(&self) -> ContextInventory {
         ContextInventory {
             objective_bytes: self.objective.as_str().len(),
-            bundle_id: self.bundle.bundle_id.clone(),
-            bundle_digest: self.bundle.digest.clone(),
+            bundle_id: self.bundle.bundle_id().to_string(),
+            bundle_digest: self.bundle.digest().to_string(),
             capability_names: self
                 .capabilities
                 .names()
@@ -1817,6 +1826,15 @@ impl ReasoningSubagentTool {
             redaction_policy: BundleRedactionPolicy::default(),
         };
         bundle.digest = bundle.compute_digest();
+
+        // The FIRST privacy boundary (SA-14/SA-15): reject — never
+        // filter — Private-Dyad/AgentSoul-derived refs before the run
+        // exists. The V1 path builds an empty source-ref list, so this
+        // holds trivially today; the boundary exists so a future
+        // capture sweep cannot regress to redaction-only protection.
+        let bundle = bundle.admit().map_err(|error| {
+            format!("context bundle refused at the admitted-bundle boundary: {error}")
+        })?;
 
         let capabilities = ChildToolSet::from_profile(&profile)
             .map_err(|e| format!("child tool set admission failed: {e}"))?;
