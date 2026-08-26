@@ -215,11 +215,11 @@
     }
   ],
   "store_crates": [
-    "zeroclaw-channels",
-    "zeroclaw-config",
-    "zeroclaw-gateway",
-    "zeroclaw-infra",
-    "zeroclaw-memory",
-    "zeroclaw-runtime"
+    "crates/zeroclaw-channels",
+    "crates/zeroclaw-config",
+    "crates/zeroclaw-gateway",
+    "crates/zeroclaw-infra",
+    "crates/zeroclaw-memory",
+    "crates/zeroclaw-runtime"
   ]
 }

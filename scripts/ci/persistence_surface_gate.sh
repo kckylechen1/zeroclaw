@@ -59,11 +59,13 @@ trap 'rm -rf "$tmp_dir"' EXIT
         "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
     rg -l --no-messages 'Connection::open' \
         "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
-    rg -l --no-messages --glob '*.sql' . "$scan_root/crates" 2>/dev/null || true
+    rg -l --no-messages --glob '*.sql' . "$scan_root/crates" "$scan_root/apps" 2>/dev/null || true
 } | sed -E "s#^$scan_root/##" | sort -u >"$tmp_dir/detected_files"
 
-rg -l --no-messages '^(rusqlite|sled|redb|rocksdb)' "$scan_root/crates" -g 'Cargo.toml' 2>/dev/null |
-    sed -E 's#.*/crates/([^/]+)/Cargo.toml$#\1#' | sort -u >"$tmp_dir/detected_crates" || true
+{
+    rg -l --no-messages '^(rusqlite|sled|redb|rocksdb)' "$scan_root/crates" -g 'Cargo.toml' 2>/dev/null || true
+    rg -l --no-messages '^(rusqlite|sled|redb|rocksdb)' "$scan_root/apps" -g 'Cargo.toml' 2>/dev/null || true
+} | sed -E "s#^$scan_root/##" | sed -E 's#^((crates|apps)/[^/]+)/Cargo.toml$#\1#' | sort -u >"$tmp_dir/detected_crates"
 
 python3 - "$manifest" "$tmp_dir/detected_files" "$tmp_dir/detected_crates" <<'PYEOF'
 import json

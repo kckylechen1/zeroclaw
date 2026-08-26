@@ -428,7 +428,13 @@ impl TachiBridgeClient {
 
     /// Watch from the task's in-memory last-seen cursor (first watch
     /// starts from seq 0 — full history backfill, TB-9). The cursor
-    /// advances only after a successfully observed page.
+    /// advances only after a successfully observed page, and only
+    /// MONOTONICALLY: a slower in-flight response carrying an older page
+    /// can never regress the cursor below a sequence a faster response
+    /// already recorded (TB-9 reconnect truth). Concurrent watch calls
+    /// each observe from the cursor at their start — overlap between
+    /// concurrent pages is duplicate delivery, tolerated by the TB-9
+    /// law and deterministically suppressible by `(seq, event_id)`.
     pub async fn watch_new_events(
         &self,
         task_ref: &TaskRef,
@@ -437,9 +443,11 @@ impl TachiBridgeClient {
         let after_seq = *self.cursors.lock().get(task_ref.as_wire()).unwrap_or(&0);
         let page = self.port.watch(task_ref, after_seq, limit).await?;
         if let Some(last) = page.events.last() {
-            self.cursors
-                .lock()
-                .insert(task_ref.as_wire().to_string(), last.seq);
+            let mut cursors = self.cursors.lock();
+            let cursor = cursors.entry(task_ref.as_wire().to_string()).or_insert(0);
+            if last.seq > *cursor {
+                *cursor = last.seq;
+            }
         }
         Ok(page)
     }

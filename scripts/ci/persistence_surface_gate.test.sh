@@ -54,7 +54,7 @@ SQL
   "version": 1,
   "law": "fixture",
   "exemptions": [],
-  "store_crates": ["fixture-crate"],
+  "store_crates": ["crates/fixture-crate"],
   "files": [
     {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture"},
     {"path":"crates/other-crate/migrations/001_smuggled.sql","store":"pending_results.db","role":"store","basis":"fixture"}$smuggled_entry
@@ -116,7 +116,7 @@ cat >"$tmp_root/crate-drift/manifest.json" <<JSON
   "version": 1,
   "law": "fixture",
   "exemptions": [],
-  "store_crates": ["fixture-crate"],
+  "store_crates": ["crates/fixture-crate"],
   "files": [
     {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture"}
   ]

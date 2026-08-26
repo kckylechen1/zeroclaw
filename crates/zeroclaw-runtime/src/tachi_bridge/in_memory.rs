@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use sha2::{Digest as _, Sha256};
 use zeroclaw_api::taskintent::{AttemptRef, RequestId, SCHEMA_TAG, TaskIntentV1, TaskRef};
 
 use super::client::{
@@ -63,6 +64,23 @@ enum FactDetail {
         diff_present: bool,
         provenance: String,
     },
+}
+
+/// Real SHA-256 lower-hex digest over a canonical fact identity — the
+/// `TaskEventView::payload_digest` contract is an actual hex digest, not
+/// a label.
+fn fact_digest(parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\x1f");
+    }
+    let bytes = hasher.finalize();
+    let mut out = String::with_capacity(2 * bytes.len());
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 #[derive(Debug, Default)]
@@ -156,7 +174,12 @@ impl InMemoryTachiTaskBridge {
             InMemoryFact {
                 event_id: format!("exec-{label}-{}-{occurrence}", task_ref.as_wire()),
                 kind: "execution".to_string(),
-                payload_digest: format!("sha256:{label}:{occurrence}"),
+                payload_digest: fact_digest(&[
+                    "execution",
+                    task_ref.as_wire(),
+                    label,
+                    &occurrence.to_string(),
+                ]),
                 detail: FactDetail::Execution {
                     label: label.to_string(),
                 },
@@ -183,7 +206,12 @@ impl InMemoryTachiTaskBridge {
             InMemoryFact {
                 event_id: format!("adj-{label}-{}-{occurrence}", task_ref.as_wire()),
                 kind: "adjudication".to_string(),
-                payload_digest: format!("sha256:{label}:{occurrence}"),
+                payload_digest: fact_digest(&[
+                    "adjudication",
+                    task_ref.as_wire(),
+                    label,
+                    &occurrence.to_string(),
+                ]),
                 detail: FactDetail::Adjudication {
                     label: label.to_string(),
                 },
@@ -231,9 +259,14 @@ impl InMemoryTachiTaskBridge {
         state.append(
             task_ref,
             InMemoryFact {
-                event_id,
+                event_id: event_id.clone(),
                 kind: "outcome_observed".to_string(),
-                payload_digest: format!("sha256:outcome:{reported_outcome}"),
+                payload_digest: fact_digest(&[
+                    "outcome",
+                    task_ref.as_wire(),
+                    event_id.as_str(),
+                    reported_outcome,
+                ]),
                 detail: FactDetail::OutcomeObserved {
                     attempt,
                     reported_outcome: reported_outcome.to_string(),
@@ -447,7 +480,7 @@ impl TachiTaskBridge for InMemoryTachiTaskBridge {
             InMemoryFact {
                 event_id: format!("submitted-{}", task_ref.as_wire()),
                 kind: "task_submitted".to_string(),
-                payload_digest: digest.clone(),
+                payload_digest: fact_digest(&["task_submitted", task_ref.as_wire(), &digest]),
                 detail: FactDetail::TaskSubmitted { digest },
             },
         );

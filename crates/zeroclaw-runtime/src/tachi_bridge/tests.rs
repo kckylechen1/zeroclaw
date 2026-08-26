@@ -411,6 +411,48 @@ fn client_rejects_forbidden_content_in_requester_authored_refs() {
             );
             assert_eq!(spy.submit_calls(), 0, "{field}: transport never touched");
         }
+        // The reconciling path enforces the same ref law (mutation-
+        // discriminated: deleting the scan from submit_reconciling alone
+        // must turn this red).
+        let spy = SubmitSpy::new(Arc::new(InMemoryTachiTaskBridge::new()));
+        let client = TachiBridgeClient::new(spy.clone());
+        let mut intent = compose("clean").expect("clean");
+        intent.supervisor_ref = Some(SubAgentRunRef::own("tmux attach -t x").expect("bounded"));
+        let receipt = client
+            .submit_reconciling(&intent, &request_id(1))
+            .await
+            .expect("typed");
+        assert!(
+            matches!(receipt, SubmitReceipt::Rejected { .. }),
+            "{receipt:?}"
+        );
+        assert_eq!(
+            spy.submit_calls(),
+            0,
+            "reconciling path: transport untouched"
+        );
+        // A forbidden BODY inside a decoded retry_of ref (the task:
+        // namespace itself is legitimate for this field; the body is
+        // still content-scanned).
+        let spy = SubmitSpy::new(Arc::new(InMemoryTachiTaskBridge::new()));
+        let client = TachiBridgeClient::new(spy.clone());
+        let mut intent = compose("clean").expect("clean");
+        intent.retry_of = Some(
+            serde_json::from_value(serde_json::Value::String(
+                "task:ghp_0123456789abcdef".to_string(),
+            ))
+            .expect("wire-shaped"),
+        );
+        let receipt = client.submit(&intent, &request_id(1)).await.expect("typed");
+        assert!(
+            matches!(receipt, SubmitReceipt::Rejected { .. }),
+            "{receipt:?}"
+        );
+        assert_eq!(
+            spy.submit_calls(),
+            0,
+            "forbidden retry_of body: transport untouched"
+        );
         // A clean retry lineage (a decoded prior TaskRef) still submits.
         let host = Arc::new(InMemoryTachiTaskBridge::new());
         let client = TachiBridgeClient::new(host.clone());
@@ -614,7 +656,12 @@ fn watch_backfill_replays_exactly_the_missed_events() {
             assert!(!event.source_revision.is_empty());
             assert!(!event.occurred_at.is_empty());
             assert!(!event.recorded_at.is_empty());
-            assert!(!event.payload_digest.is_empty());
+            assert!(
+                event.payload_digest.len() == 64
+                    && event.payload_digest.chars().all(|c| c.is_ascii_hexdigit()),
+                "payload digest must be SHA-256 lower hex: {}",
+                event.payload_digest
+            );
             assert!(!event.visibility.is_empty());
             assert!(!event.kind.is_empty());
         }
@@ -643,6 +690,22 @@ fn repeated_transitions_are_distinct_facts_and_fold_in_order() {
         host.ingest_execution(&task_ref, "running");
         let snapshot = client.get(&task_ref).await.expect("snapshot");
         assert_eq!(snapshot.execution.label(), "running");
+        // Repeated labels are DISTINCT facts: their event ids differ
+        // (asserted on the id strings themselves - seq uniqueness alone
+        // cannot prove this).
+        let page = host.watch(&task_ref, 0, 100).await.expect("page");
+        let running_ids: Vec<&str> = page
+            .events
+            .iter()
+            .filter(|event| event.event_id.starts_with("exec-running-"))
+            .map(|event| event.event_id.as_str())
+            .collect();
+        assert_eq!(running_ids.len(), 2, "two running facts: {running_ids:?}");
+        assert_ne!(running_ids[0], running_ids[1]);
+        let mut all_ids: Vec<&str> = page.events.iter().map(|e| e.event_id.as_str()).collect();
+        all_ids.sort_unstable();
+        all_ids.dedup();
+        assert_eq!(all_ids.len(), page.events.len(), "event ids are unique");
         // Outcome → accepted → new outcome: the latest revision carries
         // the latest outcome with an adjudication that applies to IT.
         let attempt: zeroclaw_api::taskintent::AttemptRef =
@@ -689,7 +752,27 @@ fn repeated_transitions_are_distinct_facts_and_fold_in_order() {
 
 #[test]
 #[should_panic(expected = "admitted tasks only")]
-fn ingesting_facts_for_an_unadmitted_task_ref_is_refused() {
+fn ingesting_execution_for_an_unadmitted_task_ref_is_refused() {
+    let host = InMemoryTachiTaskBridge::new();
+    let fabricated: zeroclaw_api::taskintent::TaskRef =
+        serde_json::from_value(serde_json::Value::String("task:inmem-00000001".to_string()))
+            .expect("wire-shaped fabricated ref");
+    host.ingest_execution(&fabricated, "running");
+}
+
+#[test]
+#[should_panic(expected = "admitted tasks only")]
+fn ingesting_adjudication_for_an_unadmitted_task_ref_is_refused() {
+    let host = InMemoryTachiTaskBridge::new();
+    let fabricated: zeroclaw_api::taskintent::TaskRef =
+        serde_json::from_value(serde_json::Value::String("task:inmem-00000001".to_string()))
+            .expect("wire-shaped fabricated ref");
+    host.ingest_adjudication(&fabricated, "accepted");
+}
+
+#[test]
+#[should_panic(expected = "admitted tasks only")]
+fn observing_an_outcome_for_an_unadmitted_task_ref_is_refused() {
     // Host-double discipline: the ingest drivers accept
     // only refs the double itself admitted via submit. A fabricated
     // future ref (`task:inmem-00000001` is predictable) cannot pre-seed
