@@ -70,7 +70,7 @@ trap 'rm -rf "$tmp_dir"' EXIT
 # source tree: crates/, apps/, the ROOT package (src/), tools/, and
 # xtask — the root Cargo.toml is itself a workspace member, so a ledger
 # smuggled into src/ must not be invisible to the scan.
-scan_dirs=("$scan_root/crates" "$scan_root/apps" "$scan_root/src" "$scan_root/tools" "$scan_root/xtask")
+scan_dirs=("$scan_root/crates" "$scan_root/apps" "$scan_root/src" "$scan_root/tests" "$scan_root/benches" "$scan_root/tools" "$scan_root/xtask")
 scan_dirs=("${scan_dirs[@]}" "$scan_root/dev" "$scan_root/scripts")
 {
     for d in "${scan_dirs[@]}"; do
