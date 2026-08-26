@@ -394,9 +394,45 @@
       "role": "store",
       "basis": "#205 annex row 3: ProcedureRun side migrates to Tachi; definitions stay",
       "signals": 8
+    },
+    {
+      "path": "src/bin/zeroclaw-acp-bridge.rs",
+      "store": "acp-bridge-state",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by widened scan (root package src/): OpenOptions write path",
+      "signals": 1
+    },
+    {
+      "path": "src/commands/self_test.rs",
+      "store": "self-test.db",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by widened scan (root package src/): rusqlite connection open in self-test",
+      "signals": 2
+    },
+    {
+      "path": "src/memory/battle_tests.rs",
+      "store": "memories.db",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by widened scan (root package src/): rusqlite test writes",
+      "signals": 1
+    },
+    {
+      "path": "src/migration.rs",
+      "store": "zeroclaw.db",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by widened scan (root package src/): rusqlite migration module",
+      "signals": 1
+    },
+    {
+      "path": "tools/fill-translations/src/main.rs",
+      "store": "translations.json",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by widened scan (tools/): OpenOptions write path",
+      "signals": 1
     }
   ],
   "store_crates": [
+    "Cargo.toml",
     "crates/zeroclaw-channels",
     "crates/zeroclaw-config",
     "crates/zeroclaw-gateway",

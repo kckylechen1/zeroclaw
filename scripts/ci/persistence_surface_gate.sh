@@ -23,9 +23,10 @@
 #      sled, redb, rocksdb).
 #
 # Additionally, each manifest entry pins an exact per-file SIGNAL COUNT
-# (matching lines across all patterns), so in-place growth — a new
-# table, connection site, or write path inside an already-listed file —
-# trips the gate exactly like a new file would (TB-22 no-new-writer-path).
+# (matching OCCURRENCES across all patterns — two signals on one line
+# count twice), so in-place growth — a new table, connection site, or
+# write path inside an already-listed file — trips the gate exactly like
+# a new file would (TB-22 no-new-writer-path).
 #
 # Detection is signature-based, not semantic: a determined author can
 # still evade it (constructed DDL fragments, file writes without
@@ -65,30 +66,41 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 # Detected surface: DDL (incl. .txt/.md), connection-open sites,
 # store-crate mentions (alias-proof), OpenOptions write paths, and
-# store-crate dependencies under the workspace source trees.
+# store-crate dependencies. Scan roots cover EVERY workspace member's
+# source tree: crates/, apps/, the ROOT package (src/), tools/, and
+# xtask — the root Cargo.toml is itself a workspace member, so a ledger
+# smuggled into src/ must not be invisible to the scan.
+scan_dirs=("$scan_root/crates" "$scan_root/apps" "$scan_root/src" "$scan_root/tools" "$scan_root/xtask")
+scan_dirs=("${scan_dirs[@]}" "$scan_root/dev" "$scan_root/scripts")
 {
-    rg -l --no-messages -i -U \
-        'create[[:space:]]+table|alter[[:space:]]+table|create[[:space:]]*/\*[^*]*\*/[[:space:]]*table' \
-        "$scan_root/crates" "$scan_root/apps" -g '*.rs' -g '*.txt' -g '*.md' 2>/dev/null || true
-    rg -l --no-messages 'Connection::open' \
-        "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
-    rg -l --no-messages --glob '*.sql' . "$scan_root/crates" "$scan_root/apps" 2>/dev/null || true
-    rg -l --no-messages -w -e 'rusqlite' -e 'sled' -e 'redb' -e 'rocksdb' \
-        "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
-    rg -l --no-messages 'OpenOptions' \
-        "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
+    for d in "${scan_dirs[@]}"; do
+        [[ -d "$d" ]] || continue
+        rg -l --no-messages -i -U \
+            'create[[:space:]]+table|alter[[:space:]]+table|create[[:space:]]*/\*[^*]*\*/[[:space:]]*table' \
+            "$d" -g '*.rs' -g '*.txt' -g '*.md' 2>/dev/null || true
+        rg -l --no-messages 'Connection::open' \
+            "$d" -g '*.rs' 2>/dev/null || true
+        rg -l --no-messages --glob '*.sql' . "$d" 2>/dev/null || true
+        rg -l --no-messages -w -e 'rusqlite' -e 'sled' -e 'redb' -e 'rocksdb' \
+            "$d" -g '*.rs' 2>/dev/null || true
+        rg -l --no-messages 'OpenOptions' \
+            "$d" -g '*.rs' 2>/dev/null || true
+    done
 } | sed -E "s#^$scan_root/##" | sort -u >"$tmp_dir/detected_files"
 
 {
+    for d in "${scan_dirs[@]}"; do
+        [[ -d "$d" ]] || continue
+        rg -l --no-messages \
+            -e "^[[:space:]]*(rusqlite|sled|redb|rocksdb)[[:space:]]*=" \
+            -e "^\\[[^]]*dependencies\\.(rusqlite|sled|redb|rocksdb)\\]" \
+            "$d" -g 'Cargo.toml' 2>/dev/null || true
+    done
     rg -l --no-messages \
         -e "^[[:space:]]*(rusqlite|sled|redb|rocksdb)[[:space:]]*=" \
         -e "^\\[[^]]*dependencies\\.(rusqlite|sled|redb|rocksdb)\\]" \
-        "$scan_root/crates" -g 'Cargo.toml' 2>/dev/null || true
-    rg -l --no-messages \
-        -e "^[[:space:]]*(rusqlite|sled|redb|rocksdb)[[:space:]]*=" \
-        -e "^\\[[^]]*dependencies\\.(rusqlite|sled|redb|rocksdb)\\]" \
-        "$scan_root/apps" -g 'Cargo.toml' 2>/dev/null || true
-} | sed -E "s#^$scan_root/##" | sed -E 's#^((crates|apps)/[^/]+)/Cargo.toml$#\1#' | sort -u >"$tmp_dir/detected_crates"
+        "$scan_root/Cargo.toml" 2>/dev/null || true
+} | sed -E "s#^$scan_root/##" | sed -E 's#^((crates|apps|tools|xtask)/[^/]+)/Cargo.toml$#\1#' | sort -u >"$tmp_dir/detected_crates"
 
 # Signal counts: per detected file, the number of matching OCCURRENCES
 # (not lines — two signals on one line count twice) across every

@@ -40,9 +40,14 @@
 //!   scan covers every `BoundedText` field of the intent; the typed refs
 //!   are namespace- and length-enforced instead (they carry no free
 //!   text). The scan is category-law, not a prose ban: text that merely
-//!   MENTIONS a vendor inside an otherwise-clean objective is admitted
-//!   by the frozen law on BOTH sides — the structural bans above are
-//!   what make placement impossible.
+//!   MENTIONS a vendor inside an otherwise-clean objective passes THIS
+//!   mirrored scan (and the host-side law it mirrors) — the structural
+//!   bans above are what make placement impossible. The V2b CLIENT adds
+//!   a deliberate strict superset on top
+//!   (`zeroclaw-runtime`'s `tachi_bridge::compose` watershed layer):
+//!   vendor/model/worktree/cwd/tmux-SSH/sandbox/CLI-flag PROSE is
+//!   rejected at compose time before anything is sent. The client may
+//!   reject more than the mirrored law; it may never reject less.
 //! - **`TaskRef`/`AttemptRef` are decode-only here** (TB-6): Tachi mints
 //!   them; the ZeroClaw side has NO public constructor, no `mint`, and
 //!   no `From<String>` — there is no constructor API, so no code path

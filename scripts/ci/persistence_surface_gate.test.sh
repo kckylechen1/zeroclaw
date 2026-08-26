@@ -177,10 +177,7 @@ expect_fail "DDL in .txt sidecar" "$tmp_root/txtddl" "UNLISTED PERSISTENCE-SURFA
 
 # (d) in-place growth inside an already-listed file: same file set, one
 #     MORE table than the manifest pins — membership alone would pass;
-#     the signal count must trip it. The second fixture puts BOTH the
-#     new table and a new OpenOptions site on ONE line with an existing
-#     signal shape — occurrence counting (rg -o | wc -l), not line
-#     counting, must still trip it.
+#     the signal count must trip it.
 evasion_tree "$tmp_root/growth"
 cat >>"$tmp_root/growth/crates/fixture-crate/src/store.rs" <<'RS'
 
@@ -190,10 +187,15 @@ pub fn ddl2() -> &'static str {
 RS
 expect_fail "in-place ledger growth in listed file" "$tmp_root/growth" "SIGNAL-COUNT DRIFT" || status=1
 
+# (e) SAME-LINE growth: the fixture rewrites the listed file so the
+#     number of MATCHING LINES is unchanged (1) but occurrences double
+#     (two CREATE TABLE on the one string line). Line-count-based
+#     pinning would NOT trip this; occurrence counting must.
 evasion_tree "$tmp_root/same-line-growth"
-cat >>"$tmp_root/same-line-growth/crates/fixture-crate/src/store.rs" <<'RS'
-
-pub fn ddl2() -> &'static str { "CREATE TABLE t2 (id)"; }  // plus: let _ = OpenOptions::new();
+cat >"$tmp_root/same-line-growth/crates/fixture-crate/src/store.rs" <<'RS'
+pub fn ddl() -> &'static str {
+    "CREATE TABLE IF NOT EXISTS kept (id INTEGER PRIMARY KEY); CREATE TABLE second_table (id INTEGER)"
+}
 RS
 expect_fail "same-line signal growth in listed file" "$tmp_root/same-line-growth" "SIGNAL-COUNT DRIFT" || status=1
 
