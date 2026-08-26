@@ -270,6 +270,94 @@ fn forbidden_payloads_are_rejected_over_every_text_bearing_field() {
     }
 }
 
+#[test]
+fn watershed_dimensions_are_rejected_as_prose_anywhere_in_text() {
+    // Row 4 discrimination list, PROSE form (codex round finding): the
+    // banned dimensions must be rejected even when the text is not
+    // shaped like a command or a path — a vendor name as backend prose,
+    // a worktree as a relative path, a cwd/tmux/sandbox mention, or a
+    // CLI flag as a standalone token. Each case mutates ONLY the
+    // objective of an otherwise clean intent.
+    let cases: &[(&str, ForbiddenCategory)] = &[
+        // Vendor/model names as prose (TB-5).
+        (
+            "Use Anthropic Claude as the backend",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        (
+            "route this to glm-4 for speed",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        (
+            "prefer deepseek over the default",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        // Worktree/placement vocabulary (TB-4).
+        (
+            "do the work in a worktree ../feature-v2b",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        (
+            "clone into wt-2 then compare against ./main",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        // cwd (TB-1 dimension).
+        (
+            "set cwd to the repository root first",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        (
+            "run from the working directory of the repo",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        // tmux/SSH as prose (TB-4).
+        (
+            "keep a tmux session alive during the run",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        (
+            "tunnel over ssh for the build",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        // Sandbox flags (TB-4).
+        (
+            "disable the sandbox for this one",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        // CLI flags as standalone tokens (TB-4).
+        (
+            "pass --full-auto to the tool",
+            ForbiddenCategory::ExecutionDetail,
+        ),
+        ("invoke with -rf once", ForbiddenCategory::ExecutionDetail),
+    ];
+    for (payload, expected) in cases {
+        let mut inputs = acceptance_inputs("clean objective");
+        inputs.objective = BoundedText::new(*payload).expect("bounded");
+        let rejection = compose_intent(
+            &inputs,
+            &repository_implementation_policy(),
+            &structural_context("bundle-7f3a"),
+        )
+        .unwrap_err();
+        let ComposeRejection::ForbiddenContent { category: hit, .. } = rejection else {
+            panic!("expected ForbiddenContent for {payload:?}, got {rejection:?}");
+        };
+        assert_eq!(&hit, expected, "payload {payload:?}");
+    }
+    // Discrimination control: ordinary implementation prose still passes.
+    let clean = compose_intent(
+        &acceptance_inputs("add a regression test for the digest contract"),
+        &repository_implementation_policy(),
+        &structural_context("bundle-7f3a"),
+    )
+    .expect("clean objective composes");
+    assert_eq!(
+        clean.objective.as_str(),
+        "add a regression test for the digest contract"
+    );
+}
+
 /// Transport wrapper that COUNTS port.submit calls — the discrimination
 /// instrument for the client fail-closed law: a client-side rejection
 /// must mean ZERO transport calls, independent of what the host would
@@ -813,8 +901,7 @@ fn payload_digest_is_the_canonical_json_sha256_of_the_payload() {
             .find(|e| e.kind == "execution")
             .expect("execution event");
         let expected_payload = serde_json::json!({"kind": "execution", "label": "running"});
-        let canonical =
-            zeroclaw_api::taskintent::canonical_json(&expected_payload).to_string();
+        let canonical = zeroclaw_api::taskintent::canonical_json(&expected_payload).to_string();
         use sha2::Digest as _;
         let expected = sha2::Sha256::digest(canonical.as_bytes());
         let hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
@@ -836,9 +923,11 @@ fn watch_cursor_never_regresses_on_a_stale_out_of_order_response() {
     // A scripted transport returns an OLDER page after a newer one (the
     // slow-response race): the cursor must keep the higher sequence.
     struct ScriptedWatch {
-        pages: std::sync::Mutex<std::collections::VecDeque<
-            Result<super::client::TaskEventPageView, super::client::BridgeQueryError>,
-        >>,
+        pages: std::sync::Mutex<
+            std::collections::VecDeque<
+                Result<super::client::TaskEventPageView, super::client::BridgeQueryError>,
+            >,
+        >,
     }
 
     #[async_trait::async_trait]
@@ -884,7 +973,9 @@ fn watch_cursor_never_regresses_on_a_stale_out_of_order_response() {
         }
     }
 
-    fn page_with(seqs: &[u64]) -> Result<super::client::TaskEventPageView, super::client::BridgeQueryError> {
+    fn page_with(
+        seqs: &[u64],
+    ) -> Result<super::client::TaskEventPageView, super::client::BridgeQueryError> {
         Ok(super::client::TaskEventPageView {
             task_ref: serde_json::from_value(serde_json::Value::String("task:x".to_string()))
                 .expect("wire-shaped"),

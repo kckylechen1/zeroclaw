@@ -12,8 +12,12 @@
 //!
 //! Encode-side admission ([`scan_intent`]) mirrors the tachi host's
 //! forbidden-content categories so a violation is caught BEFORE anything
-//! is sent; the host-side admission remains authoritative. Both sides
-//! use the same category set and marker lists.
+//! is sent; the host-side admission remains authoritative. The mirrored
+//! lists are byte-identical to the host's; on top of them the client
+//! runs a STRICT SUPERSET watershed layer (`ExecutionDetail`): vendor /
+//! model / worktree / cwd / tmux-SSH / sandbox / CLI-flag dimensions are
+//! rejected as PROSE anywhere in a text-bearing value. The client may
+//! reject more than the host; it may never reject less.
 
 use std::collections::BTreeSet;
 
@@ -125,6 +129,15 @@ pub enum ForbiddenCategory {
     /// Caller-minted task/attempt id smuggled as content.
     #[error("caller-minted task/attempt id")]
     CallerMintedRef,
+    /// Execution detail named as PROSE in a text-bearing value — a
+    /// vendor/model name, worktree, cwd, tmux/SSH, sandbox, or CLI-flag
+    /// token anywhere in the text (vertical V2b discrimination list).
+    /// Client-side strict superset of the mirrored host categories: the
+    /// host law stays authoritative host-side; this layer exists so the
+    /// watershed dimensions are rejected before transport even when they
+    /// are not shaped like commands or paths.
+    #[error("execution detail named in text")]
+    ExecutionDetail,
 }
 
 /// Compose failure that is not a policy/content rejection.
@@ -231,6 +244,40 @@ const WORKTREE_MARKERS: &[&str] = &[
 /// Markers for Private-Dyad-labeled content (TB-4 category 4).
 const PRIVATE_DYAD_MARKERS: &[&str] = &["private dyad", "private_dyad", "private-dyad"];
 
+/// Vendor/model names the Parent must never place in any text-bearing
+/// value (vertical V2b discrimination list: glm/codex/any model or
+/// vendor name, TB-5). Matched on word boundaries over the lowercased
+/// text so `Use Anthropic Claude as the backend` is rejected even though
+/// it is not shaped like a command.
+const WATERSHED_VENDOR_TOKENS: &[&str] = &[
+    "glm",
+    "codex",
+    "claude",
+    "anthropic",
+    "openai",
+    "chatgpt",
+    "gpt",
+    "gemini",
+    "deepseek",
+    "qwen",
+    "kimi",
+    "moonshot",
+    "llama",
+    "mistral",
+    "grok",
+    "aider",
+    "opencode",
+    "copilot",
+    "cursor",
+];
+
+/// Execution-placement tokens banned ANYWHERE in a text-bearing value
+/// (vertical V2b discrimination list: worktree, tmux/SSH, sandbox flags,
+/// cwd — TB-4/TB-1). Word-boundary matched; `working directory` is
+/// phrase-matched because it is two words.
+const WATERSHED_PLACEMENT_TOKENS: &[&str] = &["worktree", "tmux", "ssh", "sandbox", "cwd"];
+const WATERSHED_PLACEMENT_PHRASES: &[&str] = &["working directory"];
+
 /// Scan one text-bearing value against every forbidden category. Returns
 /// the first match by category order (same order as the host).
 pub fn scan_text(field: &'static str, value: &BoundedText) -> Result<(), ComposeRejection> {
@@ -251,7 +298,7 @@ fn scan_str(field: &'static str, text: &str) -> Result<(), ComposeRejection> {
     if COMMAND_LEAD_TOKENS.contains(&first_token) {
         return Err(forbid(ForbiddenCategory::Command, field));
     }
-    if lower.starts_with("./") || lower.starts_with("/") || lower.starts_with('~') {
+    if lower.starts_with("./") || lower.starts_with('/') || lower.starts_with('~') {
         return Err(forbid(ForbiddenCategory::WorktreePath, field));
     }
     for marker in WORKTREE_MARKERS {
@@ -266,6 +313,42 @@ fn scan_str(field: &'static str, text: &str) -> Result<(), ComposeRejection> {
     }
     if text.contains(TaskRef::WIRE_PREFIX) || text.contains(AttemptRef::WIRE_PREFIX) {
         return Err(forbid(ForbiddenCategory::CallerMintedRef, field));
+    }
+
+    // Client-side watershed layer (vertical V2b discrimination list).
+    // This is a deliberate STRICT SUPERSET of the mirrored host law:
+    // the host's five categories stay byte-identical above; this layer
+    // exists because the watershed dimensions are semantic, not
+    // shape-based — `name the model`, `use a worktree`, `pass --flag`
+    // are forbidden as PROSE, wherever they appear. The client may
+    // reject more than the host; it may never reject less.
+    for word in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if WATERSHED_VENDOR_TOKENS.contains(&word) {
+            return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
+        }
+        if WATERSHED_PLACEMENT_TOKENS.contains(&word) {
+            return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
+        }
+    }
+    for phrase in WATERSHED_PLACEMENT_PHRASES {
+        if lower.contains(phrase) {
+            return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
+        }
+    }
+    // Mid-string relative paths (`worktree ../feature-v2b`, `see
+    // ./docs/x`) — the prefix checks above only catch leading paths.
+    if lower.contains("../") || lower.contains(" ./") || lower.contains(" ~/") {
+        return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
+    }
+    // CLI flags as standalone tokens (`--fast`, `-rf`): whitespace-
+    // delimited tokens that begin with `-` followed by a letter/digit.
+    for token in lower.split_whitespace() {
+        let stripped = token.trim_start_matches('-');
+        if stripped.len() != token.len()
+            && stripped.chars().next().is_some_and(char::is_alphanumeric)
+        {
+            return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
+        }
     }
     Ok(())
 }

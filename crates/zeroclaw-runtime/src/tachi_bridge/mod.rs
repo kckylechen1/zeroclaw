@@ -41,7 +41,15 @@
 
 pub mod client;
 pub mod compose;
-pub mod in_memory;
+
+/// Test doubles for the [`TachiTaskBridge`] port — STRICTLY test-only
+/// (TB-22): the in-memory bridge is structurally a task/status ledger
+/// (tuple bindings, fact log, counters) and must never be constructible
+/// from production code, where it would be exactly the second task
+/// ledger the freeze forbids. The live host is a transport-backed
+/// implementation of the same port, not this module.
+#[cfg(test)]
+mod in_memory;
 
 #[cfg(test)]
 mod tests;
@@ -56,4 +64,3 @@ pub use compose::{
     StructuralIntentContext, TaskIntentInputs, compose_intent, scan_client_authored_refs,
     scan_intent, scan_text,
 };
-pub use in_memory::{AmbiguousSubmitOnce, InMemoryTachiTaskBridge, UnavailableTachiTaskBridge};

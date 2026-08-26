@@ -757,8 +757,14 @@ mod tests {
     }
 
     #[test]
-    fn golden_payload_round_trips_byte_stably() {
+    fn golden_payload_round_trips_value_stably() {
         // A nested-type or serde-rename change on this side breaks here.
+        // The comparison is at the canonical-JSON Value level (semantic
+        // equality, formatting-insensitive): byte-level formatting is
+        // pinned separately — the RFC3339 `Z`→`+00:00` normalization is
+        // asserted in `timestamps_round_trip_the_golden_rfc3339_form`,
+        // and key order is normalized by `canonical_json` (digest-pinned
+        // in `golden_digest_pin_matches_encoder_digest`).
         let (_, intent) = golden();
         let encoded = serde_json::to_value(&intent).expect("intent serializes");
         let document: Value = serde_json::from_str(GOLDEN_TASK_INTENT_V1).expect("golden parses");

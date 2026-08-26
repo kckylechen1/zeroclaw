@@ -11,14 +11,20 @@
 #   1. every source file containing sqlite DDL (case-insensitive
 #      CREATE/ALTER TABLE, including inside test blocks and string
 #      literals - drift is what this gate flags; judgment happens in the
-#      PR that updates the manifest);
+#      PR that updates the manifest); .txt/.md files with DDL count too
+#      (DDL smuggled outside .rs);
 #   2. every .sql file containing DDL;
-#   3. every source file opening a rusqlite connection;
-#   4. every crate declaring an embedded-store dependency (rusqlite,
+#   3. every source file opening a rusqlite connection, OR mentioning a
+#      store-crate name at all (alias proof: `use rusqlite as db` still
+#      contains the crate name);
+#   4. every source file using OpenOptions (the hand-rolled durable
+#      file-store shape - JSONL append ledgers live here);
+#   5. every crate declaring an embedded-store dependency (rusqlite,
 #      sled, redb, rocksdb).
 #
-# Detection is signature-based, not semantic: constructed DDL strings or
-# a hand-rolled file store can evade it. The gate's contract is drift
+# Detection is signature-based, not semantic: a determined author can
+# still evade it (constructed DDL fragments, file writes without
+# OpenOptions in fresh code paths). The gate's contract is drift
 # VISIBILITY plus a PR-visible manifest change - human review stays the
 # authority.
 #
@@ -52,15 +58,20 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-# Detected surface: union of DDL and connection-open sites under the
-# workspace source trees, plus crates declaring rusqlite.
+# Detected surface: DDL (incl. .txt/.md), connection-open sites,
+# store-crate mentions (alias-proof), OpenOptions write paths, and
+# store-crate dependencies under the workspace source trees.
 {
     rg -l --no-messages -i -U \
         'create[[:space:]]+table|alter[[:space:]]+table|create[[:space:]]*/\*[^*]*\*/[[:space:]]*table' \
-        "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
+        "$scan_root/crates" "$scan_root/apps" -g '*.rs' -g '*.txt' -g '*.md' 2>/dev/null || true
     rg -l --no-messages 'Connection::open' \
         "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
     rg -l --no-messages --glob '*.sql' . "$scan_root/crates" "$scan_root/apps" 2>/dev/null || true
+    rg -l --no-messages -w -e 'rusqlite' -e 'sled' -e 'redb' -e 'rocksdb' \
+        "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
+    rg -l --no-messages 'OpenOptions' \
+        "$scan_root/crates" "$scan_root/apps" -g '*.rs' 2>/dev/null || true
 } | sed -E "s#^$scan_root/##" | sort -u >"$tmp_dir/detected_files"
 
 {

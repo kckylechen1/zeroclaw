@@ -124,6 +124,62 @@ cat >"$tmp_root/crate-drift/manifest.json" <<JSON
 JSON
 expect_fail "unlisted embedded-store crate" "$tmp_root/crate-drift" "UNLISTED STORE CRATE" || status=1
 
+# Evasion modes (codex round 2): each tree smuggles ONE shape the
+# original patterns missed; each must fail independently.
+base_manifest() {
+    cat <<JSON
+{
+  "version": 1,
+  "law": "fixture",
+  "exemptions": [],
+  "store_crates": ["crates/fixture-crate"],
+  "files": [
+    {"path":"crates/fixture-crate/src/store.rs","store":"kept.db","role":"store","basis":"fixture"}
+  ]
+}
+JSON
+}
+
+evasion_tree() {
+    local root="$1"
+    mkdir -p "$root/crates/fixture-crate/src" "$root/crates/other-crate/src"
+    cp "$tmp_root/clean/crates/fixture-crate/src/store.rs" "$root/crates/fixture-crate/src/store.rs"
+    cp "$tmp_root/clean/crates/fixture-crate/Cargo.toml" "$root/crates/fixture-crate/Cargo.toml"
+    base_manifest >"$root/manifest.json"
+}
+
+# (a) aliased store-crate import: no `Connection::open` literal, no DDL,
+#     no dep declaration in this crate — only the name-mention scan sees it.
+evasion_tree "$tmp_root/alias"
+cat >"$tmp_root/alias/crates/other-crate/src/handles.rs" <<'RS'
+use rusqlite as db;
+pub fn borrow(conn: &mut db::Connection) {}
+RS
+expect_fail "aliased store-crate import" "$tmp_root/alias" "UNLISTED PERSISTENCE-SURFACE FILE" || status=1
+
+# (b) hand-rolled append ledger via OpenOptions: no DDL, no store crate.
+evasion_tree "$tmp_root/jsonl"
+cat >"$tmp_root/jsonl/crates/other-crate/src/ledger.rs" <<'RS'
+use std::fs::OpenOptions;
+pub fn append(line: &str) {
+    let _ = OpenOptions::new().create(true).append(true).open("pending_results.jsonl");
+}
+RS
+expect_fail "OpenOptions append ledger" "$tmp_root/jsonl" "UNLISTED PERSISTENCE-SURFACE FILE" || status=1
+
+# (c) DDL smuggled into a .txt sidecar.
+evasion_tree "$tmp_root/txtddl"
+cat >"$tmp_root/txtddl/crates/other-crate/schema_notes.txt" <<'TXT'
+schema v2:
+CREATE TABLE pending_results (id TEXT PRIMARY KEY, payload TEXT)
+TXT
+expect_fail "DDL in .txt sidecar" "$tmp_root/txtddl" "UNLISTED PERSISTENCE-SURFACE FILE" || status=1
+
+# Control: the evasion-tree base alone stays clean (the fixture's own
+# DDL store is listed).
+evasion_tree "$tmp_root/evasion-clean"
+expect_pass "evasion base tree clean" "$tmp_root/evasion-clean" || status=1
+
 if (( status != 0 )); then
     echo "persistence-surface gate self-test: FAILED" >&2
     exit 1
