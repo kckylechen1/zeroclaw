@@ -382,7 +382,7 @@ fn watershed_vendor_list_covers_every_canonical_provider_slot() {
     assert!(!provider_ids.is_empty(), "collector macro ran");
     let mut uncovered: Vec<&str> = Vec::new();
     for id in &provider_ids {
-        let exempt = super::compose::WATERSHED_VENDOR_EXEMPTIONS
+        let exempt = VENDOR_EXEMPTIONS
             .iter()
             .any(|(exempt_id, _reason)| exempt_id == id);
         let covered = id
@@ -404,7 +404,7 @@ fn watershed_vendor_list_covers_every_canonical_provider_slot() {
     );
     // And every NON-EXEMPT id actually rejects as prose.
     for id in &provider_ids {
-        let exempt = super::compose::WATERSHED_VENDOR_EXEMPTIONS
+        let exempt = VENDOR_EXEMPTIONS
             .iter()
             .any(|(exempt_id, _reason)| exempt_id == id);
         if exempt {
@@ -494,6 +494,33 @@ fn a_hand_built_intent_with_a_smuggled_schema_field_fails_the_scan() {
         );
     });
 }
+
+/// Canonical provider slots DELIBERATELY NOT covered by the watershed
+/// lists because the id is an ordinary dictionary word whose prose use
+/// is legitimate in objectives — banning it would reject clean intents
+/// wholesale. Each entry is a conscious, documented exemption; naming
+/// that vendor in prose still falls to the tachi host admission law
+/// (authoritative) and to human review. The drift-guard test forces
+/// every NEW upstream provider slot to be covered OR added here with a
+/// reason — silent gaps fail the build.
+const VENDOR_EXEMPTIONS: &[(&str, &str)] = &[
+    (
+        "manifest",
+        "ordinary word (the persistence manifest); naming falls to host admission",
+    ),
+    ("morph", "ordinary verb; naming falls to host admission"),
+    ("inception", "ordinary word; naming falls to host admission"),
+    (
+        "synthetic",
+        "ordinary adjective; naming falls to host admission",
+    ),
+    (
+        "custom",
+        "ordinary adjective; naming falls to host admission",
+    ),
+    ("kilo", "ordinary unit word; naming falls to host admission"),
+    ("upstage", "ordinary verb; naming falls to host admission"),
+];
 
 /// Transport wrapper that COUNTS port.submit calls — the discrimination
 /// instrument for the client fail-closed law: a client-side rejection

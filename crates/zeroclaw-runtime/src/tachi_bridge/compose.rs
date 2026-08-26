@@ -257,10 +257,10 @@ const PRIVATE_DYAD_MARKERS: &[&str] = &["private dyad", "private_dyad", "private
 ///
 /// Coverage law: every canonical model-provider slot declared by
 /// `zeroclaw_config::for_each_model_provider_slot!` must be covered
-/// here (word tokens and/or [`WATERSHED_VENDOR_PHRASES`]) — the
-/// drift-guard test in `tests.rs` enforces it, so a new provider added
-/// upstream fails this crate's tests until the watershed list catches
-/// up. Beyond the canonical slots, the list carries the known harness
+/// here (word tokens and/or [`WATERSHED_VENDOR_PHRASES`]), or carry a
+/// documented exemption in the drift-guard test in `tests.rs` — a new
+/// provider added upstream fails this crate's tests until one of the
+/// two happens. Beyond the canonical slots, the list carries the known harness
 /// CLI and vendor-alias family. A NOVEL vendor name not yet listed is
 /// the documented residual class — the authoritative rejection is the
 /// tachi host admission, and list extension is a one-line PR.
@@ -360,33 +360,6 @@ pub(crate) const WATERSHED_VENDOR_PHRASES: &[&str] = &[
     "github_models",
     "lambda_ai",
     "kilocli",
-];
-
-/// Canonical provider slots DELIBERATELY NOT covered by the watershed
-/// lists because the id is an ordinary dictionary word whose prose use
-/// is legitimate in objectives — banning it would reject clean intents
-/// wholesale. Each entry is a conscious, documented exemption; naming
-/// that vendor in prose still falls to the tachi host admission law
-/// (authoritative) and to human review. The drift-guard test forces
-/// every NEW upstream provider slot to be covered OR added here with a
-/// reason — silent gaps fail the build.
-pub(crate) const WATERSHED_VENDOR_EXEMPTIONS: &[(&str, &str)] = &[
-    (
-        "manifest",
-        "ordinary word (the persistence manifest); naming falls to host admission",
-    ),
-    ("morph", "ordinary verb; naming falls to host admission"),
-    ("inception", "ordinary word; naming falls to host admission"),
-    (
-        "synthetic",
-        "ordinary adjective; naming falls to host admission",
-    ),
-    (
-        "custom",
-        "ordinary adjective; naming falls to host admission",
-    ),
-    ("kilo", "ordinary unit word; naming falls to host admission"),
-    ("upstage", "ordinary verb; naming falls to host admission"),
 ];
 
 /// Execution-placement tokens banned ANYWHERE in a text-bearing value
