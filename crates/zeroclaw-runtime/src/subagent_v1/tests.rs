@@ -729,8 +729,12 @@ async fn time_ceiling_enforces() {
 
 #[tokio::test]
 async fn action_ceiling_blocks_further_spawns_shared_meter() {
-    // SA-8: the meter is SHARED with the parent — a child exhausting
-    // the action budget blocks further parent spawns.
+    // SA-8 sharing scope, via the EXPLICIT host-shared seam
+    // (`meter_override`): a host that hands one meter to several spawns
+    // sees child consumption count against it and exhaustion block
+    // further spawns through that shared meter. (The production default
+    // is per-run meters by owner ruling — see
+    // `budget_meter_is_fresh_per_run_not_process_cached`.)
     let mut profile = test_profile();
     profile.budget.max_actions = 1;
     let meter = Arc::new(SubAgentBudgetMeter::new(profile.budget));
@@ -755,6 +759,97 @@ async fn action_ceiling_blocks_further_spawns_shared_meter() {
         .await
         .unwrap_err();
     assert!(err.contains("exhausted") || err.contains("budget"), "{err}");
+}
+
+#[tokio::test]
+async fn budget_meter_is_fresh_per_run_not_process_cached() {
+    // The owner closing-review P1: on master the tool cached ONE meter
+    // per profile/revision with a non-resetting `Instant::now()` start,
+    // so the first run consumed the 120s window and every later turn
+    // with that profile was permanently rejected until restart (the
+    // channel registry holds the tool Arc for the process lifetime).
+    // RED probe on master `ba9a311149` drove exactly that: first run
+    // Completed, the cached meter's clock advanced 121s (no sleep), the
+    // second run returned "the shared budget meter for this profile is
+    // exhausted; the parent must wait for the time window to reset" —
+    // a reset window that does not exist. After the fix there is NO
+    // meter storage on the tool at all (compile-level: the field is
+    // gone), so cross-run reuse is unrepresentable.
+    //
+    // BEHAVIORAL discriminator (no clock injection needed): admit a
+    // max_actions = 1 profile revision, then run two PRODUCTION-path
+    // spawns (no meter override). Under ANY cache keyed by
+    // profile/revision the first run consumes the single action and the
+    // second is refused; with per-run meters both Complete. On the
+    // pre-fix code this test is red.
+    let mut narrow = test_profile();
+    narrow.profile_id = DEFAULT_REASONING_PROFILE_ID.to_string();
+    narrow.revision = 2; // must increase over the admitted default (1)
+    narrow.budget.max_actions = 1;
+    narrow.digest = narrow.compute_digest();
+    let tool = reasoning_tool().with_model_resolver(StubResolver::json(ok_report_body("ok")));
+    tool.registry
+        .lock()
+        .admit(narrow)
+        .expect("revision 2 admits");
+
+    let first = tool.run_child("first objective").await.expect("first run");
+    assert_eq!(first.status, SubAgentTerminalFact::Completed);
+    let second = tool
+        .run_child("second objective")
+        .await
+        .expect("second run must mint a fresh meter, not inherit run 1's actions");
+    assert_eq!(second.status, SubAgentTerminalFact::Completed);
+}
+
+#[tokio::test]
+async fn within_run_time_ceiling_trips_when_time_advances() {
+    // The per-run ceiling STILL enforces: a run whose meter's clock
+    // started 121s ago against a 120s budget refuses before start
+    // (override seam) and terminates timed_out mid-run (execution
+    // seam) — the fresh-per-run fix removed cross-run reuse, not the
+    // within-run ceiling.
+    let mut profile = test_profile();
+    profile.budget.time_limit_secs = 120;
+    let backdated_start = std::time::Instant::now()
+        .checked_sub(Duration::from_secs(121))
+        .expect("test process has been up 121s");
+
+    // Parent-side pre-check refuses the spawn outright.
+    let tool = reasoning_tool().with_model_resolver(StubResolver::json(ok_report_body("unused")));
+    let stale = Arc::new(SubAgentBudgetMeter::new_with_start(
+        profile.budget,
+        backdated_start,
+    ));
+    let err = tool
+        .run_child_with("objective", Some(stale))
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("exhausted") || err.contains("budget"),
+        "the pre-check must refuse an already-expired run window: {err}"
+    );
+
+    // Child-side execution terminates timed_out. The stub is delayed
+    // (as in `time_ceiling_enforces`) so the zero remaining-time unit
+    // timeout deterministically wins the race; the timeout fires
+    // immediately, so no real waiting happens.
+    let run = admitted_run(StubResolver::delayed(
+        ok_report_body("late"),
+        Duration::from_secs(30),
+    ));
+    let meter = Arc::new(SubAgentBudgetMeter::new_with_start(
+        profile.budget,
+        backdated_start,
+    ));
+    let (ctx, _rx) = build_ctx(
+        sample_bundle(),
+        ChildToolSet::from_profile(&test_profile()).unwrap(),
+        root_lineage().child(),
+        meter,
+    );
+    let report = run.execute(ctx).await;
+    assert_eq!(report.status, SubAgentTerminalFact::TimedOut);
 }
 
 #[tokio::test]
