@@ -274,7 +274,14 @@ pub struct SubAgentContextPolicyV1 {
 }
 
 /// Privacy policy: which partitions may appear as bundle source refs.
-/// `PrivateDyad` can never be permitted — the type offers no way to say it.
+/// `PrivateDyad` and `AgentSoul` can never be permitted: the runtime
+/// partition check in `projection_with_policy` refuses both regardless
+/// of this list, and the admitted-bundle boundary
+/// ([`ContextBundleV1::admit`]) rejects their refs before a child run
+/// can hold the bundle at all. This `Vec<SourcePartition>` field CAN
+/// spell those variants — it is a narrowing list, not the structural
+/// gate; the structural gate is the closed
+/// [`AdmittedPartition`] enum, which has no such variants.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubAgentPrivacyPolicyV1 {
     /// Partitions whose PUBLIC, non-private-dyad content may be referenced.
@@ -462,6 +469,155 @@ pub enum ProjectionPolicyError {
         actual_bytes: usize,
         max_bytes: usize,
     },
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Admitted-bundle boundary (SA-14/SA-15) — the FIRST privacy boundary
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The child-admissible partition set: a CLOSED enum that structurally
+/// lacks the `PrivateDyad` and `AgentSoul` variants of
+/// [`SourcePartition`] (SA-14: Private Dyad is unreachable from any
+/// SubAgent path by construction, not by prompt; SA-15: AgentSoul is
+/// excluded by default and no v1 profile class exists that could admit
+/// it). A child-held bundle reference cannot even spell those
+/// partitions: there is no variant to construct and no wire token that
+/// deserializes into one.
+///
+/// The raw `SourcePartition` enum keeps its four variants for the
+/// parent-side capture and projection surfaces; projection-time
+/// redaction on the raw type remains as defense-in-depth and is
+/// explicitly NOT the first privacy boundary — admission is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmittedPartition {
+    UserModel,
+    SharedLexicon,
+}
+
+/// Compile-level closed-enum proof: this exhaustive match compiles only
+/// while [`AdmittedPartition`] has exactly the two child-admissible
+/// variants. Adding any variant (a PrivateDyad or AgentSoul arm, or any
+/// future front-stage partition) breaks this constant's compilation.
+const _: () = {
+    let exhaustive = |partition: AdmittedPartition| match partition {
+        AdmittedPartition::UserModel | AdmittedPartition::SharedLexicon => {}
+    };
+    let _ = exhaustive;
+};
+
+impl AdmittedPartition {
+    /// The corresponding raw partition. Used only to check the admitted
+    /// ref against the profile's `permitted_partitions` narrowing list
+    /// (single policy source); the raw value never travels back into a
+    /// child-held type.
+    #[must_use]
+    pub const fn as_source_partition(self) -> SourcePartition {
+        match self {
+            Self::UserModel => SourcePartition::UserModel,
+            Self::SharedLexicon => SourcePartition::SharedLexicon,
+        }
+    }
+
+    /// Wire/storage token, identical to the raw enum's spelling for the
+    /// same partition so an admitted bundle's canonical digest equals
+    /// the raw bundle's digest over isomorphic content.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UserModel => "user_model",
+            Self::SharedLexicon => "shared_lexicon",
+        }
+    }
+}
+
+impl std::fmt::Display for AdmittedPartition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<SourcePartition> for AdmittedPartition {
+    type Error = BundleAdmissionError;
+
+    /// The exhaustive conversion IS the admission boundary for one ref:
+    /// the private variants have no arm that produces an admitted
+    /// partition, only rejection.
+    fn try_from(partition: SourcePartition) -> Result<Self, Self::Error> {
+        match partition {
+            SourcePartition::UserModel => Ok(Self::UserModel),
+            SourcePartition::SharedLexicon => Ok(Self::SharedLexicon),
+            SourcePartition::PrivateDyad | SourcePartition::AgentSoul => {
+                Err(BundleAdmissionError::UnadmissiblePartition {
+                    partition,
+                    ref_id: String::new(),
+                })
+            }
+        }
+    }
+}
+
+/// A source reference inside an ADMITTED bundle. Same shape as
+/// [`BundleSourceRef`] but the partition is the closed
+/// [`AdmittedPartition`]: a Private-Dyad- or AgentSoul-derived ref is
+/// unrepresentable here, not merely filtered later.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmittedSourceRef {
+    pub ref_id: String,
+    pub partition: AdmittedPartition,
+    pub content_digest: String,
+}
+
+/// Why a bundle was refused at the admitted-bundle boundary.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BundleAdmissionError {
+    #[error(
+        "source ref {ref_id:?} carries partition {partition}, which no child-admitted \
+         bundle can express (Private Dyad and Agent Soul are excluded from every \
+         SubAgent path by construction)"
+    )]
+    UnadmissiblePartition {
+        ref_id: String,
+        partition: SourcePartition,
+    },
+    #[error("bundle digest refused at admission: pinned {pinned}, computed {computed}")]
+    Digest { pinned: String, computed: String },
+}
+
+impl From<DigestMismatchError> for BundleAdmissionError {
+    fn from(mismatch: DigestMismatchError) -> Self {
+        Self::Digest {
+            pinned: mismatch.pinned,
+            computed: mismatch.computed,
+        }
+    }
+}
+
+/// The ADMITTED bundle: what child execution accepts (and all it
+/// accepts). Minted only by [`ContextBundleV1::admit`], which verifies
+/// the pinned digest and rejects every Private-Dyad- or AgentSoul-derived
+/// source ref at the boundary. The pinned digest equals the raw
+/// bundle's digest — admission adds no content and removes none (it
+/// rejects rather than filters), so mid-run mutation of an admitted
+/// bundle is caught by the same digest law (SA-18).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdmittedContextBundleV1 {
+    pub bundle_id: String,
+    pub revision: u32,
+    pub digest: String,
+    pub parent_ref: ParentRunRef,
+    pub objective_context: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<AdmittedSourceRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applicable_user_model: Vec<ProjectedFactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub procedure_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explicit_exclusions: Vec<ContextClassV1>,
+    pub redaction_policy: BundleRedactionPolicy,
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -763,6 +919,14 @@ impl ContextBundleV1 {
     /// UNCONDITIONALLY — ids, digests, counts, and existence — so a bundle
     /// materialized with and without such inputs projects byte-identically
     /// (existence-blind). Explicit exclusions remove their classes.
+    ///
+    /// DEFENSE-IN-DEPTH, not the first privacy boundary: the first
+    /// boundary is [`ContextBundleV1::admit`], which rejects
+    /// Private-Dyad- and AgentSoul-derived refs before a child run can
+    /// hold the bundle (the child accepts only
+    /// [`AdmittedContextBundleV1`], whose partition enum cannot express
+    /// them). This raw-side redaction still guards any path that
+    /// projects an unadmitted bundle.
     #[must_use]
     pub fn projection(&self) -> BundleProjection {
         let excluded = |class: ContextClassV1| self.explicit_exclusions.contains(&class);
@@ -889,6 +1053,177 @@ impl ContextBundleV1 {
         // Compute the digest FIRST, then measure the FINAL projection
         // (including the digest) against the size ceiling — the ceiling
         // covers exactly what the child receives.
+        projection.projection_digest = projection.compute_digest();
+        let serialized = serde_json::to_string(&projection).unwrap_or_default().len();
+        if serialized > max_projection_bytes {
+            return Err(ProjectionPolicyError::ProjectionTooLarge {
+                actual_bytes: serialized,
+                max_bytes: max_projection_bytes,
+            });
+        }
+        Ok(projection)
+    }
+
+    /// The admitted-bundle boundary (SA-14/SA-15): the FIRST privacy
+    /// boundary a bundle crosses on its way to a child run. Verifies
+    /// the pinned digest (SA-18) and REJECTS — never silently filters —
+    /// any source ref derived from `PrivateDyad` or `AgentSoul`: those
+    /// partitions have no variant in [`AdmittedPartition`], so the
+    /// returned [`AdmittedContextBundleV1`] cannot express them at any
+    /// later stage. Child execution accepts only the admitted type;
+    /// the raw-side projection redaction remains as defense-in-depth
+    /// (documented on [`ContextBundleV1::projection`]), not as the
+    /// first boundary.
+    pub fn admit(&self) -> Result<AdmittedContextBundleV1, BundleAdmissionError> {
+        self.verify_digest()?;
+        let mut source_refs = Vec::with_capacity(self.source_refs.len());
+        for source in &self.source_refs {
+            match AdmittedPartition::try_from(source.partition) {
+                Ok(partition) => source_refs.push(AdmittedSourceRef {
+                    ref_id: source.ref_id.clone(),
+                    partition,
+                    content_digest: source.content_digest.clone(),
+                }),
+                Err(mut error) => {
+                    if let BundleAdmissionError::UnadmissiblePartition { ref_id, .. } = &mut error {
+                        *ref_id = source.ref_id.clone();
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(AdmittedContextBundleV1 {
+            bundle_id: self.bundle_id.clone(),
+            revision: self.revision,
+            digest: self.digest.clone(),
+            parent_ref: self.parent_ref.clone(),
+            objective_context: self.objective_context.clone(),
+            source_refs,
+            applicable_user_model: self.applicable_user_model.clone(),
+            skill_refs: self.skill_refs.clone(),
+            procedure_refs: self.procedure_refs.clone(),
+            explicit_exclusions: self.explicit_exclusions.clone(),
+            redaction_policy: self.redaction_policy,
+        })
+    }
+}
+
+impl AdmittedContextBundleV1 {
+    /// Digest over the admitted bundle's canonical content EXCLUDING the
+    /// digest field itself. Because admission rejects (rather than
+    /// filters) private-derived refs, an admitted bundle's canonical
+    /// content is isomorphic to the raw bundle's — the wire tokens of
+    /// [`AdmittedPartition`] match the raw enum's — so this digest
+    /// equals the raw bundle's pinned digest.
+    #[must_use]
+    pub fn compute_digest(&self) -> String {
+        let mut value = canonical_json(self);
+        if let serde_json::Value::Object(map) = &mut value {
+            map.remove("digest");
+        }
+        sha256_hex(serde_json::to_string(&value).unwrap_or_default().as_bytes())
+    }
+
+    /// Verify the pinned digest (SA-18 applies unchanged on the
+    /// admitted type: mid-run mutation of an admitted bundle is
+    /// refused).
+    pub fn verify_digest(&self) -> Result<(), DigestMismatchError> {
+        let computed = self.compute_digest();
+        if computed == self.digest {
+            Ok(())
+        } else {
+            Err(DigestMismatchError {
+                pinned: self.digest.clone(),
+                computed,
+            })
+        }
+    }
+
+    /// The policy-enforced projection of an ADMITTED bundle. Mirrors
+    /// [`ContextBundleV1::projection_with_policy`] (classes, partition
+    /// narrowing against the profile's `permitted_partitions`, size
+    /// ceiling) but operates on the closed partition set: every ref in
+    /// the result was admissible by construction, and a partition the
+    /// profile does not permit is REFUSED with the same typed error,
+    /// never silently dropped.
+    pub fn projection_with_policy(
+        &self,
+        allowed_classes: &[ContextClassV1],
+        permitted_partitions: &[SourcePartition],
+        max_projection_bytes: usize,
+    ) -> Result<BundleProjection, ProjectionPolicyError> {
+        let class_allowed = |class: ContextClassV1| allowed_classes.contains(&class);
+        for source in &self.source_refs {
+            if !permitted_partitions.contains(&source.partition.as_source_partition()) {
+                return Err(ProjectionPolicyError::DisallowedPartition {
+                    ref_id: source.ref_id.clone(),
+                    partition: source.partition.as_source_partition(),
+                });
+            }
+        }
+        let source_refs = if class_allowed(ContextClassV1::SourceRefs)
+            && !self
+                .explicit_exclusions
+                .contains(&ContextClassV1::SourceRefs)
+        {
+            self.source_refs
+                .iter()
+                .map(|source| BundleSourceRef {
+                    ref_id: source.ref_id.clone(),
+                    partition: source.partition.as_source_partition(),
+                    content_digest: source.content_digest.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let applicable_user_model = if class_allowed(ContextClassV1::UserModelProjection)
+            && !self
+                .explicit_exclusions
+                .contains(&ContextClassV1::UserModelProjection)
+        {
+            self.applicable_user_model.clone()
+        } else {
+            Vec::new()
+        };
+        let skill_refs = if class_allowed(ContextClassV1::SkillRefs)
+            && !self
+                .explicit_exclusions
+                .contains(&ContextClassV1::SkillRefs)
+            && !self.redaction_policy.redact_skill_refs
+        {
+            self.skill_refs.clone()
+        } else {
+            Vec::new()
+        };
+        let procedure_refs = if class_allowed(ContextClassV1::ProcedureRefs)
+            && !self
+                .explicit_exclusions
+                .contains(&ContextClassV1::ProcedureRefs)
+            && !self.redaction_policy.redact_procedure_refs
+        {
+            self.procedure_refs.clone()
+        } else {
+            Vec::new()
+        };
+        let objective_context = if class_allowed(ContextClassV1::ObjectiveContext)
+            && !self
+                .explicit_exclusions
+                .contains(&ContextClassV1::ObjectiveContext)
+        {
+            self.objective_context.clone()
+        } else {
+            String::new()
+        };
+        let mut projection = BundleProjection {
+            bundle_id: self.bundle_id.clone(),
+            projection_digest: String::new(),
+            objective_context,
+            source_refs,
+            applicable_user_model,
+            skill_refs,
+            procedure_refs,
+        };
         projection.projection_digest = projection.compute_digest();
         let serialized = serde_json::to_string(&projection).unwrap_or_default().len();
         if serialized > max_projection_bytes {
@@ -1100,6 +1435,151 @@ mod tests {
             65_536,
         );
         assert_eq!(policy.unwrap(), policy_private.unwrap());
+    }
+
+    // SA-14/SA-15: admission is the FIRST privacy boundary — a bundle
+    // carrying a Private-Dyad- or AgentSoul-derived ref is REJECTED at
+    // admit(), before any child run can hold it. On the pre-boundary
+    // code, this same bundle compiled straight into child execution and
+    // only the projection redaction dropped the content (red: the door
+    // was open; a probe run on master completed a child run with the
+    // private ref inside the input bundle).
+    #[test]
+    fn admit_rejects_private_dyad_and_agent_soul_refs_at_the_boundary() {
+        for (partition, label) in [
+            (SourcePartition::PrivateDyad, "private dyad"),
+            (SourcePartition::AgentSoul, "agent soul"),
+        ] {
+            let mut with_private = sample_bundle();
+            with_private.source_refs.push(BundleSourceRef {
+                ref_id: format!("secret-{label}"),
+                partition,
+                content_digest: "cc".into(),
+            });
+            with_private.digest = with_private.compute_digest();
+            with_private.verify_digest().unwrap();
+            let error = with_private
+                .admit()
+                .expect_err("admission must reject the private-derived ref");
+            assert_eq!(
+                error,
+                BundleAdmissionError::UnadmissiblePartition {
+                    ref_id: format!("secret-{label}"),
+                    partition,
+                },
+                "the typed error must name the offending ref and partition ({label})"
+            );
+        }
+        // A digest-invalid bundle admits nothing either: admission
+        // verifies the pin first (fail closed).
+        let mut bad_digest = sample_bundle();
+        bad_digest.objective_context = "smuggled".into();
+        assert!(matches!(
+            bad_digest.admit(),
+            Err(BundleAdmissionError::Digest { .. })
+        ));
+        // The clean bundle admits.
+        assert!(sample_bundle().admit().is_ok());
+    }
+
+    // SA-14/SA-15: the admitted partition set is a CLOSED enum — the
+    // private variants cannot be constructed, converted, or parsed.
+    #[test]
+    fn admitted_partition_is_a_closed_enum() {
+        // Conversion: the private variants have no productive arm.
+        assert_eq!(
+            AdmittedPartition::try_from(SourcePartition::UserModel).unwrap(),
+            AdmittedPartition::UserModel
+        );
+        assert_eq!(
+            AdmittedPartition::try_from(SourcePartition::SharedLexicon).unwrap(),
+            AdmittedPartition::SharedLexicon
+        );
+        assert!(AdmittedPartition::try_from(SourcePartition::PrivateDyad).is_err());
+        assert!(AdmittedPartition::try_from(SourcePartition::AgentSoul).is_err());
+        // Wire: the private tokens do not deserialize into the closed
+        // enum at all.
+        for token in ["private_dyad", "agent_soul", "made_up"] {
+            assert!(
+                serde_json::from_str::<AdmittedPartition>(&format!("\"{token}\"")).is_err(),
+                "wire token {token} must not deserialize into AdmittedPartition"
+            );
+        }
+        for (token, expected) in [
+            ("user_model", AdmittedPartition::UserModel),
+            ("shared_lexicon", AdmittedPartition::SharedLexicon),
+        ] {
+            assert_eq!(
+                serde_json::from_str::<AdmittedPartition>(&format!("\"{token}\"")).unwrap(),
+                expected
+            );
+        }
+        // A closed-enum exhaustive match also lives at module level as a
+        // const assertion: adding any variant breaks its compilation.
+    }
+
+    // SA-18 on the admitted type: admission preserves the pinned digest
+    // exactly (admission adds and removes nothing), and mid-run
+    // mutation of an admitted bundle is caught by the same digest law.
+    #[test]
+    fn admitted_bundle_digest_equals_raw_and_pins_content() {
+        let raw = sample_bundle();
+        let admitted = raw.admit().unwrap();
+        assert_eq!(admitted.digest, raw.digest);
+        assert_eq!(admitted.compute_digest(), raw.compute_digest());
+        admitted.verify_digest().unwrap();
+        let mut mutated = admitted.clone();
+        mutated.objective_context = "smuggled context".into();
+        assert!(
+            mutated.verify_digest().is_err(),
+            "mid-run mutation of an admitted bundle must fail digest verification"
+        );
+        // Admitted source refs are isomorphic to the raw ones (same
+        // ids/digests; partitions from the closed set).
+        assert_eq!(admitted.source_refs.len(), raw.source_refs.len());
+        assert_eq!(admitted.source_refs[0].ref_id, raw.source_refs[0].ref_id);
+        assert_eq!(
+            admitted.source_refs[0].partition.as_source_partition(),
+            raw.source_refs[0].partition
+        );
+    }
+
+    // The admitted-side projection keeps the profile narrowing law: a
+    // partition the profile does not permit is REFUSED with the typed
+    // error, never silently dropped.
+    #[test]
+    fn admitted_projection_refuses_unpermitted_partitions() {
+        let mut bundle = sample_bundle();
+        bundle.source_refs.push(BundleSourceRef {
+            ref_id: "lex-1".into(),
+            partition: SourcePartition::SharedLexicon,
+            content_digest: "dd".into(),
+        });
+        bundle.digest = bundle.compute_digest();
+        let admitted = bundle.admit().unwrap();
+        let classes = [
+            ContextClassV1::ObjectiveContext,
+            ContextClassV1::SourceRefs,
+            ContextClassV1::UserModelProjection,
+        ];
+        // SharedLexicon not permitted by this policy:
+        let refused =
+            admitted.projection_with_policy(&classes, &[SourcePartition::UserModel], 65_536);
+        assert!(matches!(
+            refused,
+            Err(ProjectionPolicyError::DisallowedPartition { ref_id, partition })
+                if ref_id == "lex-1" && partition == SourcePartition::SharedLexicon
+        ));
+        // Both public partitions permitted: the projection carries the
+        // refs (values admissible by construction).
+        let allowed = admitted
+            .projection_with_policy(
+                &classes,
+                &[SourcePartition::UserModel, SourcePartition::SharedLexicon],
+                65_536,
+            )
+            .unwrap();
+        assert_eq!(allowed.source_refs.len(), 2);
     }
 
     // SA-14/SA-15: the policy-filtered projection fails closed on
