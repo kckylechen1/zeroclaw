@@ -1,4 +1,4 @@
-//! Vertical V4 discriminations (ticket #236 frozen checks; owner tests
+//! Vertical V4 discriminations (the V4 vertical ticket's frozen checks; owner tests
 //! 1/3/7/8/9 mapping). Every test runs against the in-memory bridge
 //! double — the TACHI-side stand-in — proving the ZeroClaw half's laws:
 //! snapshot immutability, run binding, no local run store, publication
@@ -685,7 +685,7 @@ fn procedure_v1_module_has_no_durable_write_calls() {
             concat!("sl", "ed"),
             concat!("rocks", "db"),
             concat!("sq", "lx"),
-            // The legacy run engine family (KP-16 / #197 boundary).
+            // The legacy run engine family (KP-16 / deletion-vertical).
             "SopEngine",
             "SopRunStore",
             "sop_events",

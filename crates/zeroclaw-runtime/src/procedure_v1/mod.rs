@@ -1,5 +1,5 @@
 //! Procedure vertical V4 — the ZeroClaw half of the Tachi-owned
-//! ProcedureRun (frozen contracts #205/#207 rev 3; ticket #236).
+//! ProcedureRun (frozen wire + contract revisions rev 3; the V4 vertical ticket).
 //!
 //! ```text
 //! existing SOP package (<sops_dir>/<name>/SOP.toml + SOP.md)
@@ -17,7 +17,7 @@
 //!
 //! - **No legacy coupling**: nothing here constructs the legacy SOP
 //!   engine, run store, approval broker, or audit mirror. The legacy
-//!   engine stays untouched (#197 deletes it after V4 green); the only
+//!   engine stays untouched (the deletion vertical removes it after V4
 //!   legacy surface reused is the pure definition parsing
 //!   (`SopManifest`, `parse_steps`) — authored-format reading, not the
 //!   run engine.

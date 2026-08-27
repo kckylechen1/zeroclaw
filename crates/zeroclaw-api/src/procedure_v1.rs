@@ -1,5 +1,5 @@
-//! Procedure vertical V4 wire/domain types (frozen contract #207 rev 3,
-//! KP-10/KP-11/KP-15/KP-17/KP-18/KP-19; wire dependency #205).
+//! Procedure vertical V4 wire/domain types (frozen contract rev 3,
+//! KP-10/KP-11/KP-15/KP-17/KP-18/KP-19; the frozen bridge wire).
 //!
 //! The split this module carries:
 //!
