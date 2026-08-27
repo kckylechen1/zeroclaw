@@ -113,32 +113,6 @@ pub(crate) fn drain_step_calls(sink: &StepCallSink) -> Vec<StepToolCall> {
     }
 }
 
-/// Queue a live action when the current tool call is running inside an agent
-/// turn. Only `ExecuteStep` actions are queued; all other variants are already
-/// terminal or blocked.
-pub(crate) fn enqueue_live_action(
-    engine: Arc<Mutex<SopEngine>>,
-    audit: Option<Arc<SopAuditLogger>>,
-    action: &SopRunAction,
-) {
-    if !matches!(action, SopRunAction::ExecuteStep { .. }) {
-        return;
-    }
-
-    let queued = QueuedSopAction {
-        engine,
-        audit,
-        action: action.clone(),
-    };
-    let _ = LIVE_SOP_ACTION_QUEUE.try_with(|queue| {
-        if let Some(queue) = queue
-            && let Ok(mut queue) = queue.lock()
-        {
-            queue.push_back(queued);
-        }
-    });
-}
-
 pub(crate) fn drain_live_actions(queue: &LiveActionQueue) -> Vec<QueuedSopAction> {
     match queue.lock() {
         Ok(mut queue) => queue.drain(..).collect(),

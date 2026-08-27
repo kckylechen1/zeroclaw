@@ -234,23 +234,6 @@ pub async fn run(
             (None, None)
         };
 
-        // Build SOP engine when sops_dir is configured so SOP tools are
-        // available on this path (CLI agent run). No channel map is wired on this
-        // path, so the approval route adapter is the no-op (log-only); the daemon
-        // path injects a real channel-delivering adapter.
-        let (sop_engine, sop_audit) = if config.sop.sops_dir.is_some() {
-            let sop_mem: Arc<dyn zeroclaw_memory::Memory> =
-                zeroclaw_memory::create_memory_for_agent(&config, agent_alias, None).await?;
-            let (engine, audit) = crate::sop::build_sop_engine(
-                config.sop.clone(),
-                &config.data_dir,
-                sop_mem,
-                Default::default(),
-            );
-            (Some(engine), Some(audit))
-        } else {
-            (None, None)
-        };
 
         let all_tools_result = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
@@ -271,8 +254,6 @@ pub async fn run(
             None,
             is_subagent_caller,
             None,
-            sop_engine,
-            sop_audit,
             None,
             Some(effective_lineage.clone()),
         );

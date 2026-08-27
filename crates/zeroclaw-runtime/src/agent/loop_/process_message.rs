@@ -132,23 +132,6 @@ pub async fn process_message(
             (None, None)
         };
 
-        // Build SOP engine when sops_dir is configured so SOP tools are
-        // available on this path (process_message CLI agent). No channel map is
-        // wired here, so the approval route adapter is the no-op (log-only); the
-        // daemon path injects a real channel-delivering adapter.
-        let (sop_engine, sop_audit) = if config.sop.sops_dir.is_some() {
-            let sop_mem: Arc<dyn zeroclaw_memory::Memory> =
-                zeroclaw_memory::create_memory_for_agent(&config, agent_alias, None).await?;
-            let (engine, audit) = crate::sop::build_sop_engine(
-                config.sop.clone(),
-                &config.data_dir,
-                sop_mem,
-                Default::default(),
-            );
-            (Some(engine), Some(audit))
-        } else {
-            (None, None)
-        };
 
         let all_tools_result_pm = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
@@ -171,8 +154,6 @@ pub async fn process_message(
             None,
             false,
             None,
-            sop_engine,
-            sop_audit,
             None,
             // Gateway/WS and ACP turn seeding is a top-level origin: the
             // turn's own lineage root, no inherited one.
