@@ -1791,9 +1791,20 @@ async fn client_maps_a_carrier_binding_refusal_to_the_typed_error() {
 
 #[tokio::test]
 async fn port_refuses_swapped_expectation_order_and_weakened_evaluation() {
-    let dir = fixture_dir();
+    // A step output contract gives the projection its SECOND artifact
+    // expectation (VerificationLog) — ordered pairing is discriminable.
+    let with_contract_md = format!("{STAGEX_MD}\n").replace(
+        "   - tools: shell, file_read\n",
+        "   - tools: shell, file_read\n   - output: {\"type\":\"boolean\"}\n",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    write_package(dir.path(), STAGEX_TOML, &with_contract_md);
     let snapshot =
         mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    assert!(
+        snapshot.guidance.artifact_expectations.len() >= 2,
+        "fixture must carry two expectations for the swap discrimination"
+    );
     let reference = snapshot.snapshot_ref();
     let paired: Vec<zeroclaw_api::taskintent::ArtifactExpectation> = snapshot
         .guidance
@@ -1839,33 +1850,31 @@ async fn port_refuses_swapped_expectation_order_and_weakened_evaluation() {
         };
     let double = Arc::new(InMemoryTachiTaskBridge::new());
 
-    // Swapped order (only discriminable with >= 2 expectations; the
-    // fixture's VerificationLog presence is schema-dependent, so guard).
-    if paired.len() >= 2 {
-        let mut swapped = paired.clone();
-        swapped.swap(0, 1);
-        let intent = compose_intent(
-            &inputs_with(swapped, snapshot.guidance.evaluation_requirement.clone()),
-            &full_policy(),
-            &context(reference.clone()),
+    // Swapped order: the pairing is ORDERED — a permutation of the
+    // same expectations is refused.
+    let mut swapped = paired.clone();
+    swapped.swap(0, 1);
+    let intent = compose_intent(
+        &inputs_with(swapped, snapshot.guidance.evaluation_requirement.clone()),
+        &full_policy(),
+        &context(reference.clone()),
+    )
+    .expect("composes");
+    let receipt = double
+        .submit_procedure_run(
+            &intent,
+            &derive_request_id("stagex-update", &snapshot.procedure_digest, "ord-1"),
+            &snapshot,
         )
-        .expect("composes");
-        let receipt = double
-            .submit_procedure_run(
-                &intent,
-                &derive_request_id("stagex-update", &snapshot.procedure_digest, "ord-1"),
-                &snapshot,
-            )
-            .await
-            .expect("transport level ok");
-        assert!(
-            matches!(
-                &receipt,
-                SubmitReceipt::Rejected { reason } if reason == "intent_expectation_mismatch"
-            ),
-            "swapped order refused: {receipt:?}"
-        );
-    }
+        .await
+        .expect("transport level ok");
+    assert!(
+        matches!(
+            &receipt,
+            SubmitReceipt::Rejected { reason } if reason == "intent_expectation_mismatch"
+        ),
+        "swapped order refused: {receipt:?}"
+    );
 
     // Weakened evaluation independence.
     let weakened = zeroclaw_api::taskintent::EvaluationRequirement {
