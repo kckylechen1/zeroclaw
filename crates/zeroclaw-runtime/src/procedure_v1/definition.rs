@@ -181,6 +181,14 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
             let Some(toml) = toml else {
                 bail!("SOP.toml for `{name}` not found (required)");
             };
+            // Present-but-EMPTY is an incomplete publication, not an
+            // md-less one: the byte string alone cannot carry presence
+            // (an empty `definition_md` is ambiguous downstream), so a
+            // truncate-before-write install pause is refused HERE,
+            // loudly, rather than frozen as a TOML-only revision.
+            if md.as_ref().is_some_and(|md| md.is_empty()) {
+                bail!("SOP.md for `{name}` is present but empty (incomplete publication refused)");
+            }
             break (toml, md.unwrap_or_default());
         }
         attempts += 1;

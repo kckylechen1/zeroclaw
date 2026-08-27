@@ -1250,11 +1250,38 @@ impl super::procedure::ProcedureSubmitPort for InMemoryTachiTaskBridge {
         // process-lifetime CAS — the durable production story is the
         // real tachi host's store).
         let receipt = self.submit(intent, request_id).await;
-        if let Ok(SubmitReceipt::Admitted { task_ref, .. }) = &receipt {
-            self.state
-                .lock()
-                .procedure_runs
-                .insert(task_ref.as_wire().to_string(), reference.clone());
+        if let Ok(SubmitReceipt::Admitted { task_ref, replayed }) = &receipt {
+            let mut state = self.state.lock();
+            let existing = state.procedure_runs.get(task_ref.as_wire()).cloned();
+            match existing {
+                // A procedure run re-submitted under its own tuple: the
+                // binding must be the SAME snapshot (a different ref on
+                // the same task is a binding conflict, never a rebind).
+                Some(bound) => {
+                    if bound != reference {
+                        return Ok(SubmitReceipt::Rejected {
+                            reason: "procedure_binding_conflict".to_string(),
+                        });
+                    }
+                }
+                // First procedure binding for this task. If the base
+                // submit REPLAYED (the task already existed), the task
+                // was originally admitted through the BASE port — its
+                // acknowledgment predates snapshot retention and
+                // procedure binding, and it must not be retroactively
+                // converted (verify-before-ack applies to every
+                // procedure-run admission).
+                None => {
+                    if *replayed {
+                        return Ok(SubmitReceipt::Rejected {
+                            reason: "replay_of_non_procedure_task".to_string(),
+                        });
+                    }
+                    state
+                        .procedure_runs
+                        .insert(task_ref.as_wire().to_string(), reference.clone());
+                }
+            }
         }
         receipt
     }

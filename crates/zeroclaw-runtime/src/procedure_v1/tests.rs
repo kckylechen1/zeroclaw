@@ -1436,7 +1436,7 @@ fn missing_toml_is_a_loud_capture_failure() {
     std::fs::write(package.join("SOP.md"), STAGEX_MD).unwrap();
     let refused = capture_definition(&dir.path().join("sops"), "stagex-update");
     assert!(refused.is_err());
-    let message = refused.err().unwrap().to_string();
+    let message = refused.unwrap_err().to_string();
     assert!(
         message.contains("not found"),
         "loud missing-required failure, got: {message}"
@@ -1489,4 +1489,85 @@ async fn port_refuses_an_intent_whose_capability_is_not_the_snapshots() {
         ),
         "unexpected receipt: {receipt:?}"
     );
+}
+
+#[test]
+fn present_but_empty_sop_md_is_an_incomplete_publication_refused() {
+    // Truncate-before-write install pause: the md file exists but is
+    // empty. Presence is not representable in the byte string alone,
+    // so the refusal happens at capture — an empty SOP.md can never
+    // freeze as a TOML-only revision that skips the pairing law.
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("sops").join("stagex-update");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("SOP.toml"), STAGEX_TOML).unwrap();
+    std::fs::write(package.join("SOP.md"), "").unwrap();
+    let refused = capture_definition(&dir.path().join("sops"), "stagex-update");
+    let message = refused.expect_err("empty md refused").to_string();
+    assert!(
+        message.contains("present but empty"),
+        "incomplete-publication refusal, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn replaying_a_base_admitted_task_through_the_procedure_port_is_refused() {
+    // Cross-port replay: a task first admitted through BASE submit
+    // must not be retroactively converted into a procedure run — its
+    // original acknowledgment predates snapshot retention and
+    // procedure binding (verify-before-ack governs every procedure
+    // admission).
+    let dir = fixture_dir();
+    let snapshot =
+        mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    let reference = snapshot.snapshot_ref();
+    let (client, double) = client_and_double();
+
+    // A base (non-procedure) submit reusing the SAME request-id tuple.
+    let objective = BoundedText::new("base task sharing the tuple".to_string()).unwrap();
+    let inputs = TaskIntentInputs {
+        objective,
+        capability_request: zeroclaw_api::taskintent::CapabilityRequest {
+            capability: snapshot.guidance.required_capability,
+        },
+        constraints: vec![],
+        expected_artifacts: vec![],
+        evaluation_requirement: snapshot.guidance.evaluation_requirement.clone(),
+    };
+    let context = StructuralIntentContext {
+        requester: requester(),
+        parent_ref: None,
+        supervisor_ref: None,
+        context_bundle_ref: BoundedText::new(reference.clone()).expect("bounded"),
+        source_refs: vec![],
+        expiry: None,
+        retry_of: None,
+    };
+    let intent = compose_intent(&inputs, &full_policy(), &context).expect("composes");
+    let request_id = derive_request_id("stagex-update", &snapshot.procedure_digest, "xport-1");
+    let base = client
+        .bridge()
+        .submit(&intent, &request_id)
+        .await
+        .expect("base submit");
+    let SubmitReceipt::Admitted { task_ref, .. } = base else {
+        panic!("base submit must admit");
+    };
+
+    // Same tuple through the PROCEDURE port: the replay would
+    // retroactively bind the base task to the snapshot.
+    let receipt = double
+        .submit_procedure_run(&intent, &request_id, &snapshot)
+        .await
+        .expect("transport level ok");
+    assert!(
+        matches!(
+            &receipt,
+            SubmitReceipt::Rejected { reason } if reason == "replay_of_non_procedure_task"
+        ),
+        "unexpected receipt: {receipt:?}"
+    );
+    // No procedure binding was created for the base task.
+    let drive = double.drive_procedure_steps(&task_ref, &reference);
+    assert!(drive.is_err(), "base task is not a procedure run");
 }
