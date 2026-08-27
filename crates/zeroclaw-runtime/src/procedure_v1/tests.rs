@@ -1422,3 +1422,71 @@ fn marker_published_but_md_half_missing_is_refused() {
         "half-published revision refused at capture"
     );
 }
+
+#[test]
+fn missing_toml_is_a_loud_capture_failure() {
+    // The stable analog of the transient-TOML race: a package directory
+    // without its required SOP.toml fails loudly — it can never read as
+    // an md-only or empty capture (presence coherence treats a
+    // read/stat contradiction as instability, and stable absence is
+    // the explicit missing-required-file error).
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("sops").join("stagex-update");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("SOP.md"), STAGEX_MD).unwrap();
+    let refused = capture_definition(&dir.path().join("sops"), "stagex-update");
+    assert!(refused.is_err());
+    let message = refused.err().unwrap().to_string();
+    assert!(
+        message.contains("not found"),
+        "loud missing-required failure, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn port_refuses_an_intent_whose_capability_is_not_the_snapshots() {
+    // KP-17 carrier-enforced: a direct port caller pairing a stronger
+    // (invariant-valid) snapshot with a weaker, independently valid
+    // intent is rejected — the capability request must BE the
+    // snapshot's requirement.
+    let dir = fixture_dir();
+    let snapshot =
+        mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    let reference = snapshot.snapshot_ref();
+    let inputs = TaskIntentInputs {
+        objective: BoundedText::new(
+            "Execute procedure stagex-update revision 1.0.0 per the pinned snapshot".to_string(),
+        )
+        .expect("bounded"),
+        // Weaker than the snapshot's RepositoryImplementation.
+        capability_request: zeroclaw_api::taskintent::CapabilityRequest {
+            capability: Capability::ReasoningReview,
+        },
+        constraints: vec![],
+        expected_artifacts: vec![],
+        evaluation_requirement: snapshot.guidance.evaluation_requirement.clone(),
+    };
+    let context = StructuralIntentContext {
+        requester: requester(),
+        parent_ref: None,
+        supervisor_ref: None,
+        context_bundle_ref: BoundedText::new(reference).expect("bounded"),
+        source_refs: vec![],
+        expiry: None,
+        retry_of: None,
+    };
+    let intent = compose_intent(&inputs, &full_policy(), &context).expect("composes");
+    let double = Arc::new(InMemoryTachiTaskBridge::new());
+    let request_id = derive_request_id("stagex-update", &snapshot.procedure_digest, "cap-1");
+    let receipt = double
+        .submit_procedure_run(&intent, &request_id, &snapshot)
+        .await
+        .expect("transport level ok");
+    assert!(
+        matches!(
+            &receipt,
+            SubmitReceipt::Rejected { reason } if reason == "capability_intent_mismatch"
+        ),
+        "unexpected receipt: {receipt:?}"
+    );
+}

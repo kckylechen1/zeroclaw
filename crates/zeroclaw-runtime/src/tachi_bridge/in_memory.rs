@@ -1219,6 +1219,17 @@ impl super::procedure::ProcedureSubmitPort for InMemoryTachiTaskBridge {
                 reason: "snapshot_ref_binding_mismatch".to_string(),
             });
         }
+        // KP-17 narrow-only law, carrier-enforced: the intent's
+        // capability request must BE the snapshot's required capability
+        // — a direct port caller cannot pair a stronger snapshot with a
+        // weaker, independently valid intent (the client composes the
+        // request FROM the snapshot; the carrier must not have to trust
+        // that).
+        if intent.capability_request.capability != snapshot.guidance.required_capability {
+            return Ok(SubmitReceipt::Rejected {
+                reason: "capability_intent_mismatch".to_string(),
+            });
+        }
         // Defense-in-depth: the full snapshot invariant law (the same
         // one the client runs) is re-enforced AT THE PORT — a caller
         // that bypasses `ProcedureRunClient` and drives the port

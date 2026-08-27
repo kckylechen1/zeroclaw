@@ -59,10 +59,6 @@ fn stat_signature(path: &Path) -> Option<(u64, std::time::SystemTime)> {
     Some((meta.len(), meta.modified().ok()?))
 }
 
-fn read_stable(path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
-}
-
 /// Read an optional file, distinguishing ABSENT (stable None) from any
 /// other failure. Presence is judged by the read result itself, never
 /// by a separate `exists()` probe — an `exists()`-then-read pair has
@@ -156,26 +152,35 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
     // (`SnapshotMintError::UnpairedPublication`), so no run can be
     // created from a mixed or unpaired tree either way.
     //
-    // 3. Presence coherence: the optional MD file's READ result must
-    //    agree with the stat signatures on both sides. A rename-aside
+    // 3. Presence coherence, BOTH files: each file's READ result must
+    //    agree with its stat signatures on both sides. A rename-aside
     //    during the reads (the file restored with size/mtime intact
     //    before the closing stat) reads as ABSENT while the stats say
     //    PRESENT — that contradiction is instability, never "the
     //    package is TOML-only": without this check, an md-bearing tree
     //    could freeze an empty-MD capture that skips the pairing law.
+    //    Symmetrically, a TRANSIENT SOP.toml (absent at both stats,
+    //    readable during the reads) would freeze a revision the tree
+    //    never stably held — the toml presence contradiction is
+    //    instability too, and a stably-absent TOML is the loud
+    //    missing-required-file failure below.
     let mut attempts = 0;
     let (toml_bytes, md_bytes) = loop {
         let before = (stat_signature(&toml_path), stat_signature(&md_path));
-        let toml = read_stable(&toml_path)?;
+        let toml = read_optional(&toml_path)?;
         let md = read_optional(&md_path)?;
-        let toml_again = read_stable(&toml_path)?;
+        let toml_again = read_optional(&toml_path)?;
         let md_again = read_optional(&md_path)?;
         let after = (stat_signature(&toml_path), stat_signature(&md_path));
         if before == after
             && toml == toml_again
             && md == md_again
+            && toml.is_some() == before.0.is_some()
             && md.is_some() == before.1.is_some()
         {
+            let Some(toml) = toml else {
+                bail!("SOP.toml for `{name}` not found (required)");
+            };
             break (toml, md.unwrap_or_default());
         }
         attempts += 1;
