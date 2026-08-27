@@ -35,9 +35,15 @@
 //!   returns typed `Unavailable` and there is NO local execution path —
 //!   this module holds no process/command capability at all (source-scan
 //!   test below).
-//! - **Scope (owner-specified)**: submit / get / watch / collect ONLY.
-//!   No intervene/request_stop surface exists on this client (V3 leaf);
-//!   no requester-restart delivery (tachi durable delivery not landed).
+//! - **Scope (owner-specified)**: submit / get / watch / collect (V2b)
+//!   plus intervene / request_stop (vertical V3, TB-11/TB-12 — the
+//!   supervisor-gated entry point is
+//!   `TachiBridgeClient::supervisor_intervene`). No requester-restart
+//!   delivery (tachi durable delivery not landed). No production
+//!   transport ships in this crate yet: the binding point is the
+//!   `TachiTaskBridge` port; the live stage-B harness implements it
+//!   over HTTP against the real tachi host, and the parent-runtime
+//!   wiring is the V4 leaf.
 
 pub mod client;
 pub mod compose;

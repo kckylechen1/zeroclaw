@@ -73,8 +73,8 @@ use zeroclaw_api::subagent_v1::{
     VersionedProfileRef,
 };
 use zeroclaw_api::taskintent::{
-    BoundedText, Capability, CapabilityRequest, IndependenceClass, InterventionReceipt, RequestId,
-    RequesterRef, TaskConstraint, TaskRef,
+    BoundedText, Capability, CapabilityRequest, IndependenceClass, InterventionError,
+    InterventionReceipt, InterventionV1, RequestId, RequesterRef, TaskConstraint, TaskRef,
 };
 
 use crate::subagent_v1::{SubAgentBudgetMeter, SubAgentProfileRegistry};
@@ -140,10 +140,10 @@ fn parse_provenance(provenance: &str) -> (String, String) {
                 malformed = true;
             }
         } else if let Some(value) = part.strip_prefix("model=") {
-            if model
+            let duplicated = model
                 .replace(value.trim().trim_matches('"').to_string())
-                .is_some()
-            {
+                .is_some();
+            if duplicated {
                 malformed = true;
             }
         }
@@ -172,6 +172,11 @@ pub struct ReviewLineageRecord {
     context_bundle_ref: String,
     implementation_bundle_ref: String,
     request_id: String,
+    /// The implementation result's observed state AT REQUEST TIME — the
+    /// review is bound to the implementation revision it was requested
+    /// against; a LATER correction (a new revision) never retroactively
+    /// re-opens this review's satisfaction.
+    implementation_at_request: ResultObservation,
     observed: Option<ResultObservation>,
 }
 
@@ -220,6 +225,13 @@ impl ReviewLineageRecord {
         self.observed.as_ref()
     }
 
+    /// The implementation task's observed state when the review was
+    /// requested (the revision binding — see the field docs).
+    #[must_use]
+    pub fn implementation_at_request(&self) -> &ResultObservation {
+        &self.implementation_at_request
+    }
+
     /// Whether this review satisfies an independence-marked requirement.
     /// The gate is CONJUNCTIVE and fail-closed, and BOTH the label and
     /// the evidence must reach the requirement:
@@ -245,14 +257,11 @@ impl ReviewLineageRecord {
     ///      (and not mintable through this surface; see
     ///      [`SupervisorSessionV1::request_independent_review`]).
     #[must_use]
-    pub fn satisfies(
-        &self,
-        required: IndependenceClass,
-        implementation_observed: Option<&ResultObservation>,
-    ) -> bool {
+    pub fn satisfies(&self, required: IndependenceClass) -> bool {
         let Some(review_observed) = self.observed.as_ref() else {
             return false;
         };
+        let implementation_observed = &self.implementation_at_request;
         if self.review_task == self.review_of
             || self.context_bundle_ref == self.implementation_bundle_ref
         {
@@ -263,25 +272,23 @@ impl ReviewLineageRecord {
         }
         // The evidence rank the observed provenances support. Comparisons
         // are case-insensitive; missing provenance caps the rank at 1.
-        let evidence_rank: u8 = match implementation_observed {
-            Some(implementation) => {
-                let a = implementation.provenance_vendor.to_ascii_lowercase();
-                let b = review_observed.provenance_vendor.to_ascii_lowercase();
-                if a.is_empty() || b.is_empty() {
-                    1
-                } else if a != b {
-                    3
+        let implementation = implementation_observed;
+        let evidence_rank: u8 = {
+            let a = implementation.provenance_vendor.to_ascii_lowercase();
+            let b = review_observed.provenance_vendor.to_ascii_lowercase();
+            if a.is_empty() || b.is_empty() {
+                1
+            } else if a != b {
+                3
+            } else {
+                let m1 = implementation.provenance_model.to_ascii_lowercase();
+                let m2 = review_observed.provenance_model.to_ascii_lowercase();
+                if !m1.is_empty() && !m2.is_empty() && m1 != m2 {
+                    2
                 } else {
-                    let m1 = implementation.provenance_model.to_ascii_lowercase();
-                    let m2 = review_observed.provenance_model.to_ascii_lowercase();
-                    if !m1.is_empty() && !m2.is_empty() && m1 != m2 {
-                        2
-                    } else {
-                        1
-                    }
+                    1
                 }
             }
-            None => 1,
         };
         let required_rank: u8 = match required {
             IndependenceClass::FreshContextSameHarness => 1,
@@ -306,6 +313,7 @@ impl ReviewLineageRecord {
         context_bundle_ref: String,
         implementation_bundle_ref: String,
         request_id: String,
+        implementation_at_request: ResultObservation,
     ) -> Self {
         Self {
             review_task,
@@ -314,6 +322,7 @@ impl ReviewLineageRecord {
             context_bundle_ref,
             implementation_bundle_ref,
             request_id,
+            implementation_at_request,
             observed: None,
         }
     }
@@ -334,6 +343,7 @@ impl ReviewLineageRecord {
         context_bundle_ref: String,
         implementation_bundle_ref: String,
         request_id: String,
+        implementation_at_request: ResultObservation,
         observed: Option<ResultObservation>,
     ) -> Self {
         Self {
@@ -343,6 +353,7 @@ impl ReviewLineageRecord {
             context_bundle_ref,
             implementation_bundle_ref,
             request_id,
+            implementation_at_request,
             observed,
         }
     }
@@ -467,16 +478,16 @@ pub enum SupervisorFlowError {
     #[error("review task {task_ref} is not one of this session's review lineages")]
     UnknownReviewTask { task_ref: TaskRef },
     #[error(
-        "the offered projection belongs to {actual:?}, not to review task {expected:?} — a \
-         result from another task cannot complete this review's gate"
-    )]
-    ObservationTaskMismatch { expected: TaskRef, actual: TaskRef },
-    #[error(
         "class {class:?} cannot be requested through this surface: the supervisor submits \
          machine-executed review tasks (capability reasoning_review); a human review enters \
          through the human review path, never a supervisor task submission"
     )]
     ClassNotRequestableHere { class: IndependenceClass },
+    #[error(
+        "no implementation result has been observed yet: collect the implementation task's \
+         result first — a review is bound to the implementation revision it reviews"
+    )]
+    ImplementationResultNotObserved,
 }
 
 /// The supervisor session. Constructed ONLY from an admitted
@@ -502,7 +513,14 @@ pub struct SupervisorSessionV1 {
     /// The pending ambiguous review submission (TB-7 rule 4): when a
     /// review submit's response was lost, the SAME `(intent,
     /// request_id)` tuple is retained and replayed — never a new id.
-    pending_review_submit: Option<(zeroclaw_api::taskintent::TaskIntentV1, RequestId)>,
+    pending_review_submit: Option<(
+        zeroclaw_api::taskintent::TaskIntentV1,
+        RequestId,
+        ResultObservation,
+    )>,
+    /// The pending ambiguous intervention (TB-7 rule 6): same law as
+    /// `pending_review_submit` — replay the same tuple, never re-mint.
+    pending_intervention: Option<(InterventionV1, RequestId)>,
     reviews: Vec<ReviewLineageRecord>,
     proposals: Vec<JudgmentProposalV1>,
     meter: Arc<SubAgentBudgetMeter>,
@@ -574,6 +592,7 @@ impl SupervisorSessionV1 {
             implementation_intent_digest: None,
             implementation_observation: None,
             pending_review_submit: None,
+            pending_intervention: None,
             reviews: Vec::new(),
             proposals: Vec::new(),
             meter: Arc::new(SubAgentBudgetMeter::new(
@@ -806,26 +825,28 @@ impl SupervisorSessionV1 {
         Ok(projection)
     }
 
-    /// Record the observed completed-result facts for one of this
-    /// session's review lineages (from a projection already collected
-    /// through [`Self::collect_result`]). Until this is called, the
-    /// review record CANNOT satisfy any independence-marked requirement:
-    /// task admission alone is not a completed review.
-    pub fn note_review_observation(
+    /// Observe a review task's completed result THROUGH the session's
+    /// own collect (ReadResultRefs authority): the projection is
+    /// fetched by the session, never accepted from the caller, so a
+    /// caller-constructed projection cannot open the gate. Until this
+    /// succeeds for a review, its record CANNOT satisfy any
+    /// independence-marked requirement: task admission alone is not a
+    /// completed review.
+    pub async fn observe_review_result(
         &mut self,
         review_task: &TaskRef,
-        projection: &ResultProjectionView,
-    ) -> Result<(), SupervisorFlowError> {
-        // The projection must belong to the review task it is offered
-        // for — a result from ANY other task cannot complete this
-        // review's gate.
-        if &projection.task_ref != review_task {
-            return Err(SupervisorFlowError::ObservationTaskMismatch {
-                expected: review_task.clone(),
-                actual: projection.task_ref.clone(),
+    ) -> Result<ResultObservation, SupervisorFlowError> {
+        if !self
+            .reviews
+            .iter()
+            .any(|record| record.review_task == *review_task)
+        {
+            return Err(SupervisorFlowError::UnknownReviewTask {
+                task_ref: review_task.clone(),
             });
         }
-        let observation = ResultObservation::from_projection(projection);
+        let projection = self.collect_result(review_task).await?;
+        let observation = ResultObservation::from_projection(&projection);
         let record = self
             .reviews
             .iter_mut()
@@ -833,8 +854,8 @@ impl SupervisorSessionV1 {
             .ok_or_else(|| SupervisorFlowError::UnknownReviewTask {
                 task_ref: review_task.clone(),
             })?;
-        record.note_observation(observation);
-        Ok(())
+        record.note_observation(observation.clone());
+        Ok(observation)
     }
 
     /// `RequestIndependentReview` (SA-29/TB-11/TB-17): maps to a NEW
@@ -870,7 +891,9 @@ impl SupervisorSessionV1 {
         // resolved with the SAME tuple before a new review is created —
         // this branch replays the retained (intent, request_id)
         // verbatim.
-        if let Some((intent, request_id)) = self.pending_review_submit.clone() {
+        if let Some((intent, request_id, implementation_at_request)) =
+            self.pending_review_submit.clone()
+        {
             let review_of = self.implementation_task_ref()?;
             let implementation_bundle = self
                 .implementation_bundle_ref
@@ -889,6 +912,7 @@ impl SupervisorSessionV1 {
                         bundle_ref,
                         implementation_bundle,
                         request_id.to_string(),
+                        implementation_at_request,
                     );
                     self.reviews.push(record.clone());
                     Ok(record)
@@ -923,6 +947,14 @@ impl SupervisorSessionV1 {
             });
         }
         let review_of = self.implementation_task_ref()?;
+        // The review is BOUND to the implementation revision it reviews:
+        // an observed implementation result is required before any
+        // review is requested (the observation is captured at request
+        // time and never re-read from later state).
+        let implementation_at_request = self
+            .implementation_observation
+            .clone()
+            .ok_or(SupervisorFlowError::ImplementationResultNotObserved)?;
         let implementation_bundle = self
             .implementation_bundle_ref
             .clone()
@@ -1003,6 +1035,7 @@ impl SupervisorSessionV1 {
                     bundle_ref,
                     implementation_bundle,
                     request_id.to_string(),
+                    implementation_at_request,
                 );
                 self.reviews.push(record.clone());
                 Ok(record)
@@ -1015,7 +1048,7 @@ impl SupervisorSessionV1 {
             // the submission: nothing is retained.
             Ok(receipt @ SubmitReceipt::ReconciliationUnknown { .. })
             | Ok(receipt @ SubmitReceipt::Unavailable) => {
-                self.pending_review_submit = Some((intent, request_id));
+                self.pending_review_submit = Some((intent, request_id, implementation_at_request));
                 Err(SupervisorFlowError::ReviewSubmitRefused { receipt })
             }
             Ok(other) => Err(SupervisorFlowError::ReviewSubmitRefused { receipt: other }),
@@ -1024,22 +1057,12 @@ impl SupervisorSessionV1 {
             // it verbatim (see the pending check at the top); no new
             // request id is ever minted for this submission.
             Err(_) => {
-                self.pending_review_submit = Some((intent, request_id));
+                self.pending_review_submit = Some((intent, request_id, implementation_at_request));
                 Err(SupervisorFlowError::ReviewSubmitRefused {
                     receipt: SubmitReceipt::Unavailable,
                 })
             }
         }
-    }
-
-    /// Abandon a pending ambiguous review submission (typed, no bridge
-    /// call): the retained tuple is dropped so a NEW review may be
-    /// requested. Use only after the caller has reconciled the pending
-    /// tuple out-of-band or decided to give up on it; the abandoned
-    /// submission's facts (if the host committed it) remain Tachi-side
-    /// truth this session no longer tracks.
-    pub fn abandon_pending_review(&mut self) -> bool {
-        self.pending_review_submit.take().is_some()
     }
 
     /// All review lineage records this session minted, in order.
@@ -1054,9 +1077,9 @@ impl SupervisorSessionV1 {
     /// part of the gate, not just the recorded class label.
     #[must_use]
     pub fn latest_review_satisfies(&self, required: IndependenceClass) -> bool {
-        self.reviews.last().is_some_and(|record| {
-            record.satisfies(required, self.implementation_observation.as_ref())
-        })
+        self.reviews
+            .last()
+            .is_some_and(|record| record.satisfies(required))
     }
 
     /// A session intervention on the implementation task, gated by the
@@ -1073,7 +1096,36 @@ impl SupervisorSessionV1 {
         op: SupervisorIntervention,
     ) -> Result<InterventionReceipt, SupervisorFlowError> {
         let task_ref = self.implementation_task_ref()?;
+        // TB-7 rule 6 (interventions): an ambiguous intervention (typed
+        // ReconciliationUnknown / OwnerDisappeared, or a lost response,
+        // or an unavailable bridge) retains the EXACT (operation,
+        // request_id) tuple; the next call REPLAYS it verbatim — never
+        // a new id, never a second forward. Definitive outcomes and
+        // definitive refusals clear the pending tuple.
+        if let Some((wire, request_id)) = self.pending_intervention.clone() {
+            self.record_action("intervention replay")?;
+            return self
+                .client
+                .intervene(&task_ref, &wire, &self.requester, &request_id, None)
+                .await
+                .map(|receipt| {
+                    self.pending_intervention = None;
+                    receipt
+                })
+                .map_err(|error| {
+                    if !matches!(
+                        error,
+                        InterventionError::ReconciliationUnknown
+                            | InterventionError::OwnerDisappeared
+                            | InterventionError::Unavailable
+                    ) {
+                        self.pending_intervention = None;
+                    }
+                    SupervisorFlowError::Intervention(SupervisorInterventionError::Host(error))
+                });
+        }
         let request_id = self.fresh_request_id("intervene");
+        let wire = op.to_wire();
         self.record_action("intervene")?;
         self.client
             .supervisor_intervene(
@@ -1085,7 +1137,23 @@ impl SupervisorSessionV1 {
                 None,
             )
             .await
-            .map_err(SupervisorFlowError::Intervention)
+            .map(|receipt| {
+                self.pending_intervention = None;
+                receipt
+            })
+            .map_err(|error| {
+                if matches!(
+                    &error,
+                    SupervisorInterventionError::Host(
+                        InterventionError::ReconciliationUnknown
+                            | InterventionError::OwnerDisappeared
+                            | InterventionError::Unavailable
+                    )
+                ) {
+                    self.pending_intervention = Some((wire, request_id));
+                }
+                SupervisorFlowError::Intervention(error)
+            })
     }
 
     /// `ProposeJudgment` (SA-29): a receipt-bound, run-scoped

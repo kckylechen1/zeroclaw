@@ -1552,7 +1552,22 @@ fn parse_report_core(text: &str) -> Result<ReportCore, anyhow::Error> {
         .and_then(|rest| rest.strip_suffix("```"))
         .map(str::trim)
         .unwrap_or(trimmed);
-    serde_json::from_str(body).map_err(Into::into)
+    let core: ReportCore = serde_json::from_str(body)?;
+    // The submit_task_intent action (and its typed payload) is the
+    // SUPERVISOR session's vocabulary (SA-29 role-exclusive law): a
+    // reasoning child's model output cannot carry it — the report is
+    // malformed and the run fails, rather than smuggling a submit
+    // request through the reasoning report channel.
+    if core
+        .requested_parent_actions
+        .iter()
+        .any(|action| action.action.requires_task_intent_payload())
+    {
+        anyhow::bail!(
+            "requested_parent_actions carries a submit_task_intent action: that action is              supervisor-session vocabulary and cannot come from a reasoning child report"
+        );
+    }
+    Ok(core)
 }
 
 // ─────────────────────────────────────────────────────────────────────────

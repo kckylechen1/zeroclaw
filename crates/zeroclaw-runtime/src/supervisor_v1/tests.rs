@@ -134,6 +134,24 @@ async fn parent_submits_planned_task(supervisor: &mut SupervisorSessionV1, rig: 
                 .attach_implementation_task(task_ref.clone())
                 .await
                 .expect("attach — digest matches the planned intent");
+            // Round 0 of the implementation: completed WITHOUT
+            // verification (the state a first review reacts to), and
+            // the session observes it — reviews are bound to the
+            // implementation revision they review.
+            rig.bridge.observe_outcome(
+                &task_ref,
+                attempt(0),
+                "done",
+                Some("artifact:impl-r0".into()),
+                vec!["evidence:impl-r0".into()],
+                false,
+                true,
+                "vendor=codex; model=codex; basis=attested",
+            );
+            let _ = supervisor
+                .collect_result(&task_ref)
+                .await
+                .expect("implementation result observed");
             task_ref
         }
         other => panic!("parent submit not admitted: {other:?}"),
@@ -467,7 +485,7 @@ async fn discrimination_same_session_is_not_independence_but_fresh_context_same_
     );
     // ADMISSION IS NOT COMPLETION: before the review's result is
     // observed, the record satisfies NOTHING (fail closed).
-    assert!(!record.satisfies(IC::FreshContextSameHarness, None));
+    assert!(!record.satisfies(IC::FreshContextSameHarness));
     assert!(!supervisor.latest_review_satisfies(IC::FreshContextSameHarness));
     // A SameSessionContinuation-class "review" is refused outright
     // (the same-session case cannot even be requested as a class).
@@ -489,18 +507,15 @@ async fn discrimination_same_session_is_not_independence_but_fresh_context_same_
         false,
         "vendor=glm; model=glm; basis=attested",
     );
-    let review_projection = supervisor
-        .collect_result(record.review_task())
+    let _review_observation = supervisor
+        .observe_review_result(record.review_task())
         .await
-        .expect("collect review");
-    supervisor
-        .note_review_observation(record.review_task(), &review_projection)
-        .expect("observation recorded");
+        .expect("observation recorded (self-collected)");
     assert!(record_satisfies(&supervisor, IC::FreshContextSameHarness));
     // It does NOT satisfy a stricter requirement (fresh-context
     // same-harness cannot stand in for cross-vendor).
     let latest = supervisor.review_records().last().unwrap();
-    assert!(!latest.satisfies(IC::FreshContextCrossVendor, None));
+    assert!(!latest.satisfies(IC::FreshContextCrossVendor));
     // Lineage forgery guard (red-team seam): a forged record whose
     // bundle ref COLLAPSED onto the implementation's, or whose review
     // task EQUALS the reviewed task, satisfies nothing — whatever its
@@ -511,6 +526,12 @@ async fn discrimination_same_session_is_not_independence_but_fresh_context_same_
         provenance_model: "glm".into(),
         terminal_classification: "done".into(),
     };
+    let implementation = super::ResultObservation {
+        result_revision: 1,
+        provenance_vendor: "codex".into(),
+        provenance_model: "codex".into(),
+        terminal_classification: "done".into(),
+    };
     let collapsed = super::ReviewLineageRecord::forge_for_test(
         record.review_task().clone(),
         record.review_of().clone(),
@@ -518,9 +539,10 @@ async fn discrimination_same_session_is_not_independence_but_fresh_context_same_
         record.implementation_bundle_ref().to_string(),
         record.implementation_bundle_ref().to_string(),
         record.request_id().to_string(),
+        implementation.clone(),
         Some(observed.clone()),
     );
-    assert!(!collapsed.satisfies(IC::FreshContextCrossVendor, None));
+    assert!(!collapsed.satisfies(IC::FreshContextCrossVendor));
     let self_review = super::ReviewLineageRecord::forge_for_test(
         record.review_task().clone(),
         record.review_task().clone(),
@@ -528,9 +550,10 @@ async fn discrimination_same_session_is_not_independence_but_fresh_context_same_
         "bundle-x".into(),
         record.implementation_bundle_ref().to_string(),
         record.request_id().to_string(),
+        implementation,
         Some(observed),
     );
-    assert!(!self_review.satisfies(IC::FreshContextCrossVendor, None));
+    assert!(!self_review.satisfies(IC::FreshContextCrossVendor));
     // Session-level acceptance gate agrees.
     assert!(supervisor.latest_review_satisfies(IC::FreshContextSameHarness));
     assert!(!supervisor.latest_review_satisfies(IC::HumanReview));
@@ -688,13 +711,10 @@ async fn full_loop_runs_through_the_bridge_surface() {
     // Observe BOTH results through the session; the cross-vendor claim
     // is then corroborated (codex implementation, glm review).
     let impl_projection = supervisor.collect_result(&task).await.expect("collect");
-    let review_projection = supervisor
-        .collect_result(record.review_task())
+    let _review_observation = supervisor
+        .observe_review_result(record.review_task())
         .await
-        .expect("collect review");
-    supervisor
-        .note_review_observation(record.review_task(), &review_projection)
-        .expect("observation recorded");
+        .expect("observation recorded (self-collected)");
     assert!(supervisor.latest_review_satisfies(IC::FreshContextCrossVendor));
     assert_eq!(impl_projection.adjudication.label(), "accepted");
     let proposal = supervisor.propose_judgment(&task).await.expect("proposal");
@@ -750,13 +770,10 @@ async fn correction_cycle_runs_through_the_bridge_surface() {
         "vendor=codex; model=codex; basis=attested",
     );
     rig.bridge.ingest_adjudication(&task, "rejected");
-    let first_projection = supervisor
-        .collect_result(first.review_task())
+    let _first_observation = supervisor
+        .observe_review_result(first.review_task())
         .await
-        .expect("collect first review");
-    supervisor
-        .note_review_observation(first.review_task(), &first_projection)
-        .expect("observation recorded");
+        .expect("observation recorded (self-collected)");
 
     // The owner leg declares correction support (TB-15: advertisement is
     // a typed, revisioned fact — the managed-lane baseline is stops
@@ -818,13 +835,10 @@ async fn correction_cycle_runs_through_the_bridge_surface() {
         "vendor=glm; model=glm; basis=attested",
     );
     rig.bridge.ingest_adjudication(&task, "accepted");
-    let second_projection = supervisor
-        .collect_result(second.review_task())
+    let _second_observation = supervisor
+        .observe_review_result(second.review_task())
         .await
-        .expect("collect second review");
-    supervisor
-        .note_review_observation(second.review_task(), &second_projection)
-        .expect("observation recorded");
+        .expect("observation recorded (self-collected)");
     assert!(supervisor.latest_review_satisfies(IC::FreshContextSameHarness));
     let proposal = supervisor.propose_judgment(&task).await.expect("proposal");
     assert_eq!(proposal.adjudication_observed, "accepted");
@@ -944,19 +958,40 @@ async fn authority_not_granted_refuses_the_operation() {
         None,
     )
     .expect("admits");
-    let task = parent_submits_planned_task(&mut supervisor, &rig).await;
+    // The reduced session plans; the parent submits and attaches —
+    // WITHOUT the observation step (this session cannot even read the
+    // implementation result: that is the point).
+    let action = supervisor
+        .plan_implementation_task(&implementation_inputs(), &parent_policy())
+        .expect("plan");
+    let payload = action.task_intent_request.clone().expect("payload");
+    let task = match rig
+        .client()
+        .submit(&payload.intent, &payload.request_id)
+        .await
+        .expect("parent submit")
+    {
+        SubmitReceipt::Admitted { task_ref, .. } => {
+            supervisor
+                .attach_implementation_task(task_ref.clone())
+                .await
+                .expect("attach");
+            task_ref
+        }
+        other => panic!("submit failed: {other:?}"),
+    };
+    assert!(matches!(
+        supervisor.collect_result(&task).await,
+        Err(super::SupervisorFlowError::AuthorityNotGranted {
+            authority: SupervisorAuthority::ReadResultRefs
+        })
+    ));
     assert!(matches!(
         supervisor
             .request_independent_review(IC::FreshContextCrossVendor, "x")
             .await,
         Err(super::SupervisorFlowError::AuthorityNotGranted {
             authority: SupervisorAuthority::RequestIndependentReview
-        })
-    ));
-    assert!(matches!(
-        supervisor.collect_result(&task).await,
-        Err(super::SupervisorFlowError::AuthorityNotGranted {
-            authority: SupervisorAuthority::ReadResultRefs
         })
     ));
 }
@@ -1258,9 +1293,23 @@ async fn ambiguous_review_submit_replays_the_same_tuple_never_a_new_id() {
     {
         SubmitReceipt::Admitted { task_ref, .. } => {
             supervisor2
-                .attach_implementation_task(task_ref)
+                .attach_implementation_task(task_ref.clone())
                 .await
                 .expect("attach");
+            inner.observe_outcome(
+                &task_ref,
+                serde_json::from_value(serde_json::json!("attempt:test-0000")).unwrap(),
+                "done",
+                Some("artifact:impl-r0".into()),
+                vec!["evidence:impl-r0".into()],
+                false,
+                true,
+                "vendor=codex; model=codex; basis=attested",
+            );
+            let _ = supervisor2
+                .collect_result(&task_ref)
+                .await
+                .expect("implementation result observed");
         }
         other => panic!("submit failed: {other:?}"),
     }
@@ -1346,13 +1395,10 @@ async fn cross_vendor_satisfaction_requires_vendor_corroboration() {
         .collect_result(&task)
         .await
         .expect("collect impl");
-    let review_projection = supervisor
-        .collect_result(record.review_task())
+    let _observation = supervisor
+        .observe_review_result(record.review_task())
         .await
-        .expect("collect review");
-    supervisor
-        .note_review_observation(record.review_task(), &review_projection)
-        .expect("observed");
+        .expect("observed (self-collected)");
     assert!(
         !supervisor.latest_review_satisfies(IC::FreshContextCrossVendor),
         "same-vendor review must NOT corroborate a cross-vendor requirement"
@@ -1377,21 +1423,20 @@ async fn cross_vendor_satisfaction_requires_vendor_corroboration() {
         false,
         "vendor=glm; model=glm; basis=attested",
     );
-    let review2_projection = supervisor
-        .collect_result(record2.review_task())
+    let _observation2 = supervisor
+        .observe_review_result(record2.review_task())
         .await
-        .expect("collect review 2");
-    supervisor
-        .note_review_observation(record2.review_task(), &review2_projection)
-        .expect("observed 2");
+        .expect("observed 2 (self-collected)");
     assert!(supervisor.latest_review_satisfies(IC::FreshContextCrossVendor));
 }
 
 #[tokio::test]
-async fn observation_from_a_foreign_task_cannot_complete_the_gate() {
-    // Codex round-2 finding 1: note_review_observation must bind the
-    // offered projection to the review task it claims to complete — a
-    // result from ANY other task is refused typed.
+async fn review_observations_are_self_collected_only() {
+    // Codex round-3 finding 1: the review gate opens ONLY through the
+    // session's own collect — there is no caller-supplied projection
+    // surface at all, so a caller-constructed ResultProjectionView
+    // cannot complete a review (the type being publicly constructible
+    // no longer matters: nothing accepts one).
     let rig = Rig::new();
     let mut supervisor = session(&rig);
     let task = parent_submits_planned_task(&mut supervisor, &rig).await;
@@ -1400,9 +1445,7 @@ async fn observation_from_a_foreign_task_cannot_complete_the_gate() {
         .await
         .expect("review");
 
-    // The implementation task has a completed result; the review does
-    // not. Offering the IMPLEMENTATION's projection for the REVIEW is
-    // refused.
+    // The implementation task completes; the review does not.
     rig.bridge.observe_outcome(
         &task,
         attempt(1),
@@ -1413,19 +1456,35 @@ async fn observation_from_a_foreign_task_cannot_complete_the_gate() {
         true,
         "vendor=glm; model=glm; basis=attested",
     );
-    let impl_projection = supervisor.collect_result(&task).await.expect("collect");
-    let err = supervisor
-        .note_review_observation(review.review_task(), &impl_projection)
-        .expect_err("foreign projection refused");
-    assert!(
-        matches!(
-            err,
-            super::SupervisorFlowError::ObservationTaskMismatch { .. }
-        ),
-        "wrong error: {err}"
-    );
-    // The gate stays closed.
+    let _ = supervisor
+        .collect_result(&task)
+        .await
+        .expect("collect impl");
+    // Gate still closed (no review observation).
     assert!(!supervisor.latest_review_satisfies(IC::FreshContextSameHarness));
+    // The only way to open it is the session's own collect of the
+    // review task's result.
+    rig.bridge.observe_outcome(
+        review.review_task(),
+        attempt(2),
+        "done",
+        Some("artifact:r".into()),
+        vec!["evidence:r".into()],
+        true,
+        false,
+        "vendor=glm; model=glm; basis=attested",
+    );
+    let _observation = supervisor
+        .observe_review_result(review.review_task())
+        .await
+        .expect("observed (self-collected)");
+    assert!(supervisor.latest_review_satisfies(IC::FreshContextSameHarness));
+    // An unknown review task is refused typed.
+    let stray: TaskRef = serde_json::from_value(serde_json::json!("task:stray")).unwrap();
+    assert!(matches!(
+        supervisor.observe_review_result(&stray).await,
+        Err(super::SupervisorFlowError::UnknownReviewTask { .. })
+    ));
 }
 
 #[tokio::test]
@@ -1457,14 +1516,20 @@ async fn human_review_class_cannot_be_minted_by_this_surface() {
         "bundle-r".into(),
         "bundle-i".into(),
         "rid".into(),
-        Some(super::ResultObservation {
+        super::ResultObservation {
             result_revision: 1,
             provenance_vendor: "human".into(),
             provenance_model: String::new(),
             terminal_classification: "done".into(),
+        },
+        Some(super::ResultObservation {
+            result_revision: 1,
+            provenance_vendor: "codex".into(),
+            provenance_model: "codex".into(),
+            terminal_classification: "done".into(),
         }),
     );
-    assert!(!forged.satisfies(IC::HumanReview, None));
+    assert!(!forged.satisfies(IC::HumanReview));
 }
 
 #[tokio::test]
@@ -1504,13 +1569,10 @@ async fn duplicated_provenance_keys_and_case_tricks_cannot_forge_corroboration()
         .collect_result(&task)
         .await
         .expect("collect impl");
-    let review_projection = supervisor
-        .collect_result(review.review_task())
+    let _observation = supervisor
+        .observe_review_result(review.review_task())
         .await
-        .expect("collect review");
-    supervisor
-        .note_review_observation(review.review_task(), &review_projection)
-        .expect("observed");
+        .expect("observed (self-collected)");
     assert!(
         !supervisor.latest_review_satisfies(IC::FreshContextCrossVendor),
         "duplicated-key provenance must not corroborate"
@@ -1532,13 +1594,10 @@ async fn duplicated_provenance_keys_and_case_tricks_cannot_forge_corroboration()
         false,
         "vendor=CODEX; model=gpt; basis=attested",
     );
-    let case_projection = supervisor
-        .collect_result(case_review.review_task())
+    let _case_observation = supervisor
+        .observe_review_result(case_review.review_task())
         .await
-        .expect("collect review 2");
-    supervisor
-        .note_review_observation(case_review.review_task(), &case_projection)
-        .expect("observed 2");
+        .expect("observed 2 (self-collected)");
     assert!(
         !supervisor.latest_review_satisfies(IC::FreshContextCrossVendor),
         "case-only vendor difference is not cross-vendor"
@@ -1582,13 +1641,10 @@ async fn corroborated_stronger_review_satisfies_weaker_requirement() {
         .collect_result(&task)
         .await
         .expect("collect impl");
-    let review_projection = supervisor
-        .collect_result(review.review_task())
+    let _observation = supervisor
+        .observe_review_result(review.review_task())
         .await
-        .expect("collect review");
-    supervisor
-        .note_review_observation(review.review_task(), &review_projection)
-        .expect("observed");
+        .expect("observed (self-collected)");
     assert!(supervisor.latest_review_satisfies(IC::FreshContextCrossVendor));
     assert!(
         supervisor.latest_review_satisfies(IC::FreshContextCrossModelSameVendor),
@@ -1729,9 +1785,23 @@ async fn typed_reconciliation_unknown_retains_the_replay_tuple() {
     {
         SubmitReceipt::Admitted { task_ref, .. } => {
             supervisor
-                .attach_implementation_task(task_ref)
+                .attach_implementation_task(task_ref.clone())
                 .await
                 .expect("attach");
+            inner.observe_outcome(
+                &task_ref,
+                serde_json::from_value(serde_json::json!("attempt:test-0000")).unwrap(),
+                "done",
+                Some("artifact:impl-r0".into()),
+                vec!["evidence:impl-r0".into()],
+                false,
+                true,
+                "vendor=codex; model=codex; basis=attested",
+            );
+            let _ = supervisor
+                .collect_result(&task_ref)
+                .await
+                .expect("implementation result observed");
         }
         other => panic!("submit failed: {other:?}"),
     }
