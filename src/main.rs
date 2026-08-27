@@ -267,7 +267,7 @@ use gateway_helpers::{
     PaircodeAction, PaircodeResult, fetch_paircode, gateway_admin_url, paircode_no_code_message,
     shutdown_gateway,
 };
-use gateway_helpers::{log_gateway_start, resolve_gateway_addr, sop_admin_dispatch};
+use gateway_helpers::{log_gateway_start, resolve_gateway_addr};
 pub(crate) use gateway_helpers::{t, ta};
 
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
@@ -2915,15 +2915,8 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 let companion_store = zeroclaw_memory::create_companion_store(&config)?;
                 let companion_outbox_observer =
                     spawn_companion_outbox_observer(companion_store.clone());
-                let result = Box::pin(channels::start_channels(
-                    config,
-                    None,
-                    cancel,
-                    sop_engine,
-                    sop_audit,
-                    companion_store,
-                ))
-                .await;
+                let result =
+                    Box::pin(channels::start_channels(config, None, cancel, companion_store)).await;
                 if let Some(handle) = sop_maintenance {
                     handle.abort();
                 }
@@ -2951,15 +2944,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
 
         Commands::Browse { path } => browse::handle_browse(path, &config),
 
-        Commands::Sop { sop_command } => match sop_command {
-            // Out-of-band approval verbs talk to the running daemon over the
-            // gateway (they must see the daemon's runs, not a throwaway local
-            // engine). List/Validate/Show stay local + synchronous.
-            cmd @ (SopCommands::Approve { .. }
-            | SopCommands::Deny { .. }
-            | SopCommands::Pending) => sop_admin_dispatch(cmd, &config).await,
-            other => sop::handle_command(other, &config),
-        },
+        Commands::Sop { sop_command } => sop::handle_command(sop_command, &config),
 
         Commands::Migrate { migrate_command } => {
             migration::handle_command(migrate_command, &config).await
@@ -3845,16 +3830,7 @@ async fn run_gateway_if_enabled(
     // Companion store is constructed once here — run_gateway never opens it.
     let companion_store = zeroclaw_memory::create_companion_store(&config)?;
     let result = Box::pin(gateway::run_gateway(
-        host,
-        port,
-        config,
-        tx,
-        None,
-        None,
-        None,
-        None,
-        None,
-        companion_store,
+        host, port, config, tx, None, None, None, companion_store,
     ))
     .await;
     // Self-respawn after the listener is released, if an in-app upgrade

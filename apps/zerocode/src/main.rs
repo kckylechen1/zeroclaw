@@ -41,7 +41,6 @@ mod keymap;
 mod logs;
 mod mouse;
 mod quickstart_pane;
-mod sop_pane;
 mod terminal_backend;
 mod theme;
 mod todo_tracker;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, XCircle, Loader2, Plus, Save, Trash2, X } from 'lucide-react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Badge, Card, PageHeader, HelpTip } from '@/components/ui';
@@ -11,11 +11,8 @@ import { t } from '@/lib/i18n';
 import { loadAgentPickerSummaries } from '@/lib/agents';
 import {
   listSops,
-  listRuns,
   getSopGraph,
-  getRunOverlay,
   getSop,
-  runSop,
   createSop,
   saveSop,
   deleteSop,
@@ -23,7 +20,6 @@ import {
   graphDraft,
   triggerSources,
   sopFieldHelp,
-  overlayCallsByStep,
   parseCondition,
   buildCondition,
   sopPriorities,
@@ -32,12 +28,10 @@ import {
   type WireRole,
   type SopSummary,
   type SopGraph,
-  type RunOverlay,
   type Sop,
   type SopStep,
   type SopTrigger,
   type StepFailure,
-  type StepToolCall,
   type TriggerSourceRegistry,
   type BoundTriggerSource,
   type TriggerField,
@@ -301,7 +295,6 @@ function StepEditor({
   step,
   index,
   count,
-  capturedCalls,
   onChange,
   onRemove,
   onMove,
@@ -311,7 +304,6 @@ function StepEditor({
   step: SopStep;
   index: number;
   count: number;
-  capturedCalls?: StepToolCall[];
   onChange: (patch: Partial<SopStep>) => void;
   onRemove: () => void;
   onMove: (dir: -1 | 1) => void;
@@ -570,7 +562,6 @@ function StepEditor({
       <div className="mt-2">
         <PlannedCallsEditor
           calls={step.calls ?? []}
-          captured={capturedCalls}
           agent={step.agent ?? parentAgent}
           onChange={(next) => onChange({ calls: next })}
         />
@@ -1296,7 +1287,6 @@ function DraftSidebar({
 function StepInspector({
   draft,
   selectedStep,
-  runCallsByStep,
   agentAliases,
   onStep,
   onRemoveStep,
@@ -1304,7 +1294,6 @@ function StepInspector({
 }: {
   draft: Sop;
   selectedStep: number | null;
-  runCallsByStep: Map<number, StepToolCall[]>;
   agentAliases: string[];
   onStep: (i: number, patch: Partial<SopStep>) => void;
   onRemoveStep: (i: number) => void;
@@ -1324,7 +1313,6 @@ function StepInspector({
       step={step}
       index={index}
       count={draft.steps.length}
-      capturedCalls={runCallsByStep.get(step.number)}
       onChange={(patch) => onStep(index, patch)}
       onRemove={() => onRemoveStep(index)}
       onMove={(dir) => onMoveStep(index, dir)}
@@ -1335,112 +1323,6 @@ function StepInspector({
 }
 
 const noop = () => {};
-
-/// Build a Manual-run payload skeleton from a SOP's step-1 input JSON Schema.
-/// Registry-driven: keys and placeholder value shapes come from the SOP's own
-/// declared `schema.input`, never a hardcoded per-SOP template.
-function payloadSkeleton(sop: Sop | null): string {
-  const input = sop?.steps?.find((s) => s.number === 1)?.schema?.input;
-  const props =
-    input && typeof input === 'object' && !Array.isArray(input)
-      ? (input as { properties?: Record<string, unknown> }).properties
-      : undefined;
-  if (!props || typeof props !== 'object') return '{}';
-  const skeleton: Record<string, unknown> = {};
-  for (const [key, spec] of Object.entries(props)) {
-    const type =
-      spec && typeof spec === 'object' && !Array.isArray(spec)
-        ? (spec as { type?: string }).type
-        : undefined;
-    skeleton[key] = placeholderForType(type);
-  }
-  return JSON.stringify(skeleton, null, 2);
-}
-
-function placeholderForType(type: string | undefined): unknown {
-  switch (type) {
-    case 'number':
-    case 'integer':
-      return 0;
-    case 'boolean':
-      return false;
-    case 'array':
-      return [];
-    case 'object':
-      return {};
-    default:
-      return '';
-  }
-}
-
-/// Manual-run affordance for a SOP that declares a manual trigger. Fires
-/// POST /api/sops/{name}/run and navigates to the run detail page so the
-/// existing overlay route animates the run.
-function ManualRunPanel({ name, sop }: { name: string; sop: Sop | null }) {
-  const navigate = useNavigate();
-  const [payload, setPayload] = useState('');
-  const [running, setRunning] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
-
-  const hasManualTrigger = useMemo(
-    () => (sop?.triggers ?? []).some((tr) => tr.type === 'manual'),
-    [sop],
-  );
-
-  useEffect(() => {
-    if (!hasManualTrigger) {
-      setPayload('');
-      return;
-    }
-    setPayload((cur) => (cur.trim() ? cur : payloadSkeleton(sop)));
-  }, [hasManualTrigger, sop]);
-
-  const onRun = useCallback(() => {
-    const trimmed = payload.trim();
-    if (trimmed) {
-      try {
-        JSON.parse(trimmed);
-      } catch {
-        setRunError(`${t('sops.run_error')}: invalid JSON`);
-        return;
-      }
-    }
-    setRunning(true);
-    setRunError(null);
-    runSop(name, trimmed || undefined)
-      .then(({ run_id }) =>
-        navigate(`/runs/${encodeURIComponent(name)}/${encodeURIComponent(run_id)}`),
-      )
-      .catch((e: unknown) => setRunError(`${t('sops.run_error')}: ${String(e)}`))
-      .finally(() => setRunning(false));
-  }, [name, payload, navigate]);
-
-  if (!hasManualTrigger) return null;
-
-  return (
-    <Card className="space-y-2">
-      <textarea
-        value={payload}
-        onChange={(e) => setPayload(e.target.value)}
-        placeholder={t('sops.run_payload_placeholder')}
-        rows={4}
-        className="w-full rounded border border-pc-border bg-pc-surface px-2 py-1 font-mono text-xs text-pc-text"
-      />
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={onRun}
-          disabled={running}
-          className="inline-flex items-center gap-1 rounded border border-pc-border bg-pc-accent px-3 py-1 text-sm font-medium text-[#0b1220] hover:opacity-90 disabled:opacity-40"
-        >
-          {running ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : null}
-          {t('sops.run')}
-        </button>
-        {runError ? <span className="text-xs text-status-error">{runError}</span> : null}
-      </div>
-    </Card>
-  );
-}
 
 // ── /sops ── read-only collection navigator. No selection, graph, overlay, or
 // mutation lives here; rows link to the addressable member view. Create is an
@@ -1575,7 +1457,6 @@ export function SopView() {
           <div className="text-status-error">{error}</div>
         </Card>
       ) : null}
-      <ManualRunPanel name={name} sop={viewSop} />
       <div>
         <div className="mb-3 flex flex-wrap items-center gap-2">
           {graph ? (
@@ -1659,7 +1540,6 @@ export function SopEditor() {
   const [selectedTrigger, setSelectedTrigger] = useState<number | null>(null);
   const [triggerRegistry, setTriggerRegistry] = useState<TriggerSourceRegistry | null>(null);
   const [agentAliases, setAgentAliases] = useState<string[]>([]);
-  const [latestOverlay, setLatestOverlay] = useState<RunOverlay | null>(null);
 
   // Load the draft the route addresses: an existing SOP by name for edit, or a
   // blank draft for new. A session-mirrored draft under the same identity wins
@@ -1725,29 +1605,6 @@ export function SopEditor() {
       active = false;
     };
   }, []);
-
-  // Captured-calls overlay from the SOP's latest run, one-shot. Feeds the step
-  // inspector's pin-from-run flow only; live run watching is the run page's job.
-  useEffect(() => {
-    setLatestOverlay(null);
-    if (editingRoute === null) return;
-    let active = true;
-    listRuns(editingRoute)
-      .then((runs) => {
-        const latest = runs.sort((a, b) => b.started_at.localeCompare(a.started_at))[0];
-        if (!latest) return null;
-        return getRunOverlay(editingRoute, latest.run_id);
-      })
-      .then((o) => {
-        if (active && o) setLatestOverlay(o);
-      })
-      .catch(() => {});
-    return () => {
-      active = false;
-    };
-  }, [editingRoute]);
-
-  const runCallsByStep = useMemo(() => overlayCallsByStep(latestOverlay), [latestOverlay]);
 
   // Snapshot the current draft before a canvas mutation so it can be undone.
   const pushUndo = useCallback((snapshot: Sop) => {
@@ -2007,7 +1864,6 @@ export function SopEditor() {
           <StepInspector
             draft={draft}
             selectedStep={selectedStep}
-            runCallsByStep={runCallsByStep}
             agentAliases={agentAliases}
             onStep={editorHandlers.onStep}
             onRemoveStep={editorHandlers.onRemoveStep}

@@ -20,5 +20,3 @@ export const SopView = lazy(() => import('../pages/Sops').then((m) => ({ default
 export const SopEditor = lazy(() =>
   import('../pages/Sops').then((m) => ({ default: m.SopEditor })),
 );
-export const Runs = lazy(() => import('../pages/Runs'));
-export const RunDetail = lazy(() => import('../pages/RunDetail'));
