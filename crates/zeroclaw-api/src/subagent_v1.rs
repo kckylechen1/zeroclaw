@@ -749,7 +749,7 @@ pub enum ParentActionKind {
     /// SA-29's role-exclusive law): the Supervisor holds no submit
     /// operation, so implementation work it needs is requested as a
     /// typed action and the PARENT performs the initial `submit` through
-    /// the #205 bridge surface. The payload carries everything the
+    /// the TaskIntent bridge surface. The payload carries everything the
     /// Parent needs — the composed intent and the TB-7 request id.
     SubmitTaskIntent,
 }

@@ -677,7 +677,7 @@ impl SubAgentProfileRegistry {
     /// ten typed SA-29 authorities, zero tools, structured report only.
     /// A Supervisor needing implementation work requests it as a typed
     /// `requested_parent_actions` entry — the PARENT submits through
-    /// #205 (the SA-29 set has no submit operation).
+    /// the TaskIntent bridge (the SA-29 set has no submit operation).
     #[must_use]
     pub fn default_supervisor_profile() -> SubAgentProfileV1 {
         use zeroclaw_api::subagent_v1::SupervisorAuthority as Authority;
