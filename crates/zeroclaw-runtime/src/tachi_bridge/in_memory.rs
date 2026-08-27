@@ -1251,23 +1251,63 @@ impl super::procedure::ProcedureSubmitPort for InMemoryTachiTaskBridge {
                 reason: "snapshot_invariant_violation".to_string(),
             });
         }
+        // The intent's evaluation contract must BE the snapshot
+        // guidance's: artifact expectations (class + required, in
+        // order) and the evaluation requirement compose FROM the
+        // snapshot client-side; a direct port caller cannot weaken
+        // them by supplying an independently valid but weaker intent
+        // (collection enforces the INTENT's expectations — they must
+        // be the snapshot's).
+        {
+            let expected: Vec<(serde_json::Value, bool)> = snapshot
+                .guidance
+                .artifact_expectations
+                .iter()
+                .map(|expectation| {
+                    (
+                        serde_json::to_value(expectation.artifact_class)
+                            .expect("artifact class serializes"),
+                        expectation.required,
+                    )
+                })
+                .collect();
+            let claimed: Vec<(serde_json::Value, bool)> = intent
+                .expected_artifacts
+                .iter()
+                .map(|expectation| {
+                    (
+                        serde_json::to_value(expectation.artifact_class)
+                            .expect("artifact class serializes"),
+                        expectation.required,
+                    )
+                })
+                .collect();
+            if expected != claimed
+                || intent.evaluation_requirement != snapshot.guidance.evaluation_requirement
+            {
+                return Ok(SubmitReceipt::Rejected {
+                    reason: "intent_expectation_mismatch".to_string(),
+                });
+            }
+        }
         // Carrier law, in the ratified order — retention, admission,
         // AND procedure binding run under ONE critical section: the
-        // bytes are retained and verified BEFORE any acknowledgment,
-        // and neither a concurrent same-tuple base submission (which
-        // would replay into a retroactive binding) nor a concurrent
-        // same-tuple procedure replay (which would momentarily observe
-        // an unbound task and misread it as non-procedure) can
-        // interleave. In this double: process-lifetime CAS — the
-        // durable production story is the real tachi host's store.
+        // bytes are retained and verified BEFORE any acknowledgment
+        // escapes it, and neither a concurrent same-tuple base
+        // submission (which would replay into a retroactive binding)
+        // nor a concurrent same-tuple procedure replay (which would
+        // momentarily observe an unbound task and misread it as
+        // non-procedure) can interleave. Retention happens ONLY on the
+        // successful path — a rejected or base-replayed submission
+        // leaves no unbound retained bytes behind. In this double:
+        // process-lifetime CAS — the durable production story is the
+        // real tachi host's store.
         let receipt = {
             let mut state = self.state.lock();
-            state
-                .procedure_snapshots
-                .insert(digest.clone(), snapshot.clone());
             let receipt = Self::submit_locked(&mut state, intent, request_id)?;
             if let SubmitReceipt::Admitted { task_ref, replayed } = &receipt {
                 let existing = state.procedure_runs.get(task_ref.as_wire()).cloned();
+                let first_binding = existing.is_none();
                 match existing {
                     // A procedure run re-submitted under its own tuple:
                     // the binding must be the SAME snapshot (a different
@@ -1293,10 +1333,18 @@ impl super::procedure::ProcedureSubmitPort for InMemoryTachiTaskBridge {
                                 reason: "replay_of_non_procedure_task".to_string(),
                             });
                         }
-                        state
-                            .procedure_runs
-                            .insert(task_ref.as_wire().to_string(), reference.clone());
                     }
+                }
+                // Success path: retain the bytes and record the binding
+                // BEFORE the acknowledgment leaves the critical section
+                // (verify-before-ack; idempotent on tuple replay).
+                state
+                    .procedure_snapshots
+                    .insert(digest.clone(), snapshot.clone());
+                if first_binding {
+                    state
+                        .procedure_runs
+                        .insert(task_ref.as_wire().to_string(), reference.clone());
                 }
             }
             receipt

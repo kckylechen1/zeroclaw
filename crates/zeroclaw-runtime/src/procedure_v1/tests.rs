@@ -1523,7 +1523,9 @@ async fn replaying_a_base_admitted_task_through_the_procedure_port_is_refused() 
     let reference = snapshot.snapshot_ref();
     let (client, double) = client_and_double();
 
-    // A base (non-procedure) submit reusing the SAME request-id tuple.
+    // A base (non-procedure) submit reusing the SAME request-id tuple
+    // (expectation-paired so it reaches the replay logic, not an
+    // earlier pairing rejection).
     let objective = BoundedText::new("base task sharing the tuple".to_string()).unwrap();
     let inputs = TaskIntentInputs {
         objective,
@@ -1531,7 +1533,18 @@ async fn replaying_a_base_admitted_task_through_the_procedure_port_is_refused() 
             capability: snapshot.guidance.required_capability,
         },
         constraints: vec![],
-        expected_artifacts: vec![],
+        expected_artifacts: snapshot
+            .guidance
+            .artifact_expectations
+            .iter()
+            .map(
+                |expectation| zeroclaw_api::taskintent::ArtifactExpectation {
+                    artifact_class: expectation.artifact_class,
+                    description: expectation.description.clone(),
+                    required: expectation.required,
+                },
+            )
+            .collect(),
         evaluation_requirement: snapshot.guidance.evaluation_requirement.clone(),
     };
     let context = StructuralIntentContext {
@@ -1600,4 +1613,59 @@ async fn concurrent_same_tuple_procedure_submits_never_misclassify() {
         .expect("procedure-bound");
     assert_eq!(completed, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     assert_eq!(gate, None);
+}
+
+#[tokio::test]
+async fn port_refuses_an_intent_whose_expectations_are_not_the_snapshots() {
+    // Direct-port pairing law: the intent's artifact expectations and
+    // evaluation requirement must BE the snapshot guidance's — a
+    // weaker, independently valid intent cannot water down what
+    // collection enforces.
+    let dir = fixture_dir();
+    let snapshot =
+        mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    let reference = snapshot.snapshot_ref();
+    let inputs = TaskIntentInputs {
+        objective: BoundedText::new(
+            "Execute procedure stagex-update revision 1.0.0 per the pinned snapshot".to_string(),
+        )
+        .expect("bounded"),
+        capability_request: zeroclaw_api::taskintent::CapabilityRequest {
+            capability: snapshot.guidance.required_capability,
+        },
+        constraints: vec![],
+        // Weaker than the snapshot's: empty artifacts + the snapshot's
+        // evaluation requirement is still insufficient.
+        expected_artifacts: vec![],
+        evaluation_requirement: snapshot.guidance.evaluation_requirement.clone(),
+    };
+    let context = StructuralIntentContext {
+        requester: requester(),
+        parent_ref: None,
+        supervisor_ref: None,
+        context_bundle_ref: BoundedText::new(reference).expect("bounded"),
+        source_refs: vec![],
+        expiry: None,
+        retry_of: None,
+    };
+    let intent = compose_intent(&inputs, &full_policy(), &context).expect("composes");
+    let double = Arc::new(InMemoryTachiTaskBridge::new());
+    let request_id = derive_request_id("stagex-update", &snapshot.procedure_digest, "exp-1");
+    let receipt = double
+        .submit_procedure_run(&intent, &request_id, &snapshot)
+        .await
+        .expect("transport level ok");
+    assert!(
+        matches!(
+            &receipt,
+            SubmitReceipt::Rejected { reason } if reason == "intent_expectation_mismatch"
+        ),
+        "unexpected receipt: {receipt:?}"
+    );
+    // Nothing retained: rejection leaves no unbound retained bytes.
+    let retained = double
+        .retained_snapshot(&snapshot.snapshot_ref())
+        .await
+        .unwrap();
+    assert!(retained.is_none(), "no retention on rejection");
 }

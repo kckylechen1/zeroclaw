@@ -88,6 +88,15 @@ pub enum ProcedureSubmitError {
         "procedure run refused: request id already bound to a different intent (policy or content changed; use a new run instance)"
     )]
     RequestIdConflict,
+    /// The carrier refused to procedure-bind the tuple: the task
+    /// behind it was admitted outside the procedure port (a base-port
+    /// replay), or it is already bound to a DIFFERENT snapshot. Both
+    /// are terminal truths, not transport ambiguity.
+    #[error("procedure run refused by the host carrier: {reason}")]
+    HostRefusedProcedureBinding {
+        /// The carrier-law rejection token.
+        reason: String,
+    },
     /// Encode-side admission rejected the composed intent (TB-4).
     #[error("procedure run refused: {0}")]
     Compose(#[from] ComposeRejection),
@@ -297,7 +306,17 @@ impl ProcedureRunClient {
                         .with_attrs(serde_json::json!({ "reason": reason })),
                     "procedure_v1: host rejected the procedure run submission"
                 );
-                Err(ProcedureSubmitError::Transport(SubmitTransportError))
+                // Carrier-law rejections with procedure semantics are
+                // TYPED, not ambiguous transport failures: a base-port
+                // replay of the tuple (its ack predates retention) and
+                // an already-differently-bound task are terminal
+                // refusal truths the caller can distinguish.
+                match reason.as_str() {
+                    "replay_of_non_procedure_task" | "procedure_binding_conflict" => {
+                        Err(ProcedureSubmitError::HostRefusedProcedureBinding { reason })
+                    }
+                    _ => Err(ProcedureSubmitError::Transport(SubmitTransportError)),
+                }
             }
             // A TB-7 rule-3 conflict is TYPED truth (typically a
             // policy change across a restart), not a transport
