@@ -26,7 +26,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use sha2::{Digest as _, Sha256};
-use zeroclaw_api::taskintent::{AttemptRef, RequestId, SCHEMA_TAG, TaskIntentV1, TaskRef};
+use zeroclaw_api::taskintent::{
+    AttemptRef, InterventionError, InterventionReceipt, InterventionStatic, InterventionV1,
+    RequestId, RequesterRef, SCHEMA_TAG, StopMode, StopReceipt, StopStage, TaskIntentV1, TaskRef,
+};
 
 use super::client::{
     BridgeQueryError, ContractViolationView, ProjectedAdjudicationState, ProjectedDeliveryState,
@@ -45,7 +48,7 @@ struct InMemoryFact {
 }
 
 /// The fact shapes the double models (mirroring the tachi event payload
-/// vocabulary for the four in-scope ops).
+/// vocabulary for the in-scope ops).
 #[derive(Debug, Clone)]
 enum FactDetail {
     /// The intent was admitted (carries the digest).
@@ -64,6 +67,22 @@ enum FactDetail {
         diff_present: bool,
         provenance: String,
     },
+    /// An owner capability declaration (TB-15: advertisement is a typed,
+    /// revisioned fact — the harness/test declares what its owner leg
+    /// supports beyond the lifecycle-mode baseline).
+    OwnerCapabilities { operations: Vec<InterventionStatic> },
+    /// A session intervention was forwarded (carries the intervention id
+    /// and the operation).
+    InterventionForwarded {
+        operation: InterventionStatic,
+        intervention_id: String,
+    },
+    /// A stop was requested/forwarded (TB-12 multi-stage fact; the double
+    /// never confirms — `cancelled` requires authoritative owner
+    /// confirmation, which only a real owner can produce). The reason
+    /// rides the fact's payload digest only — the stop identity law
+    /// excludes it, so no later stage needs it.
+    StopRequested { mode: StopMode, stop_id: String },
 }
 
 /// SHA-256 lower-hex over the CANONICAL JSON of the typed payload
@@ -92,6 +111,11 @@ struct HostState {
     next_task: u64,
     /// Admitted expected artifacts per task (for TB-13 collect checks).
     expected: BTreeMap<String, Vec<(String, bool)>>,
+    /// Submitting requester per task (TB-11 requester-owns-task law).
+    owners: BTreeMap<String, String>,
+    /// Materialized intervention receipts per TB-7 rule-6 tuple
+    /// (same tuple + same digest ⇒ the SAME receipt on replay).
+    intervention_receipts: BTreeMap<(String, String), InterventionReceipt>,
 }
 
 impl HostState {
@@ -122,6 +146,29 @@ impl HostState {
             log.iter()
                 .any(|(_, f)| matches!(f.detail, FactDetail::TaskSubmitted { .. }))
         })
+    }
+
+    /// The advertised intervention set for a task (TB-15): the
+    /// `tachi_managed_batch` baseline (the two stop operations, exactly
+    /// the real tachi `LifecycleMode` baseline) unioned with any owner
+    /// capability declarations ingested onto the fact log.
+    fn supported_interventions(&self, task_ref: &TaskRef) -> Vec<InterventionStatic> {
+        let mut supported = vec![
+            InterventionStatic::RequestGracefulStop,
+            InterventionStatic::RequestHardCancel,
+        ];
+        if let Some(log) = self.facts.get(task_ref.as_wire()) {
+            for (_, fact) in log {
+                if let FactDetail::OwnerCapabilities { operations } = &fact.detail {
+                    for op in operations {
+                        if !supported.contains(op) {
+                            supported.push(*op);
+                        }
+                    }
+                }
+            }
+        }
+        supported
     }
 }
 
@@ -279,6 +326,41 @@ impl InMemoryTachiTaskBridge {
         );
     }
 
+    /// Test/harness driver: declare owner capabilities on a task's fact
+    /// log (TB-15: advertisement is a typed, revisioned fact — the
+    /// baseline for the managed lane is stops only, exactly like the
+    /// real tachi `LifecycleMode` baseline; anything else the owner leg
+    /// supports must be declared). Admitted tasks only.
+    pub fn declare_owner_capabilities(
+        &self,
+        task_ref: &TaskRef,
+        operations: &[InterventionStatic],
+    ) {
+        for op in operations {
+            assert!(InterventionStatic::ALL.contains(op), "unknown op {op:?}");
+        }
+        let mut state = self.state.lock();
+        assert!(
+            state.has_task_submitted(task_ref),
+            "capability declarations attach to admitted tasks only (host-double discipline)"
+        );
+        let occurrence = state.facts.get(task_ref.as_wire()).map_or(0, Vec::len);
+        state.append(
+            task_ref,
+            InMemoryFact {
+                event_id: format!("owner-caps-{}-{occurrence}", task_ref.as_wire()),
+                kind: "owner_capabilities_declared".to_string(),
+                payload_digest: fact_digest(&serde_json::json!({
+                    "kind": "owner_capabilities_declared",
+                    "operations": operations.len(),
+                })),
+                detail: FactDetail::OwnerCapabilities {
+                    operations: operations.to_vec(),
+                },
+            },
+        );
+    }
+
     fn snapshot_from(state: &HostState, task_ref: &TaskRef) -> TaskSnapshotView {
         let log = state
             .facts
@@ -298,12 +380,22 @@ impl InMemoryTachiTaskBridge {
                     execution =
                         ProjectedExecutionState::project(label).expect("host label is mapped");
                 }
+                FactDetail::StopRequested { .. } => {
+                    // TB-12: a stop REQUEST is the multi-stage fact's
+                    // first stages — the projection moves to
+                    // `cancellation_requested` at most, NEVER `cancelled`
+                    // (confirmation is the owner's alone).
+                    execution = ProjectedExecutionState::project("cancellation_requested")
+                        .expect("cancellation_requested is mapped");
+                }
                 FactDetail::Adjudication { label } => {
                     adjudication =
                         ProjectedAdjudicationState::project(label).expect("host label is mapped");
                 }
                 FactDetail::OutcomeObserved { .. } => {
                     delivery = ProjectedDeliveryState::project("ready").expect("ready is mapped");
+                }
+                FactDetail::OwnerCapabilities { .. } | FactDetail::InterventionForwarded { .. } => {
                 }
             }
         }
@@ -458,6 +550,9 @@ impl TachiTaskBridge for InMemoryTachiTaskBridge {
         state
             .bindings
             .insert(tuple, (digest.clone(), task_ref.clone()));
+        state
+            .owners
+            .insert(task_ref.as_wire().to_string(), intent.requester.to_string());
         state.expected.insert(
             task_ref.as_wire().to_string(),
             intent
@@ -523,16 +618,34 @@ impl TachiTaskBridge for InMemoryTachiTaskBridge {
         let events = missed
             .into_iter()
             .take(limit)
-            .map(|(seq, fact)| TaskEventView {
-                seq,
-                event_id: fact.event_id.clone(),
-                source: "bridge".to_string(),
-                source_revision: seq.to_string(),
-                occurred_at: format!("t{seq}"),
-                recorded_at: format!("t{seq}"),
-                payload_digest: fact.payload_digest.clone(),
-                visibility: "internal".to_string(),
-                kind: fact.kind.clone(),
+            .map(|(seq, fact)| {
+                // The payload-detail token rides the kind label so the
+                // operation/mode of intervention and stop facts is
+                // observable from the watch view (not just the id).
+                let (kind, source_revision) = match &fact.detail {
+                    FactDetail::InterventionForwarded {
+                        operation,
+                        intervention_id,
+                    } => (
+                        format!("intervention_forwarded_{}", op_token(operation)),
+                        intervention_id.clone(),
+                    ),
+                    FactDetail::StopRequested { mode, stop_id, .. } => {
+                        (format!("stop_requested_{}", mode.as_str()), stop_id.clone())
+                    }
+                    _ => (fact.kind.clone(), seq.to_string()),
+                };
+                TaskEventView {
+                    seq,
+                    event_id: fact.event_id.clone(),
+                    source: "bridge".to_string(),
+                    source_revision,
+                    occurred_at: format!("t{seq}"),
+                    recorded_at: format!("t{seq}"),
+                    payload_digest: fact.payload_digest.clone(),
+                    visibility: "internal".to_string(),
+                    kind,
+                }
             })
             .collect();
         Ok(TaskEventPageView {
@@ -562,6 +675,286 @@ impl TachiTaskBridge for InMemoryTachiTaskBridge {
                 .find(|projection| projection.result_revision == pinned)
                 .ok_or(BridgeQueryError::ResultRevisionNotFound),
         }
+    }
+
+    async fn intervene(
+        &self,
+        task_ref: &TaskRef,
+        intervention: &InterventionV1,
+        requester: &RequesterRef,
+        request_id: &RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<InterventionReceipt, InterventionError> {
+        let op = intervention.discriminant();
+        // TB-11: these are new task/adjudication lineage, NOT session
+        // interventions — typed refusal, zero mutation, no fresh-task
+        // fallback (mirrors the tachi host law exactly; this is the
+        // SERVER-side half of "continuation ≠ independent review": the
+        // session-intervention path can never mint review lineage).
+        if matches!(
+            op,
+            InterventionStatic::RequestIndependentReview | InterventionStatic::Escalate
+        ) {
+            return Err(InterventionError::RequiresNewTaskLineage { operation: op });
+        }
+        // Single-pathed stop authority: the stop variants ARE
+        // request_stop (TB-11/TB-12).
+        if matches!(
+            op,
+            InterventionStatic::RequestGracefulStop | InterventionStatic::RequestHardCancel
+        ) {
+            let (mode, reason) = match intervention {
+                InterventionV1::RequestGracefulStop { reason } => {
+                    (StopMode::Graceful, reason.as_str().to_string())
+                }
+                InterventionV1::RequestHardCancel { reason } => {
+                    (StopMode::Hard, reason.as_str().to_string())
+                }
+                _ => unreachable!("discriminant checked above"),
+            };
+            return self
+                .stop_inner(
+                    task_ref,
+                    mode,
+                    &reason,
+                    requester,
+                    request_id,
+                    expected_task_revision,
+                )
+                .await
+                .map(InterventionReceipt::Stop);
+        }
+        let mut state = self.state.lock();
+        if !state.has_task_submitted(task_ref) {
+            return Err(InterventionError::NotFound);
+        }
+        // TB-11 requester-owns-task: only the submitting requester may
+        // intervene (collapsed to NotFound — existence is not leaked).
+        if state
+            .owners
+            .get(task_ref.as_wire())
+            .is_some_and(|owner| owner != &requester.to_string())
+            || !state.owners.contains_key(task_ref.as_wire())
+        {
+            return Err(InterventionError::NotFound);
+        }
+        // Advertisement check: typed refusal, zero mutation (TB-11/TB-15).
+        if !state.supported_interventions(task_ref).contains(&op) {
+            return Err(InterventionError::UnsupportedByLifecycleOwner { operation: op });
+        }
+        // Revision-bound, never best-effort (TB-11).
+        let revision = state.facts.get(task_ref.as_wire()).map_or(0, Vec::len) as u64;
+        Self::revision_check(expected_task_revision, revision)?;
+        // TB-7 rule 6 tuple law (mirrored from the host): bind first,
+        // forward second; same tuple + same digest replays the same
+        // receipt.
+        let digest = {
+            let payload = serde_json::to_value(intervention).unwrap_or_default();
+            fact_digest(&serde_json::json!({
+                "task": task_ref.as_wire(),
+                "intervention": payload,
+            }))
+        };
+        let tuple = (requester.to_string(), request_id.to_string());
+        if let Some(bound) = state.bindings.get(&tuple) {
+            if bound.0 != digest {
+                return Err(InterventionError::RequestIdConflict {
+                    bound_digest: bound.0.clone(),
+                    submitted_digest: digest,
+                });
+            }
+            return state
+                .intervention_receipts
+                .get(&tuple)
+                .cloned()
+                .ok_or(InterventionError::ReconciliationUnknown);
+        }
+        let intervention_id = format!(
+            "iv:{}-{}",
+            task_ref.as_wire(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let receipt = match op {
+            InterventionStatic::ProvideAdditionalContext => InterventionReceipt::ContextProvided {
+                intervention_id: intervention_id.clone(),
+            },
+            InterventionStatic::RequestCorrection => InterventionReceipt::CorrectionRequested {
+                intervention_id: intervention_id.clone(),
+            },
+            InterventionStatic::RequestContinuation => InterventionReceipt::ContinuationRequested {
+                intervention_id: intervention_id.clone(),
+            },
+            InterventionStatic::RequestUserInput => InterventionReceipt::UserInputRequested {
+                intervention_id: intervention_id.clone(),
+            },
+            InterventionStatic::RequestPause => InterventionReceipt::Paused {
+                intervention_id: intervention_id.clone(),
+            },
+            InterventionStatic::RequestResume => InterventionReceipt::Resumed {
+                intervention_id: intervention_id.clone(),
+            },
+            // Stop/new-lineage ops never reach here (handled above).
+            InterventionStatic::RequestGracefulStop
+            | InterventionStatic::RequestHardCancel
+            | InterventionStatic::RequestIndependentReview
+            | InterventionStatic::Escalate => {
+                return Err(InterventionError::UnsupportedByLifecycleOwner { operation: op });
+            }
+        };
+        state
+            .bindings
+            .insert(tuple.clone(), (digest, task_ref.clone()));
+        state.append(
+            task_ref,
+            InMemoryFact {
+                event_id: format!("ivfwd-{intervention_id}"),
+                kind: "intervention_forwarded".to_string(),
+                payload_digest: fact_digest(&serde_json::json!({
+                    "kind": "intervention_forwarded",
+                    "operation": format!("{op:?}"),
+                    "intervention_id": intervention_id,
+                })),
+                detail: FactDetail::InterventionForwarded {
+                    operation: op,
+                    intervention_id,
+                },
+            },
+        );
+        state.intervention_receipts.insert(tuple, receipt.clone());
+        Ok(receipt)
+    }
+
+    async fn request_stop(
+        &self,
+        task_ref: &TaskRef,
+        mode: StopMode,
+        requester: &RequesterRef,
+        request_id: &RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<StopReceipt, InterventionError> {
+        self.stop_inner(
+            task_ref,
+            mode,
+            "",
+            requester,
+            request_id,
+            expected_task_revision,
+        )
+        .await
+    }
+}
+
+impl InMemoryTachiTaskBridge {
+    /// The shared TB-11 revision-bound check (never best-effort).
+    fn revision_check(
+        expected_task_revision: Option<u64>,
+        revision: u64,
+    ) -> Result<(), InterventionError> {
+        match expected_task_revision {
+            Some(expected) if expected != revision => Err(InterventionError::RevisionConflict {
+                expected,
+                actual: revision,
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    /// The shared stop path (TB-11 single stop authority): bind the
+    /// `(requester, request_id)` tuple against the stop digest
+    /// `{task, mode}`, append the multi-stage stop fact, forward to the
+    /// implicit owner, and return the receipt at stage `Forwarded` — the
+    /// double NEVER produces `Confirmed` (only a real lifecycle owner
+    /// can authoritatively confirm a cancellation).
+    async fn stop_inner(
+        &self,
+        task_ref: &TaskRef,
+        mode: StopMode,
+        reason: &str,
+        requester: &RequesterRef,
+        request_id: &RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<StopReceipt, InterventionError> {
+        let mut state = self.state.lock();
+        if !state.has_task_submitted(task_ref) {
+            return Err(InterventionError::NotFound);
+        }
+        if state
+            .owners
+            .get(task_ref.as_wire())
+            .is_some_and(|owner| owner != &requester.to_string())
+        {
+            return Err(InterventionError::NotFound);
+        }
+        if !state
+            .supported_interventions(task_ref)
+            .contains(&match mode {
+                StopMode::Graceful => InterventionStatic::RequestGracefulStop,
+                StopMode::Hard => InterventionStatic::RequestHardCancel,
+            })
+        {
+            return Err(InterventionError::UnsupportedByLifecycleOwner {
+                operation: match mode {
+                    StopMode::Graceful => InterventionStatic::RequestGracefulStop,
+                    StopMode::Hard => InterventionStatic::RequestHardCancel,
+                },
+            });
+        }
+        let revision = state.facts.get(task_ref.as_wire()).map_or(0, Vec::len) as u64;
+        Self::revision_check(expected_task_revision, revision)?;
+        let digest = fact_digest(&serde_json::json!({
+            "task": task_ref.as_wire(),
+            "mode": mode.as_str(),
+        }));
+        let tuple = (requester.to_string(), request_id.to_string());
+        if let Some(bound) = state.bindings.get(&tuple) {
+            if bound.0 != digest {
+                return Err(InterventionError::RequestIdConflict {
+                    bound_digest: bound.0.clone(),
+                    submitted_digest: digest,
+                });
+            }
+            // Same tuple + same stop digest: replay the same stop fact.
+            if let Some(InterventionReceipt::Stop(stop)) = state.intervention_receipts.get(&tuple) {
+                return Ok(stop.clone());
+            }
+            return Err(InterventionError::ReconciliationUnknown);
+        }
+        let stop_id = format!(
+            "stop:{}-{}",
+            task_ref.as_wire(),
+            uuid::Uuid::new_v4().simple()
+        );
+        state
+            .bindings
+            .insert(tuple.clone(), (digest, task_ref.clone()));
+        state.append(
+            task_ref,
+            InMemoryFact {
+                event_id: format!("stopreq-{stop_id}"),
+                kind: "stop_requested".to_string(),
+                payload_digest: fact_digest(&serde_json::json!({
+                    "kind": "stop_requested",
+                    "mode": mode.as_str(),
+                    "reason": reason,
+                    "stop_id": stop_id,
+                })),
+                detail: FactDetail::StopRequested {
+                    mode,
+                    stop_id: stop_id.clone(),
+                },
+            },
+        );
+        let receipt = StopReceipt {
+            task_ref: task_ref.clone(),
+            stop_id,
+            mode,
+            stage: StopStage::Forwarded,
+            request_id: request_id.to_string(),
+        };
+        state
+            .intervention_receipts
+            .insert(tuple, InterventionReceipt::Stop(receipt.clone()));
+        Ok(receipt)
     }
 }
 
@@ -599,6 +992,28 @@ impl TachiTaskBridge for UnavailableTachiTaskBridge {
         _result_revision: Option<u64>,
     ) -> Result<ResultProjectionView, BridgeQueryError> {
         Err(BridgeQueryError::Unavailable)
+    }
+
+    async fn intervene(
+        &self,
+        _task_ref: &TaskRef,
+        _intervention: &InterventionV1,
+        _requester: &RequesterRef,
+        _request_id: &RequestId,
+        _expected_task_revision: Option<u64>,
+    ) -> Result<InterventionReceipt, InterventionError> {
+        Err(InterventionError::Unavailable)
+    }
+
+    async fn request_stop(
+        &self,
+        _task_ref: &TaskRef,
+        _mode: StopMode,
+        _requester: &RequesterRef,
+        _request_id: &RequestId,
+        _expected_task_revision: Option<u64>,
+    ) -> Result<StopReceipt, InterventionError> {
+        Err(InterventionError::Unavailable)
     }
 }
 
@@ -667,4 +1082,50 @@ impl TachiTaskBridge for AmbiguousSubmitOnce {
     ) -> Result<ResultProjectionView, BridgeQueryError> {
         self.inner.collect(task_ref, result_revision).await
     }
+
+    async fn intervene(
+        &self,
+        task_ref: &TaskRef,
+        intervention: &InterventionV1,
+        requester: &RequesterRef,
+        request_id: &RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<InterventionReceipt, InterventionError> {
+        self.inner
+            .intervene(
+                task_ref,
+                intervention,
+                requester,
+                request_id,
+                expected_task_revision,
+            )
+            .await
+    }
+
+    async fn request_stop(
+        &self,
+        task_ref: &TaskRef,
+        mode: StopMode,
+        requester: &RequesterRef,
+        request_id: &RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<StopReceipt, InterventionError> {
+        self.inner
+            .request_stop(
+                task_ref,
+                mode,
+                requester,
+                request_id,
+                expected_task_revision,
+            )
+            .await
+    }
+}
+
+/// Snake-case token for an intervention discriminant (watch-kind labels).
+fn op_token(op: &InterventionStatic) -> String {
+    serde_json::to_value(op)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{op:?}"))
 }

@@ -35,9 +35,15 @@
 //!   returns typed `Unavailable` and there is NO local execution path —
 //!   this module holds no process/command capability at all (source-scan
 //!   test below).
-//! - **Scope (owner-specified)**: submit / get / watch / collect ONLY.
-//!   No intervene/request_stop surface exists on this client (V3 leaf);
-//!   no requester-restart delivery (tachi durable delivery not landed).
+//! - **Scope (owner-specified)**: submit / get / watch / collect (V2b)
+//!   plus intervene / request_stop (vertical V3, TB-11/TB-12 — the
+//!   supervisor-gated entry point is
+//!   `TachiBridgeClient::supervisor_intervene`). No requester-restart
+//!   delivery (tachi durable delivery not landed). No production
+//!   transport ships in this crate yet: the binding point is the
+//!   `TachiTaskBridge` port; the live stage-B harness implements it
+//!   over HTTP against the real tachi host, and the parent-runtime
+//!   wiring is the V4 leaf.
 
 pub mod client;
 pub mod compose;
@@ -47,17 +53,20 @@ pub mod compose;
 /// (tuple bindings, fact log, counters) and must never be constructible
 /// from production code, where it would be exactly the second task
 /// ledger the freeze forbids. The live host is a transport-backed
-/// implementation of the same port, not this module.
+/// implementation of the same port, not this module. `pub(crate)` under
+/// `cfg(test)` so sibling crates' test modules (supervisor_v1) can bind
+/// to it; it never exists in production builds.
 #[cfg(test)]
-mod in_memory;
+pub(crate) mod in_memory;
 
 #[cfg(test)]
 mod tests;
 
 pub use client::{
     BridgeQueryError, ProjectedAdjudicationState, ProjectedDeliveryState, ProjectedExecutionState,
-    ResultProjectionView, SubmitReceipt, SubmitRejection, SubmitTransportError, TachiBridgeClient,
-    TachiTaskBridge, TaskEventPageView, TaskEventView, TaskSnapshotView, VerificationSummaryView,
+    ResultProjectionView, SubmitReceipt, SubmitRejection, SubmitTransportError,
+    SupervisorIntervention, SupervisorInterventionError, TachiBridgeClient, TachiTaskBridge,
+    TaskEventPageView, TaskEventView, TaskSnapshotView, VerificationSummaryView,
 };
 pub use compose::{
     ComposeError, ComposeRejection, ForbiddenCategory, RequesterBridgePolicy,

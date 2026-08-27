@@ -348,7 +348,14 @@ fn supervisor_runs_are_refused_in_v1_but_schema_constrained() {
         stub_binding(StubResolver::json(ok_report_body("ok"))),
     )
     .unwrap_err();
-    assert!(err.to_string().contains("V3"), "{err}");
+    // V3: the refusal now points at the dedicated supervisor session
+    // type (supervisor runs are bridge-driven state machines, not
+    // bounded model units).
+    assert!(
+        err.to_string()
+            .contains("supervisor_v1::SupervisorSessionV1"),
+        "{err}"
+    );
 
     // Reasoning profiles may not carry a supervisor authority set.
     let mut rogue = test_profile();
@@ -1036,11 +1043,19 @@ fn candidates_land_in_review_queue_and_no_apply_path_exists() {
                 candidate_id: "cand-ordinary".into(),
                 kind: ProposedCandidateKind::OrdinaryMemory,
                 content_digest: "x".into(),
+                payload_ref: None,
+                provenance: None,
             },
             ProposedCandidate {
                 candidate_id: "cand-kp18".into(),
                 kind: ProposedCandidateKind::UserModel,
                 content_digest: "y".into(),
+                payload_ref: Some("evidence:///candidates/cand-kp18".into()),
+                provenance: Some(zeroclaw_api::subagent_v1::CandidateProvenance {
+                    source_task_refs: vec!["task:a".into()],
+                    evidence_refs: vec!["evidence:///candidates/cand-kp18".into()],
+                    derivation: "review finding distilled into a user-model change".into(),
+                }),
             },
         ],
         usage: Default::default(),
@@ -1054,6 +1069,16 @@ fn candidates_land_in_review_queue_and_no_apply_path_exists() {
         .expect("KP-18 candidate routes into reviewed promotion");
     assert_eq!(record.routed_to, "reviewed_promotion_path");
     assert_eq!(record.kind, ProposedCandidateKind::UserModel);
+    // The routing record carries the promotion SUBSTANCE (V3, P2
+    // caveat): payload ref + provenance travel with the routing so the
+    // reviewed path has something real to act on.
+    assert_eq!(
+        record.payload_ref.as_deref(),
+        Some("evidence:///candidates/cand-kp18")
+    );
+    let provenance = record.provenance.as_ref().expect("provenance travels");
+    assert_eq!(provenance.source_task_refs, vec!["task:a".to_string()]);
+    assert!(!provenance.derivation.is_empty());
 
     // Ordinary candidate: the Parent's disposition is route-or-discard;
     // committing ordinary memory happens through the PARENT's own
@@ -1076,6 +1101,74 @@ fn candidates_land_in_review_queue_and_no_apply_path_exists() {
                 || entry.candidate.candidate_id == "cand-ordinary"
         );
     }
+}
+
+#[test]
+fn digest_only_kp18_candidate_cannot_be_routed_into_promotion() {
+    // The P2-caveat law (V1 conformance record; mandatory from V3): a
+    // KP-18 active-authority candidate that carries only a digest says a
+    // candidate EXISTS but not WHAT it changes — routing it into the
+    // reviewed promotion path is refused, and the refusal keeps it
+    // queued for a payload-carrying revision (nothing silently dropped,
+    // nothing promoted without substance).
+    let queue = SubAgentCandidateReviewQueue::new();
+    let report = SubAgentReportV1 {
+        run_ref: SubAgentRunRef::from_opaque("run-digest-only"),
+        profile_ref: VersionedProfileRef {
+            profile_id: DEFAULT_REASONING_PROFILE_ID.into(),
+            revision: 1,
+            digest: "d".into(),
+        },
+        context_bundle_ref: "b".into(),
+        status: zeroclaw_api::subagent_v1::SubAgentTerminalFact::Completed,
+        summary: String::new(),
+        findings: vec![],
+        evidence_refs: vec![],
+        uncertainty: vec![],
+        recommendations: vec![],
+        requested_parent_actions: vec![],
+        proposed_candidates: vec![ProposedCandidate {
+            candidate_id: "cand-digest-only".into(),
+            kind: ProposedCandidateKind::Skill,
+            content_digest: "abc".into(),
+            payload_ref: None,
+            provenance: None,
+        }],
+        usage: Default::default(),
+    };
+    assert_eq!(queue.receive(&report), 1);
+    let error = queue
+        .route_to_reviewed_promotion(&report.run_ref, "cand-digest-only")
+        .expect_err("digest-only KP-18 candidate must not route");
+    assert!(matches!(
+        error,
+        super::ReviewQueueError::DigestOnlyCandidateNotRoutable { .. }
+    ));
+    // The candidate stays queued, still awaiting disposition.
+    let snapshot = queue.snapshot();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(
+        snapshot[0].disposition,
+        super::CandidateDisposition::AwaitingParentDisposition
+    );
+    // Ordinary memory remains digest-only routable (the law targets the
+    // KP-18 active-authority kinds only).
+    let ordinary = SubAgentReportV1 {
+        run_ref: SubAgentRunRef::from_opaque("run-ordinary"),
+        proposed_candidates: vec![ProposedCandidate {
+            candidate_id: "cand-ordinary-2".into(),
+            kind: ProposedCandidateKind::OrdinaryMemory,
+            content_digest: "xyz".into(),
+            payload_ref: None,
+            provenance: None,
+        }],
+        ..report
+    };
+    assert_eq!(queue.receive(&ordinary), 1);
+    let record = queue
+        .route_to_reviewed_promotion(&ordinary.run_ref, "cand-ordinary-2")
+        .expect("ordinary memory routes digest-only");
+    assert_eq!(record.routed_to, "reviewed_promotion_path");
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1663,6 +1756,12 @@ fn review_queue_is_run_scoped_and_refuses_duplicate_ids() {
             candidate_id: id.into(),
             kind: ProposedCandidateKind::UserModel,
             content_digest: "x".into(),
+            payload_ref: Some(format!("evidence:///candidates/{id}")),
+            provenance: Some(zeroclaw_api::subagent_v1::CandidateProvenance {
+                source_task_refs: vec!["task:a".into()],
+                evidence_refs: vec![format!("evidence:///candidates/{id}")],
+                derivation: "substantiated for the promotion routing tests".into(),
+            }),
         }],
         usage: Default::default(),
     };

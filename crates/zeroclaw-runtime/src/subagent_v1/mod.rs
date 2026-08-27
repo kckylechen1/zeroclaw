@@ -583,6 +583,19 @@ pub enum ProfileAdmissionError {
     #[error("reasoning profile {profile_id:?} carries a supervisor authority set (SA-29)")]
     SupervisorAuthorityOnReasoning { profile_id: String },
     #[error(
+        "supervisor profile {profile_id:?} carries an empty authority set (SA-29: a \
+         Supervisor's Tachi authority is the typed request set — enumerate it explicitly)"
+    )]
+    EmptySupervisorAuthority { profile_id: String },
+    #[error(
+        "supervisor profile {profile_id:?} repeats authority {authority:?} in its set \
+         (SA-29 sets are sets, not multisets)"
+    )]
+    DuplicateSupervisorAuthority {
+        profile_id: String,
+        authority: zeroclaw_api::subagent_v1::SupervisorAuthority,
+    },
+    #[error(
         "v1 profile {profile_id:?} declares tools ({first:?}) outside the empty V1 child \
          catalog; V1 reasoning runs execute no tools"
     )]
@@ -596,6 +609,12 @@ pub enum ProfileAdmissionError {
 /// The built-in default minimal Reasoning profile (SA-5's reference
 /// profile): zero tools, bounded budget, structured report only.
 pub const DEFAULT_REASONING_PROFILE_ID: &str = "default-reasoning-v1";
+
+/// The built-in default Supervisor profile (vertical V3): EXACTLY the
+/// ten typed SA-29 Tachi authorities, zero tools, no direct-execution
+/// capability of any kind (SA-29/SA-30: the transitional trio is a
+/// parent-kernel marking, never a Supervisor grant).
+pub const DEFAULT_SUPERVISOR_PROFILE_ID: &str = "default-supervisor-v1";
 
 impl SubAgentProfileRegistry {
     #[must_use]
@@ -654,6 +673,59 @@ impl SubAgentProfileRegistry {
         profile
     }
 
+    /// The built-in default Supervisor profile (vertical V3): EXACTLY the
+    /// ten typed SA-29 authorities, zero tools, structured report only.
+    /// A Supervisor needing implementation work requests it as a typed
+    /// `requested_parent_actions` entry — the PARENT submits through
+    /// the TaskIntent bridge (the SA-29 set has no submit operation).
+    #[must_use]
+    pub fn default_supervisor_profile() -> SubAgentProfileV1 {
+        use zeroclaw_api::subagent_v1::SupervisorAuthority as Authority;
+        let mut profile = SubAgentProfileV1 {
+            profile_id: DEFAULT_SUPERVISOR_PROFILE_ID.to_string(),
+            revision: 1,
+            digest: String::new(),
+            role: SubAgentRoleV1::Supervisor,
+            model_policy: ModelPolicyV1 {
+                provider_ref: String::new(),
+                model: None,
+                temperature: None,
+            },
+            tool_policy: SubAgentToolPolicyV1::default(),
+            supervisor_authority_set: vec![
+                Authority::ObserveTask,
+                Authority::ReadResultRefs,
+                Authority::ProvideContext,
+                Authority::RequestCorrection,
+                Authority::RequestContinuation,
+                Authority::RequestIndependentReview,
+                Authority::RequestUserInput,
+                Authority::RequestGracefulStop,
+                Authority::RequestCancel,
+                Authority::ProposeJudgment,
+            ],
+            context_policy: zeroclaw_api::subagent_v1::SubAgentContextPolicyV1 {
+                allowed_classes: vec![
+                    ContextClassV1::ObjectiveContext,
+                    ContextClassV1::SourceRefs,
+                    ContextClassV1::UserModelProjection,
+                ],
+                max_projection_bytes: 65_536,
+            },
+            privacy_policy: zeroclaw_api::subagent_v1::SubAgentPrivacyPolicyV1 {
+                permitted_partitions: vec![
+                    zeroclaw_api::companion::SourcePartition::UserModel,
+                    zeroclaw_api::companion::SourcePartition::SharedLexicon,
+                ],
+            },
+            budget: SubAgentBudgetV1::default(),
+            recursion: zeroclaw_api::subagent_v1::SubAgentRecursionPolicyV1::NoLocalSpawn,
+            output_schema: zeroclaw_api::subagent_v1::SubAgentOutputSchemaV1::StructuredReport,
+        };
+        profile.digest = profile.compute_digest();
+        profile
+    }
+
     /// Admit a profile revision. Validates the frozen law (SA-3/SA-4/
     /// SA-5/SA-29) and refuses otherwise. A capability change arrives
     /// here as a NEW revision with a NEW digest — never as a mutation of
@@ -677,11 +749,30 @@ impl SubAgentProfileRegistry {
                     });
                 }
             }
-            // SA-29 schema constraint: a Supervisor's authority is the
-            // typed Tachi request set (the enum guarantees that) and it
-            // must not carry direct-execution tools. V1 runs none of
-            // them (V3 leaf).
-            SubAgentRoleV1::Supervisor => {}
+            // SA-29 schema constraint (vertical V3): a Supervisor's
+            // authority is the typed Tachi request set — the enum
+            // guarantees every element is one of the ten; admission
+            // additionally demands a non-empty, duplicate-free set. The
+            // direct-execution law is structural: `tool_policy` is
+            // checked below for EVERY role (the V1 catalog is empty, and
+            // `shell`/`file_write`/`file_edit` cannot even be named —
+            // `SubAgentToolNameV1::parse` refuses them, SA-30).
+            SubAgentRoleV1::Supervisor => {
+                if profile.supervisor_authority_set.is_empty() {
+                    return Err(ProfileAdmissionError::EmptySupervisorAuthority {
+                        profile_id: profile.profile_id.clone(),
+                    });
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for authority in &profile.supervisor_authority_set {
+                    if !seen.insert(*authority) {
+                        return Err(ProfileAdmissionError::DuplicateSupervisorAuthority {
+                            profile_id: profile.profile_id.clone(),
+                            authority: *authority,
+                        });
+                    }
+                }
+            }
         }
         if let Some(first) = profile.tool_policy.tools.first() {
             return Err(ProfileAdmissionError::NonEmptyToolPolicy {
@@ -759,7 +850,9 @@ pub enum RunAdmissionError {
         digest: String,
     },
     #[error(
-        "supervisor runs are not constructible in V1 (V3 leaf); profile {profile_id:?} is Supervisor"
+        "supervisor runs are not model-unit runs: profile {profile_id:?} must be driven \
+         through supervisor_v1::SupervisorSessionV1 (SA-29), not the bounded reasoning \
+         run constructor"
     )]
     SupervisorNotInV1 { profile_id: String },
     #[error(
@@ -1459,7 +1552,22 @@ fn parse_report_core(text: &str) -> Result<ReportCore, anyhow::Error> {
         .and_then(|rest| rest.strip_suffix("```"))
         .map(str::trim)
         .unwrap_or(trimmed);
-    serde_json::from_str(body).map_err(Into::into)
+    let core: ReportCore = serde_json::from_str(body)?;
+    // The submit_task_intent action (and its typed payload) is the
+    // SUPERVISOR session's vocabulary (SA-29 role-exclusive law): a
+    // reasoning child's model output cannot carry it — the report is
+    // malformed and the run fails, rather than smuggling a submit
+    // request through the reasoning report channel.
+    if core
+        .requested_parent_actions
+        .iter()
+        .any(|action| action.action.requires_task_intent_payload())
+    {
+        anyhow::bail!(
+            "requested_parent_actions carries a submit_task_intent action: that action is              supervisor-session vocabulary and cannot come from a reasoning child report"
+        );
+    }
+    Ok(core)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1520,6 +1628,16 @@ pub enum ReviewQueueError {
         candidate_id: String,
         kind: zeroclaw_api::subagent_v1::ProposedCandidateKind,
     },
+    #[error(
+        "candidate {candidate_id:?} targets KP-18 kind {kind:?} but carries no payload_ref \
+         and/or provenance; a digest-only candidate cannot be routed into the reviewed \
+         promotion path (it says a candidate exists, not WHAT it changes) — await a \
+         payload-carrying revision"
+    )]
+    DigestOnlyCandidateNotRoutable {
+        candidate_id: String,
+        kind: zeroclaw_api::subagent_v1::ProposedCandidateKind,
+    },
 }
 
 impl SubAgentCandidateReviewQueue {
@@ -1575,7 +1693,11 @@ impl SubAgentCandidateReviewQueue {
     /// Route a candidate into the reviewed promotion path. Returns the
     /// routing record; applies nothing. The only disposition available
     /// to any candidate — KP-18 kinds included — is this routing or
-    /// discard.
+    /// discard. A KP-18 candidate that carries no payload_ref and/or no
+    /// provenance is REFUSED here (the P2-caveat law from vertical V3):
+    /// digest-only candidates have no promotable substance, and the
+    /// refusal keeps them queued for a payload-carrying revision instead
+    /// of silently dropping or promoting them.
     pub fn route_to_reviewed_promotion(
         &self,
         run_ref: &SubAgentRunRef,
@@ -1596,12 +1718,22 @@ impl SubAgentCandidateReviewQueue {
                 disposition: entry.disposition,
             });
         }
+        if entry.candidate.kind.requires_reviewed_promotion() && !entry.candidate.is_substantiated()
+        {
+            return Err(ReviewQueueError::DigestOnlyCandidateNotRoutable {
+                candidate_id: candidate_id.to_string(),
+                kind: entry.candidate.kind,
+            });
+        }
         entry.disposition = CandidateDisposition::RoutedToReviewedPromotion;
         Ok(CandidateRoutingRecord {
             run_ref: run_ref.clone(),
             candidate_id: candidate_id.to_string(),
             kind: entry.candidate.kind,
             routed_to: "reviewed_promotion_path".to_string(),
+            content_digest: entry.candidate.content_digest.clone(),
+            payload_ref: entry.candidate.payload_ref.clone(),
+            provenance: entry.candidate.provenance.clone(),
         })
     }
 
@@ -1641,13 +1773,21 @@ impl Default for SubAgentCandidateReviewQueue {
 }
 
 /// A routing record: proof the candidate was sent to the reviewed
-/// promotion path. Carries no authority and applies nothing.
+/// promotion path. Carries no authority and applies nothing. From
+/// vertical V3 on it also carries the candidate's payload reference and
+/// provenance (the promotion substance — what the reviewed path is to
+/// act on), when the candidate provides them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateRoutingRecord {
     pub run_ref: SubAgentRunRef,
     pub candidate_id: String,
     pub kind: zeroclaw_api::subagent_v1::ProposedCandidateKind,
     pub routed_to: String,
+    /// The candidate's content digest — carried so the reviewed path can
+    /// bind the routed payload to the proposed content.
+    pub content_digest: String,
+    pub payload_ref: Option<String>,
+    pub provenance: Option<zeroclaw_api::subagent_v1::CandidateProvenance>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────

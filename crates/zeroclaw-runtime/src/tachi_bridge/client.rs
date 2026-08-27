@@ -17,14 +17,18 @@
 //! mapping functions, which read their own dimension's wire label and
 //! nothing else.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use zeroclaw_api::taskintent::{AttemptRef, RequestId, TaskIntentV1, TaskRef};
+use zeroclaw_api::subagent_v1::SupervisorAuthority;
+use zeroclaw_api::taskintent::{
+    AttemptRef, BoundedText, InterventionError, InterventionReceipt, InterventionV1, RequestId,
+    RequesterRef, StopMode, StopReceipt, TaskIntentV1, TaskRef,
+};
 
-use super::compose::{ComposeRejection, scan_client_authored_refs, scan_intent};
+use super::compose::{ComposeRejection, scan_client_authored_refs, scan_intent, scan_text};
 
 // ─────────────────────────────────────────────────────────────────────────
 // TB-16: three per-dimension mapping tables
@@ -302,8 +306,9 @@ pub enum BridgeQueryError {
 }
 
 /// The Tachi TaskIntent bridge transport port — the binding point every
-/// production transport implements. Exactly four operations (owner
-/// scope): no intervene/request_stop client surface exists in this leaf.
+/// production transport implements. The owner-scoped operation set:
+/// submit / get / watch / collect (V2b) plus intervene / request_stop
+/// (vertical V3, TB-11/TB-12).
 ///
 /// Implementations are Tachi-side truth: they mint `TaskRef` values,
 /// derive lifecycle state through the bridge's own TB-16 mapping tables,
@@ -313,7 +318,11 @@ pub enum BridgeQueryError {
 /// **This trait is for transport IMPLEMENTORS, not callers.** Calling
 /// `submit` on a port directly bypasses the encode-side admission law;
 /// route submissions through [`TachiBridgeClient`], which always runs
-/// the fail-closed scan first.
+/// the fail-closed scan first. For interventions, route through
+/// [`TachiBridgeClient::intervene`] / [`TachiBridgeClient::request_stop`]
+/// (same law) or — for supervisor sessions —
+/// [`TachiBridgeClient::supervisor_intervene`], which additionally gates
+/// on the session's granted authority set.
 #[async_trait]
 pub trait TachiTaskBridge: Send + Sync {
     /// `submit(TaskIntentV1, RequestId)` (TB-5b/TB-6/TB-7).
@@ -340,6 +349,34 @@ pub trait TachiTaskBridge: Send + Sync {
         task_ref: &TaskRef,
         result_revision: Option<u64>,
     ) -> Result<ResultProjectionView, BridgeQueryError>;
+
+    /// `intervene(TaskRef, InterventionV1, RequesterRef, RequestId,
+    /// expected_task_revision?)` (TB-11, vertical V3): typed receipts or
+    /// typed refusals — `unsupported_by_lifecycle_owner` /
+    /// `requires_new_task_lineage` carry zero silent fallback and zero
+    /// state mutation; stop-alias variants resolve to the single stop
+    /// authority (TB-12).
+    async fn intervene(
+        &self,
+        task_ref: &TaskRef,
+        intervention: &InterventionV1,
+        requester: &RequesterRef,
+        request_id: &RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<InterventionReceipt, InterventionError>;
+
+    /// `request_stop(TaskRef, StopMode, RequesterRef, RequestId,
+    /// expected_task_revision?)` (TB-12, vertical V3): the multi-stage
+    /// stop fact — requested → forwarded → confirmed. A receipt is never
+    /// a `cancelled` confirmation.
+    async fn request_stop(
+        &self,
+        task_ref: &TaskRef,
+        mode: StopMode,
+        requester: &RequesterRef,
+        request_id: &RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<StopReceipt, InterventionError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -473,5 +510,258 @@ impl TachiBridgeClient {
         result_revision: u64,
     ) -> Result<ResultProjectionView, BridgeQueryError> {
         self.port.collect(task_ref, Some(result_revision)).await
+    }
+
+    /// `intervene` with the encode-side admission law applied first:
+    /// every text-bearing intervention field is content-scanned (TB-4,
+    /// the same fail-closed mirror as submit) BEFORE the port is
+    /// touched, so no intervention path can carry forbidden content to a
+    /// transport. Typed host receipts/refusals pass through unchanged
+    /// (TB-11: `unsupported_by_lifecycle_owner` /
+    /// `requires_new_task_lineage` are TRUTH, not errors to route
+    /// around).
+    pub async fn intervene(
+        &self,
+        task_ref: &TaskRef,
+        intervention: &InterventionV1,
+        requester: &RequesterRef,
+        request_id: &RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<InterventionReceipt, InterventionError> {
+        scan_intervention_texts(intervention)?;
+        self.port
+            .intervene(
+                task_ref,
+                intervention,
+                requester,
+                request_id,
+                expected_task_revision,
+            )
+            .await
+    }
+
+    /// `request_stop` (TB-12): the reason text is content-scanned first,
+    /// then the port is called. The receipt is the multi-stage stop
+    /// fact — the client never converts it into a `cancelled`
+    /// projection.
+    pub async fn request_stop(
+        &self,
+        task_ref: &TaskRef,
+        mode: StopMode,
+        reason: &str,
+        requester: &RequesterRef,
+        request_id: &RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<StopReceipt, InterventionError> {
+        let reason = BoundedText::new(reason).map_err(|_| InterventionError::ForbiddenContent {
+            category: "oversize text".to_string(),
+            field: "stop_reason".to_string(),
+        })?;
+        let intervention = match mode {
+            StopMode::Graceful => InterventionV1::RequestGracefulStop {
+                reason: reason.clone(),
+            },
+            StopMode::Hard => InterventionV1::RequestHardCancel { reason },
+        };
+        let receipt = self
+            .intervene(
+                task_ref,
+                &intervention,
+                requester,
+                request_id,
+                expected_task_revision,
+            )
+            .await?;
+        match receipt {
+            InterventionReceipt::Stop(stop) => Ok(stop),
+            // The port maps stop aliases to the single stop authority
+            // (TB-11); any other shape is a transport contract break —
+            // surfaced as a typed unavailable rather than guessed.
+            other => {
+                ::zeroclaw_log::record!(
+                    ERROR,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "task_ref": task_ref.as_wire(),
+                            "receipt": format!("{other:?}"),
+                        })),
+                    "tachi_bridge: stop-alias intervention did not resolve to the stop authority; refusing to guess"
+                );
+                Err(InterventionError::Unavailable)
+            }
+        }
+    }
+
+    /// The supervisor-gated intervention surface (vertical V3, SA-29):
+    /// every operation is checked against the session's granted
+    /// authority set BEFORE anything is sent, and the supervisor
+    /// vocabulary structurally cannot express `RequestPause` /
+    /// `RequestResume` / `Escalate` (outside the SA-29 set — see
+    /// `InterventionStatic::supervisor_authority`).
+    pub async fn supervisor_intervene(
+        &self,
+        granted: &BTreeSet<SupervisorAuthority>,
+        op: SupervisorIntervention,
+        task_ref: &TaskRef,
+        requester: &RequesterRef,
+        request_id: &RequestId,
+        expected_task_revision: Option<u64>,
+    ) -> Result<InterventionReceipt, SupervisorInterventionError> {
+        if !granted.contains(&op.required_authority()) {
+            return Err(SupervisorInterventionError::AuthorityNotGranted {
+                authority: op.required_authority(),
+            });
+        }
+        self.intervene(
+            task_ref,
+            &op.to_wire(),
+            requester,
+            request_id,
+            expected_task_revision,
+        )
+        .await
+        .map_err(SupervisorInterventionError::Host)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// The supervisor intervention vocabulary (vertical V3, SA-29 gate)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A supervisor-session intervention: the six SESSION-side TB-11
+/// operations that correspond one-to-one with SA-29 authorities. The
+/// other SA-29 authorities are not interventions at all:
+/// `ObserveTask`/`ReadResultRefs` are the read ops (`get`/`watch`/
+/// `collect`), `RequestIndependentReview` maps to a NEW task submission
+/// (see `supervisor_v1`), and `ProposeJudgment` is a run-scoped
+/// proposal. `RequestPause`/`RequestResume`/`Escalate` are outside the
+/// Supervisor grant set and are UNREPRESENTABLE in this type — no
+/// variant exists for them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorIntervention {
+    /// Provide additional context (authority: `ProvideContext`).
+    ProvideContext {
+        /// The context note (content, scanned).
+        note: BoundedText,
+    },
+    /// Request a correction (authority: `RequestCorrection`).
+    RequestCorrection {
+        /// What to correct (content, scanned).
+        note: BoundedText,
+    },
+    /// Request continuation (authority: `RequestContinuation`). NEVER
+    /// independent review — TB-17: the receipt this produces is a
+    /// continuation fact and can never satisfy an independence-marked
+    /// requirement.
+    RequestContinuation {
+        /// Continuation note (content, scanned).
+        note: BoundedText,
+    },
+    /// Request user input (authority: `RequestUserInput`; the PARENT
+    /// owns asking and wording — SA-25).
+    RequestUserInput {
+        /// The question to surface (content, scanned).
+        prompt: BoundedText,
+    },
+    /// Request a graceful stop (authority: `RequestGracefulStop`).
+    RequestGracefulStop {
+        /// Why (content, scanned).
+        reason: BoundedText,
+    },
+    /// Request a hard cancel (authority: `RequestCancel`).
+    RequestHardCancel {
+        /// Why (content, scanned).
+        reason: BoundedText,
+    },
+}
+
+impl SupervisorIntervention {
+    /// The SA-29 authority this operation requires.
+    #[must_use]
+    pub fn required_authority(&self) -> SupervisorAuthority {
+        match self {
+            Self::ProvideContext { .. } => SupervisorAuthority::ProvideContext,
+            Self::RequestCorrection { .. } => SupervisorAuthority::RequestCorrection,
+            Self::RequestContinuation { .. } => SupervisorAuthority::RequestContinuation,
+            Self::RequestUserInput { .. } => SupervisorAuthority::RequestUserInput,
+            Self::RequestGracefulStop { .. } => SupervisorAuthority::RequestGracefulStop,
+            Self::RequestHardCancel { .. } => SupervisorAuthority::RequestCancel,
+        }
+    }
+
+    /// The wire form (TB-11 `InterventionV1` mirror).
+    #[must_use]
+    pub fn to_wire(&self) -> InterventionV1 {
+        match self {
+            Self::ProvideContext { note } => {
+                InterventionV1::ProvideAdditionalContext { note: note.clone() }
+            }
+            Self::RequestCorrection { note } => {
+                InterventionV1::RequestCorrection { note: note.clone() }
+            }
+            Self::RequestContinuation { note } => {
+                InterventionV1::RequestContinuation { note: note.clone() }
+            }
+            Self::RequestUserInput { prompt } => InterventionV1::RequestUserInput {
+                prompt: prompt.clone(),
+            },
+            Self::RequestGracefulStop { reason } => InterventionV1::RequestGracefulStop {
+                reason: reason.clone(),
+            },
+            Self::RequestHardCancel { reason } => InterventionV1::RequestHardCancel {
+                reason: reason.clone(),
+            },
+        }
+    }
+}
+
+/// Typed failure of a supervisor-gated intervention.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SupervisorInterventionError {
+    /// The session's admitted authority set does not include the
+    /// operation (SA-29: the typed set is the authority; anything
+    /// outside it is refused before any transport call).
+    #[error("supervisor authority not granted: {authority:?}")]
+    AuthorityNotGranted { authority: SupervisorAuthority },
+    /// A text-bearing field matched a forbidden-content category
+    /// (TB-4 fail-closed mirror).
+    #[error("{0}")]
+    Forbidden(#[from] InterventionError),
+    /// The host refused or failed the intervention (typed truth —
+    /// `unsupported_by_lifecycle_owner`, `requires_new_task_lineage`,
+    /// revision conflicts, outages — never routed around).
+    #[error("{0}")]
+    Host(InterventionError),
+}
+
+/// Scan every text-bearing field of an intervention against the
+/// mirrored TB-4 categories (the same fail-closed law submit applies,
+/// with the client-side watershed superset on top).
+fn scan_intervention_texts(intervention: &InterventionV1) -> Result<(), InterventionError> {
+    let scan = |field: &'static str, text: &BoundedText| {
+        scan_text(field, text).map_err(|rejection: ComposeRejection| {
+            let ComposeRejection::ForbiddenContent { category, field } = rejection else {
+                return InterventionError::ForbiddenContent {
+                    category: "rejected text".to_string(),
+                    field: field.to_string(),
+                };
+            };
+            InterventionError::ForbiddenContent {
+                category: category.to_string().replace(char::is_whitespace, "_"),
+                field: field.to_string(),
+            }
+        })
+    };
+    match intervention {
+        InterventionV1::ProvideAdditionalContext { note } => scan("intervention.note", note),
+        InterventionV1::RequestCorrection { note } => scan("intervention.note", note),
+        InterventionV1::RequestContinuation { note } => scan("intervention.note", note),
+        InterventionV1::RequestUserInput { prompt } => scan("intervention.prompt", prompt),
+        InterventionV1::RequestGracefulStop { reason }
+        | InterventionV1::RequestHardCancel { reason } => scan("intervention.reason", reason),
+        InterventionV1::RequestIndependentReview { .. } => Ok(()),
+        InterventionV1::RequestPause | InterventionV1::RequestResume => Ok(()),
+        InterventionV1::Escalate { reason } => scan("intervention.reason", reason),
     }
 }

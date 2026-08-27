@@ -550,6 +550,399 @@ pub enum IndependenceClass {
     HumanReview,
 }
 
+impl IndependenceClass {
+    /// Whether this class marks an INDEPENDENT-review requirement
+    /// (vertical V3's discriminating half of TB-17): the fresh-context
+    /// classes and human review. `SameSessionContinuation` and
+    /// `DeterministicCheck` are deliberately NOT independence-marked —
+    /// a requirement carried by either of those classes is not asking
+    /// for independence at all.
+    #[must_use]
+    pub fn is_independence_marked(self) -> bool {
+        matches!(
+            self,
+            Self::FreshContextSameHarness
+                | Self::FreshContextCrossModelSameVendor
+                | Self::FreshContextCrossVendor
+                | Self::HumanReview
+        )
+    }
+
+    /// The frozen satisfaction law (TB-17 + vertical V3):
+    ///
+    /// - `SameSessionContinuation` satisfies NOTHING independence-marked,
+    ///   ever — continuation is not independent review. It satisfies only
+    ///   an explicit `same_session_continuation` requirement.
+    /// - `DeterministicCheck` likewise satisfies only its own class: a
+    ///   mechanical check is not independent review either.
+    /// - Among the independence-marked classes, a STRICTER actual class
+    ///   satisfies a weaker requirement (`fresh_context_same_harness` <
+    ///   `fresh_context_cross_model_same_vendor` <
+    ///   `fresh_context_cross_vendor`), and `human_review` satisfies every
+    ///   independence-marked requirement (a human is strictly more
+    ///   independent than any model context).
+    /// - A non-marked requirement is satisfied only by its exact class.
+    #[must_use]
+    pub fn satisfies_requirement(self, required: Self) -> bool {
+        fn rank(class: IndependenceClass) -> Option<u8> {
+            match class {
+                IndependenceClass::FreshContextSameHarness => Some(1),
+                IndependenceClass::FreshContextCrossModelSameVendor => Some(2),
+                IndependenceClass::FreshContextCrossVendor => Some(3),
+                IndependenceClass::HumanReview => Some(4),
+                IndependenceClass::DeterministicCheck
+                | IndependenceClass::SameSessionContinuation => None,
+            }
+        }
+        match (rank(self), rank(required)) {
+            (Some(actual), Some(needed)) => actual >= needed,
+            // Same class, exact match — including the two non-marked
+            // classes, which satisfy nothing but themselves.
+            _ => self == required && !required.is_independence_marked(),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// TB-11/TB-12 intervention wire (vertical V3): the ZeroClaw mirror of the
+// tachi host's `intervention.rs` vocabulary, receipts, and typed failure
+// surface. Shapes are frozen by the tachi-side implementation
+// (externally-tagged serde, `deny_unknown_fields`); drift breaks the
+// stage-B live pair, not a golden file.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Payload-free discriminant of the frozen 10-op `InterventionV1`
+/// vocabulary (TB-11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterventionStatic {
+    /// ProvideAdditionalContext
+    ProvideAdditionalContext,
+    /// RequestCorrection
+    RequestCorrection,
+    /// RequestContinuation
+    RequestContinuation,
+    /// RequestIndependentReview
+    RequestIndependentReview,
+    /// RequestUserInput
+    RequestUserInput,
+    /// RequestPause
+    RequestPause,
+    /// RequestResume
+    RequestResume,
+    /// RequestGracefulStop (alias of `request_stop(graceful)`)
+    RequestGracefulStop,
+    /// RequestHardCancel (alias of `request_stop(hard)`)
+    RequestHardCancel,
+    /// Escalate
+    Escalate,
+}
+
+impl InterventionStatic {
+    /// All ten frozen operations (machine-checkable vocabulary freeze).
+    pub const ALL: [Self; 10] = [
+        Self::ProvideAdditionalContext,
+        Self::RequestCorrection,
+        Self::RequestContinuation,
+        Self::RequestIndependentReview,
+        Self::RequestUserInput,
+        Self::RequestPause,
+        Self::RequestResume,
+        Self::RequestGracefulStop,
+        Self::RequestHardCancel,
+        Self::Escalate,
+    ];
+
+    /// The SA-29 Supervisor authority this operation corresponds to, if
+    /// any. `RequestPause`/`RequestResume`/`Escalate` are OUTSIDE the
+    /// Supervisor grant set (vertical V3 DoD row 1) and map to `None` —
+    /// the mapping is the refusal law made structural: no supervisor
+    /// surface can be built for an operation with no corresponding
+    /// authority.
+    #[must_use]
+    pub fn supervisor_authority(self) -> Option<crate::subagent_v1::SupervisorAuthority> {
+        use crate::subagent_v1::SupervisorAuthority;
+        match self {
+            Self::ProvideAdditionalContext => Some(SupervisorAuthority::ProvideContext),
+            Self::RequestCorrection => Some(SupervisorAuthority::RequestCorrection),
+            Self::RequestContinuation => Some(SupervisorAuthority::RequestContinuation),
+            Self::RequestIndependentReview => Some(SupervisorAuthority::RequestIndependentReview),
+            Self::RequestUserInput => Some(SupervisorAuthority::RequestUserInput),
+            Self::RequestGracefulStop => Some(SupervisorAuthority::RequestGracefulStop),
+            Self::RequestHardCancel => Some(SupervisorAuthority::RequestCancel),
+            Self::RequestPause | Self::RequestResume | Self::Escalate => None,
+        }
+    }
+}
+
+/// The frozen 10-op intervention vocabulary (TB-11), ZeroClaw mirror.
+/// `RequestIndependentReview` and `Escalate` are NOT session
+/// interventions — the host refuses them with
+/// [`InterventionError::RequiresNewTaskLineage`] and the client maps
+/// independent review to a NEW task submission (vertical V3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum InterventionV1 {
+    /// Provide additional context to the running work.
+    ProvideAdditionalContext {
+        /// The context note (content, not authority — TB-4 seam law).
+        note: BoundedText,
+    },
+    /// Request a correction.
+    RequestCorrection {
+        /// What to correct.
+        note: BoundedText,
+    },
+    /// Request continuation (NEVER independent review — TB-17).
+    RequestContinuation {
+        /// Continuation note.
+        note: BoundedText,
+    },
+    /// Request independent review (new task/adjudication lineage —
+    /// refused by the session-intervention path on both sides).
+    RequestIndependentReview {
+        /// Required independence class for the review.
+        independence_class: IndependenceClass,
+    },
+    /// Request user input.
+    RequestUserInput {
+        /// The question to surface.
+        prompt: BoundedText,
+    },
+    /// Request a pause.
+    RequestPause,
+    /// Request a resume.
+    RequestResume,
+    /// Request a graceful stop — alias of `request_stop(graceful)`.
+    RequestGracefulStop {
+        /// Why the stop is requested.
+        reason: BoundedText,
+    },
+    /// Request a hard cancel — alias of `request_stop(hard)`.
+    RequestHardCancel {
+        /// Why the cancel is requested.
+        reason: BoundedText,
+    },
+    /// Escalate (new task/adjudication lineage — refused by the
+    /// session-intervention path).
+    Escalate {
+        /// Why the escalation is requested.
+        reason: BoundedText,
+    },
+}
+
+impl InterventionV1 {
+    /// The payload-free discriminant of this operation.
+    #[must_use]
+    pub fn discriminant(&self) -> InterventionStatic {
+        match self {
+            Self::ProvideAdditionalContext { .. } => InterventionStatic::ProvideAdditionalContext,
+            Self::RequestCorrection { .. } => InterventionStatic::RequestCorrection,
+            Self::RequestContinuation { .. } => InterventionStatic::RequestContinuation,
+            Self::RequestIndependentReview { .. } => InterventionStatic::RequestIndependentReview,
+            Self::RequestUserInput { .. } => InterventionStatic::RequestUserInput,
+            Self::RequestPause => InterventionStatic::RequestPause,
+            Self::RequestResume => InterventionStatic::RequestResume,
+            Self::RequestGracefulStop { .. } => InterventionStatic::RequestGracefulStop,
+            Self::RequestHardCancel { .. } => InterventionStatic::RequestHardCancel,
+            Self::Escalate { .. } => InterventionStatic::Escalate,
+        }
+    }
+}
+
+/// Stop mode for `request_stop` and the stop-alias interventions (TB-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopMode {
+    /// Graceful stop: ask the work to wind down.
+    Graceful,
+    /// Hard cancel: terminate.
+    Hard,
+}
+
+impl StopMode {
+    /// Wire token for the mode.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Graceful => "graceful",
+            Self::Hard => "hard",
+        }
+    }
+}
+
+/// The multi-stage stop fact (TB-12): requested → forwarded → confirmed →
+/// terminal. `Confirmed` is the only stage a `cancelled` projection may
+/// derive from; the client never mints one locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopStage {
+    /// Stop requested and bound (not yet forwarded).
+    Requested,
+    /// Forwarded to the lifecycle owner (still not cancelled).
+    Forwarded,
+    /// The lifecycle owner authoritatively confirmed the terminal
+    /// cancellation.
+    Confirmed,
+    /// The owner disappeared after possible side effects — outcome unknown.
+    OutcomeUnknown,
+}
+
+/// One `request_stop` receipt (TB-12). Exactly one stop receipt type; the
+/// stop variants of `intervene` carry this payload (TB-11 connection).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopReceipt {
+    /// The task stopped.
+    pub task_ref: TaskRef,
+    /// Host-minted stop operation id.
+    pub stop_id: String,
+    /// `graceful` or `hard`.
+    pub mode: StopMode,
+    /// Current stage of the multi-stage stop fact.
+    pub stage: StopStage,
+    /// The RequestId this stop was idempotency-bound to.
+    pub request_id: String,
+}
+
+/// Typed intervention receipt envelope (TB-11). The stop variants carry
+/// exactly the [`StopReceipt`] of TB-12. Externally tagged with the
+/// tachi host's EXACT serde shape — the host's enum carries no
+/// `rename_all`, so variant tags travel PascalCase
+/// (`{"CorrectionRequested": {...}}`, `{"Stop": {...}}`); the stage-B
+/// live pair depends on the shapes matching byte-for-byte.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InterventionReceipt {
+    /// Additional context was forwarded.
+    ContextProvided {
+        /// Host-minted intervention id.
+        intervention_id: String,
+    },
+    /// Correction was requested.
+    CorrectionRequested {
+        /// Host-minted intervention id.
+        intervention_id: String,
+    },
+    /// Continuation was requested (recorded as continuation — NEVER
+    /// independent review; TB-17).
+    ContinuationRequested {
+        /// Host-minted intervention id.
+        intervention_id: String,
+    },
+    /// User input was requested.
+    UserInputRequested {
+        /// Host-minted intervention id.
+        intervention_id: String,
+    },
+    /// Pause was forwarded.
+    Paused {
+        /// Host-minted intervention id.
+        intervention_id: String,
+    },
+    /// Resume was forwarded.
+    Resumed {
+        /// Host-minted intervention id.
+        intervention_id: String,
+    },
+    /// Stop-alias interventions resolve to the single stop authority
+    /// (TB-11/TB-12).
+    Stop(StopReceipt),
+}
+
+impl InterventionReceipt {
+    /// The intervention id this receipt is bound to, when it is a
+    /// non-stop receipt. Stop receipts are bound to their stop id.
+    #[must_use]
+    pub fn intervention_id(&self) -> Option<&str> {
+        match self {
+            Self::ContextProvided { intervention_id }
+            | Self::CorrectionRequested { intervention_id }
+            | Self::ContinuationRequested { intervention_id }
+            | Self::UserInputRequested { intervention_id }
+            | Self::Paused { intervention_id }
+            | Self::Resumed { intervention_id } => Some(intervention_id),
+            Self::Stop(_) => None,
+        }
+    }
+
+    /// Whether this receipt is a CONTINUATION fact. Load-bearing for
+    /// TB-17: a continuation receipt can never be used as independent
+    /// review evidence — this predicate is the client-side hook the
+    /// supervisor gate consults (a continuation answers `false` to
+    /// "is this an independent review?" by construction).
+    #[must_use]
+    pub fn is_continuation(&self) -> bool {
+        matches!(self, Self::ContinuationRequested { .. })
+    }
+}
+
+/// Typed intervention/stop failure surface (TB-11/TB-12), ZeroClaw mirror
+/// of the tachi host's `InterventionError`. `category` in
+/// `ForbiddenContent` is a label string because the forbidden-category
+/// enum lives in `zeroclaw-runtime`'s compose layer (client superset);
+/// the host law stays authoritative host-side.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InterventionError {
+    /// The lifecycle owner does not support the requested operation —
+    /// typed refusal, ZERO state mutation, NO fresh-task fallback (TB-11).
+    #[error("unsupported_by_lifecycle_owner")]
+    UnsupportedByLifecycleOwner {
+        /// The refused operation.
+        operation: InterventionStatic,
+    },
+    /// The operation maps to NEW task/adjudication lineage and is refused
+    /// by the session-intervention path on both sides (TB-11). The
+    /// client's independent-review surface performs this mapping by
+    /// submitting a NEW review task.
+    #[error("operation requires new task/adjudication lineage (not a session intervention)")]
+    RequiresNewTaskLineage {
+        /// The refused operation.
+        operation: InterventionStatic,
+    },
+    /// `expected_task_revision` mismatch — typed conflict, never a
+    /// best-effort apply (TB-11).
+    #[error("expected_task_revision mismatch: expected {expected}, snapshot is {actual}")]
+    RevisionConflict {
+        /// The revision the caller expected.
+        expected: u64,
+        /// The snapshot's actual revision.
+        actual: u64,
+    },
+    /// Same `(requester, request_id)` bound to a different digest
+    /// (TB-7 rule 3, applied to interventions per rule 6).
+    #[error("request id conflict: bound to {bound_digest}, submitted {submitted_digest}")]
+    RequestIdConflict {
+        /// Digest the tuple is already bound to.
+        bound_digest: String,
+        /// Digest of the incoming request.
+        submitted_digest: String,
+    },
+    /// The task does not exist, or the requester does not own it.
+    #[error("task not found")]
+    NotFound,
+    /// The requester is not admitted by the authority source.
+    #[error("requester not admitted")]
+    RequesterNotAdmitted,
+    /// An intervention text matched a forbidden-content category (TB-4).
+    #[error("intervention rejected: {category} in field `{field}`")]
+    ForbiddenContent {
+        /// The matched category label.
+        category: String,
+        /// The offending field.
+        field: String,
+    },
+    /// The request tuple is bound but its receipt has not materialized
+    /// (ambiguous in-flight window).
+    #[error("intervention pending reconciliation")]
+    ReconciliationUnknown,
+    /// The lifecycle owner disappeared while the request was in flight;
+    /// nothing was mutated.
+    #[error("lifecycle owner disappeared")]
+    OwnerDisappeared,
+    /// The bridge transport/truth source is unavailable (TB-20).
+    #[error("bridge unavailable")]
+    Unavailable,
+}
+
 /// Typed workspace selector (TB-3 `workspace_source`): a repo and revision
 /// the requester points at. This is a **selector over Tachi-admitted
 /// workspace truth** (the Tachi ExecEnv/Workspace plane owns placement);
@@ -1028,5 +1421,144 @@ mod tests {
             round["capability_request"]["capability"],
             Value::String("repository_implementation".into())
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Vertical V3: TB-17 independence law + TB-11/TB-12 intervention wire
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn same_session_continuation_never_satisfies_independence_marked_requirements() {
+        use IndependenceClass as IC;
+        // Discrimination 1 (continuation ≠ independent review): for EVERY
+        // independence-marked requirement, a SameSessionContinuation
+        // actual class fails — and so does a DeterministicCheck.
+        for required in [
+            IC::FreshContextSameHarness,
+            IC::FreshContextCrossModelSameVendor,
+            IC::FreshContextCrossVendor,
+            IC::HumanReview,
+        ] {
+            assert!(
+                required.is_independence_marked(),
+                "{required:?} must be independence-marked"
+            );
+            assert!(
+                !IC::SameSessionContinuation.satisfies_requirement(required),
+                "SameSessionContinuation must never satisfy {required:?}"
+            );
+            assert!(
+                !IC::DeterministicCheck.satisfies_requirement(required),
+                "DeterministicCheck must never satisfy {required:?}"
+            );
+        }
+        // The two non-marked classes are not independence-marked.
+        assert!(!IC::SameSessionContinuation.is_independence_marked());
+        assert!(!IC::DeterministicCheck.is_independence_marked());
+        // A non-marked requirement is satisfied only by its exact class.
+        assert!(IC::SameSessionContinuation.satisfies_requirement(IC::SameSessionContinuation));
+        assert!(!IC::DeterministicCheck.satisfies_requirement(IC::SameSessionContinuation));
+        assert!(IC::DeterministicCheck.satisfies_requirement(IC::DeterministicCheck));
+    }
+
+    #[test]
+    fn fresh_context_same_harness_is_a_valid_distinct_independence_class() {
+        use IndependenceClass as IC;
+        // Discrimination 2 (same harness SESSION ≠ independent review, but
+        // FRESH CONTEXT SAME HARNESS is a valid distinct frozen class):
+        // the class exists, is independence-marked, and satisfies exactly
+        // the marked requirements at or below its rank.
+        assert!(IC::FreshContextSameHarness.is_independence_marked());
+        assert!(IC::FreshContextSameHarness.satisfies_requirement(IC::FreshContextSameHarness));
+        // It does NOT substitute for a stricter requirement.
+        assert!(!IC::FreshContextSameHarness.satisfies_requirement(IC::FreshContextCrossVendor));
+        // A stricter actual class satisfies the weaker fresh requirement…
+        assert!(IC::FreshContextCrossVendor.satisfies_requirement(IC::FreshContextSameHarness));
+        assert!(
+            IC::FreshContextCrossModelSameVendor.satisfies_requirement(IC::FreshContextSameHarness)
+        );
+        // …and human review satisfies every marked requirement.
+        for required in [
+            IC::FreshContextSameHarness,
+            IC::FreshContextCrossModelSameVendor,
+            IC::FreshContextCrossVendor,
+            IC::HumanReview,
+        ] {
+            assert!(IC::HumanReview.satisfies_requirement(required));
+        }
+    }
+
+    #[test]
+    fn supervisor_authority_mapping_refuses_pause_resume_escalate() {
+        use crate::subagent_v1::SupervisorAuthority;
+        // Vertical V3 DoD row 1: TB-11 operations outside the Supervisor
+        // grant set have NO corresponding supervisor authority — the
+        // mapping is None, so no supervisor surface can be built for them.
+        for op in [
+            InterventionStatic::RequestPause,
+            InterventionStatic::RequestResume,
+            InterventionStatic::Escalate,
+        ] {
+            assert_eq!(
+                op.supervisor_authority(),
+                None,
+                "{op:?} is outside the Supervisor grant set"
+            );
+        }
+        // The seven session-side authorities map one-to-one.
+        assert_eq!(
+            InterventionStatic::ProvideAdditionalContext.supervisor_authority(),
+            Some(SupervisorAuthority::ProvideContext)
+        );
+        assert_eq!(
+            InterventionStatic::RequestHardCancel.supervisor_authority(),
+            Some(SupervisorAuthority::RequestCancel)
+        );
+        assert_eq!(
+            InterventionStatic::RequestIndependentReview.supervisor_authority(),
+            Some(SupervisorAuthority::RequestIndependentReview)
+        );
+        // The vocabulary is exactly the frozen ten.
+        assert_eq!(InterventionStatic::ALL.len(), 10);
+    }
+
+    #[test]
+    fn intervention_wire_round_trips_the_frozen_shapes() {
+        // Mirror fidelity: the externally-tagged wire form matches the
+        // tachi host's serde shape (`{"variant": {...}}`).
+        let intervention = InterventionV1::RequestCorrection {
+            note: BoundedText::new("tighten the boundary check").expect("bounded"),
+        };
+        let wire = serde_json::to_value(&intervention).expect("serializes");
+        assert_eq!(
+            wire,
+            serde_json::json!({"request_correction": {"note": "tighten the boundary check"}})
+        );
+        let back: InterventionV1 = serde_json::from_value(wire).expect("decodes");
+        assert_eq!(back, intervention);
+        assert_eq!(back.discriminant(), InterventionStatic::RequestCorrection);
+        // deny_unknown_fields: a smuggled field fails decode.
+        let mut smuggled = serde_json::to_value(&intervention).expect("serializes");
+        smuggled["request_correction"]["command"] = Value::String("rm -rf".into());
+        assert!(serde_json::from_value::<InterventionV1>(smuggled).is_err());
+        // Stop receipts round-trip and the continuation predicate holds.
+        let stop = InterventionReceipt::Stop(StopReceipt {
+            task_ref: serde_json::from_value(Value::String("task:abc".into())).expect("ref"),
+            stop_id: "stop-1".into(),
+            mode: StopMode::Hard,
+            stage: StopStage::Forwarded,
+            request_id: "rid-1".into(),
+        });
+        let round: InterventionReceipt =
+            serde_json::from_value(serde_json::to_value(&stop).expect("serializes"))
+                .expect("decodes");
+        assert_eq!(round, stop);
+        assert!(!round.is_continuation());
+        assert!(round.intervention_id().is_none());
+        let cont = InterventionReceipt::ContinuationRequested {
+            intervention_id: "iv-1".into(),
+        };
+        assert!(cont.is_continuation());
+        assert_eq!(cont.intervention_id(), Some("iv-1"));
     }
 }
