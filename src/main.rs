@@ -2582,32 +2582,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 }
                 let mut registry = daemon::DaemonRegistry::new();
 
-                // SOP loading is gated on `[sop] sops_dir`: unset disables all
-                // SOP runtime behavior, matching the documented rollback path.
-                let (sop_engine, sop_audit) = if current_config.sop.sops_dir.is_some() {
-                    let mem: Arc<dyn zeroclaw_memory::Memory> = Arc::from(
-                        zeroclaw_memory::create_memory_from_config(&current_config, None)?,
-                    );
-                    let sop_adapters = build_sop_adapters(&current_config);
-                    let (engine, audit) = zeroclaw_runtime::sop::build_sop_engine(
-                        current_config.sop.clone(),
-                        &current_config.data_dir,
-                        mem,
-                        sop_adapters,
-                    );
-                    (Some(engine), Some(audit))
-                } else {
-                    (None, None)
-                };
-
-                // EPIC A1 + SOP cron: drive periodic maintenance and cron
-                // triggers against the shared engine for this daemon iteration.
-                let sop_maintenance = spawn_sop_maintenance(
-                    sop_engine.as_ref(),
-                    sop_audit.as_ref(),
-                    current_config.sop.maintenance_interval_secs,
-                );
-
                 #[cfg(feature = "gateway")]
                 registry.register_gateway(Box::new(
                     move |host, port, config, tx, reload_controls, tui_registry| {
@@ -2675,10 +2649,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     })
                 }));
 
-                // Pass the shared SOP engine through the registry so
-                // RpcContext (RPC/TUI agent sessions) can share it.
-                registry.set_sop_engine(sop_engine, sop_audit);
-
                 let exit = Box::pin(daemon::run(
                     current_config.clone(),
                     host.clone(),
@@ -2687,9 +2657,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     ephemeral,
                 ))
                 .await;
-                if let Some(handle) = sop_maintenance {
-                    handle.abort();
-                }
                 if let Some(handle) = companion_outbox_observer {
                     handle.abort();
                 }
@@ -2894,26 +2861,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 }));
 
                 let cancel = tokio_util::sync::CancellationToken::new();
-                let (sop_engine, sop_audit) = if config.sop.sops_dir.is_some() {
-                    let mem: Arc<dyn zeroclaw_memory::Memory> =
-                        Arc::from(zeroclaw_memory::create_memory_from_config(&config, None)?);
-                    let sop_adapters = build_sop_adapters(&config);
-                    let (engine, audit) = zeroclaw_runtime::sop::build_sop_engine(
-                        config.sop.clone(),
-                        &config.data_dir,
-                        mem,
-                        sop_adapters,
-                    );
-                    (Some(engine), Some(audit))
-                } else {
-                    (None, None)
-                };
-                // EPIC A1 + SOP cron: same tick as the full daemon path.
-                let sop_maintenance = spawn_sop_maintenance(
-                    sop_engine.as_ref(),
-                    sop_audit.as_ref(),
-                    config.sop.maintenance_interval_secs,
-                );
                 let companion_store = zeroclaw_memory::create_companion_store(&config)?;
                 let companion_outbox_observer =
                     spawn_companion_outbox_observer(companion_store.clone());
@@ -2924,9 +2871,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     companion_store,
                 ))
                 .await;
-                if let Some(handle) = sop_maintenance {
-                    handle.abort();
-                }
                 if let Some(handle) = companion_outbox_observer {
                     handle.abort();
                 }
@@ -3458,162 +3402,6 @@ fn gate_security_posture(
     Ok(Some(handle))
 }
 
-/// Build the SOP channel-backed adapters from one shared channel map:
-/// - the approval ROUTE adapter, so a SOP that parks at a policied gate (or later
-///   times out) can deliver its approval request / escalation notice to a real
-///   channel (Discord, Slack, ...);
-/// - the FORGE-WRITE adapter, so an approved `forge.comment` capability step can
-///   post its comment back to the forge by driving the git channel's normal
-///   outbound path.
-///
-/// - the LLM adapter, so an `llm.generate` capability step can run one bounded
-///   model call on the default agent's resolved provider.
-///
-/// Each field is `None` when not applicable (no channels at all; no git channel
-/// for the forge half; no resolvable default model provider for the llm half), in
-/// which case `build_sop_engine` falls back to the log-only no-op route adapter
-/// and the fail-closed `forge.comment` / `llm.generate` placeholders (unchanged
-/// behavior). MUST be called from within the tokio runtime: it captures
-/// `Handle::current()` so the sync, under-the-engine-lock adapter calls can bridge
-/// to the async channel/provider calls.
-#[cfg(feature = "agent-runtime")]
-fn build_sop_adapters(config: &Config) -> zeroclaw_runtime::sop::SopEngineAdapters {
-    // `llm.generate` runs on the DEFAULT agent's resolved model provider — the
-    // daemon-level model of record. No resolvable provider = fail-closed.
-    let llm: Option<std::sync::Arc<dyn zeroclaw_runtime::sop::capability::LlmGenerateAdapter>> =
-        config
-            .resolved_model_provider_for_agent("default")
-            .and_then(|(provider_type, alias, entry)| {
-                // Alias-aware factory WITH the alias's runtime options: the options
-                // carry zeroclaw_dir (auth-profile store) and per-alias runtime
-                // knobs — without them, OAuth/subscription providers (codex,
-                // opencode) sit unauthenticated and never answer. This mirrors the
-                // delegate tool's provider construction.
-                let options = zeroclaw::providers::provider_runtime_options_for_alias(
-                    config,
-                    provider_type,
-                    alias,
-                );
-                let provider = match zeroclaw::providers::create_model_provider_for_alias(
-                    config,
-                    provider_type,
-                    alias,
-                    entry.api_key.as_deref(),
-                    &options,
-                ) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        ::zeroclaw_log::record!(
-                            WARN,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"error": e.to_string()})),
-                            "SOP llm.generate adapter unavailable: default model provider failed to build"
-                        );
-                        return None;
-                    }
-                };
-                let model = entry.model.clone().unwrap_or_else(|| "default".to_string());
-                Some(std::sync::Arc::new(
-                    zeroclaw_runtime::sop::capability::ProviderLlmAdapter::new(
-                        std::sync::Arc::from(provider),
-                        model,
-                    ),
-                ) as _)
-            });
-
-    let channels = zeroclaw_channels::orchestrator::build_channel_map(config);
-    // Startup validation: this send-only adapter's channel map omits channels that
-    // need runtime SOP handles (e.g. AMQP SOP-dispatch channels). Surface at BOOT any
-    // configured approval route whose channel is absent here, so a `request_route` /
-    // `escalation_route` that would silently fail to deliver at gate time is caught up
-    // front rather than on the first parked gate. This runs BEFORE the empty-map return:
-    // when there are no deliverable channels at all, EVERY configured route is
-    // undeliverable and must still be surfaced.
-    // A route target must be a channel that can actually deliver OUTBOUND; an
-    // inbound-only channel (e.g. AMQP, whose `send` is a no-op) in the map cannot send
-    // an approval notice, so it is not a resolvable route target.
-    let deliverable_keys: std::collections::HashSet<String> = channels
-        .iter()
-        .filter(|(_, ch)| ch.supports_outbound_send())
-        .map(|(key, _)| key.clone())
-        .collect();
-    for issue in zeroclaw_runtime::sop::approval::unresolvable_approval_routes(
-        &config.sop.approval,
-        &deliverable_keys,
-    ) {
-        match issue {
-            zeroclaw_runtime::sop::approval::ApprovalRouteIssue::Malformed {
-                policy,
-                route_kind,
-                route,
-            } => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "policy": policy,
-                            "route_kind": route_kind,
-                            "route": route,
-                        })),
-                    "SOP approval route is malformed; use the required channel:recipient format"
-                );
-            }
-            zeroclaw_runtime::sop::approval::ApprovalRouteIssue::UndeliverableChannel {
-                policy,
-                route_kind,
-                route,
-                channel_key,
-            } => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "policy": policy,
-                            "route_kind": route_kind,
-                            "route": route,
-                            "channel": channel_key,
-                        })),
-                    "SOP approval route names a channel the route adapter cannot deliver to; \
-                     its approval notices will not be sent (the channel may require runtime SOP \
-                     handles this send-only adapter lacks)"
-                );
-            }
-        }
-    }
-    if channels.is_empty() {
-        return zeroclaw_runtime::sop::SopEngineAdapters {
-            llm,
-            ..Default::default()
-        };
-    }
-    let handle = tokio::runtime::Handle::current();
-    let route: std::sync::Arc<dyn zeroclaw_runtime::sop::approval::ApprovalRouteAdapter> =
-        std::sync::Arc::new(zeroclaw_runtime::sop::approval::ChannelRouteAdapter::new(
-            channels.clone(),
-            handle.clone(),
-        ));
-    // Only offer the forge adapter when a git channel actually exists, so
-    // `forge.comment` stays fail-closed on daemons without a forge.
-    let has_git = channels.keys().any(|k| k == "git" || k.starts_with("git."));
-    let forge: Option<std::sync::Arc<dyn zeroclaw_runtime::sop::capability::ForgeCommentAdapter>> =
-        has_git.then(|| {
-            std::sync::Arc::new(zeroclaw_runtime::sop::capability::ChannelForgeAdapter::new(
-                channels,
-            )) as _
-        });
-    zeroclaw_runtime::sop::SopEngineAdapters {
-        route: Some(route),
-        forge,
-        llm,
-    }
-}
-
 fn companion_outbox_health_for_cli(
     config: &zeroclaw_config::schema::Config,
 ) -> zeroclaw_api::companion::CompanionOutboxHealth {
@@ -3679,63 +3467,6 @@ fn spawn_companion_outbox_observer(
     }))
 }
 
-/// Spawn the periodic SOP maintenance tick (EPIC A1 + SOP cron): on each interval it
-/// fires fail-closed approval timeouts, reaps expired concurrency-claim leases,
-/// prunes terminal runs past the retention policy, and dispatches cached cron
-/// SOP triggers. Returns `None` (no task) when the tick is disabled
-/// (`interval_secs == 0`) or no SOP engine is configured. The caller owns the
-/// returned handle and aborts it when the foreground daemon/channel run exits.
-/// The tick itself self-approves nothing - timeout handling follows
-/// `approval_timeout_action` (default `escalate`, fail-closed).
-#[cfg(feature = "agent-runtime")]
-fn spawn_sop_maintenance(
-    sop_engine: Option<&std::sync::Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-    sop_audit: Option<&std::sync::Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
-    interval_secs: u64,
-) -> Option<tokio::task::JoinHandle<()>> {
-    if interval_secs == 0 {
-        return None;
-    }
-    let engine = sop_engine.cloned()?;
-    let audit = sop_audit.cloned();
-    let cron_cache = audit
-        .as_ref()
-        .map(|_| zeroclaw_runtime::sop::dispatch::SopCronCache::from_engine(&engine));
-    Some(::zeroclaw_spawn::spawn!(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut last_cron_check = chrono::Utc::now();
-        loop {
-            ticker.tick().await;
-            let Some(report) = run_sop_maintenance_tick(
-                &engine,
-                audit.as_ref(),
-                cron_cache.as_ref(),
-                &mut last_cron_check,
-            )
-            .await
-            else {
-                continue;
-            };
-            if !report.is_empty() {
-                ::zeroclaw_log::record!(
-                    INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_attrs(::serde_json::json!({
-                            "timed_out": report.maintenance.timed_out,
-                            "reaped_claims": report.maintenance.reaped_claims,
-                            "pruned_runs": report.maintenance.pruned_runs,
-                            "cron_started": report.cron_started,
-                            "cron_skipped": report.cron_skipped,
-                            "cron_no_match": report.cron_no_match,
-                        })),
-                    "SOP maintenance tick"
-                );
-            }
-        }
-    }))
-}
-
 #[cfg(feature = "agent-runtime")]
 #[derive(Default)]
 struct SopMaintenanceTickReport {
@@ -3755,66 +3486,6 @@ impl SopMaintenanceTickReport {
             && self.cron_blocked_unsafe == 0
             && self.cron_no_match == 0
     }
-}
-
-#[cfg(feature = "agent-runtime")]
-async fn run_sop_maintenance_tick(
-    engine: &std::sync::Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>,
-    audit: Option<&std::sync::Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
-    cron_cache: Option<&zeroclaw_runtime::sop::dispatch::SopCronCache>,
-    last_cron_check: &mut chrono::DateTime<chrono::Utc>,
-) -> Option<SopMaintenanceTickReport> {
-    let maintenance = match engine.lock() {
-        Ok(mut e) => e.run_maintenance_tick(),
-        Err(_) => {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "SOP maintenance tick: engine lock poisoned; skipping this pass"
-            );
-            return None;
-        }
-    };
-
-    let mut report = SopMaintenanceTickReport {
-        maintenance,
-        ..SopMaintenanceTickReport::default()
-    };
-
-    if let (Some(audit), Some(cache)) = (audit, cron_cache) {
-        let results = zeroclaw_runtime::sop::dispatch::check_sop_cron_triggers(
-            engine,
-            audit,
-            cache,
-            last_cron_check,
-        )
-        .await;
-        for result in &results {
-            match result {
-                zeroclaw_runtime::sop::dispatch::DispatchResult::Started { .. } => {
-                    report.cron_started += 1;
-                }
-                zeroclaw_runtime::sop::dispatch::DispatchResult::Skipped { .. }
-                | zeroclaw_runtime::sop::dispatch::DispatchResult::Deferred { .. }
-                | zeroclaw_runtime::sop::dispatch::DispatchResult::Coalesced { .. } => {
-                    // A2: deferred (backpressure) / coalesced triggers did not start a
-                    // run this tick; the cron schedule re-fires them next pass. The
-                    // precise outcome is logged by process_headless_results below.
-                    report.cron_skipped += 1;
-                }
-                zeroclaw_runtime::sop::dispatch::DispatchResult::BlockedUnsafe { .. } => {
-                    report.cron_blocked_unsafe += 1;
-                }
-                zeroclaw_runtime::sop::dispatch::DispatchResult::NoMatch => {
-                    report.cron_no_match += 1;
-                }
-            }
-        }
-        zeroclaw_runtime::sop::dispatch::process_headless_results(&results);
-    }
-
-    Some(report)
 }
 
 #[cfg(feature = "gateway")]
@@ -5457,66 +5128,6 @@ mod tests {
                 .as_str(),
             "test-token"
         );
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "agent-runtime")]
-    async fn sop_maintenance_tick_dispatches_cached_cron_triggers() {
-        use std::sync::{Arc, Mutex};
-        use zeroclaw_config::schema::{MemoryConfig, SopConfig};
-        use zeroclaw_memory::traits::Memory;
-        use zeroclaw_runtime::sop::{
-            Sop, SopEngine, SopExecutionMode, SopPriority, SopStep, SopStepKind, SopTrigger,
-        };
-
-        let mut engine = SopEngine::new(SopConfig::default());
-        engine.set_sops_for_test(vec![Sop {
-            name: "cron-sop".into(),
-            description: "cron regression".into(),
-            version: "0.1.0".into(),
-            execution_mode: SopExecutionMode::Supervised,
-            priority: SopPriority::Normal,
-            triggers: vec![SopTrigger::Cron {
-                expression: "* * * * *".into(),
-            }],
-            steps: vec![SopStep {
-                number: 1,
-                title: "Step one".into(),
-                body: "Do step one".into(),
-                suggested_tools: vec![],
-                requires_confirmation: false,
-                kind: SopStepKind::default(),
-                schema: None,
-                ..SopStep::default()
-            }],
-            cooldown_secs: 0,
-            max_concurrent: 2,
-            location: None,
-            deterministic: false,
-            admission_policy: zeroclaw_runtime::sop::types::SopAdmissionPolicy::Parallel,
-            max_pending_approvals: 0,
-            agent: None,
-        }]);
-        let engine = Arc::new(Mutex::new(engine));
-
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let mem_cfg = MemoryConfig {
-            backend: "sqlite".into(),
-            ..MemoryConfig::default()
-        };
-        let memory: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let audit = Arc::new(zeroclaw_runtime::sop::SopAuditLogger::new(memory));
-        let cache = zeroclaw_runtime::sop::dispatch::SopCronCache::from_engine(&engine);
-
-        let mut last_cron_check = chrono::Utc::now() - chrono::Duration::minutes(2);
-        let report =
-            run_sop_maintenance_tick(&engine, Some(&audit), Some(&cache), &mut last_cron_check)
-                .await
-                .expect("maintenance tick should complete");
-
-        assert_eq!(report.cron_started, 1);
-        assert_eq!(engine.lock().unwrap().active_runs().len(), 1);
     }
 
     #[test]

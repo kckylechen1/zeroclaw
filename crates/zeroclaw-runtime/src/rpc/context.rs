@@ -162,8 +162,6 @@ pub struct RpcContext {
 
     /// Shared SOP engine from the daemon (for RPC/TUI agent sessions).
     /// `None` when standalone — sessions build their own.
-    pub sop_engine: Option<Arc<std::sync::Mutex<crate::sop::SopEngine>>>,
-    pub sop_audit: Option<Arc<crate::sop::SopAuditLogger>>,
 
     /// Lifecycle hook runner. `None` when hooks are disabled in config.
     pub hooks: Option<Arc<crate::hooks::HookRunner>>,
@@ -190,8 +188,6 @@ impl RpcContext {
             approval_pending: Arc::new(ApprovalPendingMap::default()),
             tui_registry: Arc::new(TuiRegistry::new(&tui_dir)),
             acp_session_store: AcpSessionStore::new(data_dir.as_path()).ok().map(Arc::new),
-            sop_engine: None,
-            sop_audit: None,
             hooks: None,
         })
     }
@@ -211,8 +207,6 @@ impl RpcContext {
             approval_pending: Arc::new(ApprovalPendingMap::default()),
             tui_registry: Arc::new(TuiRegistry::new_unsigned()),
             acp_session_store: None,
-            sop_engine: None,
-            sop_audit: None,
             hooks: None,
         })
     }
@@ -236,33 +230,6 @@ impl RpcContext {
             approval_pending: Arc::new(ApprovalPendingMap::default()),
             tui_registry: Arc::new(TuiRegistry::new_unsigned()),
             acp_session_store: None,
-            sop_engine: None,
-            sop_audit: None,
-            hooks: None,
-        })
-    }
-
-    #[cfg(test)]
-    pub fn minimal_with_sop_engine(
-        config: Config,
-        sessions: Arc<SessionStore>,
-        sop_engine: Arc<std::sync::Mutex<crate::sop::SopEngine>>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            config: Arc::new(RwLock::new(config)),
-            config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            sessions,
-            session_backend: None,
-            memory: None,
-            cost_tracker: None,
-            event_tx: None,
-            reload_tx: None,
-            gateway_shutdown_tx: None,
-            approval_pending: Arc::new(ApprovalPendingMap::default()),
-            tui_registry: Arc::new(TuiRegistry::new_unsigned()),
-            acp_session_store: None,
-            sop_engine: Some(sop_engine),
-            sop_audit: None,
             hooks: None,
         })
     }
@@ -286,8 +253,6 @@ impl RpcContext {
             approval_pending: Arc::new(ApprovalPendingMap::default()),
             tui_registry: Arc::new(TuiRegistry::new_unsigned()),
             acp_session_store: None,
-            sop_engine: None,
-            sop_audit: None,
             hooks: None,
         })
     }
@@ -311,8 +276,6 @@ impl RpcContext {
             approval_pending: Arc::new(ApprovalPendingMap::default()),
             tui_registry: Arc::new(TuiRegistry::new_unsigned()),
             acp_session_store: None,
-            sop_engine: None,
-            sop_audit: None,
             hooks: None,
         })
     }
@@ -337,8 +300,6 @@ impl RpcContext {
             approval_pending: Arc::new(ApprovalPendingMap::default()),
             tui_registry: Arc::new(TuiRegistry::new_unsigned()),
             acp_session_store,
-            sop_engine: None,
-            sop_audit: None,
             hooks: None,
         })
     }
@@ -363,8 +324,6 @@ impl RpcContext {
             approval_pending: Arc::new(ApprovalPendingMap::default()),
             tui_registry: Arc::new(TuiRegistry::new_unsigned()),
             acp_session_store: None,
-            sop_engine: None,
-            sop_audit: None,
             hooks: None,
         })
     }

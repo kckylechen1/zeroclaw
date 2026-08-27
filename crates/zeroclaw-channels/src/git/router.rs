@@ -101,7 +101,7 @@ mod tests {
     use super::*;
 
     fn route(message: bool) -> GitEventRoute {
-        GitEventRoute { message }
+        GitEventRoute { message, sop: None }
     }
 
     #[test]

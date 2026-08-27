@@ -100,9 +100,7 @@ pub const V3_CHANNEL_TYPES: &[&str] = &[
     "voice_call",
     "voice_wake",
     "voice_duplex",
-    "mqtt",
     "amqp",
-    "filesystem",
 ];
 
 impl V2Config {
@@ -995,6 +993,23 @@ fn alias_wrap_channels(channels_value: toml::Value, peer_groups: &mut toml::Tabl
     fold_discord_history(&mut channels_table);
 
     let stashed_feishu_v2 = strip_feishu_block(&mut channels_table);
+
+    // Retired SOP run-side channels (#197 wall 5): MQTT/filesystem were
+    // SOP-trigger-only fan-in with no remaining runtime. Drop their tables
+    // during migration (loudly) instead of porting them into a config that
+    // would then fail to parse.
+    for retired in ["mqtt", "filesystem"] {
+        if channels_table.remove(retired).is_some() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Skip),
+                &format!(
+                    "[channels.{retired}] dropped during migration: SOP-trigger-only channel \
+                     retired (#197 wall 5); SOP runs are Tachi-side ProcedureRuns (#243)"
+                )
+            );
+        }
+    }
 
     // Per-channel-type: singular→plural fold, peer-auth lift into
     // [peer_groups.<type>_default], then alias-wrap as <type>.default.

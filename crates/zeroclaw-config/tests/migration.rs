@@ -1836,33 +1836,6 @@ enabled = false
 }
 
 #[test]
-fn v2_channels_mqtt_block_alias_wraps() {
-    // V3 preserves disabled channel blocks rather than dropping them, so
-    // the test config has to satisfy MqttConfig's required `broker_url` /
-    // `client_id` fields — a parked channel still has to deserialize.
-    let raw = r#"
-default_provider = "openai"
-default_model = "gpt-4o-mini"
-
-[channels_config.mqtt]
-enabled = false
-broker_url = "mqtt://localhost:1883"
-client_id = "parked-test-client"
-"#;
-    let cfg = migrate_to_current(raw).expect("mqtt flat V2 block must alias-wrap");
-    assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
-    let mqtt = cfg
-        .channels
-        .mqtt
-        .get("default")
-        .expect("parked mqtt block survives V2→V3 migration");
-    assert!(
-        !mqtt.enabled,
-        "operator's enabled = false ports through verbatim"
-    );
-}
-
-#[test]
 fn v2_tunnel_provider_renamed_to_tunnel_provider() {
     // V2 grammar wrote `[tunnel] provider = "cloudflare"`. V3 qualifies the
     // field name as `tunnel_provider` (it's not a model provider). Without

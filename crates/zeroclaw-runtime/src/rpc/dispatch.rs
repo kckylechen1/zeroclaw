@@ -20,8 +20,7 @@ use zeroclaw_config::schema::Config;
 use zeroclaw_api::jsonrpc::error_codes::*;
 use zeroclaw_api::jsonrpc::{
     JSONRPC_VERSION, JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
-    RpcOutbound, SopDecideRequest, SopRunOverlayRequest, SopRunRequest, SopRunResponse,
-    SopRunsRequest, SopSaveRequest, SopSelectRequest,
+    RpcOutbound, SopSaveRequest, SopSelectRequest,
 };
 #[cfg(test)]
 use zeroclaw_api::model_provider::ChatMessage;
@@ -173,14 +172,10 @@ pub enum Method {
     SopsList,
     SopsGet,
     SopsGraph,
-    SopsRun,
-    SopsRuns,
-    SopsRunOverlay,
     SopsValidate,
     SopsSave,
     SopsCreate,
     SopsDelete,
-    SopsDecide,
     SopsWireDraft,
     SopsGraphDraft,
     SopsTriggerSources,
@@ -282,14 +277,10 @@ impl Method {
         (Method::SopsList, "sops/list"),
         (Method::SopsGet, "sops/get"),
         (Method::SopsGraph, "sops/graph"),
-        (Method::SopsRun, "sops/run"),
-        (Method::SopsRuns, "sops/runs"),
-        (Method::SopsRunOverlay, "sops/run-overlay"),
         (Method::SopsValidate, "sops/validate"),
         (Method::SopsSave, "sops/save"),
         (Method::SopsCreate, "sops/create"),
         (Method::SopsDelete, "sops/delete"),
-        (Method::SopsDecide, "sops/decide"),
         (Method::SopsWireDraft, "sops/wire-draft"),
         (Method::SopsGraphDraft, "sops/graph-draft"),
         (Method::SopsTriggerSources, "sops/trigger-sources"),
@@ -727,14 +718,10 @@ impl RpcDispatcher {
             Method::SopsList => self.handle_sops_list(),
             Method::SopsGet => self.handle_sops_get(&req.params),
             Method::SopsGraph => self.handle_sops_graph(&req.params),
-            Method::SopsRun => self.handle_sops_run(&req.params).await,
-            Method::SopsRuns => self.handle_sops_runs(&req.params),
-            Method::SopsRunOverlay => self.handle_sops_run_overlay(&req.params),
             Method::SopsValidate => self.handle_sops_validate(&req.params),
             Method::SopsSave => self.handle_sops_save(&req.params),
             Method::SopsCreate => self.handle_sops_create(&req.params),
             Method::SopsDelete => self.handle_sops_delete(&req.params),
-            Method::SopsDecide => self.handle_sops_decide(&req.params).await,
             Method::SopsWireDraft => self.handle_sops_wire_draft(&req.params),
             Method::SopsGraphDraft => self.handle_sops_graph_draft(&req.params),
             Method::SopsTriggerSources => self.handle_sops_trigger_sources(),
@@ -1511,237 +1498,6 @@ impl RpcDispatcher {
             &sop,
             &self.sop_tool_specs(),
         ))
-    }
-
-    async fn handle_sops_run(&self, params: &Value) -> RpcResult {
-        let req: SopRunRequest = parse_params(params)?;
-
-        if let Some(payload) = req.payload.as_deref()
-            && !payload.trim().is_empty()
-            && serde_json::from_str::<Value>(payload).is_err()
-        {
-            return Err(rpc_err(INVALID_PARAMS, "payload is not valid JSON"));
-        }
-
-        let engine = self
-            .ctx
-            .sop_engine
-            .as_ref()
-            .ok_or_else(|| rpc_err(INTERNAL_ERROR, "SOP subsystem not enabled"))?;
-        let audit = self
-            .ctx
-            .sop_audit
-            .as_ref()
-            .ok_or_else(|| rpc_err(INTERNAL_ERROR, "SOP subsystem not enabled"))?;
-
-        let payload = req
-            .payload
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(str::to_string);
-
-        let event = crate::sop::SopEvent {
-            source: crate::sop::SopTriggerSource::Manual,
-            topic: None,
-            payload,
-            timestamp: crate::sop::engine::now_iso8601(),
-        };
-
-        let results =
-            crate::sop::dispatch::dispatch_sop_event_to(engine, audit, event, &req.name).await;
-        crate::sop::dispatch::process_headless_results(&results);
-
-        for result in &results {
-            match result {
-                crate::sop::dispatch::DispatchResult::Started { run_id, .. } => {
-                    return to_result(SopRunResponse {
-                        run_id: run_id.clone(),
-                    });
-                }
-                crate::sop::dispatch::DispatchResult::Skipped { reason, .. }
-                | crate::sop::dispatch::DispatchResult::BlockedUnsafe { reason, .. } => {
-                    return Err(rpc_err(INVALID_PARAMS, reason.clone()));
-                }
-                crate::sop::dispatch::DispatchResult::Deferred { reason, .. } => {
-                    return Err(rpc_err(INVALID_PARAMS, reason.clone()));
-                }
-                crate::sop::dispatch::DispatchResult::Coalesced {
-                    existing_run_id, ..
-                } => {
-                    return to_result(SopRunResponse {
-                        run_id: existing_run_id.clone(),
-                    });
-                }
-                crate::sop::dispatch::DispatchResult::NoMatch => {}
-            }
-        }
-
-        Err(rpc_err(
-            INVALID_PARAMS,
-            format!("SOP '{}' has no matching manual trigger", req.name),
-        ))
-    }
-
-    fn handle_sops_runs(&self, params: &Value) -> RpcResult {
-        let req: SopRunsRequest = parse_params(params)?;
-        let engine = self
-            .ctx
-            .sop_engine
-            .as_ref()
-            .ok_or_else(|| rpc_err(INTERNAL_ERROR, "SOP subsystem not enabled"))?;
-        let runs = crate::sop::run_summaries_for(engine, req.sop.as_deref())
-            .map_err(|e| rpc_err(INTERNAL_ERROR, e.to_string()))?;
-        to_result(serde_json::json!({ "runs": runs }))
-    }
-
-    fn handle_sops_run_overlay(&self, params: &Value) -> RpcResult {
-        let req: SopRunOverlayRequest = parse_params(params)?;
-        let (dir, mode) = self.sops_dir_and_mode();
-        let sop = crate::sop::load_sop_by_name(&dir, &req.name, mode)
-            .map_err(|e| rpc_err(INVALID_PARAMS, format!("SOP '{}': {e}", req.name)))?;
-        let engine = self
-            .ctx
-            .sop_engine
-            .as_ref()
-            .ok_or_else(|| rpc_err(INTERNAL_ERROR, "SOP subsystem not enabled"))?;
-        let overlay = crate::sop::run_overlay_for(&sop, engine, &req.run_id).map_err(|e| {
-            let msg = e.to_string();
-            let code = if msg.contains("not found") {
-                INVALID_PARAMS
-            } else {
-                INTERNAL_ERROR
-            };
-            rpc_err(code, msg)
-        })?;
-        to_result(overlay)
-    }
-
-    async fn handle_sops_decide(&self, params: &Value) -> RpcResult {
-        let req: SopDecideRequest = parse_params(params)?;
-        let decision: crate::sop::approval::ApprovalDecision =
-            serde_json::from_value(req.decision.clone()).map_err(|e| {
-                rpc_err(
-                    INVALID_PARAMS,
-                    format!("decision is not a valid approval decision: {e}"),
-                )
-            })?;
-
-        let (dir, mode) = self.sops_dir_and_mode();
-        let sop = crate::sop::load_sop_by_name(&dir, &req.name, mode)
-            .map_err(|e| rpc_err(INVALID_PARAMS, format!("SOP '{}': {e}", req.name)))?;
-        let engine = self
-            .ctx
-            .sop_engine
-            .as_ref()
-            .ok_or_else(|| rpc_err(INTERNAL_ERROR, "SOP subsystem not enabled"))?
-            .clone();
-
-        let agent_alias = sop.agent.clone().unwrap_or_default();
-        let span = ::zeroclaw_log::info_span!(
-            target: "zeroclaw_log_internal_scope",
-            "zeroclaw_scope",
-            session_key = %req.run_id,
-            agent_alias = %agent_alias,
-            channel = "rpc",
-        );
-        let _guard = span.enter();
-
-        let mut resolved_outcome = None;
-        {
-            let mut guard = engine
-                .lock()
-                .map_err(|_| rpc_err(INTERNAL_ERROR, "SOP engine lock poisoned"))?;
-            let run_sop_name = guard
-                .get_run(&req.run_id)
-                .map(|run| run.sop_name.clone())
-                .ok_or_else(|| {
-                    rpc_err(INVALID_PARAMS, format!("run '{}' not found", req.run_id))
-                })?;
-            if run_sop_name != req.name {
-                return Err(rpc_err(
-                    INVALID_PARAMS,
-                    format!(
-                        "run '{}' belongs to SOP '{}', not '{}'",
-                        req.run_id, run_sop_name, req.name
-                    ),
-                ));
-            }
-            use crate::sop::approval::{BrokerOutcome, ResolveOutcome};
-            let principal = crate::sop::approval::ApprovalPrincipal::cli(self.tui_id.clone());
-            match guard
-                .resolve_via_broker(&req.run_id, decision, principal)
-                .map_err(|e| rpc_err(INTERNAL_ERROR, e.to_string()))?
-            {
-                outcome @ BrokerOutcome::Resolved(ResolveOutcome::Resumed(_)) => {
-                    resolved_outcome = Some(outcome);
-                }
-                BrokerOutcome::Resolved(
-                    ResolveOutcome::Denied
-                    | ResolveOutcome::AlreadyResolved
-                    | ResolveOutcome::Revised,
-                )
-                | BrokerOutcome::PendingQuorum { .. } => {}
-                BrokerOutcome::Resolved(
-                    ResolveOutcome::NotWaiting | ResolveOutcome::DeferredAtCapacity,
-                )
-                | BrokerOutcome::NotWaiting => {
-                    return Err(rpc_err(
-                        INVALID_PARAMS,
-                        crate::i18n::get_required_cli_string_with_args(
-                            "sop-rpc-decision-invalid-state",
-                            &[("run_id", req.run_id.as_str())],
-                        ),
-                    ));
-                }
-                BrokerOutcome::Resolved(ResolveOutcome::RejectedSelfApproval)
-                | BrokerOutcome::NotAuthorized { .. } => {
-                    return Err(rpc_err(
-                        AUTH_REQUIRED,
-                        crate::i18n::get_required_cli_string("sop-rpc-decision-unauthorized"),
-                    ));
-                }
-                BrokerOutcome::PolicyMissing { name } => {
-                    return Err(rpc_err(
-                        INTERNAL_ERROR,
-                        crate::i18n::get_required_cli_string_with_args(
-                            "sop-rpc-policy-missing",
-                            &[("name", name.as_str())],
-                        ),
-                    ));
-                }
-                BrokerOutcome::PolicyUnavailable { reason } => {
-                    return Err(rpc_err(
-                        INTERNAL_ERROR,
-                        crate::i18n::get_required_cli_string_with_args(
-                            "sop-rpc-policy-unavailable",
-                            &[("reason", reason.as_str())],
-                        ),
-                    ));
-                }
-            }
-        }
-
-        if let Some(outcome) = resolved_outcome {
-            let config = self.ctx.config.read();
-            crate::sop::drive_resumed_broker_action(
-                &config,
-                Arc::clone(&engine),
-                self.ctx.sop_audit.clone(),
-                &outcome,
-            );
-        }
-
-        let overlay = crate::sop::run_overlay_for(&sop, &engine, &req.run_id).map_err(|e| {
-            let msg = e.to_string();
-            let code = if msg.contains("not found") {
-                INVALID_PARAMS
-            } else {
-                INTERNAL_ERROR
-            };
-            rpc_err(code, msg)
-        })?;
-        to_result(overlay)
     }
 
     fn handle_sops_validate(&self, params: &Value) -> RpcResult {
