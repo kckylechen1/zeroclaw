@@ -217,6 +217,86 @@ impl InMemoryTachiTaskBridge {
         Self::default()
     }
 
+    /// The base admission path over an ALREADY-HELD state guard —
+    /// `submit_procedure_run` runs retention, admission, and procedure
+    /// binding under ONE critical section so no concurrent same-tuple
+    /// submission can interleave between acknowledgment and binding.
+    fn submit_locked(
+        state: &mut HostState,
+        intent: &TaskIntentV1,
+        request_id: &RequestId,
+    ) -> Result<SubmitReceipt, SubmitTransportError> {
+        if intent.schema != SCHEMA_TAG {
+            return Ok(SubmitReceipt::Rejected {
+                reason: "schema_tag_mismatch".to_string(),
+            });
+        }
+        // Host-side admission (authoritative; the compose-time scan is
+        // pre-flight only). Same law, same categories.
+        if let Err(rejection) = scan_intent(intent) {
+            return Ok(SubmitReceipt::Rejected {
+                reason: rejection.to_string(),
+            });
+        }
+        let digest = intent.canonical_digest();
+        let tuple = (intent.requester.to_string(), request_id.to_string());
+        if let Some((bound_digest, task_ref)) = state.bindings.get(&tuple) {
+            if *bound_digest != digest {
+                return Ok(SubmitReceipt::RequestIdConflict {
+                    bound_digest: bound_digest.clone(),
+                    submitted_digest: digest,
+                });
+            }
+            // TB-7 rule 2: same tuple + same digest ⇒ the SAME TaskRef,
+            // never a second worker.
+            let replayed = state.has_task_submitted(task_ref);
+            return Ok(SubmitReceipt::Admitted {
+                task_ref: task_ref.clone(),
+                replayed,
+            });
+        }
+        // TB-6: the host mints the TaskRef, after admission.
+        let task_ref = state.mint_task_ref();
+        state
+            .bindings
+            .insert(tuple, (digest.clone(), task_ref.clone()));
+        state
+            .owners
+            .insert(task_ref.as_wire().to_string(), intent.requester.to_string());
+        state.expected.insert(
+            task_ref.as_wire().to_string(),
+            intent
+                .expected_artifacts
+                .iter()
+                .map(|a| {
+                    (
+                        serde_json::to_value(a.artifact_class)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_string))
+                            .unwrap_or_default(),
+                        a.required,
+                    )
+                })
+                .collect(),
+        );
+        state.append(
+            &task_ref,
+            InMemoryFact {
+                event_id: format!("submitted-{}", task_ref.as_wire()),
+                kind: "task_submitted".to_string(),
+                payload_digest: fact_digest(&serde_json::json!({
+                    "kind": "task_submitted",
+                    "intent_digest": digest,
+                })),
+                detail: FactDetail::TaskSubmitted { digest },
+            },
+        );
+        Ok(SubmitReceipt::Admitted {
+            task_ref,
+            replayed: false,
+        })
+    }
+
     /// How many distinct TB-7 tuples are bound (test observability for
     /// "zero new execution" / "never invents a new request id").
     pub fn binding_count(&self) -> usize {
@@ -555,75 +635,7 @@ impl TachiTaskBridge for InMemoryTachiTaskBridge {
         request_id: &RequestId,
     ) -> Result<SubmitReceipt, SubmitTransportError> {
         let mut state = self.state.lock();
-        if intent.schema != SCHEMA_TAG {
-            return Ok(SubmitReceipt::Rejected {
-                reason: "schema_tag_mismatch".to_string(),
-            });
-        }
-        // Host-side admission (authoritative; the compose-time scan is
-        // pre-flight only). Same law, same categories.
-        if let Err(rejection) = scan_intent(intent) {
-            return Ok(SubmitReceipt::Rejected {
-                reason: rejection.to_string(),
-            });
-        }
-        let digest = intent.canonical_digest();
-        let tuple = (intent.requester.to_string(), request_id.to_string());
-        if let Some((bound_digest, task_ref)) = state.bindings.get(&tuple) {
-            if *bound_digest != digest {
-                return Ok(SubmitReceipt::RequestIdConflict {
-                    bound_digest: bound_digest.clone(),
-                    submitted_digest: digest,
-                });
-            }
-            // TB-7 rule 2: same tuple + same digest ⇒ the SAME TaskRef,
-            // never a second worker.
-            let replayed = state.has_task_submitted(task_ref);
-            return Ok(SubmitReceipt::Admitted {
-                task_ref: task_ref.clone(),
-                replayed,
-            });
-        }
-        // TB-6: the host mints the TaskRef, after admission.
-        let task_ref = state.mint_task_ref();
-        state
-            .bindings
-            .insert(tuple, (digest.clone(), task_ref.clone()));
-        state
-            .owners
-            .insert(task_ref.as_wire().to_string(), intent.requester.to_string());
-        state.expected.insert(
-            task_ref.as_wire().to_string(),
-            intent
-                .expected_artifacts
-                .iter()
-                .map(|a| {
-                    (
-                        serde_json::to_value(a.artifact_class)
-                            .ok()
-                            .and_then(|v| v.as_str().map(str::to_string))
-                            .unwrap_or_default(),
-                        a.required,
-                    )
-                })
-                .collect(),
-        );
-        state.append(
-            &task_ref,
-            InMemoryFact {
-                event_id: format!("submitted-{}", task_ref.as_wire()),
-                kind: "task_submitted".to_string(),
-                payload_digest: fact_digest(&serde_json::json!({
-                    "kind": "task_submitted",
-                    "intent_digest": digest,
-                })),
-                detail: FactDetail::TaskSubmitted { digest },
-            },
-        );
-        Ok(SubmitReceipt::Admitted {
-            task_ref,
-            replayed: false,
-        })
+        Self::submit_locked(&mut state, intent, request_id)
     }
 
     async fn get(&self, task_ref: &TaskRef) -> Result<TaskSnapshotView, BridgeQueryError> {
@@ -1239,51 +1251,57 @@ impl super::procedure::ProcedureSubmitPort for InMemoryTachiTaskBridge {
                 reason: "snapshot_invariant_violation".to_string(),
             });
         }
-        {
+        // Carrier law, in the ratified order — retention, admission,
+        // AND procedure binding run under ONE critical section: the
+        // bytes are retained and verified BEFORE any acknowledgment,
+        // and neither a concurrent same-tuple base submission (which
+        // would replay into a retroactive binding) nor a concurrent
+        // same-tuple procedure replay (which would momentarily observe
+        // an unbound task and misread it as non-procedure) can
+        // interleave. In this double: process-lifetime CAS — the
+        // durable production story is the real tachi host's store.
+        let receipt = {
             let mut state = self.state.lock();
             state
                 .procedure_snapshots
                 .insert(digest.clone(), snapshot.clone());
-        }
-        // Retained BEFORE the submit; the ack below can only arrive
-        // after the bytes are held Tachi-side (in this double:
-        // process-lifetime CAS — the durable production story is the
-        // real tachi host's store).
-        let receipt = self.submit(intent, request_id).await;
-        if let Ok(SubmitReceipt::Admitted { task_ref, replayed }) = &receipt {
-            let mut state = self.state.lock();
-            let existing = state.procedure_runs.get(task_ref.as_wire()).cloned();
-            match existing {
-                // A procedure run re-submitted under its own tuple: the
-                // binding must be the SAME snapshot (a different ref on
-                // the same task is a binding conflict, never a rebind).
-                Some(bound) => {
-                    if bound != reference {
-                        return Ok(SubmitReceipt::Rejected {
-                            reason: "procedure_binding_conflict".to_string(),
-                        });
+            let receipt = Self::submit_locked(&mut state, intent, request_id)?;
+            if let SubmitReceipt::Admitted { task_ref, replayed } = &receipt {
+                let existing = state.procedure_runs.get(task_ref.as_wire()).cloned();
+                match existing {
+                    // A procedure run re-submitted under its own tuple:
+                    // the binding must be the SAME snapshot (a different
+                    // ref on the same task is a binding conflict, never
+                    // a rebind).
+                    Some(bound) => {
+                        if bound != reference {
+                            return Ok(SubmitReceipt::Rejected {
+                                reason: "procedure_binding_conflict".to_string(),
+                            });
+                        }
                     }
-                }
-                // First procedure binding for this task. If the base
-                // submit REPLAYED (the task already existed), the task
-                // was originally admitted through the BASE port — its
-                // acknowledgment predates snapshot retention and
-                // procedure binding, and it must not be retroactively
-                // converted (verify-before-ack applies to every
-                // procedure-run admission).
-                None => {
-                    if *replayed {
-                        return Ok(SubmitReceipt::Rejected {
-                            reason: "replay_of_non_procedure_task".to_string(),
-                        });
+                    // First procedure binding for this task. If the
+                    // admission REPLAYED (the tuple was already bound),
+                    // the task was originally admitted through the BASE
+                    // port — its acknowledgment predates snapshot
+                    // retention and procedure binding, and it must not
+                    // be retroactively converted (verify-before-ack
+                    // applies to every procedure-run admission).
+                    None => {
+                        if *replayed {
+                            return Ok(SubmitReceipt::Rejected {
+                                reason: "replay_of_non_procedure_task".to_string(),
+                            });
+                        }
+                        state
+                            .procedure_runs
+                            .insert(task_ref.as_wire().to_string(), reference.clone());
                     }
-                    state
-                        .procedure_runs
-                        .insert(task_ref.as_wire().to_string(), reference.clone());
                 }
             }
-        }
-        receipt
+            receipt
+        };
+        Ok(receipt)
     }
 
     async fn retained_snapshot(

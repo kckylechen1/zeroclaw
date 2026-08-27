@@ -1571,3 +1571,33 @@ async fn replaying_a_base_admitted_task_through_the_procedure_port_is_refused() 
     let drive = double.drive_procedure_steps(&task_ref, &reference);
     assert!(drive.is_err(), "base task is not a procedure run");
 }
+
+#[tokio::test]
+async fn concurrent_same_tuple_procedure_submits_never_misclassify() {
+    // Codex round-9: admission and procedure binding must be ONE
+    // critical section — a concurrent same-tuple replay that observes
+    // an admitted-but-unbound task would be falsely refused as
+    // replay_of_non_procedure_task (or worse, base-replay into a
+    // retroactive binding). Both racers must admit to the SAME task
+    // with the binding intact.
+    let dir = fixture_dir();
+    let snapshot =
+        mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    let reference = snapshot.snapshot_ref();
+    let (client, double) = client_and_double();
+    let request_id = derive_request_id("stagex-update", &snapshot.procedure_digest, "race-1");
+
+    let policy = full_policy();
+    let who = requester();
+    let a = client.submit_run(&snapshot, &policy, &who, &request_id);
+    let b = client.submit_run(&snapshot, &policy, &who, &request_id);
+    let (a, b) = tokio::join!(a, b);
+    let (a, b) = (a.expect("first admit"), b.expect("concurrent replay admit"));
+    assert_eq!(a.task_ref, b.task_ref);
+    // The binding exists and drives under the recorded ref.
+    let (completed, gate) = double
+        .drive_procedure_steps(&a.task_ref, &reference)
+        .expect("procedure-bound");
+    assert_eq!(completed, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(gate, None);
+}
