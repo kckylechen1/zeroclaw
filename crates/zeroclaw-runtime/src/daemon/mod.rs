@@ -2088,9 +2088,6 @@ fn has_supervised_channels(config: &Config) -> bool {
     config.channels.has_any_enabled()
 }
 
-// run_mqtt_sop_listener has been moved to zeroclaw-channels::orchestrator::mqtt.
-// The daemon now receives it as a starter via DaemonRegistry::register_mqtt.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2620,27 +2617,6 @@ mod tests {
         assert_eq!(
             target,
             Some(("matrix".to_string(), "!room:example.org".to_string()))
-        );
-    }
-
-    #[test]
-    fn resolve_delivery_rejects_configured_but_undeliverable_channel() {
-        // review: a configured input-only channel (mqtt is a fan-in
-        // listener whose Channel::send is a no-op) must not pass heartbeat
-        // validation just because its table exists. Otherwise the validator
-        // claims a target the delivery surface silently drops.
-        let mut config = Config::default();
-        config.heartbeat.target = Some("mqtt".into());
-        config.heartbeat.to = Some("ops/heartbeat".into());
-        config
-            .channels
-            .mqtt
-            .insert("default".to_string(), Default::default());
-
-        let err = resolve_heartbeat_delivery(&config).unwrap_err();
-        assert!(
-            err.to_string().contains("input-only channel"),
-            "expected input-only rejection, got: {err}"
         );
     }
 

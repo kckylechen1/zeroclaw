@@ -13411,12 +13411,11 @@ where
 fn reject_retired_sop_channel<'de, D, V>(deserializer: D) -> Result<HashMap<String, V>, D::Error>
 where
     D: serde::Deserializer<'de>,
-    V: serde::Deserialize<'de>,
+    V: Default,
 {
-    let map = HashMap::<String, serde::de::IgnoredAny>::deserialize(deserializer)?;
-    if map.is_empty() {
-        return Ok(HashMap::new());
-    }
+    // Any presence of the section — even an empty header — is rejected: the
+    // section is retired, presence itself is the misconfiguration.
+    let _map = HashMap::<String, serde::de::IgnoredAny>::deserialize(deserializer)?;
     Err(serde::de::Error::custom(
         "retired SOP run-side channel: MQTT/filesystem listeners were SOP-trigger-only \
          fan-in; SOP runs are Tachi-side ProcedureRuns since #243 (#197 wall 5) — remove \
@@ -13628,22 +13627,10 @@ impl ChannelsConfig {
                 configured: !self.voice_wake.is_empty(),
             },
             ChannelInfo {
-                kind: "mqtt",
-                name: "MQTT",
-                desc: "MQTT SOP Listener",
-                configured: !self.mqtt.is_empty(),
-            },
-            ChannelInfo {
                 kind: "amqp",
                 name: "AMQP",
                 desc: "AMQP topic consumer",
                 configured: !self.amqp.is_empty(),
-            },
-            ChannelInfo {
-                kind: "filesystem",
-                name: "Filesystem",
-                desc: "filesystem change SOP listener",
-                configured: !self.filesystem.is_empty(),
             },
             ChannelInfo {
                 kind: "webhook",
@@ -13692,9 +13679,7 @@ impl ChannelsConfig {
             || self.voice_call.values().any(|c| c.enabled)
             || self.voice_wake.values().any(|c| c.enabled)
             || self.voice_duplex.values().any(|c| c.enabled)
-            || self.mqtt.values().any(|c| c.enabled)
             || self.amqp.values().any(|c| c.enabled)
-            || self.filesystem.values().any(|c| c.enabled)
             || self.git.values().any(|c| c.enabled)
     }
 
@@ -13705,7 +13690,7 @@ impl ChannelsConfig {
     /// amqp are fan-in listeners; voice_wake is input-only), so a name-addressed
     /// outbound surface such as `heartbeat.target` can refuse them at validation
     /// instead of accepting a target the delivery layer silently drops.
-    pub fn channel_presence(&self) -> [(&'static str, bool, bool); 36] {
+    pub fn channel_presence(&self) -> [(&'static str, bool, bool); 34] {
         [
             ("telegram", !self.telegram.is_empty(), true),
             ("discord", !self.discord.is_empty(), true),
@@ -13740,9 +13725,7 @@ impl ChannelsConfig {
             ("voice_call", !self.voice_call.is_empty(), true),
             ("voice_wake", !self.voice_wake.is_empty(), false),
             ("voice_duplex", !self.voice_duplex.is_empty(), false),
-            ("mqtt", !self.mqtt.is_empty(), false),
             ("amqp", !self.amqp.is_empty(), false),
-            ("filesystem", !self.filesystem.is_empty(), false),
         ]
     }
 
@@ -23477,9 +23460,13 @@ max_height = 8
         let err = mqtt.unwrap_err().to_string();
         assert!(err.contains("retired SOP run-side channel"), "{err}");
 
-        // An explicitly empty section still parses (nothing to retire).
-        let empty: Result<ChannelsConfig, _> = ::toml::from_str("[filesystem]\n[mqtt]\n");
-        assert!(empty.is_ok());
+        // Even an explicitly EMPTY retired section header fails: the section
+        // is retired, presence itself is the misconfiguration.
+        for header in ["[filesystem]", "[mqtt]"] {
+            let empty: Result<ChannelsConfig, _> = ::toml::from_str(header);
+            let err = empty.unwrap_err().to_string();
+            assert!(err.contains("retired SOP run-side channel"), "{err}");
+        }
     }
 
     #[test]
@@ -38573,7 +38560,7 @@ model_provider = \"ollama.default\"
         undeliverable.sort_unstable();
         assert_eq!(
             undeliverable,
-            ["amqp", "filesystem", "mqtt", "voice_duplex", "voice_wake"],
+            ["amqp", "voice_duplex", "voice_wake"],
             "only input-only transports may be non-deliverable; update channel_presence and is_channel_deliverable together"
         );
     }

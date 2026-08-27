@@ -90,8 +90,6 @@ pub struct AcpServer {
     /// that `/ws/canvas/:id` WebSocket subscribers read from.  `None` in
     /// standalone `zeroclaw acp` mode where no gateway is running.
     canvas_store: Option<CanvasStore>,
-    /// Shared SOP engine from the daemon. `None` in standalone mode — agents
-    /// build their own engine from config.
     /// Connection-scoped default agent alias (`?agent=` on the gateway ACP
     /// endpoint). Slots into the `session/new` alias precedence chain between
     /// an explicit `agentAlias` and `[acp].default_agent`. Not a config

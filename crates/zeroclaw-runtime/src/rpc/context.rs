@@ -160,9 +160,6 @@ pub struct RpcContext {
     /// callers must treat persistence as best-effort.
     pub acp_session_store: Option<Arc<AcpSessionStore>>,
 
-    /// Shared SOP engine from the daemon (for RPC/TUI agent sessions).
-    /// `None` when standalone — sessions build their own.
-
     /// Lifecycle hook runner. `None` when hooks are disabled in config.
     pub hooks: Option<Arc<crate::hooks::HookRunner>>,
 }
