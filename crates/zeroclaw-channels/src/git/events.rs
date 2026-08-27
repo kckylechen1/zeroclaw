@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use zeroclaw_api::channel::{CHANNEL_SOP_SUBJECT_PREFIX, ChannelMessage};
+use zeroclaw_api::channel::ChannelMessage;
 
 use super::types::{
     EVT_ISSUE_COMMENT_CREATED, EVT_ISSUES_OPENED, EVT_PR_REVIEW_COMMENT_CREATED,
@@ -358,51 +358,6 @@ pub fn event_to_message(
     }
 }
 
-/// Map a routed git event into a channel-carried SOP event. The message
-/// envelope exists only to reuse the channel listener bus; the orchestrator
-/// consumes it before debounce, `/stop`, or LLM processing.
-pub fn event_to_sop_message(
-    event: &GitEvent,
-    filter: &EventFilter<'_>,
-    channel_key: &str,
-    alias: &str,
-    provider: &str,
-    sop: &str,
-) -> Option<ChannelMessage> {
-    // Authorless events carry no identity to gate on; keep that behavior
-    // aligned with conversational messages.
-    let author = event.author()?;
-    if !filter.admit_author(author) {
-        return None;
-    }
-
-    let id = event.dedup_id();
-    let timestamp = event.created_at().timestamp();
-    let target = event_target(event);
-    let topic = sop_topic(channel_key, alias, event.event_type());
-    let payload = event_payload(event, channel_key, alias, provider, sop, &topic);
-    let ctx = MessageCtx { channel_key, alias };
-    let mut msg = message(
-        id,
-        author.login.clone(),
-        &target,
-        payload.to_string(),
-        timestamp,
-        Some(format!("{CHANNEL_SOP_SUBJECT_PREFIX}{topic}")),
-        &ctx,
-    );
-    // Internal marker the orchestrator keys SOP routing on. Only this git
-    // producer sets it, so an inbound user/email message cannot forge a SOP
-    // event by crafting its `subject`. The subject above stays human-readable
-    // for logs and reply threading but is no longer the routing trigger.
-    msg.internal_sop_event = Some(topic);
-    Some(msg)
-}
-
-fn sop_topic(channel_key: &str, alias: &str, event_type: &str) -> String {
-    zeroclaw_api::channel::ChannelSopTopic::build(channel_key, alias, event_type)
-}
-
 fn event_target(event: &GitEvent) -> String {
     match event {
         GitEvent::IssueCommentCreated(p) | GitEvent::PullRequestReviewCommentCreated(p) => {
@@ -428,94 +383,6 @@ fn actor_payload(actor: &EventActor) -> serde_json::Value {
     })
 }
 
-fn common_payload(
-    event: &GitEvent,
-    channel_key: &str,
-    alias: &str,
-    provider: &str,
-    sop: &str,
-    topic: &str,
-) -> serde_json::Value {
-    json!({
-        "source": "channel",
-        "channel": channel_key,
-        "channel_alias": alias,
-        "provider": provider,
-        "sop": sop,
-        "topic": topic,
-        "event_type": event.event_type(),
-        "dedup_id": event.dedup_id(),
-        "created_at": event.created_at().to_rfc3339(),
-        "target": event_target(event),
-    })
-}
-
-fn event_payload(
-    event: &GitEvent,
-    channel_key: &str,
-    alias: &str,
-    provider: &str,
-    sop: &str,
-    topic: &str,
-) -> serde_json::Value {
-    let mut payload = common_payload(event, channel_key, alias, provider, sop, topic);
-    let obj = payload
-        .as_object_mut()
-        .expect("common_payload produces a JSON object");
-    match event {
-        GitEvent::IssueCommentCreated(p) | GitEvent::PullRequestReviewCommentCreated(p) => {
-            obj.insert("repo".into(), json!(p.repo.to_string()));
-            obj.insert("number".into(), json!(p.number));
-            obj.insert("comment_id".into(), json!(p.comment_id));
-            obj.insert("author".into(), actor_payload(&p.author));
-            obj.insert("body".into(), json!(p.body));
-        }
-        GitEvent::IssueOpened(p) => {
-            obj.insert("repo".into(), json!(p.repo.to_string()));
-            obj.insert("number".into(), json!(p.number));
-            obj.insert("issue_id".into(), json!(p.issue_id));
-            obj.insert("author".into(), actor_payload(&p.author));
-            obj.insert("title".into(), json!(p.title));
-            obj.insert("body".into(), json!(p.body));
-        }
-        GitEvent::PullRequestOpened(p) => {
-            obj.insert("repo".into(), json!(p.repo.to_string()));
-            obj.insert("number".into(), json!(p.number));
-            obj.insert("author".into(), actor_payload(&p.author));
-            obj.insert("title".into(), json!(p.title));
-            obj.insert("body".into(), json!(p.body));
-        }
-        GitEvent::PullRequestClosed(t) | GitEvent::PullRequestMerged(t) => {
-            obj.insert("repo".into(), json!(t.repo.to_string()));
-            obj.insert("number".into(), json!(t.number));
-            obj.insert("author".into(), actor_payload(&t.author));
-            obj.insert("title".into(), json!(t.title));
-            obj.insert("html_url".into(), json!(t.html_url));
-        }
-        GitEvent::WorkflowRunCompleted(r) | GitEvent::WorkflowRunFailed(r) => {
-            obj.insert("repo".into(), json!(r.repo.to_string()));
-            obj.insert("run_id".into(), json!(r.run_id));
-            obj.insert("attempt".into(), json!(r.attempt));
-            obj.insert("name".into(), json!(r.name));
-            obj.insert("branch".into(), json!(r.branch));
-            obj.insert("run_number".into(), json!(r.run_number));
-            obj.insert("pr_number".into(), json!(r.pr_number));
-            obj.insert("actor".into(), r.actor.as_ref().map(actor_payload).into());
-            obj.insert("html_url".into(), json!(r.html_url));
-        }
-        GitEvent::ReleasePublished(r) => {
-            obj.insert("repo".into(), json!(r.repo.to_string()));
-            obj.insert("release_id".into(), json!(r.release_id));
-            obj.insert("tag".into(), json!(r.tag));
-            obj.insert("name".into(), json!(r.name));
-            obj.insert("author".into(), actor_payload(&r.author));
-            obj.insert("body".into(), json!(r.body));
-            obj.insert("html_url".into(), json!(r.html_url));
-        }
-    }
-    payload
-}
-
 /// Per-message attribution context: the channel key and configured alias.
 struct MessageCtx<'a> {
     channel_key: &'a str,
@@ -523,7 +390,7 @@ struct MessageCtx<'a> {
 }
 
 /// Content for an opening post: the gated body on the message path; on
-/// ungated (sop-routed) paths an empty body falls back to a synthesized
+/// ungated paths an empty body falls back to a synthesized
 /// line so the event still carries the title.
 fn opening_content(
     filter: &EventFilter<'_>,
@@ -716,46 +583,6 @@ mod tests {
     }
 
     #[test]
-    fn sop_message_carries_reserved_subject_and_structured_payload() {
-        let event = GitEvent::PullRequestOpened(PullPost {
-            repo: repo(),
-            number: 12,
-            author: actor("test_user", false),
-            title: "Route through SOP".to_string(),
-            body: "Please review".to_string(),
-            created_at: at("2026-06-13T01:00:00Z"),
-        });
-
-        let msg = event_to_sop_message(
-            &event,
-            &filter(true, false),
-            "git",
-            "main",
-            "github",
-            "triage",
-        )
-        .unwrap();
-        assert_eq!(
-            msg.subject.as_deref(),
-            Some("zeroclaw:sop-event:git.main:pull_request.opened")
-        );
-        assert_eq!(msg.reply_target, "octo/repo#12");
-
-        let payload: serde_json::Value = serde_json::from_str(&msg.content).unwrap();
-        assert_eq!(payload["source"], "channel");
-        assert_eq!(payload["channel"], "git");
-        assert_eq!(payload["channel_alias"], "main");
-        assert_eq!(payload["provider"], "github");
-        assert_eq!(payload["sop"], "triage");
-        assert_eq!(payload["topic"], "git.main:pull_request.opened");
-        assert_eq!(payload["event_type"], "pull_request.opened");
-        assert_eq!(payload["repo"], "octo/repo");
-        assert_eq!(payload["number"], 12);
-        assert_eq!(payload["author"]["login"], "test_user");
-        assert_eq!(payload["title"], "Route through SOP");
-    }
-
-    #[test]
     fn pull_transition_message_shape() {
         let merged = GitEvent::PullRequestMerged(PullTransition {
             repo: repo(),
@@ -891,7 +718,7 @@ mod tests {
         });
         // Gated (message) path: nothing to say, dropped (v1 behavior).
         assert!(to_message(&event, &filter(true, false), true).is_none());
-        // Ungated (sop-degraded) path: the event still matters.
+        // Ungated path: the event still matters.
         let msg = to_message(&event, &filter(true, false), false).unwrap();
         assert_eq!(msg.content, "Pull request #12 opened: Flaky test");
     }

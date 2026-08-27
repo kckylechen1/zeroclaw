@@ -15508,25 +15508,6 @@ fn default_filesystem_max_content_bytes() -> Option<usize> {
 /// Agent-loop channels (Telegram, Discord, Slack, ...) do not carry a `dispatch`
 /// field: their fan-in is trigger-driven, opting in via a SOP `channel` trigger
 /// while the normal agent turn always runs. The mode is source-agnostic.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, zeroclaw_macros::ConfigEnum,
-)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum SopDispatch {
-    /// Drive a normal agent turn: the delivery becomes a `ChannelMessage`.
-    /// This is the default and preserves each channel's original behavior.
-    #[default]
-    AgentLoop,
-    /// Dispatch the delivery to the SOP engine as a `SopEvent` (`topic` =
-    /// source identifier, `payload` = body), matching SOPs whose trigger for
-    /// this source matches. No agent turn is started.
-    Sop,
-    /// Do both: dispatch to the SOP engine and drive an agent turn from the
-    /// same delivery.
-    SopAndAgentLoop,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "channels.amqp"]
@@ -15598,13 +15579,6 @@ pub struct AmqpConfig {
     #[tab(Behavior)]
     #[serde(default = "default_amqp_durable_ack")]
     pub durable_ack: bool,
-    /// Where consumed deliveries are routed: drive an agent turn
-    /// (`agent_loop`, default), dispatch to the SOP engine (`sop`), or both
-    /// (`sop_and_agent_loop`). The `sop` and `sop_and_agent_loop` modes match
-    /// the delivery against SOP `amqp` triggers by routing key.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub dispatch: SopDispatch,
     /// Tools excluded from this channel's tool spec. When set, these tools
     /// are not exposed to the model when responding via this channel.
     #[tab(Behavior)]
@@ -23505,11 +23479,6 @@ max_height = 8
             ..base
         };
         assert!(both.validate().is_ok());
-    }
-
-    #[test]
-    async fn amqp_dispatch_defaults_to_agent_loop() {
-        assert_eq!(AmqpConfig::default().dispatch, SopDispatch::AgentLoop);
     }
 
     #[test]

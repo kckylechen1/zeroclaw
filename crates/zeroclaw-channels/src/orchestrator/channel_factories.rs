@@ -129,20 +129,14 @@ pub(crate) struct ActiveChannelAliases {
     /// Bindings declared by all agents, including disabled owners. Their
     /// presence prevents legacy fallback from activating disabled channels.
     all_known_bindings: HashSet<String>,
-    /// `<type>.<alias>` named by an approval request or escalation route.
-    /// These channels are live to deliver and receive SOP gate replies, but
-    /// they remain absent from the agent ownership map for ordinary traffic.
-    approval_route_bindings: HashSet<String>,
 }
 
 impl ActiveChannelAliases {
-    /// Returns true when `channel_ref` is agent-bound, named by an approval
-    /// route, or when no explicit agent bindings exist and legacy "accept all
-    /// enabled channels" mode applies.
+    /// Returns true when `channel_ref` is agent-bound, or when no explicit
+    /// agent bindings exist and legacy "accept all enabled channels" mode
+    /// applies.
     pub(crate) fn contains(&self, channel_ref: &str) -> bool {
-        self.all_known_bindings.is_empty()
-            || self.enabled_bindings.contains(channel_ref)
-            || self.approval_route_bindings.contains(channel_ref)
+        self.all_known_bindings.is_empty() || self.enabled_bindings.contains(channel_ref)
     }
 
     /// True when bindings exist somewhere in the config but every owner is
@@ -152,41 +146,8 @@ impl ActiveChannelAliases {
     }
 
     /// Computes the canonical channel-binding view used by collection and
-    /// startup checks. Disabled owners never activate channels, while an
-    /// explicit SOP approval route keeps its delivery channel live without
-    /// assigning it to an agent.
+    /// startup checks. Disabled owners never activate channels.
     pub(crate) fn compute(config: &Config) -> Self {
-        let configured_channel_aliases = config.channels_by_alias();
-        let approval_route_bindings = config
-            .sop
-            .approval
-            .policies
-            .values()
-            .flat_map(|policy| {
-                [
-                    policy.request_route.as_deref(),
-                    policy.escalation_route.as_deref(),
-                ]
-            })
-            .filter_map(|route| {
-                route.and_then(zeroclaw_runtime::sop::approval::channel_route::parse_approval_route)
-            })
-            .flat_map(|(channel_key, _)| {
-                if channel_key.contains('.') {
-                    return vec![channel_key.to_string()];
-                }
-
-                let enabled_aliases: Vec<_> = configured_channel_aliases
-                    .iter()
-                    .filter(|channel| channel.enabled && channel.channel_type == channel_key)
-                    .collect();
-                match enabled_aliases.as_slice() {
-                    [channel] => vec![format!("{}.{}", channel.channel_type, channel.alias)],
-                    _ => vec![channel_key.to_string()],
-                }
-            })
-            .collect();
-
         Self {
             enabled_bindings: config
                 .agents
@@ -199,7 +160,6 @@ impl ActiveChannelAliases {
                 .values()
                 .flat_map(|a| a.channels.iter().map(|c| c.as_str().to_string()))
                 .collect(),
-            approval_route_bindings,
         }
     }
 }
@@ -208,7 +168,7 @@ pub fn build_channel_map(
     config: &Config,
 ) -> HashMap<String, Arc<dyn zeroclaw_api::channel::Channel>> {
     let config_arc = Arc::new(RwLock::new(config.clone()));
-    let configured = collect_configured_channels(&config_arc, "", &[], None, None);
+    let configured = collect_configured_channels(&config_arc, "", &[]);
     configured_channel_map(&configured)
 }
 
@@ -221,7 +181,7 @@ pub fn register_channels_for_tools(
     escalate_handle: &Option<tools::PerToolChannelHandle>,
 ) -> Vec<String> {
     let config_arc = Arc::new(RwLock::new(config.clone()));
-    let configured = collect_configured_channels(&config_arc, "", &[], None, None);
+    let configured = collect_configured_channels(&config_arc, "", &[]);
 
     let handles = [
         ask_user_handle.as_ref(),
@@ -258,13 +218,9 @@ pub(crate) fn collect_configured_channels(
     config_arc: &Arc<RwLock<Config>>,
     matrix_skip_context: &str,
     tool_specs: &[(String, String)],
-    sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-    sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
 ) -> Vec<ConfiguredChannel> {
     let _ = matrix_skip_context;
     let _ = tool_specs;
-    #[cfg(not(feature = "channel-amqp"))]
-    let _ = (&sop_engine, &sop_audit);
     #[allow(unused_mut)]
     let mut channels = Vec::new();
 
@@ -1107,8 +1063,6 @@ pub(crate) fn collect_configured_channels(
             thread_id_field: amqp.thread_id_field.clone(),
             durable_ack: amqp.durable_ack,
             dispatch: amqp.dispatch,
-            engine: sop_engine.clone(),
-            audit: sop_audit.clone(),
             alias: alias.clone(),
             peer_resolver,
         }) {

@@ -2683,8 +2683,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
         }
     }
 

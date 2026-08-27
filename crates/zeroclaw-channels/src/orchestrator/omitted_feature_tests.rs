@@ -12,7 +12,7 @@ fn collect_configured_channels_omits_telegram_when_compiled_out() {
         },
     );
     let config_arc = Arc::new(RwLock::new(config));
-    let channels = collect_configured_channels(&config_arc, "test", &[], None, None);
+    let channels = collect_configured_channels(&config_arc, "test", &[]);
     assert!(
         channels.iter().all(|c| c.display_name != "Telegram"),
         "Telegram must be absent from collect_configured_channels when \

@@ -1343,8 +1343,6 @@ mod tests {
             )),
             pending_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
         }
     }
 

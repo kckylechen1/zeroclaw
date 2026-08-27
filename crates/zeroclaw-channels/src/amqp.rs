@@ -15,11 +15,6 @@ use lapin::{
     types::FieldTable,
 };
 use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
-use zeroclaw_config::schema::SopDispatch;
-use zeroclaw_runtime::sop::audit::SopAuditLogger;
-use zeroclaw_runtime::sop::dispatch::{dispatch_untrusted_fan_in, results_need_redelivery};
-use zeroclaw_runtime::sop::engine::SopEngine;
-use zeroclaw_runtime::sop::types::SopTriggerSource;
 
 static MSG_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -35,9 +30,6 @@ pub struct AmqpChannel {
     content_template: String,
     thread_id_field: String,
     durable_ack: bool,
-    dispatch: SopDispatch,
-    engine: Option<Arc<Mutex<SopEngine>>>,
-    audit: Option<Arc<SopAuditLogger>>,
     alias: String,
     peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
 }
@@ -55,9 +47,6 @@ pub struct AmqpChannelConfig {
     pub content_template: String,
     pub thread_id_field: String,
     pub durable_ack: bool,
-    pub dispatch: SopDispatch,
-    pub engine: Option<Arc<Mutex<SopEngine>>>,
-    pub audit: Option<Arc<SopAuditLogger>>,
     pub alias: String,
     pub peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
 }
@@ -65,34 +54,11 @@ pub struct AmqpChannelConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryOutcome {
     Processed,
-    /// A matched SOP was backpressured (exec slot or pending-approval pool full)
-    /// in SOP-only dispatch mode. The delivery was NOT fully handled: under
-    /// `durable_ack` it must be nack/requeued for redelivery rather than acked,
-    /// so the trigger is retried once capacity frees instead of being lost. Never
-    /// returned for combined `sop_and_agent_loop` dispatch - there, the agent loop
-    /// already consumed the delivery, so a SOP-side overflow is surfaced loudly
-    /// and acked rather than risking a broker redelivery that would double-run
-    /// the agent side (see `route_delivery`).
-    Deferred,
     ReceiverGone,
 }
 
 impl AmqpChannel {
     pub fn new(cfg: AmqpChannelConfig) -> anyhow::Result<Self> {
-        let routes_sop = matches!(
-            cfg.dispatch,
-            SopDispatch::Sop | SopDispatch::SopAndAgentLoop
-        );
-        if routes_sop && (cfg.engine.is_none() || cfg.audit.is_none()) {
-            anyhow::bail!(
-                "amqp.{}: dispatch = {:?} routes to the SOP engine but no SOP \
-                 engine/audit handles are available; refusing to start a \
-                 channel that would acknowledge deliveries without dispatching \
-                 them",
-                cfg.alias,
-                cfg.dispatch
-            );
-        }
         Ok(Self {
             amqp_url: cfg.amqp_url,
             exchange: cfg.exchange,
@@ -105,9 +71,6 @@ impl AmqpChannel {
             content_template: cfg.content_template,
             thread_id_field: cfg.thread_id_field,
             durable_ack: cfg.durable_ack,
-            dispatch: cfg.dispatch,
-            engine: cfg.engine,
-            audit: cfg.audit,
             alias: cfg.alias,
             peer_resolver: cfg.peer_resolver,
         })
@@ -151,16 +114,7 @@ impl AmqpChannel {
         redelivered: bool,
         tx: &mpsc::Sender<ChannelMessage>,
     ) -> DeliveryOutcome {
-        let routes_sop = matches!(
-            self.dispatch,
-            SopDispatch::Sop | SopDispatch::SopAndAgentLoop
-        );
-        let routes_agent = matches!(
-            self.dispatch,
-            SopDispatch::AgentLoop | SopDispatch::SopAndAgentLoop
-        );
-
-        if routes_agent {
+        {
             let (content, thread_ts) = self.map_delivery(data);
             let seq = MSG_SEQ.fetch_add(1, Ordering::Relaxed);
 
@@ -185,67 +139,6 @@ impl AmqpChannel {
 
             if tx.send(channel_msg).await.is_err() {
                 return DeliveryOutcome::ReceiverGone;
-            }
-        }
-
-        if routes_sop && let (Some(engine), Some(audit)) = (&self.engine, &self.audit) {
-            // A2 per-message idempotency: key on the delivery's `message_id` - the only
-            // cross-redelivery-stable identity the broker exposes - SCOPED to this channel
-            // alias (so two aliases reusing an id do not collide). Only a CONFIRMED
-            // redelivery (`redelivered`) coalesces (a redelivery of the same message, e.g.
-            // one requeued because a sibling SOP deferred); a FRESH delivery always
-            // dispatches, and a fresh reuse of a live key marks it ambiguous downstream. A
-            // delivery with NO / a BLANK message-id is not deduplicated at all (we never
-            // ACK a message away on a guess).
-            //
-            // Best-effort under the AMQP unique-`message_id` contract: publishers MUST set
-            // a unique, stable `message_id` per logical message for exactly-once. Under id
-            // REUSE (a contract violation) a redelivery of a reused id can still coalesce a
-            // distinct trigger - an accepted, documented at-most-once edge. See the full
-            // contract on `SopEngine::dispatch_dedup` (sop/engine.rs).
-            let dedup = message_id
-                .filter(|id| !id.is_empty())
-                .map(|id| (format!("amqp:{}:{id}", self.alias), redelivered));
-            let results = dispatch_untrusted_fan_in(
-                engine,
-                audit,
-                SopTriggerSource::Amqp,
-                Some(routing_key),
-                Some(&String::from_utf8_lossy(data)),
-                dedup,
-            )
-            .await;
-            if results_need_redelivery(&results) {
-                if routes_agent {
-                    // Combined `sop_and_agent_loop`: the agent loop ALREADY accepted
-                    // this delivery above (`tx.send` succeeded). Requeuing to retry
-                    // the SOP side would redeliver the SAME broker message to the
-                    // agent loop and double-run its side effects. Without a durable
-                    // intake queue (a separate follow-up) there is nothing to
-                    // durably re-home the backpressured trigger into, so in combined
-                    // mode a SOP-side overflow is a genuine, surfaced-loudly drop
-                    // rather than a broker-level redelivery: the broker-redelivery
-                    // safety net is reserved for SOP-only dispatch, where there is no
-                    // agent handoff to double-run.
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({
-                                "alias": self.alias,
-                                "routing_key": routing_key,
-                                "dispatch": "sop_and_agent_loop",
-                            })),
-                        "amqp: SOP admission backpressured in combined mode; trigger dropped rather \
-                         than requeued (the agent side already consumed this delivery and must not \
-                         be redelivered)"
-                    );
-                } else {
-                    // SOP-only mode: no agent handoff happened, so signal the
-                    // listener to requeue (not ack) so the trigger is redelivered
-                    // when capacity frees.
-                    return DeliveryOutcome::Deferred;
-                }
             }
         }
 
@@ -474,24 +367,6 @@ impl Channel for AmqpChannel {
                         delivery.acker.ack(BasicAckOptions::default()).await?;
                     }
                 }
-                DeliveryOutcome::Deferred => {
-                    // Backpressured: nack with requeue so the broker redelivers the
-                    // trigger once an exec slot / pending-approval slot frees, rather
-                    // than acking it away. `no_ack` is false whenever `durable_ack`
-                    // is set, so a manual nack is valid here. Under sustained
-                    // saturation this drives broker-paced redelivery churn (the
-                    // intended backpressure signal); operators wanting delayed retry
-                    // configure a broker-side dead-letter exchange with a TTL.
-                    if self.durable_ack {
-                        delivery
-                            .acker
-                            .nack(BasicNackOptions {
-                                requeue: true,
-                                ..BasicNackOptions::default()
-                            })
-                            .await?;
-                    }
-                }
                 DeliveryOutcome::ReceiverGone => return Ok(()),
             }
         }
@@ -575,13 +450,7 @@ fn str_of_value(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
-    fn try_channel_with(
-        content_template: &str,
-        thread_id_field: &str,
-        dispatch: SopDispatch,
-        engine: Option<Arc<Mutex<SopEngine>>>,
-        audit: Option<Arc<SopAuditLogger>>,
-    ) -> anyhow::Result<AmqpChannel> {
+    fn try_channel_with(content_template: &str, thread_id_field: &str) -> anyhow::Result<AmqpChannel> {
         AmqpChannel::new(AmqpChannelConfig {
             amqp_url: "amqp://localhost:5672".into(),
             exchange: "amq.topic".into(),
@@ -594,23 +463,14 @@ mod tests {
             content_template: content_template.into(),
             thread_id_field: thread_id_field.into(),
             durable_ack: true,
-            dispatch,
-            engine,
-            audit,
             alias: "stagex".into(),
             peer_resolver: Arc::new(Vec::new),
         })
     }
 
     fn channel_with(content_template: &str, thread_id_field: &str) -> AmqpChannel {
-        try_channel_with(
-            content_template,
-            thread_id_field,
-            SopDispatch::AgentLoop,
-            None,
-            None,
-        )
-        .expect("agent-loop dispatch needs no SOP handles")
+        try_channel_with(content_template, thread_id_field)
+            .expect("amqp channel constructs")
     }
 
     #[test]
@@ -756,438 +616,4 @@ tr7J6RKtO4OsZS/2KoYL8M+o
         assert!(ch.build_client_identity().expect("no client tls").is_none());
     }
 
-    fn sop_handles() -> (Arc<Mutex<SopEngine>>, Arc<SopAuditLogger>) {
-        use zeroclaw_config::schema::SopConfig;
-        use zeroclaw_memory::NoneMemory;
-        let engine = Arc::new(Mutex::new(SopEngine::new(SopConfig::default())));
-        let audit = Arc::new(SopAuditLogger::new(Arc::new(NoneMemory::new("none"))));
-        (engine, audit)
-    }
-
-    #[test]
-    fn new_rejects_sop_dispatch_without_handles() {
-        for dispatch in [SopDispatch::Sop, SopDispatch::SopAndAgentLoop] {
-            let result = try_channel_with("", "", dispatch, None, None);
-            let Err(err) = result else {
-                panic!("SOP dispatch without engine/audit must fail closed");
-            };
-            assert!(
-                err.to_string().contains("SOP engine"),
-                "unexpected error: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn new_accepts_agent_loop_without_handles() {
-        assert!(try_channel_with("", "", SopDispatch::AgentLoop, None, None).is_ok());
-    }
-
-    #[tokio::test]
-    async fn combined_route_fails_closed_when_receiver_gone() {
-        let (engine, audit) = sop_handles();
-        let ch = try_channel_with(
-            "{name}",
-            "name",
-            SopDispatch::SopAndAgentLoop,
-            Some(engine),
-            Some(audit),
-        )
-        .expect("sop_and_agent_loop with handles constructs");
-
-        let (tx, rx) = mpsc::channel::<ChannelMessage>(1);
-        drop(rx);
-
-        let outcome = ch
-            .route_delivery("anitya.update", br#"{"name":"curl"}"#, None, false, &tx)
-            .await;
-
-        assert_eq!(
-            outcome,
-            DeliveryOutcome::ReceiverGone,
-            "a closed receiver must short-circuit before SOP dispatch so the \
-             delivery is left unacked for broker redelivery, not run as a SOP"
-        );
-    }
-
-    #[tokio::test]
-    async fn combined_route_dispatches_agent_when_receiver_open() {
-        let (engine, audit) = sop_handles();
-        let ch = try_channel_with(
-            "{name}",
-            "name",
-            SopDispatch::SopAndAgentLoop,
-            Some(engine),
-            Some(audit),
-        )
-        .expect("sop_and_agent_loop with handles constructs");
-
-        let (tx, mut rx) = mpsc::channel::<ChannelMessage>(1);
-        let outcome = ch
-            .route_delivery("anitya.update", br#"{"name":"curl"}"#, None, false, &tx)
-            .await;
-
-        assert_eq!(outcome, DeliveryOutcome::Processed);
-        let msg = rx.recv().await.expect("agent-loop message delivered");
-        assert_eq!(msg.content, "curl");
-    }
-
-    #[tokio::test]
-    async fn deferred_sop_dispatch_requeues_instead_of_acking() {
-        let (engine, audit) = sop_handles_at_exec_slot_full();
-        let ch = try_channel_with(
-            "{name}",
-            "name",
-            SopDispatch::Sop,
-            Some(engine),
-            Some(audit),
-        )
-        .expect("sop-only channel with handles constructs");
-        let (tx, _rx) = mpsc::channel::<ChannelMessage>(1);
-
-        // A second matching delivery is backpressured (slot full). route_delivery must
-        // report Deferred so the listener nacks/requeues it, rather than acking the
-        // trigger away under durable_ack.
-        let outcome = ch
-            .route_delivery("anitya.update", br#"{"name":"curl"}"#, None, false, &tx)
-            .await;
-        assert_eq!(
-            outcome,
-            DeliveryOutcome::Deferred,
-            "a backpressured SOP delivery must requeue for redelivery, not ack-and-lose"
-        );
-    }
-
-    #[tokio::test]
-    async fn sop_only_mixed_started_and_deferred_delivery_starts_none_and_requeues() {
-        let (engine, audit) = sop_handles_with_mixed_admission();
-        let ch = try_channel_with(
-            "{name}",
-            "name",
-            SopDispatch::Sop,
-            Some(Arc::clone(&engine)),
-            Some(audit),
-        )
-        .expect("sop-only channel with handles constructs");
-        let (tx, _rx) = mpsc::channel::<ChannelMessage>(1);
-
-        let outcome = ch
-            .route_delivery("anitya.update", br#"{"name":"curl"}"#, None, false, &tx)
-            .await;
-
-        assert_eq!(
-            outcome,
-            DeliveryOutcome::Deferred,
-            "a mixed ready+deferred SOP-only delivery must requeue as one broker unit"
-        );
-        let eng = engine.lock().unwrap();
-        assert!(
-            eng.run_summaries(Some("amqp-ready")).is_empty(),
-            "the ready sibling must not start before the deferred sibling can share the delivery"
-        );
-        assert_eq!(
-            eng.run_summaries(Some("amqp-full")).len(),
-            1,
-            "the pre-existing full SOP run remains the only run for that SOP"
-        );
-    }
-
-    /// Build sop/audit handles with `amqp-sop` already occupying its single exec
-    /// slot (`max_concurrent = 1`), so the next matching AMQP delivery is
-    /// backpressured and `dispatch_sop_event` returns a `Deferred` result.
-    fn sop_handles_at_exec_slot_full() -> (Arc<Mutex<SopEngine>>, Arc<SopAuditLogger>) {
-        use zeroclaw_runtime::sop::SopStepKind;
-        use zeroclaw_runtime::sop::types::{
-            Sop, SopAdmissionPolicy, SopEvent, SopExecutionMode, SopPriority, SopStep, SopTrigger,
-        };
-        let (engine, audit) = sop_handles();
-        {
-            let mut eng = engine.lock().unwrap();
-            eng.set_sops_for_test(vec![Sop {
-                name: "amqp-sop".into(),
-                description: "test".into(),
-                version: "1.0.0".into(),
-                priority: SopPriority::Normal,
-                execution_mode: SopExecutionMode::Auto,
-                triggers: vec![SopTrigger::Amqp {
-                    routing_key: "anitya.update".into(),
-                    condition: None,
-                }],
-                steps: vec![SopStep {
-                    number: 1,
-                    title: "Step one".into(),
-                    body: "Do step one".into(),
-                    suggested_tools: vec![],
-                    requires_confirmation: false,
-                    kind: SopStepKind::default(),
-                    schema: None,
-                    ..SopStep::default()
-                }],
-                cooldown_secs: 0,
-                max_concurrent: 1,
-                location: None,
-                deterministic: false,
-                admission_policy: SopAdmissionPolicy::Parallel,
-                max_pending_approvals: 0,
-                agent: None,
-            }]);
-            // Fill the single exec slot with an in-flight run.
-            eng.start_run(
-                "amqp-sop",
-                SopEvent {
-                    source: SopTriggerSource::Amqp,
-                    topic: Some("anitya.update".into()),
-                    payload: None,
-                    timestamp: zeroclaw_runtime::sop::engine::now_iso8601(),
-                },
-            )
-            .expect("first run fills the slot");
-        }
-        (engine, audit)
-    }
-
-    fn sop_handles_with_parallel_amqp_sop() -> (Arc<Mutex<SopEngine>>, Arc<SopAuditLogger>) {
-        use zeroclaw_runtime::sop::SopStepKind;
-        use zeroclaw_runtime::sop::types::{
-            Sop, SopAdmissionPolicy, SopExecutionMode, SopPriority, SopStep, SopTrigger,
-        };
-        let (engine, audit) = sop_handles();
-        {
-            let mut eng = engine.lock().unwrap();
-            eng.set_sops_for_test(vec![Sop {
-                name: "amqp-sop".into(),
-                description: "test".into(),
-                version: "1.0.0".into(),
-                priority: SopPriority::Normal,
-                execution_mode: SopExecutionMode::Auto,
-                triggers: vec![SopTrigger::Amqp {
-                    routing_key: "anitya.update".into(),
-                    condition: None,
-                }],
-                steps: vec![SopStep {
-                    number: 1,
-                    title: "Step one".into(),
-                    body: "Do step one".into(),
-                    suggested_tools: vec![],
-                    requires_confirmation: false,
-                    kind: SopStepKind::default(),
-                    schema: None,
-                    ..SopStep::default()
-                }],
-                cooldown_secs: 0,
-                max_concurrent: 8,
-                location: None,
-                deterministic: false,
-                admission_policy: SopAdmissionPolicy::Parallel,
-                max_pending_approvals: 0,
-                agent: None,
-            }]);
-        }
-        (engine, audit)
-    }
-
-    fn sop_handles_with_mixed_admission() -> (Arc<Mutex<SopEngine>>, Arc<SopAuditLogger>) {
-        use zeroclaw_runtime::sop::SopStepKind;
-        use zeroclaw_runtime::sop::types::{
-            Sop, SopAdmissionPolicy, SopEvent, SopExecutionMode, SopPriority, SopStep, SopTrigger,
-        };
-
-        fn amqp_sop(name: &str) -> Sop {
-            Sop {
-                name: name.into(),
-                description: "test".into(),
-                version: "1.0.0".into(),
-                priority: SopPriority::Normal,
-                execution_mode: SopExecutionMode::Auto,
-                triggers: vec![SopTrigger::Amqp {
-                    routing_key: "anitya.update".into(),
-                    condition: None,
-                }],
-                steps: vec![SopStep {
-                    number: 1,
-                    title: "Step one".into(),
-                    body: "Do step one".into(),
-                    suggested_tools: vec![],
-                    requires_confirmation: false,
-                    kind: SopStepKind::default(),
-                    schema: None,
-                    ..SopStep::default()
-                }],
-                cooldown_secs: 0,
-                max_concurrent: 1,
-                location: None,
-                deterministic: false,
-                admission_policy: SopAdmissionPolicy::Parallel,
-                max_pending_approvals: 0,
-                agent: None,
-            }
-        }
-
-        let (engine, audit) = sop_handles();
-        {
-            let mut eng = engine.lock().unwrap();
-            eng.set_sops_for_test(vec![amqp_sop("amqp-ready"), amqp_sop("amqp-full")]);
-            eng.start_run(
-                "amqp-full",
-                SopEvent {
-                    source: SopTriggerSource::Amqp,
-                    topic: Some("anitya.update".into()),
-                    payload: None,
-                    timestamp: zeroclaw_runtime::sop::engine::now_iso8601(),
-                },
-            )
-            .expect("first run fills amqp-full slot");
-        }
-        (engine, audit)
-    }
-
-    #[tokio::test]
-    async fn route_delivery_coalesces_only_a_redelivery_of_the_same_message_id() {
-        // Only a CONFIRMED redelivery (`redelivered = true`) of the same message-id
-        // coalesces; a distinct message-id starts its own run. `amqp-sop` is Parallel with
-        // ample concurrency, so without the dedup the redelivery would start a second run.
-        let (engine, audit) = sop_handles_with_parallel_amqp_sop();
-        let ch = try_channel_with(
-            "{name}",
-            "name",
-            SopDispatch::Sop,
-            Some(engine.clone()),
-            Some(audit),
-        )
-        .expect("sop channel constructs");
-        let (tx, _rx) = mpsc::channel::<ChannelMessage>(4);
-        let body = br#"{"name":"curl"}"#;
-
-        // Fresh m1 starts a run.
-        assert_eq!(
-            ch.route_delivery("anitya.update", body, Some("m1"), false, &tx)
-                .await,
-            DeliveryOutcome::Processed
-        );
-        // A REDELIVERY of m1 coalesces (no second run).
-        assert_eq!(
-            ch.route_delivery("anitya.update", body, Some("m1"), true, &tx)
-                .await,
-            DeliveryOutcome::Processed
-        );
-        assert_eq!(
-            engine.lock().unwrap().active_runs().len(),
-            1,
-            "a redelivery of the same message-id must not start a second run"
-        );
-        // A distinct message-id starts its own run.
-        assert_eq!(
-            ch.route_delivery("anitya.update", body, Some("m2"), false, &tx)
-                .await,
-            DeliveryOutcome::Processed
-        );
-        assert_eq!(
-            engine.lock().unwrap().active_runs().len(),
-            2,
-            "a distinct message-id must start its own run"
-        );
-    }
-
-    #[tokio::test]
-    async fn route_delivery_fresh_deliveries_reusing_a_message_id_both_start() {
-        // The loss case a message-id-only dedup would reintroduce: TWO distinct FRESH
-        // deliveries that reuse the same message-id must BOTH start - never coalesce/ACK
-        // one away - because only a confirmed redelivery (not a fresh delivery) coalesces.
-        let (engine, audit) = sop_handles_with_parallel_amqp_sop();
-        let ch = try_channel_with(
-            "{name}",
-            "name",
-            SopDispatch::Sop,
-            Some(engine.clone()),
-            Some(audit),
-        )
-        .expect("sop channel constructs");
-        let (tx, _rx) = mpsc::channel::<ChannelMessage>(8);
-        let body = br#"{"name":"curl"}"#;
-
-        // Same id, both FRESH (redelivered = false) -> both start.
-        for _ in 0..2 {
-            assert_eq!(
-                ch.route_delivery("anitya.update", body, Some("reused"), false, &tx)
-                    .await,
-                DeliveryOutcome::Processed
-            );
-        }
-        assert_eq!(
-            engine.lock().unwrap().active_runs().len(),
-            2,
-            "distinct fresh deliveries reusing a message-id must both start, never coalesce"
-        );
-    }
-
-    #[tokio::test]
-    async fn route_delivery_without_or_blank_message_id_does_not_dedup() {
-        // No message-id (`None`) and a BLANK message-id (`""`) both mean "no per-message
-        // identity": deliveries must NOT be coalesced (never ACK a distinct message away
-        // on a guess). Each starts its own run, even when flagged as a redelivery.
-        let (engine, audit) = sop_handles_with_parallel_amqp_sop();
-        let ch = try_channel_with(
-            "{name}",
-            "name",
-            SopDispatch::Sop,
-            Some(engine.clone()),
-            Some(audit),
-        )
-        .expect("sop channel constructs");
-        let (tx, _rx) = mpsc::channel::<ChannelMessage>(8);
-        let body = br#"{"name":"curl"}"#;
-
-        for (mid, redelivered) in [
-            (None, false),
-            (None, true),
-            (Some(""), false),
-            (Some(""), true),
-        ] {
-            assert_eq!(
-                ch.route_delivery("anitya.update", body, mid, redelivered, &tx)
-                    .await,
-                DeliveryOutcome::Processed
-            );
-        }
-        assert_eq!(
-            engine.lock().unwrap().active_runs().len(),
-            4,
-            "absent and blank message-ids must never coalesce distinct deliveries"
-        );
-    }
-
-    #[tokio::test]
-    async fn combined_mode_acks_sop_overflow_and_agent_gets_exactly_one_message() {
-        // Blocker regression: in combined `sop_and_agent_loop` the agent loop already
-        // accepted the delivery, so requeuing to retry a backpressured SOP side would
-        // redeliver the SAME message to the agent and double-run its side effects. The
-        // channel must ACK (Processed) instead, and the agent must see it exactly once.
-        let (engine, audit) = sop_handles_at_exec_slot_full();
-        let ch = try_channel_with(
-            "{name}",
-            "name",
-            SopDispatch::SopAndAgentLoop,
-            Some(engine),
-            Some(audit),
-        )
-        .expect("combined channel constructs");
-        let (tx, mut rx) = mpsc::channel::<ChannelMessage>(4);
-
-        let outcome = ch
-            .route_delivery("anitya.update", br#"{"name":"curl"}"#, None, false, &tx)
-            .await;
-        assert_eq!(
-            outcome,
-            DeliveryOutcome::Processed,
-            "combined mode ACKs a backpressured SOP delivery (agent already consumed); it must not requeue"
-        );
-        assert!(
-            rx.try_recv().is_ok(),
-            "the agent loop received the delivery once"
-        );
-        assert!(
-            rx.try_recv().is_err(),
-            "the agent loop must NOT be handed a duplicate of the same delivery"
-        );
-    }
 }

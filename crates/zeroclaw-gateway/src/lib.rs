@@ -22,7 +22,6 @@ pub mod api_plugins;
 pub mod api_quickstart;
 pub mod api_sections;
 pub mod api_skills;
-pub mod api_sop;
 pub mod api_sop_author;
 pub mod api_user_model;
 #[cfg(feature = "webauthn")]
@@ -54,7 +53,6 @@ pub mod version;
 pub mod voice_duplex;
 pub mod ws;
 pub mod ws_approval;
-pub mod ws_sop_runs;
 
 use anyhow::{Context, Result};
 #[cfg(any(
@@ -579,11 +577,6 @@ pub struct AppState {
     /// TUI session registry from the daemon (for /api/tuis endpoint).
     /// `None` when the gateway runs standalone without a daemon.
     pub tui_registry: Option<Arc<zeroclaw_runtime::rpc::tui_identity::TuiRegistry>>,
-    /// Shared SOP engine from the daemon (for WS agent sessions).
-    /// `None` when the gateway runs standalone — sessions build their own.
-    pub sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-    /// Shared SOP audit logger from the daemon (for WS agent sessions).
-    pub sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
@@ -601,9 +594,6 @@ pub async fn run_gateway(
     // TUI session registry from the daemon for the /api/tuis endpoint.
     tui_registry: Option<Arc<zeroclaw_runtime::rpc::tui_identity::TuiRegistry>>,
     canvas_store: Option<CanvasStore>,
-    // Shared SOP engine from the daemon. `None` when standalone — sessions build their own.
-    sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-    sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
     // Companion PortableKernel handle from the composition root. Daemon
     // constructs once and injects the same Arc into channels. Standalone
     // gateway constructs at `run_gateway_if_enabled`. Never opened here.
@@ -851,8 +841,6 @@ pub async fn run_gateway(
                 Some(canvas_store.clone()),
                 false,
                 None,
-                sop_engine.clone(),
-                sop_audit.clone(),
                 None,
                 // Gateway request handling is a top-level origin.
                 None,
@@ -986,8 +974,6 @@ pub async fn run_gateway(
             Some(canvas_store.clone()),
             false,
             None,
-            sop_engine.clone(),
-            sop_audit.clone(),
             None,
             // Dashboard agent-tool enumeration: top-level origin.
             None,
@@ -1654,8 +1640,6 @@ pub async fn run_gateway(
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         tui_registry,
-        sop_engine,
-        sop_audit,
         #[cfg(feature = "webauthn")]
         webauthn: if config.security.webauthn.enabled {
             let secret_store = Arc::new(zeroclaw_runtime::security::SecretStore::new(
@@ -1687,9 +1671,6 @@ pub async fn run_gateway(
         // ── Admin routes (for CLI management) ──
         .route("/admin/shutdown", post(handle_admin_shutdown))
         .route("/admin/reload", post(handle_admin_reload))
-        .route("/admin/sop/pending", get(api_sop::handle_sop_pending))
-        .route("/admin/sop/approve", post(api_sop::handle_sop_approve))
-        .route("/admin/sop/deny", post(api_sop::handle_sop_deny))
         .route("/admin/paircode", get(handle_admin_paircode))
         .route("/admin/paircode/new", post(handle_admin_paircode_new))
         // ── Existing routes ──
@@ -1737,11 +1718,6 @@ pub async fn run_gateway(
             get(api_sop_author::handle_sop_graph),
         )
         .route(
-            "/api/sops/{name}/run",
-            post(api_sop_author::handle_sop_run),
-        )
-        .route("/api/sops/runs", get(api_sop_author::handle_sop_runs))
-        .route(
             "/api/sops/{name}/full",
             get(api_sop_author::handle_sop_full),
         )
@@ -1764,14 +1740,6 @@ pub async fn run_gateway(
         .route(
             "/api/tools/param-options",
             post(api_sop_author::handle_tools_param_options),
-        )
-        .route(
-            "/api/sops/{name}/runs/{run_id}/overlay",
-            get(api_sop_author::handle_sop_run_overlay),
-        )
-        .route(
-            "/api/sops/{name}/runs/{run_id}/decide",
-            post(api_sop_author::handle_sop_decide),
         )
         .route("/api/config/drift", get(api_config::handle_drift))
         .route(
@@ -2025,8 +1993,6 @@ pub async fn run_gateway(
         .route("/acp", get(acp::handle_ws_acp))
         // ── WebSocket agent chat ──
         .route("/ws/chat", get(ws::handle_ws_chat))
-        // ── WebSocket SOP runs feed ──
-        .route("/ws/sops/runs", get(ws_sop_runs::handle_ws_sop_runs))
         // ── WebSocket canvas updates ──
         .route("/ws/canvas/{id}", get(canvas::handle_ws_canvas));
     // ── WebSocket node discovery (nodes feature) ──
@@ -4572,8 +4538,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         }
@@ -4966,8 +4930,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
-                None,
             )
             .await
         });
@@ -5034,8 +4996,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
-                None,
             )
             .await
         });
@@ -5082,8 +5042,6 @@ mod tests {
                 "127.0.0.1",
                 0,
                 config,
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -5145,8 +5103,6 @@ mod tests {
                 config,
                 None,
                 Some(reload_controls),
-                None,
-                None,
                 None,
                 None,
                 None,
@@ -5242,8 +5198,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -5334,8 +5288,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -6013,8 +5965,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -6123,8 +6073,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -6248,8 +6196,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -6353,8 +6299,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -6477,8 +6421,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -6567,8 +6509,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -6662,8 +6602,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -6764,8 +6702,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -6862,8 +6798,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -7010,8 +6944,6 @@ mod tests {
             pending_pairings: None,
             canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -7840,8 +7772,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         }
@@ -7931,8 +7861,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         };
@@ -8096,8 +8024,6 @@ mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
             #[cfg(feature = "webauthn")]
             webauthn: None,
         }

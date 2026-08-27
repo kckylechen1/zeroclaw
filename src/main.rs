@@ -2609,85 +2609,36 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 );
 
                 #[cfg(feature = "gateway")]
-                registry.register_gateway(Box::new({
-                    let sop_e = sop_engine.clone();
-                    let sop_a = sop_audit.clone();
-                    move |host, port, config, tx, reload_controls, tui_registry| {
-                        let canvas_store = canvas_store_for_gateway.clone();
-                        let sop_engine = sop_e.clone();
-                        let sop_audit = sop_a.clone();
-                        let companion_store = companion_for_gateway.clone();
-                        Box::pin(async move {
-                            Box::pin(zeroclaw_gateway::run_gateway(
-                                &host,
-                                port,
-                                config,
-                                tx,
-                                reload_controls,
-                                tui_registry,
-                                Some(canvas_store),
-                                sop_engine,
-                                sop_audit,
-                                companion_store,
-                            ))
-                            .await
-                        })
-                    }
+                registry.register_gateway(Box::new(move |host, port, config, tx, reload_controls, tui_registry| {
+                    let canvas_store = canvas_store_for_gateway.clone();
+                    let companion_store = companion_for_gateway.clone();
+                    Box::pin(async move {
+                        Box::pin(zeroclaw_gateway::run_gateway(
+                            &host,
+                            port,
+                            config,
+                            tx,
+                            reload_controls,
+                            tui_registry,
+                            Some(canvas_store),
+                            companion_store,
+                        ))
+                        .await
+                    })
                 }));
 
-                registry.register_channels(Box::new({
-                    let sop_e = sop_engine.clone();
-                    let sop_a = sop_audit.clone();
-                    move |config, cancel| {
-                        let canvas_store = canvas_store_for_channels.clone();
-                        let sop_engine = sop_e.clone();
-                        let sop_audit = sop_a.clone();
-                        let companion_store = companion_for_channels.clone();
-                        Box::pin(async move {
-                            Box::pin(zeroclaw_channels::orchestrator::start_channels(
-                                config,
-                                Some(canvas_store),
-                                cancel,
-                                sop_engine,
-                                sop_audit,
-                                companion_store,
-                            ))
-                            .await
-                        })
-                    }
-                }));
-
-                #[cfg(feature = "channel-mqtt")]
-                registry.register_mqtt(Box::new({
-                    let engine = sop_engine.clone();
-                    let audit = sop_audit.clone();
-                    move |mqtt_config| {
-                        let engine = engine.clone();
-                        let audit = audit.clone();
-                        Box::pin(async move {
-                            if let (Some(engine), Some(audit)) = (engine, audit) {
-                                zeroclaw_channels::orchestrator::mqtt::run_mqtt_sop_listener(
-                                    &mqtt_config,
-                                    engine,
-                                    audit,
-                                )
-                                .await
-                            } else {
-                                // No SOPs directory configured — this is a valid
-                                // user state, not a misconfiguration. Skip the
-                                // listener gracefully.
-                                ::zeroclaw_log::record!(
-                                    INFO,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Skip
-                                    ),
-                                    "MQTT SOP listener skipped — no SOPs directory configured"
-                                );
-                                Ok(())
-                            }
-                        })
-                    }
+                registry.register_channels(Box::new(move |config, cancel| {
+                    let canvas_store = canvas_store_for_channels.clone();
+                    let companion_store = companion_for_channels.clone();
+                    Box::pin(async move {
+                        Box::pin(zeroclaw_channels::orchestrator::start_channels(
+                            config,
+                            Some(canvas_store),
+                            cancel,
+                            companion_store,
+                        ))
+                        .await
+                    })
                 }));
 
                 registry.register_socket(Box::new(|ctx, cancel, client_count| {
