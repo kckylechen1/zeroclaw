@@ -17168,9 +17168,6 @@ pub struct GitEventRoute {
     /// Deliver the event into the agent loop as a normal channel message.
     #[serde(default)]
     pub message: bool,
-    /// Route the event to the named SOP through channel-sourced SOP ingress.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sop: Option<String>,
 }
 
 /// Voice duplex configuration (`[channels.voice_duplex]`).
@@ -23378,10 +23375,10 @@ max_height = 8
             events_backbone = true
 
             [events]
-            "pull_request.opened" = { sop = "pr-triage" }
-            "issues.opened" = { sop = "issue-triage" }
+            "pull_request.opened" = { message = false }
+            "issues.opened" = { message = true }
             "issue_comment.created" = { message = true }
-            "workflow_run.failed" = { sop = "ci-failure" }
+            "workflow_run.failed" = { message = true }
             "#,
         )
         .unwrap();
@@ -23390,10 +23387,9 @@ max_height = 8
         assert!(cfg.events_backbone);
         assert_eq!(cfg.events.len(), 4);
         let pr = &cfg.events["pull_request.opened"];
-        assert_eq!(pr.sop.as_deref(), Some("pr-triage"));
         assert!(!pr.message);
         assert!(cfg.events["issue_comment.created"].message);
-        assert!(cfg.events["issue_comment.created"].sop.is_none());
+        assert!(cfg.events["issues.opened"].message);
 
         // An explicit provider round-trips.
         let gitlab: GitConfig = ::toml::from_str("enabled = true\nprovider = \"gitlab\"").unwrap();

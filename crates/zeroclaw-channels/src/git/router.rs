@@ -45,7 +45,7 @@ pub fn resolve_route(event_type: &str, table: &HashMap<String, GitEventRoute>) -
 /// (typos). Surfaced as startup warnings.
 pub fn validate_routes(table: &HashMap<String, GitEventRoute>) -> Vec<String> {
     let mut problems = Vec::new();
-    for (key, route) in table {
+    for key in table.keys() {
         if !KNOWN_EVENT_TYPES.contains(&key.as_str()) {
             problems.push(format!(
                 "unknown event type `{key}` (known: {})",

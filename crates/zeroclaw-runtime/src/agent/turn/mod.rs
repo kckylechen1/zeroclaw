@@ -2419,13 +2419,6 @@ mod sop_step_reassembly_tests {
         assert!(!step_needs_reassembly(Some("A"), Some("A")));
     }
 
-    /// Real-scope tie: re-assembling a step's named agent yields THAT agent's
-    /// own gated tool set, and distinct agents resolve distinct scopes — so the
-    /// gate decision is load-bearing (choosing to re-assemble genuinely changes
-    /// which tools the step can reach).
-    /// A parent approval manager with a live back-channel survives delegation:
-    /// the derived child manager keeps the interactivity mode while enforcing
-    /// the CHILD's risk profile.
     // ── Shared test doubles ──────────────────────────────────────────────────
 
     /// A provider that, if the nested loop ever ran, would drive the parent's

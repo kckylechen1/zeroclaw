@@ -1120,10 +1120,7 @@ mod tests {
             let mut cfg = base_cfg();
             cfg.events.insert(
                 "workflow_run.failed".to_string(),
-                zeroclaw_config::schema::GitEventRoute {
-                    message: true,
-                    sop: None,
-                },
+                zeroclaw_config::schema::GitEventRoute { message: true },
             );
             let plan = TransportPlan::from_routes(&cfg.events);
             assert!(plan.workflow_runs);

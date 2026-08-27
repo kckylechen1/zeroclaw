@@ -412,6 +412,10 @@ mod tests {
             // Voice duplex is a gateway event-stream config surface, not a
             // `zeroclaw-channels` Channel implementation with its own feature.
             "voice_duplex",
+            // Retired SOP-trigger-only channels (#197 wall 5): no compile spec
+            // ships; their config keys are removed with the run-side teardown.
+            "mqtt",
+            "filesystem",
         ]);
 
         for channel_type in zeroclaw_config::schema::v2::V3_CHANNEL_TYPES {

@@ -1062,7 +1062,6 @@ pub(crate) fn collect_configured_channels(
             content_template: amqp.content_template.clone(),
             thread_id_field: amqp.thread_id_field.clone(),
             durable_ack: amqp.durable_ack,
-            dispatch: amqp.dispatch,
             alias: alias.clone(),
             peer_resolver,
         }) {

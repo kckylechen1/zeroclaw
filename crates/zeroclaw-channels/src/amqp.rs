@@ -1,16 +1,13 @@
 use async_trait::async_trait;
 use portable_atomic::{AtomicU64, Ordering};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use futures_util::StreamExt;
 use lapin::{
     Connection, ConnectionProperties,
-    options::{
-        BasicAckOptions, BasicConsumeOptions, BasicNackOptions, QueueBindOptions,
-        QueueDeclareOptions,
-    },
+    options::{BasicAckOptions, BasicConsumeOptions, QueueBindOptions, QueueDeclareOptions},
     tcp::{OwnedIdentity, OwnedTLSConfig},
     types::FieldTable,
 };
@@ -104,44 +101,34 @@ impl AmqpChannel {
 
     async fn route_delivery(
         &self,
-        routing_key: &str,
         data: &[u8],
-        // The delivery's AMQP `message_id` (replayed unchanged on a redelivery), used as
-        // the per-message SOP idempotency key. `None` when the publisher set none.
-        message_id: Option<&str>,
-        // The broker's `redelivered` flag: only a confirmed redelivery coalesces, so a
-        // FRESH delivery reusing a message-id is never coalesced/ACKed away.
-        redelivered: bool,
         tx: &mpsc::Sender<ChannelMessage>,
     ) -> DeliveryOutcome {
-        {
-            let (content, thread_ts) = self.map_delivery(data);
-            let seq = MSG_SEQ.fetch_add(1, Ordering::Relaxed);
+        let (content, thread_ts) = self.map_delivery(data);
+        let seq = MSG_SEQ.fetch_add(1, Ordering::Relaxed);
 
-            let channel_msg = ChannelMessage {
-                id: format!("amqp_{}_{seq}", chrono::Utc::now().timestamp_millis()),
-                sender: self.sender_label.clone(),
-                reply_target: self.sender_label.clone(),
-                content,
-                channel: "amqp".to_string(),
-                channel_alias: Some(self.alias.clone()),
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                thread_ts,
-                interruption_scope_id: None,
-                attachments: vec![],
-                subject: None,
+        let channel_msg = ChannelMessage {
+            id: format!("amqp_{}_{seq}", chrono::Utc::now().timestamp_millis()),
+            sender: self.sender_label.clone(),
+            reply_target: self.sender_label.clone(),
+            content,
+            channel: "amqp".to_string(),
+            channel_alias: Some(self.alias.clone()),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            thread_ts,
+            interruption_scope_id: None,
+            attachments: vec![],
+            subject: None,
 
-                ..Default::default()
-            };
+            ..Default::default()
+        };
 
-            if tx.send(channel_msg).await.is_err() {
-                return DeliveryOutcome::ReceiverGone;
-            }
+        if tx.send(channel_msg).await.is_err() {
+            return DeliveryOutcome::ReceiverGone;
         }
-
         DeliveryOutcome::Processed
     }
 
@@ -345,23 +332,7 @@ impl Channel for AmqpChannel {
                 continue;
             };
 
-            let routing_key = delivery.routing_key.as_str().to_string();
-            let message_id = delivery
-                .properties
-                .message_id()
-                .as_ref()
-                .map(|id| id.to_string());
-            let redelivered = delivery.redelivered;
-            match self
-                .route_delivery(
-                    &routing_key,
-                    &delivery.data,
-                    message_id.as_deref(),
-                    redelivered,
-                    &tx,
-                )
-                .await
-            {
+            match self.route_delivery(&delivery.data, &tx).await {
                 DeliveryOutcome::Processed => {
                     if self.durable_ack {
                         delivery.acker.ack(BasicAckOptions::default()).await?;

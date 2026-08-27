@@ -2,7 +2,6 @@
 //! `ChannelMessage`s.
 
 use chrono::{DateTime, Utc};
-use serde_json::json;
 use zeroclaw_api::channel::ChannelMessage;
 
 use super::types::{
@@ -356,31 +355,6 @@ pub fn event_to_message(
             ))
         }
     }
-}
-
-fn event_target(event: &GitEvent) -> String {
-    match event {
-        GitEvent::IssueCommentCreated(p) | GitEvent::PullRequestReviewCommentCreated(p) => {
-            issue_target(&p.repo, p.number)
-        }
-        GitEvent::IssueOpened(p) => issue_target(&p.repo, p.number),
-        GitEvent::PullRequestOpened(p) => issue_target(&p.repo, p.number),
-        GitEvent::PullRequestClosed(t) | GitEvent::PullRequestMerged(t) => {
-            issue_target(&t.repo, t.number)
-        }
-        GitEvent::WorkflowRunCompleted(r) | GitEvent::WorkflowRunFailed(r) => match r.pr_number {
-            Some(number) => issue_target(&r.repo, number),
-            None => r.repo.to_string(),
-        },
-        GitEvent::ReleasePublished(r) => r.repo.to_string(),
-    }
-}
-
-fn actor_payload(actor: &EventActor) -> serde_json::Value {
-    json!({
-        "login": actor.login,
-        "is_bot": actor.is_bot,
-    })
 }
 
 /// Per-message attribution context: the channel key and configured alias.
