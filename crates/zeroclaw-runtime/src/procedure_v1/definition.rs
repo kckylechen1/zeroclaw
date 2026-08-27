@@ -135,7 +135,14 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
     //    read passes and settle back.
     //
     // Instability triggers ONE bounded re-capture; a second instability
-    // fails the capture loudly. A mixed revision can never be frozen.
+    // fails the capture loudly. An edit RACING the capture therefore
+    // cannot freeze a mixed revision. A STABLE mixed tree (an author's
+    // sequenced install paused between the TOML and MD halves) is
+    // undetectable by re-reading alone — that window is closed by the
+    // pair-publication marker: a mismatched marker is refused right
+    // below, and an absent marker is refused at MINT
+    // (`SnapshotMintError::UnpairedPublication`), so no run can be
+    // created from a mixed or unpaired tree either way.
     let mut attempts = 0;
     let (toml_bytes, md_bytes) = loop {
         let before = (stat_signature(&toml_path), stat_signature(&md_path));
@@ -167,6 +174,17 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
     })
 }
 
+/// The declared pair-publication marker (`[sop] md_sha256`), if the
+/// manifest publishes one. Crate-public: the mint refuses an
+/// md-bearing capture with NO marker (`UnpairedPublication`).
+pub(crate) fn declared_md_marker(toml_bytes: &str) -> Option<String> {
+    let raw: toml::Value = toml::from_str(toml_bytes).ok()?;
+    raw.get("sop")?
+        .get("md_sha256")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Pure byte projection: everything `capture_definition` derives from
 /// the bytes, with NO filesystem access. Public within the crate: the
 /// submit-side invariant verifier re-runs this over a snapshot's
@@ -180,19 +198,16 @@ pub(crate) fn recapture_from_bytes(
 ) -> Result<CapturedDefinition> {
     let manifest: SopManifest =
         toml::from_str(&toml_bytes).context("SOP.toml manifest decode failed")?;
-    // Pair-publication marker (optional): an author who publishes
-    // `[sop] md_sha256 = "<hex>"` binds the manifest to exactly one
-    // markdown body — a capture during a sequenced install (TOML-B
-    // paused before MD-B) sees a stable-but-mixed tree that the
-    // byte/stat guards cannot detect, but the marker refuses. Absent,
-    // the byte/stat guards are the protection (documented residual).
+    // Pair-publication marker: an author who publishes an md-bearing
+    // revision publishes `[sop] md_sha256 = "<hex>"` binding the
+    // manifest to exactly one markdown body. A capture during a
+    // sequenced install (TOML-B paused before MD-B) sees a
+    // stable-but-mixed tree that the byte/stat guards cannot detect;
+    // the MISMATCHED marker refuses it here, and an ABSENT marker is
+    // refused at mint (`UnpairedPublication`) — the mixed window
+    // cannot mint either way.
     {
-        let raw: toml::Value = toml::from_str(&toml_bytes).context("SOP.toml reparse")?;
-        if let Some(declared) = raw
-            .get("sop")
-            .and_then(|table| table.get("md_sha256"))
-            .and_then(|value| value.as_str())
-        {
+        if let Some(declared) = declared_md_marker(&toml_bytes) {
             let actual = zeroclaw_api::taskintent::canonical_json_digest_hex(
                 &serde_json::json!({ "md": md_bytes }),
             );

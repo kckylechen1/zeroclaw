@@ -47,6 +47,17 @@ pub enum SnapshotMintError {
         "snapshot mint refused: definition revision is a draft (publication required before run creation)"
     )]
     DraftRevision,
+    /// KP-11 rule 2: an md-bearing package must be PUBLISHED AS A PAIR —
+    /// the manifest names its markdown body's digest
+    /// (`[sop] md_sha256`). Without the pairing, a sequenced install
+    /// paused between `SOP.toml` and `SOP.md` presents a stable mixed
+    /// tree that no reader can detect; with it, the mixed tree is
+    /// refused at capture and the unpaired tree at mint. Publication is
+    /// an explicit authored act (same class as `review_state`).
+    #[error(
+        "snapshot mint refused: SOP.md present but SOP.toml publishes no md_sha256 pair marker (publish the revision as a pair before run creation)"
+    )]
+    UnpairedPublication,
     /// Forbidden content in the captured definition (category only —
     /// existence-blind for the PrivateDyad class).
     #[error("snapshot mint refused: forbidden content category `{category}` in the definition")]
@@ -230,6 +241,17 @@ pub fn mint_snapshot(
         .map_err(|_| SnapshotMintError::DraftRevision)?;
     if raw_review_state != DefinitionReviewState::Published {
         return Err(SnapshotMintError::DraftRevision);
+    }
+    // KP-11 rule 2 (paired publication): an md-bearing package must
+    // name its markdown body's digest in the manifest. A MISMATCHED
+    // marker is already refused at capture (mixed revision); an ABSENT
+    // marker is refused HERE — the sequenced-install window cannot
+    // present a mixed tree that mints. TOML-only packages carry no
+    // markdown half and need no pairing.
+    if !captured.md_bytes.is_empty()
+        && super::definition::declared_md_marker(&captured.toml_bytes).is_none()
+    {
+        return Err(SnapshotMintError::UnpairedPublication);
     }
     // Bounded-text law: an oversize step body is a typed refusal, never
     // a silently-emptied projection.

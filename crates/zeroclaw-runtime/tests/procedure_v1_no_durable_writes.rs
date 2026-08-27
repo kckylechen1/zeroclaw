@@ -404,7 +404,19 @@ async fn v4_procedure_run_writes_no_durable_state_under_hostile_legacy_layout() 
     let sops = dir.path().join("sops");
     let package = sops.join("stagex-update");
     std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(package.join("SOP.toml"), STAGEX_TOML).unwrap();
+    // Published AS A PAIR (KP-11 rule 2): the manifest names its
+    // markdown body's digest.
+    let md_marker = zeroclaw_api::taskintent::canonical_json_digest_hex(
+        &serde_json::json!({ "md": STAGEX_MD }),
+    );
+    std::fs::write(
+        package.join("SOP.toml"),
+        STAGEX_TOML.replace(
+            "review_state = \"published\"",
+            &format!("review_state = \"published\"\nmd_sha256 = \"{md_marker}\""),
+        ),
+    )
+    .unwrap();
     std::fs::write(package.join("SOP.md"), STAGEX_MD).unwrap();
     let legacy_db = dir.path().join("sop").join("runs.db");
     std::fs::create_dir_all(legacy_db.parent().unwrap()).unwrap();

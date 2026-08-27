@@ -67,10 +67,26 @@ pub(crate) const STAGEX_MD: &str = r#"## Steps
    - tools: shell
 "#;
 
+/// Write a PUBLISHED package. Publication is paired for md-bearing
+/// bodies (KP-11 rule 2): unless the caller already published an
+/// `md_sha256` marker (tests that deliberately exercise marker
+/// mismatch pass their own), the marker for exactly this markdown body
+/// is appended — mirroring what the authoring side must emit on save.
 fn write_package(dir: &std::path::Path, toml_body: &str, md_body: &str) {
     let package = dir.join("stagex-update");
     std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(package.join("SOP.toml"), toml_body).unwrap();
+    let toml_out = if !md_body.is_empty() && !toml_body.contains("md_sha256") {
+        let marker = zeroclaw_api::taskintent::canonical_json_digest_hex(
+            &serde_json::json!({ "md": md_body }),
+        );
+        toml_body.replace(
+            "review_state = \"published\"",
+            &format!("review_state = \"published\"\nmd_sha256 = \"{marker}\""),
+        )
+    } else {
+        toml_body.to_string()
+    };
+    std::fs::write(package.join("SOP.toml"), toml_out).unwrap();
     std::fs::write(package.join("SOP.md"), md_body).unwrap();
 }
 
@@ -1322,4 +1338,59 @@ async fn direct_port_submit_of_an_invariant_violating_snapshot_is_rejected() {
     // And nothing was retained for the forged ref.
     let retained = double.retained_snapshot(&reference).await.unwrap();
     assert!(retained.is_none());
+}
+
+#[test]
+fn unpaired_publication_is_refused_at_mint() {
+    // A stable md-bearing tree WITHOUT the pair marker: capture is
+    // permissive (definition listing may read it), but MINT refuses —
+    // the sequenced-install mixed window cannot produce a runnable
+    // snapshot either way (KP-11 rule 2).
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("sops").join("stagex-update");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("SOP.toml"), STAGEX_TOML).unwrap();
+    std::fs::write(package.join("SOP.md"), STAGEX_MD).unwrap();
+    let captured = capture_definition(&dir.path().join("sops"), "stagex-update").unwrap();
+    assert!(matches!(
+        mint_snapshot(&captured),
+        Err(SnapshotMintError::UnpairedPublication)
+    ));
+}
+
+#[test]
+fn paired_publication_mints_and_the_stable_mixed_tree_is_refused_at_capture() {
+    // Codex round-5 scenario: writer installs MD-B and pauses BEFORE
+    // TOML-B. The tree is STABLE (no byte/stat guard can fire), but the
+    // marker published with TOML-A names MD-A — the mixed tree is
+    // refused at capture, so the pause window cannot mint.
+    let original_md = STAGEX_MD;
+    let marker = zeroclaw_api::taskintent::canonical_json_digest_hex(
+        &serde_json::json!({ "md": original_md }),
+    );
+    let toml_with_marker = STAGEX_TOML.replace(
+        "review_state = \"published\"",
+        &format!("review_state = \"published\"\nmd_sha256 = \"{marker}\""),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("sops").join("stagex-update");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("SOP.toml"), &toml_with_marker).unwrap();
+    std::fs::write(package.join("SOP.md"), original_md).unwrap();
+    let sops = dir.path().join("sops");
+    let paired = mint_snapshot(&capture_definition(&sops, "stagex-update").unwrap()).unwrap();
+    assert!(!paired.approval_gates.is_empty() || !paired.steps.is_empty());
+
+    // The paused install: markdown half swapped, manifest half still
+    // names the OLD body — stable, mixed, refused.
+    std::fs::write(
+        package.join("SOP.md"),
+        format!("{original_md}\n9. **Extra** — later.\n"),
+    )
+    .unwrap();
+    let mixed = capture_definition(&sops, "stagex-update");
+    assert!(
+        mixed.is_err(),
+        "stable mixed tree refused by the pair marker"
+    );
 }
