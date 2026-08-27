@@ -2,10 +2,11 @@
 //! `ProcedureDefinitionV1` from exactly those bytes (KP-11 publication
 //! rules 2–3: complete-definition atomicity, race-free mint).
 //!
-//! The capture is a single `read` per file; the manifest, the parsed
-//! steps, and the digest all derive from the CAPTURED bytes, never from
-//! a second read — there is no window where parsed steps and digested
-//! bytes can disagree (no TOCTOU on the content hash).
+//! The capture reads each file and read-back byte-compares (the
+//! atomicity guard below); the manifest, the parsed steps, and the
+//! digest all derive from the CAPTURED bytes, never from a later read —
+//! there is no window where parsed steps and digested bytes can
+//! disagree (no TOCTOU on the content hash).
 //!
 //! Publication state (KP-11 rule 1): the authored `[sop] review_state`
 //! key (`"draft"` | `"published"`); ABSENT means draft — fail closed.
@@ -121,17 +122,20 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
     let toml_path = sop_dir.join("SOP.toml");
     let md_path = sop_dir.join("SOP.md");
 
-    // Single-read capture per file (KP-11 rules 2–3): everything below
-    // derives from these bytes; nothing re-reads the tree. A
-    // package-atomicity guard follows: after both reads, the files'
-    // (size, mtime) must be unchanged — an edit that landed BETWEEN the
-    // two reads would otherwise freeze a mixed revision that never
-    // existed atomically. One bounded retry, then a loud failure.
-    // Package-atomicity guard: stat BEFORE reading, read both files,
-    // then re-stat — an edit that lands between (or during) the reads
-    // changes a signature and triggers ONE bounded re-capture; a second
-    // instability fails the capture loudly. A mixed old-TOML/new-MD
-    // revision can never be frozen.
+    // Package-atomicity guard (KP-11 rules 2–3), in two layers:
+    //
+    // 1. Read-back byte comparison: read both files, then RE-READ both
+    //    and require byte-identical content. A same-length swap under
+    //    coarse timestamps can fool a (size, mtime) signature — the
+    //    bytes cannot lie. Any interleaved edit that would freeze a
+    //    mixed old-TOML/new-MD revision changes at least one of the
+    //    four reads.
+    // 2. Stat stability: the (size, mtime) signatures before and after
+    //    must also match, catching swaps that land between the two
+    //    read passes and settle back.
+    //
+    // Instability triggers ONE bounded re-capture; a second instability
+    // fails the capture loudly. A mixed revision can never be frozen.
     let mut attempts = 0;
     let (toml_bytes, md_bytes) = loop {
         let before = (stat_signature(&toml_path), stat_signature(&md_path));
@@ -141,8 +145,14 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
         } else {
             String::new()
         };
+        let toml_again = read_stable(&toml_path)?;
+        let md_again = if md_path.exists() {
+            read_stable(&md_path)?
+        } else {
+            String::new()
+        };
         let after = (stat_signature(&toml_path), stat_signature(&md_path));
-        if before == after {
+        if before == after && toml == toml_again && md == md_again {
             break (toml, md);
         }
         attempts += 1;
@@ -151,14 +161,31 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
         }
     };
 
+    recapture_from_bytes(name, toml_bytes, md_bytes).map(|mut captured| {
+        captured.sops_dir = sops_dir.to_path_buf();
+        captured
+    })
+}
+
+/// Pure byte projection: everything `capture_definition` derives from
+/// the bytes, with NO filesystem access. Public within the crate: the
+/// submit-side invariant verifier re-runs this over a snapshot's
+/// embedded bytes to prove the snapshot is exactly the mint of them
+/// (the totality seal — no field can be forged while the bytes stay
+/// fixed).
+pub(crate) fn recapture_from_bytes(
+    name: &str,
+    toml_bytes: String,
+    md_bytes: String,
+) -> Result<CapturedDefinition> {
     let manifest: SopManifest =
         toml::from_str(&toml_bytes).context("SOP.toml manifest decode failed")?;
     // Pair-publication marker (optional): an author who publishes
     // `[sop] md_sha256 = "<hex>"` binds the manifest to exactly one
     // markdown body — a capture during a sequenced install (TOML-B
-    // paused before MD-B) sees a stable-but-mixed tree that the stat
-    // guard cannot detect, but the marker refuses. Absent, the stat
-    // guard is the only protection (documented residual).
+    // paused before MD-B) sees a stable-but-mixed tree that the
+    // byte/stat guards cannot detect, but the marker refuses. Absent,
+    // the byte/stat guards are the protection (documented residual).
     {
         let raw: toml::Value = toml::from_str(&toml_bytes).context("SOP.toml reparse")?;
         if let Some(declared) = raw
@@ -198,7 +225,7 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
         review_state,
         steps,
         digest,
-        sops_dir: sops_dir.to_path_buf(),
+        sops_dir: std::path::PathBuf::new(),
         name: name.to_string(),
     })
 }

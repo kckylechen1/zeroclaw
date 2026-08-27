@@ -1219,6 +1219,15 @@ impl super::procedure::ProcedureSubmitPort for InMemoryTachiTaskBridge {
                 reason: "snapshot_ref_binding_mismatch".to_string(),
             });
         }
+        // Defense-in-depth: the full snapshot invariant law (the same
+        // one the client runs) is re-enforced AT THE PORT — a caller
+        // that bypasses `ProcedureRunClient` and drives the port
+        // directly cannot retain an invariant-violating snapshot.
+        if crate::procedure_v1::run::verify_snapshot_invariants(snapshot).is_err() {
+            return Ok(SubmitReceipt::Rejected {
+                reason: "snapshot_invariant_violation".to_string(),
+            });
+        }
         {
             let mut state = self.state.lock();
             state
@@ -1258,11 +1267,32 @@ impl InMemoryTachiTaskBridge {
     /// This double has no filesystem access to the definitions tree —
     /// structurally, live-definition mutation cannot reach a run here
     /// (the KP-12 discrimination).
+    ///
+    /// The snapshot is resolved from the task's RECORDED binding, never
+    /// from the caller's say-so: driving task A against a foreign,
+    /// gate-free snapshot B would execute A's steps without approval —
+    /// the supplied ref must equal the binding recorded at admission.
     pub fn drive_procedure_steps(
         &self,
         task_ref: &TaskRef,
         snapshot_ref: &str,
-    ) -> (Vec<u32>, Option<u32>) {
+    ) -> Result<(Vec<u32>, Option<u32>), String> {
+        let recorded_binding = {
+            let state = self.state.lock();
+            state.procedure_runs.get(task_ref.as_wire()).cloned()
+        };
+        let Some(recorded_binding) = recorded_binding else {
+            return Err(format!(
+                "task {} is not an admitted procedure run",
+                task_ref.as_wire()
+            ));
+        };
+        if snapshot_ref != recorded_binding {
+            return Err(format!(
+                "snapshot ref {snapshot_ref} is not the binding recorded for task {} (recorded: {recorded_binding})",
+                task_ref.as_wire()
+            ));
+        }
         let state = self.state.lock();
         let Some(snapshot) = state
             .procedure_snapshots
@@ -1273,7 +1303,9 @@ impl InMemoryTachiTaskBridge {
             )
             .cloned()
         else {
-            return (Vec::new(), None);
+            return Err(format!(
+                "recorded snapshot {snapshot_ref} is not retained by this carrier"
+            ));
         };
         drop(state);
 
@@ -1337,7 +1369,7 @@ impl InMemoryTachiTaskBridge {
                                 },
                             },
                         );
-                        return (completed, None);
+                        return Ok((completed, None));
                     }
                 } else if decision.is_none() {
                     let mut state = self.state.lock();
@@ -1354,7 +1386,7 @@ impl InMemoryTachiTaskBridge {
                             detail: FactDetail::ProcedureGateWaiting { step: step.number },
                         },
                     );
-                    return (completed, Some(step.number));
+                    return Ok((completed, Some(step.number)));
                 }
             }
             let mut state = self.state.lock();
@@ -1377,7 +1409,7 @@ impl InMemoryTachiTaskBridge {
             );
             completed.push(step.number);
         }
-        (completed, None)
+        Ok((completed, None))
     }
 
     /// Test/harness driver: resolve a parked procedure gate with an

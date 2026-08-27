@@ -421,7 +421,12 @@ pub fn derive_learning_candidate(
 /// steps that are not what the embedded markdown parses to — is refused
 /// here, at submit, regardless of how the snapshot object was
 /// constructed.
-fn verify_snapshot_invariants(snapshot: &ProcedureSnapshotV1) -> Result<(), ProcedureSubmitError> {
+///
+/// Crate-public: the reference carrier re-runs the same law at the port
+/// (defense-in-depth — a direct port caller cannot skip it).
+pub(crate) fn verify_snapshot_invariants(
+    snapshot: &ProcedureSnapshotV1,
+) -> Result<(), ProcedureSubmitError> {
     use crate::sop::types::{SopManifest, SopStepKind};
     let mismatch = |field: &'static str| ProcedureSubmitError::SnapshotInvariant { field };
 
@@ -581,6 +586,27 @@ fn verify_snapshot_invariants(snapshot: &ProcedureSnapshotV1) -> Result<(), Proc
         || snapshot.guidance.guidance_digest != snapshot.compiled_guidance_digest
     {
         return Err(mismatch("compiled_guidance_digest"));
+    }
+    // 9. TOTALITY SEAL: the snapshot must be exactly the PURE MINT of
+    //    its own embedded bytes — recapture the bytes and re-mint, then
+    //    require the canonical digests to match. This subsumes every
+    //    per-field check above AND the fields no enumeration names
+    //    (artifact/evidence descriptions, required-checks text,
+    //    user_input_points, privacy text, the evaluation-contract
+    //    digest, the schema tag): there is no field a forge can
+    //    originate that the remint does not re-derive from the bytes.
+    //    A mutation that recomputes every digest remains refusable
+    //    here, because the remint of the SAME bytes is unique.
+    let recaptured = super::definition::recapture_from_bytes(
+        &snapshot.procedure_id,
+        snapshot.definition_toml.clone(),
+        snapshot.definition_md.clone(),
+    )
+    .map_err(|_| mismatch("definition_bytes"))?;
+    let reminted =
+        super::snapshot::mint_snapshot(&recaptured).map_err(|_| mismatch("definition_bytes"))?;
+    if reminted.canonical_digest() != snapshot.canonical_digest() {
+        return Err(mismatch("snapshot_totality"));
     }
     Ok(())
 }

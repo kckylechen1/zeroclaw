@@ -10,15 +10,17 @@ use std::sync::Arc;
 use zeroclaw_api::procedure_v1::{DefinitionReviewState, PROCEDURE_SNAPSHOT_REF_PREFIX};
 use zeroclaw_api::subagent_v1::ProposedCandidateKind;
 use zeroclaw_api::taskintent::{
-    ApprovalRequirement, Capability, PrivacyClass, RequestId, RequesterRef, RoutingPreference,
-    SCHEMA_TAG,
+    ApprovalRequirement, BoundedText, Capability, PrivacyClass, RequestId, RequesterRef,
+    RoutingPreference, SCHEMA_TAG,
 };
 
 use super::definition::capture_definition;
 use super::run::{ProcedureRunClient, ProcedureSubmitError, derive_request_id};
 use super::snapshot::{SnapshotContentCategory, SnapshotMintError, mint_snapshot};
 use crate::tachi_bridge::SubmitReceipt;
-use crate::tachi_bridge::compose::RequesterBridgePolicy;
+use crate::tachi_bridge::compose::{
+    RequesterBridgePolicy, StructuralIntentContext, TaskIntentInputs, compose_intent,
+};
 use crate::tachi_bridge::in_memory::InMemoryTachiTaskBridge;
 use crate::tachi_bridge::procedure::ProcedureSubmitPort;
 
@@ -132,7 +134,9 @@ async fn mid_run_definition_mutation_leaves_run_on_pinned_snapshot() {
     write_package(dir.path(), &mutated_toml, &mutated_md);
 
     // The Tachi side continues the run from the RETAINED snapshot.
-    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    let (completed, gate) = double
+        .drive_procedure_steps(&output.task_ref, &reference)
+        .unwrap();
     assert_eq!(
         completed.len(),
         8,
@@ -522,7 +526,9 @@ async fn approval_gate_parks_and_resolves_through_host_side_decision() {
     let reference = snapshot.snapshot_ref();
 
     // Drive: parks at gate 1, zero steps completed.
-    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    let (completed, gate) = double
+        .drive_procedure_steps(&output.task_ref, &reference)
+        .unwrap();
     assert_eq!(completed, Vec::<u32>::new());
     assert_eq!(gate, Some(1));
 
@@ -546,7 +552,9 @@ async fn approval_gate_parks_and_resolves_through_host_side_decision() {
     );
 
     // Resumed: all 8 steps complete from the retained snapshot.
-    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    let (completed, gate) = double
+        .drive_procedure_steps(&output.task_ref, &reference)
+        .unwrap();
     assert_eq!(completed, (1..=8).collect::<Vec<u32>>());
     assert_eq!(gate, None);
     // The decision is on the durable fact log (host-side truth).
@@ -573,7 +581,9 @@ async fn learning_output_is_candidate_only_with_no_apply_path() {
         .submit_run(&snapshot, &full_policy(), &requester(), &request_id)
         .await
         .unwrap();
-    double.drive_procedure_steps(&output.task_ref, &snapshot.snapshot_ref());
+    double
+        .drive_procedure_steps(&output.task_ref, &snapshot.snapshot_ref())
+        .unwrap();
     double.ingest_execution(&output.task_ref, "completed");
     let attempt: zeroclaw_api::taskintent::AttemptRef =
         serde_json::from_value(serde_json::Value::String("attempt:proc-1".to_string()))
@@ -634,6 +644,9 @@ fn procedure_v1_module_has_no_durable_write_calls() {
         for forbidden in [
             "fs::write",
             "fs::create_dir_all",
+            "fs::hard_link",
+            "fs::rename",
+            "fs::copy",
             "File::create",
             "OpenOptions::new",
             "write_all",
@@ -641,8 +654,16 @@ fn procedure_v1_module_has_no_durable_write_calls() {
             "fs::remove_dir",
             "Connection::open",
             "rusqlite",
+            // Serialization/DB sinks a hidden run store could use.
+            "to_writer",
+            "sled",
+            "rocksdb",
+            "sqlx",
+            // The legacy run engine family (KP-16 / #197 boundary).
             "SopEngine",
             "SopRunStore",
+            "sop_events",
+            "PersistedRun",
         ] {
             assert!(
                 !source.contains(forbidden),
@@ -753,7 +774,9 @@ async fn denied_gate_cancels_instead_of_resuming() {
         .await
         .unwrap();
     let reference = snapshot.snapshot_ref();
-    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    let (completed, gate) = double
+        .drive_procedure_steps(&output.task_ref, &reference)
+        .unwrap();
     assert_eq!(completed, Vec::<u32>::new());
     assert_eq!(gate, Some(1));
 
@@ -761,7 +784,9 @@ async fn denied_gate_cancels_instead_of_resuming() {
         .resolve_procedure_gate(&output.task_ref, 1, "deny", "dec-deny")
         .unwrap();
     // A DENIED gate must never execute its step: driving again cancels.
-    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    let (completed, gate) = double
+        .drive_procedure_steps(&output.task_ref, &reference)
+        .unwrap();
     assert_eq!(completed, Vec::<u32>::new(), "denied gate executed steps");
     assert_eq!(gate, None);
     assert!(double.procedure_executed_steps(&output.task_ref).is_empty());
@@ -875,14 +900,18 @@ async fn gate_at_step_two_resumes_without_reexecuting_step_one_and_refuses_unpre
             .is_err()
     );
 
-    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    let (completed, gate) = double
+        .drive_procedure_steps(&output.task_ref, &reference)
+        .unwrap();
     assert_eq!(completed, vec![1], "step 1 runs, then parks at gate 2");
     assert_eq!(gate, Some(2));
 
     double
         .resolve_procedure_gate(&output.task_ref, 2, "approve", "dec-ok")
         .unwrap();
-    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    let (completed, gate) = double
+        .drive_procedure_steps(&output.task_ref, &reference)
+        .unwrap();
     // Step 1 is NOT re-executed; the run continues 2..=8.
     assert_eq!(completed, (2..=8).collect::<Vec<u32>>());
     assert_eq!(gate, None);
@@ -1016,7 +1045,9 @@ async fn parking_at_gate_two_does_not_authorize_resolving_gate_five() {
         .unwrap();
     let reference = snapshot.snapshot_ref();
 
-    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    let (completed, gate) = double
+        .drive_procedure_steps(&output.task_ref, &reference)
+        .unwrap();
     assert_eq!(completed, vec![1]);
     assert_eq!(gate, Some(2));
     // Parked at 2: resolving 5 is refused (never presented).
@@ -1031,7 +1062,9 @@ async fn parking_at_gate_two_does_not_authorize_resolving_gate_five() {
         .resolve_procedure_gate(&output.task_ref, 2, "approve", "dec-2")
         .unwrap();
     // The approved gate step itself now executes, then 3..4, park at 5.
-    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    let (completed, gate) = double
+        .drive_procedure_steps(&output.task_ref, &reference)
+        .unwrap();
     assert_eq!(completed, vec![2, 3, 4]);
     assert_eq!(gate, Some(5));
     assert!(
@@ -1042,7 +1075,9 @@ async fn parking_at_gate_two_does_not_authorize_resolving_gate_five() {
     double
         .resolve_procedure_gate(&output.task_ref, 5, "approve", "dec-5")
         .unwrap();
-    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    let (completed, gate) = double
+        .drive_procedure_steps(&output.task_ref, &reference)
+        .unwrap();
     assert_eq!(completed, (5..=8).collect::<Vec<u32>>());
     assert_eq!(gate, None);
 }
@@ -1145,4 +1180,146 @@ fn extended_content_markers_refused() {
             category: SnapshotContentCategory::WorktreePath
         })
     ));
+}
+
+// ── Codex round-4 hardening: recorded-binding drive, totality seal,
+// port-level invariant enforcement ───────────────────────────────────────
+
+#[tokio::test]
+async fn drive_with_a_foreign_snapshot_ref_is_refused_not_silently_ungated() {
+    // Admit a GATED run (approval gate at step 2) and an ungated twin.
+    let gated_md = format!("{STAGEX_MD}\n").replace(
+        "   - tools: shell, file_write\n",
+        "   - tools: shell, file_write\n   - requires_confirmation: true\n",
+    );
+    let ungated_dir = tempfile::tempdir().unwrap();
+    write_package(ungated_dir.path(), STAGEX_TOML, STAGEX_MD);
+    let gated_dir = tempfile::tempdir().unwrap();
+    write_package(gated_dir.path(), STAGEX_TOML, &gated_md);
+    let gated =
+        mint_snapshot(&capture_definition(gated_dir.path(), "stagex-update").unwrap()).unwrap();
+    let ungated =
+        mint_snapshot(&capture_definition(ungated_dir.path(), "stagex-update").unwrap()).unwrap();
+    assert!(!gated.approval_gates.is_empty());
+    assert!(ungated.approval_gates.is_empty());
+
+    let (client, double) = client_and_double();
+    let gated_id = derive_request_id(
+        &gated.procedure_id,
+        &gated.procedure_digest,
+        "foreign-ref-gated",
+    );
+    let ungated_id = derive_request_id(
+        &ungated.procedure_id,
+        &ungated.procedure_digest,
+        "foreign-ref-ungated",
+    );
+    let gated_run = client
+        .submit_run(&gated, &full_policy(), &requester(), &gated_id)
+        .await
+        .unwrap();
+    let ungated_run = client
+        .submit_run(&ungated, &full_policy(), &requester(), &ungated_id)
+        .await
+        .unwrap();
+    let foreign_ref = ungated_run.binding.snapshot_ref.clone();
+
+    // The attack: drive the GATED task against the UNGATED snapshot's
+    // ref — before round 4 this executed every step with no approval.
+    let attack = double.drive_procedure_steps(&gated_run.task_ref, &foreign_ref);
+    assert!(attack.is_err(), "foreign snapshot ref must be refused");
+    // The gated run is UNTOUCHED: driving it with its OWN ref still
+    // parks at the first gate, having completed only step 1.
+    let (completed, gate) = double
+        .drive_procedure_steps(&gated_run.task_ref, &gated_run.binding.snapshot_ref.clone())
+        .unwrap();
+    assert_eq!(completed, vec![1]);
+    assert_eq!(gate, Some(2));
+}
+
+#[tokio::test]
+async fn forged_description_surviving_every_enumerated_check_dies_at_the_totality_seal() {
+    // Mutate a field NO enumerated invariant names — an artifact
+    // description — and recompute every digest. Only the remint-and-
+    // compare totality seal can refuse it.
+    let dir = fixture_dir();
+    let mut snapshot =
+        mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    snapshot.guidance.artifact_expectations[0].description =
+        BoundedText::new("forge: skip the outcome report entirely".to_string()).expect("bounded");
+    snapshot.guidance.guidance_digest =
+        super::snapshot::guidance_payload_digest(&snapshot.guidance);
+    snapshot.compiled_guidance_digest = snapshot.guidance.guidance_digest.clone();
+
+    let (client, _double) = client_and_double();
+    let request_id = derive_request_id("stagex-update", &snapshot.procedure_digest, "forge-5");
+    let refused = client
+        .submit_run(&snapshot, &full_policy(), &requester(), &request_id)
+        .await;
+    assert!(matches!(
+        refused,
+        Err(ProcedureSubmitError::SnapshotInvariant {
+            field: "snapshot_totality"
+        })
+    ));
+}
+
+#[tokio::test]
+async fn direct_port_submit_of_an_invariant_violating_snapshot_is_rejected() {
+    // Bypass ProcedureRunClient and drive the PORT directly with a
+    // self-consistent gate-stripped forge: the carrier itself re-runs
+    // the invariant law (defense-in-depth — verify-before-retain).
+    let gated_md = format!("{STAGEX_MD}\n").replace(
+        "   - tools: shell, file_write\n",
+        "   - tools: shell, file_write\n   - requires_confirmation: true\n",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    write_package(dir.path(), STAGEX_TOML, &gated_md);
+    let mut snapshot =
+        mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    assert_eq!(snapshot.approval_gates.len(), 1);
+    snapshot.approval_gates.clear();
+    snapshot.guidance.guidance_digest =
+        super::snapshot::guidance_payload_digest(&snapshot.guidance);
+    snapshot.compiled_guidance_digest = snapshot.guidance.guidance_digest.clone();
+    let reference = snapshot.snapshot_ref();
+
+    let inputs = TaskIntentInputs {
+        objective: BoundedText::new(
+            "Execute procedure stagex-update revision 1.0.0 per the pinned snapshot".to_string(),
+        )
+        .expect("bounded"),
+        capability_request: zeroclaw_api::taskintent::CapabilityRequest {
+            capability: snapshot.guidance.required_capability,
+        },
+        constraints: vec![],
+        expected_artifacts: vec![],
+        evaluation_requirement: snapshot.guidance.evaluation_requirement.clone(),
+    };
+    let context = StructuralIntentContext {
+        requester: requester(),
+        parent_ref: None,
+        supervisor_ref: None,
+        context_bundle_ref: BoundedText::new(reference.clone()).expect("bounded"),
+        source_refs: vec![],
+        expiry: None,
+        retry_of: None,
+    };
+    let intent = compose_intent(&inputs, &full_policy(), &context).expect("composes");
+    let double = Arc::new(InMemoryTachiTaskBridge::new());
+    let request_id = derive_request_id("stagex-update", &snapshot.procedure_digest, "port-1");
+    let receipt = double
+        .submit_procedure_run(&intent, &request_id, &snapshot)
+        .await
+        .expect("transport level ok");
+    assert!(
+        matches!(
+            &receipt,
+            SubmitReceipt::Rejected { reason } if reason == "snapshot_invariant_violation"
+        ),
+        "unexpected receipt: {receipt:?}"
+    );
+    // And nothing was retained for the forged ref.
+    let retained = double.retained_snapshot(&reference).await.unwrap();
+    assert!(retained.is_none());
 }
