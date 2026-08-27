@@ -13686,8 +13686,8 @@ impl ChannelsConfig {
     /// One `(canonical_name, configured, deliverable)` row per channel in the
     /// registry. Single source for name-addressed channel lookups so no surface
     /// has to hardcode a subset of the channel list. `deliverable` is `false`
-    /// for input-only transports whose `Channel::send` is a no-op (mqtt and
-    /// amqp are fan-in listeners; voice_wake is input-only), so a name-addressed
+    /// for input-only transports whose `Channel::send` is a no-op (amqp is a
+    /// fan-in consumer; voice_wake and voice_duplex are input-only), so a name-addressed
     /// outbound surface such as `heartbeat.target` can refuse them at validation
     /// instead of accepting a target the delivery layer silently drops.
     pub fn channel_presence(&self) -> [(&'static str, bool, bool); 34] {
@@ -13749,9 +13749,9 @@ impl ChannelsConfig {
     }
 
     /// Whether `name` (case-insensitive) names a channel that can actually
-    /// deliver an outbound message. Input-only transports (mqtt, amqp,
-    /// voice_wake) are known and may be configured, but their `Channel::send`
-    /// is a no-op, so they are not valid outbound targets.
+    /// deliver an outbound message. Input-only transports (amqp, voice_wake,
+    /// voice_duplex) are known and may be configured, but their `Channel::send`
+    /// is a no-op or absent, so they are not valid outbound targets.
     pub fn is_channel_deliverable(&self, name: &str) -> bool {
         let needle = name.to_ascii_lowercase();
         self.channel_presence()
