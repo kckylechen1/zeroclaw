@@ -127,31 +127,29 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
     // (size, mtime) must be unchanged — an edit that landed BETWEEN the
     // two reads would otherwise freeze a mixed revision that never
     // existed atomically. One bounded retry, then a loud failure.
-    let mut toml_bytes = read_stable(&toml_path)?;
-    let mut md_bytes = if md_path.exists() {
-        read_stable(&md_path)?
-    } else {
-        String::new()
-    };
-    let stable = stat_signature(&toml_path).zip(stat_signature(&md_path));
-    if let Some((toml_sig, md_sig)) = stable {
-        let still = stat_signature(&toml_path).zip(stat_signature(&md_path));
-        if still != Some((toml_sig, md_sig)) {
-            // One bounded retry on a raced read; a second race fails the
-            // capture loudly (never a mixed freeze).
-            toml_bytes = read_stable(&toml_path)?;
-            md_bytes = if md_path.exists() {
-                read_stable(&md_path)?
-            } else {
-                String::new()
-            };
-            let again = stat_signature(&toml_path).zip(stat_signature(&md_path));
-            let after = stat_signature(&toml_path).zip(stat_signature(&md_path));
-            if after.is_none() || after != again {
-                bail!("definitions tree changed during capture (mixed revision refused)");
-            }
+    // Package-atomicity guard: stat BEFORE reading, read both files,
+    // then re-stat — an edit that lands between (or during) the reads
+    // changes a signature and triggers ONE bounded re-capture; a second
+    // instability fails the capture loudly. A mixed old-TOML/new-MD
+    // revision can never be frozen.
+    let mut attempts = 0;
+    let (toml_bytes, md_bytes) = loop {
+        let before = (stat_signature(&toml_path), stat_signature(&md_path));
+        let toml = read_stable(&toml_path)?;
+        let md = if md_path.exists() {
+            read_stable(&md_path)?
+        } else {
+            String::new()
+        };
+        let after = (stat_signature(&toml_path), stat_signature(&md_path));
+        if before == after {
+            break (toml, md);
         }
-    }
+        attempts += 1;
+        if attempts >= 2 {
+            bail!("definitions tree changed during capture (mixed revision refused)");
+        }
+    };
 
     let manifest: SopManifest =
         toml::from_str(&toml_bytes).context("SOP.toml manifest decode failed")?;
@@ -246,7 +244,7 @@ pub fn project_definition(captured: &CapturedDefinition) -> ProcedureDefinitionV
         .filter(|step| step.requires_confirmation || step.kind == SopStepKind::Checkpoint)
         .map(|step| ProcedureGateV1 {
             step: step.number,
-            policy: None,
+            policy: step.policy.clone(),
         })
         .collect();
 

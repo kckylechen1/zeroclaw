@@ -136,7 +136,10 @@ pub fn snapshot_content_scan(toml_bytes: &str, md_bytes: &str) -> Result<(), Sna
             });
         }
         for marker in WORKTREE_PATH_MARKERS {
-            if lower.contains(marker) {
+            // Markers compare against the LOWERCASED content — match the
+            // marker's own lowercase form so mid-string `/Users/` paths
+            // cannot evade by case.
+            if lower.contains(&marker.to_ascii_lowercase()) {
                 return Err(SnapshotMintError::ForbiddenContent {
                     category: SnapshotContentCategory::WorktreePath,
                 });

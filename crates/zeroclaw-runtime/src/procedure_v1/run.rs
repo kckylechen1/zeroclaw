@@ -80,6 +80,14 @@ pub enum ProcedureSubmitError {
         "procedure run refused: transport did not retain the snapshot bytes before acknowledging"
     )]
     NotRetainedBeforeAck,
+    /// The same `(requester, request_id)` tuple is already bound to a
+    /// different intent digest (TB-7 rule 3) — typically a policy change
+    /// across a restart. Zero new execution; the caller must use a new
+    /// run-instance identity, never replay this tuple with new policy.
+    #[error(
+        "procedure run refused: request id already bound to a different intent (policy or content changed; use a new run instance)"
+    )]
+    RequestIdConflict,
     /// Encode-side admission rejected the composed intent (TB-4).
     #[error("procedure run refused: {0}")]
     Compose(#[from] ComposeRejection),
@@ -291,11 +299,13 @@ impl ProcedureRunClient {
                 );
                 Err(ProcedureSubmitError::Transport(SubmitTransportError))
             }
+            // A TB-7 rule-3 conflict is TYPED truth (typically a
+            // policy change across a restart), not a transport
+            // failure.
+            SubmitReceipt::RequestIdConflict { .. } => Err(ProcedureSubmitError::RequestIdConflict),
             // Ambiguity surfaces typed; the caller replays the SAME
             // (requester, request_id) tuple — never invents a new id.
-            SubmitReceipt::Unavailable
-            | SubmitReceipt::ReconciliationUnknown { .. }
-            | SubmitReceipt::RequestIdConflict { .. } => {
+            SubmitReceipt::Unavailable | SubmitReceipt::ReconciliationUnknown { .. } => {
                 Err(ProcedureSubmitError::Transport(SubmitTransportError))
             }
         }
@@ -436,11 +446,10 @@ fn verify_snapshot_invariants(snapshot: &ProcedureSnapshotV1) -> Result<(), Proc
     {
         return Err(mismatch("review_state"));
     }
-    // 3. The step projection IS what the embedded markdown parses to.
+    // 3. The step projection IS what the embedded definition parses
+    //    to. TOML-only manifest steps are a legal source (markdown
+    //    absent ⇒ manifest steps) — the fallback below handles it.
     let parsed = crate::sop::parse_steps(&snapshot.definition_md);
-    if parsed.is_empty() && !manifest.steps.is_empty() {
-        return Err(mismatch("steps"));
-    }
     let steps_source = if parsed.is_empty() {
         &manifest.steps
     } else {
@@ -450,28 +459,84 @@ fn verify_snapshot_invariants(snapshot: &ProcedureSnapshotV1) -> Result<(), Proc
         return Err(mismatch("steps"));
     }
     for (step, projected) in steps_source.iter().zip(&snapshot.steps) {
+        let body_ok = zeroclaw_api::taskintent::BoundedText::new(step.body.clone())
+            .map(|body| body.as_str() == projected.body.as_str())
+            .unwrap_or(false);
         if step.number != projected.number
             || step.title != projected.title
+            || !body_ok
+            || step.suggested_tools != projected.suggested_tools
             || step.requires_confirmation != projected.requires_confirmation
         {
             return Err(mismatch("steps"));
         }
+        let kind_label = match step.kind {
+            SopStepKind::Execute => "execute",
+            SopStepKind::Checkpoint => "checkpoint",
+            SopStepKind::Capability => "capability",
+        };
+        if projected.kind != kind_label {
+            return Err(mismatch("steps"));
+        }
     }
-    // 4. The gates are exactly the parsed confirmation/checkpoint steps.
-    let gates: std::collections::BTreeSet<u32> = steps_source
+    // 4. The gates are exactly the parsed confirmation/checkpoint
+    //    steps, WITH their authored approval policies.
+    let mut gates: Vec<(u32, Option<String>)> = steps_source
         .iter()
         .filter(|step| step.requires_confirmation || step.kind == SopStepKind::Checkpoint)
-        .map(|step| step.number)
+        .map(|step| (step.number, step.policy.clone()))
         .collect();
-    let claimed: std::collections::BTreeSet<u32> = snapshot
+    gates.sort();
+    let mut claimed: Vec<(u32, Option<String>)> = snapshot
         .approval_gates
         .iter()
-        .map(|gate| gate.step)
+        .map(|gate| (gate.step, gate.policy.clone()))
         .collect();
+    claimed.sort();
     if gates != claimed {
         return Err(mismatch("approval_gates"));
     }
-    // 5. The required capability is what the pinned steps' FULL tool
+    // 5. The guidance's artifact expectations are the DEFINITION-derived
+    //    projections (Report always; VerificationLog iff any step
+    //    declares a contract) and all required — a forge cannot strip
+    //    required evidence. The evaluation requirement is the frozen
+    //    deterministic-check class — a forge cannot weaken evaluation.
+    let schema_any = steps_source.iter().any(|step| step.schema.is_some());
+    let expected_classes: std::collections::BTreeSet<&str> = if schema_any {
+        ["report", "verification_log"].into_iter().collect()
+    } else {
+        ["report"].into_iter().collect()
+    };
+    let claimed_classes: std::collections::BTreeSet<&str> = snapshot
+        .guidance
+        .artifact_expectations
+        .iter()
+        .map(|expectation| match expectation.artifact_class {
+            zeroclaw_api::taskintent::ArtifactClass::Report => "report",
+            zeroclaw_api::taskintent::ArtifactClass::Diff => "diff",
+            zeroclaw_api::taskintent::ArtifactClass::VerificationLog => "verification_log",
+        })
+        .collect();
+    if expected_classes != claimed_classes
+        || snapshot
+            .guidance
+            .artifact_expectations
+            .iter()
+            .any(|expectation| !expectation.required)
+    {
+        return Err(mismatch("artifact_expectations"));
+    }
+    if snapshot.guidance.evaluation_requirement.independence
+        != zeroclaw_api::taskintent::IndependenceClass::DeterministicCheck
+    {
+        return Err(mismatch("evaluation_requirement"));
+    }
+    // 6. Forbidden content categories apply at submit exactly as at
+    //    mint (a minted-then-tampered body carrying credentials or
+    //    Private-Dyad material dies here, existence-blind).
+    super::snapshot::snapshot_content_scan(&snapshot.definition_toml, &snapshot.definition_md)
+        .map_err(|_| mismatch("content_scan"))?;
+    // 7. The required capability is what the pinned steps' FULL tool
     //    surface implies (narrow-only: guidance can never lower it
     //    below what the procedure actually does).
     if super::snapshot::required_capability_of(steps_source)
@@ -479,7 +544,7 @@ fn verify_snapshot_invariants(snapshot: &ProcedureSnapshotV1) -> Result<(), Proc
     {
         return Err(mismatch("required_capability"));
     }
-    // 6. The guidance digest binds the embedded guidance (shared
+    // 8. The guidance digest binds the embedded guidance (shared
     //    binding rule: digest over the payload with the field itself
     //    normalized to empty).
     if super::snapshot::guidance_payload_digest(&snapshot.guidance)

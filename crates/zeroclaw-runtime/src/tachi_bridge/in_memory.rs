@@ -139,9 +139,13 @@ struct HostState {
     /// half holds them in the envelope only.
     procedure_snapshots: BTreeMap<String, zeroclaw_api::procedure_v1::ProcedureSnapshotV1>,
     /// Resolved procedure gates (test lane): task → (gate step →
-    /// decision id) — decisions are durable facts on the host side,
-    /// never a ZeroClaw-side gate ledger.
+    /// (decision, decision id)) — decisions are durable facts on the
+    /// host side, never a ZeroClaw-side gate ledger.
     resolved_gates: BTreeMap<String, BTreeMap<u32, (String, String)>>,
+    /// Procedure runs (test lane): task → the snapshot ref its intent
+    /// bound (set at submit; resolution checks gate declarations
+    /// against the RETAINED snapshot, not the caller's claim).
+    procedure_runs: BTreeMap<String, String>,
 }
 
 impl HostState {
@@ -1218,7 +1222,14 @@ impl super::procedure::ProcedureSubmitPort for InMemoryTachiTaskBridge {
         // after the bytes are held Tachi-side (in this double:
         // process-lifetime CAS — the durable production story is the
         // real tachi host's store).
-        self.submit(intent, request_id).await
+        let receipt = self.submit(intent, request_id).await;
+        if let Ok(SubmitReceipt::Admitted { task_ref, .. }) = &receipt {
+            self.state
+                .lock()
+                .procedure_runs
+                .insert(task_ref.as_wire().to_string(), reference.clone());
+        }
+        receipt
     }
 
     async fn retained_snapshot(
@@ -1264,8 +1275,29 @@ impl InMemoryTachiTaskBridge {
             .iter()
             .map(|gate| gate.step)
             .collect();
+        // Progression truth: steps already executed live on the durable
+        // fact log — a resumed drive CONTINUES, it never re-executes
+        // earlier steps.
+        let already_executed: std::collections::BTreeSet<u32> = {
+            let state = self.state.lock();
+            state
+                .facts
+                .get(task_ref.as_wire())
+                .map(|log| {
+                    log.iter()
+                        .filter_map(|(_, fact)| match &fact.detail {
+                            FactDetail::ProcedureStep { step, .. } => Some(*step),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         let mut completed = Vec::new();
         for step in &snapshot.steps {
+            if already_executed.contains(&step.number) {
+                continue;
+            }
             if gate_steps.contains(&step.number) {
                 // The recorded DECISION governs: approve resumes, deny
                 // cancels — a denied gate must never execute its step.
@@ -1357,6 +1389,37 @@ impl InMemoryTachiTaskBridge {
             return Err(format!("unknown gate decision {decision}"));
         }
         let mut state = self.state.lock();
+        // The gate must be DECLARED by the retained snapshot bound to
+        // this task (not the caller's say-so)...
+        let snapshot_ref = state
+            .procedure_runs
+            .get(task_ref.as_wire())
+            .cloned()
+            .unwrap_or_default();
+        let declared = state
+            .procedure_snapshots
+            .get(
+                snapshot_ref
+                    .strip_prefix(zeroclaw_api::procedure_v1::PROCEDURE_SNAPSHOT_REF_PREFIX)
+                    .unwrap_or_default(),
+            )
+            .is_some_and(|snapshot| snapshot.approval_gates.iter().any(|gate| gate.step == step));
+        if !declared {
+            return Err(format!("step {step} is not a declared gate of this run"));
+        }
+        // ...and PRESENTED (the run actually parked at it).
+        let presented = state.facts.get(task_ref.as_wire()).is_some_and(|log| {
+            log.iter().any(|(_, fact)| {
+                fact.kind == "procedure_gate_waiting"
+                    && matches!(
+                        &fact.detail,
+                        FactDetail::Execution { label } if label == "waiting_input"
+                    )
+            })
+        });
+        if !presented {
+            return Err(format!("gate {step} was never presented to an approver"));
+        }
         let gates = state
             .resolved_gates
             .entry(task_ref.as_wire().to_string())
