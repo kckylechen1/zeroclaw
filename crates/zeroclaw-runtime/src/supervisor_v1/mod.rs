@@ -122,18 +122,37 @@ impl ResultObservation {
 }
 
 /// Parse `vendor=…; model=…; basis=…` provenance into its tokens.
+/// Fail-closed against forgery: a DUPLICATE `vendor=` or `model=` key
+/// makes the whole provenance malformed (both tokens come back empty —
+/// a duplicated-key string can never corroborate anything). Comparisons
+/// elsewhere are case-insensitive over these tokens.
 fn parse_provenance(provenance: &str) -> (String, String) {
-    let mut vendor = String::new();
-    let mut model = String::new();
+    let mut vendor: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut malformed = false;
     for part in provenance.split(';') {
         let part = part.trim();
         if let Some(value) = part.strip_prefix("vendor=") {
-            vendor = value.trim().to_string();
+            if vendor
+                .replace(value.trim().trim_matches('"').to_string())
+                .is_some()
+            {
+                malformed = true;
+            }
         } else if let Some(value) = part.strip_prefix("model=") {
-            model = value.trim().trim_matches('"').to_string();
+            if model
+                .replace(value.trim().trim_matches('"').to_string())
+                .is_some()
+            {
+                malformed = true;
+            }
         }
     }
-    (vendor, model)
+    if malformed {
+        // A duplicated-key provenance can never corroborate anything.
+        return (String::new(), String::new());
+    }
+    (vendor.unwrap_or_default(), model.unwrap_or_default())
 }
 
 /// Run-scoped record of one independent-review task (TB-17): the review's
@@ -202,23 +221,29 @@ impl ReviewLineageRecord {
     }
 
     /// Whether this review satisfies an independence-marked requirement.
-    /// The gate is CONJUNCTIVE and fail-closed:
+    /// The gate is CONJUNCTIVE and fail-closed, and BOTH the label and
+    /// the evidence must reach the requirement:
     ///
     /// 1. the review's result must have been OBSERVED (a collected
     ///    projection — admission alone is not a completed review);
     /// 2. the review task must be a DISTINCT task from the one reviewed;
     /// 3. the context lineage must be distinct from the implementation
     ///    task's;
-    /// 4. the recorded class must satisfy the requirement under the
-    ///    frozen TB-17 law;
-    /// 5. vendor/model corroboration: a `fresh_context_cross_vendor`
-    ///    requirement additionally requires BOTH observed provenances
-    ///    with DIFFERENT vendors; `fresh_context_cross_model_same_vendor`
-    ///    requires the SAME vendor and a DIFFERENT model (the recorded
-    ///    class label alone never suffices). `fresh_context_same_harness`
-    ///    and `human_review` corroborate on lineage + completion (their
-    ///    distinguishing dimension is not machine-observable from the
-    ///    projection).
+    /// 4. the RECORDED class must satisfy the requirement under the
+    ///    frozen TB-17 lattice (an understated label cannot satisfy
+    ///    beyond itself);
+    /// 5. the OBSERVED EVIDENCE must independently rank at or above the
+    ///    requirement — the class label alone never suffices, and an
+    ///    overstated label cannot either:
+    ///    - evidence rank 3 (different vendors observed on both sides)
+    ///      covers `fresh_context_cross_vendor` and below;
+    ///    - rank 2 (same vendor, different models) covers
+    ///      `fresh_context_cross_model_same_vendor` and below;
+    ///    - rank 1 (completion + distinct lineage; vendor facts absent
+    ///      or identical) covers `fresh_context_same_harness` only;
+    ///    - `human_review` is NOT corroborable from provenance at all
+    ///      (and not mintable through this surface; see
+    ///      [`SupervisorSessionV1::request_independent_review`]).
     #[must_use]
     pub fn satisfies(
         &self,
@@ -236,32 +261,40 @@ impl ReviewLineageRecord {
         if !self.independence_class.satisfies_requirement(required) {
             return false;
         }
-        match required {
-            IndependenceClass::FreshContextCrossVendor => match implementation_observed {
-                Some(implementation)
-                    if !implementation.provenance_vendor.is_empty()
-                        && !review_observed.provenance_vendor.is_empty() =>
-                {
-                    implementation.provenance_vendor != review_observed.provenance_vendor
+        // The evidence rank the observed provenances support. Comparisons
+        // are case-insensitive; missing provenance caps the rank at 1.
+        let evidence_rank: u8 = match implementation_observed {
+            Some(implementation) => {
+                let a = implementation.provenance_vendor.to_ascii_lowercase();
+                let b = review_observed.provenance_vendor.to_ascii_lowercase();
+                if a.is_empty() || b.is_empty() {
+                    1
+                } else if a != b {
+                    3
+                } else {
+                    let m1 = implementation.provenance_model.to_ascii_lowercase();
+                    let m2 = review_observed.provenance_model.to_ascii_lowercase();
+                    if !m1.is_empty() && !m2.is_empty() && m1 != m2 {
+                        2
+                    } else {
+                        1
+                    }
                 }
-                // Missing provenance cannot corroborate a cross-vendor
-                // claim — fail closed.
-                _ => false,
-            },
-            IndependenceClass::FreshContextCrossModelSameVendor => match implementation_observed {
-                Some(implementation)
-                    if !implementation.provenance_vendor.is_empty()
-                        && !review_observed.provenance_vendor.is_empty() =>
-                {
-                    implementation.provenance_vendor == review_observed.provenance_vendor
-                        && !implementation.provenance_model.is_empty()
-                        && !review_observed.provenance_model.is_empty()
-                        && implementation.provenance_model != review_observed.provenance_model
-                }
-                _ => false,
-            },
-            _ => true,
-        }
+            }
+            None => 1,
+        };
+        let required_rank: u8 = match required {
+            IndependenceClass::FreshContextSameHarness => 1,
+            IndependenceClass::FreshContextCrossModelSameVendor => 2,
+            IndependenceClass::FreshContextCrossVendor => 3,
+            // Human participation is not machine-corroborable from a
+            // provenance projection — and this surface cannot mint a
+            // human-review record in the first place.
+            IndependenceClass::HumanReview
+            | IndependenceClass::DeterministicCheck
+            | IndependenceClass::SameSessionContinuation => return false,
+        };
+        evidence_rank >= required_rank
     }
 
     /// The production mint — crate-private: only the supervisor session
@@ -431,12 +464,19 @@ pub enum SupervisorFlowError {
         expected: String,
         actual: String,
     },
-    #[error(
-        "an ambiguous review submission is pending (same (requester, request_id) tuple must be          replayed per TB-7 rule 4); resolve it before requesting another review"
-    )]
-    AmbiguousReviewPending,
     #[error("review task {task_ref} is not one of this session's review lineages")]
     UnknownReviewTask { task_ref: TaskRef },
+    #[error(
+        "the offered projection belongs to {actual:?}, not to review task {expected:?} — a \
+         result from another task cannot complete this review's gate"
+    )]
+    ObservationTaskMismatch { expected: TaskRef, actual: TaskRef },
+    #[error(
+        "class {class:?} cannot be requested through this surface: the supervisor submits \
+         machine-executed review tasks (capability reasoning_review); a human review enters \
+         through the human review path, never a supervisor task submission"
+    )]
+    ClassNotRequestableHere { class: IndependenceClass },
 }
 
 /// The supervisor session. Constructed ONLY from an admitted
@@ -776,6 +816,15 @@ impl SupervisorSessionV1 {
         review_task: &TaskRef,
         projection: &ResultProjectionView,
     ) -> Result<(), SupervisorFlowError> {
+        // The projection must belong to the review task it is offered
+        // for — a result from ANY other task cannot complete this
+        // review's gate.
+        if &projection.task_ref != review_task {
+            return Err(SupervisorFlowError::ObservationTaskMismatch {
+                expected: review_task.clone(),
+                actual: projection.task_ref.clone(),
+            });
+        }
         let observation = ResultObservation::from_projection(projection);
         let record = self
             .reviews
@@ -844,6 +893,14 @@ impl SupervisorSessionV1 {
                     self.reviews.push(record.clone());
                     Ok(record)
                 }
+                // TYPED ambiguity (ReconciliationUnknown) and host
+                // Unavailable both mean "the tuple may or may not be
+                // committed" — the pending tuple stays retained for
+                // replay; a definitive conflict is surfaced as-is.
+                Ok(receipt @ SubmitReceipt::ReconciliationUnknown { .. })
+                | Ok(receipt @ SubmitReceipt::Unavailable) => {
+                    Err(SupervisorFlowError::ReviewSubmitRefused { receipt })
+                }
                 Ok(other) => Err(SupervisorFlowError::ReviewSubmitRefused { receipt: other }),
                 Err(_) => Err(SupervisorFlowError::ReviewSubmitRefused {
                     receipt: SubmitReceipt::Unavailable,
@@ -852,6 +909,16 @@ impl SupervisorSessionV1 {
         }
         if !required_class.is_independence_marked() {
             return Err(SupervisorFlowError::ClassNotIndependenceMarked {
+                class: required_class,
+            });
+        }
+        // A machine-submitted review task can never BE a human review:
+        // the class is refused here. The independence law still lets a
+        // REAL human review satisfy requirements — it just cannot be
+        // minted through this surface, and human participation cannot
+        // be corroborated from a provenance projection either.
+        if required_class == IndependenceClass::HumanReview {
+            return Err(SupervisorFlowError::ClassNotRequestableHere {
                 class: required_class,
             });
         }
@@ -940,6 +1007,17 @@ impl SupervisorSessionV1 {
                 self.reviews.push(record.clone());
                 Ok(record)
             }
+            // TYPED ambiguity (ReconciliationUnknown) and host
+            // Unavailable both retain the SAME tuple for replay — the
+            // submission may or may not be committed, so the next call
+            // replays it verbatim (never a new id, never a second
+            // task). Definitive outcomes (rejected, id conflict) end
+            // the submission: nothing is retained.
+            Ok(receipt @ SubmitReceipt::ReconciliationUnknown { .. })
+            | Ok(receipt @ SubmitReceipt::Unavailable) => {
+                self.pending_review_submit = Some((intent, request_id));
+                Err(SupervisorFlowError::ReviewSubmitRefused { receipt })
+            }
             Ok(other) => Err(SupervisorFlowError::ReviewSubmitRefused { receipt: other }),
             // The response was lost after possible host commit: retain
             // the SAME tuple for replay. A retry of this method replays
@@ -952,6 +1030,16 @@ impl SupervisorSessionV1 {
                 })
             }
         }
+    }
+
+    /// Abandon a pending ambiguous review submission (typed, no bridge
+    /// call): the retained tuple is dropped so a NEW review may be
+    /// requested. Use only after the caller has reconciled the pending
+    /// tuple out-of-band or decided to give up on it; the abandoned
+    /// submission's facts (if the host committed it) remain Tachi-side
+    /// truth this session no longer tracks.
+    pub fn abandon_pending_review(&mut self) -> bool {
+        self.pending_review_submit.take().is_some()
     }
 
     /// All review lineage records this session minted, in order.

@@ -781,6 +781,25 @@ async fn correction_cycle_runs_through_the_bridge_surface() {
         InterventionReceipt::CorrectionRequested { .. }
     ));
 
+    // The CORRECTED implementation result lands BEFORE the re-review:
+    // verification now present, a NEW result revision the re-review is
+    // bound to (the round-1 result had none — see the projection above).
+    rig.bridge.observe_outcome(
+        &task,
+        attempt(3),
+        "done",
+        Some("artifact:impl-diff-1".into()),
+        vec!["evidence:impl-2-verified".into()],
+        true,
+        true,
+        "vendor=codex; model=codex; basis=attested",
+    );
+    let impl_round2 = supervisor
+        .collect_result(&task)
+        .await
+        .expect("collect impl r2");
+    assert!(impl_round2.contract_violations.is_empty());
+
     // Re-review: a NEW review task on ANOTHER fresh lineage.
     let second = supervisor
         .request_independent_review(IC::FreshContextSameHarness, "review round two")
@@ -1361,4 +1380,383 @@ async fn cross_vendor_satisfaction_requires_vendor_corroboration() {
         .note_review_observation(record2.review_task(), &review2_projection)
         .expect("observed 2");
     assert!(supervisor.latest_review_satisfies(IC::FreshContextCrossVendor));
+}
+
+#[tokio::test]
+async fn observation_from_a_foreign_task_cannot_complete_the_gate() {
+    // Codex round-2 finding 1: note_review_observation must bind the
+    // offered projection to the review task it claims to complete — a
+    // result from ANY other task is refused typed.
+    let rig = Rig::new();
+    let mut supervisor = session(&rig);
+    let task = parent_submits_planned_task(&mut supervisor, &rig).await;
+    let review = supervisor
+        .request_independent_review(IC::FreshContextSameHarness, "review")
+        .await
+        .expect("review");
+
+    // The implementation task has a completed result; the review does
+    // not. Offering the IMPLEMENTATION's projection for the REVIEW is
+    // refused.
+    rig.bridge.observe_outcome(
+        &task,
+        attempt(1),
+        "done",
+        Some("artifact:i".into()),
+        vec!["evidence:i".into()],
+        true,
+        true,
+        "vendor=glm; model=glm; basis=attested",
+    );
+    let impl_projection = supervisor.collect_result(&task).await.expect("collect");
+    let err = supervisor
+        .note_review_observation(review.review_task(), &impl_projection)
+        .expect_err("foreign projection refused");
+    assert!(
+        matches!(
+            err,
+            super::SupervisorFlowError::ObservationTaskMismatch { .. }
+        ),
+        "wrong error: {err}"
+    );
+    // The gate stays closed.
+    assert!(!supervisor.latest_review_satisfies(IC::FreshContextSameHarness));
+}
+
+#[tokio::test]
+async fn human_review_class_cannot_be_minted_by_this_surface() {
+    // Codex round-2 finding 3: the supervisor submits machine-executed
+    // review tasks (capability reasoning_review); a HumanReview class
+    // can never be minted through it — the class is refused at request
+    // time, and a forged HumanReview record satisfies nothing.
+    let rig = Rig::new();
+    let mut supervisor = session(&rig);
+    parent_submits_planned_task(&mut supervisor, &rig).await;
+    let err = supervisor
+        .request_independent_review(IC::HumanReview, "review")
+        .await
+        .expect_err("human review class refused");
+    assert!(
+        matches!(
+            err,
+            super::SupervisorFlowError::ClassNotRequestableHere { .. }
+        ),
+        "wrong error: {err}"
+    );
+    // And even a forged record with a completed observation cannot
+    // corroborate human participation from provenance.
+    let forged = super::ReviewLineageRecord::forge_for_test(
+        serde_json::from_value(serde_json::json!("task:r1")).unwrap(),
+        serde_json::from_value(serde_json::json!("task:i1")).unwrap(),
+        IC::HumanReview,
+        "bundle-r".into(),
+        "bundle-i".into(),
+        "rid".into(),
+        Some(super::ResultObservation {
+            result_revision: 1,
+            provenance_vendor: "human".into(),
+            provenance_model: String::new(),
+            terminal_classification: "done".into(),
+        }),
+    );
+    assert!(!forged.satisfies(IC::HumanReview, None));
+}
+
+#[tokio::test]
+async fn duplicated_provenance_keys_and_case_tricks_cannot_forge_corroboration() {
+    // Codex round-2 finding 2: a duplicated vendor key makes the whole
+    // provenance malformed (fails closed), and case differences do not
+    // create vendor distinctness.
+    let rig = Rig::new();
+    let mut supervisor = session(&rig);
+    let task = parent_submits_planned_task(&mut supervisor, &rig).await;
+    let review = supervisor
+        .request_independent_review(IC::FreshContextCrossVendor, "review")
+        .await
+        .expect("review");
+    rig.bridge.observe_outcome(
+        &task,
+        attempt(1),
+        "done",
+        Some("artifact:i".into()),
+        vec!["evidence:i".into()],
+        true,
+        true,
+        "vendor=codex; model=codex; basis=attested",
+    );
+    // Forged review provenance: duplicated vendor keys.
+    rig.bridge.observe_outcome(
+        review.review_task(),
+        attempt(2),
+        "done",
+        Some("artifact:r".into()),
+        vec!["evidence:r".into()],
+        true,
+        false,
+        "vendor=codex; vendor=glm; model=x; basis=attested",
+    );
+    let _ = supervisor
+        .collect_result(&task)
+        .await
+        .expect("collect impl");
+    let review_projection = supervisor
+        .collect_result(review.review_task())
+        .await
+        .expect("collect review");
+    supervisor
+        .note_review_observation(review.review_task(), &review_projection)
+        .expect("observed");
+    assert!(
+        !supervisor.latest_review_satisfies(IC::FreshContextCrossVendor),
+        "duplicated-key provenance must not corroborate"
+    );
+    // Case tricks: same vendor in different cases is the same vendor
+    // (cannot fabricate cross-vendor), and different cases of the same
+    // vendor do not fabricate cross-model either.
+    let case_review = supervisor
+        .request_independent_review(IC::FreshContextCrossVendor, "case review")
+        .await
+        .expect("review 2");
+    rig.bridge.observe_outcome(
+        case_review.review_task(),
+        attempt(3),
+        "done",
+        Some("artifact:r2".into()),
+        vec!["evidence:r2".into()],
+        true,
+        false,
+        "vendor=CODEX; model=gpt; basis=attested",
+    );
+    let case_projection = supervisor
+        .collect_result(case_review.review_task())
+        .await
+        .expect("collect review 2");
+    supervisor
+        .note_review_observation(case_review.review_task(), &case_projection)
+        .expect("observed 2");
+    assert!(
+        !supervisor.latest_review_satisfies(IC::FreshContextCrossVendor),
+        "case-only vendor difference is not cross-vendor"
+    );
+}
+
+#[tokio::test]
+async fn corroborated_stronger_review_satisfies_weaker_requirement() {
+    // Codex round-2 finding 4: corroboration branches on the RECORD's
+    // class, then the frozen lattice decides adequacy — a corroborated
+    // cross-vendor review satisfies the weaker cross-model-same-vendor
+    // requirement, exactly as the lattice says.
+    let rig = Rig::new();
+    let mut supervisor = session(&rig);
+    let task = parent_submits_planned_task(&mut supervisor, &rig).await;
+    let review = supervisor
+        .request_independent_review(IC::FreshContextCrossVendor, "cross review")
+        .await
+        .expect("review");
+    rig.bridge.observe_outcome(
+        &task,
+        attempt(1),
+        "done",
+        Some("artifact:i".into()),
+        vec!["evidence:i".into()],
+        true,
+        true,
+        "vendor=codex; model=codex; basis=attested",
+    );
+    rig.bridge.observe_outcome(
+        review.review_task(),
+        attempt(2),
+        "done",
+        Some("artifact:r".into()),
+        vec!["evidence:r".into()],
+        true,
+        false,
+        "vendor=glm; model=glm; basis=attested",
+    );
+    let _ = supervisor
+        .collect_result(&task)
+        .await
+        .expect("collect impl");
+    let review_projection = supervisor
+        .collect_result(review.review_task())
+        .await
+        .expect("collect review");
+    supervisor
+        .note_review_observation(review.review_task(), &review_projection)
+        .expect("observed");
+    assert!(supervisor.latest_review_satisfies(IC::FreshContextCrossVendor));
+    assert!(
+        supervisor.latest_review_satisfies(IC::FreshContextCrossModelSameVendor),
+        "a corroborated stronger review satisfies the weaker requirement (lattice)"
+    );
+    assert!(supervisor.latest_review_satisfies(IC::FreshContextSameHarness));
+}
+
+#[tokio::test]
+async fn typed_reconciliation_unknown_retains_the_replay_tuple() {
+    // Codex round-2 finding 5: a TYPED ReconciliationUnknown receipt is
+    // as ambiguous as a lost response — the exact (intent, request_id)
+    // tuple is retained and replayed; no new id is minted.
+    use parking_lot::Mutex as TestMutex;
+    struct UnknownOnce {
+        inner: Arc<InMemoryTachiTaskBridge>,
+        fired: TestMutex<bool>,
+    }
+    #[async_trait::async_trait]
+    impl TachiTaskBridge for UnknownOnce {
+        async fn submit(
+            &self,
+            intent: &zeroclaw_api::taskintent::TaskIntentV1,
+            request_id: &RequestId,
+        ) -> Result<SubmitReceipt, crate::tachi_bridge::SubmitTransportError> {
+            let fire = {
+                let mut fired = self.fired.lock();
+                if *fired {
+                    false
+                } else {
+                    *fired = true;
+                    true
+                }
+            };
+            if fire {
+                // The host commits; the client observes typed
+                // ambiguity instead of the admission.
+                let _ = self.inner.submit(intent, request_id).await;
+                let digest = intent.canonical_digest();
+                return Ok(SubmitReceipt::ReconciliationUnknown { digest });
+            }
+            self.inner.submit(intent, request_id).await
+        }
+        async fn get(
+            &self,
+            task_ref: &zeroclaw_api::taskintent::TaskRef,
+        ) -> Result<crate::tachi_bridge::TaskSnapshotView, crate::tachi_bridge::BridgeQueryError>
+        {
+            self.inner.get(task_ref).await
+        }
+        async fn watch(
+            &self,
+            task_ref: &zeroclaw_api::taskintent::TaskRef,
+            after_seq: u64,
+            limit: usize,
+        ) -> Result<crate::tachi_bridge::TaskEventPageView, crate::tachi_bridge::BridgeQueryError>
+        {
+            self.inner.watch(task_ref, after_seq, limit).await
+        }
+        async fn collect(
+            &self,
+            task_ref: &zeroclaw_api::taskintent::TaskRef,
+            result_revision: Option<u64>,
+        ) -> Result<crate::tachi_bridge::ResultProjectionView, crate::tachi_bridge::BridgeQueryError>
+        {
+            self.inner.collect(task_ref, result_revision).await
+        }
+        async fn intervene(
+            &self,
+            task_ref: &zeroclaw_api::taskintent::TaskRef,
+            intervention: &zeroclaw_api::taskintent::InterventionV1,
+            requester: &zeroclaw_api::taskintent::RequesterRef,
+            request_id: &RequestId,
+            expected_task_revision: Option<u64>,
+        ) -> Result<
+            zeroclaw_api::taskintent::InterventionReceipt,
+            zeroclaw_api::taskintent::InterventionError,
+        > {
+            self.inner
+                .intervene(
+                    task_ref,
+                    intervention,
+                    requester,
+                    request_id,
+                    expected_task_revision,
+                )
+                .await
+        }
+        async fn request_stop(
+            &self,
+            task_ref: &zeroclaw_api::taskintent::TaskRef,
+            mode: zeroclaw_api::taskintent::StopMode,
+            requester: &zeroclaw_api::taskintent::RequesterRef,
+            request_id: &RequestId,
+            expected_task_revision: Option<u64>,
+        ) -> Result<
+            zeroclaw_api::taskintent::StopReceipt,
+            zeroclaw_api::taskintent::InterventionError,
+        > {
+            self.inner
+                .request_stop(
+                    task_ref,
+                    mode,
+                    requester,
+                    request_id,
+                    expected_task_revision,
+                )
+                .await
+        }
+    }
+    let inner = Arc::new(InMemoryTachiTaskBridge::new());
+    let plain = Rig {
+        bridge: Arc::clone(&inner),
+    };
+    let client = TachiBridgeClient::new(Arc::new(UnknownOnce {
+        inner: Arc::clone(&inner),
+        fired: TestMutex::new(false),
+    }) as Arc<dyn TachiTaskBridge>);
+    let registry = registry();
+    let mut supervisor = SupervisorSessionV1::from_admitted_profile(
+        &registry,
+        &supervisor_vref(&registry),
+        &LineageRef::new_root(ParentRunRef::from_opaque("root-typed-unknown")),
+        client,
+        requester(),
+        None,
+    )
+    .expect("admits");
+    let action = supervisor
+        .plan_implementation_task(&implementation_inputs(), &parent_policy())
+        .expect("plan");
+    let payload = action.task_intent_request.clone().expect("payload");
+    match plain
+        .client()
+        .submit(&payload.intent, &payload.request_id)
+        .await
+        .unwrap()
+    {
+        SubmitReceipt::Admitted { task_ref, .. } => {
+            supervisor
+                .attach_implementation_task(task_ref)
+                .await
+                .expect("attach");
+        }
+        other => panic!("submit failed: {other:?}"),
+    }
+    let bindings_before = inner.binding_count();
+    let tasks_before = inner.task_count();
+    let err = supervisor
+        .request_independent_review(IC::FreshContextSameHarness, "typed ambiguity probe")
+        .await
+        .expect_err("typed ambiguity surfaces");
+    assert!(
+        matches!(
+            err,
+            super::SupervisorFlowError::ReviewSubmitRefused {
+                receipt: SubmitReceipt::ReconciliationUnknown { .. }
+            }
+        ),
+        "wrong error: {err}"
+    );
+    // The host committed exactly one binding + task.
+    assert_eq!(inner.binding_count(), bindings_before + 1);
+    assert_eq!(inner.task_count(), tasks_before + 1);
+    // The replay returns the SAME task (idempotent), no second anything.
+    let replayed = supervisor
+        .request_independent_review(IC::FreshContextSameHarness, "retry")
+        .await
+        .expect("typed replay reconciles");
+    assert_eq!(inner.binding_count(), bindings_before + 1);
+    assert_eq!(inner.task_count(), tasks_before + 1);
+    assert_eq!(
+        replayed.review_task().as_wire(),
+        format!("task:inmem-{:08x}", tasks_before + 1)
+    );
 }
