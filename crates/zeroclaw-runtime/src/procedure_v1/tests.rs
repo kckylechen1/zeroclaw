@@ -958,3 +958,191 @@ async fn policy_change_across_restart_is_a_typed_conflict_not_a_transport_error(
         Err(ProcedureSubmitError::RequestIdConflict)
     ));
 }
+
+// ── Codex round-3 hardening: identity forges, step-specific gates,
+// pair markers, extended markers, unnumbered TOML steps ──────────────────
+
+#[tokio::test]
+async fn forged_procedure_id_refused_at_submit() {
+    let dir = fixture_dir();
+    let mut snapshot =
+        mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    snapshot.procedure_id = "other-procedure".to_string();
+    snapshot.guidance.guidance_digest =
+        super::snapshot::guidance_payload_digest(&snapshot.guidance);
+    snapshot.compiled_guidance_digest = snapshot.guidance.guidance_digest.clone();
+    let (client, _double) = client_and_double();
+    let request_id = derive_request_id("other-procedure", &snapshot.procedure_digest, "forge-4");
+    let refused = client
+        .submit_run(&snapshot, &full_policy(), &requester(), &request_id)
+        .await;
+    assert!(matches!(
+        refused,
+        Err(ProcedureSubmitError::SnapshotInvariant {
+            field: "procedure_id"
+        })
+    ));
+}
+
+#[tokio::test]
+async fn parking_at_gate_two_does_not_authorize_resolving_gate_five() {
+    let gated_md = format!(
+        "{STAGEX_MD}\n"
+    )
+    .replace(
+        "   - tools: shell, file_write\n",
+        "   - tools: shell, file_write\n   - requires_confirmation: true\n",
+    )
+    .replace(
+        "5. **Digest repro** — Run `make digests`, build a second time, confirm the digest is unchanged.\n   - tools: shell\n",
+        "5. **Digest repro** — Run `make digests`, build a second time, confirm the digest is unchanged.\n   - requires_confirmation: true\n",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    write_package(dir.path(), STAGEX_TOML, &gated_md);
+    let captured = capture_definition(dir.path(), "stagex-update").unwrap();
+    let snapshot = mint_snapshot(&captured).unwrap();
+    let gate_steps: Vec<u32> = snapshot.approval_gates.iter().map(|g| g.step).collect();
+    assert_eq!(gate_steps, vec![2, 5]);
+
+    let (client, double) = client_and_double();
+    let request_id = derive_request_id(
+        &snapshot.procedure_id,
+        &snapshot.procedure_digest,
+        "gates25",
+    );
+    let output = client
+        .submit_run(&snapshot, &full_policy(), &requester(), &request_id)
+        .await
+        .unwrap();
+    let reference = snapshot.snapshot_ref();
+
+    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    assert_eq!(completed, vec![1]);
+    assert_eq!(gate, Some(2));
+    // Parked at 2: resolving 5 is refused (never presented).
+    assert!(
+        double
+            .resolve_procedure_gate(&output.task_ref, 5, "approve", "dec-pre5")
+            .is_err()
+    );
+    // Resolving 2 works, then the run parks at 5; resolving 2 AGAIN is
+    // refused as already-resolved-by-another-id.
+    double
+        .resolve_procedure_gate(&output.task_ref, 2, "approve", "dec-2")
+        .unwrap();
+    // The approved gate step itself now executes, then 3..4, park at 5.
+    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    assert_eq!(completed, vec![2, 3, 4]);
+    assert_eq!(gate, Some(5));
+    assert!(
+        double
+            .resolve_procedure_gate(&output.task_ref, 2, "approve", "dec-2b")
+            .is_err()
+    );
+    double
+        .resolve_procedure_gate(&output.task_ref, 5, "approve", "dec-5")
+        .unwrap();
+    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    assert_eq!(completed, (5..=8).collect::<Vec<u32>>());
+    assert_eq!(gate, None);
+}
+
+#[test]
+fn pair_publication_marker_refuses_a_mixed_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    // Author publishes the marker for the ORIGINAL markdown...
+    let original_md = STAGEX_MD;
+    let marker = {
+        let value = serde_json::json!({ "md": original_md });
+        zeroclaw_api::taskintent::canonical_json_digest_hex(&value)
+    };
+    let toml_with_marker = STAGEX_TOML.replace(
+        "review_state = \"published\"",
+        &format!("review_state = \"published\"\nmd_sha256 = \"{marker}\""),
+    );
+    write_package(dir.path(), &toml_with_marker, original_md);
+    assert!(capture_definition(dir.path(), "stagex-update").is_ok());
+    // ...then installs a NEW markdown while the marker still names the
+    // old one — the sequenced-install mix the stat guard cannot see.
+    write_package(
+        dir.path(),
+        &toml_with_marker,
+        &format!("{original_md}\n9. **Extra** — later.\n"),
+    );
+    let mixed = capture_definition(dir.path(), "stagex-update");
+    assert!(mixed.is_err(), "mixed revision refused by the pair marker");
+}
+
+#[tokio::test]
+async fn unnumbered_toml_only_steps_mint_and_submit() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("sops").join("unnumbered-proc");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("SOP.toml"),
+        r#"[sop]
+name = "unnumbered-proc"
+description = "Steps without explicit numbers."
+version = "0.5.0"
+review_state = "published"
+
+[[triggers]]
+type = "manual"
+
+[[steps]]
+title = "Alpha"
+body = "First."
+suggested_tools = ["file_read"]
+
+[[steps]]
+title = "Beta"
+body = "Second."
+suggested_tools = ["file_read"]
+"#,
+    )
+    .unwrap();
+    let captured = capture_definition(&dir.path().join("sops"), "unnumbered-proc").unwrap();
+    // Capture renumbers to 1..=N.
+    assert_eq!(
+        captured.steps.iter().map(|s| s.number).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let snapshot = mint_snapshot(&captured).unwrap();
+    // Submit's verifier applies the same renumbering — admits.
+    let (client, _double) = client_and_double();
+    let request_id = derive_request_id("unnumbered-proc", &snapshot.procedure_digest, "u-1");
+    let output = client
+        .submit_run(&snapshot, &full_policy(), &requester(), &request_id)
+        .await
+        .unwrap();
+    assert_eq!(output.binding.revision, "0.5.0");
+}
+
+#[test]
+fn extended_content_markers_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    write_package(
+        dir.path(),
+        STAGEX_TOML,
+        &format!("{STAGEX_MD}\n\n- secret: AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI\n"),
+    );
+    let captured = capture_definition(dir.path(), "stagex-update").unwrap();
+    assert!(matches!(
+        mint_snapshot(&captured),
+        Err(SnapshotMintError::ForbiddenContent {
+            category: SnapshotContentCategory::Credential
+        })
+    ));
+    write_package(
+        dir.path(),
+        STAGEX_TOML,
+        &format!("{STAGEX_MD}\n\nWindows notes live at C:\\Users\\operator\\notes.\n"),
+    );
+    let captured = capture_definition(dir.path(), "stagex-update").unwrap();
+    assert!(matches!(
+        mint_snapshot(&captured),
+        Err(SnapshotMintError::ForbiddenContent {
+            category: SnapshotContentCategory::WorktreePath
+        })
+    ));
+}

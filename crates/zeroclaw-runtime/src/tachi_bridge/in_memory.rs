@@ -99,6 +99,9 @@ enum FactDetail {
         decision: String,
         decision_id: String,
     },
+    /// A procedure gate PRESENTATION: the run parked at this exact
+    /// gate (the approver-visible prompt fact; step-specific).
+    ProcedureGateWaiting { step: u32 },
 }
 
 /// SHA-256 lower-hex over the CANONICAL JSON of the typed payload
@@ -424,6 +427,10 @@ impl InMemoryTachiTaskBridge {
                 }
                 FactDetail::OutcomeObserved { .. } => {
                     delivery = ProjectedDeliveryState::project("ready").expect("ready is mapped");
+                }
+                FactDetail::ProcedureGateWaiting { .. } => {
+                    execution = ProjectedExecutionState::project("waiting_input")
+                        .expect("waiting_input is mapped");
                 }
                 FactDetail::OwnerCapabilities { .. }
                 | FactDetail::InterventionForwarded { .. }
@@ -1344,9 +1351,7 @@ impl InMemoryTachiTaskBridge {
                                 "snapshot": snapshot_ref,
                                 "step": step.number,
                             })),
-                            detail: FactDetail::Execution {
-                                label: "waiting_input".to_string(),
-                            },
+                            detail: FactDetail::ProcedureGateWaiting { step: step.number },
                         },
                     );
                     return (completed, Some(step.number));
@@ -1407,14 +1412,14 @@ impl InMemoryTachiTaskBridge {
         if !declared {
             return Err(format!("step {step} is not a declared gate of this run"));
         }
-        // ...and PRESENTED (the run actually parked at it).
+        // ...and PRESENTED — the run parked at THIS gate specifically
+        // (parking at step 2 must not authorize resolving step 5).
         let presented = state.facts.get(task_ref.as_wire()).is_some_and(|log| {
             log.iter().any(|(_, fact)| {
-                fact.kind == "procedure_gate_waiting"
-                    && matches!(
-                        &fact.detail,
-                        FactDetail::Execution { label } if label == "waiting_input"
-                    )
+                matches!(
+                    &fact.detail,
+                    FactDetail::ProcedureGateWaiting { step: waiting } if *waiting == step
+                )
             })
         });
         if !presented {

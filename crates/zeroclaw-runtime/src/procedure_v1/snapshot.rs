@@ -86,6 +86,8 @@ impl std::fmt::Display for SnapshotContentCategory {
 }
 
 const CREDENTIAL_MARKERS: &[&str] = &[
+    "aws_secret_access_key",
+    "aws_session_token",
     "-----BEGIN OPENSSH PRIVATE KEY",
     "-----BEGIN RSA PRIVATE KEY",
     "-----BEGIN PRIVATE KEY",
@@ -106,8 +108,17 @@ const CREDENTIAL_MARKERS: &[&str] = &[
 
 const PRIVATE_DYAD_MARKERS: &[&str] = &["private dyad", "private_dyad", "private-dyad"];
 
-const WORKTREE_PATH_MARKERS: &[&str] =
-    &["/worktrees/", "/Users/", "/home/", "/tmp/", "/var/folders/"];
+const WORKTREE_PATH_MARKERS: &[&str] = &[
+    "/worktrees/",
+    "/users/",
+    "/home/",
+    "/tmp/",
+    "/var/folders/",
+    "c:\\users\\",
+    "\\\\",
+    "/etc/",
+    "/private/var/",
+];
 
 /// Scan captured definition content for mint-refusal categories. Shared
 /// by the mint and by tests proving the privacy law.

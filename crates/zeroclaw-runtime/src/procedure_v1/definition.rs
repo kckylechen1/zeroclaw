@@ -153,6 +153,29 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
 
     let manifest: SopManifest =
         toml::from_str(&toml_bytes).context("SOP.toml manifest decode failed")?;
+    // Pair-publication marker (optional): an author who publishes
+    // `[sop] md_sha256 = "<hex>"` binds the manifest to exactly one
+    // markdown body — a capture during a sequenced install (TOML-B
+    // paused before MD-B) sees a stable-but-mixed tree that the stat
+    // guard cannot detect, but the marker refuses. Absent, the stat
+    // guard is the only protection (documented residual).
+    {
+        let raw: toml::Value = toml::from_str(&toml_bytes).context("SOP.toml reparse")?;
+        if let Some(declared) = raw
+            .get("sop")
+            .and_then(|table| table.get("md_sha256"))
+            .and_then(|value| value.as_str())
+        {
+            let actual = zeroclaw_api::taskintent::canonical_json_digest_hex(
+                &serde_json::json!({ "md": md_bytes }),
+            );
+            if !declared.eq_ignore_ascii_case(&actual) {
+                bail!(
+                    "SOP.toml md_sha256 marker does not match SOP.md bytes (mixed revision refused)"
+                );
+            }
+        }
+    }
     let review_state = review_state_from_raw(&toml_bytes)?;
     let steps = if !md_bytes.is_empty() {
         parse_steps(&md_bytes)

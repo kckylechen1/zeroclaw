@@ -440,6 +440,25 @@ fn verify_snapshot_invariants(snapshot: &ProcedureSnapshotV1) -> Result<(), Proc
     if manifest.sop.version != snapshot.procedure_revision {
         return Err(mismatch("procedure_revision"));
     }
+    // The snapshot is a TOTAL function of the captured bytes for the
+    // SOP package format: identity, provenance, privacy class, and the
+    // format-empty collections (constraints, skill refs) are fixed
+    // projections — a forge cannot originate values there either.
+    if manifest.sop.name != snapshot.procedure_id {
+        return Err(mismatch("procedure_id"));
+    }
+    if snapshot.provenance.authored_via != "zeroclaw-sops-dir" {
+        return Err(mismatch("provenance"));
+    }
+    if snapshot.privacy_class != zeroclaw_api::taskintent::PrivacyClass::Public {
+        return Err(mismatch("privacy_class"));
+    }
+    if !snapshot.source_skill_refs.is_empty()
+        || !snapshot.resolved_constraints.is_empty()
+        || !snapshot.guidance.objective_constraints.is_empty()
+    {
+        return Err(mismatch("projection_purity"));
+    }
     if super::definition::review_state_of(&snapshot.definition_toml)
         .map_err(|_| mismatch("review_state"))?
         != zeroclaw_api::procedure_v1::DefinitionReviewState::Published
@@ -450,8 +469,18 @@ fn verify_snapshot_invariants(snapshot: &ProcedureSnapshotV1) -> Result<(), Proc
     //    to. TOML-only manifest steps are a legal source (markdown
     //    absent ⇒ manifest steps) — the fallback below handles it.
     let parsed = crate::sop::parse_steps(&snapshot.definition_md);
-    let steps_source = if parsed.is_empty() {
-        &manifest.steps
+    // TOML-only fallback: the manifest steps carry authored numbers
+    // that may legitimately default to zero — apply the SAME dense
+    // 1..=N renumbering the capture applies before comparing.
+    let renumbered_manifest: Vec<crate::sop::types::SopStep> = {
+        let mut steps = manifest.steps.clone();
+        for (index, step) in steps.iter_mut().enumerate() {
+            step.number = (index as u32) + 1;
+        }
+        steps
+    };
+    let steps_source: &Vec<crate::sop::types::SopStep> = if parsed.is_empty() {
+        &renumbered_manifest
     } else {
         &parsed
     };
