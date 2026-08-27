@@ -1580,9 +1580,16 @@ async fn replaying_a_base_admitted_task_through_the_procedure_port_is_refused() 
         ),
         "unexpected receipt: {receipt:?}"
     );
-    // No procedure binding was created for the base task.
+    // No procedure binding was created for the base task...
     let drive = double.drive_procedure_steps(&task_ref, &reference);
     assert!(drive.is_err(), "base task is not a procedure run");
+    // ...and no unbound retained bytes: the replay rejection leaves
+    // the CAS untouched (retention is success-path only).
+    let retained = double.retained_snapshot(&reference).await.unwrap();
+    assert!(
+        retained.is_none(),
+        "no retention without a procedure binding"
+    );
 }
 
 #[tokio::test]
@@ -1668,4 +1675,221 @@ async fn port_refuses_an_intent_whose_expectations_are_not_the_snapshots() {
         .await
         .unwrap();
     assert!(retained.is_none(), "no retention on rejection");
+}
+
+/// Minimal client-boundary stub: a port whose procedure lane always
+/// rejects with the carrier-law token — proves the CLIENT maps it to
+/// the typed `HostRefusedProcedureBinding`, never ambiguous transport.
+struct RefusingProcedurePort;
+
+#[async_trait::async_trait]
+impl crate::tachi_bridge::TachiTaskBridge for RefusingProcedurePort {
+    async fn submit(
+        &self,
+        _intent: &zeroclaw_api::taskintent::TaskIntentV1,
+        _request_id: &RequestId,
+    ) -> Result<SubmitReceipt, crate::tachi_bridge::SubmitTransportError> {
+        Ok(SubmitReceipt::Rejected {
+            reason: "replay_of_non_procedure_task".to_string(),
+        })
+    }
+    async fn get(
+        &self,
+        _task_ref: &zeroclaw_api::taskintent::TaskRef,
+    ) -> Result<crate::tachi_bridge::TaskSnapshotView, crate::tachi_bridge::BridgeQueryError> {
+        Err(crate::tachi_bridge::BridgeQueryError::NotFound)
+    }
+    async fn watch(
+        &self,
+        _task_ref: &zeroclaw_api::taskintent::TaskRef,
+        _after_seq: u64,
+        _limit: usize,
+    ) -> Result<crate::tachi_bridge::TaskEventPageView, crate::tachi_bridge::BridgeQueryError> {
+        Err(crate::tachi_bridge::BridgeQueryError::NotFound)
+    }
+    async fn collect(
+        &self,
+        _task_ref: &zeroclaw_api::taskintent::TaskRef,
+        _result_revision: Option<u64>,
+    ) -> Result<crate::tachi_bridge::ResultProjectionView, crate::tachi_bridge::BridgeQueryError>
+    {
+        Err(crate::tachi_bridge::BridgeQueryError::NotFound)
+    }
+    async fn intervene(
+        &self,
+        _task_ref: &zeroclaw_api::taskintent::TaskRef,
+        _intervention: &zeroclaw_api::taskintent::InterventionV1,
+        _requester: &RequesterRef,
+        _request_id: &RequestId,
+        _expected_task_revision: Option<u64>,
+    ) -> Result<
+        zeroclaw_api::taskintent::InterventionReceipt,
+        zeroclaw_api::taskintent::InterventionError,
+    > {
+        Err(
+            zeroclaw_api::taskintent::InterventionError::UnsupportedByLifecycleOwner {
+                operation: zeroclaw_api::taskintent::InterventionStatic::RequestCorrection,
+            },
+        )
+    }
+    async fn request_stop(
+        &self,
+        _task_ref: &zeroclaw_api::taskintent::TaskRef,
+        _mode: zeroclaw_api::taskintent::StopMode,
+        _requester: &RequesterRef,
+        _request_id: &RequestId,
+        _expected_task_revision: Option<u64>,
+    ) -> Result<zeroclaw_api::taskintent::StopReceipt, zeroclaw_api::taskintent::InterventionError>
+    {
+        Err(
+            zeroclaw_api::taskintent::InterventionError::UnsupportedByLifecycleOwner {
+                operation: zeroclaw_api::taskintent::InterventionStatic::RequestCorrection,
+            },
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tachi_bridge::procedure::ProcedureSubmitPort for RefusingProcedurePort {
+    async fn submit_procedure_run(
+        &self,
+        _intent: &zeroclaw_api::taskintent::TaskIntentV1,
+        _request_id: &RequestId,
+        _snapshot: &zeroclaw_api::procedure_v1::ProcedureSnapshotV1,
+    ) -> Result<SubmitReceipt, crate::tachi_bridge::SubmitTransportError> {
+        Ok(SubmitReceipt::Rejected {
+            reason: "replay_of_non_procedure_task".to_string(),
+        })
+    }
+    async fn retained_snapshot(
+        &self,
+        _snapshot_ref: &str,
+    ) -> Result<
+        Option<zeroclaw_api::procedure_v1::ProcedureSnapshotV1>,
+        crate::tachi_bridge::SubmitTransportError,
+    > {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn client_maps_a_carrier_binding_refusal_to_the_typed_error() {
+    let dir = fixture_dir();
+    let snapshot =
+        mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    let client = ProcedureRunClient::new(std::sync::Arc::new(RefusingProcedurePort));
+    let request_id = derive_request_id("stagex-update", &snapshot.procedure_digest, "map-1");
+    let refused = client
+        .submit_run(&snapshot, &full_policy(), &requester(), &request_id)
+        .await;
+    assert!(matches!(
+        refused,
+        Err(ProcedureSubmitError::HostRefusedProcedureBinding { reason })
+            if reason == "replay_of_non_procedure_task"
+    ));
+}
+
+#[tokio::test]
+async fn port_refuses_swapped_expectation_order_and_weakened_evaluation() {
+    let dir = fixture_dir();
+    let snapshot =
+        mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    let reference = snapshot.snapshot_ref();
+    let paired: Vec<zeroclaw_api::taskintent::ArtifactExpectation> = snapshot
+        .guidance
+        .artifact_expectations
+        .iter()
+        .map(
+            |expectation| zeroclaw_api::taskintent::ArtifactExpectation {
+                artifact_class: expectation.artifact_class,
+                description: expectation.description.clone(),
+                required: expectation.required,
+            },
+        )
+        .collect();
+    // The stagex fixture has TWO expectations when any step declares a
+    // schema; otherwise one. Build BOTH discriminations from the
+    // paired list: swapped order (when >=2) and a weakened evaluation
+    // independence class.
+    let context = |bundle: String| StructuralIntentContext {
+        requester: requester(),
+        parent_ref: None,
+        supervisor_ref: None,
+        context_bundle_ref: BoundedText::new(bundle).expect("bounded"),
+        source_refs: vec![],
+        expiry: None,
+        retry_of: None,
+    };
+    let inputs_with =
+        |artifacts: Vec<zeroclaw_api::taskintent::ArtifactExpectation>,
+         evaluation: zeroclaw_api::taskintent::EvaluationRequirement| {
+            TaskIntentInputs {
+                objective: BoundedText::new(
+                    "Execute procedure stagex-update revision 1.0.0 per the pinned snapshot"
+                        .to_string(),
+                )
+                .expect("bounded"),
+                capability_request: zeroclaw_api::taskintent::CapabilityRequest {
+                    capability: snapshot.guidance.required_capability,
+                },
+                constraints: vec![],
+                expected_artifacts: artifacts,
+                evaluation_requirement: evaluation,
+            }
+        };
+    let double = Arc::new(InMemoryTachiTaskBridge::new());
+
+    // Swapped order (only discriminable with >= 2 expectations; the
+    // fixture's VerificationLog presence is schema-dependent, so guard).
+    if paired.len() >= 2 {
+        let mut swapped = paired.clone();
+        swapped.swap(0, 1);
+        let intent = compose_intent(
+            &inputs_with(swapped, snapshot.guidance.evaluation_requirement.clone()),
+            &full_policy(),
+            &context(reference.clone()),
+        )
+        .expect("composes");
+        let receipt = double
+            .submit_procedure_run(
+                &intent,
+                &derive_request_id("stagex-update", &snapshot.procedure_digest, "ord-1"),
+                &snapshot,
+            )
+            .await
+            .expect("transport level ok");
+        assert!(
+            matches!(
+                &receipt,
+                SubmitReceipt::Rejected { reason } if reason == "intent_expectation_mismatch"
+            ),
+            "swapped order refused: {receipt:?}"
+        );
+    }
+
+    // Weakened evaluation independence.
+    let weakened = zeroclaw_api::taskintent::EvaluationRequirement {
+        independence: zeroclaw_api::taskintent::IndependenceClass::SameSessionContinuation,
+    };
+    let intent = compose_intent(
+        &inputs_with(paired, weakened),
+        &full_policy(),
+        &context(reference),
+    )
+    .expect("composes");
+    let receipt = double
+        .submit_procedure_run(
+            &intent,
+            &derive_request_id("stagex-update", &snapshot.procedure_digest, "eval-1"),
+            &snapshot,
+        )
+        .await
+        .expect("transport level ok");
+    assert!(
+        matches!(
+            &receipt,
+            SubmitReceipt::Rejected { reason } if reason == "intent_expectation_mismatch"
+        ),
+        "weakened evaluation refused: {receipt:?}"
+    );
 }
