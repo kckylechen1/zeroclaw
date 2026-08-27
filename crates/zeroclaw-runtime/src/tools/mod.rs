@@ -1729,8 +1729,8 @@ fn claim_plugin_tool_name(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
     use zeroclaw_config::schema::{BrowserConfig, Config, MemoryConfig};
 

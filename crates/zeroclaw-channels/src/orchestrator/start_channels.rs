@@ -457,11 +457,8 @@ pub async fn start_channels(
             }
 
             #[allow(unused_mut)]
-            let mut configured_channels: Vec<ConfiguredChannel> = collect_configured_channels(
-                &config_arc,
-                "runtime startup",
-                &tool_specs,
-            );
+            let mut configured_channels: Vec<ConfiguredChannel> =
+                collect_configured_channels(&config_arc, "runtime startup", &tool_specs);
 
             #[cfg(feature = "channel-nostr")]
             {

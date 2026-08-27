@@ -1694,10 +1694,8 @@ async fn drive_live_sop_actions(
                             step_alias.expect("needs_reassembly implies a step agent alias");
                         if let Some(reassembly) = sop_reassembly {
                             if !exec_cache.contains_key(alias) {
-                                match assemble_owned_execution(
-                                    reassembly.config, alias, approval,
-                                )
-                                .await
+                                match assemble_owned_execution(reassembly.config, alias, approval)
+                                    .await
                                 {
                                     Ok(owned) => {
                                         exec_cache.insert(alias.to_string(), owned);

@@ -450,7 +450,10 @@ fn str_of_value(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
-    fn try_channel_with(content_template: &str, thread_id_field: &str) -> anyhow::Result<AmqpChannel> {
+    fn try_channel_with(
+        content_template: &str,
+        thread_id_field: &str,
+    ) -> anyhow::Result<AmqpChannel> {
         AmqpChannel::new(AmqpChannelConfig {
             amqp_url: "amqp://localhost:5672".into(),
             exchange: "amq.topic".into(),
@@ -469,8 +472,7 @@ mod tests {
     }
 
     fn channel_with(content_template: &str, thread_id_field: &str) -> AmqpChannel {
-        try_channel_with(content_template, thread_id_field)
-            .expect("amqp channel constructs")
+        try_channel_with(content_template, thread_id_field).expect("amqp channel constructs")
     }
 
     #[test]
@@ -615,5 +617,4 @@ tr7J6RKtO4OsZS/2KoYL8M+o
         let ch = channel_with("", "");
         assert!(ch.build_client_identity().expect("no client tls").is_none());
     }
-
 }

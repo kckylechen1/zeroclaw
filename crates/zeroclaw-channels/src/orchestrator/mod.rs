@@ -67,7 +67,6 @@ use channel_build::one_shot_channel_workspace_dir;
 mod start_channels;
 pub use start_channels::start_channels;
 
-
 mod deliver_announcement;
 pub use deliver_announcement::deliver_announcement;
 

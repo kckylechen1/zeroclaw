@@ -234,7 +234,6 @@ pub async fn run(
             (None, None)
         };
 
-
         let all_tools_result = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
             &security,

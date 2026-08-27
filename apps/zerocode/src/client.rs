@@ -1280,7 +1280,6 @@ impl RpcClient {
         .await
     }
 
-
     // ── Session methods ──────────────────────────────────────────
 
     pub async fn session_new(

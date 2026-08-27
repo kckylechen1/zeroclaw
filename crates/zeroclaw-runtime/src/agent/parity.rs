@@ -364,11 +364,10 @@ async fn parity_l2_sop_live_step_agent_isolation() {
         },
     );
 
-
     // The live-SOP path: re-assemble the step agent's own execution context.
     let owned = crate::agent::turn::assemble_owned_execution(&config, "restricted", None)
         .await
-    .expect("assemble_owned_execution must build the restricted step agent's context");
+        .expect("assemble_owned_execution must build the restricted step agent's context");
     let sop_names = retained_names(&owned.tools_registry);
 
     // Security property: the RESTRICTED policy is applied, not the parent's. The

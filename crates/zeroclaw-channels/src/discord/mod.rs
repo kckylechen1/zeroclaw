@@ -9,7 +9,9 @@ use std::time::Duration;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
-use zeroclaw_api::channel::{Channel, ChannelApprovalRequest, ChannelApprovalResponse, ChannelMessage, SendMessage};
+use zeroclaw_api::channel::{
+    Channel, ChannelApprovalRequest, ChannelApprovalResponse, ChannelMessage, SendMessage,
+};
 use zeroclaw_api::media::MediaAttachment;
 use zeroclaw_runtime::i18n;
 
@@ -3692,7 +3694,6 @@ impl Channel for DiscordChannel {
             };
         Ok(Some(attributed))
     }
-
 }
 
 #[cfg(test)]

@@ -2055,5 +2055,4 @@ mod tests {
              session_exists() returned false (see #7126)"
         );
     }
-
 }

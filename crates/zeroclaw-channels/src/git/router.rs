@@ -21,7 +21,6 @@ pub enum RouteAction {
     /// Deliver as a channel message with the conversational filters
     /// (mention gate under `mention_only`).
     Message,
-    /// Emit a channel-sourced SOP event.
 }
 
 pub fn resolve_route(event_type: &str, table: &HashMap<String, GitEventRoute>) -> RouteAction {
@@ -177,10 +176,7 @@ mod tests {
     #[test]
     fn transport_plan_follows_routed_event_types() {
         let mut table = HashMap::new();
-        table.insert(
-            EVT_WORKFLOW_RUN_FAILED.to_string(),
-            route(false),
-        );
+        table.insert(EVT_WORKFLOW_RUN_FAILED.to_string(), route(false));
         table.insert(EVT_RELEASE_PUBLISHED.to_string(), route(true));
         let plan = TransportPlan::from_routes(&table);
         assert!(plan.workflow_runs);

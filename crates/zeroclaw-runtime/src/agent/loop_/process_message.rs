@@ -132,7 +132,6 @@ pub async fn process_message(
             (None, None)
         };
 
-
         let all_tools_result_pm = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
             &security,

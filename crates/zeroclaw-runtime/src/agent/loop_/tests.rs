@@ -21,8 +21,6 @@ use zeroclaw_api::channel::{
 use zeroclaw_providers::{ChatMessage, ToolCall};
 use zeroclaw_tool_call_parser::parse_tool_calls;
 
-
-
 zeroclaw_api::mock_tool_attribution!(
     CountingTool,
     CredentialOutputTool,

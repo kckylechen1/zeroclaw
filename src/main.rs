@@ -2609,23 +2609,25 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 );
 
                 #[cfg(feature = "gateway")]
-                registry.register_gateway(Box::new(move |host, port, config, tx, reload_controls, tui_registry| {
-                    let canvas_store = canvas_store_for_gateway.clone();
-                    let companion_store = companion_for_gateway.clone();
-                    Box::pin(async move {
-                        Box::pin(zeroclaw_gateway::run_gateway(
-                            &host,
-                            port,
-                            config,
-                            tx,
-                            reload_controls,
-                            tui_registry,
-                            Some(canvas_store),
-                            companion_store,
-                        ))
-                        .await
-                    })
-                }));
+                registry.register_gateway(Box::new(
+                    move |host, port, config, tx, reload_controls, tui_registry| {
+                        let canvas_store = canvas_store_for_gateway.clone();
+                        let companion_store = companion_for_gateway.clone();
+                        Box::pin(async move {
+                            Box::pin(zeroclaw_gateway::run_gateway(
+                                &host,
+                                port,
+                                config,
+                                tx,
+                                reload_controls,
+                                tui_registry,
+                                Some(canvas_store),
+                                companion_store,
+                            ))
+                            .await
+                        })
+                    },
+                ));
 
                 registry.register_channels(Box::new(move |config, cancel| {
                     let canvas_store = canvas_store_for_channels.clone();
@@ -2915,8 +2917,13 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 let companion_store = zeroclaw_memory::create_companion_store(&config)?;
                 let companion_outbox_observer =
                     spawn_companion_outbox_observer(companion_store.clone());
-                let result =
-                    Box::pin(channels::start_channels(config, None, cancel, companion_store)).await;
+                let result = Box::pin(channels::start_channels(
+                    config,
+                    None,
+                    cancel,
+                    companion_store,
+                ))
+                .await;
                 if let Some(handle) = sop_maintenance {
                     handle.abort();
                 }
@@ -3830,7 +3837,14 @@ async fn run_gateway_if_enabled(
     // Companion store is constructed once here — run_gateway never opens it.
     let companion_store = zeroclaw_memory::create_companion_store(&config)?;
     let result = Box::pin(gateway::run_gateway(
-        host, port, config, tx, None, None, None, companion_store,
+        host,
+        port,
+        config,
+        tx,
+        None,
+        None,
+        None,
+        companion_store,
     ))
     .await;
     // Self-respawn after the listener is released, if an in-app upgrade

@@ -4921,17 +4921,7 @@ mod tests {
         );
 
         let handle = zeroclaw_spawn::spawn!(async move {
-            run_gateway(
-                "127.0.0.1",
-                0,
-                config,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
+            run_gateway("127.0.0.1", 0, config, None, None, None, None, None).await
         });
 
         match tokio::time::timeout(
@@ -4987,17 +4977,7 @@ mod tests {
         config.agents.insert("fake123".to_string(), agent);
 
         let handle = zeroclaw_spawn::spawn!(async move {
-            run_gateway(
-                "127.0.0.1",
-                0,
-                config,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
+            run_gateway("127.0.0.1", 0, config, None, None, None, None, None).await
         });
 
         match tokio::time::timeout(
@@ -5038,17 +5018,7 @@ mod tests {
         );
 
         let handle = zeroclaw_spawn::spawn!(async move {
-            run_gateway(
-                "127.0.0.1",
-                0,
-                config,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
+            run_gateway("127.0.0.1", 0, config, None, None, None, None, None).await
         });
 
         match tokio::time::timeout(
