@@ -47,6 +47,7 @@
 
 pub mod client;
 pub mod compose;
+pub mod procedure;
 
 /// Test doubles for the [`TachiTaskBridge`] port — STRICTLY test-only
 /// (TB-22): the in-memory bridge is structurally a task/status ledger
@@ -73,3 +74,4 @@ pub use compose::{
     StructuralIntentContext, TaskIntentInputs, compose_intent, scan_client_authored_refs,
     scan_intent, scan_text,
 };
+pub use procedure::ProcedureSubmitPort;
