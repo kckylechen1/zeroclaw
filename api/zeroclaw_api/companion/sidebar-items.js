@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AuthorityClass","CaptureOrigin","CaptureOutcome","CompanionOutboxStatus","SourcePartition"],"fn":["classify_companion_authority"],"struct":["AgentIdentityId","CaptureContext","CaptureReceipt","CompanionIngress","CompanionOutboxHealth","CompanionOwnerGate","CompanionPrincipal","IngressIdentity"]};

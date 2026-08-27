@@ -1,0 +1,88 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The V3 Supervisor session: a typed state machine that drives implementation plus fresh-context independent review through Tachi — the runtime productization of the owner’s human loop (implementation → adversarial review → correction → re-review → judgment → report)."><title>zeroclaw_runtime::supervisor_v1 - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="zeroclaw_runtime" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module supervisor_v1</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../zeroclaw_runtime/index.html">zeroclaw_<wbr>runtime</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module supervisor_<wbr>v1</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate zeroclaw_<wbr>runtime</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">zeroclaw_runtime</a></div><h1>Module <span>supervisor_<wbr>v1</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The V3 Supervisor session: a typed state machine that drives
+implementation plus fresh-context independent review through Tachi —
+the runtime productization of the owner’s human loop (implementation
+→ adversarial review → correction → re-review → judgment → report).</p>
+<div class="example-wrap"><pre class="language-text"><code>Parent
+  → SupervisorSessionV1                 admitted Supervisor profile (SA-3)
+  → plan_implementation_task            typed `requested_parent_actions`
+                                       (submit_task_intent payload; SA-29:
+                                       the set has no submit op — the
+                                       PARENT performs the initial submit)
+  → attach_implementation_task          Tachi-minted TaskRef handed back
+  → observe / collect_result            ObserveTask / ReadResultRefs
+  → request_independent_review          TB-11 mapping: NEW review task on a
+                                       distinct Task/context lineage, its
+                                       independence class recorded (TB-17)
+  → request_correction … re-review      at least one correction cycle
+  → propose_judgment                    receipt-bound proposal — NEVER
+                                       canonical adjudication truth (SA-29,
+                                       KP-21, TB-13)
+  → conclude                            SupervisorReport = SubAgentReportV1
+                                       → Parent (SA-21, the ONLY channel)</code></pre></div>
+<p>Authority laws encoded here:</p>
+<ul>
+<li><strong>No direct-execution authority</strong> (SA-29/SA-30, N-R2 boundary 2):
+the session type holds no <code>Config</code>, no tool registry, no filesystem
+root, no shell/process handle, and no spawn surface — its ONLY
+outbound surface is the gated bridge client plus the structured
+report. The field set is pinned by <a href="struct.SupervisorInventory.html" title="struct zeroclaw_runtime::supervisor_v1::SupervisorInventory"><code>SupervisorInventory</code></a>.</li>
+<li><strong>Child/review work through Tachi only</strong> (SA-12 = D1): there is no
+local spawn path of any kind in this module (source-scan test).</li>
+<li><strong>Submit is parent-only for implementation</strong> (SA-29 role-exclusive
+law): <code>plan_implementation_task</code> composes the intent and RETURNS it
+as a typed parent action; the session’s own submit surface is the
+<code>RequestIndependentReview</code> mapping, which can only mint
+<code>reasoning_review</code> review tasks (capability forced), never
+implementation tasks.</li>
+<li><strong>Continuation ≠ independent review / same session ≠ independent
+review</strong> (TB-17): the only constructor of
+<a href="struct.ReviewLineageRecord.html" title="struct zeroclaw_runtime::supervisor_v1::ReviewLineageRecord"><code>ReviewLineageRecord</code></a> is [<code>Self::request_independent_review</code>],
+which refuses non-independence-marked classes, mints a fresh
+context bundle ref distinct from the implementation task’s, and
+records the class; <code>ReviewLineageRecord::satisfies</code> additionally
+requires the distinct lineage. A continuation receipt can never
+construct a record (structural) and <code>SameSessionContinuation</code>
+fails <code>is_independence_marked</code> (typed).</li>
+<li><strong>Worker success ≠ adjudication</strong> (TB-13/TB-18):
+[<code>Self::propose_judgment</code>] reads the verdict EXCLUSIVELY from the
+adjudication dimension of the collected projection; the worker’s
+terminal classification is carried as an observed FACT, explicitly
+not the verdict.</li>
+<li><strong>Supervisor judgment ≠ canonical eval truth</strong> (SA-29, KP-21):
+<code>propose_judgment</code> performs NO bridge write of any kind — the
+proposal is run-scoped content bound to receipts; canonical
+adjudication state stays Tachi’s (test observes it unchanged
+across a proposal).</li>
+<li><strong>Nothing durable</strong> (SA-26/TB-22): every field of the session is
+run-scoped; this module owns no DDL, opens no database, and writes
+no files (integration test mirrors <code>subagent_v1</code>’s). Structured
+ERROR logging rides the pre-existing <code>zeroclaw-log</code> surface
+(operator-gated persistence) — that is observability, not a task
+ledger; no new store and no new writer path to any annex table.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.JudgmentProposalV1.html" title="struct zeroclaw_runtime::supervisor_v1::JudgmentProposalV1">Judgment<wbr>Proposal<wbr>V1</a></dt><dd>A receipt-bound judgment proposal (SA-29 <code>ProposeJudgment</code>): run-scoped
+INTERPRETATION over Tachi’s adjudication truth — never canonical eval
+state (KP-21). Every field is derived from a receipt (task ref, result
+revision, projected labels); producing a proposal performs no bridge
+write, so it cannot be a lifecycle transition.</dd><dt><a class="struct" href="struct.ResultObservation.html" title="struct zeroclaw_runtime::supervisor_v1::ResultObservation">Result<wbr>Observation</a></dt><dd>What the session OBSERVED about a completed task result (from a
+collected <code>ResultProjectionV1</code>): receipt-bound facts used to
+corroborate independence claims. The provenance fields ride the
+TB-13 projection (observation only — provenance is readable, never
+placement authority).</dd><dt><a class="struct" href="struct.ReviewLineageRecord.html" title="struct zeroclaw_runtime::supervisor_v1::ReviewLineageRecord">Review<wbr>Lineage<wbr>Record</a></dt><dd>Run-scoped record of one independent-review task (TB-17): the review’s
+OWN task identity, what it reviews, its recorded independence class,
+its context lineage, and — only after the session observes the
+review’s completed result — the receipt-bound observation that
+corroborates the claim. The ONLY production constructor is
+<a href="struct.SupervisorSessionV1.html#method.request_independent_review" title="method zeroclaw_runtime::supervisor_v1::SupervisorSessionV1::request_independent_review"><code>SupervisorSessionV1::request_independent_review</code></a> (the fields are
+private); a continuation (or a same-session follow-up) can never
+masquerade as one, and a hand-built record cannot exist outside the
+test seam.</dd><dt><a class="struct" href="struct.SupervisorInventory.html" title="struct zeroclaw_runtime::supervisor_v1::SupervisorInventory">Supervisor<wbr>Inventory</a></dt><dd>What a supervisor session contains (the negative-capability
+inventory). No credential, shell, filesystem, tool-registry, or
+spawn-surface fields exist on this type — the serialized key set is
+the inventory, pinned by test so an execution-shaped addition becomes
+observable.</dd><dt><a class="struct" href="struct.SupervisorSessionV1.html" title="struct zeroclaw_runtime::supervisor_v1::SupervisorSessionV1">Supervisor<wbr>Session<wbr>V1</a></dt><dd>The supervisor session. Constructed ONLY from an admitted
+Supervisor-role <a href="../../zeroclaw_api/subagent_v1/struct.VersionedProfileRef.html" title="struct zeroclaw_api::subagent_v1::VersionedProfileRef"><code>VersionedProfileRef</code></a> (SA-3); holds NO execution
+capability of any kind (see the module authority laws).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.SupervisorAdmissionError.html" title="enum zeroclaw_runtime::supervisor_v1::SupervisorAdmissionError">Supervisor<wbr>Admission<wbr>Error</a></dt><dd>Typed admission failure for a supervisor session.</dd><dt><a class="enum" href="enum.SupervisorFlowError.html" title="enum zeroclaw_runtime::supervisor_v1::SupervisorFlowError">Supervisor<wbr>Flow<wbr>Error</a></dt><dd>Typed flow failure inside a live session.</dd><dt><a class="enum" href="enum.SupervisorPhase.html" title="enum zeroclaw_runtime::supervisor_v1::SupervisorPhase">Supervisor<wbr>Phase</a></dt><dd>The session’s phase machine. Typed transitions only; out-of-order
+calls are refused with <a href="enum.SupervisorFlowError.html#variant.WrongPhase" title="variant zeroclaw_runtime::supervisor_v1::SupervisorFlowError::WrongPhase"><code>SupervisorFlowError::WrongPhase</code></a>.</dd></dl></section></div></main></body></html>

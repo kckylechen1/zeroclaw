@@ -1,0 +1,31 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Request fields this phase cannot honour, named so a refusal can say which."><title>unsupported_request_fields in zeroclaw_runtime::subagent_host - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="zeroclaw_runtime" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">unsupported_request_fields</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../zeroclaw_runtime/index.html">zeroclaw_<wbr>runtime</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In zeroclaw_<wbr>runtime::<wbr>subagent_<wbr>host</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">zeroclaw_runtime</a>::<wbr><a href="index.html">subagent_host</a></div><h1>Function <span class="fn">unsupported_<wbr>request_<wbr>fields</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><pre class="rust item-decl"><code>pub fn unsupported_request_fields(request: &amp;<a class="struct" href="../../zeroclaw_coordinator/types/struct.ChildRequest.html" title="struct zeroclaw_coordinator::types::ChildRequest">ChildRequest</a>) -&gt; <a class="struct" href="https://doc.rust-lang.org/1.96.1/alloc/vec/struct.Vec.html" title="struct alloc::vec::Vec">Vec</a>&lt;&amp;'static <a class="primitive" href="https://doc.rust-lang.org/1.96.1/std/primitive.str.html">str</a>&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Request fields this phase cannot honour, named so a refusal can say which.</p>
+<p>Every entry is something <a href="../agent/loop_/fn.run.html" title="fn zeroclaw_runtime::agent::loop_::run"><code>crate::agent::run</code></a> has no parameter for, and
+dropping it silently would run a child that is not the child the caller
+asked for:</p>
+<ul>
+<li><code>resume_from</code> / <code>fork_context</code> seed the child’s conversation. <code>agent::run</code>
+starts from a fresh history built in <code>agent/loop_.rs:1849-1852</code>.</li>
+<li><code>cwd</code> is documented as “validated by the runner”. Honouring it means
+moving <code>SecurityPolicy::workspace_dir</code>, which is the child’s file-tool
+jail root and the shell tool’s spawn cwd
+(<code>zeroclaw-config/src/policy.rs:2217-2231</code>) — a capability change, not a
+convenience, and it needs a policy-scoped validation this phase does not
+have.</li>
+<li><code>overrides.persona</code> would have to override <code>Config::persona_for_agent</code>,
+which <code>agent::run</code> reads directly (<code>agent/loop_.rs:1169-1171</code>).</li>
+<li><code>overrides.reasoning_effort</code> has no parameter; the turn engine takes
+thinking level from a directive parsed out of the message
+(<code>agent/loop_.rs:1705</code>).</li>
+<li><code>overrides.output_token_budget</code> has no parameter and no enforcement point
+on this path.</li>
+</ul>
+<p>Fields deliberately absent from this list are ones the <em>coordinator</em> owns,
+not the runner: <code>completion_output_cap</code> (applied in
+<code>coordinator.rs:545-548</code>), <code>loop_task_id</code>, <code>run_in_background</code>,
+<code>await_to_completion</code>, <code>surface_completion</code>. <code>overrides.spawn_depth</code> is
+also absent: depth is capped structurally instead, by running the child
+with <code>AgentRunOverrides::is_subagent = true</code>, which makes the child’s own
+<code>spawn_subagent</code> tool refuse to recurse (<code>tools/spawn_subagent.rs:93-102</code>).</p>
+</div></details></section></div></main></body></html>

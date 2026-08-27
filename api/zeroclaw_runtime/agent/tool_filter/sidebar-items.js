@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["append_pinned_mcp_section","apply_policy_tool_filter","eager_mcp_tool_allowed","filter_by_allowed_tools","filter_tool_specs_for_turn","mcp_tool_access_policy","register_eager_mcp_tool_if_allowed"]};

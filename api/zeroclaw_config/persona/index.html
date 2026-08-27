@@ -1,0 +1,34 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Persona knobs: how an agent talks, as a small set of dials."><title>zeroclaw_config::persona - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="zeroclaw_config" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module persona</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../zeroclaw_config/index.html">zeroclaw_<wbr>config</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module persona</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-these-five-dials" title="Why these five dials">Why these five dials</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate zeroclaw_<wbr>config</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">zeroclaw_config</a></div><h1>Module <span>persona</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Persona knobs: how an agent talks, as a small set of dials.</p>
+<p>A persona is <em>authored</em>, not learned. It is part of an agent’s definition,
+in the same sense as its risk profile — something a person sets and the
+agent reads. Nothing here is derived from conversation history, and nothing
+here can widen what an agent is allowed to do.</p>
+<p>The dials use the same five-step vocabulary as <code>reasoning_effort</code>
+(<code>minimal</code> / <code>low</code> / <code>medium</code> / <code>high</code> / <code>xhigh</code>) so one mental model covers
+both. They are enums rather than free strings or floats on purpose: a
+number invites arithmetic, and the moment a warmth value can be multiplied
+into a score it has stopped being a delivery hint and started being an
+input to a decision.</p>
+<h3 id="why-these-five-dials"><a class="doc-anchor" href="#why-these-five-dials">§</a>Why these five dials</h3>
+<p>Each earns its place from a documented failure, not from taste:</p>
+<ul>
+<li><a href="struct.PersonaKnobs.html#structfield.challenge" title="field zeroclaw_config::persona::PersonaKnobs::challenge"><code>PersonaKnobs::challenge</code></a> is the structural answer to sycophancy. An
+assistant tuned for agreement drifts into telling people what they want
+to hear, which in a trading context rebuilds the procyclical problem
+inside the relationship. A high challenge setting is what makes
+disagreement part of the contract instead of a lapse in manners.</li>
+<li><a href="struct.PersonaKnobs.html#structfield.directness" title="field zeroclaw_config::persona::PersonaKnobs::directness"><code>PersonaKnobs::directness</code></a> exists because correct advice delivered as a
+command provokes resistance. Probing rather than commanding is a delivery
+technique, not a personality flourish.</li>
+<li><a href="struct.PersonaKnobs.html#structfield.explanation_density" title="field zeroclaw_config::persona::PersonaKnobs::explanation_density"><code>PersonaKnobs::explanation_density</code></a>, <a href="struct.PersonaKnobs.html#structfield.warmth" title="field zeroclaw_config::persona::PersonaKnobs::warmth"><code>PersonaKnobs::warmth</code></a> and
+<a href="struct.PersonaKnobs.html#structfield.humor" title="field zeroclaw_config::persona::PersonaKnobs::humor"><code>PersonaKnobs::humor</code></a> cover the rest of the observable temperament:
+how much reasoning is shown, how much heat is in the voice, and whether
+levity is allowed.</li>
+</ul>
+<p>What is deliberately <em>not</em> here: reminder intensity and delivery mode.
+Those are properties of a single message — derived per turn from what is
+happening — not properties of who the agent is.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.PersonaKnobs.html" title="struct zeroclaw_config::persona::PersonaKnobs">Persona<wbr>Knobs</a></dt><dd>The dials themselves. Every field defaults to <code>medium</code>, so an agent with no
+persona configured renders no persona text at all.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.PersonaLevel.html" title="enum zeroclaw_config::persona::PersonaLevel">Persona<wbr>Level</a></dt><dd>One dial position, sharing <code>reasoning_effort</code>’s vocabulary.</dd></dl></section></div></main></body></html>

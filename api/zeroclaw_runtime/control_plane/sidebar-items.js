@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["authority","boot","coordinator_host","global","goal_task","reaper","subagent_persistence","task_registry","task_store_sqlite"]};
