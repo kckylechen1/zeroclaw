@@ -83,6 +83,22 @@ enum FactDetail {
     /// rides the fact's payload digest only — the stop identity law
     /// excludes it, so no later stage needs it.
     StopRequested { mode: StopMode, stop_id: String },
+    /// A procedure step attempt, driven from the CAS-retained snapshot
+    /// (vertical V4): the executing truth is the retained bytes, never a
+    /// live definitions re-read. The snapshot binding rides the fact's
+    /// payload digest; the detail carries the audit substance.
+    ProcedureStep {
+        step: u32,
+        title: String,
+        outcome: String,
+    },
+    /// A procedure approval gate resolution (decision recorded
+    /// host-side with its idempotency id; approve/deny only).
+    ProcedureGateResolved {
+        step: u32,
+        decision: String,
+        decision_id: String,
+    },
 }
 
 /// SHA-256 lower-hex over the CANONICAL JSON of the typed payload
@@ -116,6 +132,16 @@ struct HostState {
     /// Materialized intervention receipts per TB-7 rule-6 tuple
     /// (same tuple + same digest ⇒ the SAME receipt on replay).
     intervention_receipts: BTreeMap<(String, String), InterventionReceipt>,
+    /// CAS-retained procedure snapshots (vertical V4, DECISION KP-16/E
+    /// option (b)): the double's TACHI-side retention — keyed by
+    /// canonical digest, byte-verified at submit BEFORE the ack. This is
+    /// the only place the snapshot bytes live in tests; the ZeroClaw
+    /// half holds them in the envelope only.
+    procedure_snapshots: BTreeMap<String, zeroclaw_api::procedure_v1::ProcedureSnapshotV1>,
+    /// Resolved procedure gates (test lane): task → (gate step →
+    /// decision id) — decisions are durable facts on the host side,
+    /// never a ZeroClaw-side gate ledger.
+    resolved_gates: BTreeMap<String, BTreeMap<u32, String>>,
 }
 
 impl HostState {
@@ -395,8 +421,10 @@ impl InMemoryTachiTaskBridge {
                 FactDetail::OutcomeObserved { .. } => {
                     delivery = ProjectedDeliveryState::project("ready").expect("ready is mapped");
                 }
-                FactDetail::OwnerCapabilities { .. } | FactDetail::InterventionForwarded { .. } => {
-                }
+                FactDetail::OwnerCapabilities { .. }
+                | FactDetail::InterventionForwarded { .. }
+                | FactDetail::ProcedureStep { .. }
+                | FactDetail::ProcedureGateResolved { .. } => {}
             }
         }
         TaskSnapshotView {
@@ -1128,4 +1156,285 @@ fn op_token(op: &InterventionStatic) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| format!("{op:?}"))
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Vertical V4: the procedure-run carrier lane (DECISION KP-16/E option (b))
+// ─────────────────────────────────────────────────────────────────────────
+
+#[async_trait]
+impl super::procedure::ProcedureSubmitPort for InMemoryTachiTaskBridge {
+    async fn submit_procedure_run(
+        &self,
+        intent: &TaskIntentV1,
+        request_id: &RequestId,
+        snapshot: &zeroclaw_api::procedure_v1::ProcedureSnapshotV1,
+    ) -> Result<SubmitReceipt, SubmitTransportError> {
+        // Carrier law, in the ratified order: byte-verify + persist
+        // BEFORE any acknowledgment — there is no ack-then-fetch window.
+        let serialized = snapshot.serialized_len();
+        if serialized > zeroclaw_api::procedure_v1::PROCEDURE_SNAPSHOT_MAX_BYTES {
+            return Ok(SubmitReceipt::Rejected {
+                reason: format!("snapshot_oversize:{serialized}"),
+            });
+        }
+        let digest = snapshot.canonical_digest();
+        // Byte-verification: the recomputed canonical digest must equal
+        // the digest the CAS ref names, and the embedded definition
+        // bytes must re-derive the pinned procedure digest.
+        let reference = snapshot.snapshot_ref();
+        if reference
+            != format!(
+                "{}{digest}",
+                zeroclaw_api::procedure_v1::PROCEDURE_SNAPSHOT_REF_PREFIX
+            )
+        {
+            return Ok(SubmitReceipt::Rejected {
+                reason: "snapshot_digest_mismatch".to_string(),
+            });
+        }
+        let derived = zeroclaw_api::taskintent::canonical_json_digest_hex(&serde_json::json!({
+            "sop_toml": snapshot.definition_toml,
+            "sop_md": snapshot.definition_md,
+        }));
+        if derived != snapshot.procedure_digest {
+            return Ok(SubmitReceipt::Rejected {
+                reason: "definition_digest_mismatch".to_string(),
+            });
+        }
+        // The intent must carry the SAME CAS ref (binding consistency).
+        if intent.context_bundle_ref.as_str() != reference {
+            return Ok(SubmitReceipt::Rejected {
+                reason: "snapshot_ref_binding_mismatch".to_string(),
+            });
+        }
+        {
+            let mut state = self.state.lock();
+            state
+                .procedure_snapshots
+                .insert(digest.clone(), snapshot.clone());
+        }
+        // Retained BEFORE the submit; the ack below can only arrive
+        // after the bytes are held Tachi-side (in this double:
+        // process-lifetime CAS — the durable production story is the
+        // real tachi host's store).
+        self.submit(intent, request_id).await
+    }
+
+    async fn retained_snapshot(
+        &self,
+        snapshot_ref: &str,
+    ) -> Result<Option<zeroclaw_api::procedure_v1::ProcedureSnapshotV1>, SubmitTransportError> {
+        let digest = snapshot_ref
+            .strip_prefix(zeroclaw_api::procedure_v1::PROCEDURE_SNAPSHOT_REF_PREFIX)
+            .unwrap_or_default();
+        Ok(self.state.lock().procedure_snapshots.get(digest).cloned())
+    }
+}
+
+impl InMemoryTachiTaskBridge {
+    /// Test/harness driver (vertical V4): drive the procedure's steps
+    /// to the next approval gate or completion, executing STRICTLY from
+    /// the CAS-retained snapshot bytes. Returns the step numbers
+    /// completed in this drive and whether the run parked at a gate.
+    /// This double has no filesystem access to the definitions tree —
+    /// structurally, live-definition mutation cannot reach a run here
+    /// (the KP-12 discrimination).
+    pub fn drive_procedure_steps(
+        &self,
+        task_ref: &TaskRef,
+        snapshot_ref: &str,
+    ) -> (Vec<u32>, Option<u32>) {
+        let state = self.state.lock();
+        let Some(snapshot) = state
+            .procedure_snapshots
+            .get(
+                snapshot_ref
+                    .strip_prefix(zeroclaw_api::procedure_v1::PROCEDURE_SNAPSHOT_REF_PREFIX)
+                    .unwrap_or_default(),
+            )
+            .cloned()
+        else {
+            return (Vec::new(), None);
+        };
+        drop(state);
+
+        let gate_steps: std::collections::BTreeSet<u32> = snapshot
+            .approval_gates
+            .iter()
+            .map(|gate| gate.step)
+            .collect();
+        let mut completed = Vec::new();
+        for step in &snapshot.steps {
+            if gate_steps.contains(&step.number) {
+                let already = {
+                    let state = self.state.lock();
+                    state
+                        .resolved_gates
+                        .get(task_ref.as_wire())
+                        .is_some_and(|gates| gates.contains_key(&step.number))
+                };
+                if !already {
+                    let mut state = self.state.lock();
+                    state.append(
+                        task_ref,
+                        InMemoryFact {
+                            event_id: format!("procgate-{}-{}", task_ref.as_wire(), step.number),
+                            kind: "procedure_gate_waiting".to_string(),
+                            payload_digest: fact_digest(&serde_json::json!({
+                                "kind": "procedure_gate_waiting",
+                                "snapshot": snapshot_ref,
+                                "step": step.number,
+                            })),
+                            detail: FactDetail::Execution {
+                                label: "waiting_input".to_string(),
+                            },
+                        },
+                    );
+                    return (completed, Some(step.number));
+                }
+            }
+            let mut state = self.state.lock();
+            state.append(
+                task_ref,
+                InMemoryFact {
+                    event_id: format!("procstep-{}-{}", task_ref.as_wire(), step.number),
+                    kind: "procedure_step_completed".to_string(),
+                    payload_digest: fact_digest(&serde_json::json!({
+                        "kind": "procedure_step_completed",
+                        "snapshot": snapshot_ref,
+                        "step": step.number,
+                    })),
+                    detail: FactDetail::ProcedureStep {
+                        step: step.number,
+                        title: step.title.clone(),
+                        outcome: "completed".to_string(),
+                    },
+                },
+            );
+            completed.push(step.number);
+        }
+        (completed, None)
+    }
+
+    /// Test/harness driver: resolve a parked procedure gate with an
+    /// explicit approve/deny decision (idempotent per decision id;
+    /// recorded as a host-side durable fact — never a ZeroClaw ledger).
+    pub fn resolve_procedure_gate(
+        &self,
+        task_ref: &TaskRef,
+        step: u32,
+        decision: &str,
+        decision_id: &str,
+    ) -> Result<(), String> {
+        if !matches!(decision, "approve" | "deny") {
+            return Err(format!("unknown gate decision {decision}"));
+        }
+        let mut state = self.state.lock();
+        let gates = state
+            .resolved_gates
+            .entry(task_ref.as_wire().to_string())
+            .or_default();
+        if let Some(bound) = gates.get(&step) {
+            if *bound != decision_id {
+                return Err(format!("gate {step} already resolved by decision {bound}"));
+            }
+            return Ok(());
+        }
+        gates.insert(step, decision_id.to_string());
+        state.append(
+            task_ref,
+            InMemoryFact {
+                event_id: format!("procgate-dec-{decision_id}"),
+                kind: "procedure_gate_resolved".to_string(),
+                payload_digest: fact_digest(&serde_json::json!({
+                    "kind": "procedure_gate_resolved",
+                    "step": step,
+                    "decision": decision,
+                    "decision_id": decision_id,
+                })),
+                detail: FactDetail::ProcedureGateResolved {
+                    step,
+                    decision: decision.to_string(),
+                    decision_id: decision_id.to_string(),
+                },
+            },
+        );
+        Ok(())
+    }
+
+    /// Test observability: the CAS-retained step titles for a snapshot
+    /// ref (the executing truth — used by the mid-run-mutation
+    /// discrimination to prove the run follows the RETAINED bytes).
+    pub fn retained_step_titles(&self, snapshot_ref: &str) -> Vec<String> {
+        self.state
+            .lock()
+            .procedure_snapshots
+            .get(
+                snapshot_ref
+                    .strip_prefix(zeroclaw_api::procedure_v1::PROCEDURE_SNAPSHOT_REF_PREFIX)
+                    .unwrap_or_default(),
+            )
+            .map(|snapshot| {
+                snapshot
+                    .steps
+                    .iter()
+                    .map(|step| step.title.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl InMemoryTachiTaskBridge {
+    /// Test observability: the procedure steps executed against a task,
+    /// as recorded on the durable fact log — `(step, title, outcome)`
+    /// in execution order, read from the FACT detail (the audit trail),
+    /// not from the CAS.
+    pub fn procedure_executed_steps(&self, task_ref: &TaskRef) -> Vec<(u32, String, String)> {
+        let state = self.state.lock();
+        state
+            .facts
+            .get(task_ref.as_wire())
+            .map(|log| {
+                log.iter()
+                    .filter_map(|(_, fact)| match &fact.detail {
+                        FactDetail::ProcedureStep {
+                            step,
+                            title,
+                            outcome,
+                            ..
+                        } => Some((*step, title.clone(), outcome.clone())),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Test observability: the gate decisions recorded on a task's fact
+    /// log — `(step, decision, decision_id)` triples (approve/deny
+    /// only; the id is the idempotency binding).
+    pub fn procedure_gate_decisions(
+        &self,
+        task_ref: &TaskRef,
+    ) -> Vec<(u32, String, String)> {
+        let state = self.state.lock();
+        state
+            .facts
+            .get(task_ref.as_wire())
+            .map(|log| {
+                log.iter()
+                    .filter_map(|(_, fact)| match &fact.detail {
+                        FactDetail::ProcedureGateResolved {
+                            step,
+                            decision,
+                            decision_id,
+                        } => Some((*step, decision.clone(), decision_id.clone())),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
