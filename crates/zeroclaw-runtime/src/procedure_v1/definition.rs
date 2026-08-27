@@ -53,10 +53,26 @@ pub struct CapturedDefinition {
     pub name: String,
 }
 
+fn stat_signature(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+fn read_stable(path: &Path) -> Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+}
+
 /// Read the review state from the RAW manifest table — the typed
 /// `SopMeta` does not carry it (legacy-compatible extra key). Absent or
 /// unrecognized values are DRAFT: publication must be an explicit
 /// authored act (fail closed, KP-11 rule 1).
+/// Publication truth read from the RAW manifest bytes (public within
+/// the crate: the mint re-derives it instead of trusting the capture
+/// struct's mutable field).
+pub(crate) fn review_state_of(toml_bytes: &str) -> Result<DefinitionReviewState> {
+    review_state_from_raw(toml_bytes)
+}
+
 fn review_state_from_raw(toml_bytes: &str) -> Result<DefinitionReviewState> {
     let value: toml::Value = toml::from_str(toml_bytes).context("SOP.toml is not valid TOML")?;
     let Some(sop_table) = value.get("sop") else {
@@ -106,15 +122,36 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
     let md_path = sop_dir.join("SOP.md");
 
     // Single-read capture per file (KP-11 rules 2–3): everything below
-    // derives from these bytes; nothing re-reads the tree.
-    let toml_bytes = std::fs::read_to_string(&toml_path)
-        .with_context(|| format!("reading {}", toml_path.display()))?;
-    let md_bytes = if md_path.exists() {
-        std::fs::read_to_string(&md_path)
-            .with_context(|| format!("reading {}", md_path.display()))?
+    // derives from these bytes; nothing re-reads the tree. A
+    // package-atomicity guard follows: after both reads, the files'
+    // (size, mtime) must be unchanged — an edit that landed BETWEEN the
+    // two reads would otherwise freeze a mixed revision that never
+    // existed atomically. One bounded retry, then a loud failure.
+    let mut toml_bytes = read_stable(&toml_path)?;
+    let mut md_bytes = if md_path.exists() {
+        read_stable(&md_path)?
     } else {
         String::new()
     };
+    let stable = stat_signature(&toml_path).zip(stat_signature(&md_path));
+    if let Some((toml_sig, md_sig)) = stable {
+        let still = stat_signature(&toml_path).zip(stat_signature(&md_path));
+        if still != Some((toml_sig, md_sig)) {
+            // One bounded retry on a raced read; a second race fails the
+            // capture loudly (never a mixed freeze).
+            toml_bytes = read_stable(&toml_path)?;
+            md_bytes = if md_path.exists() {
+                read_stable(&md_path)?
+            } else {
+                String::new()
+            };
+            let again = stat_signature(&toml_path).zip(stat_signature(&md_path));
+            let after = stat_signature(&toml_path).zip(stat_signature(&md_path));
+            if after.is_none() || after != again {
+                bail!("definitions tree changed during capture (mixed revision refused)");
+            }
+        }
+    }
 
     let manifest: SopManifest =
         toml::from_str(&toml_bytes).context("SOP.toml manifest decode failed")?;
@@ -257,12 +294,7 @@ pub fn project_definition(captured: &CapturedDefinition) -> ProcedureDefinitionV
         privacy_class: PrivacyClass::Public,
         provenance: DefinitionProvenance {
             authored_via: "zeroclaw-sops-dir".to_string(),
-            captured_at: chrono_now_rfc3339(),
         },
         review_state: captured.review_state,
     }
-}
-
-fn chrono_now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }

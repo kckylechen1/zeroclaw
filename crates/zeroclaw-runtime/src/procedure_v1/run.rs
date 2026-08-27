@@ -31,7 +31,7 @@ use crate::tachi_bridge::client::{
 };
 use crate::tachi_bridge::compose::{
     ComposeRejection, RequesterBridgePolicy, StructuralIntentContext, TaskIntentInputs,
-    compose_intent,
+    compose_intent, scan_client_authored_refs,
 };
 use crate::tachi_bridge::procedure::ProcedureSubmitPort;
 
@@ -63,6 +63,23 @@ pub enum ProcedureSubmitError {
         "procedure run refused: snapshot ref is not a content-addressed CAS ref (bare-path binding is refused)"
     )]
     BarePathBinding,
+    /// The snapshot failed invariant re-derivation: its authority-bearing
+    /// claims (required capability, approval gates, review state, step
+    /// projection) are not what its pinned bytes actually say. Kills the
+    /// forged/mutated-snapshot class: submit trusts only the bytes.
+    #[error(
+        "procedure run refused: snapshot invariant mismatch (`{field}` does not match the pinned definition bytes)"
+    )]
+    SnapshotInvariant {
+        /// Which re-derived invariant failed.
+        field: &'static str,
+    },
+    /// The transport acknowledged the run but cannot produce the
+    /// retained snapshot bytes (verify-before-ack violated — refused).
+    #[error(
+        "procedure run refused: transport did not retain the snapshot bytes before acknowledging"
+    )]
+    NotRetainedBeforeAck,
     /// Encode-side admission rejected the composed intent (TB-4).
     #[error("procedure run refused: {0}")]
     Compose(#[from] ComposeRejection),
@@ -112,13 +129,13 @@ pub struct ProcedureRunClient {
 impl ProcedureRunClient {
     /// Bind a procedure-run client to its carrier transport (which also
     /// implements the base bridge port — see the E2E transport).
-    pub fn new(
-        bridge_port: Arc<dyn crate::tachi_bridge::TachiTaskBridge>,
-        carrier: Arc<dyn ProcedureSubmitPort>,
-    ) -> Self {
+    pub fn new<T>(transport: Arc<T>) -> Self
+    where
+        T: crate::tachi_bridge::TachiTaskBridge + ProcedureSubmitPort + 'static,
+    {
         Self {
-            bridge: TachiBridgeClient::new(bridge_port),
-            carrier,
+            bridge: TachiBridgeClient::new(transport.clone()),
+            carrier: transport,
         }
     }
 
@@ -157,6 +174,11 @@ impl ProcedureRunClient {
                 max: PROCEDURE_SNAPSHOT_MAX_BYTES,
             });
         }
+        // Invariant re-derivation from the PINNED BYTES: a snapshot is
+        // a public wire type, so submit trusts nothing but its bytes —
+        // review state, capability requirement, gates, and the step
+        // projection must all be what the embedded definition says.
+        verify_snapshot_invariants(snapshot)?;
         let snapshot_ref = snapshot.snapshot_ref();
         if !snapshot_ref.starts_with(PROCEDURE_SNAPSHOT_REF_PREFIX)
             || snapshot_ref.contains('/')
@@ -231,16 +253,34 @@ impl ProcedureRunClient {
             retry_of: None,
         };
         let intent = compose_intent(&inputs, policy, &context)?;
+        // The base client's ref-wire hardening applies here too: the
+        // requester claim and lineage refs are content-scanned before
+        // any transport sees the intent (same law as base submit).
+        scan_client_authored_refs(&intent)?;
         let receipt = self
             .carrier
             .submit_procedure_run(&intent, request_id, snapshot)
             .await?;
         match receipt {
-            SubmitReceipt::Admitted { task_ref, replayed } => Ok(ProcedureRunDriverOutput {
-                task_ref,
-                binding: ProcedureRunBinding::from_snapshot(snapshot),
-                replayed,
-            }),
+            SubmitReceipt::Admitted { task_ref, replayed } => {
+                // Encoded verify-before-ack: a transport that
+                // acknowledged without retaining cannot produce the
+                // bytes for the ref it just bound — refuse loudly
+                // instead of proceeding on an unbacked acknowledgment.
+                let retained = self.carrier.retained_snapshot(&snapshot_ref).await;
+                let verified = matches!(
+                    &retained,
+                    Ok(Some(retained)) if retained.canonical_digest() == snapshot.canonical_digest()
+                );
+                if !verified {
+                    return Err(ProcedureSubmitError::NotRetainedBeforeAck);
+                }
+                Ok(ProcedureRunDriverOutput {
+                    task_ref,
+                    binding: ProcedureRunBinding::from_snapshot(snapshot),
+                    replayed,
+                })
+            }
             SubmitReceipt::Rejected { reason } => {
                 ::zeroclaw_log::record!(
                     WARN,
@@ -363,4 +403,90 @@ pub fn derive_learning_candidate(
         .expect("static bounded text"),
         policy_disposition: CandidatePolicyDisposition::ReviewQueued,
     }
+}
+
+/// Re-derive every authority-bearing snapshot claim from the PINNED
+/// definition bytes (KP-11/KP-17): a forged or mutated snapshot — lowered
+/// `required_capability`, removed `approval_gates`, draft review state,
+/// steps that are not what the embedded markdown parses to — is refused
+/// here, at submit, regardless of how the snapshot object was
+/// constructed.
+fn verify_snapshot_invariants(snapshot: &ProcedureSnapshotV1) -> Result<(), ProcedureSubmitError> {
+    use crate::sop::types::{SopManifest, SopStepKind};
+    let mismatch = |field: &'static str| ProcedureSubmitError::SnapshotInvariant { field };
+
+    // 1. The embedded definition bytes re-derive the pinned digest.
+    let derived = zeroclaw_api::taskintent::canonical_json_digest_hex(&serde_json::json!({
+        "sop_toml": snapshot.definition_toml,
+        "sop_md": snapshot.definition_md,
+    }));
+    if derived != snapshot.procedure_digest {
+        return Err(mismatch("procedure_digest"));
+    }
+    // 2. The embedded manifest is the published revision the snapshot
+    //    claims (review truth from the RAW bytes).
+    let manifest: SopManifest =
+        toml::from_str(&snapshot.definition_toml).map_err(|_| mismatch("definition_toml"))?;
+    if manifest.sop.version != snapshot.procedure_revision {
+        return Err(mismatch("procedure_revision"));
+    }
+    if super::definition::review_state_of(&snapshot.definition_toml)
+        .map_err(|_| mismatch("review_state"))?
+        != zeroclaw_api::procedure_v1::DefinitionReviewState::Published
+    {
+        return Err(mismatch("review_state"));
+    }
+    // 3. The step projection IS what the embedded markdown parses to.
+    let parsed = crate::sop::parse_steps(&snapshot.definition_md);
+    if parsed.is_empty() && !manifest.steps.is_empty() {
+        return Err(mismatch("steps"));
+    }
+    let steps_source = if parsed.is_empty() {
+        &manifest.steps
+    } else {
+        &parsed
+    };
+    if steps_source.len() != snapshot.steps.len() {
+        return Err(mismatch("steps"));
+    }
+    for (step, projected) in steps_source.iter().zip(&snapshot.steps) {
+        if step.number != projected.number
+            || step.title != projected.title
+            || step.requires_confirmation != projected.requires_confirmation
+        {
+            return Err(mismatch("steps"));
+        }
+    }
+    // 4. The gates are exactly the parsed confirmation/checkpoint steps.
+    let gates: std::collections::BTreeSet<u32> = steps_source
+        .iter()
+        .filter(|step| step.requires_confirmation || step.kind == SopStepKind::Checkpoint)
+        .map(|step| step.number)
+        .collect();
+    let claimed: std::collections::BTreeSet<u32> = snapshot
+        .approval_gates
+        .iter()
+        .map(|gate| gate.step)
+        .collect();
+    if gates != claimed {
+        return Err(mismatch("approval_gates"));
+    }
+    // 5. The required capability is what the pinned steps' FULL tool
+    //    surface implies (narrow-only: guidance can never lower it
+    //    below what the procedure actually does).
+    if super::snapshot::required_capability_of(steps_source)
+        != snapshot.guidance.required_capability
+    {
+        return Err(mismatch("required_capability"));
+    }
+    // 6. The guidance digest binds the embedded guidance (shared
+    //    binding rule: digest over the payload with the field itself
+    //    normalized to empty).
+    if super::snapshot::guidance_payload_digest(&snapshot.guidance)
+        != snapshot.compiled_guidance_digest
+        || snapshot.guidance.guidance_digest != snapshot.compiled_guidance_digest
+    {
+        return Err(mismatch("compiled_guidance_digest"));
+    }
+    Ok(())
 }

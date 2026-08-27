@@ -177,15 +177,17 @@ pub struct EvaluationContractRef {
     pub digest: String,
 }
 
-/// Provenance of a captured definition revision.
+/// Provenance of a captured definition revision. Deliberately carries
+/// NO capture timestamp: the snapshot digest must be a pure function of
+/// the captured CONTENT, so re-minting unchanged bytes yields the same
+/// content-addressed ref and a TB-7 replay after a ZeroClaw restart
+/// reconciles instead of conflicting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DefinitionProvenance {
     /// Which surface authored/captured the revision (e.g.
     /// `zeroclaw-sops-dir`).
     pub authored_via: String,
-    /// When the bytes were captured (RFC3339).
-    pub captured_at: String,
 }
 
 /// A source SkillDefinition reference folded into the snapshot (KP-11:
@@ -473,7 +475,6 @@ mod tests {
             privacy_class: PrivacyClass::Public,
             provenance: DefinitionProvenance {
                 authored_via: "zeroclaw-sops-dir".to_string(),
-                captured_at: "2026-08-26T00:00:00Z".to_string(),
             },
             approval_gates: vec![],
             guidance: CompiledProcedureGuidanceV1 {

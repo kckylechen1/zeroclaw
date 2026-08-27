@@ -17,10 +17,10 @@ use zeroclaw_api::taskintent::{
 use super::definition::capture_definition;
 use super::run::{ProcedureRunClient, ProcedureSubmitError, derive_request_id};
 use super::snapshot::{SnapshotContentCategory, SnapshotMintError, mint_snapshot};
+use crate::tachi_bridge::SubmitReceipt;
 use crate::tachi_bridge::compose::RequesterBridgePolicy;
 use crate::tachi_bridge::in_memory::InMemoryTachiTaskBridge;
 use crate::tachi_bridge::procedure::ProcedureSubmitPort;
-use crate::tachi_bridge::SubmitReceipt;
 
 /// The StageX-derived conformance fixture: the documented reference SOP
 /// (`docs/book/src/sop/example.md` — the in-tree "stagex-update"
@@ -94,7 +94,7 @@ fn full_policy() -> RequesterBridgePolicy {
 
 fn client_and_double() -> (ProcedureRunClient, Arc<InMemoryTachiTaskBridge>) {
     let double = Arc::new(InMemoryTachiTaskBridge::new());
-    let client = ProcedureRunClient::new(double.clone(), double.clone());
+    let client = ProcedureRunClient::new(double.clone());
     (client, double)
 }
 
@@ -177,7 +177,7 @@ async fn restart_replay_yields_same_task_and_same_content() {
     // host truth); the ZeroClaw-side client is recreated fresh below,
     // exactly as a process restart would.
     let double = Arc::new(InMemoryTachiTaskBridge::new());
-    let client = ProcedureRunClient::new(double.clone(), double.clone());
+    let client = ProcedureRunClient::new(double.clone());
     let request_id = derive_request_id(
         &snapshot.procedure_id,
         &snapshot.procedure_digest,
@@ -192,7 +192,7 @@ async fn restart_replay_yields_same_task_and_same_content() {
     // watch cursors) replays the SAME (requester, request_id) tuple —
     // TB-7 rule 2 returns the SAME TaskRef, same binding, and starts no
     // second run. The request id is re-derived deterministically.
-    let client2 = ProcedureRunClient::new(double.clone(), double.clone());
+    let client2 = ProcedureRunClient::new(double.clone());
     let replayed_request_id = derive_request_id(
         &snapshot.procedure_id,
         &snapshot.procedure_digest,
@@ -236,7 +236,9 @@ async fn different_digest_same_tuple_is_a_conflict_not_a_second_run() {
         .await;
     assert!(matches!(
         replay,
-        Err(ProcedureSubmitError::Transport(crate::tachi_bridge::SubmitTransportError))
+        Err(ProcedureSubmitError::Transport(
+            crate::tachi_bridge::SubmitTransportError
+        ))
     ));
     assert_eq!(double.task_count(), 1, "no second task was minted");
 }
@@ -636,6 +638,11 @@ fn procedure_v1_module_has_no_durable_write_calls() {
             "fs::create_dir_all",
             "File::create",
             "OpenOptions::new",
+            "write_all",
+            "fs::remove_file",
+            "fs::remove_dir",
+            "Connection::open",
+            "rusqlite",
             "SopEngine",
             "SopRunStore",
         ] {
@@ -645,4 +652,148 @@ fn procedure_v1_module_has_no_durable_write_calls() {
             );
         }
     }
+}
+
+// ── Codex round-1 hardening: forged snapshots, deny-cancel, mint determinism ──
+
+#[tokio::test]
+async fn forged_snapshot_with_lowered_capability_refused_at_submit() {
+    // Build a SELF-CONSISTENT forge: recompute every digest after
+    // lowering `required_capability`, so only the invariant
+    // RE-DERIVATION (capability implied by the pinned step bytes) can
+    // catch it.
+    let dir = fixture_dir();
+    let captured = capture_definition(dir.path(), "stagex-update").unwrap();
+    let mut snapshot = mint_snapshot(&captured).unwrap();
+    snapshot.guidance.required_capability = Capability::ReasoningReview;
+    let value = serde_json::to_value(&snapshot.guidance).unwrap();
+    let digest = zeroclaw_api::taskintent::canonical_json_digest_hex(&value);
+    snapshot.guidance.guidance_digest = digest.clone();
+    snapshot.compiled_guidance_digest = digest;
+
+    let (client, _double) = client_and_double();
+    let request_id = derive_request_id("stagex-update", &snapshot.procedure_digest, "forge-1");
+    let refused = client
+        .submit_run(&snapshot, &full_policy(), &requester(), &request_id)
+        .await;
+    assert!(matches!(
+        refused,
+        Err(ProcedureSubmitError::SnapshotInvariant {
+            field: "required_capability"
+        })
+    ));
+}
+
+#[tokio::test]
+async fn forged_snapshot_with_removed_gates_refused_at_submit() {
+    let gated_md = STAGEX_MD.replacen(
+        "   - tools: shell, file_read\n",
+        "   - tools: shell, file_read\n   - requires_confirmation: true\n",
+        1,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    write_package(dir.path(), STAGEX_TOML, &gated_md);
+    let captured = capture_definition(dir.path(), "stagex-update").unwrap();
+    let mut snapshot = mint_snapshot(&captured).unwrap();
+    assert_eq!(snapshot.approval_gates.len(), 1);
+    // Strip the gate and re-bind the guidance digest (a consistent
+    // forge): the re-derivation from the PINNED markdown still sees the
+    // confirmation bullet.
+    snapshot.approval_gates.clear();
+    snapshot.guidance.user_input_points.clear();
+    let value = serde_json::to_value(&snapshot.guidance).unwrap();
+    let digest = zeroclaw_api::taskintent::canonical_json_digest_hex(&value);
+    snapshot.guidance.guidance_digest = digest.clone();
+    snapshot.compiled_guidance_digest = digest;
+
+    let (client, _double) = client_and_double();
+    let request_id = derive_request_id("stagex-update", &snapshot.procedure_digest, "forge-2");
+    let refused = client
+        .submit_run(&snapshot, &full_policy(), &requester(), &request_id)
+        .await;
+    assert!(matches!(
+        refused,
+        Err(ProcedureSubmitError::SnapshotInvariant {
+            field: "approval_gates"
+        })
+    ));
+}
+
+#[tokio::test]
+async fn draft_review_state_flip_after_capture_still_refuses_mint() {
+    // Mutating the captured struct's review_state cannot publish a
+    // draft: the mint reads publication truth from the RAW bytes.
+    let dir = tempfile::tempdir().unwrap();
+    write_package(
+        dir.path(),
+        &STAGEX_TOML.replace("published", "draft"),
+        STAGEX_MD,
+    );
+    let mut captured = capture_definition(dir.path(), "stagex-update").unwrap();
+    assert_eq!(captured.review_state, DefinitionReviewState::Draft);
+    captured.review_state = DefinitionReviewState::Published;
+    assert_eq!(
+        mint_snapshot(&captured),
+        Err(SnapshotMintError::DraftRevision)
+    );
+}
+
+#[tokio::test]
+async fn denied_gate_cancels_instead_of_resuming() {
+    let gated_md = STAGEX_MD.replacen(
+        "   - tools: shell, file_read\n",
+        "   - tools: shell, file_read\n   - requires_confirmation: true\n",
+        1,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    write_package(dir.path(), STAGEX_TOML, &gated_md);
+    let captured = capture_definition(dir.path(), "stagex-update").unwrap();
+    let snapshot = mint_snapshot(&captured).unwrap();
+    let (client, double) = client_and_double();
+    let request_id =
+        derive_request_id(&snapshot.procedure_id, &snapshot.procedure_digest, "deny-1");
+    let output = client
+        .submit_run(&snapshot, &full_policy(), &requester(), &request_id)
+        .await
+        .unwrap();
+    let reference = snapshot.snapshot_ref();
+    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    assert_eq!(completed, Vec::<u32>::new());
+    assert_eq!(gate, Some(1));
+
+    double
+        .resolve_procedure_gate(&output.task_ref, 1, "deny", "dec-deny")
+        .unwrap();
+    // A DENIED gate must never execute its step: driving again cancels.
+    let (completed, gate) = double.drive_procedure_steps(&output.task_ref, &reference);
+    assert_eq!(completed, Vec::<u32>::new(), "denied gate executed steps");
+    assert_eq!(gate, None);
+    assert!(double.procedure_executed_steps(&output.task_ref).is_empty());
+    // The cancellation is on the durable fact log.
+    let snapshot_state = client.get(&output.task_ref).await.unwrap();
+    assert_eq!(snapshot_state.execution.label(), "cancelled");
+}
+
+#[test]
+fn remint_of_unchanged_bytes_yields_the_same_snapshot_ref() {
+    // Replay determinism (KP-13/TB-7): a ZeroClaw restart that re-mints
+    // from unchanged files derives the IDENTICAL content-addressed ref —
+    // no timestamp or nonce rides the digest.
+    let dir = fixture_dir();
+    let first = mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    let second = mint_snapshot(&capture_definition(dir.path(), "stagex-update").unwrap()).unwrap();
+    assert_eq!(first.canonical_digest(), second.canonical_digest());
+    assert_eq!(first.snapshot_ref(), second.snapshot_ref());
+}
+
+#[test]
+fn oversize_step_body_is_a_typed_refusal_not_a_silent_empty_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let oversized_md = format!("## Steps\n\n1. **Fill** — {}\n", "x".repeat(5000));
+    write_package(dir.path(), STAGEX_TOML, &oversized_md);
+    let captured = capture_definition(dir.path(), "stagex-update").unwrap();
+    assert!(matches!(
+        mint_snapshot(&captured),
+        Err(SnapshotMintError::Oversize { .. })
+    ));
 }

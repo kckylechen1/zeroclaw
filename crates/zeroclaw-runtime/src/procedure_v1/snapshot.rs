@@ -147,38 +147,56 @@ pub fn snapshot_content_scan(toml_bytes: &str, md_bytes: &str) -> Result<(), Sna
 }
 
 /// Tool-class table for the narrow-only capability law (KP-17): the
-/// capability a procedure REQUIRES given the tools its steps name.
-/// Unknown tool names conservatively require the strongest capability —
-/// the failure direction of the narrow-only law is refusal, never
-/// silent downgrade.
+/// capability a procedure REQUIRES given EVERY tool-bearing surface a
+/// step declares — `suggested_tools`, the typed `scope.allow`, planned
+/// `calls`, and capability-step ids. Unknown tool names conservatively
+/// require the strongest capability — the failure direction of the
+/// narrow-only law is refusal, never silent downgrade.
+/// The capability a step list requires (crate-public: the submit-side
+/// invariant verifier re-derives it from the pinned bytes).
+pub(crate) fn required_capability_of(steps: &[crate::sop::types::SopStep]) -> Capability {
+    required_capability_for_tools(steps)
+}
+
 fn required_capability_for_tools(steps: &[crate::sop::types::SopStep]) -> Capability {
     use crate::sop::types::SopStepKind;
-    let rank = |tools: &[String], kind: SopStepKind| -> u8 {
-        if matches!(kind, SopStepKind::Checkpoint) {
-            // Gates are adjudication, not execution breadth.
-            return 1;
+    let class_of = |tool: &str| -> u8 {
+        let lower = tool.to_ascii_lowercase();
+        match lower.as_str() {
+            // Read-only surface: the read-only investigation capability.
+            "file_read" | "memory_recall" | "read_skill" => 2,
+            // Side-effecting surface: the implementation capability.
+            "shell" | "file_write" | "git_operations" | "http_request" | "pushover"
+            | "memory_store" => 3,
+            // Unknown: strongest requirement (fail closed).
+            _ => 3,
         }
-        let mut max = 1;
-        for tool in tools {
-            let lower = tool.to_ascii_lowercase();
-            let class = match lower.as_str() {
-                // Read-only surface.
-                "file_read" | "memory_recall" | "read_skill" => 1,
-                // Side-effecting surface: the implementation capability.
-                "shell" | "file_write" | "git_operations" | "http_request" | "pushover"
-                | "memory_store" => 3,
-                // Unknown: strongest requirement (fail closed).
-                _ => 3,
-            };
-            max = max.max(class);
-        }
-        max
     };
-    let max = steps
-        .iter()
-        .map(|step| rank(&step.suggested_tools, step.kind))
-        .max()
-        .unwrap_or(1);
+    let mut max = 1u8;
+    for step in steps {
+        if matches!(step.kind, SopStepKind::Checkpoint) {
+            // Gates are adjudication, not execution breadth.
+            continue;
+        }
+        // The merged authoritative tool surface of the step.
+        let mut tools: Vec<String> = Vec::new();
+        if let Some(allow) = step.effective_tool_scope().and_then(|scope| scope.allow) {
+            tools.extend(allow);
+        }
+        for call in &step.calls {
+            tools.push(call.tool.clone());
+        }
+        if let Some(capability) = step.capability_id() {
+            tools.push(capability.to_string());
+        }
+        for tool in &tools {
+            max = max.max(class_of(tool));
+        }
+        // A capability step EXECUTES real capability code by definition.
+        if step.kind == SopStepKind::Capability {
+            max = max.max(3);
+        }
+    }
     match max {
         3 => Capability::RepositoryImplementation,
         2 => Capability::ReadOnlyInvestigation,
@@ -191,8 +209,23 @@ fn required_capability_for_tools(steps: &[crate::sop::types::SopStep]) -> Capabi
 pub fn mint_snapshot(
     captured: &CapturedDefinition,
 ) -> Result<ProcedureSnapshotV1, SnapshotMintError> {
-    if captured.review_state != DefinitionReviewState::Published {
+    // Publication truth is the RAW captured bytes, never the (mutable)
+    // struct field — flipping `CapturedDefinition.review_state` after
+    // capture cannot publish a draft.
+    let raw_review_state = super::definition::review_state_of(&captured.toml_bytes)
+        .map_err(|_| SnapshotMintError::DraftRevision)?;
+    if raw_review_state != DefinitionReviewState::Published {
         return Err(SnapshotMintError::DraftRevision);
+    }
+    // Bounded-text law: an oversize step body is a typed refusal, never
+    // a silently-emptied projection.
+    for step in &captured.steps {
+        if BoundedText::new(step.body.clone()).is_err() {
+            return Err(SnapshotMintError::Oversize {
+                len: step.body.len(),
+                max: zeroclaw_api::taskintent::BOUNDED_TEXT_MAX,
+            });
+        }
     }
     snapshot_content_scan(&captured.toml_bytes, &captured.md_bytes)?;
 
@@ -241,14 +274,12 @@ pub fn mint_snapshot(
         approval_gates: definition.approval_gates.clone(),
         guidance,
     };
-    // Digest-bound guidance: bind the guidance digest BEFORE the
-    // snapshot digest covers it (two-level binding — the snapshot
-    // digest covers the guidance digest; KP-11
-    // `compiled_guidance_digest`).
-    snapshot.guidance.guidance_digest = {
-        let value = serde_json::to_value(&snapshot.guidance).expect("guidance serializes");
-        canonical_json_digest_hex(&value)
-    };
+    // Digest-bound guidance (two-level binding — the snapshot digest
+    // covers the guidance digest; KP-11 `compiled_guidance_digest`).
+    // The digest covers the guidance payload with the digest field
+    // itself normalized to empty, so mint and independent verifiers
+    // re-derive the SAME value ([`guidance_payload_digest`]).
+    snapshot.guidance.guidance_digest = guidance_payload_digest(&snapshot.guidance);
     snapshot.compiled_guidance_digest = snapshot.guidance.guidance_digest.clone();
 
     let serialized = snapshot.serialized_len();
@@ -259,4 +290,14 @@ pub fn mint_snapshot(
         });
     }
     Ok(snapshot)
+}
+
+/// The canonical digest of a guidance payload with its own
+/// `guidance_digest` field normalized to empty — the single binding
+/// rule shared by the mint and the submit-side invariant verifier.
+pub(crate) fn guidance_payload_digest(guidance: &CompiledProcedureGuidanceV1) -> String {
+    let mut normalized = guidance.clone();
+    normalized.guidance_digest = String::new();
+    let value = serde_json::to_value(&normalized).expect("guidance serializes");
+    canonical_json_digest_hex(&value)
 }

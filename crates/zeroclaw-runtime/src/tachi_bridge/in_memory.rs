@@ -141,7 +141,7 @@ struct HostState {
     /// Resolved procedure gates (test lane): task → (gate step →
     /// decision id) — decisions are durable facts on the host side,
     /// never a ZeroClaw-side gate ledger.
-    resolved_gates: BTreeMap<String, BTreeMap<u32, String>>,
+    resolved_gates: BTreeMap<String, BTreeMap<u32, (String, String)>>,
 }
 
 impl HostState {
@@ -1267,14 +1267,40 @@ impl InMemoryTachiTaskBridge {
         let mut completed = Vec::new();
         for step in &snapshot.steps {
             if gate_steps.contains(&step.number) {
-                let already = {
+                // The recorded DECISION governs: approve resumes, deny
+                // cancels — a denied gate must never execute its step.
+                let decision = {
                     let state = self.state.lock();
                     state
                         .resolved_gates
                         .get(task_ref.as_wire())
-                        .is_some_and(|gates| gates.contains_key(&step.number))
+                        .and_then(|gates| gates.get(&step.number))
+                        .map(|(decision, _)| decision.clone())
                 };
-                if !already {
+                if decision.as_deref() == Some("deny") {
+                    {
+                        let mut state = self.state.lock();
+                        state.append(
+                            task_ref,
+                            InMemoryFact {
+                                event_id: format!(
+                                    "proccancel-{}-{}",
+                                    task_ref.as_wire(),
+                                    step.number
+                                ),
+                                kind: "procedure_run_cancelled".to_string(),
+                                payload_digest: fact_digest(&serde_json::json!({
+                                    "kind": "procedure_run_cancelled",
+                                    "denied_gate": step.number,
+                                })),
+                                detail: FactDetail::Execution {
+                                    label: "cancelled".to_string(),
+                                },
+                            },
+                        );
+                        return (completed, None);
+                    }
+                } else if decision.is_none() {
                     let mut state = self.state.lock();
                     state.append(
                         task_ref,
@@ -1335,13 +1361,15 @@ impl InMemoryTachiTaskBridge {
             .resolved_gates
             .entry(task_ref.as_wire().to_string())
             .or_default();
-        if let Some(bound) = gates.get(&step) {
-            if *bound != decision_id {
-                return Err(format!("gate {step} already resolved by decision {bound}"));
+        if let Some((_, bound_id)) = gates.get(&step) {
+            if bound_id != decision_id {
+                return Err(format!(
+                    "gate {step} already resolved by decision {bound_id}"
+                ));
             }
             return Ok(());
         }
-        gates.insert(step, decision_id.to_string());
+        gates.insert(step, (decision.to_string(), decision_id.to_string()));
         state.append(
             task_ref,
             InMemoryFact {
@@ -1415,10 +1443,7 @@ impl InMemoryTachiTaskBridge {
     /// Test observability: the gate decisions recorded on a task's fact
     /// log — `(step, decision, decision_id)` triples (approve/deny
     /// only; the id is the idempotency binding).
-    pub fn procedure_gate_decisions(
-        &self,
-        task_ref: &TaskRef,
-    ) -> Vec<(u32, String, String)> {
+    pub fn procedure_gate_decisions(&self, task_ref: &TaskRef) -> Vec<(u32, String, String)> {
         let state = self.state.lock();
         state
             .facts

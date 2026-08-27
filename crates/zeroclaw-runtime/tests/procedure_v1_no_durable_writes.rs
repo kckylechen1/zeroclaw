@@ -415,8 +415,11 @@ async fn v4_procedure_run_writes_no_durable_state_under_hostile_legacy_layout() 
     // The full V4 flow.
     let captured = capture_definition(&sops, "stagex-update").unwrap();
     let snapshot = mint_snapshot(&captured).unwrap();
+    // Run with cwd INSIDE the snapshotted workspace root so even a
+    // mutant writing to its process cwd cannot escape the tree diff.
+    std::env::set_current_dir(dir.path()).expect("cwd into the hostile workspace");
     let transport = Arc::new(WorkingTransport::default());
-    let client = ProcedureRunClient::new(transport.clone(), transport.clone());
+    let client = ProcedureRunClient::new(transport.clone());
     let policy = RequesterBridgePolicy {
         admitted_capabilities: BTreeSet::from([
             zeroclaw_api::taskintent::Capability::RepositoryImplementation,
@@ -454,7 +457,7 @@ async fn v4_procedure_run_writes_no_durable_state_under_hostile_legacy_layout() 
     );
 
     // "Restart": fresh client over the same host truth.
-    let client2 = ProcedureRunClient::new(transport.clone(), transport.clone());
+    let client2 = ProcedureRunClient::new(transport.clone());
     let replay = client2
         .submit_run(&snapshot, &policy, &requester, &request_id)
         .await
