@@ -1394,3 +1394,31 @@ fn paired_publication_mints_and_the_stable_mixed_tree_is_refused_at_capture() {
         "stable mixed tree refused by the pair marker"
     );
 }
+
+#[test]
+fn marker_published_but_md_half_missing_is_refused() {
+    // Stable incomplete publication: the manifest names its markdown
+    // body, but SOP.md is absent. The marker is checked against the
+    // empty body and refuses — a half-installed revision cannot
+    // capture, let alone mint (the stable analog of the mid-read
+    // rename-aside race, which the capture's presence-coherence check
+    // treats as instability).
+    let original_md = STAGEX_MD;
+    let marker = zeroclaw_api::taskintent::canonical_json_digest_hex(
+        &serde_json::json!({ "md": original_md }),
+    );
+    let toml_with_marker = STAGEX_TOML.replace(
+        "review_state = \"published\"",
+        &format!("review_state = \"published\"\nmd_sha256 = \"{marker}\""),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("sops").join("stagex-update");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("SOP.toml"), &toml_with_marker).unwrap();
+    // NOTE: no SOP.md written.
+    let refused = capture_definition(&dir.path().join("sops"), "stagex-update");
+    assert!(
+        refused.is_err(),
+        "half-published revision refused at capture"
+    );
+}

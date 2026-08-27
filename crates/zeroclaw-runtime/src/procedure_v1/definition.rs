@@ -63,6 +63,18 @@ fn read_stable(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
 }
 
+/// Read an optional file, distinguishing ABSENT (stable None) from any
+/// other failure. Presence is judged by the read result itself, never
+/// by a separate `exists()` probe — an `exists()`-then-read pair has
+/// its own disappearance window.
+fn read_optional(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(anyhow::Error::new(err).context(format!("reading {}", path.display()))),
+    }
+}
+
 /// Read the review state from the RAW manifest table — the typed
 /// `SopMeta` does not carry it (legacy-compatible extra key). Absent or
 /// unrecognized values are DRAFT: publication must be an explicit
@@ -143,24 +155,28 @@ pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinit
     // below, and an absent marker is refused at MINT
     // (`SnapshotMintError::UnpairedPublication`), so no run can be
     // created from a mixed or unpaired tree either way.
+    //
+    // 3. Presence coherence: the optional MD file's READ result must
+    //    agree with the stat signatures on both sides. A rename-aside
+    //    during the reads (the file restored with size/mtime intact
+    //    before the closing stat) reads as ABSENT while the stats say
+    //    PRESENT — that contradiction is instability, never "the
+    //    package is TOML-only": without this check, an md-bearing tree
+    //    could freeze an empty-MD capture that skips the pairing law.
     let mut attempts = 0;
     let (toml_bytes, md_bytes) = loop {
         let before = (stat_signature(&toml_path), stat_signature(&md_path));
         let toml = read_stable(&toml_path)?;
-        let md = if md_path.exists() {
-            read_stable(&md_path)?
-        } else {
-            String::new()
-        };
+        let md = read_optional(&md_path)?;
         let toml_again = read_stable(&toml_path)?;
-        let md_again = if md_path.exists() {
-            read_stable(&md_path)?
-        } else {
-            String::new()
-        };
+        let md_again = read_optional(&md_path)?;
         let after = (stat_signature(&toml_path), stat_signature(&md_path));
-        if before == after && toml == toml_again && md == md_again {
-            break (toml, md);
+        if before == after
+            && toml == toml_again
+            && md == md_again
+            && md.is_some() == before.1.is_some()
+        {
+            break (toml, md.unwrap_or_default());
         }
         attempts += 1;
         if attempts >= 2 {
