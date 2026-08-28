@@ -32,7 +32,7 @@
 //!
 //! Everything written today is `TaskKind::Subagent`. `TaskKind::Delegate`
 //! rows are legacy `control_plane.db` debt from the retired delegate tool
-//! (#197 wall 1): no writer mints them anymore, and the read side
+//! (wall 1): no writer mints them anymore, and the read side
 //! (`load_finished`) stays fail-closed on the kind plus a non-NULL
 //! `parent_id` so a legacy row cannot leak across sessions.
 //!
@@ -118,7 +118,7 @@ impl ChildPersistence for SubagentPersistence {
     /// This is the production writer of `parent_id`: coordinator-spawned
     /// children carry a caller-supplied parent identity on `ChildRequest`.
     /// The legacy `TaskKind::Delegate` discrimination died with the
-    /// delegate tool (#197 wall 1): no new writer mints it, but the kind
+    /// delegate tool (wall 1): no new writer mints it, but the kind
     /// itself stays resolvable for existing `control_plane.db` rows
     /// (frozen migration debt; read side stays fail-closed on it).
     fn record_spawn(&mut self, request: &ChildRequest) -> Result<(), PersistenceError> {
@@ -403,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_delegate_rows_still_read_fail_closed() {
-        // #197 wall 1: the delegate tool is gone, but existing
+        // Wall 1: the delegate tool is gone, but existing
         // `control_plane.db` rows keep their kind. Simulate one legacy row
         // (the old writer's exact shape) and pin BOTH halves of the
         // fail-closed read: parent linkage required, executor claim intact.

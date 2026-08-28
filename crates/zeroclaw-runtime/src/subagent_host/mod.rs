@@ -18,7 +18,7 @@
 //! is what keeps a coordinator child identical to a `spawn_subagent` child:
 //! same registry assembly, same prompt build, same memory scope. (The legacy
 //! `DelegateTool` had its own sub-loop starting from a caller's
-//! already-built registry; that tool is retired with #197 wall 1, and with
+//! already-built registry; that tool is retired with the wall-1 demolition, and with
 //! it the last user of the hosted-run parking seam below.)
 //!
 //! `agent::run` is `pub` and takes no tool-loop state, so nothing had to be

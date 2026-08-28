@@ -53,7 +53,7 @@ use zeroclaw_config::schema::Config;
 // tool instances (census §2.1: the historical bounded-delegate handout,
 // where children received the parent's tool Arcs without a registry
 // rebuild — its only producer, the delegate sub-loop, was retired with
-// #197 wall 1). The scope REMAINS the SA-9 defense-in-depth: any future
+// wall 1). The scope REMAINS the SA-9 defense-in-depth: any future
 // shared-registry context must scope its tool-call loop with a child
 // lineage so spawn-capable shared tools observe the CHILD's depth, not
 // the parent's. Registries built with an explicit lineage (every

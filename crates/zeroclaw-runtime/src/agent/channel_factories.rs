@@ -70,7 +70,7 @@ pub fn register_channel_map_fn(f: ChannelMapFn) {
 /// Populate the parent turn's channel-driven tool handles from the
 /// registered factory.
 ///
-/// SA-7c (frozen #202 contract, owner-ratified): a child run must not
+/// SA-7c (frozen SubAgent contract, owner-ratified): a child run must not
 /// inherit a live `ask_user` handle or any user-reaching channel Arc, on
 /// ANY spawn path. The gate therefore lives in this single choke point:
 /// `is_subagent` child runs seed NOTHING (the function returns 0 before

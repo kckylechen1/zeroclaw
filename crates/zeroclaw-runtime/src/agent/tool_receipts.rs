@@ -192,7 +192,7 @@ tokio::task_local! {
     /// Nested tool loops read this to forward receipts into their own
     /// sub-loops so nested tool calls land in the same per-turn collector.
     /// (The delegate tool's sub-loop was the first consumer; it was retired
-    /// with #197 wall 1, and the forwarding seam stays for any nested loop.)
+    /// with the wall-1 demolition, and the forwarding seam stays for any nested loop.)
     pub static TOOL_LOOP_RECEIPT_CONTEXT: Option<ReceiptScope>;
 }
 
