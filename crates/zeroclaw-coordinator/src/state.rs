@@ -180,15 +180,13 @@ pub struct CoordinatorConfig {
     /// Deepest spawn generation the actor will admit, counting a top-level
     /// child as depth 0.
     ///
-    /// The number is inherited from the delegation path, which is the only
-    /// place in this workspace that already enforces a recursion depth:
-    /// `DelegateTool::resolve_max_depth`
-    /// (`zeroclaw-runtime/src/tools/delegate.rs`) falls back to `3` when the
-    /// runtime profile names no `max_delegation_depth`, and its own gate
-    /// compares the *caller's* depth against it, so the deepest child that
-    /// can exist there carries depth == the configured maximum. This gate
-    /// compares the *child's* resolved depth against the same bound and so
-    /// admits exactly the same set of generations.
+    /// The number is inherited from the historical delegation path, which
+    /// was the first place in this workspace that enforced a recursion
+    /// depth: the retired delegate tool resolved `3` when the runtime
+    /// profile names no `max_delegation_depth`, and its gate compared the
+    /// caller's depth against it. This gate compares the *child's*
+    /// resolved depth against the same bound (`max_delegation_depth`,
+    /// default 3), so it admits exactly the same set of generations.
     ///
     /// `0` disables the gate, matching `resolve_max_depth`'s
     /// `.filter(|&d| d > 0)` treatment of a zero profile value.
@@ -203,11 +201,11 @@ pub struct CoordinatorConfig {
     /// panic.
     ///
     /// **Why the default is 6 and not 128.** It was 128, inherited verbatim
-    /// from a retired `DelegateTool` runaway backstop. Reaching 128 meant
+    /// from the retired delegate tool's runaway backstop. Reaching 128 meant
     /// something was broken, and it was never a claim that 128 simultaneous
     /// agent turns are reasonable. Copying it into the slot where an operating
-    /// limit belongs left this actor effectively uncapped. Background delegate
-    /// now shares this operating limit — the file-store path and its 128
+    /// limit belongs left this actor effectively uncapped. Background children
+    /// now share this operating limit — the file-store path and its 128
     /// backstop are gone.
     ///
     /// Operators set this through `[subagents] max_concurrent_children`

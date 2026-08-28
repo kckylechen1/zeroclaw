@@ -50,11 +50,13 @@ use zeroclaw_config::schema::Config;
 // ─────────────────────────────────────────────────────────────────────────
 
 // Ambient spawn lineage for contexts that execute with SHARED parent
-// tool instances — the legacy bounded-delegate handout, where children
-// receive the parent's tool Arcs without a registry rebuild (census
-// §2.1). The bounded sub-loop scopes this around its tool-call loop so
-// spawn-capable inherited tools observe the CHILD's depth, not the
-// parent's. Registries built with an explicit lineage (every
+// tool instances (census §2.1: the historical bounded-delegate handout,
+// where children received the parent's tool Arcs without a registry
+// rebuild — its only producer, the delegate sub-loop, was retired with
+// #197 wall 1). The scope REMAINS the SA-9 defense-in-depth: any future
+// shared-registry context must scope its tool-call loop with a child
+// lineage so spawn-capable shared tools observe the CHILD's depth, not
+// the parent's. Registries built with an explicit lineage (every
 // `agent::run` rebuild) carry their own; the ambient value never
 // LOWERS an explicitly carried lineage (readers take the max).
 tokio::task_local! {

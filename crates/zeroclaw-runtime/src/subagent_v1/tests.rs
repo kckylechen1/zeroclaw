@@ -1611,31 +1611,6 @@ async fn report_json_survives_to_the_parent_visible_text() {
     assert!(text.contains("\"status\": \"completed\""), "{text}");
 }
 
-#[test]
-fn bounded_scope_lineage_is_never_a_root() {
-    // The production counterexample that motivated the ambient scope:
-    // channel registries build DelegateTool with `lineage: None`. The
-    // bounded sub-loop's ambient scope must STILL be a child lineage
-    // (depth >= 1), never a fresh depth-0 root.
-    let agents: std::collections::HashMap<String, zeroclaw_config::schema::AliasedAgentConfig> =
-        std::collections::HashMap::new();
-    let tool = crate::tools::delegate::DelegateTool::new_with_options(
-        agents,
-        None,
-        Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
-        Default::default(),
-    );
-    assert_eq!(tool.bounded_scope_lineage().depth(), 1);
-
-    // With a carried lineage, the scope advances exactly once from it.
-    let tool = tool.with_lineage(Some(root_lineage().child()));
-    assert_eq!(tool.bounded_scope_lineage().depth(), 2);
-    assert_eq!(
-        tool.bounded_scope_lineage().root_ref(),
-        root_lineage().root_ref()
-    );
-}
-
 #[tokio::test]
 async fn shared_spawn_arc_in_lineage_none_bounded_context_refuses_at_depth() {
     // End-to-end version of the lineage=None hole: a spawn tool Arc

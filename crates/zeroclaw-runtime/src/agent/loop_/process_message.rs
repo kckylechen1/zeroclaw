@@ -198,7 +198,10 @@ pub async fn process_message(
         let tools_registry = registry.into_inner();
 
         // Populate all channel-driven tool handles from the registered factory.
+        // `process_message` is the parent channel-turn entry; `false` keeps
+        // the SA-7c child gate (inside the seed function) inert here.
         let count = seed_channel_handles(
+            false,
             &ask_user_handle,
             &channel_room_handle,
             &reaction_handle,

@@ -56,7 +56,6 @@ tool-cron-runs = List recent run history for a cron job
 tool-cron-update = Patch an existing cron job (schedule, command, prompt, enabled, delivery, model, etc.)
 
 
-tool-delegate = Delegate a subtask to a specialized agent. Use when: a task benefits from a different model (e.g. fast summarization, deep reasoning, code generation). The sub-agent runs a single prompt by default; with agentic=true it can iterate with a filtered tool-call loop.
 
 tool-file-edit = Edit a file by replacing an exact string match with new content
 

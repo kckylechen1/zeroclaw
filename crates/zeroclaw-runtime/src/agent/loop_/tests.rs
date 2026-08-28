@@ -10183,6 +10183,7 @@ async fn preactivate_respects_mcp_access_policy() {
         &activated,
         &always_group(&["files__*"]),
         Some(&policy),
+        None,
     );
 
     assert_eq!(names, mcp_set(&["files__list"]));

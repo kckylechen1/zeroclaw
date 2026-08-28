@@ -189,8 +189,10 @@ pub fn render_receipts_block(receipts: &[String]) -> Option<String> {
 
 tokio::task_local! {
     /// Set by the orchestrator when `[agent.tool_receipts] enabled = true`.
-    /// `DelegateTool` reads this to forward receipts into sub-agent tool loops
-    /// so subagent tool calls land in the same per-turn collector.
+    /// Nested tool loops read this to forward receipts into their own
+    /// sub-loops so nested tool calls land in the same per-turn collector.
+    /// (The delegate tool's sub-loop was the first consumer; it was retired
+    /// with #197 wall 1, and the forwarding seam stays for any nested loop.)
     pub static TOOL_LOOP_RECEIPT_CONTEXT: Option<ReceiptScope>;
 }
 

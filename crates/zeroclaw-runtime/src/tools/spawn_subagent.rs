@@ -67,10 +67,11 @@ pub struct SpawnSubagentTool {
     /// Unified spawn lineage (SA-9): the lineage of the registry this
     /// tool instance was built for. The child run receives
     /// `lineage.child()` in its `AgentRunOverrides`, so a registry
-    /// rebuild inside the child cannot reset depth (SA-11) and the
-    /// `delegate ⇄ spawn_subagent` zig-zag is counted by ONE ledger
-    /// (SA-10). `None` (legacy unit-test constructors) behaves as a
-    /// depth-0 root, exactly like the pre-lineage depth field.
+    /// rebuild inside the child cannot reset depth (SA-11) and every
+    /// spawn hop is counted by ONE ledger (SA-10; the retired `delegate`
+    /// tool was the other historical hop). `None` (legacy unit-test
+    /// constructors) behaves as a depth-0 root, exactly like the
+    /// pre-lineage depth field.
     lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 }
 
@@ -113,7 +114,7 @@ impl SpawnSubagentTool {
     /// The lineage of the child this tool would spawn: the tool's own
     /// lineage advanced by one (SA-9/SA-10). This is the single
     /// depth-advancing operation on the spawn site. The AMBIENT scope
-    /// wins when deeper: bounded-delegate children execute with the
+    /// wins when deeper: bounded children historically executed with the
     /// parent's shared Arcs, and the ambient lineage names the context
     /// those Arcs actually run in.
     fn child_lineage(&self) -> zeroclaw_api::subagent_v1::LineageRef {
@@ -133,16 +134,15 @@ impl SpawnSubagentTool {
 
     /// Effective depth of the context this tool lives in, per the ONE
     /// ledger (SA-9): max of its carried lineage and the ambient scope.
-    /// Without either (legacy unit-test constructors) the depth is 0,
-    /// matching the pre-lineage `depth` field on DelegateTool.
+    /// Without either (legacy unit-test constructors) the depth is 0.
     fn effective_depth(&self) -> u32 {
         crate::subagent_v1::effective_depth_with_ambient(self.lineage.as_ref())
     }
 
     /// The delegation depth cap for this caller's agent, from the named
-    /// runtime profile (default 3) — the same cap source `DelegateTool`
-    /// uses, so both tools refuse at the same threshold regardless of
-    /// which fronts the spawn (SA-10).
+    /// runtime profile (default 3) — the same cap source the retired
+    /// `delegate` tool used, so a caller configured against the old tool
+    /// refuses at the same threshold (SA-10).
     fn lineage_depth_cap(&self) -> u32 {
         let runtime_profile = self
             .config
@@ -399,11 +399,10 @@ impl Tool for SpawnSubagentTool {
             });
         }
 
-        // Unified lineage cap (SA-9/SA-10): the same ledger
-        // `DelegateTool` counts against. A context whose lineage is at
-        // or beyond the configured cap refuses here regardless of which
-        // tool fronts the spawn — this closes the census zig-zag where
-        // a registry rebuild inside a child minted a fresh depth.
+        // Unified lineage cap (SA-9/SA-10). A context whose lineage is
+        // at or beyond the configured cap refuses here — this closes the
+        // census zig-zag where a registry rebuild inside a child minted
+        // a fresh depth (the retired `delegate` tool was the other hop).
         let cap = self.lineage_depth_cap();
         if self.effective_depth() >= cap {
             return Ok(ToolResult {
@@ -411,8 +410,8 @@ impl Tool for SpawnSubagentTool {
                 output: ToolOutput::default(),
                 error: Some(format!(
                     "spawn_subagent: lineage depth limit reached ({depth}/{cap}). \
-                     The unified spawn lineage counts every local spawn across \
-                     delegate and spawn_subagent; this context is at the cap.",
+                     The unified spawn lineage counts every local spawn on this \
+                     run; this context is at the cap.",
                     depth = self.effective_depth(),
                 )),
             });
@@ -1439,10 +1438,11 @@ mod tests {
         // because two of the three gates are unreachable from this call site
         // today: the tool mints a fresh uuid per call (so it can never collide)
         // and a detached spawn from a top-level turn resolves to depth 0 (so it
-        // can never exceed the depth cap). They become reachable through
-        // `delegate.rs`, which carries a real depth and caller-chosen ids —
-        // which is exactly why the caller must handle every kind now rather
-        // than only the one it can currently trip. That a real coordinator
+        // can never exceed the depth cap). They were reachable through the
+        // retired `delegate.rs`, which carried a real depth and
+        // caller-chosen ids — which is exactly why the caller must handle
+        // every kind rather than only the one it can currently trip. That
+        // a real coordinator
         // emits these three on the admission channel is proved separately, in
         // `zeroclaw-coordinator`'s own tests; `refusal_from_a_live_coordinator_*`
         // below joins the two halves end to end over the reachable gate.

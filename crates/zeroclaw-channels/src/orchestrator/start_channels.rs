@@ -371,12 +371,6 @@ pub async fn start_channels(
             "channel_room",
             "Create channel rooms and invite users through active channels. Use with Matrix channel keys such as matrix.default.",
         ));
-        if !config.agents.is_empty() {
-            tool_descs.push((
-                "delegate",
-                "Delegate a subtask to a specialized agent. Use when: a task benefits from a different model (e.g. fast summarization, deep reasoning, code generation). The sub-agent runs a single prompt and returns its response.",
-            ));
-        }
         if config.channels.email.values().any(|c| c.enabled) {
             tool_descs.push((
                 "email_search",
