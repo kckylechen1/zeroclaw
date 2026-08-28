@@ -389,13 +389,6 @@
       "signals": 1
     },
     {
-      "path": "crates/zeroclaw-runtime/src/sop/store/sqlite.rs",
-      "store": "sop/runs.db",
-      "role": "store",
-      "basis": "#205 annex row 3: ProcedureRun side migrates to Tachi; definitions stay",
-      "signals": 8
-    },
-    {
       "path": "src/bin/zeroclaw-acp-bridge.rs",
       "store": "acp-bridge-state",
       "role": "role",
