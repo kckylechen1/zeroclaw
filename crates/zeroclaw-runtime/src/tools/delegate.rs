@@ -2968,7 +2968,6 @@ impl DelegateTool {
             crate::subagent_v1::AMBIENT_SPAWN_LINEAGE.scope(
                 self.bounded_scope_lineage(),
                 run_tool_call_loop(ToolLoop {
-                    sop_reassembly: None,
                     exec: ResolvedAgentExecution::resolve(
                         ResolvedModelAccess {
                             model_provider,

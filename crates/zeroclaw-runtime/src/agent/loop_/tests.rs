@@ -1475,7 +1475,6 @@ async fn tool_results_for_denying_channel(
 
     let _ = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -1799,7 +1798,6 @@ async fn run_tool_call_loop_returns_structured_error_for_non_vision_provider() {
 
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -1876,7 +1874,6 @@ async fn run_tool_call_loop_skips_oversized_image_payload() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -1958,7 +1955,6 @@ async fn run_tool_call_loop_degrades_carried_over_image_on_non_vision_provider()
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -2047,7 +2043,6 @@ async fn run_tool_call_loop_accepts_valid_multimodal_request_flow() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -2121,7 +2116,6 @@ async fn run_tool_call_loop_degrades_tool_result_image_for_non_vision_provider()
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -2198,7 +2192,6 @@ async fn run_tool_call_loop_vision_provider_creation_failure() {
 
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -2276,7 +2269,6 @@ async fn run_tool_call_loop_no_images_uses_default_provider() {
     // should succeed because there are no image markers to trigger routing.
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -2340,7 +2332,6 @@ async fn run_tool_call_loop_ingress_default_loop_is_behavior_identical() {
 
         run_tool_call_loop(ToolLoop {
             parent_agent_alias: None,
-            sop_reassembly: None,
             exec: ResolvedAgentExecution {
                 model_access: ResolvedModelAccess {
                     model_provider: &model_provider,
@@ -2524,7 +2515,6 @@ async fn run_tool_call_loop_memory_injection_keys_on_origin() {
 
         run_tool_call_loop(ToolLoop {
             parent_agent_alias: None,
-            sop_reassembly: None,
             exec: ResolvedAgentExecution {
                 model_access: ResolvedModelAccess {
                     model_provider: &model_provider,
@@ -2649,7 +2639,6 @@ async fn run_tool_call_loop_vision_provider_without_model_falls_back() {
 
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -2726,7 +2715,6 @@ async fn run_tool_call_loop_empty_image_markers_use_default_provider() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -2802,7 +2790,6 @@ async fn run_tool_call_loop_multiple_images_trigger_vision_routing() {
 
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -2964,7 +2951,6 @@ async fn run_tool_call_loop_executes_multiple_tools_with_ordered_results() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -3090,7 +3076,6 @@ async fn run_tool_call_loop_native_emits_tool_message_per_parallel_call() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -3256,7 +3241,6 @@ async fn run_tool_call_loop_parallel_cancel_no_double_terminal_for_completed_cal
 
     let _ = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -3365,7 +3349,6 @@ async fn run_tool_call_loop_injects_channel_delivery_defaults_for_cron_add() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -3458,7 +3441,6 @@ async fn run_tool_call_loop_preserves_explicit_cron_delivery_none() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -3543,7 +3525,6 @@ async fn run_tool_call_loop_injects_channel_delivery_defaults_for_lark() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -3636,7 +3617,6 @@ async fn run_tool_call_loop_injects_channel_delivery_defaults_for_feishu() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -3732,7 +3712,6 @@ async fn run_tool_call_loop_deduplicates_repeated_tool_calls() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -3833,7 +3812,6 @@ async fn run_tool_call_loop_allows_low_risk_shell_in_non_interactive_mode() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -3927,7 +3905,6 @@ async fn run_tool_call_loop_reports_unanswerable_approval_without_blaming_the_us
 
     let _ = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -4047,7 +4024,6 @@ async fn run_tool_call_loop_aborts_repeated_prompt_required_shell_before_repromp
 
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -4144,7 +4120,6 @@ async fn run_tool_call_loop_skips_same_round_prompt_required_shell_duplicate_wit
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -4247,7 +4222,6 @@ async fn run_tool_call_loop_prompt_guard_ignores_same_round_dedup_exempt_tools()
 
     let err = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -4340,7 +4314,6 @@ async fn run_tool_call_loop_dedup_exempt_allows_repeated_calls() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -4437,7 +4410,6 @@ async fn run_tool_call_loop_reentrant_agent_tools_are_dedup_exempt_by_default() 
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -4536,7 +4508,6 @@ async fn run_tool_call_loop_dedup_exempt_only_affects_listed_tools() {
 
     let _result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -4621,7 +4592,6 @@ async fn run_tool_call_loop_native_mode_preserves_fallback_tool_call_ids() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -4710,7 +4680,6 @@ async fn run_tool_call_loop_retries_malformed_tool_protocol_without_leaking_json
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -4793,7 +4762,6 @@ async fn run_tool_call_loop_preserves_unknown_function_call_json_with_tools() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -4875,7 +4843,6 @@ async fn run_tool_call_loop_preserves_malformed_unknown_tool_calls_json_with_too
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -4960,7 +4927,6 @@ async fn run_tool_call_loop_falls_back_after_repeated_malformed_tool_protocol() 
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5042,7 +5008,6 @@ async fn run_tool_call_loop_streams_toolcalls_reference_json_when_no_tools_are_e
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5123,7 +5088,6 @@ async fn run_tool_call_loop_returns_toolcalls_reference_json_when_no_tools_are_e
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5196,7 +5160,6 @@ async fn run_tool_call_loop_returns_schema_json_array_when_no_tools_are_enabled(
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5269,7 +5232,6 @@ async fn run_tool_call_loop_returns_tool_calls_audit_json_when_no_tools_are_enab
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5343,7 +5305,6 @@ async fn run_tool_call_loop_returns_function_call_reference_json_when_no_tools_a
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5419,7 +5380,6 @@ This is an example, not an invocation."#;
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5500,7 +5460,6 @@ This is an example, not an invocation."#;
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5593,7 +5552,6 @@ This is an example, not an invocation."#;
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5668,7 +5626,6 @@ Done."#;
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5746,7 +5703,6 @@ Done."#;
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5822,7 +5778,6 @@ async fn run_tool_call_loop_retries_malformed_tool_protocol_fenced_call_without_
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -5900,7 +5855,6 @@ This is an example, not an invocation."#;
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -6035,7 +5989,6 @@ This is an example, not an invocation."#;
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -6120,7 +6073,6 @@ This is an example, not an invocation."#;
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -6210,7 +6162,6 @@ async fn run_tool_call_loop_executes_streamed_tool_call_fence_without_draft_leak
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -6323,7 +6274,6 @@ async fn run_tool_call_loop_sanitizes_native_tool_call_text_before_display_and_h
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -6440,7 +6390,6 @@ async fn run_tool_call_loop_consumes_provider_stream_for_final_response() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -6532,7 +6481,6 @@ async fn run_tool_call_loop_streaming_path_preserves_tool_loop_semantics() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -6635,7 +6583,6 @@ async fn parsed_tool_call_iteration_text_is_suppressed() {
     let turn_id = uuid::Uuid::new_v4().to_string();
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -7517,7 +7464,6 @@ async fn run_tool_call_loop_streams_native_tool_events_without_chat_fallback() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -7622,7 +7568,6 @@ async fn run_tool_call_loop_does_not_duplicate_streamed_narration_before_native_
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -7726,7 +7671,6 @@ async fn run_tool_call_loop_forwards_native_narration_emitted_after_tool_call() 
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -7830,7 +7774,6 @@ async fn run_tool_call_loop_preserves_guard_withheld_narration_tail_before_tool_
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -7989,7 +7932,6 @@ async fn run_tool_call_loop_routed_streaming_uses_live_provider_deltas_once() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &router,
@@ -10375,7 +10317,6 @@ async fn run_tool_call_loop_surfaces_tool_failure_reason_in_on_delta() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -10552,7 +10493,6 @@ async fn cost_tracking_records_usage_when_scoped() {
             Some(ctx),
             run_tool_call_loop(ToolLoop {
                 parent_agent_alias: None,
-                sop_reassembly: None,
                 exec: ResolvedAgentExecution {
                     model_access: ResolvedModelAccess {
                         model_provider: &model_provider,
@@ -10629,7 +10569,6 @@ async fn tool_loop_normalizes_non_leading_system_messages_before_provider_reques
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &provider,
@@ -10743,7 +10682,6 @@ async fn cost_tracking_enforces_budget() {
             Some(ctx),
             run_tool_call_loop(ToolLoop {
                 parent_agent_alias: None,
-                sop_reassembly: None,
                 exec: ResolvedAgentExecution {
                     model_access: ResolvedModelAccess {
                         model_provider: &model_provider,
@@ -10825,7 +10763,6 @@ async fn cost_tracking_is_noop_without_scope() {
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -10914,7 +10851,6 @@ async fn trim_record_carries_model_attribution() {
 
     let _ = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,
@@ -11856,76 +11792,6 @@ async fn runtime_entrypoints_resolve_runtime_profile_tunables_before_provider_se
          before provider setup; observed {seen:?}"
     );
 }
-
-#[tokio::test]
-async fn process_message_provides_sop_reassembly_to_agent_turn() {
-    use zeroclaw_config::schema::{
-        AliasedAgentConfig, ModelProviderConfig, OllamaModelProviderConfig, RiskProfileConfig,
-    };
-
-    let mut config = zeroclaw_config::schema::Config::default();
-    config.providers.models.ollama.insert(
-        "default".to_string(),
-        OllamaModelProviderConfig {
-            base: ModelProviderConfig {
-                model: Some("process-message-reassembly-test".to_string()),
-                timeout_secs: Some(1),
-                uri: Some("http://127.0.0.1:9".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-    );
-    config.agents.insert(
-        "process-message-reassembly-agent".to_string(),
-        AliasedAgentConfig {
-            model_provider: "ollama.default".into(),
-            risk_profile: "default".into(),
-            ..Default::default()
-        },
-    );
-    config
-        .risk_profiles
-        .insert("default".to_string(), RiskProfileConfig::default());
-
-    let seen = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
-    let seen_for_hook = Arc::clone(&seen);
-    {
-        let mut hook = super::AGENT_TURN_SOP_REASSEMBLY_TEST_HOOK
-            .lock()
-            .expect("agent-turn reassembly test hook lock should not be poisoned");
-        *hook = Some(Arc::new(move |has_reassembly| {
-            seen_for_hook
-                .lock()
-                .expect("seen lock should not be poisoned")
-                .push(has_reassembly);
-        }));
-    }
-
-    let result = super::process_message(
-        config,
-        "process-message-reassembly-agent",
-        "hello",
-        Some("session"),
-        TurnOrigin::SubTurn,
-    )
-    .await;
-
-    {
-        let mut hook = super::AGENT_TURN_SOP_REASSEMBLY_TEST_HOOK
-            .lock()
-            .expect("agent-turn reassembly test hook lock should not be poisoned");
-        *hook = None;
-    }
-
-    let seen = seen.lock().expect("seen lock should not be poisoned");
-    assert!(
-        seen.iter().any(|has_reassembly| *has_reassembly),
-        "process_message must pass a config-backed SopStepReassembly handle into agent_turn; \
-         observed {seen:?}; process_message result: {result:?}"
-    );
-}
-
 #[tokio::test]
 async fn process_message_seam_narrows_safe_defaults_outside_allowed_tools() {
     let config = zeroclaw_config::schema::Config::default();
@@ -12154,7 +12020,6 @@ async fn run_tool_call_loop_events_share_consistent_turn_id_channel_and_alias() 
 
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution {
             model_access: ResolvedModelAccess {
                 model_provider: &model_provider,

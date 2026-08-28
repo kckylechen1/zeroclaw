@@ -19,12 +19,11 @@ use zeroclaw_memory::{self, Memory};
 use zeroclaw_providers::{ChatMessage, ModelProvider};
 
 use super::{
-    agent_turn_with_sop_reassembly, apply_text_tool_prompt_policy, build_hardware_context,
+    agent_turn, apply_text_tool_prompt_policy, build_hardware_context,
     build_tool_instructions_for_names, claim_announcements_for_turn, compute_excluded_mcp_tools,
     live_channel_registry, native_tool_specs_present_for_turn, observe_turn_user_message,
     resolved_agent_for_turn, seed_channel_handles, settle_announcement_guards,
 };
-use crate::agent::turn::SopStepReassembly;
 
 /// Process a single message through the full agent (with tools, peripherals, memory).
 /// Used by channels (Telegram, Discord, etc.) to enable hardware and tool use.
@@ -529,7 +528,7 @@ pub async fn process_message(
         let turn_result = zeroclaw_api::NATIVE_THINKING_OVERRIDE
             .scope(
                 thinking_params.native_thinking,
-                agent_turn_with_sop_reassembly(
+                agent_turn(
                     Some(&config),
                     model_provider.as_ref(),
                     &mut history,
@@ -569,7 +568,6 @@ pub async fn process_message(
                     }),
                     Some(agent_alias),
                     Some(&turn_id),
-                    Some(SopStepReassembly { config: &config }),
                 ),
             )
             .await;

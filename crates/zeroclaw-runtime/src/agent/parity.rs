@@ -147,7 +147,6 @@ async fn parity_l1_engine_honors_excluded_tools() {
     let turn_id = uuid::Uuid::new_v4().to_string();
     let result = run_tool_call_loop(ToolLoop {
         parent_agent_alias: None,
-        sop_reassembly: None,
         exec: ResolvedAgentExecution::resolve(
             ResolvedModelAccess {
                 model_provider: &provider,
@@ -364,24 +363,6 @@ async fn parity_l2_sop_live_step_agent_isolation() {
         },
     );
 
-    // The live-SOP path: re-assemble the step agent's own execution context.
-    let owned = crate::agent::turn::assemble_owned_execution(&config, "restricted", None)
-        .await
-        .expect("assemble_owned_execution must build the restricted step agent's context");
-    let sop_names = retained_names(&owned.tools_registry);
-
-    // Security property: the RESTRICTED policy is applied, not the parent's. The
-    // allowlisted built-in survives; a built-in denied by allowlist omission does
-    // not.
-    assert!(
-        sop_names.contains(&"file_read".to_string()),
-        "the step agent's allowlisted tool must be present: {sop_names:?}"
-    );
-    assert!(
-        !sop_names.contains(&"shell".to_string()),
-        "a tool the step agent's policy denies must be absent: {sop_names:?}"
-    );
-
     // Parity: the same agent's tools assembled the CANONICAL seam way must resolve
     // the identical retained set. Feed the seam the SAME per-agent policy the
     // helper resolves internally (`SecurityPolicy::for_agent`), so this catches a
@@ -414,18 +395,6 @@ async fn parity_l2_sop_live_step_agent_isolation() {
     let mut seam_names = retained_names(&assembled.registry.into_inner());
     seam_names.sort();
 
-    let mut sop_over_universe: Vec<String> = sop_names
-        .iter()
-        .filter(|n| universe.contains(&n.as_str()))
-        .cloned()
-        .collect();
-    sop_over_universe.sort();
-
-    assert_eq!(
-        seam_names, sop_over_universe,
-        "the live-SOP re-assembly and the direct seam must resolve the step \
-         agent's tool set identically over the shared name universe"
-    );
     assert_eq!(
         seam_names,
         vec!["file_read".to_string()],

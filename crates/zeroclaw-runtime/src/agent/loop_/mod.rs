@@ -310,12 +310,9 @@ pub use zeroclaw_api::TOOL_CHOICE_OVERRIDE;
 pub use super::tool_execution::{ToolExecutionOutcome, should_execute_tools_in_parallel};
 
 // agent_turn entry moved to `agent_turn`.
-#[cfg(test)]
-pub(crate) use self::agent_turn::AGENT_TURN_SOP_REASSEMBLY_TEST_HOOK;
 pub use self::agent_turn::agent_turn;
 
 // Run overrides / resolve helpers moved to `run_overrides`.
-pub(crate) use self::agent_turn::agent_turn_with_sop_reassembly;
 pub use self::process_message::process_message;
 pub use self::run::run;
 pub use self::run_overrides::AgentRunOverrides;
@@ -339,9 +336,8 @@ pub(crate) use super::turn::{
 pub use super::turn::{
     DraftEvent, LoopKnobs, MaxIterationBehavior, ModelSwitchCallback, ModelSwitchRequested,
     PROGRESS_MIN_INTERVAL_MS, ResolvedAgentExecution, ResolvedIo, ResolvedModelAccess,
-    ResolvedRuntimeKnobs, SopStepReassembly, StreamDelta, ToolLoop, ToolLoopCancelled,
-    drain_steering_messages, is_model_switch_requested, is_tool_loop_cancelled, run_tool_call_loop,
-    scrub_credentials,
+    ResolvedRuntimeKnobs, StreamDelta, ToolLoop, ToolLoopCancelled, drain_steering_messages,
+    is_model_switch_requested, is_tool_loop_cancelled, run_tool_call_loop, scrub_credentials,
 };
 
 // Heavy suite gated so lib-test iteration does not pay 13.9k lines; CI runtime leg enables it.
