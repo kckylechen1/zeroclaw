@@ -9,7 +9,7 @@ Use this page when a change adds scheduled or autonomous work, introduces a wait
 | Work type | Current owner or status surface | Durable records |
 | --- | --- | --- |
 | Cron job | Cron scheduler and store | `data/cron/jobs.db` |
-| SOP run | `SopEngine` and `SopRunStore` | Process memory by default; `data/sop/runs.db` when durable SQLite initialization succeeds |
+| SOP run | Removed with the run side | The legacy `SopEngine`/`SopRunStore` were demolished; a leftover `data/sop/runs.db` is left in place with a boot-time WARN |
 | Background delegation | Coordinator spawn + announce chain, with durable task rows | a task row in `data/control_plane.db` under a booted daemon |
 | Runtime-spawned subagent | Spawn site, with control-plane supervision when available | A best-effort task row in `data/control_plane.db` under a booted daemon |
 
@@ -25,9 +25,9 @@ Startup behavior is explicit. With catch-up enabled, overdue jobs are considered
 
 ## SOP runs
 
-SOP definitions live under the configured `sops` directory. `SopEngine` owns run progression, approval waits, checkpoints, terminal transitions, and the in-process status surface. `SopRunStore` is the concurrency source of truth when it admits and claims a run.
+SOP definitions live under the configured `sops` directory. Run progression, approval waits, checkpoints, and terminal transitions were owned by the legacy `SopEngine`, with `SopRunStore` as the concurrency source of truth; both were removed with the run side.
 
-Run persistence is opt-in. With the default `sop.persist_runs = false`, the engine uses an in-memory store. When persistence is enabled, the default SQLite backend writes `runs.db` under `<data_dir>/sop` unless `run_state_dir` overrides it. Successful store initialization lets active snapshots, terminal records, events, revisions, and concurrency claims support restart restoration. If store initialization fails, the daemon logs a warning and falls back to the in-memory store.
+SOP run persistence was removed with the run side: `sop.persist_runs`, `run_store_backend`, and `run_state_dir` no longer configure anything, and the `SopEngine`/`SopRunStore` pair that consumed them was demolished. A leftover `data/sop/runs.db` from an older install is left in place and reported by a boot-time warning that names the migration path.
 
 SOP audit records in the Memory backend are a separate observability surface. They do not replace the run store and must not be used as the authority for whether a run is active, paused, approved, or terminal.
 

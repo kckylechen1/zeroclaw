@@ -2542,6 +2542,26 @@ async fn async_main(command: clap::Command) -> Result<()> {
             // "(deleted)" path on Linux). Used by the post-loop self-respawn.
             zeroclaw_runtime::restart::record_launch();
 
+            // Non-destructive disposition for the retired legacy SOP run store:
+            // a real install may still carry `<data_dir>/sop/runs.db` (runs,
+            // events, claims, proposals) from before the run-side demolition.
+            // The file is left exactly in place - nothing reads, migrates, or
+            // deletes it - and this once-per-boot WARN names the migration path
+            // so the disposition is never silent. Run truth lives Tachi-side as
+            // ProcedureRuns through the procedure_v1 seam.
+            let legacy_sop_run_store = config.data_dir.join("sop").join("runs.db");
+            if legacy_sop_run_store.exists() {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({
+                            "path": legacy_sop_run_store.display().to_string()
+                        })),
+                    "Legacy SOP run store found and left in place (never read, migrated, or deleted); SOP runs are Tachi-side ProcedureRuns via the procedure_v1 seam - archive or remove the file manually if it is no longer needed"
+                );
+            }
+
             // Reload loop. `daemon::run` returns DaemonExit::Shutdown on
             // SIGINT/SIGTERM (loop ends) or DaemonExit::Reload on SIGUSR1
             // (loop re-reads config from disk and re-runs). The PID stays
