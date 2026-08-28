@@ -79,7 +79,7 @@ const MATRIX: &[ParityRow] = &[
         // The live SOP driver builds its own engine input; a nested step that
         // delegates to a different agent re-assembles THAT agent's context
         // through the one ScopedToolRegistry::assemble seam (via
-        // assemble_owned_execution), so the step runs with the step agent's own
+        // per-agent re-assembly), so the step runs with the step agent's own
         // gated tools/policy/MCP scope, provider binding, runtime controls, and
         // an isolated child transcript rather than the parent turn's. Backed by
         // the seam-level test here plus loop-boundary regressions in
@@ -302,7 +302,7 @@ async fn parity_l2_builtin_filter_semantic_parity() {
 
 /// L2 positive parity assertion for the live SOP nested-step surface: when a SOP
 /// step delegates to a different agent, the live driver re-assembles THAT agent's
-/// execution context via `assemble_owned_execution`, which routes tool resolution
+/// execution context via the per-agent re-assembly step, which routes tool resolution
 /// through the one `ScopedToolRegistry::assemble` seam under the step agent's own
 /// `SecurityPolicy`. The step therefore runs with the step agent's gated tool set,
 /// not the parent turn's broader one.
