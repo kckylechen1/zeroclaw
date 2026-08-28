@@ -299,7 +299,7 @@ The `[sop]` config controls enforcement:
 |---|---:|---|
 | `step_schema_enforce` | `true` | Validate declared step input/output schemas at engine boundaries. |
 | `step_scope_enforce` | `false` | Treat per-step tool scopes as enforced filters instead of advisory hints. |
-| `step_mandatory_tools` | `["sop_advance", "sop_approve", "sop_status"]` | Keep lifecycle tools available while scope enforcement is enabled. |
+| `step_mandatory_tools` | - | Retired with the run side: the lifecycle tools it listed were removed, so this key no longer has an effect. |
 | `max_step_visits` | `256` | Stop routed runs that revisit one step too many times. |
 | `max_step_retries` | `2` | Limit retries requested by a step failure policy. |
 | `untrusted_payload_max_bytes` | `8192` | Cap untrusted trigger topic/payload text at a UTF-8 character boundary; `0` disables the cap. |
@@ -307,7 +307,7 @@ The `[sop]` config controls enforcement:
 | `untrusted_guard_sensitivity` | `0.7` | Sensitivity used by prompt-guard screening and outbound redaction. |
 | `untrusted_frame_warning` | `true` | Include explanatory warning text in the untrusted-content frame. Frame boundaries remain enabled. |
 | `untrusted_outbound_redact` | `true` | Enable shared outbound redaction for SOP content-safety consumers. |
-| `procedural_memory_enabled` | `false` | Register the `sop_workshop` tool for proposal capture, review, and explicit SOP write-back. |
+| `procedural_memory_enabled` | - | Retired with the run side: the `sop_workshop` proposal pipeline it gated was removed, so this key no longer has an effect. |
 
 Schema enforcement fails closed: invalid step input prevents the step from
 starting, and invalid step output is routed through the step's `on_failure`
@@ -320,24 +320,16 @@ framed before it reaches step context. Framing is always on; the warning text ca
 be hidden, but raw external trigger text is not interpolated into the model
 context.
 
-Procedural memory is opt-in. When enabled, `sop_workshop` can create and inspect
-stored SOP proposals, capture completed run context into a candidate procedure,
-and apply an approved proposal to `SOP.toml`/`SOP.md`. Write-back only happens
-through the explicit `apply` action.
+Procedural memory was removed with the run side: `sop_workshop`, proposal
+capture, and proposal write-back no longer exist. Proposal-style learning
+belongs to the Tachi-side procedure_v1 seam.
 
 ### Run Durability
 
-The `[sop]` config also controls whether run state survives a daemon restart:
-
-| Field | Default | Effect |
-|---|---:|---|
-| `persist_runs` | `true` | Persist run state - including runs parked at a HITL approval or a deterministic checkpoint - so they survive a restart. Set `false` for an in-memory-only, non-durable engine. |
-| `run_store_backend` | `"sqlite"` | Durable backend when `persist_runs` is true. `sqlite` writes `runs.db` under the run-state dir. |
-
-`persist_runs = true` is the default so a parked HITL approval is not lost on
-restart (`build_sop_engine` falls back to an in-memory store with a loud log if
-the durable backend cannot open, so this is default-safe); `persist_runs = false`
-is the documented opt-out for an ephemeral engine.
+Removed with the run side: `persist_runs`, `run_store_backend`, and
+`run_state_dir` no longer configure anything, and the runs.db store they
+described was demolished. Existing `sop/runs.db` files on disk are left in
+place untouched.
 
 ## 4. Trigger Types
 

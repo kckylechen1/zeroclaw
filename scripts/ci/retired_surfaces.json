@@ -135,6 +135,84 @@
       "kind": "code-path",
       "retired_in": "PR #222",
       "notes": "Triple-dead runtime platform module deleted; WASM support lives in the zeroclaw-plugins host bridge. Docs must not teach the module path."
+    },
+    {
+      "term": "sop_execute",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy agent-facing SOP run tool; the run side was demolished. Run truth is Tachi-side ProcedureRuns through the procedure_v1 seam.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "sop_advance",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy agent-facing SOP run tool; the run side was demolished. Run truth is Tachi-side ProcedureRuns through the procedure_v1 seam.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "sop_approve",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy agent-facing SOP run tool; the run side was demolished. Approvals are Tachi-side through the procedure_v1 seam.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "sop_status",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy agent-facing SOP run tool; the run side was demolished. Run truth is Tachi-side ProcedureRuns through the procedure_v1 seam.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "sop_list",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy agent-facing SOP run tool; the run side was demolished. Definitions stay authorable; runs are Tachi-side.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "sop_workshop",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy proposal-review run tool; the run-derived proposal pipeline was demolished with the engine, store, and procedural-memory capture.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "persist_runs",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP run-persistence key; the runs.db store and engine were demolished and the key still parses but is inert: nothing consumes it any more."
+    },
+    {
+      "term": "run_store_backend",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP run-store backend key; the runs.db store was demolished and the key still parses but is inert: nothing consumes it any more."
+    },
+    {
+      "term": "run_state_dir",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP run-state directory key; the runs.db store was demolished and the key still parses but is inert: nothing consumes it any more."
+    },
+    {
+      "term": "step_mandatory_tools",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP step tool-scope key; the sop_* lifecycle tools it referenced were demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "procedural_memory_enabled",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired key for the sop_workshop proposal pipeline; capture, store, and review tool were demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "sop/runs.db",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy SQLite run store (runs, events, claims, proposals). Existing files on real installs are left in place with a boot-time WARN naming the migration path; nothing reads or migrates them."
     }
   ]
 }
