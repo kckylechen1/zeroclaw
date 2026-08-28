@@ -3487,27 +3487,6 @@ fn spawn_companion_outbox_observer(
     }))
 }
 
-#[cfg(feature = "agent-runtime")]
-#[derive(Default)]
-struct SopMaintenanceTickReport {
-    maintenance: zeroclaw_runtime::sop::MaintenanceSummary,
-    cron_started: usize,
-    cron_skipped: usize,
-    cron_blocked_unsafe: usize,
-    cron_no_match: usize,
-}
-
-#[cfg(feature = "agent-runtime")]
-impl SopMaintenanceTickReport {
-    fn is_empty(&self) -> bool {
-        self.maintenance.is_empty()
-            && self.cron_started == 0
-            && self.cron_skipped == 0
-            && self.cron_blocked_unsafe == 0
-            && self.cron_no_match == 0
-    }
-}
-
 #[cfg(feature = "gateway")]
 async fn run_gateway_if_enabled(
     host: &str,

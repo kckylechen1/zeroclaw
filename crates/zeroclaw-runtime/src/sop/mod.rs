@@ -1,74 +1,40 @@
-pub mod active_scope;
-pub mod approval;
-pub mod audit;
 pub mod binding;
-pub mod capability;
 pub mod condition;
-pub mod dispatch;
-pub mod engine;
-pub mod executor;
 pub mod graph;
-pub mod metrics;
-pub mod procedural_memory;
-pub mod route;
-pub mod rundata;
 pub mod schema;
 pub mod scope;
 pub mod step_contract;
-pub mod store;
-pub mod time;
 pub mod trigger_registry;
-pub mod trigger_source;
-pub(crate) mod triggers;
 pub mod types;
 pub mod wire;
 
-pub use approval::ApprovalDecision;
-pub use audit::SopAuditLogger;
-#[allow(unused_imports)]
 pub use binding::{
     BindingContext, BindingRef, BindingScope, ExtractedBinding, extract_bindings, remap_step_refs,
     resolve_args,
 };
-pub use capability::{
-    CapabilityContext, CapabilityInfo, CapabilityResult, SopCapability, SopCapabilityRegistry,
-};
-pub use engine::{FinishRunError, MaintenanceSummary, SopEngine, err_is_resume_at_capacity};
-pub use executor::{drive_resumed_broker_action, spawn_headless_run_driver};
 pub use graph::{
     FlowRole, GraphDiagnostic, GraphLayout, GraphLegend, GraphNode, GraphPin, GraphSeverity,
-    GraphWire, LayoutGeometry, LegendEntry, NodeKind, NodePosition, NodeRunOverlay, NodeRunState,
-    PinClass, RunOverlay, SopGraph, SopGraphExt, TRIGGER_NODE_BASE, TextGraphFormat, ToolSpecs,
-    render_graph_text,
+    GraphWire, LayoutGeometry, LegendEntry, NodeKind, NodePosition, PinClass, SopGraph,
+    SopGraphExt, TRIGGER_NODE_BASE, TextGraphFormat, ToolSpecs, render_graph_text,
 };
-pub use metrics::SopMetricsCollector;
 pub use scope::StepToolScope;
 pub use step_contract::{StepFailure, StepRouting, SwitchRule};
-pub use store::{
-    ClaimToken, PersistedRun, ProposalKind, ProposalRecord, ProposalStatus, SopEventRecord,
-    SopRunStore, SqliteRunStore, StoreError, build_run_store,
-};
-pub use time::now_iso8601;
 pub use trigger_registry::{
     BoundTriggerSource, ChannelAlias, ChannelTriggerKind, ConditionField, ConditionValueType,
     ConfiguredChannel, PayloadContract, TriggerField, TriggerFieldKind, TriggerSourceRegistry,
     build_registry, registry_from_config,
 };
 pub use types::{
-    DeterministicRunState, DeterministicSavings, FilesystemEventKind, PlannedToolCall, Sop,
-    SopEvent, SopExecutionMode, SopPriority, SopRun, SopRunAction, SopRunStatus, SopRunSummary,
-    SopStep, SopStepKind, SopStepResult, SopStepStatus, SopTrigger, SopTriggerSource, StepSchema,
-    StepToolCall,
+    FilesystemEventKind, PlannedToolCall, Sop, SopExecutionMode, SopPriority, SopStep, SopStepKind,
+    SopTrigger, SopTriggerSource, StepSchema,
 };
 pub use wire::{WireEdit, WireError, WireOp, apply_wire};
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use types::{SopManifest, SopMeta};
-use zeroclaw_config::schema::SopConfig;
-use zeroclaw_memory::traits::Memory;
 
 /// Build the tool-spec map an SOP graph projection uses to type step pins.
 /// Keys are tool names; values are the tool's declared `parameters` (input
@@ -90,82 +56,6 @@ pub fn tool_specs_from_config(
             (spec.name.clone(), spec)
         })
         .collect()
-}
-
-/// Injected side-effect adapters for [`build_sop_engine`]. Each is optional and
-/// fail-closed when absent: the route falls back to the log-only no-op adapter,
-/// and the `forge.comment` / `llm.generate` capabilities report a clear failure
-/// instead of acting. The daemon injects real implementations; CLI / standalone
-/// callers pass `SopEngineAdapters::default()`.
-#[derive(Default)]
-pub struct SopEngineAdapters {
-    /// Delivers approval request / escalation notices to a channel.
-    pub route: Option<Arc<dyn approval::ApprovalRouteAdapter>>,
-    /// Posts a SOP step's comment to a git forge (`forge.comment`).
-    pub forge: Option<Arc<dyn capability::ForgeCommentAdapter>>,
-    /// Runs one bounded model call as a pipeline step (`llm.generate`).
-    pub llm: Option<Arc<dyn capability::LlmGenerateAdapter>>,
-}
-
-/// Build a single shared SopEngine + SopAuditLogger pair.
-/// This is the sole construction site for SOP state within a daemon.
-/// Callers receive `Arc<Mutex<SopEngine>>` and `Arc<SopAuditLogger>`
-/// handles — never call `SopEngine::new` or `SopAuditLogger::new`
-/// directly outside this module.
-pub fn build_sop_engine(
-    config: SopConfig,
-    workspace_dir: &Path,
-    audit_memory: Arc<dyn Memory>,
-    adapters: SopEngineAdapters,
-) -> (Arc<Mutex<SopEngine>>, Arc<SopAuditLogger>) {
-    let SopEngineAdapters {
-        route: route_adapter,
-        forge: forge_adapter,
-        llm: llm_adapter,
-    } = adapters;
-    // Select the run-state backend from config (default: durable sqlite, so parked
-    // HITL runs survive a restart). A backend-open failure must not crash daemon
-    // startup, so fall back to in-memory with a loud log. `workspace_dir` here is the
-    // daemon data dir (every caller passes `config.data_dir`), so a durable store
-    // lands at `<data_dir>/sop/runs.db` unless `[sop] run_state_dir` overrides it.
-    let store = store::build_run_store(&config, workspace_dir).unwrap_or_else(|e| {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                .with_attrs(::serde_json::json!({"error": e.to_string()})),
-            "SOP: run-store init failed; falling back to in-memory"
-        );
-        Arc::new(store::InMemoryRunStore::new())
-    });
-    let (run_tx, _run_rx) = tokio::sync::broadcast::channel(256);
-    // EPIC G: the approval broker (membership + quorum) resolves policies/groups
-    // from the engine's live `[sop.approval]` at use-time. The route adapter
-    // delivers approval request/escalation notices to a channel; the daemon injects
-    // a real channel-delivering adapter, while CLI/standalone callers pass `None`
-    // and fall back to the no-op (log-only) adapter - unchanged behavior there.
-    let route: Arc<dyn approval::ApprovalRouteAdapter> =
-        route_adapter.unwrap_or_else(|| Arc::new(approval::NoopRouteAdapter));
-    let approval_broker = Arc::new(approval::ApprovalBroker::with_route(route));
-    // Deterministic capability registry: builtins + the injected-adapter
-    // capabilities (`forge.comment` write-back, `llm.generate` bounded model
-    // call). The daemon injects real adapters; CLI/standalone callers pass
-    // `SopEngineAdapters::default()`, leaving both fail-closed exactly like
-    // `shell.exec`/`notify.channel`.
-    let mut capabilities = capability::SopCapabilityRegistry::with_builtins();
-    capabilities.register(capability::ForgeCommentCapability::new(forge_adapter));
-    capabilities.register(capability::LlmGenerateCapability::new(llm_adapter));
-    let mut engine = SopEngine::new(config)
-        .with_store(store)
-        .with_metrics(SopMetricsCollector::shared())
-        .with_run_notifier(run_tx)
-        .with_approval_broker(approval_broker)
-        .with_capabilities(Arc::new(capabilities));
-    engine.reload(workspace_dir);
-    engine.restore_runs();
-    let engine = Arc::new(Mutex::new(engine));
-    let audit = Arc::new(SopAuditLogger::new(audit_memory));
-    (engine, audit)
 }
 
 /// Parse an execution mode string into `SopExecutionMode`, falling back to
@@ -298,36 +188,6 @@ pub fn delete_sop_typed(sops_dir: &Path, name: &str) -> std::result::Result<(), 
         return Err(SopAuthorError::NotFound(name.to_string()));
     }
     std::fs::remove_dir_all(&dir).map_err(|e| SopAuthorError::Other(e.into()))
-}
-
-/// Project the live run state for `run_id` onto `sop`'s graph. Errors if
-/// the run is unknown or the engine lock is poisoned.
-pub fn run_overlay_for(
-    sop: &Sop,
-    engine: &Arc<Mutex<SopEngine>>,
-    run_id: &str,
-) -> Result<RunOverlay> {
-    let guard = engine
-        .lock()
-        .map_err(|_| anyhow::Error::msg("SOP engine lock poisoned"))?;
-    let run = guard
-        .get_run(run_id)
-        .ok_or_else(|| anyhow::Error::msg(format!("run '{run_id}' not found")))?;
-    let graph = SopGraph::from_sop(sop);
-    Ok(RunOverlay::project(&graph, run))
-}
-
-/// Enumerate every run the engine holds (active + retained terminal),
-/// newest first, optionally scoped to one SOP. Errors only if the engine
-/// lock is poisoned. This is the Runs surface's data source.
-pub fn run_summaries_for(
-    engine: &Arc<Mutex<SopEngine>>,
-    sop_name: Option<&str>,
-) -> Result<Vec<SopRunSummary>> {
-    let guard = engine
-        .lock()
-        .map_err(|_| anyhow::Error::msg("SOP engine lock poisoned"))?;
-    Ok(guard.run_summaries(sop_name))
 }
 
 /// Renumber steps to a contiguous 1..=N sequence (positional order wins)
@@ -479,7 +339,6 @@ fn load_sop(sop_dir: &Path, default_execution_mode: SopExecutionMode) -> Result<
         max_pending_approvals,
         agent,
     };
-    capability::SopCapabilityRegistry::with_builtins().validate_sop(&sop)?;
     Ok(sop)
 }
 
