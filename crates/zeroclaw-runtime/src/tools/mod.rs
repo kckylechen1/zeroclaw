@@ -462,10 +462,11 @@ pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Tool names retired from the ordinary model-visible registry. Their
-/// implementations stay compiled (operator surfaces and tests construct
-/// them directly), but no assembly path may register them and no plugin
-/// may claim the names. Kept as one list so the registry totality test
+/// Tool names retired from the ordinary model-visible registry. No assembly
+/// path may register them and no plugin may claim the names. Most entries
+/// keep their implementations compiled (operator surfaces and tests
+/// construct them directly); the SOP run tools below were deleted outright
+/// with the legacy run side. Kept as one list so the registry totality test
 /// and the plugin collision guard assert the same set.
 #[cfg(any(test, feature = "plugins-wasm"))]
 pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
@@ -475,6 +476,12 @@ pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
     "security_ops",
     "backup",
     "data_management",
+    "sop_execute",
+    "sop_advance",
+    "sop_approve",
+    "sop_status",
+    "sop_list",
+    "sop_workshop",
 ];
 
 /// Bundled return values from tool registry construction.
@@ -1792,6 +1799,21 @@ mod tests {
                 "novel-tool".to_string(),
             ])
         );
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn retired_tool_names_stay_reserved_from_plugin_claims() {
+        let mut registered_names = RETIRED_OPERATOR_TOOL_NAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        for name in RETIRED_OPERATOR_TOOL_NAMES {
+            assert!(
+                !claim_plugin_tool_name(&mut registered_names, name),
+                "a plugin reclaimed retired tool name {name}"
+            );
+        }
     }
 
     #[cfg(feature = "plugins-wasm")]
