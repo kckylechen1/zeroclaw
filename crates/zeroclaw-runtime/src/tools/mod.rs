@@ -514,7 +514,7 @@ pub fn all_tools(
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
     // Formerly the delegate tool's agent roster / parent fallback key.
-    // `delegate` is retired (#197 wall 1); the parameters stay in the
+    // `delegate` is retired (wall 1); the parameters stay in the
     // signature (underscored, intentionally unused) so call sites do not
     // churn and the registry contract is unchanged for callers.
     _agents: &HashMap<String, AliasedAgentConfig>,
@@ -584,7 +584,7 @@ pub fn all_tools_with_runtime(
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
     // Formerly the delegate tool's agent roster / parent fallback key.
-    // `delegate` is retired (#197 wall 1); the parameters stay in the
+    // `delegate` is retired (wall 1); the parameters stay in the
     // signature (underscored, intentionally unused) so call sites do not
     // churn and the registry contract is unchanged for callers.
     _agents: &HashMap<String, AliasedAgentConfig>,
@@ -1438,7 +1438,7 @@ pub fn all_tools_with_runtime(
         }
     }
 
-    // `delegate` is retired (#197 wall 1): the legacy full-parent-inheritance
+    // `delegate` is retired (wall 1): the legacy full-parent-inheritance
     // delegation tool is no longer constructed on any composition. Its
     // replacement-first surfaces are the V1 `reasoning_subagent` (minimal and
     // full alike) and the Tachi bridge for durable/heavy work. The name stays
@@ -2640,7 +2640,7 @@ mod tests {
 
     #[test]
     fn delegate_stays_absent_from_every_registry() {
-        // #197 wall 1: the legacy full-parent-inheritance delegation tool is
+        // Wall 1: the legacy full-parent-inheritance delegation tool is
         // retired. Neither an agents-configured full-composition registry nor
         // an agents-less one may surface it, and the retired-name guard keeps
         // plugins from claiming the name. The V1 SubAgent entrypoints
