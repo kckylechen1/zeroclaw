@@ -15238,10 +15238,13 @@ impl WhatsAppConfig {
     }
 }
 
-/// MQTT channel configuration (SOP listener).
+/// MQTT channel configuration.
 ///
-/// Subscribes to MQTT topics and dispatches incoming messages
-/// to the SOP engine for processing.
+/// Subscribes to MQTT topics and feeds incoming messages into the agent
+/// loop. The former SOP-listener fan-in (which dispatched messages to the
+/// SOP engine) was removed with the run side; its config section is a
+/// parse-time tombstone that rejects legacy blocks with a migration
+/// message.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "channels.mqtt"]
@@ -15367,11 +15370,13 @@ fn default_mqtt_keep_alive_secs() -> u64 {
     30
 }
 
-/// Filesystem SOP listener configuration.
+/// Filesystem channel configuration.
 ///
-/// Watches configured paths and dispatches file create/modify/delete/rename
-/// events to the SOP engine. This is a fan-in listener, not a chat channel:
-/// its `Channel::send` has no outbound surface.
+/// Watches configured paths and feeds file create/modify/delete/rename
+/// events into the agent loop. The former SOP-listener fan-in (which
+/// dispatched these events to the SOP engine) was removed with the run
+/// side; its config section is a parse-time tombstone that rejects legacy
+/// blocks with a migration message.
 #[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "channels.filesystem"]
@@ -15536,11 +15541,10 @@ fn default_filesystem_max_content_bytes() -> Option<usize> {
 /// fields is config-driven (`content_template`, `thread_id_field`) so a new
 /// source — Anitya, an internal bus, anything publishing JSON — is onboarded by
 /// configuration rather than code.
-/// Where a fan-in delivery is routed once consumed. Used by AMQP, which carries
-/// this field to choose between the agent loop, the SOP engine, or both.
-/// Agent-loop channels (Telegram, Discord, Slack, ...) do not carry a `dispatch`
-/// field: their fan-in is trigger-driven, opting in via a SOP `channel` trigger
-/// while the normal agent turn always runs. The mode is source-agnostic.
+/// RETIRED dispatch routing for AMQP fan-in: this field formerly chose between
+/// the agent loop, the SOP engine, or both. Removed with the run side; any
+/// value now fails config parse with the migration message and deliveries
+/// always drive the agent loop.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "channels.amqp"]

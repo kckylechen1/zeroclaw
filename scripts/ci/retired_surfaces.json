@@ -280,13 +280,15 @@
       "term": "SopEngine",
       "kind": "code-path",
       "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
-      "notes": "The headless SOP run engine (FSM, admission, checkpoints, deterministic capability steps) was deleted; run truth lives Tachi-side as ProcedureRuns through the procedure_v1 seam."
+      "notes": "The headless SOP run engine (FSM, admission, checkpoints, deterministic capability steps) was deleted; run truth lives Tachi-side as ProcedureRuns through the procedure_v1 seam. The regex also trips prose teaching of 'the SOP engine' as live.",
+      "match_regex": "(?i)SopEngine\\b|\\bSOP engines?\\b"
     },
     {
       "term": "SopRunStore",
       "kind": "code-path",
       "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
-      "notes": "The durable SOP run store (runs.db) was deleted; existing files are left in place with a boot-time WARN."
+      "notes": "The durable SOP run store (runs.db) was deleted; existing files are left in place with a boot-time WARN.",
+      "match_regex": "(?i)SopRunStore\\b|\\bSOP run stores?\\b"
     },
     {
       "term": "build_sop_engine",
@@ -299,6 +301,13 @@
       "kind": "code-path",
       "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
       "notes": "Procedural-memory proposal store was deleted against its census survivor row: its only consumers (engine, workshop tool, proposal store) were demolished and the V4 seam leaves no ZeroClaw-side reader."
+    },
+    {
+      "term": "sop-run",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "match_regex": "(?i)\\bSOP runs?\\b",
+      "notes": "Prose tripwire for teaching local SOP runs as live behavior: the run side was deleted and runs live Tachi-side as ProcedureRuns through the procedure_v1 seam. Historical/removal context nearby excuses, per the gate discriminator."
     }
   ]
 }

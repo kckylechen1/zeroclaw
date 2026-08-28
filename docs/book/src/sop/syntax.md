@@ -25,41 +25,35 @@ the runtime schema, and `condition` expressions. Before running a generated or
 checked-in SOP, validate it with `zeroclaw sop validate <name>`.
 
 `SOP.toml` carries the SOP's identity (`name`, `description`, `version`), its
-`triggers`, and its execution knobs. The concurrency-admission fields govern what
-happens when a trigger arrives while this SOP's execution slots are full:
+`triggers`, and its run-side execution knobs. The concurrency-admission fields
+still parse and validate as definition format, but they were retired with the
+run side: no engine admits runs any more, so they configure nothing. Their
+former semantics, kept for reading older SOPs:
 
-| Field | Default | Effect |
+| Field | Default | Former effect |
 |---|---:|---|
-| `max_concurrent` | `1` | Maximum runs of this SOP *executing* at once. A run parked at a HITL approval or a deterministic checkpoint releases its slot, so it does not count against this. |
-| `admission_policy` | `parallel` | How a trigger that cannot admit right now is handled (see below). |
-| `max_pending_approvals` | `0` (unlimited) | Upper bound on runs of this SOP parked at a HITL approval simultaneously. Past the bound, further triggers are deferred (backpressure), never silently dropped (except under `drop`). |
+| `max_concurrent` | `1` | Maximum runs of this SOP executing at once; a run parked at a HITL approval or a deterministic checkpoint released its slot. |
+| `admission_policy` | `parallel` | How a trigger that could not admit right away was handled (see below). |
+| `max_pending_approvals` | `0` (unlimited) | Upper bound on runs of this SOP parked at a HITL approval; past the bound, further triggers were deferred (backpressure). |
 
-`admission_policy` values (`SopAdmissionPolicy`, snake_case):
+`admission_policy` values (`SopAdmissionPolicy`, snake_case), all now inert:
 
-- `parallel` (default) - admit up to `max_concurrent`; a trigger that cannot admit
-  now is **deferred** (surfaced for backpressure/redelivery on the trigger's
-  transport), never silently dropped. Best for independent work (e.g.
-  PR-approval SOPs).
-- `hold` - serialize: admit only when no run of this SOP is active or parked;
-  other triggers are deferred. For pipelines whose pre-approval steps must not
-  overlap.
-- `coalesce` - collapse a concurrent trigger onto the already-in-flight run (the
-  in-flight run's latest state already covers it).
-- `drop` - legacy fire-and-forget: a trigger that cannot admit is dropped.
+- `parallel` (default) - admitted up to `max_concurrent`; a trigger that could
+  not admit now was **deferred** (surfaced for backpressure/redelivery on the
+  trigger's transport), never silently dropped.
+- `hold` - serialized: admitted only when no run of this SOP was active or
+  parked; other triggers were deferred.
+- `coalesce` - collapsed a concurrent trigger onto the already-in-flight run.
+- `drop` - legacy fire-and-forget: a trigger that could not admit was dropped.
   Explicit opt-in only; never the default.
 
-A deferred trigger's recovery is transport-dependent - there is no in-engine
-durable pending-trigger queue in this version (that is a separate follow-up):
-
-- **AMQP** (`durable_ack = true`, SOP-only dispatch): the delivery is nacked
-  (`requeue = true`) so the broker retries it once there is room.
-- **AMQP combined `sop_and_agent_loop`**: the agent side already consumed the
-  delivery, so a backpressured SOP overflow is logged loudly and ACKed (not
-  redelivered), to avoid double-running the agent side.
-- **MQTT / cron / filesystem / channel-router** (and any other headless source
-  that only logs its dispatch results): no per-message redelivery, so a
-  deferred trigger is dropped after a loud log (the next
-  scheduled/published/observed trigger is the only recovery).
+Deferred-trigger recovery was transport-dependent and, like the rest of the
+run side, is retired (no engine dispatches SOP triggers in ZeroClaw any more):
+AMQP `durable_ack` deliveries were nacked for one broker retry, combined
+`sop_and_agent_loop` aliases logged loudly and ACKed, and MQTT / cron /
+filesystem / channel-router sources dropped the deferred trigger after a loud
+log. Run admission and trigger fan-in live Tachi-side through the
+procedure_v1 seam.
 
 ```toml
 [sop]
@@ -94,14 +88,12 @@ Steps are parsed from the `## Steps` section.
 
 2. **Deploy** — Run deployment command.
    - tools: shell
-   - requires_confirmation: true
-   - policy: prod
    - input: {"type":"object","required":["version"],"properties":{"version":{"type":"string"}}}
    - output: {"type":"object","required":["digest"],"properties":{"digest":{"type":"string"}}}
    - next: 3
 ```
 
-Routing and approval bullets can be combined in the same `SOP.md` steps:
+Routing bullets can be combined in the same `SOP.md` steps:
 
 ```md
 ## Steps
@@ -116,41 +108,40 @@ Routing and approval bullets can be combined in the same `SOP.md` steps:
    - on_failure: retry:2
    - next: 3
 
-3. **Approval gate** — Require explicit approval before changing state.
-   - kind: checkpoint
-   - requires_confirmation: true
-   - next: 4
-
-4. **Apply remediation** — Execute the approved action.
+3. **Apply remediation** — Execute the approved action.
    - tools: shell
    - allow-tools: shell
-   - on_failure: goto:5
 
-5. **Notify operator** — Send a failure notice for follow-up.
+4. **Notify operator** — Send a failure notice for follow-up.
    - tools: http_request
 ```
 
-Parser behavior:
+Parser behavior (the bullets below are all still parsed and validated as
+definition format; execution semantics were retired with the run side):
 
 - Numbered items (`1.`, `2.`, ...) define step order.
-- Leading bold text (`**Title**`) becomes step title.
+- Leading bold text (`**Title`) becomes step title.
 - `- tools:` maps to `suggested_tools`.
-- `- requires_confirmation: true` enforces approval for that step.
-- `- kind:` accepts `execute` (default) or `checkpoint`. A checkpoint step
-  pauses deterministic execution at that step. Use `requires_confirmation: true`
-  when a step must require approval in any execution mode.
+- `- requires_confirmation: true` marks the step as approval-gated. Parsed for
+  format compatibility; the approval machinery was removed with the run side.
+- `- kind:` accepts `execute` (default) or `checkpoint`. Parsed for format
+  compatibility; checkpoint parking was removed with the run side.
 - `- allow-tools:` and `- deny-tools:` define an explicit per-step tool scope.
+  Parsed for format compatibility; enforcement was removed with the run side.
 - `- input:` and `- output:` attach JSON Schema-like step boundary contracts.
-- `- when:` is a routing guard evaluated against accumulated completed-step
-  outputs after the current step finishes. When it does not match, the run
-  completes instead of dispatching another step.
-- `- next:` and `- depends_on:` route non-linear runs. Ineligible routed steps
-  are marked `skipped` and leave the run `pending` instead of dispatching.
-- `- when:` guards an explicit `- next:` jump; when the condition is false, the
-  run advances to the next linear step (`current_step + 1`) instead of completing.
-- `- on_failure:` accepts `fail`, `retry:<count>`, or `goto:<step>` and is
-  enforced for reported step failures and output schema failures.
-- `- mode:` overrides the SOP execution mode for that step.
+- `- when:` is a routing guard written against accumulated completed-step
+  outputs. Parsed for format compatibility; no run advances any more (routing
+  was removed with the run side).
+- `- next:` and `- depends_on:` route non-linear runs. Parsed for format
+  compatibility; non-linear routing was removed with the run side.
+- `- when:` guards an explicit `- next:` jump; formerly, when the condition was
+  false, the run advanced to the next linear step (`current_step + 1`) instead
+  of completing. Retired with the run side.
+- `- on_failure:` accepts `fail`, `retry:<count>`, or `goto:<step>`. Parsed for
+  format compatibility; enforcement for reported step failures and output
+  schema failures was removed with the run side.
+- `- mode:` overrides the SOP execution mode for that step. Parsed for format
+  compatibility; no engine consumes it any more.
 - `- policy:` names an approval-broker policy (a key in `[sop.approval].policies`).
   Retired with the run side: the bullet is still parsed and round-tripped as
   `SOP.md` format, but no broker consumes it, so it no longer gates anything.
