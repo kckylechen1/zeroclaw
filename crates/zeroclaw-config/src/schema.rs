@@ -13322,17 +13322,29 @@ pub struct ChannelsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub voice_duplex: HashMap<String, VoiceDuplexConfig>,
-    /// MQTT channel instances (`[channels.mqtt.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
+    /// MQTT SOP listener instances — RETIRED. The section now
+    /// fails config parse with the migration message instead of silently
+    /// no-op'ing. Field removed with the run-side config sweep.
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        deserialize_with = "reject_retired_sop_channel"
+    )]
+    #[cfg_attr(feature = "schema-export", schemars(skip))]
     pub mqtt: HashMap<String, MqttConfig>,
     /// AMQP channel instances (`[channels.amqp.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub amqp: HashMap<String, AmqpConfig>,
-    /// Filesystem SOP listener instances (`[channels.filesystem.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
+    /// Filesystem SOP listener instances — RETIRED. The section
+    /// now fails config parse with the migration message instead of silently
+    /// no-op'ing. Field removed with the run-side config sweep.
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        deserialize_with = "reject_retired_sop_channel"
+    )]
+    #[cfg_attr(feature = "schema-export", schemars(skip))]
     pub filesystem: HashMap<String, FilesystemConfig>,
     /// Base timeout in seconds for processing a single channel message (LLM + tools).
     /// Runtime uses this as a per-turn budget that scales with tool-loop depth
@@ -13372,6 +13384,43 @@ pub struct ChannelsConfig {
     /// as a single concatenated message. `0` disables debouncing. Default: `0`.
     #[serde(default)]
     pub debounce_ms: u64,
+}
+
+// ── Retired SOP run-side config keys ────────────────────────────────────────
+// These deserializers keep the retired keys PARSEABLE only long enough to
+// reject them with an actionable message: silently ignoring them would
+// reinterpret a run-side config (a SOP dispatch mode, a filesystem/mqtt SOP
+// trigger channel, a git sop route) as "do nothing", which is not a safe
+// reading of the operator's intent. Run truth is Tachi-side since the V4
+// procedure_v1 seam.
+
+fn reject_retired_sop_key<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(v) => Err(serde::de::Error::custom(format!(
+            "retired SOP run-side config key (value `{v}`): SOP runs are Tachi-side \
+             ProcedureRuns since #243 (#197 wall 5) — remove this key; see              docs/book/src/sop/ for the definition-only surface"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn reject_retired_sop_channel<'de, D, V>(deserializer: D) -> Result<HashMap<String, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    V: Default,
+{
+    // Any presence of the section — even an empty header — is rejected: the
+    // section is retired, presence itself is the misconfiguration.
+    let _map = HashMap::<String, serde::de::IgnoredAny>::deserialize(deserializer)?;
+    Err(serde::de::Error::custom(
+        "retired SOP run-side channel: MQTT/filesystem listeners were SOP-trigger-only \
+         fan-in; SOP runs are Tachi-side ProcedureRuns since #243 (#197 wall 5) — remove \
+         this [channels.*] section",
+    ))
 }
 
 impl ChannelsConfig {
@@ -13578,22 +13627,10 @@ impl ChannelsConfig {
                 configured: !self.voice_wake.is_empty(),
             },
             ChannelInfo {
-                kind: "mqtt",
-                name: "MQTT",
-                desc: "MQTT SOP Listener",
-                configured: !self.mqtt.is_empty(),
-            },
-            ChannelInfo {
                 kind: "amqp",
                 name: "AMQP",
                 desc: "AMQP topic consumer",
                 configured: !self.amqp.is_empty(),
-            },
-            ChannelInfo {
-                kind: "filesystem",
-                name: "Filesystem",
-                desc: "filesystem change SOP listener",
-                configured: !self.filesystem.is_empty(),
             },
             ChannelInfo {
                 kind: "webhook",
@@ -13642,20 +13679,18 @@ impl ChannelsConfig {
             || self.voice_call.values().any(|c| c.enabled)
             || self.voice_wake.values().any(|c| c.enabled)
             || self.voice_duplex.values().any(|c| c.enabled)
-            || self.mqtt.values().any(|c| c.enabled)
             || self.amqp.values().any(|c| c.enabled)
-            || self.filesystem.values().any(|c| c.enabled)
             || self.git.values().any(|c| c.enabled)
     }
 
     /// One `(canonical_name, configured, deliverable)` row per channel in the
     /// registry. Single source for name-addressed channel lookups so no surface
     /// has to hardcode a subset of the channel list. `deliverable` is `false`
-    /// for input-only transports whose `Channel::send` is a no-op (mqtt and
-    /// amqp are fan-in listeners; voice_wake is input-only), so a name-addressed
+    /// for input-only transports whose `Channel::send` is a no-op (amqp is a
+    /// fan-in consumer; voice_wake and voice_duplex are input-only), so a name-addressed
     /// outbound surface such as `heartbeat.target` can refuse them at validation
     /// instead of accepting a target the delivery layer silently drops.
-    pub fn channel_presence(&self) -> [(&'static str, bool, bool); 36] {
+    pub fn channel_presence(&self) -> [(&'static str, bool, bool); 34] {
         [
             ("telegram", !self.telegram.is_empty(), true),
             ("discord", !self.discord.is_empty(), true),
@@ -13690,9 +13725,7 @@ impl ChannelsConfig {
             ("voice_call", !self.voice_call.is_empty(), true),
             ("voice_wake", !self.voice_wake.is_empty(), false),
             ("voice_duplex", !self.voice_duplex.is_empty(), false),
-            ("mqtt", !self.mqtt.is_empty(), false),
             ("amqp", !self.amqp.is_empty(), false),
-            ("filesystem", !self.filesystem.is_empty(), false),
         ]
     }
 
@@ -13716,9 +13749,9 @@ impl ChannelsConfig {
     }
 
     /// Whether `name` (case-insensitive) names a channel that can actually
-    /// deliver an outbound message. Input-only transports (mqtt, amqp,
-    /// voice_wake) are known and may be configured, but their `Channel::send`
-    /// is a no-op, so they are not valid outbound targets.
+    /// deliver an outbound message. Input-only transports (amqp, voice_wake,
+    /// voice_duplex) are known and may be configured, but their `Channel::send`
+    /// is a no-op or absent, so they are not valid outbound targets.
     pub fn is_channel_deliverable(&self, name: &str) -> bool {
         let needle = name.to_ascii_lowercase();
         self.channel_presence()
@@ -15508,29 +15541,21 @@ fn default_filesystem_max_content_bytes() -> Option<usize> {
 /// Agent-loop channels (Telegram, Discord, Slack, ...) do not carry a `dispatch`
 /// field: their fan-in is trigger-driven, opting in via a SOP `channel` trigger
 /// while the normal agent turn always runs. The mode is source-agnostic.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, zeroclaw_macros::ConfigEnum,
-)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum SopDispatch {
-    /// Drive a normal agent turn: the delivery becomes a `ChannelMessage`.
-    /// This is the default and preserves each channel's original behavior.
-    #[default]
-    AgentLoop,
-    /// Dispatch the delivery to the SOP engine as a `SopEvent` (`topic` =
-    /// source identifier, `payload` = body), matching SOPs whose trigger for
-    /// this source matches. No agent turn is started.
-    Sop,
-    /// Do both: dispatch to the SOP engine and drive an agent turn from the
-    /// same delivery.
-    SopAndAgentLoop,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "channels.amqp"]
 pub struct AmqpConfig {
+    /// RETIRED dispatch mode (`sop` / `sop_and_agent_loop` / `agent_loop`).
+    /// Kept as a parse-time tombstone so a legacy value is rejected with the
+    /// migration message instead of silently reinterpreted as agent-loop
+    /// delivery. Removed with the run-side config sweep.
+    #[serde(
+        default,
+        deserialize_with = "reject_retired_sop_key",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[cfg_attr(feature = "schema-export", schemars(skip))]
+    pub dispatch: Option<String>,
     /// Whether this channel is active. The runtime only loads channels whose
     /// `enabled = true`. Default: `false` so an operator who pastes a partial
     /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
@@ -15598,13 +15623,6 @@ pub struct AmqpConfig {
     #[tab(Behavior)]
     #[serde(default = "default_amqp_durable_ack")]
     pub durable_ack: bool,
-    /// Where consumed deliveries are routed: drive an agent turn
-    /// (`agent_loop`, default), dispatch to the SOP engine (`sop`), or both
-    /// (`sop_and_agent_loop`). The `sop` and `sop_and_agent_loop` modes match
-    /// the delivery against SOP `amqp` triggers by routing key.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub dispatch: SopDispatch,
     /// Tools excluded from this channel's tool spec. When set, these tools
     /// are not exposed to the model when responding via this channel.
     #[tab(Behavior)]
@@ -17194,8 +17212,16 @@ pub struct GitEventRoute {
     /// Deliver the event into the agent loop as a normal channel message.
     #[serde(default)]
     pub message: bool,
-    /// Route the event to the named SOP through channel-sourced SOP ingress.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// RETIRED SOP route target. Parse-time tombstone: a legacy `sop = "..."`
+    /// value is rejected with the migration message instead of silently
+    /// degrading the route to `Ignore`. Removed with the run-side config
+    /// sweep.
+    #[serde(
+        default,
+        deserialize_with = "reject_retired_sop_key",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[cfg_attr(feature = "schema-export", schemars(skip))]
     pub sop: Option<String>,
 }
 
@@ -23047,10 +23073,9 @@ fn default_sop_persist_runs() -> bool {
 }
 
 fn default_sop_step_mandatory_tools() -> Vec<String> {
-    ["sop_advance", "sop_approve", "sop_status"]
-        .into_iter()
-        .map(String::from)
-        .collect()
+    // The sop_* run tools are retired; nothing is mandatory by
+    // default. The key itself is removed with the run-side config sweep.
+    Vec::new()
 }
 
 fn default_sop_step_schema_enforce() -> bool {
@@ -23395,6 +23420,55 @@ max_height = 8
         assert!(plugins.entry_config("unknown").is_none());
     }
 
+    /// The retired run-side config keys must FAIL config parse
+    /// with an actionable message, never silently no-op.
+    #[test]
+    async fn retired_sop_run_config_keys_fail_parse_loudly() {
+        let amqp: Result<AmqpConfig, _> = ::toml::from_str(
+            r#"enabled = true
+            amqp_url = "amqp://localhost:5672"
+            dispatch = "sop"
+            "#,
+        );
+        let err = amqp.unwrap_err().to_string();
+        assert!(err.contains("retired SOP run-side config key"), "{err}");
+
+        let git: Result<GitConfig, _> = ::toml::from_str(
+            r#"enabled = true
+            [events]
+            "pull_request.opened" = { sop = "pr-triage" }
+            "#,
+        );
+        let err = git.unwrap_err().to_string();
+        assert!(err.contains("retired SOP run-side config key"), "{err}");
+
+        let fs: Result<ChannelsConfig, _> = ::toml::from_str(
+            r#"[filesystem.watch]
+            enabled = true
+            paths = ["/tmp/inbox"]
+            "#,
+        );
+        let err = fs.unwrap_err().to_string();
+        assert!(err.contains("retired SOP run-side channel"), "{err}");
+
+        let mqtt: Result<ChannelsConfig, _> = ::toml::from_str(
+            r#"[mqtt.sensors]
+            enabled = true
+            broker_url = "mqtt://localhost:1883"
+            "#,
+        );
+        let err = mqtt.unwrap_err().to_string();
+        assert!(err.contains("retired SOP run-side channel"), "{err}");
+
+        // Even an explicitly EMPTY retired section header fails: the section
+        // is retired, presence itself is the misconfiguration.
+        for header in ["[filesystem]", "[mqtt]"] {
+            let empty: Result<ChannelsConfig, _> = ::toml::from_str(header);
+            let err = empty.unwrap_err().to_string();
+            assert!(err.contains("retired SOP run-side channel"), "{err}");
+        }
+    }
+
     #[test]
     async fn git_events_routing_table_parses_dotted_keys_and_defaults() {
         let cfg: GitConfig = ::toml::from_str(
@@ -23404,10 +23478,10 @@ max_height = 8
             events_backbone = true
 
             [events]
-            "pull_request.opened" = { sop = "pr-triage" }
-            "issues.opened" = { sop = "issue-triage" }
+            "pull_request.opened" = { message = false }
+            "issues.opened" = { message = true }
             "issue_comment.created" = { message = true }
-            "workflow_run.failed" = { sop = "ci-failure" }
+            "workflow_run.failed" = { message = true }
             "#,
         )
         .unwrap();
@@ -23416,10 +23490,9 @@ max_height = 8
         assert!(cfg.events_backbone);
         assert_eq!(cfg.events.len(), 4);
         let pr = &cfg.events["pull_request.opened"];
-        assert_eq!(pr.sop.as_deref(), Some("pr-triage"));
         assert!(!pr.message);
         assert!(cfg.events["issue_comment.created"].message);
-        assert!(cfg.events["issue_comment.created"].sop.is_none());
+        assert!(cfg.events["issues.opened"].message);
 
         // An explicit provider round-trips.
         let gitlab: GitConfig = ::toml::from_str("enabled = true\nprovider = \"gitlab\"").unwrap();
@@ -23505,11 +23578,6 @@ max_height = 8
             ..base
         };
         assert!(both.validate().is_ok());
-    }
-
-    #[test]
-    async fn amqp_dispatch_defaults_to_agent_loop() {
-        assert_eq!(AmqpConfig::default().dispatch, SopDispatch::AgentLoop);
     }
 
     #[test]
@@ -38492,7 +38560,7 @@ model_provider = \"ollama.default\"
         undeliverable.sort_unstable();
         assert_eq!(
             undeliverable,
-            ["amqp", "filesystem", "mqtt", "voice_duplex", "voice_wake"],
+            ["amqp", "voice_duplex", "voice_wake"],
             "only input-only transports may be non-deliverable; update channel_presence and is_channel_deliverable together"
         );
     }

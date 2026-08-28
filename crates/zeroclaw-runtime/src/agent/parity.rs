@@ -320,7 +320,6 @@ async fn parity_l2_sop_live_step_agent_isolation() {
     use zeroclaw_config::multi_agent::{AgentMemoryConfig, MemoryBackendKind};
     use zeroclaw_config::schema::{
         AliasedAgentConfig, ModelProviderConfig, OllamaModelProviderConfig, RiskProfileConfig,
-        SopConfig,
     };
 
     // A restricted step agent whose per-agent policy allowlists exactly one real
@@ -365,20 +364,10 @@ async fn parity_l2_sop_live_step_agent_isolation() {
         },
     );
 
-    let engine = Arc::new(std::sync::Mutex::new(crate::sop::SopEngine::new(
-        SopConfig::default(),
-    )));
-
     // The live-SOP path: re-assemble the step agent's own execution context.
-    let owned = crate::agent::turn::assemble_owned_execution(
-        &config,
-        "restricted",
-        Arc::clone(&engine),
-        None,
-        None,
-    )
-    .await
-    .expect("assemble_owned_execution must build the restricted step agent's context");
+    let owned = crate::agent::turn::assemble_owned_execution(&config, "restricted", None)
+        .await
+        .expect("assemble_owned_execution must build the restricted step agent's context");
     let sop_names = retained_names(&owned.tools_registry);
 
     // Security property: the RESTRICTED policy is applied, not the parent's. The

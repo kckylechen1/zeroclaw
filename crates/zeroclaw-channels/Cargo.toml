@@ -19,9 +19,6 @@ zeroclaw-tool-call-parser.workspace = true
 zeroclaw-tools.workspace = true
 anyhow = "1.0"
 lru = "0.18"
-rumqttc = { version = "0.25", optional = true }
-notify = { version = "6", optional = true }
-glob = { version = "0.3", optional = true }
 lapin = { version = "2", optional = true, default-features = false, features = [
   "rustls",
 ] }
@@ -175,7 +172,6 @@ default-channels = [
   "channel-acp-server",
   "channel-discord",
   "channel-email",
-  "channel-filesystem",
   "channel-telegram",
   "channel-webhook",
 ]
@@ -192,7 +188,6 @@ channels-full = [
   "channel-linq",
   "channel-mattermost",
   "channel-mochat",
-  "channel-mqtt",
   "channel-amqp",
   "channel-nextcloud",
   "channel-notion",
@@ -253,8 +248,6 @@ channel-bluesky = []
 channel-twitter = []
 channel-reddit = []
 channel-notion = []
-channel-mqtt = ["dep:rumqttc"]
-channel-filesystem = ["dep:notify", "dep:glob"]
 channel-amqp = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait", "dep:async-reactor-trait", "dep:p12-keystore", "dep:rustls-pemfile"]
 channel-linq = []
 channel-wati = []

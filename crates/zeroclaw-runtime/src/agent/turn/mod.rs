@@ -1401,8 +1401,6 @@ pub(crate) struct OwnedAgentExecution {
 pub(crate) async fn assemble_owned_execution(
     config: &zeroclaw_config::schema::Config,
     alias: &str,
-    sop_engine: Arc<std::sync::Mutex<crate::sop::SopEngine>>,
-    sop_audit: Option<Arc<crate::sop::SopAuditLogger>>,
     parent_approval: Option<&crate::approval::ApprovalManager>,
 ) -> Result<OwnedAgentExecution> {
     let security = Arc::new(crate::security::SecurityPolicy::for_agent(config, alias)?);
@@ -1464,8 +1462,6 @@ pub(crate) async fn assemble_owned_execution(
         None,
         false,
         None,
-        Some(sop_engine),
-        sop_audit,
         None,
         // Headless SOP driver: a top-level origin UNLESS it is executing
         // inside a deeper context — a delegated SOP step running under a
@@ -1698,14 +1694,8 @@ async fn drive_live_sop_actions(
                             step_alias.expect("needs_reassembly implies a step agent alias");
                         if let Some(reassembly) = sop_reassembly {
                             if !exec_cache.contains_key(alias) {
-                                match assemble_owned_execution(
-                                    reassembly.config,
-                                    alias,
-                                    Arc::clone(&queued.engine),
-                                    queued.audit.clone(),
-                                    approval,
-                                )
-                                .await
+                                match assemble_owned_execution(reassembly.config, alias, approval)
+                                    .await
                                 {
                                     Ok(owned) => {
                                         exec_cache.insert(alias.to_string(), owned);
@@ -2427,186 +2417,6 @@ mod sop_step_reassembly_tests {
         // prevents it now is alias-follows-effective-agent, so this comparison
         // never happens with "A" on the left inside B's sub-loop.
         assert!(!step_needs_reassembly(Some("A"), Some("A")));
-    }
-
-    fn tool_names(tools: &[Box<dyn crate::tools::Tool>]) -> Vec<String> {
-        tools.iter().map(|t| t.name().to_string()).collect()
-    }
-
-    /// Real-scope tie: re-assembling a step's named agent yields THAT agent's
-    /// own gated tool set, and distinct agents resolve distinct scopes — so the
-    /// gate decision is load-bearing (choosing to re-assemble genuinely changes
-    /// which tools the step can reach).
-    #[tokio::test]
-    async fn reassembly_yields_the_named_agents_own_scope() {
-        use zeroclaw_config::multi_agent::{AgentMemoryConfig, MemoryBackendKind};
-        use zeroclaw_config::schema::{
-            AliasedAgentConfig, Config, ModelProviderConfig, OllamaModelProviderConfig,
-            RiskProfileConfig, SopConfig,
-        };
-
-        let root =
-            std::env::temp_dir().join(format!("zeroclaw-sop-depth2-{}", uuid::Uuid::new_v4()));
-        let mut config = Config {
-            data_dir: root.join("data"),
-            config_path: root.join("config.toml"),
-            ..Config::default()
-        };
-        // Two agents whose per-agent policy allowlists exactly one, DIFFERENT
-        // built-in each: their assembled scopes must not coincide.
-        config.risk_profiles.insert(
-            "reader".to_string(),
-            RiskProfileConfig {
-                allowed_tools: Some(vec!["file_read".to_string()]),
-                ..RiskProfileConfig::default()
-            },
-        );
-        config.risk_profiles.insert(
-            "writer".to_string(),
-            RiskProfileConfig {
-                allowed_tools: Some(vec!["file_write".to_string()]),
-                ..RiskProfileConfig::default()
-            },
-        );
-        config.providers.models.ollama.insert(
-            "p".to_string(),
-            OllamaModelProviderConfig {
-                base: ModelProviderConfig {
-                    model: Some("test-model".to_string()),
-                    ..ModelProviderConfig::default()
-                },
-                ..OllamaModelProviderConfig::default()
-            },
-        );
-        for (alias, profile) in [("reader", "reader"), ("writer", "writer")] {
-            config.agents.insert(
-                alias.to_string(),
-                AliasedAgentConfig {
-                    enabled: true,
-                    model_provider: "ollama.p".into(),
-                    risk_profile: profile.into(),
-                    memory: AgentMemoryConfig {
-                        backend: MemoryBackendKind::Markdown,
-                    },
-                    ..AliasedAgentConfig::default()
-                },
-            );
-        }
-        let engine = Arc::new(std::sync::Mutex::new(crate::sop::SopEngine::new(
-            SopConfig::default(),
-        )));
-
-        let reader = assemble_owned_execution(&config, "reader", Arc::clone(&engine), None, None)
-            .await
-            .expect("reader assembles");
-        let writer = assemble_owned_execution(&config, "writer", Arc::clone(&engine), None, None)
-            .await
-            .expect("writer assembles");
-        let reader_names = tool_names(&reader.tools_registry);
-        let writer_names = tool_names(&writer.tools_registry);
-
-        assert!(
-            reader_names.contains(&"file_read".to_string())
-                && !reader_names.contains(&"file_write".to_string()),
-            "reader gets only its own allowlisted tool: {reader_names:?}"
-        );
-        assert!(
-            writer_names.contains(&"file_write".to_string())
-                && !writer_names.contains(&"file_read".to_string()),
-            "writer gets only its own allowlisted tool: {writer_names:?}"
-        );
-        // The gate re-assembles when a step names the other agent, so a
-        // cross-agent step lands in the named agent's scope, not the baseline's.
-        assert!(step_needs_reassembly(Some("reader"), Some("writer")));
-        // With no parent approval manager the child is non-interactive
-        // (auto-deny), matching the headless driver.
-        assert!(reader.approval.is_non_interactive());
-    }
-
-    /// A parent approval manager with a live back-channel survives delegation:
-    /// the derived child manager keeps the interactivity mode while enforcing
-    /// the CHILD's risk profile.
-    #[tokio::test]
-    async fn reassembly_preserves_parent_approval_backchannel() {
-        use zeroclaw_config::multi_agent::{AgentMemoryConfig, MemoryBackendKind};
-        use zeroclaw_config::schema::{
-            AliasedAgentConfig, Config, ModelProviderConfig, OllamaModelProviderConfig,
-            RiskProfileConfig, SopConfig,
-        };
-
-        let root = std::env::temp_dir().join(format!("zeroclaw-sop-appr-{}", uuid::Uuid::new_v4()));
-        let mut config = Config {
-            data_dir: root.join("data"),
-            config_path: root.join("config.toml"),
-            ..Config::default()
-        };
-        config.risk_profiles.insert(
-            "restricted".to_string(),
-            RiskProfileConfig {
-                allowed_tools: Some(vec!["file_read".to_string()]),
-                ..RiskProfileConfig::default()
-            },
-        );
-        config.providers.models.ollama.insert(
-            "p".to_string(),
-            OllamaModelProviderConfig {
-                base: ModelProviderConfig {
-                    model: Some("test-model".to_string()),
-                    ..ModelProviderConfig::default()
-                },
-                ..OllamaModelProviderConfig::default()
-            },
-        );
-        config.agents.insert(
-            "restricted".to_string(),
-            AliasedAgentConfig {
-                enabled: true,
-                model_provider: "ollama.p".into(),
-                risk_profile: "restricted".into(),
-                memory: AgentMemoryConfig {
-                    backend: MemoryBackendKind::Markdown,
-                },
-                ..AliasedAgentConfig::default()
-            },
-        );
-        let engine = Arc::new(std::sync::Mutex::new(crate::sop::SopEngine::new(
-            SopConfig::default(),
-        )));
-
-        // Parent surface: non-interactive WITH an operator back-channel
-        // (ACP / dashboard WS shape).
-        let parent = crate::approval::ApprovalManager::for_non_interactive_backchannel(
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-        );
-        let owned = assemble_owned_execution(
-            &config,
-            "restricted",
-            Arc::clone(&engine),
-            None,
-            Some(&parent),
-        )
-        .await
-        .expect("restricted assembles");
-        // Mode preserved: still non-interactive, but shell routes through the
-        // back-channel (Prompt) instead of the plain non-interactive
-        // short-circuit (NotRequired).
-        assert!(owned.approval.is_non_interactive());
-        assert_eq!(
-            owned.approval.approval_requirement("shell"),
-            crate::approval::ApprovalRequirement::Prompt,
-            "a live approval back-channel must survive delegation"
-        );
-        // The plain non-interactive parent keeps the auto-deny shape.
-        let plain_parent = crate::approval::ApprovalManager::for_non_interactive(
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-        );
-        let plain_child = plain_parent
-            .derive_for_risk_profile(&zeroclaw_config::schema::RiskProfileConfig::default());
-        assert_eq!(
-            plain_child.approval_requirement("shell"),
-            crate::approval::ApprovalRequirement::NotRequired,
-            "a plain non-interactive parent derives a plain non-interactive child"
-        );
     }
 
     // ── Shared test doubles ──────────────────────────────────────────────────

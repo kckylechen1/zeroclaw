@@ -469,9 +469,6 @@ pub async fn run(
     let socket_client_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let need_rpc_ctx = registry.has_socket_start() || registry.has_wss_start();
 
-    // Extract shared SOP engine from registry for RpcContext.
-    let (sop_engine, sop_audit) = registry.take_sop_engine();
-
     let rpc_ctx = if need_rpc_ctx {
         use crate::rpc::context::RpcContext;
         use crate::rpc::session::SessionStore;
@@ -588,8 +585,6 @@ pub async fn run(
             ),
             tui_registry,
             acp_session_store,
-            sop_engine,
-            sop_audit,
             hooks,
         }))
     } else {
@@ -640,42 +635,6 @@ pub async fn run(
                 async move { start(ctx, cancel, count).await }
             },
         ));
-    }
-
-    // Wire up MQTT SOP listener if configured and referenced by an enabled agent
-    if let Some(mqtt_start) = registry.take_mqtt_start() {
-        let active_mqtt: std::collections::HashSet<String> = config
-            .agents
-            .values()
-            .filter(|a| a.enabled)
-            .flat_map(|a| a.channels.iter().map(|c| c.as_str().to_string()))
-            .collect();
-        let mut mqtt_started = false;
-        for (alias, mqtt_config) in &config.channels.mqtt {
-            if !active_mqtt.contains(&format!("mqtt.{alias}")) {
-                continue;
-            }
-            let mqtt_cfg = mqtt_config.clone();
-            let mqtt_start = std::sync::Arc::new(mqtt_start);
-            handles.push(spawn_component_supervisor(
-                "mqtt",
-                initial_backoff,
-                max_backoff,
-                channels_cancel.clone(),
-                move || {
-                    let cfg = mqtt_cfg.clone();
-                    let start = mqtt_start.clone();
-                    async move { start(cfg).await }
-                },
-            ));
-            mqtt_started = true;
-            break;
-        }
-        if !mqtt_started {
-            crate::health::mark_component_ok("mqtt");
-        }
-    } else {
-        crate::health::mark_component_ok("mqtt");
     }
 
     if config.heartbeat.enabled {
@@ -2129,9 +2088,6 @@ fn has_supervised_channels(config: &Config) -> bool {
     config.channels.has_any_enabled()
 }
 
-// run_mqtt_sop_listener has been moved to zeroclaw-channels::orchestrator::mqtt.
-// The daemon now receives it as a starter via DaemonRegistry::register_mqtt.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2661,27 +2617,6 @@ mod tests {
         assert_eq!(
             target,
             Some(("matrix".to_string(), "!room:example.org".to_string()))
-        );
-    }
-
-    #[test]
-    fn resolve_delivery_rejects_configured_but_undeliverable_channel() {
-        // review: a configured input-only channel (mqtt is a fan-in
-        // listener whose Channel::send is a no-op) must not pass heartbeat
-        // validation just because its table exists. Otherwise the validator
-        // claims a target the delivery surface silently drops.
-        let mut config = Config::default();
-        config.heartbeat.target = Some("mqtt".into());
-        config.heartbeat.to = Some("ops/heartbeat".into());
-        config
-            .channels
-            .mqtt
-            .insert("default".to_string(), Default::default());
-
-        let err = resolve_heartbeat_delivery(&config).unwrap_err();
-        assert!(
-            err.to_string().contains("input-only channel"),
-            "expected input-only rejection, got: {err}"
         );
     }
 

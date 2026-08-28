@@ -32,15 +32,13 @@ use super::{
     runtime_defaults_from_config, spawn_supervised_listener,
 };
 
-#[cfg(any(feature = "channel-nostr", feature = "channel-filesystem"))]
+#[cfg(feature = "channel-nostr")]
 use super::ActiveChannelAliases;
 
 pub async fn start_channels(
     config: Config,
     canvas_store: Option<zeroclaw_runtime::tools::CanvasStore>,
     cancel: tokio_util::sync::CancellationToken,
-    sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-    sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
     companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
 ) -> Result<()> {
     let config_arc = Arc::new(RwLock::new(config));
@@ -275,8 +273,6 @@ pub async fn start_channels(
             canvas_store.clone(),
             false,
             None,
-            sop_engine.clone(),
-            sop_audit.clone(),
             Some(Arc::clone(&config_arc)),
             // Channel turns are top-level origins: the turn mints its own
             // lineage root; no inherited lineage crosses this boundary.
@@ -461,13 +457,8 @@ pub async fn start_channels(
             }
 
             #[allow(unused_mut)]
-            let mut configured_channels: Vec<ConfiguredChannel> = collect_configured_channels(
-                &config_arc,
-                "runtime startup",
-                &tool_specs,
-                sop_engine.clone(),
-                sop_audit.clone(),
-            );
+            let mut configured_channels: Vec<ConfiguredChannel> =
+                collect_configured_channels(&config_arc, "runtime startup", &tool_specs);
 
             #[cfg(feature = "channel-nostr")]
             {
@@ -507,40 +498,6 @@ pub async fn start_channels(
                         .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
                     "Nostr channel is configured but this build was compiled without \
                      `channel-nostr`; skipping Nostr."
-                );
-            }
-            #[cfg(feature = "channel-filesystem")]
-            if let (Some(engine), Some(audit)) = (sop_engine.as_ref(), sop_audit.as_ref()) {
-                let active = ActiveChannelAliases::compute(&config);
-                for (alias, fs_cfg) in &config.channels.filesystem {
-                    if !active.contains(&format!("filesystem.{alias}")) {
-                        continue;
-                    }
-                    if !fs_cfg.enabled {
-                        continue;
-                    }
-                    configured_channels.push(ConfiguredChannel {
-                        display_name: "Filesystem",
-                        alias: Some(alias.clone()),
-                        channel: Arc::new(crate::filesystem::FilesystemChannel::new(
-                            crate::filesystem::FilesystemChannelConfig {
-                                config: fs_cfg.clone(),
-                                alias: alias.clone(),
-                                engine: engine.clone(),
-                                audit: audit.clone(),
-                            },
-                        )),
-                    });
-                }
-            }
-            #[cfg(not(feature = "channel-filesystem"))]
-            if !config.channels.filesystem.is_empty() {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                    "Filesystem channel is configured but this build was compiled without \
-                     `channel-filesystem`; skipping Filesystem."
                 );
             }
             let channels: Vec<Arc<dyn Channel>> = configured_channels
@@ -753,8 +710,6 @@ pub async fn start_channels(
             last_applied_config_stamp: Arc::new(Mutex::new(None)),
             runtime_defaults_override: Arc::new(Mutex::new(None)),
             persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            sop_engine: sop_engine.clone(),
-            sop_audit: sop_audit.clone(),
         });
 
         if let Some(store) = runtime_ctx.companion_store() {
@@ -860,7 +815,7 @@ pub async fn start_channels(
         }
     }
 
-    let router = AgentRouter::multi(agent_ctxs, owner_by_channel_key, sop_engine, sop_audit);
+    let router = AgentRouter::multi(agent_ctxs, owner_by_channel_key);
 
     let seen_data_dir = config.data_dir.clone();
     let seen_ids =

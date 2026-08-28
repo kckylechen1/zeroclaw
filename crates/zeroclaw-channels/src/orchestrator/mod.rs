@@ -3,8 +3,6 @@
 #[cfg(feature = "channel-acp-server")]
 pub mod acp_server;
 pub mod media_pipeline;
-#[cfg(feature = "channel-mqtt")]
-pub mod mqtt;
 
 mod channel_system_prompt;
 pub(crate) use channel_system_prompt::{
@@ -49,7 +47,7 @@ pub(crate) use runtime_commands::{
 };
 
 mod channel_factories;
-#[cfg(any(feature = "channel-nostr", feature = "channel-filesystem"))]
+#[cfg(feature = "channel-nostr")]
 pub(crate) use channel_factories::ActiveChannelAliases;
 #[cfg(feature = "channel-matrix")]
 pub(crate) use channel_factories::matrix_state_dir;
@@ -68,9 +66,6 @@ use channel_build::one_shot_channel_workspace_dir;
 
 mod start_channels;
 pub use start_channels::start_channels;
-
-mod sop_gate;
-pub(crate) use sop_gate::dispatch_channel_sop_gate;
 
 mod deliver_announcement;
 pub use deliver_announcement::deliver_announcement;
@@ -94,8 +89,6 @@ pub use crate::dingtalk::DingTalkChannel;
 pub use crate::discord::DiscordChannel;
 #[cfg(feature = "channel-email")]
 pub use crate::email_channel::EmailChannel;
-#[cfg(feature = "channel-filesystem")]
-pub use crate::filesystem::FilesystemChannel;
 #[cfg(feature = "channel-git")]
 pub use crate::git::GitChannel;
 #[cfg(feature = "channel-email")]
@@ -540,8 +533,6 @@ struct ChannelRuntimeContext {
     /// (append / remove_last / delete_session) for the same sender without
     /// serializing the full message-processing loop.
     persist_locks: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
-    sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-    sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
 }
 
 impl ChannelRuntimeContext {
@@ -3036,8 +3027,6 @@ pub(crate) struct AgentRouter {
     by_agent: Arc<HashMap<String, Arc<ChannelRuntimeContext>>>,
     owner_by_channel_key: Arc<HashMap<String, String>>,
     single_ctx: Option<Arc<ChannelRuntimeContext>>,
-    sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-    sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
 }
 
 impl AgentRouter {
@@ -3047,23 +3036,17 @@ impl AgentRouter {
             by_agent: Arc::new(HashMap::new()),
             owner_by_channel_key: Arc::new(HashMap::new()),
             single_ctx: Some(ctx),
-            sop_engine: None,
-            sop_audit: None,
         }
     }
 
     fn multi(
         by_agent: HashMap<String, Arc<ChannelRuntimeContext>>,
         owner_by_channel_key: HashMap<String, String>,
-        sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-        sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
     ) -> Self {
         Self {
             by_agent: Arc::new(by_agent),
             owner_by_channel_key: Arc::new(owner_by_channel_key),
             single_ctx: None,
-            sop_engine,
-            sop_audit,
         }
     }
 
@@ -3093,152 +3076,11 @@ impl AgentRouter {
     }
 }
 
-/// Split an inbound gate reference into its run part and revision. A reference
-/// may be revision-qualified (`<run_id>#<rev>`); a bare reference means
-/// revision 0 (the ORIGINAL presentation) — NOT "whatever is current" — so a
-/// click on a superseded prompt can never resolve a newer draft it wasn't
-/// looking at. A malformed suffix leaves the whole string as the run part.
-fn parse_gate_reference(reference: &str) -> (String, u32) {
-    match reference.rsplit_once('#') {
-        Some((run_part, rev_part)) if !run_part.is_empty() => match rev_part.parse::<u32>() {
-            Ok(rev) => (run_part.to_string(), rev),
-            Err(_) => (reference.to_string(), 0),
-        },
-        _ => (reference.to_string(), 0),
-    }
-}
-
 fn channel_key_for_message(msg: &zeroclaw_api::channel::ChannelMessage) -> String {
     match msg.channel_alias.as_deref() {
         Some(alias) => format!("{}.{alias}", msg.channel),
         None => msg.channel.clone(),
     }
-}
-
-fn unique_channel_handles(
-    channels_by_name: &HashMap<String, Arc<dyn Channel>>,
-) -> Vec<Arc<dyn Channel>> {
-    let mut unique = Vec::new();
-    for channel in channels_by_name.values() {
-        if !unique.iter().any(|existing| Arc::ptr_eq(existing, channel)) {
-            unique.push(Arc::clone(channel));
-        }
-    }
-    unique
-}
-
-async fn finalize_gate_prompts(channels: &[Arc<dyn Channel>], reference: &str, outcome: &str) {
-    for channel in channels {
-        if let Err(e) = channel.finalize_gate_prompt(reference, outcome).await {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({
-                        "reference": reference,
-                        "channel": channel.name(),
-                        "error": e.to_string(),
-                    })),
-                "gate-prompt finalize failed (decision unaffected)"
-            );
-        }
-    }
-}
-
-fn text_gate_reply_matches_approval_route(
-    engine: &zeroclaw_runtime::sop::SopEngine,
-    run_id: &str,
-    channel_route_keys: &[String],
-    reply_target: &str,
-) -> bool {
-    let Some(policy_name) = engine.current_step_policy_name(run_id) else {
-        return false;
-    };
-    let broker = engine.approval_broker();
-    broker
-        .reply_routes(engine.approval_config(), &policy_name)
-        .iter()
-        .any(|route| {
-            let Some((route_channel_key, route_recipient)) =
-                zeroclaw_runtime::sop::approval::channel_route::parse_approval_route(route)
-            else {
-                return false;
-            };
-            channel_route_keys
-                .iter()
-                .any(|channel_key| channel_key == route_channel_key)
-                && route_recipient == reply_target
-        })
-}
-
-async fn dispatch_channel_sop_event(
-    router: &AgentRouter,
-    msg: &zeroclaw_api::channel::ChannelMessage,
-) -> bool {
-    let Some(topic) = msg
-        .internal_sop_event
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-    else {
-        return false;
-    };
-
-    let Some(engine) = router.sop_engine.as_ref() else {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
-                ::serde_json::json!({
-                    "channel": msg.channel.as_str(),
-                    "channel_alias": msg.channel_alias.as_deref(),
-                    "topic": topic,
-                })
-            ),
-            "dropping channel SOP event: SOP engine is not available"
-        );
-        return true;
-    };
-    let Some(audit) = router.sop_audit.as_ref() else {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
-                ::serde_json::json!({
-                    "channel": msg.channel.as_str(),
-                    "channel_alias": msg.channel_alias.as_deref(),
-                    "topic": topic,
-                })
-            ),
-            "dropping channel SOP event: SOP audit logger is not available"
-        );
-        return true;
-    };
-
-    let event = zeroclaw_runtime::sop::types::SopEvent {
-        source: zeroclaw_runtime::sop::types::SopTriggerSource::Channel,
-        topic: Some(topic.to_string()),
-        payload: Some(msg.content.clone()),
-        timestamp: zeroclaw_runtime::sop::engine::now_iso8601(),
-    };
-    let target_sop = channel_sop_target(msg);
-    let results = if let Some(sop_name) = target_sop.as_deref() {
-        zeroclaw_runtime::sop::dispatch::dispatch_sop_event_to(engine, audit, event, sop_name).await
-    } else {
-        zeroclaw_runtime::sop::dispatch::dispatch_sop_event(engine, audit, event).await
-    };
-    zeroclaw_runtime::sop::dispatch::process_headless_results(&results);
-    true
-}
-
-fn channel_sop_target(msg: &zeroclaw_api::channel::ChannelMessage) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(&msg.content)
-        .ok()
-        .and_then(|payload| {
-            payload
-                .get("sop")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ToString::to_string)
-        })
 }
 
 /// Resolve effective debounce window: a per-channel override with a positive
@@ -3349,62 +3191,11 @@ async fn run_message_dispatch_loop(
                 }
             }
         }
-        // Gate answers (button-click markers / `approve <ref>` text replies)
-        // resolve a PARKED run and must never start one, so they are consumed
-        // BEFORE agent ownership lookup. A configured approval route may be
-        // intentionally unowned by an agent; it can present gate prompts but
-        // must never receive ordinary agent traffic. All live contexts share
-        // this global channel registry and prompt config.
-        let gate_ctx = router
-            .single_ctx
-            .as_ref()
-            .cloned()
-            .or_else(|| router.by_agent.values().next().cloned());
-        if let Some(gate_ctx) = gate_ctx {
-            let gate_channel = find_channel_for_message(&gate_ctx.channels_by_name, &msg).cloned();
-            let gate_channel_route_keys = gate_channel
-                .as_ref()
-                .map(|target| {
-                    let mut keys: Vec<String> = gate_ctx
-                        .channels_by_name
-                        .iter()
-                        .filter(|&(_key, channel)| Arc::ptr_eq(channel, target))
-                        .map(|(key, _channel)| key.clone())
-                        .collect();
-                    let inbound_key = channel_key_for_message(&msg);
-                    if !keys.iter().any(|key| key == &inbound_key) {
-                        keys.push(inbound_key);
-                    }
-                    keys.sort();
-                    keys.dedup();
-                    keys
-                })
-                .unwrap_or_else(|| vec![channel_key_for_message(&msg)]);
-            let gate_prompt_channels = unique_channel_handles(&gate_ctx.channels_by_name);
-            if dispatch_channel_sop_gate(
-                &router,
-                &msg,
-                gate_ctx.prompt_config.as_ref(),
-                &gate_prompt_channels,
-                &gate_channel_route_keys,
-            )
-            .await
-            {
-                continue;
-            }
-        }
-
         let Some(ctx) = router.resolve(&msg) else {
             ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"channel_alias": msg.channel_alias, "sender": msg.sender})), "dropping inbound message: no agent owns this channel");
             continue;
         };
 
-        // Gate answers were already considered against the global approval
-        // channel registry above. The remaining path only dispatches events and
-        // ordinary messages to an agent-owned runtime.
-        if dispatch_channel_sop_event(&router, &msg).await {
-            continue;
-        }
         // Fast path: /stop cancels the in-flight task for this sender scope without
         // spawning a worker or registering a new task. Handled here — before semaphore
         // acquisition — so the target task is still in the store and is never replaced.
@@ -3904,7 +3695,7 @@ fn no_real_time_channels_message() -> &'static str {
 pub async fn doctor_channels(config: Config) -> Result<()> {
     let config_arc = Arc::new(RwLock::new(config));
     #[allow(unused_mut)]
-    let mut channels = collect_configured_channels(&config_arc, "health check", &[], None, None);
+    let mut channels = collect_configured_channels(&config_arc, "health check", &[]);
 
     #[cfg(feature = "channel-nostr")]
     {
@@ -4354,8 +4145,6 @@ fn concurrent_persist_lock_serialization() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });

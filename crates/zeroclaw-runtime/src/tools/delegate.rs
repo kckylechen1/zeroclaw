@@ -1090,8 +1090,6 @@ impl DelegateTool {
             false,
             None,
             None,
-            None,
-            None,
             // SA-11: the independent target's registry is built with the
             // CHILD lineage (this delegating context advanced by one), so
             // the target's own DelegateTool/spawn_subagent inherit the

@@ -8520,42 +8520,6 @@ fn terminal_run_removes_the_park_snapshot_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[tokio::test]
-async fn sop_approve_tool_resumes_deterministic_checkpoint() {
-    // Regression guard: the sop_approve tool must route a
-    // PausedCheckpoint to approve_step, because resolve_gate reports NotWaiting
-    // for it. Without that routing the tool answers "not waiting for approval"
-    // and a deterministic run is stuck unresumable through every surface.
-    use crate::tools::SopApproveTool;
-    use zeroclaw_api::tool::Tool;
-
-    let mut engine = engine_with_sops(vec![deterministic_sop("det-cp")]);
-    let action = engine.start_run("det-cp", manual_event()).unwrap();
-    let run_id = extract_run_id(&action).to_string();
-    let action = engine
-        .advance_deterministic_step(&run_id, serde_json::json!("s1-out"), None)
-        .unwrap();
-    assert!(matches!(action, SopRunAction::CheckpointWait { .. }));
-    assert_eq!(
-        engine.get_run(&run_id).unwrap().status,
-        SopRunStatus::PausedCheckpoint
-    );
-
-    let tool = SopApproveTool::new(std::sync::Arc::new(std::sync::Mutex::new(engine)));
-    let result = tool
-        .execute(serde_json::json!({ "run_id": run_id }))
-        .await
-        .unwrap();
-    assert!(
-        result.success,
-        "sop_approve must resume a deterministic checkpoint, not report not-waiting: {result:?}"
-    );
-    assert!(
-        result.output.contains("Approved"),
-        "checkpoint resume should be reported as approved: {result:?}"
-    );
-}
-
 #[test]
 fn engine_restores_runs_from_store() {
     use super::super::store::SqliteRunStore;

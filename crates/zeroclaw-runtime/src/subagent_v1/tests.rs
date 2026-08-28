@@ -1312,8 +1312,6 @@ fn v1_child_capability_set_is_disjoint_from_a_real_parent_registry() {
         None,
         None,
         None,
-        None,
-        None,
     );
     let parent_names: std::collections::HashSet<String> =
         built.tools.iter().map(|t| t.name().to_string()).collect();

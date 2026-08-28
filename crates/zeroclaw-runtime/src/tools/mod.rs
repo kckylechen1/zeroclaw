@@ -25,12 +25,6 @@ pub mod shell;
 pub mod skill_http;
 pub mod skill_manage;
 pub mod skill_tool;
-pub mod sop_advance;
-pub mod sop_approve;
-pub mod sop_execute;
-pub mod sop_list;
-pub mod sop_status;
-pub mod sop_workshop;
 pub mod spawn_subagent;
 pub mod todo_write;
 pub mod verifiable_intent;
@@ -150,12 +144,6 @@ pub use send_message_to_peer::SendMessageToPeerTool;
 pub use shell::ShellTool;
 pub use skill_http::SkillHttpTool;
 pub use skill_tool::{SkillBuiltinTool, SkillShellTool};
-pub use sop_advance::SopAdvanceTool;
-pub use sop_approve::SopApproveTool;
-pub use sop_execute::SopExecuteTool;
-pub use sop_list::SopListTool;
-pub use sop_status::SopStatusTool;
-pub use sop_workshop::SopWorkshopTool;
 pub use spawn_subagent::SpawnSubagentTool;
 pub use todo_write::TodoWriteTool;
 pub use verifiable_intent::VerifiableIntentTool;
@@ -172,12 +160,10 @@ pub const REENTRANT_AGENT_TOOLS: &[&str] = &[
 
 use crate::platform::{NativeRuntime, RuntimeAdapter};
 use crate::security::{SecurityPolicy, create_sandbox};
-use crate::sop::audit::SopAuditLogger;
-use crate::sop::engine::SopEngine;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use zeroclaw_config::schema::{AliasedAgentConfig, Config};
 use zeroclaw_memory::Memory;
 
@@ -476,10 +462,11 @@ pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Tool names retired from the ordinary model-visible registry. Their
-/// implementations stay compiled (operator surfaces and tests construct
-/// them directly), but no assembly path may register them and no plugin
-/// may claim the names. Kept as one list so the registry totality test
+/// Tool names retired from the ordinary model-visible registry. No assembly
+/// path may register them and no plugin may claim the names. Most entries
+/// keep their implementations compiled (operator surfaces and tests
+/// construct them directly); the SOP run tools below were deleted outright
+/// with the legacy run side. Kept as one list so the registry totality test
 /// and the plugin collision guard assert the same set.
 #[cfg(any(test, feature = "plugins-wasm"))]
 pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
@@ -489,6 +476,12 @@ pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
     "security_ops",
     "backup",
     "data_management",
+    "sop_execute",
+    "sop_advance",
+    "sop_approve",
+    "sop_status",
+    "sop_list",
+    "sop_workshop",
 ];
 
 /// Bundled return values from tool registry construction.
@@ -552,11 +545,9 @@ pub fn all_tools(
         canvas_store,
         is_subagent_caller,
         tui_env,
-        None,
-        None,
-        None,
-        // No runtime adapter / SOP / live-config here; and no lineage —
+        // No runtime adapter / live-config here; and no lineage —
         // callers of the non-runtime variant are top-level origins.
+        None,
         None,
     )
 }
@@ -600,8 +591,6 @@ pub fn all_tools_with_runtime(
     canvas_store: Option<CanvasStore>,
     is_subagent_caller: bool,
     tui_env: Option<HashMap<String, String>>,
-    sop_engine: Option<Arc<Mutex<SopEngine>>>,
-    sop_audit: Option<Arc<SopAuditLogger>>,
     // Live config handle for `send_via` peer-group authority. `Some` from the
     // channel daemon (so reloads take effect); `None` for one-shot / non-channel
     // callers, which fall back to a snapshot of `root_config`.
@@ -1285,40 +1274,6 @@ pub fn all_tools_with_runtime(
         Arc::clone(&poll_handle),
     )));
 
-    // SOP tools (registered when engine handle is provided)
-    if let Some(ref sop_engine) = sop_engine {
-        tool_arcs.push(Arc::new(SopListTool::new(Arc::clone(sop_engine))));
-        if let Some(ref sop_audit) = sop_audit {
-            tool_arcs.push(Arc::new(
-                SopExecuteTool::new(Arc::clone(sop_engine)).with_audit(Arc::clone(sop_audit)),
-            ));
-            tool_arcs.push(Arc::new(
-                SopAdvanceTool::new(Arc::clone(sop_engine)).with_audit(Arc::clone(sop_audit)),
-            ));
-            tool_arcs.push(Arc::new(
-                SopApproveTool::new(Arc::clone(sop_engine))
-                    .with_agent_alias(agent_alias)
-                    .with_audit(Arc::clone(sop_audit)),
-            ));
-        } else {
-            tool_arcs.push(Arc::new(SopExecuteTool::new(Arc::clone(sop_engine))));
-            tool_arcs.push(Arc::new(SopAdvanceTool::new(Arc::clone(sop_engine))));
-            tool_arcs.push(Arc::new(
-                SopApproveTool::new(Arc::clone(sop_engine)).with_agent_alias(agent_alias),
-            ));
-        }
-        tool_arcs.push(Arc::new(
-            SopStatusTool::new(Arc::clone(sop_engine))
-                .with_collector(crate::sop::SopMetricsCollector::shared()),
-        ));
-        if root_config.sop.procedural_memory_enabled {
-            tool_arcs.push(Arc::new(SopWorkshopTool::new(
-                Arc::clone(sop_engine),
-                workspace_dir.to_path_buf(),
-            )));
-        }
-    }
-
     #[cfg(feature = "integrations-saas")]
     if let Some(key) = composio_key
         && !key.is_empty()
@@ -1782,11 +1737,9 @@ fn claim_plugin_tool_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
-    use zeroclaw_config::schema::{
-        ApprovalGroupConfig, ApprovalPolicyConfig, BrowserConfig, Config, MemoryConfig,
-        SopApprovalConfig,
-    };
+    use zeroclaw_config::schema::{BrowserConfig, Config, MemoryConfig};
 
     #[tokio::test]
     async fn mcp_capability_tools_respect_policy() {
@@ -1850,6 +1803,21 @@ mod tests {
 
     #[cfg(feature = "plugins-wasm")]
     #[test]
+    fn retired_tool_names_stay_reserved_from_plugin_claims() {
+        let mut registered_names = RETIRED_OPERATOR_TOOL_NAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        for name in RETIRED_OPERATOR_TOOL_NAMES {
+            assert!(
+                !claim_plugin_tool_name(&mut registered_names, name),
+                "a plugin reclaimed retired tool name {name}"
+            );
+        }
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
     fn component_with_failed_metadata_probe_is_not_registered() {
         let tmp = TempDir::new().unwrap();
         let package_dir = tmp.path().join("plugins").join("metadata-probe");
@@ -1908,8 +1876,12 @@ mod tests {
         );
     }
 
+    /// Discrimination guard for the retired SOP run side: the
+    /// legacy agent-facing run tools must never re-enter the registry. Run
+    /// truth is Tachi-side (procedure_v1 seam); definitions have no tool
+    /// surface here.
     #[test]
-    fn sop_tools_absent_when_engine_not_provided() {
+    fn sop_run_tools_stay_retired_from_the_registry() {
         let tmp = TempDir::new().unwrap();
         let security = Arc::new(SecurityPolicy::default());
         let mem_cfg = MemoryConfig {
@@ -1950,90 +1922,20 @@ mod tests {
         .tools;
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
 
-        let sop_tool_names = [
+        let retired_sop_tools = [
             "sop_list",
             "sop_execute",
             "sop_advance",
             "sop_approve",
             "sop_status",
+            "sop_workshop",
         ];
-        for name in &sop_tool_names {
+        for name in &retired_sop_tools {
             assert!(
                 !names.contains(name),
-                "SOP tool '{name}' must not be registered when engine is absent"
+                "legacy SOP run tool '{name}' is retired; the registry must not re-admit it"
             );
         }
-    }
-
-    #[test]
-    fn sop_tools_present_when_engine_provided() {
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-
-        let browser = BrowserConfig {
-            enabled: false,
-            allowed_domains: vec![],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
-        let http = zeroclaw_config::schema::HttpRequestConfig::default();
-        let cfg = test_config(&tmp);
-
-        // Build a minimal SOP engine — no sops_dir needed for this test.
-        let engine = Arc::new(Mutex::new(SopEngine::new(
-            zeroclaw_config::schema::SopConfig::default(),
-        )));
-
-        let tools = all_tools_with_runtime(
-            Arc::new(Config::default()),
-            &security,
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-            "test-agent",
-            Arc::new(NativeRuntime::new()),
-            mem,
-            None,
-            None,
-            &browser,
-            &http,
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-            Some(engine),
-            None,
-            None,
-            None,
-        )
-        .tools;
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-
-        let sop_tool_names = [
-            "sop_list",
-            "sop_execute",
-            "sop_advance",
-            "sop_approve",
-            "sop_status",
-        ];
-        for name in &sop_tool_names {
-            assert!(
-                names.contains(name),
-                "SOP tool '{name}' must be registered when engine is provided"
-            );
-        }
-        assert!(
-            !names.contains(&"sop_workshop"),
-            "sop_workshop must stay opt-in while procedural memory is disabled"
-        );
     }
 
     struct CapturingRuntime {
@@ -2149,8 +2051,6 @@ mod tests {
                 None,
                 None,
                 None,
-                None,
-                None,
             )
             .tools;
             let tool = tools
@@ -2239,8 +2139,6 @@ mod tests {
             None,
             None,
             None,
-            None,
-            None,
         )
         .tools;
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
@@ -2255,298 +2153,6 @@ mod tests {
             names.contains(&"shell"),
             "positive control: ordinary tools should still register"
         );
-    }
-
-    #[test]
-    fn sop_workshop_registered_only_when_procedural_memory_enabled() {
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-
-        let browser = BrowserConfig {
-            enabled: false,
-            allowed_domains: vec![],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
-        let http = zeroclaw_config::schema::HttpRequestConfig::default();
-        let mut cfg = test_config(&tmp);
-        cfg.sop.procedural_memory_enabled = true;
-
-        let engine = Arc::new(Mutex::new(SopEngine::new(
-            zeroclaw_config::schema::SopConfig::default(),
-        )));
-
-        let tools = all_tools_with_runtime(
-            Arc::new(Config::default()),
-            &security,
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-            "test-agent",
-            Arc::new(NativeRuntime::new()),
-            mem,
-            None,
-            None,
-            &browser,
-            &http,
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-            Some(engine),
-            None,
-            None,
-            None,
-        )
-        .tools;
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-
-        assert!(
-            names.contains(&"sop_workshop"),
-            "sop_workshop must be registered when procedural memory is enabled"
-        );
-    }
-
-    #[test]
-    fn shared_sop_engine_arc_is_observed_by_multiple_registrations() {
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-
-        let cfg = test_config(&tmp);
-        let browser = BrowserConfig::default();
-        let http = zeroclaw_config::schema::HttpRequestConfig::default();
-        let web = zeroclaw_config::schema::WebFetchConfig::default();
-        let risk = zeroclaw_config::schema::RiskProfileConfig::default();
-
-        let shared_engine = Arc::new(Mutex::new(SopEngine::new(
-            zeroclaw_config::schema::SopConfig::default(),
-        )));
-        let shared_audit = Arc::new(crate::sop::SopAuditLogger::new(mem.clone()));
-
-        // Two independent registrations using clones of the same Arc — the
-        // pattern the daemon uses when wiring gateway, channels, MQTT, and
-        // RPC sessions from one engine pair.
-        let session_a = all_tools_with_runtime(
-            Arc::new(Config::default()),
-            &security,
-            &risk,
-            "session-a",
-            Arc::new(NativeRuntime::new()),
-            mem.clone(),
-            None,
-            None,
-            &browser,
-            &http,
-            &web,
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-            Some(shared_engine.clone()),
-            Some(shared_audit.clone()),
-            None,
-            None,
-        );
-        let session_b = all_tools_with_runtime(
-            Arc::new(Config::default()),
-            &security,
-            &risk,
-            "session-b",
-            Arc::new(NativeRuntime::new()),
-            mem.clone(),
-            None,
-            None,
-            &browser,
-            &http,
-            &web,
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-            Some(shared_engine.clone()),
-            Some(shared_audit.clone()),
-            None,
-            None,
-        );
-
-        for tools in [&session_a.tools, &session_b.tools] {
-            assert!(tools.iter().any(|t| t.name() == "sop_status"));
-        }
-
-        // Outer Arc + both registrations = 3+ strong refs. Confirms the
-        // registries kept references to the same instance instead of
-        // copying state.
-        assert!(Arc::strong_count(&shared_engine) >= 3);
-        assert!(Arc::strong_count(&shared_audit) >= 3);
-    }
-
-    #[tokio::test]
-    async fn sop_approve_registry_binds_the_calling_agent_alias() {
-        use crate::sop::types::{
-            Sop, SopAdmissionPolicy, SopEvent, SopExecutionMode, SopPriority, SopRunAction,
-            SopRunStatus, SopStep, SopStepKind, SopTrigger, SopTriggerSource,
-        };
-
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let mut groups = HashMap::new();
-        groups.insert(
-            "release".to_string(),
-            ApprovalGroupConfig {
-                members: vec!["agent:ZeroClawOperator".to_string()],
-            },
-        );
-        let mut policies = HashMap::new();
-        policies.insert(
-            "prod".to_string(),
-            ApprovalPolicyConfig {
-                required_group: Some("release".to_string()),
-                quorum: 1,
-                request_route: None,
-                escalation_route: None,
-            },
-        );
-        let mut engine = SopEngine::new(zeroclaw_config::schema::SopConfig {
-            approval: SopApprovalConfig { groups, policies },
-            ..Default::default()
-        })
-        .with_approval_broker(Arc::new(crate::sop::approval::ApprovalBroker::disabled()));
-        engine.set_sops_for_test(vec![Sop {
-            name: "deploy".into(),
-            description: "test".into(),
-            version: "1.0.0".into(),
-            priority: SopPriority::Normal,
-            execution_mode: SopExecutionMode::Supervised,
-            triggers: vec![SopTrigger::Manual],
-            steps: vec![
-                SopStep {
-                    number: 1,
-                    title: "gate".into(),
-                    kind: SopStepKind::Execute,
-                    requires_confirmation: true,
-                    policy: Some("prod".into()),
-                    ..SopStep::default()
-                },
-                SopStep {
-                    number: 2,
-                    title: "execute".into(),
-                    kind: SopStepKind::Execute,
-                    ..SopStep::default()
-                },
-            ],
-            cooldown_secs: 0,
-            max_concurrent: 1,
-            location: None,
-            deterministic: false,
-            admission_policy: SopAdmissionPolicy::Parallel,
-            max_pending_approvals: 0,
-            agent: None,
-        }]);
-        let action = engine
-            .start_run(
-                "deploy",
-                SopEvent {
-                    source: SopTriggerSource::Manual,
-                    topic: None,
-                    payload: None,
-                    timestamp: crate::sop::engine::now_iso8601(),
-                },
-            )
-            .unwrap();
-        let run_id = match action {
-            SopRunAction::WaitApproval { run_id, .. } => run_id,
-            other => panic!("expected WaitApproval, got {other:?}"),
-        };
-        let shared_engine = Arc::new(Mutex::new(engine));
-        let cfg = test_config(&tmp);
-        let browser = BrowserConfig::default();
-        let http = zeroclaw_config::schema::HttpRequestConfig::default();
-        let web = zeroclaw_config::schema::WebFetchConfig::default();
-        let risk = zeroclaw_config::schema::RiskProfileConfig::default();
-
-        let build = |agent_alias: &str, memory: Arc<dyn Memory>| {
-            all_tools_with_runtime(
-                Arc::new(Config::default()),
-                &security,
-                &risk,
-                agent_alias,
-                Arc::new(NativeRuntime::new()),
-                memory,
-                None,
-                None,
-                &browser,
-                &http,
-                &web,
-                tmp.path(),
-                &HashMap::new(),
-                None,
-                &cfg,
-                None,
-                false,
-                None,
-                Some(shared_engine.clone()),
-                None,
-                None,
-                None,
-            )
-            .tools
-        };
-        let unauthorized_tools = build("ZeroClawAgent", mem.clone());
-        let authorized_tools = build("ZeroClawOperator", mem);
-
-        let unauthorized = unauthorized_tools
-            .iter()
-            .find(|tool| tool.name() == "sop_approve")
-            .expect("unauthorized registry has sop_approve");
-        let result = unauthorized
-            .execute(serde_json::json!({ "run_id": run_id.clone() }))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert_eq!(
-            shared_engine
-                .lock()
-                .unwrap()
-                .get_run(&run_id)
-                .map(|run| run.status),
-            Some(SopRunStatus::WaitingApproval)
-        );
-
-        let authorized = authorized_tools
-            .iter()
-            .find(|tool| tool.name() == "sop_approve")
-            .expect("authorized registry has sop_approve");
-        let result = authorized
-            .execute(serde_json::json!({ "run_id": run_id }))
-            .await
-            .unwrap();
-        assert!(result.success, "authorized alias must resolve: {result:?}");
     }
 
     #[test]
@@ -2609,8 +2215,6 @@ mod tests {
             None,
             None,
             None,
-            None,
-            None,
         )
         .tools;
 
@@ -2634,46 +2238,6 @@ mod tests {
         assert!(
             !workspace_dir.join("sessions").exists(),
             "session tools must not open/create a store under the per-agent workspace_dir"
-        );
-    }
-
-    #[tokio::test]
-    async fn sop_audit_memory_uses_agent_alias_not_default() {
-        let tmp = TempDir::new().unwrap();
-        let sops_dir = tmp.path().join("sops");
-        std::fs::create_dir_all(&sops_dir).unwrap();
-
-        let mut agents = HashMap::new();
-        agents.insert(
-            "ops".to_string(),
-            AliasedAgentConfig {
-                ..Default::default()
-            },
-        );
-
-        let config = Config {
-            data_dir: tmp.path().join("data"),
-            config_path: tmp.path().join("config.toml"),
-            sop: zeroclaw_config::schema::SopConfig {
-                sops_dir: Some(sops_dir.to_string_lossy().into_owned()),
-                ..zeroclaw_config::schema::SopConfig::default()
-            },
-            agents: agents.clone(),
-            ..Config::default()
-        };
-
-        // Using the session alias ("ops") must succeed even with no "default" agent.
-        let mem = zeroclaw_memory::create_memory_for_agent(&config, "ops", None).await;
-        assert!(
-            mem.is_ok(),
-            "create_memory_for_agent with session alias should succeed"
-        );
-
-        // The old hardcoded "default" must fail — proving the fix is load-bearing.
-        let mem_default = zeroclaw_memory::create_memory_for_agent(&config, "default", None).await;
-        assert!(
-            mem_default.is_err(),
-            "create_memory_for_agent(\"default\") must fail when agents.default is absent"
         );
     }
 
@@ -3029,84 +2593,6 @@ mod tests {
         assert!(names.contains(&"pushover"));
     }
 
-    #[tokio::test]
-    async fn registered_sop_tools_persist_audit_trail() {
-        let tmp = TempDir::new().unwrap();
-        let sops_dir = tmp.path().join("sops");
-        let sop_subdir = sops_dir.join("canary");
-        std::fs::create_dir_all(&sop_subdir).unwrap();
-        std::fs::write(
-            sop_subdir.join("SOP.toml"),
-            "[sop]\nname = \"canary\"\ndescription = \"audit wiring guard\"\nversion = \"1.0.0\"\n\n[[triggers]]\ntype = \"manual\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            sop_subdir.join("SOP.md"),
-            "## Steps\n\n1. **Resolve** Do the first step\n   - tools: shell\n",
-        )
-        .unwrap();
-
-        let mem_cfg = MemoryConfig {
-            backend: "sqlite".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-
-        let security = Arc::new(SecurityPolicy::default());
-        let mut cfg = test_config(&tmp);
-        cfg.sop.sops_dir = Some(sops_dir.to_string_lossy().into_owned());
-
-        let tools = {
-            let mut engine = crate::sop::SopEngine::new(cfg.sop.clone());
-            engine.reload(tmp.path());
-            let sop_engine = Arc::new(std::sync::Mutex::new(engine));
-            let sop_audit = Arc::new(crate::sop::SopAuditLogger::new(mem.clone()));
-            all_tools_with_runtime(
-                Arc::new(Config::default()),
-                &security,
-                &zeroclaw_config::schema::RiskProfileConfig::default(),
-                "test-agent",
-                Arc::new(NativeRuntime::new()),
-                mem.clone(),
-                None,
-                None,
-                &BrowserConfig::default(),
-                &zeroclaw_config::schema::HttpRequestConfig::default(),
-                &zeroclaw_config::schema::WebFetchConfig::default(),
-                tmp.path(),
-                &HashMap::new(),
-                None,
-                &cfg,
-                None,
-                false,
-                None,
-                Some(sop_engine),
-                Some(sop_audit),
-                None,
-                None,
-            )
-            .tools
-        };
-
-        let execute = tools
-            .iter()
-            .find(|t| t.name() == "sop_execute")
-            .expect("sop_execute must be registered when sops_dir is set");
-        let result = execute
-            .execute(serde_json::json!({"name": "canary"}))
-            .await
-            .unwrap();
-        assert!(result.success, "sop_execute failed: {result:?}");
-
-        let audit = crate::sop::SopAuditLogger::new(mem.clone());
-        let run_keys = audit.list_runs().await.unwrap();
-        assert!(
-            !run_keys.is_empty(),
-            "registered sop_execute must persist a sop_run_* audit entry; got none (audit not wired)"
-        );
-    }
-
     #[test]
     fn default_tools_names() {
         let security = Arc::new(SecurityPolicy::default());
@@ -3358,8 +2844,6 @@ mod tests {
             &lineage_registry_config(),
             None,
             true, // is_subagent_caller: registry belongs to a child run
-            None,
-            None,
             None,
             None,
             Some(at_cap),

@@ -452,8 +452,6 @@ fn router_test_ctx() -> Arc<ChannelRuntimeContext> {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     })
@@ -624,7 +622,7 @@ fn agent_router_multi_routes_each_alias_to_its_owning_agent() {
     let mut owners: HashMap<String, String> = HashMap::new();
     owners.insert("discord.clamps".to_string(), "clamps".to_string());
     owners.insert("discord.glados".to_string(), "glados".to_string());
-    let router = AgentRouter::multi(by_agent, owners, None, None);
+    let router = AgentRouter::multi(by_agent, owners);
 
     let msg_clamps = channel_message("discord", Some("clamps"));
     let msg_glados = channel_message("discord", Some("glados"));
@@ -647,7 +645,7 @@ fn agent_router_multi_returns_none_for_unowned_channels() {
     by_agent.insert("agent_a".to_string(), Arc::clone(&agent_a_ctx));
     let mut owners: HashMap<String, String> = HashMap::new();
     owners.insert("discord.bot_a".to_string(), "agent_a".to_string());
-    let router = AgentRouter::multi(by_agent, owners, None, None);
+    let router = AgentRouter::multi(by_agent, owners);
 
     let cli_msg = channel_message("cli", None);
     assert!(router.resolve(&cli_msg).is_none(), "cli has no owner");
@@ -660,7 +658,7 @@ fn agent_router_multi_resolves_bare_channel_for_singleton_owners() {
     by_agent.insert("ops".to_string(), Arc::clone(&notion_agent_ctx));
     let mut owners: HashMap<String, String> = HashMap::new();
     owners.insert("notion".to_string(), "ops".to_string());
-    let router = AgentRouter::multi(by_agent, owners, None, None);
+    let router = AgentRouter::multi(by_agent, owners);
 
     let msg = channel_message("notion", None);
     let resolved = router.resolve(&msg).expect("notion resolves");
@@ -686,7 +684,7 @@ fn agent_router_multi_resolves_fallback_loaded_channel_to_legacy_agent() {
     let legacy_ctx = router_test_ctx();
     let mut by_agent: HashMap<String, Arc<ChannelRuntimeContext>> = HashMap::new();
     by_agent.insert("legacy".to_string(), Arc::clone(&legacy_ctx));
-    let router = AgentRouter::multi(by_agent, owners, None, None);
+    let router = AgentRouter::multi(by_agent, owners);
 
     let msg = channel_message("mattermost", Some("default"));
     let resolved = router.resolve(&msg).expect("fallback owner resolves");
@@ -1073,8 +1071,6 @@ fn channel_runtime_context_for_defaults_test(
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     }
@@ -1560,8 +1556,6 @@ fn compact_sender_history_keeps_recent_truncated_messages() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     };
@@ -1659,8 +1653,6 @@ fn append_sender_turn_stores_single_turn_per_call() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     };
@@ -1777,8 +1769,6 @@ fn rollback_orphan_user_turn_removes_only_latest_matching_user_turn() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     };
@@ -1899,8 +1889,6 @@ fn rollback_orphan_user_turn_also_removes_from_session_store() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     };
@@ -2664,8 +2652,6 @@ fn test_runtime_ctx_with_observer(
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     })
@@ -4862,8 +4848,6 @@ fn peer_prompt_test_context(
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     })
@@ -4950,8 +4934,6 @@ async fn process_channel_message_executes_tool_calls_instead_of_sending_raw_json
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -5073,8 +5055,6 @@ async fn process_channel_message_scopes_sender_session_key_for_sessions_current_
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
         agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
@@ -5192,8 +5172,6 @@ async fn process_channel_message_renders_trailing_tool_receipts_block_when_enabl
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
         agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
@@ -5348,8 +5326,6 @@ async fn process_channel_message_omits_receipts_block_when_disabled() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
         agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
@@ -5468,8 +5444,6 @@ async fn process_channel_message_disabled_receipt_generator_emits_no_receipts_an
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
         agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
@@ -5613,8 +5587,6 @@ async fn process_channel_message_telegram_does_not_persist_tool_summary_prefix()
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -5744,8 +5716,6 @@ async fn process_channel_message_strips_unexecuted_tool_json_artifacts_from_repl
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -5860,8 +5830,6 @@ async fn process_channel_message_executes_tool_calls_with_alias_tags() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -5996,8 +5964,6 @@ async fn process_channel_message_handles_models_command_without_llm_call() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -6156,8 +6122,6 @@ async fn process_channel_message_uses_route_override_provider_and_model() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -6338,8 +6302,6 @@ async fn process_channel_message_persists_model_switch_with_route_credential() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -6824,8 +6786,6 @@ async fn process_channel_message_prefers_cached_default_provider_instance() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -6938,8 +6898,6 @@ async fn process_channel_message_respects_configured_max_tool_iterations_above_d
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -7059,8 +7017,6 @@ async fn process_channel_message_reports_configured_max_tool_iterations_limit() 
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -7332,8 +7288,6 @@ async fn message_dispatch_processes_messages_in_parallel() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -7528,8 +7482,6 @@ async fn deliver_messages_through_loop(
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -7647,8 +7599,6 @@ async fn message_dispatch_interrupts_in_flight_telegram_request_and_preserves_co
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -7809,8 +7759,6 @@ async fn message_dispatch_interrupts_in_flight_slack_request_and_preserves_conte
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -7974,8 +7922,6 @@ async fn message_dispatch_interrupts_in_flight_whatsapp_request_and_preserves_co
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -8133,8 +8079,6 @@ async fn message_dispatch_interrupt_scope_is_same_sender_same_chat() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -8270,8 +8214,6 @@ async fn process_channel_message_cancels_scoped_typing_task() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -8502,8 +8444,6 @@ async fn process_channel_message_adds_and_swaps_reactions() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -8632,8 +8572,6 @@ async fn process_channel_message_no_reply_clears_early_ack() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -8807,8 +8745,6 @@ async fn process_channel_message_acks_before_slow_model_completes() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -11004,8 +10940,6 @@ async fn process_channel_message_restores_per_sender_history_on_follow_ups() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -11182,8 +11116,6 @@ async fn process_channel_message_refreshes_available_skills_after_new_session() 
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -11573,8 +11505,6 @@ fn cache_stability_test_context(
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     })
@@ -12059,8 +11989,6 @@ async fn process_channel_message_persists_image_payload_verbatim() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -12212,8 +12140,6 @@ async fn process_channel_message_telegram_keeps_system_instruction_at_top_only()
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -12740,7 +12666,7 @@ fn collect_configured_channels_includes_mattermost_when_configured() {
     );
 
     let config_arc = Arc::new(RwLock::new(config));
-    let channels = collect_configured_channels(&config_arc, "test", &[], None, None);
+    let channels = collect_configured_channels(&config_arc, "test", &[]);
 
     assert!(
         channels
@@ -12790,7 +12716,7 @@ fn collect_configured_channels_falls_back_when_agent_bindings_missing() {
     );
 
     let config_arc = Arc::new(RwLock::new(config));
-    let channels = collect_configured_channels(&config_arc, "test", &[], None, None);
+    let channels = collect_configured_channels(&config_arc, "test", &[]);
 
     assert!(
         channels
@@ -12826,7 +12752,7 @@ fn collect_configured_channels_skips_channel_when_only_owner_is_disabled() {
     );
 
     let config_arc = Arc::new(RwLock::new(config));
-    let channels = collect_configured_channels(&config_arc, "test", &[], None, None);
+    let channels = collect_configured_channels(&config_arc, "test", &[]);
 
     assert!(
         !channels.iter().any(|entry| entry.display_name == "Discord"),
@@ -12857,7 +12783,7 @@ fn collect_configured_channels_legacy_accepts_all_when_no_bindings_declared() {
     );
 
     let config_arc = Arc::new(RwLock::new(config));
-    let channels = collect_configured_channels(&config_arc, "test", &[], None, None);
+    let channels = collect_configured_channels(&config_arc, "test", &[]);
 
     assert!(
         channels.iter().any(|entry| entry.display_name == "Discord"),
@@ -12907,7 +12833,7 @@ fn collect_configured_channels_respects_mixed_enabled_and_disabled_owners() {
     );
 
     let config_arc = Arc::new(RwLock::new(config));
-    let channels = collect_configured_channels(&config_arc, "test", &[], None, None);
+    let channels = collect_configured_channels(&config_arc, "test", &[]);
 
     let discord_channels: Vec<_> = channels
         .iter()
@@ -12922,125 +12848,6 @@ fn collect_configured_channels_respects_mixed_enabled_and_disabled_owners() {
         discord_channels[0].alias.as_deref(),
         Some("a"),
         "only the enabled owner's channel should be active"
-    );
-}
-
-#[cfg(feature = "channel-discord")]
-#[test]
-fn approval_route_collects_unowned_channel_without_agent_dispatch() {
-    let mut config = Config::default();
-    config.agents.clear();
-    config.agents.insert(
-        "worker".to_string(),
-        zeroclaw_config::schema::AliasedAgentConfig {
-            enabled: true,
-            channels: vec!["discord.worker".into()],
-            ..Default::default()
-        },
-    );
-    config.channels.discord.insert(
-        "worker".to_string(),
-        zeroclaw_config::schema::DiscordConfig {
-            enabled: true,
-            bot_token: "worker-token".to_string(),
-            ..Default::default()
-        },
-    );
-    config.channels.discord.insert(
-        "ops".to_string(),
-        zeroclaw_config::schema::DiscordConfig {
-            enabled: true,
-            bot_token: "ops-token".to_string(),
-            ..Default::default()
-        },
-    );
-    config.sop.approval.policies.insert(
-        "prod".to_string(),
-        zeroclaw_config::schema::ApprovalPolicyConfig {
-            request_route: Some("discord.ops:room-1".to_string()),
-            escalation_route: Some("discord.ops:room-2".to_string()),
-            ..Default::default()
-        },
-    );
-
-    let config_arc = Arc::new(RwLock::new(config.clone()));
-    let configured = collect_configured_channels(&config_arc, "test", &[], None, None);
-    let channel_map = configured_channel_map(&configured);
-    assert!(
-        channel_map.contains_key("discord.ops"),
-        "the approval route's configured channel must be live for adapter delivery"
-    );
-
-    let collected_keys: Vec<String> = channel_map.keys().cloned().collect();
-    let owners = build_owner_by_channel_key(&config, &["worker".to_string()], &collected_keys);
-    assert!(
-        !owners.contains_key("discord.ops"),
-        "approval-route liveness must not create an agent owner"
-    );
-
-    let worker_ctx = router_test_ctx();
-    let router = AgentRouter::multi(
-        HashMap::from([("worker".to_string(), worker_ctx)]),
-        owners,
-        None,
-        None,
-    );
-    assert!(
-        router
-            .resolve(&channel_message("discord", Some("ops")))
-            .is_none(),
-        "ordinary traffic on the approval-only alias must not reach the worker"
-    );
-}
-
-#[cfg(feature = "channel-discord")]
-#[test]
-fn bare_approval_route_collects_the_sole_enabled_alias() {
-    let mut config = Config::default();
-    config.agents.clear();
-    config.agents.insert(
-        "worker".to_string(),
-        zeroclaw_config::schema::AliasedAgentConfig {
-            enabled: true,
-            channels: vec!["discord.worker".into()],
-            ..Default::default()
-        },
-    );
-    config.channels.discord.insert(
-        "worker".to_string(),
-        zeroclaw_config::schema::DiscordConfig {
-            enabled: false,
-            bot_token: "worker-token".to_string(),
-            ..Default::default()
-        },
-    );
-    config.channels.discord.insert(
-        "ops".to_string(),
-        zeroclaw_config::schema::DiscordConfig {
-            enabled: true,
-            bot_token: "ops-token".to_string(),
-            ..Default::default()
-        },
-    );
-    config.sop.approval.policies.insert(
-        "prod".to_string(),
-        zeroclaw_config::schema::ApprovalPolicyConfig {
-            request_route: Some("discord:room-1".to_string()),
-            ..Default::default()
-        },
-    );
-
-    let config_arc = Arc::new(RwLock::new(config));
-    let configured = collect_configured_channels(&config_arc, "test", &[], None, None);
-    let channel_map = configured_channel_map(&configured);
-    assert!(channel_map.contains_key("discord.ops"));
-    assert!(
-        channel_map.contains_key("discord"),
-        "the route adapter can resolve the bare singleton key"
-    );
-    assert!(
-        !channel_map.contains_key("discord.worker"),
-        "a disabled channel must not be revived just because a sibling route is active"
     );
 }
 
@@ -13195,7 +13002,7 @@ fn collect_configured_channels_skips_unreferenced_email() {
     );
 
     let config_arc = Arc::new(RwLock::new(config));
-    let channels = collect_configured_channels(&config_arc, "test", &[], None, None);
+    let channels = collect_configured_channels(&config_arc, "test", &[]);
     assert!(
         !channels.iter().any(|entry| entry.display_name == "Email"),
         "email with no agent reference should not be collected"
@@ -13212,7 +13019,7 @@ fn collect_configured_channels_skips_unreferenced_voice_call() {
     );
 
     let config_arc = Arc::new(RwLock::new(config));
-    let channels = collect_configured_channels(&config_arc, "test", &[], None, None);
+    let channels = collect_configured_channels(&config_arc, "test", &[]);
     assert!(
         !channels
             .iter()
@@ -13965,8 +13772,6 @@ async fn e2e_photo_attachment_rejected_by_non_vision_provider() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -14088,8 +13893,6 @@ async fn e2e_failed_vision_turn_does_not_poison_follow_up_text_turn() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -14250,8 +14053,6 @@ async fn e2e_failed_non_retryable_turn_does_not_poison_follow_up_text_turn() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
         media_pipeline: zeroclaw_config::schema::MediaPipelineConfig::default(),
@@ -14491,8 +14292,6 @@ async fn process_channel_message_applies_query_classification_route() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -14647,8 +14446,6 @@ async fn process_channel_message_classification_disabled_uses_default_route() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -14795,8 +14592,6 @@ async fn process_channel_message_classification_no_match_uses_default_route() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -14963,8 +14758,6 @@ async fn process_channel_message_classification_priority_selects_highest() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -15531,8 +15324,6 @@ async fn message_dispatch_different_threads_do_not_cancel_each_other() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });
@@ -17344,195 +17135,6 @@ fn reply_to_no_subject_still_sets_in_reply_to() {
     assert!(sm.subject.is_none());
 }
 
-/// Router with no SOP engine wired. `dispatch_channel_sop_event` decides
-/// whether a message is a channel SOP event before it ever touches the
-/// engine, so this is enough to exercise the source/dispatch boundary.
-fn router_without_sop_engine() -> AgentRouter {
-    AgentRouter {
-        by_agent: Arc::new(HashMap::new()),
-        owner_by_channel_key: Arc::new(HashMap::new()),
-        single_ctx: None,
-        sop_engine: None,
-        sop_audit: None,
-    }
-}
-
-fn manual_sop_event() -> zeroclaw_runtime::sop::types::SopEvent {
-    zeroclaw_runtime::sop::types::SopEvent {
-        source: zeroclaw_runtime::sop::types::SopTriggerSource::Manual,
-        topic: None,
-        payload: None,
-        timestamp: "2026-01-01T00:00:00Z".to_string(),
-    }
-}
-
-fn channel_gate_sop(policy: Option<&str>) -> zeroclaw_runtime::sop::types::Sop {
-    use zeroclaw_runtime::sop::types::{
-        Sop, SopAdmissionPolicy, SopExecutionMode, SopPriority, SopStep, SopStepKind, SopTrigger,
-    };
-
-    Sop {
-        name: "channel-gate".to_string(),
-        description: "channel gate test".to_string(),
-        version: "1.0.0".to_string(),
-        priority: SopPriority::Normal,
-        execution_mode: SopExecutionMode::Supervised,
-        triggers: vec![SopTrigger::Manual],
-        steps: vec![SopStep {
-            number: 1,
-            title: "Approve me".to_string(),
-            body: "Do the gated work".to_string(),
-            suggested_tools: vec![],
-            requires_confirmation: false,
-            kind: SopStepKind::Execute,
-            schema: None,
-            policy: policy.map(str::to_string),
-            ..SopStep::default()
-        }],
-        cooldown_secs: 0,
-        max_concurrent: 1,
-        location: None,
-        deterministic: false,
-        admission_policy: SopAdmissionPolicy::Parallel,
-        max_pending_approvals: 0,
-        agent: None,
-    }
-}
-
-fn channel_gate_config_with_routes(
-    request_route: Option<&str>,
-    escalation_route: Option<&str>,
-) -> zeroclaw_config::schema::SopConfig {
-    let mut config = zeroclaw_config::schema::SopConfig::default();
-    if request_route.is_some() || escalation_route.is_some() {
-        config.approval.policies.insert(
-            "prod".to_string(),
-            zeroclaw_config::schema::ApprovalPolicyConfig {
-                request_route: request_route.map(str::to_string),
-                escalation_route: escalation_route.map(str::to_string),
-                ..zeroclaw_config::schema::ApprovalPolicyConfig::default()
-            },
-        );
-    }
-    config
-}
-
-fn parked_channel_gate_router(
-    policy: Option<&str>,
-    request_route: Option<&str>,
-) -> (
-    AgentRouter,
-    Arc<Mutex<zeroclaw_runtime::sop::SopEngine>>,
-    String,
-) {
-    parked_channel_gate_router_with_routes(policy, request_route, None)
-}
-
-fn parked_channel_gate_router_with_routes(
-    policy: Option<&str>,
-    request_route: Option<&str>,
-    escalation_route: Option<&str>,
-) -> (
-    AgentRouter,
-    Arc<Mutex<zeroclaw_runtime::sop::SopEngine>>,
-    String,
-) {
-    let mut engine = zeroclaw_runtime::sop::SopEngine::new(channel_gate_config_with_routes(
-        request_route,
-        escalation_route,
-    ));
-    engine.set_sops_for_test(vec![channel_gate_sop(policy)]);
-    let action = engine
-        .start_run("channel-gate", manual_sop_event())
-        .unwrap();
-    let run_id = match action {
-        zeroclaw_runtime::sop::types::SopRunAction::WaitApproval { run_id, .. } => run_id,
-        other => panic!("expected waiting approval, got {other:?}"),
-    };
-    let engine = Arc::new(Mutex::new(engine));
-    let router = AgentRouter {
-        by_agent: Arc::new(HashMap::new()),
-        owner_by_channel_key: Arc::new(HashMap::new()),
-        single_ctx: None,
-        sop_engine: Some(Arc::clone(&engine)),
-        sop_audit: None,
-    };
-    (router, engine, run_id)
-}
-
-fn active_run_status(
-    engine: &Arc<Mutex<zeroclaw_runtime::sop::SopEngine>>,
-    run_id: &str,
-) -> Option<zeroclaw_runtime::sop::types::SopRunStatus> {
-    engine
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_run(run_id)
-        .map(|run| run.status)
-}
-
-async fn dispatch_test_channel_sop_gate(
-    router: &AgentRouter,
-    msg: &ChannelMessage,
-    gate_channel: Option<Arc<dyn Channel>>,
-) -> bool {
-    let route_keys = vec![channel_key_for_message(msg)];
-    let gate_prompt_channels = gate_channel.into_iter().collect::<Vec<_>>();
-    let config = zeroclaw_config::schema::Config::default();
-    dispatch_channel_sop_gate(router, msg, &config, &gate_prompt_channels, &route_keys).await
-}
-
-async fn dispatch_test_channel_sop_gate_with_route_keys(
-    router: &AgentRouter,
-    msg: &ChannelMessage,
-    route_keys: &[&str],
-) -> bool {
-    let route_keys: Vec<String> = route_keys.iter().map(|key| (*key).to_string()).collect();
-    let config = zeroclaw_config::schema::Config::default();
-    dispatch_channel_sop_gate(router, msg, &config, &[], &route_keys).await
-}
-
-#[tokio::test]
-async fn dispatch_channel_sop_event_ignores_user_controlled_subject() {
-    // An email-shaped message: the reserved prefix sits in the
-    // user-controlled `subject`, but the internal git-only marker is
-    // absent. It MUST NOT route to SOP.
-    let msg = ChannelMessage {
-        channel: "email".to_string(),
-        sender: "attacker@example.com".to_string(),
-        subject: Some("zeroclaw:sop-event:git.main:pull_request.opened".to_string()),
-        content: r#"{"sop":"triage"}"#.to_string(),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "attacker@example.com", "", "", "email", 0)
-    };
-    let router = router_without_sop_engine();
-    assert!(
-        !dispatch_channel_sop_event(&router, &msg).await,
-        "a forged subject must not select SOP ingress"
-    );
-}
-
-#[tokio::test]
-async fn dispatch_channel_sop_event_routes_git_produced_marker() {
-    // A genuine git-produced message: the internal marker carries the
-    // topic. It IS recognized as a SOP event (returns true; the missing
-    // engine is handled inside, but the routing decision fired).
-    let msg = ChannelMessage {
-        channel: "git".to_string(),
-        channel_alias: Some("main".to_string()),
-        sender: "test_user".to_string(),
-        subject: Some("zeroclaw:sop-event:git.main:pull_request.opened".to_string()),
-        content: r#"{"sop":"triage"}"#.to_string(),
-        internal_sop_event: Some("git.main:pull_request.opened".to_string()),
-        ..ChannelMessage::new("1", "test_user", "octo/repo#12", "", "git", 0)
-    };
-    let router = router_without_sop_engine();
-    assert!(
-        dispatch_channel_sop_event(&router, &msg).await,
-        "a git-produced internal marker must select SOP ingress"
-    );
-}
-
 /// Pins the contract: the channel tool-loop reads `strict_tool_parsing` and
 /// `parallel_tools` from `agent_cfg.resolved` (populated), not from
 /// `prompt_config.agent(alias).resolved` (serde-skipped default).
@@ -17582,456 +17184,4 @@ fn resolved_agent_config_carries_strict_tool_parsing_and_parallel_tools() {
         !raw_agent.resolved.parallel_tools,
         "raw agent resolved.parallel_tools should be false (serde-skipped default)"
     );
-}
-
-#[tokio::test]
-async fn sop_gate_marker_is_consumed_even_without_an_engine() {
-    // A `sop.gate:` marker message exists ONLY to answer a gate; it must be
-    // consumed (never fall through to an agent turn) even when no SOP
-    // engine is available to resolve it.
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("gnosis".to_string()),
-        sender: "111222333".to_string(),
-        content: "approve det-1-0001".to_string(),
-        internal_sop_event: Some("sop.gate:approve:det-1-0001".to_string()),
-        ..ChannelMessage::new("1", "111222333", "chan", "", "discord", 0)
-    };
-    let router = router_without_sop_engine();
-    assert!(
-        dispatch_test_channel_sop_gate(&router, &msg, None).await,
-        "a gate-click marker must be consumed, not become an agent turn"
-    );
-}
-
-#[tokio::test]
-async fn sop_gate_text_reply_falls_through_when_nothing_is_parked() {
-    // A bare "approve <ref>" text message with NO matching parked run is
-    // ordinary conversation — it must NOT be consumed as a gate answer.
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("gnosis".to_string()),
-        sender: "111222333".to_string(),
-        content: "approve det-9999-0001".to_string(),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "111222333", "chan", "", "discord", 0)
-    };
-    let router = router_without_sop_engine();
-    assert!(
-        !dispatch_test_channel_sop_gate(&router, &msg, None).await,
-        "a text reply with no parked-run match must fall through to the agent"
-    );
-}
-
-#[tokio::test]
-async fn sop_gate_text_reply_does_not_clear_unpoliced_parked_run() {
-    let (router, engine, run_id) = parked_channel_gate_router(None, None);
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("ops".to_string()),
-        sender: "111222333".to_string(),
-        reply_target: "room-1".to_string(),
-        content: format!("approve {run_id}"),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "111222333", "room-1", "", "discord", 0)
-    };
-
-    assert!(
-        !dispatch_test_channel_sop_gate(&router, &msg, None).await,
-        "text replies must not clear parked runs that never emitted a request-route prompt"
-    );
-    assert_eq!(
-        active_run_status(&engine, &run_id),
-        Some(zeroclaw_runtime::sop::types::SopRunStatus::WaitingApproval)
-    );
-}
-
-#[tokio::test]
-async fn sop_gate_text_reply_requires_matching_request_route() {
-    let (router, engine, run_id) =
-        parked_channel_gate_router(Some("prod"), Some("discord.ops:room-1"));
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("ops".to_string()),
-        sender: "111222333".to_string(),
-        reply_target: "room-2".to_string(),
-        content: format!("approve {run_id}"),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "111222333", "room-2", "", "discord", 0)
-    };
-
-    assert!(
-        !dispatch_test_channel_sop_gate(&router, &msg, None).await,
-        "a text reply from the wrong room must fall through instead of resolving the gate"
-    );
-    assert_eq!(
-        active_run_status(&engine, &run_id),
-        Some(zeroclaw_runtime::sop::types::SopRunStatus::WaitingApproval)
-    );
-}
-
-#[tokio::test]
-async fn sop_gate_text_reply_rejects_request_route_that_delivery_would_not_target() {
-    let (router, engine, run_id) =
-        parked_channel_gate_router(Some("prod"), Some(" discord.ops:room-1"));
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("ops".to_string()),
-        sender: "111222333".to_string(),
-        reply_target: "room-1".to_string(),
-        content: format!("approve {run_id}"),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "111222333", "room-1", "", "discord", 0)
-    };
-
-    assert!(
-        !dispatch_test_channel_sop_gate(&router, &msg, None).await,
-        "text replies must not normalize a configured request_route differently from delivery"
-    );
-    assert_eq!(
-        active_run_status(&engine, &run_id),
-        Some(zeroclaw_runtime::sop::types::SopRunStatus::WaitingApproval)
-    );
-}
-
-#[tokio::test]
-async fn sop_gate_text_reply_rejects_short_suffix_reference() {
-    let (router, engine, run_id) =
-        parked_channel_gate_router(Some("prod"), Some("discord.ops:room-1"));
-    assert!(
-        run_id.ends_with('1'),
-        "the deterministic test run id should exercise the old one-character suffix match: {run_id}"
-    );
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("ops".to_string()),
-        sender: "111222333".to_string(),
-        reply_target: "room-1".to_string(),
-        content: "approve 1".to_string(),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "111222333", "room-1", "", "discord", 0)
-    };
-
-    assert!(
-        !dispatch_test_channel_sop_gate(&router, &msg, None).await,
-        "plain text replies must carry the full prompt reference, not a short run-id suffix"
-    );
-    assert_eq!(
-        active_run_status(&engine, &run_id),
-        Some(zeroclaw_runtime::sop::types::SopRunStatus::WaitingApproval)
-    );
-}
-
-#[tokio::test]
-async fn sop_gate_marker_rejects_short_suffix_reference() {
-    let (router, engine, run_id) =
-        parked_channel_gate_router(Some("prod"), Some("discord.ops:room-1"));
-    assert!(
-        run_id.ends_with('1'),
-        "the deterministic test run id should exercise the old one-character suffix match: {run_id}"
-    );
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("ops".to_string()),
-        sender: "111222333".to_string(),
-        reply_target: "room-1".to_string(),
-        content: String::new(),
-        internal_sop_event: Some("sop.gate:approve:1".to_string()),
-        ..ChannelMessage::new("1", "111222333", "room-1", "", "discord", 0)
-    };
-
-    assert!(
-        dispatch_test_channel_sop_gate(&router, &msg, None).await,
-        "a stale marker is consumed, but must not resolve by short run-id suffix"
-    );
-    assert_eq!(
-        active_run_status(&engine, &run_id),
-        Some(zeroclaw_runtime::sop::types::SopRunStatus::WaitingApproval)
-    );
-}
-
-#[tokio::test]
-async fn sop_gate_text_reply_resolves_bare_singleton_request_route() {
-    let (router, engine, run_id) = parked_channel_gate_router(Some("prod"), Some("discord:room-1"));
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("ops".to_string()),
-        sender: "111222333".to_string(),
-        reply_target: "room-1".to_string(),
-        content: format!("approve {run_id}"),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "111222333", "room-1", "", "discord", 0)
-    };
-
-    assert!(
-        dispatch_test_channel_sop_gate_with_route_keys(&router, &msg, &["discord.ops", "discord"],)
-            .await,
-        "a bare singleton route should resolve when it maps to the same channel instance"
-    );
-    assert_eq!(
-        active_run_status(&engine, &run_id),
-        Some(zeroclaw_runtime::sop::types::SopRunStatus::Running)
-    );
-}
-
-#[tokio::test]
-async fn sop_gate_text_reply_resolves_matching_request_route() {
-    let (router, engine, run_id) =
-        parked_channel_gate_router(Some("prod"), Some("discord.ops:room-1"));
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("ops".to_string()),
-        sender: "111222333".to_string(),
-        reply_target: "room-1".to_string(),
-        content: format!("approve {run_id}"),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "111222333", "room-1", "", "discord", 0)
-    };
-
-    assert!(
-        dispatch_test_channel_sop_gate(&router, &msg, None).await,
-        "a text reply from the request route remains a valid fallback answer"
-    );
-    assert_eq!(
-        active_run_status(&engine, &run_id),
-        Some(zeroclaw_runtime::sop::types::SopRunStatus::Running)
-    );
-}
-
-#[tokio::test]
-async fn channel_gate_approval_drives_resumed_execute_step() {
-    let (router, engine, run_id) =
-        parked_channel_gate_router(Some("prod"), Some("discord.ops:room-1"));
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("ops".to_string()),
-        sender: "111222333".to_string(),
-        reply_target: "room-1".to_string(),
-        content: format!("approve {run_id}"),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "111222333", "room-1", "", "discord", 0)
-    };
-    let config = zeroclaw_config::schema::Config::default();
-
-    assert!(
-        dispatch_channel_sop_gate(&router, &msg, &config, &[], &["discord.ops".to_string()],).await,
-        "the channel approval must resolve the parked gate"
-    );
-
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if active_run_status(&engine, &run_id)
-                == Some(zeroclaw_runtime::sop::types::SopRunStatus::Failed)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("channel approval must schedule the resumed ExecuteStep");
-}
-
-#[tokio::test]
-async fn approval_only_channel_gate_reply_bypasses_agent_ownership() {
-    let (mut router, engine, run_id) =
-        parked_channel_gate_router(Some("prod"), Some("test-channel:room-1"));
-    let gate_channel: Arc<dyn Channel> = Arc::new(RecordingChannel::default());
-    let gate_ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
-        gate_channel,
-        Arc::new(DummyModelProvider),
-        zeroclaw_config::schema::Config::default(),
-        zeroclaw_config::schema::AliasedAgentConfig::default(),
-        "test-provider",
-        None,
-    );
-    router.by_agent = Arc::new(HashMap::from([("worker".to_string(), gate_ctx)]));
-
-    let msg = ChannelMessage {
-        channel: "test-channel".to_string(),
-        sender: "111222333".to_string(),
-        reply_target: "room-1".to_string(),
-        content: format!("approve {run_id}"),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "111222333", "room-1", "", "test-channel", 0)
-    };
-    assert!(
-        router.resolve(&msg).is_none(),
-        "the configured approval route must not need an agent owner"
-    );
-
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
-    tx.send(msg).await.expect("queue gate reply");
-    drop(tx);
-    run_message_dispatch_loop(rx, router, 1, None).await;
-
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if active_run_status(&engine, &run_id)
-                == Some(zeroclaw_runtime::sop::types::SopRunStatus::Failed)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the approval-only channel reply must drive the resumed action");
-}
-
-#[tokio::test]
-async fn sop_gate_resolution_finalizes_request_and_escalation_channels() {
-    let (router, engine, run_id) = parked_channel_gate_router_with_routes(
-        Some("prod"),
-        Some("discord.ops:room-1"),
-        Some("discord.oncall:room-2"),
-    );
-    let request_channel = Arc::new(RecordingChannel::default());
-    let escalation_channel = Arc::new(RecordingChannel::default());
-    let prompt_channels: Vec<Arc<dyn Channel>> =
-        vec![request_channel.clone(), escalation_channel.clone()];
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("oncall".to_string()),
-        sender: "111222333".to_string(),
-        reply_target: "room-2".to_string(),
-        content: format!("approve {run_id}"),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "111222333", "room-2", "", "discord", 0)
-    };
-
-    assert!(
-        dispatch_channel_sop_gate(
-            &router,
-            &msg,
-            &zeroclaw_config::schema::Config::default(),
-            &prompt_channels,
-            &["discord.oncall".to_string()],
-        )
-        .await,
-        "an approval on the escalation route should resolve the gate"
-    );
-    assert_eq!(
-        active_run_status(&engine, &run_id),
-        Some(zeroclaw_runtime::sop::types::SopRunStatus::Running)
-    );
-    for finalized in [
-        request_channel.finalized_gate_prompts.lock().await,
-        escalation_channel.finalized_gate_prompts.lock().await,
-    ] {
-        assert_eq!(finalized.len(), 1, "every active route channel finalizes");
-        assert_eq!(finalized[0].0, run_id);
-        assert!(finalized[0].1.contains("Approved"));
-    }
-}
-
-#[tokio::test]
-async fn sop_gate_text_reply_resolves_matching_escalation_route() {
-    let (router, engine, run_id) = parked_channel_gate_router_with_routes(
-        Some("prod"),
-        Some("discord.ops:room-1"),
-        Some("discord.oncall:room-2"),
-    );
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        channel_alias: Some("oncall".to_string()),
-        sender: "111222333".to_string(),
-        reply_target: "room-2".to_string(),
-        content: format!("approve {run_id}"),
-        internal_sop_event: None,
-        ..ChannelMessage::new("1", "111222333", "room-2", "", "discord", 0)
-    };
-
-    assert!(
-        dispatch_test_channel_sop_gate(&router, &msg, None).await,
-        "a text reply from the route that receives escalation instructions must resolve"
-    );
-    assert_eq!(
-        active_run_status(&engine, &run_id),
-        Some(zeroclaw_runtime::sop::types::SopRunStatus::Running)
-    );
-}
-
-#[test]
-fn gate_reference_parsing_defaults_bare_to_revision_zero() {
-    // Bare = revision 0 (the original presentation), NOT "current": a click
-    // on a superseded prompt must never resolve a newer draft.
-    assert_eq!(parse_gate_reference("det-1-0001"), ("det-1-0001".into(), 0));
-    assert_eq!(
-        parse_gate_reference("det-1-0001#2"),
-        ("det-1-0001".into(), 2)
-    );
-    // Malformed suffix: the whole string is the run part (matches nothing).
-    assert_eq!(
-        parse_gate_reference("det-1-0001#zz"),
-        ("det-1-0001#zz".into(), 0)
-    );
-}
-
-#[tokio::test]
-async fn sop_gate_edit_and_revise_markers_are_consumed() {
-    // Edit/Revise markers exist only to answer a gate — consumed even when
-    // no engine is available, exactly like approve/deny markers.
-    for (choice, content) in [
-        ("edit", "my rewritten draft"),
-        ("revise", "make it shorter"),
-    ] {
-        let msg = ChannelMessage {
-            channel: "discord".to_string(),
-            channel_alias: Some("gnosis".to_string()),
-            sender: "111222333".to_string(),
-            content: content.to_string(),
-            internal_sop_event: Some(format!("sop.gate:{choice}:det-1-0001#1")),
-            ..ChannelMessage::new("1", "111222333", "chan", "", "discord", 0)
-        };
-        let router = router_without_sop_engine();
-        assert!(
-            dispatch_test_channel_sop_gate(&router, &msg, None).await,
-            "a {choice} marker must be consumed, not become an agent turn"
-        );
-    }
-}
-
-#[tokio::test]
-async fn sop_gate_unknown_marker_choice_is_dropped() {
-    // An unknown choice in a marker is malformed — consumed (it can only be
-    // a gate artifact), never resolved as a decision. Guards the old
-    // behavior where any non-"approve" choice silently became a DENY.
-    let msg = ChannelMessage {
-        channel: "discord".to_string(),
-        sender: "111222333".to_string(),
-        content: "frobnicate det-1-0001".to_string(),
-        internal_sop_event: Some("sop.gate:frobnicate:det-1-0001".to_string()),
-        ..ChannelMessage::new("1", "111222333", "chan", "", "discord", 0)
-    };
-    let router = router_without_sop_engine();
-    assert!(
-        dispatch_test_channel_sop_gate(&router, &msg, None).await,
-        "an unknown-choice marker must still be consumed"
-    );
-}
-
-#[tokio::test]
-async fn sop_gate_ordinary_chat_never_matches() {
-    // Ordinary messages — even ones containing the word "approve" — must
-    // never be consumed by the gate intercept.
-    for content in [
-        "please approve my PR when you can",
-        "deny",
-        "approve",
-        "approve run 12 thanks",
-    ] {
-        let msg = ChannelMessage {
-            channel: "discord".to_string(),
-            sender: "111222333".to_string(),
-            content: content.to_string(),
-            internal_sop_event: None,
-            ..ChannelMessage::new("1", "111222333", "chan", "", "discord", 0)
-        };
-        let router = router_without_sop_engine();
-        assert!(
-            !dispatch_test_channel_sop_gate(&router, &msg, None).await,
-            "ordinary chat must fall through: {content:?}"
-        );
-    }
 }

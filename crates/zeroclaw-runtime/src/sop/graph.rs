@@ -666,7 +666,8 @@ pub struct NodeRunOverlay {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 /// Live run state layered over a `SopGraph`, letting a canvas animate an
-/// execution without re-fetching the graph. Served by `sops/run-overlay`.
+/// execution without re-fetching the graph. Retired with the run side;
+/// removed with the engine-library deletion.
 pub struct RunOverlay {
     pub run_id: String,
     pub sop_name: String,
