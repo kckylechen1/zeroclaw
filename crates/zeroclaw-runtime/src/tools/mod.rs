@@ -1854,7 +1854,7 @@ mod tests {
         );
     }
 
-    /// Discrimination guard for the retired SOP run side (#197 wall 5): the
+    /// Discrimination guard for the retired SOP run side: the
     /// legacy agent-facing run tools must never re-enter the registry. Run
     /// truth is Tachi-side (procedure_v1 seam); definitions have no tool
     /// surface here.

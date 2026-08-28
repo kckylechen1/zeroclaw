@@ -13322,7 +13322,7 @@ pub struct ChannelsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub voice_duplex: HashMap<String, VoiceDuplexConfig>,
-    /// MQTT SOP listener instances — RETIRED (#197 wall 5). The section now
+    /// MQTT SOP listener instances — RETIRED. The section now
     /// fails config parse with the migration message instead of silently
     /// no-op'ing. Field removed with the run-side config sweep.
     #[serde(
@@ -13336,7 +13336,7 @@ pub struct ChannelsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub amqp: HashMap<String, AmqpConfig>,
-    /// Filesystem SOP listener instances — RETIRED (#197 wall 5). The section
+    /// Filesystem SOP listener instances — RETIRED. The section
     /// now fails config parse with the migration message instead of silently
     /// no-op'ing. Field removed with the run-side config sweep.
     #[serde(
@@ -13386,7 +13386,7 @@ pub struct ChannelsConfig {
     pub debounce_ms: u64,
 }
 
-// ── Retired SOP run-side config keys (#197 wall 5) ─────────────────────────
+// ── Retired SOP run-side config keys ────────────────────────────────────────
 // These deserializers keep the retired keys PARSEABLE only long enough to
 // reject them with an actionable message: silently ignoring them would
 // reinterpret a run-side config (a SOP dispatch mode, a filesystem/mqtt SOP
@@ -23073,7 +23073,7 @@ fn default_sop_persist_runs() -> bool {
 }
 
 fn default_sop_step_mandatory_tools() -> Vec<String> {
-    // The sop_* run tools are retired (#197 wall 5); nothing is mandatory by
+    // The sop_* run tools are retired; nothing is mandatory by
     // default. The key itself is removed with the run-side config sweep.
     Vec::new()
 }
@@ -23420,7 +23420,7 @@ max_height = 8
         assert!(plugins.entry_config("unknown").is_none());
     }
 
-    /// #197 wall 5: the retired run-side config keys must FAIL config parse
+    /// The retired run-side config keys must FAIL config parse
     /// with an actionable message, never silently no-op.
     #[test]
     async fn retired_sop_run_config_keys_fail_parse_loudly() {

@@ -4,8 +4,8 @@
 //! graph projection, wire edits, trigger registry). All routes require
 //! gateway auth. Draft endpoints (`wire-draft`, `graph-draft`) are pure:
 //! they transform the submitted SOP and never touch disk. Definition-only
-//! since the legacy run side was retired (#197 wall 5): runs are Tachi-side
-//! ProcedureRuns through the procedure_v1 seam (#243).
+//! since the legacy run side was retired: runs are Tachi-side
+//! ProcedureRuns through the procedure_v1 seam.
 
 use axum::Json;
 use axum::extract::{Path, State};

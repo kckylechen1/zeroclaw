@@ -994,7 +994,7 @@ fn alias_wrap_channels(channels_value: toml::Value, peer_groups: &mut toml::Tabl
 
     let stashed_feishu_v2 = strip_feishu_block(&mut channels_table);
 
-    // Retired SOP run-side channels (#197 wall 5): MQTT/filesystem were
+    // Retired SOP run-side channels: MQTT/filesystem were
     // SOP-trigger-only fan-in with no remaining runtime. Drop their tables
     // during migration (loudly) instead of porting them into a config that
     // would then fail to parse.
