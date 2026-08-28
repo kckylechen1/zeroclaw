@@ -94,11 +94,6 @@ tool-pushover = Pushover通知をデバイスに送信します。.envファイ�
 tool-schedule = スケジュール済みシェルのみのタスクを管理します。アクション：create/add/once/list/get/cancel/remove/pause/resume。警告：このツールは、出力がログに記録されるのみで、チャネルに配信されないシェルジョブを作成します。Discord/Telegram/Slack/Matrixにスケジュール済みメッセージを送信するには、job_type='agent'とdelivery配信設定（例：{"{"}"mode":"announce","channel":"discord","to":"<channel_id>"{"}"}）付きのcron_addツールを使用してください。
 tool-screenshot = 現在の画面のスクリーンショットをキャプチャします。ファイルパスと基数64エンコード済みPNGデータを返します。
 tool-shell = ワークスペースディレクトリ内でシェルコマンドを実行
-tool-sop-advance = 現在のSOPステップの結果を報告し、次のステップに進む。run_id、ステップが成功したか失敗したか、簡潔な出力要約を指定します。
-tool-sop-approve = オペレータ承認を待つ保留中のSOPステップを承認します。実行するステップ命令を返します。sop_statusを使用して、どの実行が待機中かを確認します。
-tool-sop-execute = Standard Operating Procedure（SOP）を名前で手動トリガーします。実行IDと最初のステップ命令を返します。sop_listを使用して、利用可能なSOPを確認します。
-tool-sop-list = ロードされたすべてのStandard Operating Procedure（SOP）をトリガー、優先度、ステップ数、アクティブ実行数と共に一覧表示します。オプションで名前または優先度でフィルタ。
-tool-sop-status = SOP実行状態をクエリします。特定の実行にはrun_idを、そのSOPの実行をリストするにはsop_nameを指定してください。引数がない場合、すべてのアクティブな実行を表示します。
 tool-tool-search = 遅延MCPツールの完全なスキーマ定義を取得して、呼び出すことができます。"select:name1,name2"で完全一致を指定するか、キーワードで検索します。
 tool-web-fetch = ウェブページを取得してその内容をクリーンなプレーンテキストとして返します。HTMLページは自動的に読みやすいテキストに変換されます。JSONおよびプレーンテキストのレスポンスはそのまま返されます。GETリクエストのみ。リダイレクトに従います。セキュリティ：ホワイトリストオンリードメイン、ローカル/プライベートホストなし。
 tool-web-search-tool = ウェブで情報を検索します。タイトル、URL、説明付きの関連検索結果を返します。最新情報、ニュース、または研究トピックを見つけるために使用します。

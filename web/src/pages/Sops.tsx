@@ -1399,9 +1399,9 @@ export function SopsList() {
 }
 
 // ── /sops/:name ── read-only member representation. Renders the SOP graph via
-// the same graph/get RPC the editor loads from, with no run-overlay tint: run
-// progress belongs to /runs, not the SOP resource. Edit and Delete are
-// addressable member actions, never inline editing.
+// the same graph/get RPC the editor loads from. There is no run overlay: the
+// legacy run side was removed, and run progress lives Tachi-side. Edit and
+// Delete are addressable member actions, never inline editing.
 export function SopView() {
   const { name = '' } = useParams();
   const navigate = useNavigate();
@@ -1519,8 +1519,8 @@ export function SopView() {
 
 // ── /sops/new and /sops/:name/edit ── the authoring surface. The draft is the
 // single source of edit state; graph projection comes from graphDraft/wireDraft
-// (never re-derived client-side). Captured-calls overlay is loaded from the
-// SOP's latest run to feed the pin-from-run flow in the step inspector.
+// (never re-derived client-side). The legacy captured-calls overlay fed from a
+// SOP's latest run was removed with the run side.
 export function SopEditor() {
   const { name: routeName } = useParams();
   const editingRoute = routeName ?? null;

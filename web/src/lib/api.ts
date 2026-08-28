@@ -1832,7 +1832,7 @@ export interface AdminResponse {
 
 /**
  * Reload the daemon in place. Same PID — the daemon's main loop tears down
- * every subsystem (gateway/channels/heartbeat/scheduler/mqtt), re-reads
+ * every subsystem (gateway/channels/heartbeat/scheduler), re-reads
  * config from disk, and re-instantiates everything. Brief HTTP downtime
  * while the gateway listener rebinds; clients should poll `/health` to
  * detect when the new instance is ready.

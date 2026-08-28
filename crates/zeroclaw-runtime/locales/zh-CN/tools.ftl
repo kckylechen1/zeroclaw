@@ -94,11 +94,6 @@ tool-pushover = 向你的设备发送 Pushover 通知。需要 .env 文件中的
 tool-schedule = 管理仅限 shell 的定时任务。操作：create/add/once/list/get/cancel/remove/pause/resume。警告：此工具创建的 shell 任务输出仅被记录，不会投递到任何频道。要向 Discord/Telegram/Slack/Matrix 发送定时消息，请使用 cron_add 工具，并设置 job_type='agent' 和如 {"{"}"mode":"announce","channel":"discord","to":"<channel_id>"{"}"} 的 delivery 配置。
 tool-screenshot = 捕获当前屏幕的截图。返回文件路径和 base64 编码的 PNG 数据。
 tool-shell = 在工作区目录中执行 shell 命令
-tool-sop-advance = 报告当前 SOP 步骤的结果并推进到下一步。提供 run_id、步骤是成功还是失败，以及简要的输出摘要。
-tool-sop-approve = 批准一个正在等待操作员审批的待处理 SOP 步骤。返回要执行的步骤指令。使用 sop_status 查看哪些运行正在等待。
-tool-sop-execute = 按名称手动触发标准操作流程 (SOP)。返回运行 ID 和第一步指令。使用 sop_list 查看可用的 SOP。
-tool-sop-list = 列出所有已加载的标准操作流程 (SOP) 及其触发器、优先级、步骤数和活动运行数。可选择按名称或优先级过滤。
-tool-sop-status = 查询 SOP 执行状态。为特定运行提供 run_id，或使用 sop_name 列出该 SOP 的运行。不带参数时，显示所有活动运行。
 tool-tool-search = 获取延迟加载的 MCP 工具的完整 schema 定义，以便调用它们。使用 "select:name1,name2" 进行精确匹配，或使用关键词进行搜索。
 tool-web-fetch = 获取网页并将其内容以干净的纯文本形式返回。HTML 页面会自动转换为可读文本。JSON 和纯文本响应按原样返回。仅支持 GET 请求；会跟随重定向。安全性：仅限白名单域名，不允许本地/私有主机。
 tool-web-search-tool = 在网络上搜索信息。返回包含标题、URL 和描述的相关搜索结果。使用此工具查找最新信息、新闻或研究主题。
