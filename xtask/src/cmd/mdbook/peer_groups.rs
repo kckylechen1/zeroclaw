@@ -1080,9 +1080,9 @@ mod generated_prose_gate {
     }
 
     #[test]
-    fn sop_trigger_channel_renders_live_and_appears_in_index() {
+    fn sop_trigger_channel_renders_retired_feeder_and_appears_in_index() {
         let single = super::render_sop_trigger("channel").expect("channel trigger renders");
-        assert!(single.contains("Live: delivered by the channel orchestrator"));
+        assert!(single.contains("the channel SOP fan-in is retired"));
         assert!(single.contains("channel"));
 
         let index = super::render_sop_trigger_index().expect("trigger index renders");
