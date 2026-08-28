@@ -65,9 +65,11 @@ most likely to be edited in a hurry.
 ## What this profile deliberately does not contain
 
 `shell`, `file_write`, `file_edit` — a trading agent has no business writing
-files or running commands. `delegate` and `spawn_subagent` — a sub-agent that
-inherits this profile is fine, but delegation to a *different* agent is a way
-to escape the tool list, so it stays forbidden.
+files or running commands. `spawn_subagent` — a sub-agent that inherits this
+profile is fine, but handing work to a *different* configured agent was a way
+to escape the tool list, so it stays forbidden (the legacy tool that did that
+was removed in #197 wall 1; the ban on off-profile delegation remains the
+standing intent).
 
 ## The line this does not defend
 
