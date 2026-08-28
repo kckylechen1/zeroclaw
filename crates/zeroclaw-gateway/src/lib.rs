@@ -818,7 +818,7 @@ pub async fn run_gateway(
         Some((risk_profile, security))
     });
 
-    let (tools_registry_raw, _delegate_handle_gw) = match (&agent_alias_opt, agent_setup) {
+    let tools_registry_raw = match (&agent_alias_opt, agent_setup) {
         (Some(agent_alias), Some((risk_profile, security))) => {
             let all_tools_result = tools::all_tools_with_runtime(
                 Arc::new(config.clone()),
@@ -892,12 +892,12 @@ pub async fn run_gateway(
             // deferred-MCP prompt section and activation handle returned by
             // `assemble` have no consumer here (live gateway chat resolves
             // its tools inside process_message).
-            (assembled.registry.into_inner(), assembled.delegate_handle)
+            assembled.registry.into_inner()
         }
         (Some(_), None) => {
             // Agent existed but its config failed to resolve. Warned
             // above; fall through to the empty-registry shape.
-            (Vec::new(), None)
+            Vec::new()
         }
         (None, _) => {
             ::zeroclaw_log::record!(
@@ -908,7 +908,7 @@ pub async fn run_gateway(
                     "Gateway: no [agents.<alias>] configured — booting with empty tools registry. Visit http://{display_addr}/quickstart to add an agent."
                 )
             );
-            (Vec::new(), None)
+            Vec::new()
         }
     };
 
@@ -4295,9 +4295,9 @@ mod tests {
         let allowed: std::sync::Arc<dyn tools::Tool> =
             std::sync::Arc::new(NamedMcpMockTool("aa_mcp__find_npcs"));
         let registered_denied =
-            register_eager_mcp_tool_if_allowed(denied, &mut gw_tools, None, mcp_policy.as_ref());
+            register_eager_mcp_tool_if_allowed(denied, &mut gw_tools, mcp_policy.as_ref());
         let registered_allowed =
-            register_eager_mcp_tool_if_allowed(allowed, &mut gw_tools, None, mcp_policy.as_ref());
+            register_eager_mcp_tool_if_allowed(allowed, &mut gw_tools, mcp_policy.as_ref());
         assert!(
             !registered_denied,
             "gateway must not register an `excluded_tools`-denied MCP tool"

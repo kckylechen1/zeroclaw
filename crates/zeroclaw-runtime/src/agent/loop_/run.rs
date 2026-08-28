@@ -290,7 +290,6 @@ pub async fn run(
         let deferred_section = assembled.combined_mcp_prompt_section();
         let scoped::ScopedAssembled {
             registry,
-            delegate_handle: _,
             ask_user_handle,
             reaction_handle,
             poll_handle,

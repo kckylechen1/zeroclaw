@@ -10124,7 +10124,6 @@ async fn preactivate_always_group_activates_matched_stubs() {
         &activated,
         &always_group(&["files__*"]),
         None,
-        None,
     );
 
     assert_eq!(names, mcp_set(&["files__list"]));
@@ -10145,7 +10144,7 @@ async fn preactivate_skips_dynamic_groups() {
         keywords: vec!["file".into()],
     }];
 
-    let names = super::preactivate_always_filter_groups(&deferred, &activated, &groups, None, None);
+    let names = super::preactivate_always_filter_groups(&deferred, &activated, &groups, None);
 
     assert!(names.is_empty());
     assert!(!activated.lock().unwrap().is_activated("files__list"));
@@ -10157,9 +10156,8 @@ async fn preactivate_is_idempotent_on_repeat_call() {
     let activated = Arc::new(Mutex::new(crate::tools::ActivatedToolSet::new()));
     let groups = always_group(&["files__*"]);
 
-    let first = super::preactivate_always_filter_groups(&deferred, &activated, &groups, None, None);
-    let second =
-        super::preactivate_always_filter_groups(&deferred, &activated, &groups, None, None);
+    let first = super::preactivate_always_filter_groups(&deferred, &activated, &groups, None);
+    let second = super::preactivate_always_filter_groups(&deferred, &activated, &groups, None);
 
     assert_eq!(first, mcp_set(&["files__list"]));
     assert!(second.is_empty());
@@ -10192,39 +10190,6 @@ async fn preactivate_respects_mcp_access_policy() {
     let guard = activated.lock().unwrap();
     assert!(guard.is_activated("files__list"));
     assert!(!guard.is_activated("files__write"));
-}
-
-#[tokio::test]
-async fn preactivate_pushes_delegate_handle_once() {
-    let deferred = make_deferred_set(&["files__list"]).await;
-    let activated = Arc::new(Mutex::new(crate::tools::ActivatedToolSet::new()));
-    let handle: crate::tools::DelegateParentToolsHandle =
-        Arc::new(parking_lot::RwLock::new(Vec::new()));
-    // Pre-seed the delegate handle with a same-named tool while the
-    // ActivatedToolSet is still empty, so the call below reaches the
-    // dedup branch (`already == true`) instead of short-circuiting on
-    // `is_activated`. Dropping the dedup must fail this test.
-    let preexisting: Arc<dyn crate::tools::Tool> =
-        Arc::from(deferred.activate("files__list").expect("stub exists"));
-    handle.write().push(preexisting);
-
-    let names = super::preactivate_always_filter_groups(
-        &deferred,
-        &activated,
-        &always_group(&["files__*"]),
-        None,
-        Some(&handle),
-    );
-
-    assert_eq!(names, mcp_set(&["files__list"]));
-    assert!(activated.lock().unwrap().is_activated("files__list"));
-    let delegate_tools = handle.read();
-    assert_eq!(
-        delegate_tools.len(),
-        1,
-        "dedup must not push a duplicate of a same-named pre-existing delegate tool"
-    );
-    assert_eq!(delegate_tools[0].name(), "files__list");
 }
 
 // ── Token-based compaction tests ──────────────────────────
@@ -11590,48 +11555,37 @@ fn append_pinned_mcp_section_is_noop_for_empty() {
 }
 
 #[test]
-fn register_eager_mcp_tool_filters_tools_and_delegate_handle_together() {
+fn register_eager_mcp_tool_filters_tools_by_policy() {
     let policy = TestPolicy {
         allowed_tools: Some(vec!["fs__read_file".into()]),
         excluded_tools: Some(vec!["slack__post".into()]),
-        // The subject here is that tools and the delegate handle stay in
-        // lockstep, which needs a name that gets in without being listed.
+        // A name that gets in without being listed keeps exercising the
+        // auto-admit path independently of the allowlist.
         mcp_discovered_tool_policy: zeroclaw_config::autonomy::McpDiscoveredToolPolicy::AutoAdmit,
         ..TestPolicy::default()
     };
     let access_policy = super::mcp_tool_access_policy(&policy, None);
-    let delegate_handle: crate::tools::DelegateParentToolsHandle =
-        std::sync::Arc::new(parking_lot::RwLock::new(Vec::new()));
     let mut tools: Vec<Box<dyn TestTool>> = Vec::new();
 
     assert!(super::register_eager_mcp_tool_if_allowed(
         mock_tool_arc("fs__read_file"),
         &mut tools,
-        Some(&delegate_handle),
         access_policy.as_ref(),
     ));
     // github__search contains "__" → auto-admitted
     assert!(super::register_eager_mcp_tool_if_allowed(
         mock_tool_arc("github__search"),
         &mut tools,
-        Some(&delegate_handle),
         access_policy.as_ref(),
     ));
     // slack__post is explicitly excluded → denied
     assert!(!super::register_eager_mcp_tool_if_allowed(
         mock_tool_arc("slack__post"),
         &mut tools,
-        Some(&delegate_handle),
         access_policy.as_ref(),
     ));
 
     assert_eq!(tool_names(&tools), vec!["fs__read_file", "github__search"]);
-    let delegate_names: Vec<String> = delegate_handle
-        .read()
-        .iter()
-        .map(|tool| tool.name().to_string())
-        .collect();
-    assert_eq!(delegate_names, vec!["fs__read_file", "github__search"]);
 }
 
 // ── agent_provider_composite regression ───────────────────────────────
