@@ -22791,9 +22791,15 @@ async fn sync_directory(path: &Path) -> Result<()> {
     }
 }
 
-// ── SOP engine configuration ───────────────────────────────────
+// ── SOP configuration ──────────────────────────────────────────
 
-/// Standard Operating Procedures engine configuration (`[sop]`).
+/// Standard Operating Procedures configuration (`[sop]`).
+///
+/// Definition-side keys (`sops_dir`, `default_execution_mode`) stay live for
+/// SOP.toml loading and authoring. The run-side engine was removed (wall-5
+/// slice 2); the remaining fields are inert retention knobs kept so legacy
+/// `[sop]` tables still parse. SOP runs are Tachi-side ProcedureRuns through
+/// the procedure_v1 seam.
 ///
 /// The `default_execution_mode` field uses the `SopExecutionMode` type from
 /// `sop::types` (re-exported via `sop::SopExecutionMode`). To avoid circular
@@ -22814,90 +22820,82 @@ pub struct SopConfig {
     #[serde(default = "default_sop_execution_mode")]
     pub default_execution_mode: String,
 
-    /// Maximum total concurrent SOP runs across all SOPs.
+    /// RETIRED with the SOP run side. No longer read; kept so existing
+    /// `[sop]` tables still parse.
     #[serde(default = "default_sop_max_concurrent_total")]
     pub max_concurrent_total: usize,
 
-    /// Approval timeout in seconds. When a run waits for approval longer than
-    /// this, the configured `approval_timeout_action` is applied (default
-    /// `escalate`: re-surface the gate to the out-of-band approver and never
-    /// self-approve). Set to 0 to disable the timeout sweep.
+    /// RETIRED with the SOP run side (approval broker removed). No longer
+    /// read; kept so existing `[sop]` tables still parse.
     #[serde(default = "default_sop_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
 
-    /// Maximum number of finished runs kept in memory for status queries.
-    /// Oldest runs are evicted when over capacity. 0 = unlimited.
+    /// RETIRED with the SOP run side. No longer read; kept so existing
+    /// `[sop]` tables still parse.
     #[serde(default = "default_sop_max_finished_runs")]
     pub max_finished_runs: usize,
 
-    /// How often (seconds) the daemon runs the SOP maintenance tick: fire
-    /// fail-closed approval timeouts (per `approval_timeout_secs` /
-    /// `approval_timeout_action`), reap expired concurrency-claim leases, and
-    /// prune terminal runs past `max_finished_runs`. Default `60`; set to `0` to
-    /// disable the tick entirely. The tick itself self-approves nothing - timeout
-    /// handling is governed by `approval_timeout_action` (default `escalate`).
+    /// RETIRED with the SOP run side (maintenance tick removed). No longer
+    /// read; kept so existing `[sop]` tables still parse.
     #[serde(default = "default_sop_maintenance_interval_secs")]
     pub maintenance_interval_secs: u64,
 
-    /// Persist run state durably across restarts. Default `true`: `build_sop_engine`
-    /// selects the configured backend (`sqlite`) and in-flight runs - including runs
-    /// parked at a HITL approval - survive a restart. This is the durable substrate
-    /// the HITL admission model relies on so a pending approval is not lost when the
-    /// daemon restarts. Set to `false` to opt back into ephemeral in-memory state.
+    /// RETIRED with the SOP run side (run store removed; this key's old doc
+    /// named the deleted `build_sop_engine`). No longer read; kept so
+    /// existing `[sop]` tables still parse.
     #[serde(default = "default_sop_persist_runs")]
     pub persist_runs: bool,
 
-    /// Durable run-state backend when `persist_runs` is true: `sqlite` (default,
-    /// durable) or `memory` (explicitly non-durable, for tests/degraded).
+    /// RETIRED with the SOP run side (run store removed). No longer read;
+    /// kept so existing `[sop]` tables still parse.
     #[serde(default)]
     pub run_store_backend: SopRunStoreBackend,
 
-    /// Directory for the durable run store (created mode-0700). When omitted,
-    /// `<data_dir>/sop`. Never OS-temp.
+    /// RETIRED with the SOP run side (run store removed). No longer read; a
+    /// leftover `<data_dir>/sop/runs.db` is left in place and reported by a
+    /// boot-time warning.
     #[serde(default)]
     pub run_state_dir: Option<String>,
 
-    /// WHO may clear a SOP approval gate. Layered with execution_mode / priority /
-    /// requires_confirmation (those still apply). Default `both` keeps today's
-    /// behavior (the agent tool OR an out-of-band principal can clear a gate).
+    /// RETIRED with the SOP run side (approval broker removed). No longer
+    /// read; kept so existing `[sop]` tables still parse.
     #[serde(default)]
     pub approval_mode: ApprovalMode,
 
-    /// What happens to a SOP gate that times out (after `approval_timeout_secs`).
-    /// Default `escalate` is fail-closed: re-surface to the out-of-band approver and
-    /// keep waiting, never self-approve. (The SOP-gate analog of the channel
-    /// approval-routing fail-closed default; reconcile with that model if both land.)
+    /// RETIRED with the SOP run side (approval broker removed). No longer
+    /// read; kept so existing `[sop]` tables still parse.
     #[serde(default)]
     pub approval_timeout_action: ApprovalTimeoutAction,
 
-    /// Approval broker policy config (`[sop.approval]`): named approver groups and
-    /// per-name approval policies (required group + quorum + escalation route) the
-    /// approval broker consumes for group-membership and quorum checks. Members are
-    /// channel-provided identities (a gateway user, a forge login), so this is a
-    /// permanent identity source, not a stopgap; a future auth system adds another
-    /// resolver alongside it rather than replacing it. An empty block means no broker
-    /// policy applies (`approval_mode` alone governs a gate, unchanged behavior).
+    /// RETIRED with the SOP run side (approval broker removed). No longer
+    /// read; kept so existing `[sop]` tables still parse.
     #[serde(default)]
     #[nested]
     pub approval: SopApprovalConfig,
 
-    /// Enforce per-step tool scope. Default false keeps `tools:` advisory.
+    /// RETIRED with the SOP run side (per-step scope consumption removed
+    /// from the agent turn). No longer read; kept so existing `[sop]`
+    /// tables still parse.
     #[serde(default)]
     pub step_scope_enforce: bool,
 
-    /// Tool names that remain available while step scope is enforced.
+    /// RETIRED with the SOP run side. No longer read; kept so existing
+    /// `[sop]` tables still parse.
     #[serde(default = "default_sop_step_mandatory_tools")]
     pub step_mandatory_tools: Vec<String>,
 
-    /// Enforce per-step input/output schemas when a step declares them.
+    /// RETIRED with the SOP run side (engine step execution removed). No
+    /// longer read; kept so existing `[sop]` tables still parse.
     #[serde(default = "default_sop_step_schema_enforce")]
     pub step_schema_enforce: bool,
 
-    /// Maximum times a routed SOP run can visit one step.
+    /// RETIRED with the SOP run side (engine step routing removed). No
+    /// longer read; kept so existing `[sop]` tables still parse.
     #[serde(default = "default_sop_max_step_visits")]
     pub max_step_visits: u32,
 
-    /// Maximum retries allowed by a step failure policy.
+    /// RETIRED with the SOP run side (engine step failure policy removed).
+    /// No longer read; kept so existing `[sop]` tables still parse.
     #[serde(default = "default_sop_max_step_retries")]
     pub max_step_retries: u32,
 
@@ -22924,9 +22922,8 @@ pub struct SopConfig {
     #[serde(default = "default_sop_untrusted_outbound_redact")]
     pub untrusted_outbound_redact: bool,
 
-    /// Enable SOP procedural-memory proposal tooling. Default false keeps
-    /// self-modifying SOP write-back opt-in while the SOP subsystem is
-    /// Experimental.
+    /// RETIRED with the SOP run side (procedural-memory tooling removed). No
+    /// longer read; kept so existing `[sop]` tables still parse.
     #[serde(default)]
     pub procedural_memory_enabled: bool,
 }
@@ -22935,24 +22932,26 @@ fn default_sop_execution_mode() -> String {
     "supervised".to_string()
 }
 
-/// Durable SOP run-state backend selector. A closed, compile-time-known set, so it
-/// is a serde enum rather than free text (mirrors `SandboxBackend` /
-/// `ObservabilityBackend` in this file); unknown values are rejected at parse time.
+/// RETIRED with the SOP run side (run store removed): kept only so existing
+/// `[sop]` tables still parse. A closed, compile-time-known set, so it is a
+/// serde enum rather than free text (mirrors `SandboxBackend` /
+/// `ObservabilityBackend` in this file); unknown values are rejected at parse
+/// time.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, zeroclaw_macros::ConfigEnum,
 )]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum SopRunStoreBackend {
-    /// Durable WAL-mode SQLite store (default).
+    /// RETIRED with the SOP run side; parse-compat default.
     #[default]
     Sqlite,
-    /// Ephemeral in-memory store: explicitly non-durable, for tests / degraded boot.
+    /// RETIRED with the SOP run side; parse-compat value.
     Memory,
 }
 
-/// WHO may clear a SOP approval gate. Layered with execution_mode / priority /
-/// requires_confirmation (all of which still apply). Closed set => serde enum.
+/// RETIRED with the SOP run side (approval broker removed): parse-compat
+/// selector, no longer read. Closed set => serde enum.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, zeroclaw_macros::ConfigEnum,
 )]
@@ -22969,8 +22968,8 @@ pub enum ApprovalMode {
     AgentTool,
 }
 
-/// What happens to a SOP approval gate when it times out. Default is fail-closed:
-/// the gate never self-approves. Closed set => serde enum.
+/// RETIRED with the SOP run side (approval broker removed): parse-compat
+/// selector, no longer read. Closed set => serde enum.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, zeroclaw_macros::ConfigEnum,
 )]
@@ -22988,9 +22987,8 @@ pub enum ApprovalTimeoutAction {
     AutoApprove,
 }
 
-/// `[sop.approval]` - approval broker policy config. A permanent identity source
-/// for channel-provided approvers (not a stopgap): the approval broker consumes it
-/// for group-membership and quorum checks. Empty = no broker policy applies.
+/// `[sop.approval]` - RETIRED with the SOP run side (approval broker removed):
+/// kept only so existing tables still parse; values are no longer read.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "sop_approval"]

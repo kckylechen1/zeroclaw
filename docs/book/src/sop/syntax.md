@@ -74,34 +74,13 @@ max_pending_approvals = 8
 type = "manual"
 ```
 
-Approval broker groups and policies live in the main ZeroClaw config, not in
-per-SOP `SOP.toml` files. A step can reference a configured policy by name with
-`- policy: prod` in `SOP.md`:
-
-```toml
-[sop.approval.groups.release]
-members = ["http:<paired-token-subject>", "agent:release-bot"]
-
-[sop.approval.policies.prod]
-required_group = "release"
-quorum = 2
-escalation_route = "oncall"
-```
-
-`[sop.approval.groups.*]` members are approval identities, not account names.
-Members may be source-qualified (`http:<subject>`, `ws:<subject>`,
-`agent:<alias>`) to grant approval rights on one transport only, or bare
-(`ZeroClawOperator`) to grant any source carrying that identity. HTTP and WebSocket
-approval surfaces use the paired-token subject; the current CLI approval path
-(`zeroclaw sop approve`) is anonymous and cannot satisfy `cli:<user>`
-membership yet.
-
-The paired-token subject is the lowercase SHA-256 hex digest of the bearer
-token. After pairing, copy the digest from the canonical
-`gateway.paired_tokens` entry, or compute it from the bearer token without
-putting that secret in shell history. Rotating a paired token creates a new
-subject, so update every approval-group membership that references the old
-digest as part of the same rotation.
+Approval broker groups and policies were removed with the SOP run side. The
+`[sop.approval]` section of the main config is a retired retention knob: it
+still parses so existing installs boot, but its values are no longer read, and
+approval authority lives Tachi-side with ProcedureRun gates through the
+procedure_v1 seam. The paired-token subject material that used to feed broker
+group membership is unchanged gateway knowledge; it no longer has a
+SOP-consumption path in ZeroClaw.
 
 ## 3. `SOP.md` Step Format
 
@@ -172,119 +151,34 @@ Parser behavior:
 - `- on_failure:` accepts `fail`, `retry:<count>`, or `goto:<step>` and is
   enforced for reported step failures and output schema failures.
 - `- mode:` overrides the SOP execution mode for that step.
-- `- policy:` names an approval-broker policy (a key in `[sop.approval].policies`)
-  that gates this step's approval with required-group membership and quorum. Omit
-  it for an unpoliced gate. A step that names a policy absent from
-  `[sop.approval].policies` fails closed (the gate stays waiting) rather than
-  clearing on a single approval.
+- `- policy:` names an approval-broker policy (a key in `[sop.approval].policies`).
+  Retired with the run side: the bullet is still parsed and round-tripped as
+  `SOP.md` format, but no broker consumes it, so it no longer gates anything.
+  Approval authority lives Tachi-side through the procedure_v1 seam.
 
-### `[sop.approval]` policies and route delivery
+### Retired approval-broker route delivery
 
-A policy may also route its approval out of band to a channel, so an approver can
-act without watching the surface that started the run:
-
-```toml
-[sop.approval.policies.prod]
-required_group = "release"
-quorum = 2
-# Delivered when a run PARKS at a gate this policy governs.
-request_route = "discord.ops:123456789012345678"
-# Delivered only if that gate later TIMES OUT (a distinct second route).
-escalation_route = "discord.oncall:987654321098765432"
-```
-
-Both routes are `channel:recipient`: `channel` is a configured channel's map key
-(`<channel>.<alias>`, or bare `<channel>` for a singleton) and `recipient` is that
-channel's addressee (a Discord channel id, a chat id, ...). Delivery is best-effort
-and never blocks or clears the gate - the approval itself still comes back through
-an authenticated approve/deny surface whose principal can satisfy the policy's
-group and quorum requirements. Routes fire only in the daemon (where channels are
-configured); leave them unset (or empty) to notify only the originating surface,
-which is the default.
-
-Route delivery has no durable retry queue. A daemon exit before the asynchronous
-send completes, or a channel send failure, can lose the notice without changing
-the parked gate. Operators can inspect pending runs with `zeroclaw sop pending`
-and contact an eligible approver through an authenticated approval surface.
-
-Approval groups that grant channel-native approvers must use the channel-qualified
-member form `channel:<channel-key>:<sender>`, for example
-`channel:discord.ops:123456789012345678`. Unscoped members such as `channel:123` or
-bare `123` do not match channel approvals because sender ids can overlap across
-platforms and channel aliases.
+Removed with the run side: the `[sop.approval]` policies, their
+`request_route`/`escalation_route` out-of-band delivery, and the broker that
+consumed them no longer exist in ZeroClaw. Gate/resume authority lives
+Tachi-side with ProcedureRuns through the procedure_v1 seam.
 
 ### Deterministic checkpoints: approval and resume
 
-A deterministic run paused at a `kind: checkpoint` step is resolved by the SAME
-approve/deny surfaces as an approval gate (`zeroclaw sop pending` lists both,
-distinguished by `kind`). On approve, the engine resumes the run and drives any
-following `kind: capability` steps headlessly to the next pause or completion -
-so a `checkpoint -> capability` tail (e.g. posting an approved draft) executes
-without a live agent turn. On deny, the run is cancelled. Both resolutions are
-recorded in the approval ledger. A checkpoint step may carry `- policy:`; the
-same policy's required-group membership and quorum apply before the checkpoint
-decision resolves. If that policy names `request_route`, the daemon sends the
-out-of-band checkpoint notice there. `escalation_route` remains the timeout route
-for timed approval gates; checkpoint pauses do not currently schedule a
-checkpoint-specific escalation timeout.
-
-Two further checkpoint resolutions let a reviewer shape the draft instead of
-just gating it (both ledger-audited like approve/deny):
-
-- **Edit (amend)** - opt-in via an `- edit: <field>` bullet on the checkpoint:
-  the approver may replace that field of the piped value with their own text
-  before the run resumes (on Discord, an Edit button opens a modal pre-filled
-  with the current value). The checkpoint's recorded output carries the
-  human-approved text; the predecessor step keeps the model's original for the
-  audit trail. The ledger row records `decision: amend`.
-- **Revise** - offered automatically when the checkpoint's predecessor is an
-  `llm.generate` step: the approver sends guidance, the engine re-runs that
-  step with the guidance framed as reviewer feedback (`revision_feedback`,
-  carried in the step's static config plane - the untrusted payload framing is
-  unchanged), replaces the draft, and re-presents the gate. Every gate
-  presentation the run makes carries a unique revision (each revise bumps it,
-  and so does each later checkpoint's first park); prompt references become
-  `<run_id>#<rev>`, and an answer on a superseded prompt - an older draft, or
-  an earlier gate's leftover buttons - is refused. Capped at 3 revisions per
-  gate; a failed re-draft keeps the previous draft parked and answerable. The
-  ledger records `decision: revise` with the guidance as the reason.
+Retired with the run side: nothing executes SOP steps in ZeroClaw any more, so
+`kind: checkpoint` gates, their approve/deny/edit/revise resolutions, and the
+approval ledger that recorded them no longer exist here. The bullet is still
+parsed and round-tripped as `SOP.md` format. Gate, resume, and review-draft
+semantics live Tachi-side with ProcedureRuns through the procedure_v1 seam.
 
 ### Injected-adapter capabilities
 
-Two `kind: capability` steps perform real side effects through adapters the daemon
-injects at engine build; without a daemon (CLI validation, tests) they fail closed
-with a clear message, like `shell.exec`:
-
-- **`llm.generate`** - one bounded model call as a pipeline step (no tools, no
-  agent loop), on the default agent's resolved model provider. Authored fields in
-  `with:` - `instruction` (required), `system`, `output_key` (default `text`),
-  `echo` (payload fields copied into the output for downstream piping). The piped
-  event payload is delivered inside an explicit untrusted-content frame and is
-  never read as configuration.
-- **`forge.comment`** - posts a comment to a git-forge issue/PR through the git
-  channel's outbound path (provider-agnostic: GitHub / Gitea / Forgejo). Input
-  fields: `repo` (`owner/repo`), `number`, `body`, and optional `channel`
-  (`git.<alias>`; defaults to the single configured git channel).
-
-Together with a checkpoint they form a headless review pipeline:
-
-```md
-1. **Draft** - kind: capability / capability: llm.generate
-   - with: { instruction = "...", output_key = "body", echo = ["repo", "number"] }
-2. **Approve** - kind: checkpoint / policy: triage
-3. **Post** - kind: capability / capability: forge.comment
-```
-
-**Where the adapters are wired.** The real adapters (`llm.generate`'s model
-provider, `forge.comment`'s git channel, and a checkpoint policy's out-of-band
-approval route) are injected only on the **daemon / channel-start** path, which
-is the only path with a configured channel map and model of record. Standalone
-agent runs and CLI SOP execution build the engine without them, so these
-capabilities and routes are **fail-closed** there: `llm.generate` /
-`forge.comment` report a clear "requires an injected adapter" failure rather than
-acting, and a checkpoint's route notice is a log-only no-op. This is the same
-fail-closed model as `shell.exec`; run a pipeline that needs these capabilities
-under the daemon.
+Retired with the run side: the `llm.generate` and `forge.comment` capability
+adapters (and the capability registry that injected them) were removed.
+`kind: capability` / `capability:` bullets are still parsed and round-tripped
+as `SOP.md` format, but no engine executes them. The headless review-pipeline
+pattern they enabled now belongs to Tachi-side ProcedureRuns through the
+procedure_v1 seam.
 
 ### Step Contract Enforcement
 
@@ -297,11 +191,11 @@ The `[sop]` config controls enforcement:
 
 | Field | Default | Effect |
 |---|---:|---|
-| `step_schema_enforce` | `true` | Validate declared step input/output schemas at engine boundaries. |
-| `step_scope_enforce` | `false` | Treat per-step tool scopes as enforced filters instead of advisory hints. |
+| `step_schema_enforce` | `true` | Retired with the run side: no engine executes steps, so step schema enforcement no longer applies. The key still parses but is no longer read. |
+| `step_scope_enforce` | `false` | Retired with the run side: no live step turn exists to scope, so per-step tool scopes are format-only. The key still parses but is no longer read. |
 | `step_mandatory_tools` | - | Retired with the run side: the lifecycle tools it listed were removed, so this key no longer has an effect. |
-| `max_step_visits` | `256` | Stop routed runs that revisit one step too many times. |
-| `max_step_retries` | `2` | Limit retries requested by a step failure policy. |
+| `max_step_visits` | `256` | Retired with the run side: no routed runs exist to bound. The key still parses but is no longer read. |
+| `max_step_retries` | `2` | Retired with the run side: no step failure policy executes. The key still parses but is no longer read. |
 | `untrusted_payload_max_bytes` | `8192` | Cap untrusted trigger topic/payload text at a UTF-8 character boundary; `0` disables the cap. |
 | `untrusted_input_guard` | `"warn"` | Prompt-guard action for untrusted trigger input: `warn`, `block`, or `sanitize`. |
 | `untrusted_guard_sensitivity` | `0.7` | Sensitivity used by prompt-guard screening and outbound redaction. |
@@ -309,16 +203,14 @@ The `[sop]` config controls enforcement:
 | `untrusted_outbound_redact` | `true` | Enable shared outbound redaction for SOP content-safety consumers. |
 | `procedural_memory_enabled` | - | Retired with the run side: the `sop_workshop` proposal pipeline it gated was removed, so this key no longer has an effect. |
 
-Schema enforcement fails closed: invalid step input prevents the step from
-starting, and invalid step output is routed through the step's `on_failure`
-policy. Routing enforcement replaces linear `current_step + 1` advancement in
-LLM and deterministic runs. Tool-scope enforcement narrows the live step turn's
-available tools and blocks scoped-out calls at dispatch.
+Step-engine enforcement was removed with the run side: schema enforcement,
+routing enforcement, and tool-scope enforcement described here applied to
+engine-driven steps that no longer exist. The `[sop]` keys in the table above
+still parse but are no longer read.
 
-Untrusted trigger topic and payload text is capped, normalized, screened, and
-framed before it reaches step context. Framing is always on; the warning text can
-be hidden, but raw external trigger text is not interpolated into the model
-context.
+The untrusted-content screening keys (`untrusted_*`) are retained with the
+surviving `security/external_content` screening surface, which currently has no
+live SOP trigger feeder in ZeroClaw after the run-side removal.
 
 Procedural memory was removed with the run side: `sop_workshop`, proposal
 capture, and proposal write-back no longer exist. Proposal-style learning

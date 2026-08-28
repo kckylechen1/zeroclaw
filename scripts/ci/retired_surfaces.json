@@ -213,6 +213,92 @@
       "kind": "code-path",
       "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
       "notes": "Legacy SQLite run store (runs, events, claims, proposals). Existing files on real installs are left in place with a boot-time WARN naming the migration path; nothing reads or migrates them."
+    },
+    {
+      "term": "maintenance_interval_secs",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP maintenance-tick interval; the tick (approval timeouts, claim reaping, pruning) was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "max_concurrent_total",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP engine admission key; the engine that admitted runs was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "max_finished_runs",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP engine cache-eviction key; the engine cache was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "approval_timeout_action",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP approval-broker timeout action; the broker was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "approval_timeout_secs",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "match_regex": "sop[^a-z_]+approval_timeout_secs|approval_timeout_secs[^a-z_]+sop|sop\\.approval",
+      "notes": "Retired SOP approval-broker timeout key; the broker was demolished with the run side and the key still parses but is inert. The regex scope keeps the identically named, still-live channel approval key (channels/*/overview, security/autonomy) out of the tripwire."
+    },
+    {
+      "term": "step_scope_enforce",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP per-step tool-scope enforcement key; the agent-turn scope consumption was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "step_schema_enforce",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP step schema enforcement key; engine step execution was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "max_step_visits",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP engine step-routing bound; engine step routing was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "max_step_retries",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP step failure-policy bound; engine step execution was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "sop.approval",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "match_regex": "\\[sop\\.approval|sop\\.approval\\.",
+      "notes": "Retired approval-broker policy section ([sop.approval] groups/policies); the broker that consumed it was demolished with the run side. The section still parses but is inert; gate/resume authority lives Tachi-side via the procedure_v1 seam."
+    },
+    {
+      "term": "SopEngine",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "The headless SOP run engine (FSM, admission, checkpoints, deterministic capability steps) was deleted; run truth lives Tachi-side as ProcedureRuns through the procedure_v1 seam."
+    },
+    {
+      "term": "SopRunStore",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "The durable SOP run store (runs.db) was deleted; existing files are left in place with a boot-time WARN."
+    },
+    {
+      "term": "build_sop_engine",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "The headless engine constructor was deleted with the run engine."
+    },
+    {
+      "term": "sop/procedural_memory.rs",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Procedural-memory proposal store was deleted against its census survivor row: its only consumers (engine, workshop tool, proposal store) were demolished and the V4 seam leaves no ZeroClaw-side reader."
     }
   ]
 }
