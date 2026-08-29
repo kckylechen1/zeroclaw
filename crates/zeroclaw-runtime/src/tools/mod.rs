@@ -461,7 +461,7 @@ pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
     "sop_list",
     "sop_workshop",
     "delegate",
-    // Wall 2 (#197): Parent-visible raw harness/vendor launch surfaces.
+    // Wall 2 prune epic: Parent-visible raw harness/vendor launch surfaces.
     "claude_code",
     "claude_code_runner",
     "codex_cli",
@@ -1787,7 +1787,7 @@ mod tests {
 
     #[tokio::test]
     async fn retired_raw_launcher_tools_never_register_even_when_enabled() {
-        // Wall 2 (#197): the Parent-visible raw harness/vendor launch tools
+        // Wall 2 raw-launcher retirement: the Parent-visible raw harness/vendor launch tools
         // (claude_code, claude_code_runner, codex_cli, gemini_cli,
         // opencode_cli) are retired. Even with their config sections enabled
         // and a full-access runtime, no registry path may re-admit them;
