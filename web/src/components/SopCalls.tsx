@@ -13,7 +13,7 @@ import { loadCatalog, type CatalogEntry } from '@/components/ToolPicker';
 
 const INPUT_CLS = 'w-full rounded border border-pc-border bg-pc-surface px-2 py-1 text-pc-text';
 
-/// Shared, cached load of the tool catalog (built-in agent tools + CLI tools).
+/// Shared, cached load of the tool catalog (built-in agent tools).
 /// `loadCatalog` is process-cached, so every mounted editor resolves instantly
 /// after the first fetch.
 function useToolCatalog(agent?: string | null): CatalogEntry[] | null {
@@ -115,7 +115,7 @@ function Accordion({
 }
 
 /// Single-select over the same tool catalog the scope `ToolPicker` walks
-/// (built-in agent tools + discovered CLI tools). A planned call's tool is a
+/// (built-in agent tools). A planned call's tool is a
 /// registry name, never free text. A value not in the catalog (removed tool,
 /// or an MCP tool absent from the default-agent listing) is preserved as its
 /// own option so editing never silently drops it.

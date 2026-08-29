@@ -5,7 +5,7 @@ export interface CatalogEntry {
   name: string;
   description: string;
   group: 'agent';
-  /** JSON Schema for the tool's args (agent tools only; CLI tools omit it). */
+  /** JSON Schema for the tool's args. */
   parameters?: unknown;
   /** Declared structured-output schema, when the tool declares one. */
   output?: unknown;

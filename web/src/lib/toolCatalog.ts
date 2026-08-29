@@ -1,5 +1,5 @@
 // Shared tool-catalog loader. `ToolPicker` and `ToolPermissionGrid` both need
-// the same flattened, group-tagged list of agent + CLI tools; this is the one
+// the same flattened, group-tagged list of agent tools; this is the one
 // place that fetches and caches it so the two components (and anything else
 // that needs the catalog) stay in sync instead of hitting the network twice.
 
