@@ -39,6 +39,28 @@ impl ModelRoutingConfigTool {
             ))
         })?;
 
+        // This reparse path bypasses the normal load pipeline's tombstone
+        // reporting, so surface retired-surface warnings here too: a legacy
+        // key (e.g. runtime_profiles.*.max_delegation_depth) is dropped by
+        // the parse below and must not vanish silently before save() rewrites
+        // the file.
+        for warning in zeroclaw_config::validation_warnings::retired_field_tombstones(&contents)
+            .into_iter()
+            .chain(zeroclaw_config::validation_warnings::retired_section_tombstones(&contents))
+        {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "code": warning.code,
+                        "path": warning.path,
+                        "message": warning.message,
+                    })),
+                "model_routing_config: retired config surface present in config file"
+            );
+        }
+
         let mut parsed =
             zeroclaw_config::migration::migrate_to_current(&contents).map_err(|error| {
                 ::zeroclaw_log::record!(

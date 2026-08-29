@@ -11443,9 +11443,11 @@ impl Default for RiskProfileConfig {
 /// Named runtime/LLM execution profile (`[runtime_profiles.<alias>]`).
 ///
 /// Reusable operational tuning: agentic mode, iteration caps, context
-/// budget, parallel dispatch, resource ceilings, recursion depth, and
-/// the budget knobs that `SecurityPolicy` enforces with subagent
-/// parent-subset discipline. Anything authorization-shaped (allowed
+/// budget, parallel dispatch, resource ceilings, and the budget knobs
+/// that `SecurityPolicy` enforces with subagent parent-subset
+/// discipline. (The spawn-depth knob retired with the spawn wall:
+/// local recursion is the fixed D1 law, and the coordinator's admission
+/// cap is `CoordinatorConfig::max_spawn_depth`.) Anything authorization-shaped (allowed
 /// commands/tools/paths, approval gates, sandbox) lives on
 /// `[risk_profiles.<alias>]`. Anything model-provider shaped (model,
 /// temperature, max_tokens, timeout_secs) lives on

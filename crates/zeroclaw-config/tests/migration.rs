@@ -845,7 +845,13 @@ fn t14b2_per_agent_timeout_secs_folds_onto_model_provider_entry() {
 }
 
 #[test]
-fn t14c_max_depth_synthesizes_per_agent_runtime_profile() {
+fn t14c_max_depth_key_is_stripped_not_forwarded() {
+    // The fixture's complex_agent carries V2 `max_depth = 4` alongside
+    // `max_iterations = 25`. The retired spawn-depth key has no V3 field
+    // (spawn wall): migration must NOT forward it, and the agent still
+    // points at the profile synthesized from the surviving keys (that
+    // synthesis is caused by max_iterations/agentic, per t14a/t14b —
+    // this test pins the STRIP half).
     let cfg = v3_config();
     let agent = cfg
         .agents
@@ -853,15 +859,12 @@ fn t14c_max_depth_synthesizes_per_agent_runtime_profile() {
         .expect("agents.complex_agent present");
     assert_eq!(
         agent.runtime_profile, "agent_complex_agent",
-        "V2 max_depth must point agent at synthesized per-agent runtime profile"
+        "surviving V2 runtime keys must still point the agent at its synthesized profile"
     );
     let profile = cfg
         .runtime_profiles
         .get("agent_complex_agent")
         .expect("synthesized runtime_profiles.agent_complex_agent");
-    // The retired spawn-depth key has no V3 field anymore (spawn wall); the
-    // synthesized profile carries only the surviving tunables (max_iterations
-    // = 25 lands as max_tool_iterations, per t14a).
     assert_eq!(profile.max_tool_iterations, 25);
 }
 

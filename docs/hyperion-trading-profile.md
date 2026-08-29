@@ -25,6 +25,12 @@ allowed_tools = [
   "hapi-edge__snapshot",
   "hapi-edge__batch_snapshot",
   "hapi-edge__history_klines",
+  # NOTE (memory contract, #2389/#2432): independent backend-native memory
+  # tool names are withdrawn — all trading-memory access goes through the
+  # typed hapi-edge memory facade (`hapi_memory`) governed by the Tool
+  # Authority Catalog, never backend-native `hapi-memory__*` tools. The
+  # names below are kept from the original example only to illustrate
+  # allowlist shape; do not copy them into a live trading config.
   "hapi-memory__hapi_save",
   "hapi-memory__hapi_search",
   "hapi-memory__hapi_memory",

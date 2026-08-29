@@ -376,7 +376,7 @@
       "term": "delegation_policy",
       "kind": "config-key",
       "retired_in": "wall 1 (SubAgent demolition)",
-      "notes": "`[risk_profiles.<alias>].delegation_policy` gate removed with the delegate tool; the recursion-depth cap (`max_delegation_depth`) survives as the unified spawn-lineage cap.",
+      "notes": "`[risk_profiles.<alias>].delegation_policy` gate removed with the delegate tool; the old spawn-depth cap (`max_delegation_depth`) retired with the spawn wall — local recursion is the fixed D1 law, and the coordinator's admission cap is `max_spawn_depth`.",
       "match_regex": "`delegation_policy`|\\[risk_profiles\\.[^\\]]*\\.delegation_policy\\]|delegation_policy\\b"
     },
     {
