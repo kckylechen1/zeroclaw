@@ -79,6 +79,7 @@ fn seed_channel_handles_populates_channel_room_handle() {
     let escalate_handle = Arc::new(RwLock::new(HashMap::new()));
 
     let count = seed_channel_handles(
+        false,
         &Some(Arc::clone(&ask_user_handle)),
         &Some(Arc::clone(&channel_room_handle)),
         &reaction,
@@ -92,6 +93,43 @@ fn seed_channel_handles_populates_channel_room_handle() {
     assert!(reaction.read().contains_key("matrix.default"));
     assert!(poll_handle.read().contains_key("matrix.default"));
     assert!(escalate_handle.read().contains_key("matrix.default"));
+}
+
+#[test]
+fn child_run_seeds_zero_channel_handles_sa7c() {
+    // SA-7c (frozen SubAgent contract): a child run must not inherit a live
+    // `ask_user` handle or any user-reaching channel Arc, on ANY spawn
+    // path. The gate sits inside `seed_channel_handles`, so a CLI child
+    // (whose process registered a global channel-map factory) cannot be
+    // re-widened by a call site forgetting to check.
+    let channel = Arc::new(SeedMockChannel) as Arc<dyn Channel>;
+    super::register_channel_map_fn(Box::new(move || {
+        let mut map = HashMap::new();
+        map.insert("matrix.default".to_string(), Arc::clone(&channel));
+        map
+    }));
+
+    let ask_user_handle = Arc::new(RwLock::new(HashMap::new()));
+    let channel_room_handle = Arc::new(RwLock::new(HashMap::new()));
+    let reaction = Arc::new(RwLock::new(HashMap::new()));
+    let poll_handle = Arc::new(RwLock::new(HashMap::new()));
+    let escalate_handle = Arc::new(RwLock::new(HashMap::new()));
+
+    let count = seed_channel_handles(
+        true,
+        &Some(Arc::clone(&ask_user_handle)),
+        &Some(Arc::clone(&channel_room_handle)),
+        &reaction,
+        &Some(Arc::clone(&poll_handle)),
+        &Some(Arc::clone(&escalate_handle)),
+    );
+
+    assert_eq!(count, 0, "a child run must seed zero channel handles");
+    assert!(ask_user_handle.read().is_empty());
+    assert!(channel_room_handle.read().is_empty());
+    assert!(reaction.read().is_empty());
+    assert!(poll_handle.read().is_empty());
+    assert!(escalate_handle.read().is_empty());
 }
 
 // ── maybe_inject_channel_delivery_defaults tests ──────────────
@@ -10183,7 +10221,6 @@ async fn preactivate_respects_mcp_access_policy() {
         &activated,
         &always_group(&["files__*"]),
         Some(&policy),
-        None,
     );
 
     assert_eq!(names, mcp_set(&["files__list"]));
