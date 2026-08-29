@@ -70,41 +70,6 @@ impl McpDiscoveredToolPolicy {
     }
 }
 
-/// Delegation mode for a risk profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum DelegationMode {
-    /// No delegation permitted.
-    #[default]
-    Forbidden,
-    /// Delegation permitted to the agents named in the allow-list.
-    Allow,
-}
-
-impl crate::config::HasPropKind for DelegationMode {
-    const PROP_KIND: crate::config::PropKind = crate::config::PropKind::Enum;
-}
-
-/// Risk-profile delegation policy for work sent to agents that share it.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, zeroclaw_macros::Configurable,
-)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-pub struct DelegationPolicy {
-    #[serde(default)]
-    pub mode: DelegationMode,
-}
-
-impl DelegationPolicy {
-    /// Whether this profile may delegate. The set of reachable targets is
-    /// determined by shared risk profile at the call site — this only gates
-    /// whether delegation is permitted at all.
-    pub fn permits(&self) -> bool {
-        matches!(self.mode, DelegationMode::Allow)
-    }
-}
-
 /// What to do when a configured approver cannot be reached. Default FAIL-CLOSED.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -148,21 +113,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn delegation_default_is_forbidden() {
-        assert_eq!(DelegationPolicy::default().mode, DelegationMode::Forbidden);
-        assert!(!DelegationPolicy::default().permits());
-    }
-
-    #[test]
-    fn delegation_allow_permits() {
-        let p = DelegationPolicy {
-            mode: DelegationMode::Allow,
-        };
-        assert!(p.permits());
-        assert!(!DelegationPolicy::default().permits());
-    }
-
-    #[test]
     fn approval_route_defaults_are_fail_closed() {
         // Absent optional fields: fail-closed policy + bounded 120s window.
         let r: ApprovalRoute = toml::from_str("approver_channel = \"ops\"").unwrap();
@@ -198,68 +148,5 @@ mod tests {
             RiskProfileConfig::default().approval_route.is_none(),
             "default profile must keep today's originating-channel behavior"
         );
-    }
-
-    #[test]
-    fn delegation_wire_format() {
-        // Forbidden serializes to `{ mode = "forbidden" }`.
-        let forbidden = toml::to_string(&DelegationPolicy::default()).unwrap();
-        assert!(forbidden.contains("mode = \"forbidden\""), "{forbidden}");
-
-        // Allow round-trips `{ mode = "allow" }`.
-        let allow = DelegationPolicy {
-            mode: DelegationMode::Allow,
-        };
-        let s = toml::to_string(&allow).unwrap();
-        assert!(s.contains("mode = \"allow\""), "{s}");
-        let back: DelegationPolicy = toml::from_str(&s).unwrap();
-        assert_eq!(back, allow);
-    }
-}
-
-#[cfg(test)]
-mod prop_exposure_tests {
-    use crate::schema::RiskProfileConfig;
-    use crate::traits::PropKind;
-
-    #[test]
-    fn delegation_policy_exposes_mode_enum_leaf() {
-        let p = RiskProfileConfig::default();
-        let mode = p
-            .prop_fields()
-            .into_iter()
-            .find(|f| f.name.ends_with("delegation_policy.mode"))
-            .expect("delegation_policy.mode leaf missing");
-        assert_eq!(mode.kind, PropKind::Enum);
-    }
-}
-
-#[cfg(all(test, feature = "schema-export"))]
-mod enum_variant_tests {
-    use super::DelegationMode;
-    use crate::schema::RiskProfileConfig;
-
-    #[test]
-    fn delegation_mode_variants_surface() {
-        let v = crate::helpers::enum_variants::<DelegationMode>();
-        assert!(v.contains("forbidden"), "{v}");
-        assert!(v.contains("allow"), "{v}");
-    }
-
-    #[test]
-    fn delegation_mode_field_carries_variants() {
-        let p = RiskProfileConfig::default();
-        let mode = p
-            .prop_fields()
-            .into_iter()
-            .find(|f| f.name.ends_with("delegation_policy.mode"))
-            .expect("mode leaf missing");
-        let variants = mode.enum_variants.map(|f| f()).unwrap_or_default();
-        assert!(
-            !variants.is_empty(),
-            "enum_variants empty — UI would render as text"
-        );
-        assert!(variants.iter().any(|v| v == "forbidden"));
-        assert!(variants.iter().any(|v| v == "allow"));
     }
 }

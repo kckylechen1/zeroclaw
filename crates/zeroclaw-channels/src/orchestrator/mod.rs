@@ -1166,6 +1166,7 @@ async fn load_runtime_config_and_defaults(
     parsed.retired_surface_warnings =
         zeroclaw_config::validation_warnings::retired_section_tombstones(&contents)
             .into_iter()
+            .chain(zeroclaw_config::validation_warnings::retired_field_tombstones(&contents))
             .chain(applied.tombstone_warnings)
             .collect();
 

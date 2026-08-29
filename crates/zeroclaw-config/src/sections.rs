@@ -792,7 +792,6 @@ mod tests {
             section_group_for_key("observability"),
             SectionGroup::Operations
         );
-        assert_eq!(section_group_for_key("delegate"), SectionGroup::MultiAgent);
         assert_eq!(section_group_for_key("web_search"), SectionGroup::Tools);
         assert_eq!(section_group_for_key("secrets"), SectionGroup::Storage);
         // Kebab spelling of a SCHEMA-grouped (non-curated) root resolves
@@ -871,7 +870,6 @@ mod tests {
             ("shell_tool", SectionGroup::Tools),
             ("observability", SectionGroup::Operations),
             ("gateway", SectionGroup::Network),
-            ("delegate", SectionGroup::MultiAgent),
             ("secrets", SectionGroup::Storage),
         ];
         for (key, group) in expected {

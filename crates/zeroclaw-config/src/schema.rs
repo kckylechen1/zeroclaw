@@ -5,14 +5,12 @@ pub mod v1;
 pub mod v2;
 
 use crate::autonomy::AutonomyLevel;
-use crate::autonomy::DelegationPolicy;
 use crate::domain_matcher::DomainMatcher;
 use crate::traits::{ChannelConfig, HasPropKind, PropKind};
 use crate::validation_bail;
 use anyhow::{Context, Result};
 use directories::UserDirs;
-use serde::de::{self, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
@@ -456,12 +454,6 @@ pub struct Config {
     #[group = "Operations"]
     pub peripherals: PeripheralsConfig,
 
-    /// Delegate tool global default configuration (`[delegate]`).
-    #[serde(default)]
-    #[nested]
-    #[group = "Multi-agent"]
-    pub delegate: DelegateToolConfig,
-
     /// Daemon-wide subagent limits (`[subagents]`). Governs the single
     /// coordinator actor this process boots, so it is a whole-process limit,
     /// not a per-agent one. See `crate::subagents::SubagentsConfig`.
@@ -473,8 +465,6 @@ pub struct Config {
     /// Aliased agents in this install. Each entry under `[agents.<alias>]`
     /// is one user-facing agent with its own identity, channels, model
     /// provider, risk profile, workspace, and memory scope.
-    /// `DelegateTool` consults this map when one agent delegates a
-    /// subtask to another.
     #[serde(default)]
     #[nested]
     pub agents: HashMap<String, AliasedAgentConfig>,
@@ -3383,34 +3373,6 @@ impl_default_family_endpoint! {
     BedrockModelProviderConfig,
 }
 
-// ── Delegate Tool Configuration ─────────────────────────────────
-
-/// Global delegate tool configuration for default timeout values.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "delegate"]
-pub struct DelegateToolConfig {
-    /// Default timeout in seconds for non-agentic sub-agent model_provider calls.
-    /// Can be overridden per-agent in `[agents.<name>]` config.
-    /// Default: 120 seconds.
-    #[serde(default = "default_delegate_timeout_secs")]
-    pub timeout_secs: u64,
-    /// Default timeout in seconds for agentic sub-agent runs.
-    /// Can be overridden per-agent in `[agents.<name>]` config.
-    /// Default: 300 seconds.
-    #[serde(default = "default_delegate_agentic_timeout_secs")]
-    pub agentic_timeout_secs: u64,
-}
-
-impl Default for DelegateToolConfig {
-    fn default() -> Self {
-        Self {
-            timeout_secs: DEFAULT_DELEGATE_TIMEOUT_SECS,
-            agentic_timeout_secs: DEFAULT_DELEGATE_AGENTIC_TIMEOUT_SECS,
-        }
-    }
-}
-
 // ── Aliased Agents ───────────────────────────────────────────────
 
 /// Runtime tunables resolved from the agent's runtime profile. Populated
@@ -3484,126 +3446,8 @@ impl Default for ResolvedRuntime {
     }
 }
 
-/// Execution semantics for one explicit delegate target.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum DelegateExecutionMode {
-    /// Parent-bounded delegation: the target is reachable through the caller,
-    /// shares caller budgets, and agentic tools are capped by the caller's
-    /// tool envelope.
-    #[default]
-    Bounded,
-    /// Independent delegation: the target runs under its own configured
-    /// policy/tool envelope, like opening a new chat with that agent.
-    Independent,
-}
-
-/// One explicit delegate target listed under `[agents.<alias>].delegates`.
-///
-/// String entries deserialize as `{ agent = "<string>", mode = "bounded" }`
-/// for concise manual editing. Serialization always emits the object form so
-/// the config surface is a pure object array.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Configurable, Default)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "delegate_target"]
-pub struct DelegateTargetConfig {
-    /// Target agent alias.
-    pub agent: String,
-    /// Whether this target is parent-bounded or independent.
-    #[serde(default)]
-    pub mode: DelegateExecutionMode,
-}
-
-impl DelegateTargetConfig {
-    /// Construct the legacy-equivalent target shape used for string entries.
-    ///
-    /// Most tests and migration paths call this instead of spelling out
-    /// `mode = Bounded`, making it explicit that a bare delegate alias never
-    /// opts into independent execution.
-    #[must_use]
-    pub fn bounded(agent: impl Into<String>) -> Self {
-        Self {
-            agent: agent.into(),
-            mode: DelegateExecutionMode::Bounded,
-        }
-    }
-
-    /// Return the raw configured alias.
-    ///
-    /// Callers that compare aliases should trim at the comparison boundary so
-    /// diagnostics can still point at the stored value when validation fails.
-    #[must_use]
-    pub fn agent(&self) -> &str {
-        self.agent.as_str()
-    }
-
-    /// Return the configured execution mode for this explicit target.
-    #[must_use]
-    pub fn mode(&self) -> DelegateExecutionMode {
-        self.mode
-    }
-}
-
-impl<'de> Deserialize<'de> for DelegateTargetConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct DelegateTargetVisitor;
-
-        impl<'de> Visitor<'de> for DelegateTargetVisitor {
-            type Value = DelegateTargetConfig;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("an agent alias string or a delegate target object")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(DelegateTargetConfig::bounded(value))
-            }
-
-            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(DelegateTargetConfig::bounded(value))
-            }
-
-            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
-            where
-                M: MapAccess<'de>,
-            {
-                // Keep the object arm strict so misspelled mode/agent fields do
-                // not silently round-trip as bounded targets. String entries
-                // already provide the forgiving legacy shape.
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct DelegateTargetObject {
-                    agent: String,
-                    #[serde(default)]
-                    mode: DelegateExecutionMode,
-                }
-
-                let target =
-                    DelegateTargetObject::deserialize(de::value::MapAccessDeserializer::new(map))?;
-                Ok(DelegateTargetConfig {
-                    agent: target.agent,
-                    mode: target.mode,
-                })
-            }
-        }
-
-        deserializer.deserialize_any(DelegateTargetVisitor)
-    }
-}
-
 /// Configuration for an aliased agent. Each `[agents.<alias>]` TOML
-/// block deserializes into one of these. The `DelegateTool` looks up
-/// entries here to dispatch a subtask to a named sibling agent.
+/// block deserializes into one of these.
 #[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "delegate_agent"]
@@ -3747,26 +3591,6 @@ pub struct AliasedAgentConfig {
     #[serde(default)]
     pub summary_provider: crate::providers::ModelProviderRef,
 
-    /// Auto-allow delegation to every agent sharing this agent's risk
-    /// profile. Default `true` preserves the historical reach where any
-    /// same-profile peer is a delegation target. Set `false` to opt this
-    /// agent out so only the explicit `delegates` list is reachable.
-    /// Gating (whether delegation is permitted at all) still lives on the
-    /// risk profile's `delegation_policy.mode`; this only narrows reach.
-    #[tab(General)]
-    #[serde(default = "default_true")]
-    pub delegate_same_risk_profile: bool,
-
-    /// Explicit delegate roster: additional agent aliases this agent may
-    /// delegate to, beyond same-profile peers. Possibly empty. String
-    /// entries are accepted for concise manual editing and load as bounded
-    /// delegates; saved config emits object entries with explicit modes.
-    /// Entries may name agents on a different risk profile. `Config::validate()`
-    /// fails loud on a dangling alias, duplicate alias, or self-reference.
-    #[tab(General)]
-    #[serde(default)]
-    pub delegates: Vec<DelegateTargetConfig>,
-
     // ── Resolved runtime tunables (populated by `resolved_agent_config`
     // from the runtime profile; not config-settable on the agent). ──
     #[serde(skip)]
@@ -3832,8 +3656,6 @@ impl Default for AliasedAgentConfig {
             classifier_provider: crate::providers::ModelProviderRef::default(),
             precheck: crate::scattered_types::ChannelPrecheckConfig::default(),
             summary_provider: crate::providers::ModelProviderRef::default(),
-            delegate_same_risk_profile: true,
-            delegates: Vec::new(),
             resolved: ResolvedRuntime::default(),
             workspace: crate::multi_agent::AgentWorkspaceConfig::default(),
             memory: crate::multi_agent::AgentMemoryConfig::default(),
@@ -4048,97 +3870,6 @@ impl Config {
             return None;
         }
         self.cards.get(card)
-    }
-
-    /// Resolve the delegate targets `caller_alias` may reach:
-    /// same-profile peers when `delegate_same_risk_profile` is set, unioned
-    /// with the explicit `delegates` roster, minus the caller. Single
-    /// source of truth for delegate reach and mode; gating
-    /// (`delegation_policy`) is enforced separately by the caller.
-    /// Deduped, sorted; unknown caller yields empty. Disabled targets are
-    /// never reachable. Explicit entries override the bounded mode used for
-    /// implicit same-profile peers.
-    ///
-    /// The implicit same-profile-peer check compares
-    /// [`Self::resolved_risk_profile_alias`], not the raw `agent.risk_profile`
-    /// field, on both the caller and every candidate: a carded agent's
-    /// `agent.risk_profile` is empty by construction (its profile lives on
-    /// its card), so comparing the raw field would silently drop a carded
-    /// agent out of this roster in either role even when its card's profile
-    /// matches.
-    #[must_use]
-    pub fn reachable_delegate_target_configs(
-        &self,
-        caller_alias: &str,
-    ) -> Vec<DelegateTargetConfig> {
-        let Some(caller) = self.agents.get(caller_alias) else {
-            return Vec::new();
-        };
-
-        let mut targets: std::collections::BTreeMap<String, DelegateExecutionMode> =
-            std::collections::BTreeMap::new();
-
-        if caller.delegate_same_risk_profile
-            && let Some(caller_profile) = self.resolved_risk_profile_alias(caller_alias)
-        {
-            for (alias, agent) in &self.agents {
-                if alias.as_str() != caller_alias
-                    && agent.enabled
-                    && self.resolved_risk_profile_alias(alias) == Some(caller_profile)
-                {
-                    targets.insert(alias.clone(), DelegateExecutionMode::Bounded);
-                }
-            }
-        }
-
-        for explicit in &caller.delegates {
-            let trimmed = explicit.agent().trim();
-            if trimmed.is_empty() || trimmed == caller_alias {
-                continue;
-            }
-            if self.agents.get(trimmed).is_some_and(|agent| agent.enabled) {
-                targets.insert(trimmed.to_string(), explicit.mode());
-            }
-        }
-
-        targets
-            .into_iter()
-            .map(|(agent, mode)| DelegateTargetConfig { agent, mode })
-            .collect()
-    }
-
-    /// Resolve only the agent aliases reachable by `caller_alias`.
-    /// Use [`Self::reachable_delegate_target_configs`] when the target mode
-    /// matters.
-    #[must_use]
-    pub fn reachable_delegate_targets(&self, caller_alias: &str) -> Vec<String> {
-        self.reachable_delegate_target_configs(caller_alias)
-            .into_iter()
-            .map(|target| target.agent)
-            .collect()
-    }
-
-    /// Resolve the execution mode for one reachable delegate target.
-    ///
-    /// Target aliases are normalized the same way the reachable roster
-    /// normalizes explicit `delegates` entries. This keeps callers that need
-    /// one target mode aligned with the canonical roster resolver instead of
-    /// creating a subtly different admission rule.
-    #[must_use]
-    pub fn delegate_target_mode(
-        &self,
-        caller_alias: &str,
-        target_alias: &str,
-    ) -> Option<DelegateExecutionMode> {
-        let target_alias = target_alias.trim();
-        if target_alias.is_empty() {
-            return None;
-        }
-
-        self.reachable_delegate_target_configs(caller_alias)
-            .into_iter()
-            .find(|target| target.agent == target_alias)
-            .map(|target| target.mode)
     }
 
     /// Resolve the `[runtime_profiles.<alias>]` entry owned by an agent
@@ -4745,14 +4476,6 @@ impl ActiveStorage<'_> {
     }
 }
 
-fn default_delegate_timeout_secs() -> u64 {
-    DEFAULT_DELEGATE_TIMEOUT_SECS
-}
-
-fn default_delegate_agentic_timeout_secs() -> u64 {
-    DEFAULT_DELEGATE_AGENTIC_TIMEOUT_SECS
-}
-
 /// Valid temperature range for all paths (config, CLI, env override).
 pub const TEMPERATURE_RANGE: std::ops::RangeInclusive<f64> = 0.0..=2.0;
 
@@ -4773,12 +4496,6 @@ pub const UNCONFIGURED_CONTEXT_WINDOW_FALLBACK: usize = 32_000;
 fn default_schema_version() -> u32 {
     0
 }
-
-/// Default delegate tool timeout for non-agentic calls: 120 seconds.
-pub const DEFAULT_DELEGATE_TIMEOUT_SECS: u64 = 120;
-
-/// Default delegate tool timeout for agentic runs: 300 seconds.
-pub const DEFAULT_DELEGATE_AGENTIC_TIMEOUT_SECS: u64 = 300;
 
 /// Per-channel reply-pacing accessor. Implemented by every `*Config`
 /// struct that participates in outbound pacing so validation and
@@ -11948,12 +11665,6 @@ pub struct RiskProfileConfig {
     /// Extra directory roots the agent may access.
     #[serde(alias = "allowed_path", alias = "allowed_paths")]
     pub allowed_roots: Vec<String>,
-    /// Whether agents using this profile may initiate delegation. Defaults to
-    /// `Forbidden`. Reachable delegate targets and bounded/independent mode
-    /// are resolved from each caller agent's config.
-    #[serde(default)]
-    #[nested]
-    pub delegation_policy: DelegationPolicy,
     /// Route this profile's tool approvals to a DISTINCT approver channel instead of the
     /// channel that triggered the run (closes the cross-channel-HITL gap). Absent ⇒ the
     /// originating channel approves (today's behavior). See [`crate::autonomy::ApprovalRoute`].
@@ -12024,7 +11735,6 @@ impl Default for RiskProfileConfig {
             auto_approve: default_auto_approve(),
             always_ask: default_always_ask(),
             allowed_roots: Vec::new(),
-            delegation_policy: DelegationPolicy::default(),
             approval_route: None,
             allowed_tools: None,
             excluded_tools: Vec::new(),
@@ -12070,12 +11780,10 @@ pub struct RuntimeProfileConfig {
     /// Parent-subset enforced for subagents.
     pub shell_timeout_secs: u64,
     // ── Delegation tuning ──
-    /// Maximum delegation recursion depth. `0` inherits the default.
+    /// Maximum delegation recursion depth. `0` inherits the default. Now the
+    /// unified spawn-lineage cap source (SA-9): every local spawn on a run
+    /// counts against it.
     pub max_delegation_depth: u32,
-    /// Delegate call timeout in seconds. `None` inherits global delegate timeout.
-    pub delegation_timeout_secs: Option<u64>,
-    /// Agentic delegate run timeout in seconds. `None` inherits global.
-    pub agentic_timeout_secs: Option<u64>,
     // ── Per-agent runtime tunables (also live on AliasedAgentConfig) ─
     /// Maximum conversation history messages retained per session. `None` inherits.
     pub max_history_messages: Option<usize>,
@@ -12131,8 +11839,6 @@ impl Default for RuntimeProfileConfig {
             max_cost_per_day_cents: 500,
             shell_timeout_secs: 60,
             max_delegation_depth: 0,
-            delegation_timeout_secs: None,
-            agentic_timeout_secs: None,
             max_history_messages: None,
             max_context_tokens: None,
             compact_context: None,
@@ -17839,7 +17545,6 @@ impl Default for Config {
             proxy: ProxyConfig::default(),
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
-            delegate: DelegateToolConfig::default(),
             subagents: crate::subagents::SubagentsConfig::default(),
             agents: HashMap::new(),
             risk_profiles: HashMap::new(),
@@ -18909,7 +18614,12 @@ impl Config {
             // fails. Sunset: this tombstone is a compatibility shim and
             // will be removed in a later announced window.
             let retired_section_warnings =
-                crate::validation_warnings::retired_section_tombstones(&contents);
+                crate::validation_warnings::retired_section_tombstones(&contents)
+                    .into_iter()
+                    .chain(crate::validation_warnings::retired_field_tombstones(
+                        &contents,
+                    ))
+                    .collect::<Vec<_>>();
 
             // `composition` hard-error gate. The key is brand-new (no
             // release predating it can legitimately carry a value this
@@ -20985,22 +20695,6 @@ impl Config {
             anyhow::bail!("security.nevis: {msg}");
         }
 
-        // Delegate tool global defaults
-        if self.delegate.timeout_secs == 0 {
-            validation_bail!(
-                InvalidNumericRange,
-                "delegate.timeout_secs",
-                "delegate.timeout_secs must be greater than 0"
-            );
-        }
-        if self.delegate.agentic_timeout_secs == 0 {
-            validation_bail!(
-                InvalidNumericRange,
-                "delegate.agentic_timeout_secs",
-                "delegate.agentic_timeout_secs must be greater than 0"
-            );
-        }
-
         // Per-profile validation: the context-compression summarizer provider
         // ref must resolve to a configured `[providers.models.*]` alias.
         // Empty = inherit (valid). A shared profile fails loud at config time
@@ -21258,44 +20952,6 @@ impl Config {
                         RequiredFieldEmpty,
                         format!("agents.{alias}.risk_profile"),
                         "agents.{alias}.risk_profile must reference a configured [risk_profiles.<alias>] entry",
-                    );
-                }
-            }
-
-            // delegates: explicit roster entries must point at OTHER
-            // configured agents, never self. Cross-profile targets are
-            // permitted (they run under the target's own policy), so no
-            // profile match is required here.
-            let mut seen_delegates: std::collections::BTreeSet<&str> =
-                std::collections::BTreeSet::new();
-            for (i, target) in agent.delegates.iter().enumerate() {
-                let target_str = target.agent().trim();
-                if target_str.is_empty() {
-                    validation_bail!(
-                        RequiredFieldEmpty,
-                        format!("agents.{alias}.delegates[{i}].agent"),
-                        "agents.{alias}.delegates[{i}].agent is empty; remove it or name a configured agent",
-                    );
-                }
-                if target_str == alias.as_str() {
-                    validation_bail!(
-                        InvalidFormat,
-                        format!("agents.{alias}.delegates[{i}].agent"),
-                        "agents.{alias}.delegates[{i}].agent = {target_str:?} names this agent itself; an agent cannot delegate to itself",
-                    );
-                }
-                if !self.agents.contains_key(target_str) {
-                    validation_bail!(
-                        DanglingReference,
-                        format!("agents.{alias}.delegates[{i}].agent"),
-                        "agents.{alias}.delegates[{i}].agent = {target_str:?} but agents.{target_str} is not configured",
-                    );
-                }
-                if !seen_delegates.insert(target_str) {
-                    validation_bail!(
-                        InvalidFormat,
-                        format!("agents.{alias}.delegates[{i}].agent"),
-                        "agents.{alias}.delegates[{i}].agent = {target_str:?} duplicates an earlier delegate target",
                     );
                 }
             }
@@ -23144,13 +22800,6 @@ impl Default for SopConfig {
             procedural_memory_enabled: false,
         }
     }
-}
-
-// Config enums self-declare via `#[derive(ConfigEnum)]` at their definition
-// site. `DelegationPolicy` is a struct whose `mode` leaf surfaces as the enum,
-// so it carries the impl directly.
-impl HasPropKind for crate::autonomy::DelegationPolicy {
-    const PROP_KIND: PropKind = PropKind::Enum;
 }
 
 impl HasPropKind for serde_json::Value {
@@ -25665,7 +25314,6 @@ auto_save = true
             pacing: PacingConfig::default(),
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
-            delegate: DelegateToolConfig::default(),
             subagents: crate::subagents::SubagentsConfig::default(),
             agents: HashMap::new(),
             runtime_profiles: HashMap::new(),
@@ -25803,7 +25451,7 @@ default_temperature = 0.7
                 .map(|(_, _, e)| e)
                 .and_then(|e| e.timeout_secs)
                 .unwrap_or(120),
-            DEFAULT_DELEGATE_TIMEOUT_SECS
+            120
         );
     }
 
@@ -26542,7 +26190,6 @@ default_temperature = 0.7
             pacing: PacingConfig::default(),
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
-            delegate: DelegateToolConfig::default(),
             subagents: crate::subagents::SubagentsConfig::default(),
             agents: HashMap::new(),
             risk_profiles: HashMap::new(),
@@ -29624,10 +29271,13 @@ name = "weather-tool"
 
     #[test]
     #[allow(clippy::large_futures)]
-    async fn load_or_init_keeps_agents_with_object_form_delegates() {
-        // Regression for the observed regression: a current
-        // schema config containing an object-form delegate must not degrade and
-        // drop the whole `agents` section.
+    async fn load_or_init_warns_on_retired_delegate_roster() {
+        // The delegate tool was deleted with the wall-1 demolition, so a
+        // legacy `[agents.*].delegates` roster no longer names anything the
+        // runtime can honor. The field tombstone ignores the key (serde
+        // drops the unknown field) but surfaces a structured warning naming
+        // the retirement, so the rest of the section keeps working and the
+        // operator is told to clean up.
         let _env_guard = env_override_lock().await;
         let temp_home =
             std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
@@ -29676,115 +29326,38 @@ runtime_profile = "default"
 
         let config = Box::pin(Config::load_or_init()).await.unwrap();
 
+        // SAFETY: test-only, guarded by env_override_lock.
+        unsafe { std::env::remove_var("ZEROCLAW_WORKSPACE") };
+        if let Some(home) = original_home {
+            // SAFETY: test-only, guarded by env_override_lock.
+            unsafe { std::env::set_var("HOME", home) };
+        } else {
+            // SAFETY: test-only, guarded by env_override_lock.
+            unsafe { std::env::remove_var("HOME") };
+        }
+        let _ = fs::remove_dir_all(temp_home).await;
+
+        let hits: Vec<_> = config
+            .retired_surface_warnings
+            .iter()
+            .filter(|warning| warning.code == "delegate_config_removed")
+            .collect();
         assert!(
-            config.degraded_security.is_empty(),
+            hits.iter()
+                .any(|warning| warning.path == "agents.*.delegates"),
+            "expected an agents.*.delegates tombstone, got {hits:?}"
+        );
+        // The surviving section is untouched: the retired key does not
+        // degrade its siblings.
+        assert!(config.agents.contains_key("task_orchestrator"));
+        assert!(config.agents.contains_key("reviewer"));
+        assert!(config.agents.contains_key("sysadmin"));
+        assert!(
+            config.degraded_sections.is_empty(),
             "{:?}",
-            config.degraded_security
+            config.degraded_sections
         );
-        assert!(config.agents.contains_key("task_orchestrator"));
-        assert!(config.agents.contains_key("reviewer"));
-        assert!(config.agents.contains_key("sysadmin"));
-        assert_eq!(
-            config.agents["task_orchestrator"].delegates,
-            vec![
-                DelegateTargetConfig::bounded("reviewer"),
-                DelegateTargetConfig {
-                    agent: "sysadmin".to_string(),
-                    mode: DelegateExecutionMode::Independent,
-                },
-            ]
-        );
-
-        // SAFETY: test-only, guarded by env_override_lock.
-        unsafe { std::env::remove_var("ZEROCLAW_WORKSPACE") };
-        if let Some(home) = original_home {
-            // SAFETY: test-only, guarded by env_override_lock.
-            unsafe { std::env::set_var("HOME", home) };
-        } else {
-            // SAFETY: test-only, guarded by env_override_lock.
-            unsafe { std::env::remove_var("HOME") };
-        }
-        let _ = fs::remove_dir_all(temp_home).await;
     }
-
-    #[test]
-    #[allow(clippy::large_futures)]
-    async fn load_or_init_migrates_agents_with_object_form_delegates() {
-        // Same shape as above, but without schema_version so the migration path
-        // proves it accepts mixed string/object delegates before validation.
-        let _env_guard = env_override_lock().await;
-        let temp_home =
-            std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
-        let workspace_dir = temp_home.join("profile-a");
-        let config_path = workspace_dir.join("config.toml");
-
-        fs::create_dir_all(&workspace_dir).await.unwrap();
-        fs::write(
-            &config_path,
-            r#"
-[providers.models.ollama.default]
-
-[risk_profiles.shared]
-
-[runtime_profiles.default]
-
-[agents.task_orchestrator]
-model_provider = "ollama.default"
-risk_profile = "shared"
-runtime_profile = "default"
-delegates = [
-  "reviewer",
-  { agent = "sysadmin", mode = "independent" },
-]
-
-[agents.reviewer]
-model_provider = "ollama.default"
-risk_profile = "shared"
-runtime_profile = "default"
-
-[agents.sysadmin]
-model_provider = "ollama.default"
-risk_profile = "shared"
-runtime_profile = "default"
-"#,
-        )
-        .await
-        .unwrap();
-
-        let original_home = std::env::var("HOME").ok();
-        // SAFETY: test-only, guarded by env_override_lock.
-        unsafe { std::env::set_var("HOME", &temp_home) };
-        // SAFETY: test-only, guarded by env_override_lock.
-        unsafe { std::env::set_var("ZEROCLAW_WORKSPACE", &workspace_dir) };
-
-        let config = Box::pin(Config::load_or_init()).await.unwrap();
-
-        assert!(config.agents.contains_key("task_orchestrator"));
-        assert!(config.agents.contains_key("reviewer"));
-        assert!(config.agents.contains_key("sysadmin"));
-        assert_eq!(
-            config.agents["task_orchestrator"].delegates,
-            vec![
-                DelegateTargetConfig::bounded("reviewer"),
-                DelegateTargetConfig {
-                    agent: "sysadmin".to_string(),
-                    mode: DelegateExecutionMode::Independent,
-                },
-            ]
-        );
-
-        // SAFETY: test-only, guarded by env_override_lock.
-        unsafe { std::env::remove_var("ZEROCLAW_WORKSPACE") };
-        if let Some(home) = original_home {
-            // SAFETY: test-only, guarded by env_override_lock.
-            unsafe { std::env::set_var("HOME", home) };
-        } else {
-            // SAFETY: test-only, guarded by env_override_lock.
-            unsafe { std::env::remove_var("HOME") };
-        }
-        let _ = fs::remove_dir_all(temp_home).await;
-    }
-
     #[test]
     async fn validate_rejects_out_of_range_temperature() {
         let mut config = Config::default();
@@ -33653,7 +33226,7 @@ auto_approve = ["file_read", "file_write", "file_edit", "memory_recall", "memory
             );
         }
 
-        use crate::autonomy::{ApprovalRoute, AutonomyLevel, DelegationPolicy};
+        use crate::autonomy::{ApprovalRoute, AutonomyLevel};
         use crate::multi_agent::{
             A2aServerConfig, A2aServerSection, AccessMode, AgentA2aConfig, AgentMemoryConfig,
             AgentWorkspaceConfig, MemoryBackendKind, OutputModality,
@@ -33667,7 +33240,6 @@ auto_approve = ["file_read", "file_write", "file_edit", "memory_recall", "memory
         use crate::validation_warnings::ValidationWarning;
 
         assert_schema_description::<AutonomyLevel>("AutonomyLevel");
-        assert_schema_description::<DelegationPolicy>("DelegationPolicy");
         assert_schema_description::<ApprovalRoute>("ApprovalRoute");
         assert_schema_description::<AccessMode>("AccessMode");
         assert_schema_description::<MemoryBackendKind>("MemoryBackendKind");
@@ -34743,11 +34315,11 @@ api_key = "op://zeroclaw/provider/openai-api-key"
 
     fn reject_poison_string_value<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
     where
-        D: Deserializer<'de>,
+        D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
         if value == "poison" {
-            return Err(de::Error::custom(
+            return Err(serde::de::Error::custom(
                 "Unknown property value rejected by a custom field validator",
             ));
         }
@@ -38078,191 +37650,6 @@ allowed_users = []
         assert!(config.collect_warnings().is_empty());
     }
 
-    fn delegate_roster_config() -> Config {
-        let mut cfg = Config::default();
-        cfg.providers.models.ollama.insert(
-            "default".to_string(),
-            crate::schema::OllamaModelProviderConfig::default(),
-        );
-        cfg.risk_profiles
-            .insert("shared".to_string(), RiskProfileConfig::default());
-        cfg.risk_profiles
-            .insert("lore".to_string(), RiskProfileConfig::default());
-        for (alias, profile) in [
-            ("aaa", "shared"),
-            ("aaatools", "shared"),
-            ("aaalore", "lore"),
-        ] {
-            cfg.agents.insert(
-                alias.to_string(),
-                AliasedAgentConfig {
-                    risk_profile: profile.into(),
-                    model_provider: "ollama.default".into(),
-                    ..AliasedAgentConfig::default()
-                },
-            );
-        }
-        cfg
-    }
-
-    fn assert_delegate_target_modes_match_roster(cfg: &Config, caller_alias: &str) {
-        // `delegate_target_mode()` is the single-target convenience wrapper
-        // used by runtime admission. Keep it mathematically tied to the
-        // materialized roster so future resolver changes cannot split the two.
-        let roster: std::collections::BTreeMap<_, _> = cfg
-            .reachable_delegate_target_configs(caller_alias)
-            .into_iter()
-            .map(|target| (target.agent, target.mode))
-            .collect();
-
-        for alias in cfg.agents.keys() {
-            assert_eq!(
-                cfg.delegate_target_mode(caller_alias, alias),
-                roster.get(alias).copied(),
-                "direct delegate target mode must match materialized roster for caller {caller_alias:?}, target {alias:?}"
-            );
-        }
-
-        assert_eq!(
-            cfg.delegate_target_mode(caller_alias, ""),
-            None,
-            "empty target aliases are never reachable"
-        );
-        assert_eq!(
-            cfg.delegate_target_mode(caller_alias, "missing-agent"),
-            None,
-            "unknown target aliases are never reachable"
-        );
-    }
-
-    #[test]
-    async fn reachable_targets_auto_allows_same_profile_peers() {
-        let cfg = delegate_roster_config();
-        assert_eq!(cfg.reachable_delegate_targets("aaa"), vec!["aaatools"]);
-    }
-
-    #[test]
-    async fn reachable_targets_excludes_self() {
-        let cfg = delegate_roster_config();
-        assert!(
-            !cfg.reachable_delegate_targets("aaa")
-                .iter()
-                .any(|a| a == "aaa")
-        );
-    }
-
-    #[test]
-    async fn reachable_targets_opt_out_hides_peers_keeps_explicit() {
-        let mut cfg = delegate_roster_config();
-        let aaa = cfg.agents.get_mut("aaa").unwrap();
-        aaa.delegate_same_risk_profile = false;
-        aaa.delegates = vec![DelegateTargetConfig::bounded("aaalore")];
-        assert_eq!(cfg.reachable_delegate_targets("aaa"), vec!["aaalore"]);
-    }
-
-    #[test]
-    async fn reachable_targets_unions_peers_and_explicit_cross_profile() {
-        let mut cfg = delegate_roster_config();
-        cfg.agents.get_mut("aaa").unwrap().delegates =
-            vec![DelegateTargetConfig::bounded("aaalore")];
-        assert_eq!(
-            cfg.reachable_delegate_targets("aaa"),
-            vec!["aaalore", "aaatools"]
-        );
-    }
-
-    #[test]
-    async fn delegate_target_mode_matches_reachable_roster_matrix() {
-        // Matrix coverage for the roster/mode invariant: implicit peers,
-        // explicit bounded targets, explicit independent overrides,
-        // opt-out mode, disabled targets, and missing callers.
-        let mut cfg = delegate_roster_config();
-        assert_delegate_target_modes_match_roster(&cfg, "aaa");
-        assert_delegate_target_modes_match_roster(&cfg, "nope");
-
-        cfg.agents.get_mut("aaa").unwrap().delegates =
-            vec![DelegateTargetConfig::bounded("aaalore")];
-        assert_delegate_target_modes_match_roster(&cfg, "aaa");
-
-        cfg.agents.get_mut("aaa").unwrap().delegates = vec![DelegateTargetConfig {
-            agent: "aaatools".to_string(),
-            mode: DelegateExecutionMode::Independent,
-        }];
-        assert_delegate_target_modes_match_roster(&cfg, "aaa");
-
-        cfg.agents
-            .get_mut("aaa")
-            .unwrap()
-            .delegate_same_risk_profile = false;
-        assert_delegate_target_modes_match_roster(&cfg, "aaa");
-
-        cfg.agents.get_mut("aaatools").unwrap().enabled = false;
-        assert_delegate_target_modes_match_roster(&cfg, "aaa");
-    }
-
-    #[test]
-    async fn delegate_target_mode_normalizes_target_alias_and_overrides_implicit_mode() {
-        // Direct lookup receives a user/tool argument, not a config entry, so it
-        // must trim the requested alias and still prefer explicit mode over the
-        // implicit same-profile bounded default.
-        let mut cfg = delegate_roster_config();
-        cfg.agents.get_mut("aaa").unwrap().delegates = vec![DelegateTargetConfig {
-            agent: "aaatools".to_string(),
-            mode: DelegateExecutionMode::Independent,
-        }];
-
-        assert_eq!(
-            cfg.delegate_target_mode("aaa", "aaatools"),
-            Some(DelegateExecutionMode::Independent),
-            "explicit entries must override same-profile bounded reach"
-        );
-        assert_eq!(
-            cfg.delegate_target_mode("aaa", " aaatools "),
-            Some(DelegateExecutionMode::Independent),
-            "direct mode lookup must match reachable roster alias normalization"
-        );
-        assert_eq!(
-            cfg.delegate_target_mode("aaa", "aaa"),
-            None,
-            "self-delegation is never reachable"
-        );
-
-        cfg.agents.get_mut("aaatools").unwrap().enabled = false;
-        assert_eq!(
-            cfg.delegate_target_mode("aaa", "aaatools"),
-            None,
-            "disabled explicit targets are not reachable"
-        );
-    }
-
-    #[test]
-    async fn reachable_targets_unknown_caller_is_empty() {
-        let cfg = delegate_roster_config();
-        assert!(cfg.reachable_delegate_targets("nope").is_empty());
-    }
-
-    #[test]
-    async fn reachable_targets_excludes_disabled_same_profile_peer() {
-        let mut cfg = delegate_roster_config();
-        cfg.agents.get_mut("aaatools").unwrap().enabled = false;
-        assert!(
-            cfg.reachable_delegate_targets("aaa").is_empty(),
-            "disabled same-profile peer must not be reachable"
-        );
-    }
-
-    // ── Carded agents in the implicit same-profile-peer roster (#21) ──
-    //
-    // `reachable_delegate_target_configs` used to compare the raw
-    // `agent.risk_profile` field on both the caller and every candidate.
-    // That field is empty by construction for a carded agent (its profile
-    // lives on `cards[card].risk_profile` instead — see
-    // `Config::resolved_risk_profile_alias`), so a carded agent silently
-    // dropped out of this roster in either role even when its card's
-    // profile matched. These four cases are the fix's discriminator: they
-    // fail if the comparison reverts to `caller.risk_profile.trim()` /
-    // `agent.risk_profile.trim()` instead of the resolved alias.
-
     fn insert_card(cfg: &mut Config, card_alias: &str, risk_profile: &str) {
         cfg.cards.insert(
             card_alias.to_string(),
@@ -38279,272 +37666,6 @@ allowed_users = []
         let agent = cfg.agents.get_mut(agent_alias).unwrap();
         agent.risk_profile = String::new().into();
         agent.card = card_alias.into();
-    }
-
-    #[test]
-    async fn reachable_targets_includes_uncarded_peer_of_a_carded_caller() {
-        // aaa is carded; its card's profile ("shared") matches aaatools'
-        // direct profile. Without resolving the caller through its card,
-        // `caller.risk_profile.trim()` is empty and the whole implicit-peer
-        // branch is skipped — aaatools would be missing from the roster.
-        let mut cfg = delegate_roster_config();
-        insert_card(&mut cfg, "aaa_card", "shared");
-        carded(&mut cfg, "aaa", "aaa_card");
-        assert_eq!(
-            cfg.reachable_delegate_targets("aaa"),
-            vec!["aaatools"],
-            "a carded caller must reach an uncarded peer whose profile matches the card's"
-        );
-    }
-
-    #[test]
-    async fn reachable_targets_includes_a_carded_candidate_of_an_uncarded_caller() {
-        // aaatools is carded; its card's profile ("shared") matches aaa's
-        // direct profile. Without resolving the candidate through its card,
-        // `agent.risk_profile.trim()` is empty and never equals "shared" —
-        // aaatools would be missing from the roster even though aaa is
-        // uncarded and unaffected.
-        let mut cfg = delegate_roster_config();
-        insert_card(&mut cfg, "aaatools_card", "shared");
-        carded(&mut cfg, "aaatools", "aaatools_card");
-        assert_eq!(
-            cfg.reachable_delegate_targets("aaa"),
-            vec!["aaatools"],
-            "an uncarded caller must reach a carded peer whose card's profile matches"
-        );
-    }
-
-    #[test]
-    async fn reachable_targets_excludes_carded_pair_with_different_resolved_profiles() {
-        // Both carded, but the cards name different profiles ("shared" vs
-        // "lore"). The implicit same-profile rule must still exclude them —
-        // resolving through cards must not paper over an actual mismatch.
-        let mut cfg = delegate_roster_config();
-        insert_card(&mut cfg, "aaa_card", "shared");
-        insert_card(&mut cfg, "aaatools_card", "lore");
-        carded(&mut cfg, "aaa", "aaa_card");
-        carded(&mut cfg, "aaatools", "aaatools_card");
-        assert!(
-            cfg.reachable_delegate_targets("aaa").is_empty(),
-            "carded agents with different resolved profiles must not become implicit peers"
-        );
-    }
-
-    #[test]
-    async fn reachable_targets_uncarded_behaviour_is_unchanged() {
-        // Regression guard: an entirely uncarded roster must resolve
-        // identically to before the resolved-alias comparison was
-        // introduced. No agent here has a `card` set, so
-        // `resolved_risk_profile_alias` takes the same direct-field branch
-        // the old raw-field comparison did.
-        let cfg = delegate_roster_config();
-        assert_eq!(cfg.reachable_delegate_targets("aaa"), vec!["aaatools"]);
-        assert_eq!(cfg.reachable_delegate_targets("aaatools"), vec!["aaa"]);
-        assert!(cfg.reachable_delegate_targets("aaalore").is_empty());
-    }
-
-    #[test]
-    async fn reachable_targets_excludes_disabled_explicit_delegate() {
-        let mut cfg = delegate_roster_config();
-        cfg.agents
-            .get_mut("aaa")
-            .unwrap()
-            .delegate_same_risk_profile = false;
-        cfg.agents.get_mut("aaa").unwrap().delegates =
-            vec![DelegateTargetConfig::bounded("aaalore")];
-        cfg.agents.get_mut("aaalore").unwrap().enabled = false;
-        assert!(
-            cfg.reachable_delegate_targets("aaa").is_empty(),
-            "disabled explicit delegate must not be reachable"
-        );
-    }
-
-    #[test]
-    async fn validate_rejects_dangling_delegate_target() {
-        let mut cfg = delegate_roster_config();
-        cfg.agents.get_mut("aaa").unwrap().delegates = vec![DelegateTargetConfig::bounded("ghost")];
-        let err = cfg.validate().expect_err("dangling delegate must fail");
-        assert!(format!("{err:#}").contains("delegates"), "{err:#}");
-    }
-
-    #[test]
-    async fn validate_rejects_self_delegate() {
-        let mut cfg = delegate_roster_config();
-        cfg.agents.get_mut("aaa").unwrap().delegates = vec![DelegateTargetConfig::bounded("aaa")];
-        let err = cfg.validate().expect_err("self-delegate must fail");
-        assert!(format!("{err:#}").contains("itself"), "{err:#}");
-    }
-
-    #[test]
-    async fn validate_rejects_duplicate_delegate_target() {
-        // Duplicate detection is by target alias, not by the full object. A
-        // bounded and independent entry for the same agent would otherwise make
-        // runtime mode selection order-dependent.
-        let mut cfg = delegate_roster_config();
-        cfg.agents.get_mut("aaa").unwrap().delegates = vec![
-            DelegateTargetConfig::bounded("aaalore"),
-            DelegateTargetConfig {
-                agent: "aaalore".to_string(),
-                mode: DelegateExecutionMode::Independent,
-            },
-        ];
-        let err = cfg.validate().expect_err("duplicate delegate must fail");
-        assert!(format!("{err:#}").contains("duplicates"), "{err:#}");
-    }
-
-    #[test]
-    async fn delegate_targets_parse_strings_as_bounded() {
-        // Existing configs used bare strings. They must continue to parse as
-        // bounded targets so simply upgrading the binary does not widen any
-        // delegate's execution mode.
-        let toml_src = "\
-[agents.legacy]
-risk_profile = \"shared\"
-model_provider = \"ollama.default\"
-delegates = [\"reviewer\"]
-";
-        let cfg: Config = toml::from_str(toml_src).expect("legacy delegate config parses");
-        let agent = cfg.agents.get("legacy").expect("agent present");
-        assert_eq!(
-            agent.delegates,
-            vec![DelegateTargetConfig::bounded("reviewer")]
-        );
-    }
-
-    #[test]
-    async fn delegate_targets_parse_objects_and_default_mode() {
-        // Object entries are the new surface. Omitted mode deliberately keeps
-        // the legacy bounded default; independent mode must be explicit.
-        let toml_src = "\
-[agents.legacy]
-risk_profile = \"shared\"
-model_provider = \"ollama.default\"
-delegates = [
-  { agent = \"reviewer\" },
-  { agent = \"sysadmin\", mode = \"independent\" },
-]
-";
-        let cfg: Config = toml::from_str(toml_src).expect("object delegate config parses");
-        let agent = cfg.agents.get("legacy").expect("agent present");
-        assert_eq!(
-            agent.delegates,
-            vec![
-                DelegateTargetConfig::bounded("reviewer"),
-                DelegateTargetConfig {
-                    agent: "sysadmin".to_string(),
-                    mode: DelegateExecutionMode::Independent,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    async fn delegate_targets_parse_mixed_string_and_object_entries() {
-        // Operators may migrate one target at a time. Mixed arrays are therefore
-        // part of the supported config shape, not just a permissive accident.
-        let toml_src = "\
-[agents.legacy]
-risk_profile = \"shared\"
-model_provider = \"ollama.default\"
-delegates = [
-  \"reviewer\",
-  { agent = \"sysadmin\", mode = \"independent\" },
-]
-";
-        let cfg: Config = toml::from_str(toml_src).expect("mixed delegate config parses");
-        let agent = cfg.agents.get("legacy").expect("agent present");
-        assert_eq!(
-            agent.delegates,
-            vec![
-                DelegateTargetConfig::bounded("reviewer"),
-                DelegateTargetConfig {
-                    agent: "sysadmin".to_string(),
-                    mode: DelegateExecutionMode::Independent,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    async fn delegate_targets_object_array_round_trips_through_set_prop_and_validate() {
-        // The programmatic config-editing path must accept the same mixed shape
-        // as TOML loading, then serialize back without dropping the agents
-        // table. This is the CLI/config-tool version of the original failure.
-        let mut cfg = delegate_roster_config();
-        let value = serde_json::json!([
-            "aaatools",
-            { "agent": "aaalore", "mode": "independent" }
-        ])
-        .to_string();
-
-        cfg.set_prop("agents.aaa.delegates", &value)
-            .expect("delegate object-array set_prop accepts mixed JSON entries");
-        cfg.validate()
-            .expect("valid delegate object-array config validates");
-        assert_eq!(
-            cfg.reachable_delegate_target_configs("aaa"),
-            vec![
-                DelegateTargetConfig {
-                    agent: "aaalore".to_string(),
-                    mode: DelegateExecutionMode::Independent,
-                },
-                DelegateTargetConfig::bounded("aaatools"),
-            ],
-            "explicit independent entry should not remove configured agents from reachability"
-        );
-
-        let toml = toml::to_string(&cfg).expect("config serializes");
-        let reparsed: Config = toml::from_str(&toml).expect("serialized config reparses");
-        assert_eq!(
-            reparsed
-                .agents
-                .get("aaa")
-                .expect("agent remains visible")
-                .delegates,
-            vec![
-                DelegateTargetConfig::bounded("aaatools"),
-                DelegateTargetConfig {
-                    agent: "aaalore".to_string(),
-                    mode: DelegateExecutionMode::Independent,
-                },
-            ]
-        );
-        assert!(reparsed.agents.contains_key("aaa"));
-        assert!(reparsed.agents.contains_key("aaatools"));
-        assert!(reparsed.agents.contains_key("aaalore"));
-    }
-
-    #[test]
-    async fn delegate_targets_serialize_as_object_array_with_explicit_mode() {
-        // Saving always emits explicit objects, including bounded mode. That
-        // makes future diffs unambiguous and avoids a lossy string/object mix on
-        // writeback.
-        let mut cfg = delegate_roster_config();
-        cfg.agents.get_mut("aaa").unwrap().delegates = vec![
-            DelegateTargetConfig::bounded("aaatools"),
-            DelegateTargetConfig {
-                agent: "aaalore".to_string(),
-                mode: DelegateExecutionMode::Independent,
-            },
-        ];
-        let toml = toml::to_string(&cfg).expect("config serializes");
-        assert!(toml.contains("agent = \"aaatools\""), "{toml}");
-        assert!(toml.contains("mode = \"bounded\""), "{toml}");
-        assert!(toml.contains("agent = \"aaalore\""), "{toml}");
-        assert!(toml.contains("mode = \"independent\""), "{toml}");
-    }
-
-    #[test]
-    async fn delegate_fields_default_for_legacy_config_roundtrip() {
-        let toml_src = "\
-[agents.legacy]
-risk_profile = \"shared\"
-model_provider = \"ollama.default\"
-";
-        let cfg: Config = toml::from_str(toml_src).expect("legacy config parses");
-        let agent = cfg.agents.get("legacy").expect("agent present");
-        assert!(agent.delegate_same_risk_profile, "default must be true");
-        assert!(agent.delegates.is_empty(), "default must be empty");
     }
 
     #[test]

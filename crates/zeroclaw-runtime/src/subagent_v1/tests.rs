@@ -1186,8 +1186,7 @@ fn digest_only_kp18_candidate_cannot_be_routed_into_promotion() {
 
 fn reasoning_config() -> Arc<Config> {
     let mut config = Config::default();
-    let mut risk = RiskProfileConfig::default();
-    risk.delegation_policy.mode = zeroclaw_config::autonomy::DelegationMode::Allow;
+    let risk = RiskProfileConfig::default();
     config.risk_profiles.insert("default".to_string(), risk);
     config.agents.insert(
         "parent-agent".to_string(),
@@ -1476,8 +1475,7 @@ async fn ambient_lineage_governs_shared_arc_spawn_tools() {
     use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
 
     let mut config = Config::default();
-    let mut risk = RiskProfileConfig::default();
-    risk.delegation_policy.mode = zeroclaw_config::autonomy::DelegationMode::Allow;
+    let risk = RiskProfileConfig::default();
     config.risk_profiles.insert("default".to_string(), risk);
     config.agents.insert(
         "parent-agent".to_string(),

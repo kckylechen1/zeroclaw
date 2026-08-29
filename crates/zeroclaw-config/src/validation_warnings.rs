@@ -71,10 +71,127 @@ impl ValidationWarning {
 /// Sunset: these tombstones are compatibility shims; they will be removed
 /// in a later announced window, after which the env paths hard-error like
 /// any other unknown path and the file sections parse-drop silently.
-pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[(
-    "gateway.pairing_dashboard",
-    "gateway_pairing_dashboard_removed",
-)];
+pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
+    (
+        "gateway.pairing_dashboard",
+        "gateway_pairing_dashboard_removed",
+    ),
+    ("delegate", "delegate_config_removed"),
+];
+
+/// Retired config FIELDS: dotted path (one `*` wildcard segment allowed for
+/// map-keyed aliases, e.g. `[agents.<alias>]`) + stable warning code. Same
+/// contract as `RETIRED_CONFIG_SURFACES`, one level deeper: the field was
+/// deleted from its struct, serde silently drops the unknown key, and this
+/// checker makes the retirement visible instead of a silent no-op.
+pub const RETIRED_CONFIG_FIELDS: &[(&str, &str)] = &[
+    ("agents.*.delegates", "delegate_config_removed"),
+    (
+        "agents.*.delegate_same_risk_profile",
+        "delegate_config_removed",
+    ),
+    (
+        "risk_profiles.*.delegation_policy",
+        "delegate_config_removed",
+    ),
+    (
+        "runtime_profiles.*.delegation_timeout_secs",
+        "delegate_config_removed",
+    ),
+    (
+        "runtime_profiles.*.agentic_timeout_secs",
+        "delegate_config_removed",
+    ),
+];
+
+/// Structured tombstone warnings for retired fields still present in a
+/// config file. Companion to [`retired_section_tombstones`]: same load-path
+/// wiring, same warning shape, same sunset. A hit means the key was dropped
+/// by serde as unknown while every other key in its section kept working —
+/// the warning says so explicitly.
+pub fn retired_field_tombstones(contents: &str) -> Vec<ValidationWarning> {
+    let Ok(root) = toml::from_str::<toml::Value>(contents) else {
+        return Vec::new();
+    };
+    let Some(root) = root.as_table() else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    for (path, code) in RETIRED_CONFIG_FIELDS {
+        if !field_path_exists(root, path) {
+            continue;
+        }
+        let warning = ValidationWarning::new(
+            *code,
+            format!(
+                "[{path}] in config.toml is ignored: the legacy delegation key was removed \
+                 from the schema with the retired delegate tool and has no runtime \
+                 consumer. Remove the key.",
+            ),
+            (*path).to_string(),
+        );
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({ "path": path, "code": code })),
+            &warning.message
+        );
+        warnings.push(warning);
+    }
+    warnings
+}
+
+/// True when a dotted path with at most one `*` wildcard segment (matching a
+/// map key) resolves to any value in the parsed root.
+fn field_path_exists(root: &toml::value::Table, path: &str) -> bool {
+    let segments: Vec<&str> = path.split('.').collect();
+    match segments.iter().position(|segment| *segment == "*") {
+        None => value_at_exists(root, &segments),
+        Some(star) => {
+            let Some(parent) = value_at_table(root, &segments[..star]) else {
+                return false;
+            };
+            let suffix = &segments[star + 1..];
+            parent.values().any(|value| match value.as_table() {
+                Some(table) => value_at_exists(table, suffix),
+                None => suffix.is_empty(),
+            })
+        }
+    }
+}
+
+/// Resolve a wildcard-free segment list to a table, if present.
+fn value_at_table<'a>(
+    table: &'a toml::value::Table,
+    segments: &[&str],
+) -> Option<&'a toml::value::Table> {
+    let mut current = table;
+    for segment in segments {
+        current = current.get(*segment)?.as_table()?;
+    }
+    Some(current)
+}
+
+/// True when a wildcard-free segment list resolves to a value. Only the
+/// intermediate segments must be tables; the terminal segment may be any
+/// value kind (the retired delegate keys are bools, arrays, and tables).
+fn value_at_exists(mut current: &toml::value::Table, segments: &[&str]) -> bool {
+    let Some((&last, intermediates)) = segments.split_last() else {
+        return false;
+    };
+    for segment in intermediates {
+        let Some(value) = current.get(*segment) else {
+            return false;
+        };
+        match value.as_table() {
+            Some(table) => current = table,
+            // A non-table mid-path value cannot contain the terminal.
+            None => return false,
+        }
+    }
+    current.contains_key(last)
+}
 
 /// Structured tombstone warnings for retired sections still present in a
 /// config file. `GatewayConfig`-style structs do not use
@@ -146,6 +263,38 @@ fn table_path_exists(root: Option<&toml::value::Table>, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_field_tombstones_flags_field_under_wildcard_alias() {
+        let contents = r#"
+[agents.lead]
+model_provider = "openai.default"
+delegates = ["peer"]
+delegate_same_risk_profile = true
+
+[risk_profiles.shared]
+delegation_policy = { mode = "allow" }
+"#;
+        let warnings = retired_field_tombstones(contents);
+        let paths: Vec<_> = warnings.iter().map(|w| w.path.as_str()).collect();
+        assert!(paths.contains(&"agents.*.delegates"), "{paths:?}");
+        assert!(
+            paths.contains(&"agents.*.delegate_same_risk_profile"),
+            "{paths:?}"
+        );
+        assert!(
+            paths.contains(&"risk_profiles.*.delegation_policy"),
+            "{paths:?}"
+        );
+        // Untouched fields never warn.
+        assert_eq!(warnings.len(), 3, "{paths:?}");
+    }
+
+    #[test]
+    fn retired_field_tombstones_silent_when_absent() {
+        let contents = "[agents.lead]\nmodel_provider = \"openai.default\"\n";
+        assert!(retired_field_tombstones(contents).is_empty());
+    }
 
     #[test]
     fn retired_section_tombstones_flags_section_but_not_scalar_or_absent() {

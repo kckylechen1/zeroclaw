@@ -2023,7 +2023,7 @@ async fn acp_persistence_skips_empty_and_failed_turns() {
 
 fn make_agent_rename_test_config(tmp: &tempfile::TempDir) -> zeroclaw_config::schema::Config {
     use zeroclaw_config::multi_agent::{AccessMode, AgentAlias, PeerGroupConfig};
-    use zeroclaw_config::schema::{AliasedAgentConfig, DelegateTargetConfig};
+    use zeroclaw_config::schema::AliasedAgentConfig;
 
     let mut config = zeroclaw_config::schema::Config {
         config_path: tmp.path().join("config.toml"),
@@ -2035,7 +2035,6 @@ fn make_agent_rename_test_config(tmp: &tempfile::TempDir) -> zeroclaw_config::sc
     config.acp.default_agent = Some("alpha".to_string());
 
     let mut alpha = AliasedAgentConfig {
-        delegates: vec![DelegateTargetConfig::bounded("alpha")],
         ..Default::default()
     };
     alpha
@@ -2045,7 +2044,6 @@ fn make_agent_rename_test_config(tmp: &tempfile::TempDir) -> zeroclaw_config::sc
     config.agents.insert("alpha".to_string(), alpha);
 
     let mut reviewer = AliasedAgentConfig {
-        delegates: vec![DelegateTargetConfig::bounded("alpha")],
         ..Default::default()
     };
     reviewer
@@ -2092,23 +2090,11 @@ async fn config_map_key_rename_uses_agent_cascade() {
     assert!(config.agents.contains_key("beta"));
     assert_eq!(config.heartbeat.agent, "beta");
     assert_eq!(config.acp.default_agent.as_deref(), Some("beta"));
-    assert_eq!(
-        config.agents["beta"].delegates,
-        vec![zeroclaw_config::schema::DelegateTargetConfig::bounded(
-            "beta"
-        )]
-    );
     assert!(
         config.agents["beta"]
             .workspace
             .access
             .contains_key(&zeroclaw_config::multi_agent::AgentAlias::new("beta"))
-    );
-    assert_eq!(
-        config.agents["reviewer"].delegates,
-        vec![zeroclaw_config::schema::DelegateTargetConfig::bounded(
-            "beta"
-        )]
     );
     assert_eq!(
         config.agents["reviewer"].workspace.read_memory_from,

@@ -39,7 +39,7 @@ Subagents inherit their parent's effective security boundary. Policy and memory 
 
 The `spawn_subagent` path can wait for the child in-turn or start it detached (`background: true`) through the coordinator. Detached completions are claimed into a later parent turn by the announce chain.
 
-The delegate tool can run synchronously or start a background task and return a UUID. Background delegate now takes the same coordinator spawn as detached `spawn_subagent`: admission, persistence (`parent_id` = the parent's session key, with the `agent:<alias>` fallback), cancellation, and the announce chain. `check_result` / `list_results` / `await_sessions` / `cancel_task` query that actor rather than a workspace file store. Pre-migration `delegate_results/*.json` files are ignored.
+The retired `delegate` tool used to start background tasks through the same coordinator spawn as detached `spawn_subagent`; it is removed, and detached `spawn_subagent` is the surviving background-child path with that coordinator behavior (admission, persistence, cancellation, and the announce chain). Pre-migration `delegate_results/*.json` files are ignored.
 
 Under a booted daemon, `SubagentPersistence` writes the durable control-plane row as part of coordinator spawn/finish: one write path, not a dual-write alongside a result file. Startup recovery marks prior-boot running rows `lost`. The task row makes an interrupted child visible but does not recreate its execution.
 
@@ -65,7 +65,7 @@ For background-work changes, answer these before reviewer sign-off:
 
 - Cron scheduler and persistence: `crates/zeroclaw-runtime/src/cron/scheduler.rs`, `crates/zeroclaw-runtime/src/cron/store.rs`
 - SOP run side: removed with the run side; the former `sop/engine.rs` and `sop/store/` pointers no longer exist (a legacy `data/sop/runs.db` on an old install is left in place and reported by a boot-time warning)
-- Delegation and subagent behavior: [Delegation & SubAgents](../agents/delegation.md), `crates/zeroclaw-runtime/src/tools/delegate.rs`, `crates/zeroclaw-runtime/src/tools/spawn_subagent.rs`, `crates/zeroclaw-runtime/src/subagent/mod.rs`
+- Delegation and subagent behavior: [Delegation & SubAgents](../agents/delegation.md), `crates/zeroclaw-runtime/src/tools/spawn_subagent.rs`, `crates/zeroclaw-runtime/src/subagent/mod.rs` (`tools/delegate.rs` was removed with the retired delegate tool)
 - Durable task control plane and recovery: `crates/zeroclaw-runtime/src/control_plane/`
 - Goal-mode decision: [ADR-008](./decisions/ADR-008-goal-mode-control-plane-and-usage-accounting.md)
 - SOP operator guide: [How SOPs run](../sop/how-it-works.md)

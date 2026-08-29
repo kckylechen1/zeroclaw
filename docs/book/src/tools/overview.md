@@ -41,7 +41,7 @@ Registered alongside the built-ins under `full`/`legacy` composition (the minima
 | `cron_*` | Manage scheduled jobs: `cron_add`, `cron_list`, `cron_remove`, `cron_update`, `cron_run`, `cron_runs` |
 | `schedule` | Shell-only one-shot/recurring scheduling |
 | `memory_forget`, `memory_export`, `memory_purge` | Long-term memory management |
-| `spawn_subagent`, `delegate` | Run a subtask in a child agent (legacy entry points, tracked as migration debt) |
+| `spawn_subagent` | Run a subtask in a child agent (legacy entry point, tracked as migration debt; the retired `delegate` tool was removed) |
 | `reasoning_subagent` | V1 SubAgent entry point: one bounded, contract-admitted ReasoningSubAgent run returning a structured report. Also the SubAgent entry point of the minimal composition. |
 
 Conditionally registered:

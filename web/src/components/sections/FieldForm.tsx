@@ -686,9 +686,6 @@ const AGENT_MULTI_ALIAS_FIELDS: Record<string, keyof AgentOptionsResponse> = {
   "skill_bundles": "skill_bundles",
   "knowledge_bundles": "knowledge_bundles",
   "mcp_bundles": "mcp_bundles",
-  // Delegates is a subset of the configured agents — give it the same themed
-  // multi-select (with agent suggestions) as the bundle fields, not free text.
-  delegates: "agents",
 };
 
 // Peer-groups carry the same alias-ref shape as agents do: a single
