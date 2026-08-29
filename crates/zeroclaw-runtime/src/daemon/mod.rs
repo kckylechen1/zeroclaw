@@ -379,56 +379,12 @@ pub async fn run(
         ));
     }
 
-    if crate::control_plane::control_plane().is_none() {
-        match crate::control_plane::ControlPlaneHandle::start(&config.data_dir).await {
-            Ok(mut handle) => {
-                // The coordinator actor is started only now, against the
-                // handle `start` already returned — i.e. strictly after that
-                // call's recovery pass reclaimed every prior-boot orphan row
-                // for this boot_id. Starting it any earlier (or folding it
-                // into `start` itself) would risk a freshly-accepted spawn
-                // racing the reaper's prior-boot sweep over the same table
-                // recovery is still reconciling; running the actor after
-                // `start` returns is what keeps those two passes from ever
-                // overlapping. See `coordinator_host`'s module doc.
-                let coordinator_host = crate::control_plane::coordinator_host::start(
-                    std::sync::Arc::new(config.clone()),
-                    std::sync::Arc::clone(&handle.sqlite_store),
-                    handle.boot_id.clone(),
-                );
-                handle.commands = Some(coordinator_host.commands);
-                // Folded into the daemon's ordinary component shutdown below
-                // (grace window, then force-abort): the coordinator's own
-                // exit condition (command channel closed AND every in-flight
-                // child settled) never fires on its own here, because the
-                // sender lives inside the process-global `ControlPlaneHandle`
-                // for the rest of the process — so this task is always
-                // force-aborted at shutdown, which is what makes
-                // `Coordinator`'s Drop sweep (ledgering any still-live child
-                // `Lost`) actually run instead of being skipped.
-                handles.push(coordinator_host.actor);
-                crate::control_plane::init_control_plane(handle);
-            }
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({ "error": format!("{e:#}") })),
-                    "control-plane failed to start; supervision disabled for this run"
-                );
-            }
-        }
-    }
-    // Respawn the reaper for THIS run iteration against the INSTALLED handle, so its
-    // boot_id matches what producers stamp via `control_plane()`.
-    if let Some(handle) = crate::control_plane::control_plane() {
-        handle.spawn_reaper(
-            crate::control_plane::reaper::DEFAULT_MAX_RUNTIME_SECS,
-            channels_cancel.clone(),
-        );
-        crate::health::mark_component_ok("control-plane");
-    }
+    // Wall 4 (#197): the durable control-plane is no longer booted. Its only
+    // production writer (the coordinator child host) lost its last spawn
+    // producer with the spawn wall (#255), and durable execution truth is
+    // owned by Tachi through the bridge (#205 annex rows 1 and 6). A legacy
+    // `<data_dir>/control_plane.db` is left exactly as it is; the migration
+    // WARN for it lands with the wall's data-disposition slice.
 
     if let Some(channels_start) = registry.take_channels_start() {
         if has_supervised_channels(&config) {
@@ -2898,6 +2854,47 @@ mod tests {
         assert!(
             component["last_error"].is_null(),
             "scheduler must have no last_error after cooperative shutdown; got: {component}"
+        );
+    }
+
+    /// A daemon boot must not create `<data_dir>/control_plane.db` anymore
+    /// (Wall 4, #197): the durable control-plane is not booted, so the one
+    /// remaining write path it had — `ControlPlaneHandle::start` creating the
+    /// DB file and its recovery pass ledgering rows at every boot — is gone.
+    /// Red on the pre-slice tree (the boot block created the file on every
+    /// run), green here.
+    #[tokio::test]
+    async fn daemon_boot_creates_no_control_plane_db() {
+        use tokio::time::{Duration, timeout};
+
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let mut registry = DaemonRegistry::new();
+        registry.register_gateway(Box::new(
+            |_host, _port, _config, _event_tx, reload_controls, _tui_reg| {
+                Box::pin(async move {
+                    let reload_tx = reload_controls
+                        .map(|controls| controls.reload_tx)
+                        .expect("daemon should pass reload controls to gateway starter");
+                    reload_tx.send(true).expect("send reload signal");
+                    std::future::pending::<Result<()>>().await
+                })
+            },
+        ));
+
+        let exit = timeout(
+            Duration::from_secs(2),
+            run(config, "127.0.0.1".to_string(), 4243, registry, false),
+        )
+        .await
+        .expect("daemon should return after gateway-triggered reload")
+        .expect("daemon run should succeed");
+        assert_eq!(exit, DaemonExit::Reload);
+
+        assert!(
+            !tmp.path().join("data").join("control_plane.db").exists(),
+            "a daemon boot must not create the control-plane DB; \
+             durable task truth is Tachi's through the bridge (#205 annex rows 1/6)"
         );
     }
 

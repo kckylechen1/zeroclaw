@@ -452,32 +452,23 @@ impl ApprovalManager {
 
 /// Resolve the local_tool boot id, freezing the first answer for the process.
 ///
-/// The choice is whatever is visible on first use: a live ControlPlane boot
-/// id if the plane is already installed, otherwise a process-local UUID.
-/// Later managers reuse that frozen value even if ControlPlane appears
-/// afterwards.
+/// The boot id is a process-local UUID. It was homologous with the durable
+/// control-plane's boot id until Wall 4 (#197) retired that plane: durable
+/// execution truth moved to Tachi (#205 annex rows 1 and 6), and the grant
+/// namespace never needed the homology — what it needs is one stable id per
+/// process so independently opened managers redeem each other's rows.
 ///
-/// That is deliberately not "always the ControlPlane id". Gateway and
-/// channel construction can attach an approval store before
-/// `init_control_plane` runs; flipping boot_id afterwards would split one
-/// process across two grant namespaces, so independently opened managers
-/// could not redeem each other's rows. Process-local consistency is the
-/// contract; homology with ControlPlane is not required.
-fn resolve_boot_id(slot: &OnceLock<String>, control_plane_boot: Option<&str>) -> String {
-    slot.get_or_init(|| {
-        control_plane_boot
-            .map(str::to_string)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-    })
-    .clone()
+/// The `OnceLock` freeze stays: gateway and channel construction can attach
+/// an approval store at different moments of the same process, and flipping
+/// boot_id mid-process would split one process across two grant namespaces.
+fn resolve_boot_id(slot: &OnceLock<String>) -> String {
+    slot.get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .clone()
 }
 
 fn process_boot_id() -> String {
     static BOOT_ID: OnceLock<String> = OnceLock::new();
-    resolve_boot_id(
-        &BOOT_ID,
-        crate::control_plane::control_plane().map(|handle| handle.boot_id.as_str()),
-    )
+    resolve_boot_id(&BOOT_ID)
 }
 
 /// Open `data_dir/approvals.db`. Failure returns `None` so callers keep the
@@ -938,33 +929,26 @@ mod approval_precedence_tests {
         );
     }
 
-    /// First manager is built with no ControlPlane. A ControlPlane then
-    /// starts (later boot id). The frozen choice stays the first one, so a
-    /// second manager on the same DB can redeem the first manager's grant.
+    /// First manager freezes a boot id. A second manager on the same DB —
+    /// opened independently, as the gateway and channel construction do —
+    /// resolves the same frozen id and can redeem the first manager's grant.
     #[tokio::test]
-    async fn frozen_boot_id_ignores_a_later_control_plane_and_cross_redeems() {
+    async fn frozen_boot_id_cross_redeems_across_independently_opened_managers() {
         let slot = std::sync::OnceLock::new();
         let dir = tempfile::tempdir().unwrap();
         let args = json!({"command": "ls"});
 
-        let first_boot = super::resolve_boot_id(&slot, None);
+        let first_boot = super::resolve_boot_id(&slot);
         let first =
             manager(AutonomyLevel::Supervised, &["shell"], &[]).with_store(std::sync::Arc::new(
                 super::store::ApprovalStore::open(dir.path(), first_boot.as_str())
                     .expect("store opens"),
             ));
 
-        let plane = crate::control_plane::ControlPlaneHandle::start(dir.path())
-            .await
-            .unwrap();
-        let after = super::resolve_boot_id(&slot, Some(plane.boot_id.as_str()));
+        let after = super::resolve_boot_id(&slot);
         assert_eq!(
             first_boot, after,
-            "the first boot choice must stay frozen after ControlPlane appears"
-        );
-        assert_ne!(
-            after, plane.boot_id,
-            "a later ControlPlane id must not replace the frozen boot"
+            "the first boot choice must stay frozen for the whole process"
         );
 
         let second =
@@ -991,7 +975,7 @@ mod approval_precedence_tests {
         );
         assert!(
             first.redeem_one_shot("run-2", "shell", &args).is_ok(),
-            "the first manager must also redeem a grant minted by itself after the plane starts"
+            "the first manager must also redeem a grant minted by itself afterwards"
         );
     }
 
