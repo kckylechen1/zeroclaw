@@ -318,6 +318,26 @@ delegation_policy = { mode = "allow" }
     }
 
     #[test]
+    fn retired_section_tombstones_warn_for_every_table_entry() {
+        // Discriminator for the wall 2 entries: the shared table is only as
+        // good as the detector actually firing for each of its paths. Build
+        // a minimal doc carrying every retired section and require exactly
+        // one warning with that entry's code and path.
+        for (path, code) in RETIRED_CONFIG_SURFACES {
+            let segments: Vec<&str> = path.split('.').collect();
+            let mut doc = String::new();
+            for depth in 1..=segments.len() {
+                doc.push_str(&format!("[{}]\n", segments[..depth].join(".")));
+            }
+            doc.push_str("legacy_key = true\n");
+            let warnings = retired_section_tombstones(&doc);
+            assert_eq!(warnings.len(), 1, "{path}: {warnings:?}");
+            assert_eq!(warnings[0].code, *code);
+            assert_eq!(warnings[0].path, *path);
+        }
+    }
+
+    #[test]
     fn env_tombstone_prefix_is_derived_from_the_retired_surface_table() {
         // SSOT guard: the env-form prefixes used by the walker must be the
         // retired table's dotted paths translated to env form — if a future
