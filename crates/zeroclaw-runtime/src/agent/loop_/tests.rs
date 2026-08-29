@@ -4426,15 +4426,22 @@ async fn run_tool_call_loop_reentrant_agent_tools_are_dedup_exempt_by_default() 
     let turn_id = uuid::Uuid::new_v4().to_string();
     // The retired `spawn_subagent` left `REENTRANT_AGENT_TOOLS` with the
     // spawn_subagent wall; the V1 `reasoning_subagent` entrypoint is the
-    // surviving re-entrant spawn surface this law pins.
-    let reentrant_spawn_tool = crate::tools::REENTRANT_AGENT_TOOLS[0];
+    // surviving re-entrant spawn surface this law pins. The name is
+    // spelled LITERALLY (not derived from the list) so the test stays an
+    // independent pin: if the list is edited, this test must fail until a
+    // human reconciles the two.
+    assert_eq!(
+        crate::tools::REENTRANT_AGENT_TOOLS,
+        &["reasoning_subagent"],
+        "REENTRANT_AGENT_TOOLS drifted; reconcile this test's literal name"
+    );
     let scripted_calls: &'static str = Box::leak(
         format!(
             r#"<tool_call>
-{{"name":"{reentrant_spawn_tool}","arguments":{{"prompt":"same"}}}}
+{{"name":"reasoning_subagent","arguments":{{"prompt":"same"}}}}
 </tool_call>
 <tool_call>
-{{"name":"{reentrant_spawn_tool}","arguments":{{"prompt":"same"}}}}
+{{"name":"reasoning_subagent","arguments":{{"prompt":"same"}}}}
 </tool_call>"#
         )
         .into_boxed_str(),
@@ -4443,7 +4450,7 @@ async fn run_tool_call_loop_reentrant_agent_tools_are_dedup_exempt_by_default() 
 
     let invocations = Arc::new(AtomicUsize::new(0));
     let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(
-        reentrant_spawn_tool,
+        "reasoning_subagent",
         Arc::clone(&invocations),
     ))];
 
