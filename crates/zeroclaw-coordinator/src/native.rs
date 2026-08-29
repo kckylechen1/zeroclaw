@@ -8,8 +8,9 @@
 //!
 //! Spawn is detached: it awaits admission only and returns a handle. That is
 //! the `AgentDriver::spawn` contract. It does **not** replace
-//! [`ChannelBackend::spawn`] or `spawn_subagent`; those callers stay on the
-//! native `ChildRequest` path until a later PR switches them over.
+//! [`ChannelBackend::spawn`] (the sole live caller since the `spawn_subagent`
+//! tool retired); that caller stays on the native `ChildRequest` path until a
+//! later PR switches it over.
 //!
 //! Resume stays on the trait default ([`DriverError::Unsupported`]). Native
 //! continuation is expressed as a new spawn with [`AgentRunRequest::resume_from`],
@@ -168,7 +169,8 @@ impl AgentDriver for NativeAgentDriver {
         // the child ends, which is `ChannelBackend::spawn`'s contract, not
         // this one. `handle_only` is set from `run_in_background`, so the
         // coordinator does not treat the dropped receiver as an abandoned
-        // foreground caller. See `spawn_subagent`'s detached path.
+        // foreground caller. See the retired `spawn_subagent` tool's detached
+        // path, whose contract this preserves.
         self.backend
             .sender()
             .send(CoordinatorCommand::Spawn(SpawnCommand {

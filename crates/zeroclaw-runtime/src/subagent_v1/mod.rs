@@ -53,10 +53,12 @@ use zeroclaw_config::schema::Config;
 // tool instances (census §2.1: the historical bounded-delegate handout,
 // where children received the parent's tool Arcs without a registry
 // rebuild — its only producer, the delegate sub-loop, was retired with
-// wall 1). The scope REMAINS the SA-9 defense-in-depth: any future
-// shared-registry context must scope its tool-call loop with a child
-// lineage so spawn-capable shared tools observe the CHILD's depth, not
-// the parent's. Registries built with an explicit lineage (every
+// wall 1, and the legacy `spawn_subagent` Arc reader with the spawn
+// wall). The scope REMAINS the SA-9 defense-in-depth, read by the v1
+// spawn surface's `effective_lineage`: any future shared-registry
+// context must scope its tool-call loop with a child lineage so
+// spawn-capable shared tools observe the CHILD's depth, not the
+// parent's. Registries built with an explicit lineage (every
 // `agent::run` rebuild) carry their own; the ambient value never
 // LOWERS an explicitly carried lineage (readers take the max).
 tokio::task_local! {
@@ -68,16 +70,6 @@ pub(crate) fn ambient_lineage() -> Option<LineageRef> {
     AMBIENT_SPAWN_LINEAGE
         .try_with(|lineage| lineage.clone())
         .ok()
-}
-
-/// The effective depth for a spawn-capable tool instance: never lower
-/// than its own carried lineage or the ambient scope (SA-9 — one
-/// monotonic ledger; sharing an Arc into a deeper context must not
-/// make the context behave shallower).
-pub(crate) fn effective_depth_with_ambient(own: Option<&LineageRef>) -> u32 {
-    let own_depth = own.map_or(0, LineageRef::depth);
-    let ambient_depth = ambient_lineage().as_ref().map_or(0, LineageRef::depth);
-    own_depth.max(ambient_depth)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2099,7 +2091,8 @@ impl Tool for ReasoningSubagentTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        // Card / risk-profile self-check, mirroring spawn_subagent's gate:
+        // Card / risk-profile self-check, mirroring the retired
+        // spawn_subagent's gate:
         // the tool must be granted by the governing card or listed in the
         // risk profile's allowed_tools (when a list exists), and not
         // excluded.

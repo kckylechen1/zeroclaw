@@ -1467,52 +1467,46 @@ async fn tool_output_carries_the_structured_report_as_data() {
 }
 
 #[tokio::test]
-async fn ambient_lineage_governs_shared_arc_spawn_tools() {
+async fn ambient_lineage_governs_spawn_arcs() {
     // The bounded-delegate hole, closed: a spawn-capable tool Arc shared
     // INTO a deeper context must observe that context's depth via the
-    // ambient scope — both the legacy spawn_subagent and the v1
-    // reasoning tool.
-    use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
-
-    let mut config = Config::default();
-    let risk = RiskProfileConfig::default();
-    config.risk_profiles.insert("default".to_string(), risk);
-    config.agents.insert(
-        "parent-agent".to_string(),
-        AliasedAgentConfig {
-            risk_profile: "default".into(),
-            ..AliasedAgentConfig::default()
-        },
-    );
-    // Legacy spawn_subagent with NO carried lineage (a top-level
-    // registry's Arc) executing inside an ambient context at the cap.
-    let spawn_tool = crate::tools::SpawnSubagentTool::new(
-        Arc::new(config),
-        "parent-agent",
-        Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
-    );
+    // ambient scope. The legacy `spawn_subagent` Arc that originally
+    // pinned this law is retired (spawn_subagent wall); the surviving
+    // spawn surface — the v1 reasoning tool — is the Arc under test,
+    // and its `effective_lineage` takes the ambient depth whenever it
+    // exceeds the Arc's own.
+    // A lineage-None spawn Arc (a top-level registry's Arc, exactly what
+    // gateway/channel paths produce) executing inside an ambient context
+    // at the cap observes the AMBIENT depth, not its own 0.
+    let spawn_tool =
+        reasoning_tool().with_model_resolver(StubResolver::json(ok_report_body("never runs")));
     let ambient_at_cap = root_lineage().child().child().child();
     let result = super::AMBIENT_SPAWN_LINEAGE
         .scope(
             ambient_at_cap,
             spawn_tool.execute(serde_json::json!({
-                "prompt": "probe"
+                "objective": "probe"
             })),
         )
         .await
         .unwrap();
     assert!(
+        !result.success,
+        "a shared spawn Arc at ambient depth 3 must refuse: {:?}",
+        result.error
+    );
+    assert!(
         result
             .error
             .as_deref()
             .unwrap_or_default()
-            .contains("lineage depth limit"),
-        "a shared spawn Arc at ambient depth 3 must refuse: {:?}",
+            .contains("depth 3"),
+        "the refusal must name the ambient depth (3), not the Arc's own 0: {:?}",
         result.error
     );
 
-    // The v1 reasoning tool refuses depth > 0 under the same ambient
-    // scope (D1: a bounded child cannot spawn a v1 child).
+    // The v1 reasoning tool refuses depth 1 under an ambient child
+    // scope too (D1: a bounded child cannot spawn a v1 child).
     let reasoning =
         reasoning_tool().with_model_resolver(StubResolver::json(ok_report_body("never runs")));
     let ambient_child = root_lineage().child();
@@ -1609,40 +1603,11 @@ async fn report_json_survives_to_the_parent_visible_text() {
     assert!(text.contains("\"status\": \"completed\""), "{text}");
 }
 
-#[tokio::test]
-async fn shared_spawn_arc_in_lineage_none_bounded_context_refuses_at_depth() {
-    // End-to-end version of the lineage=None hole: a spawn tool Arc
-    // (built for a lineage:None registry, exactly what gateway/channel
-    // paths produce) executing under a bounded sub-loop's ambient scope
-    // observes the ambient depth, not 0.
-    let config = reasoning_config();
-    let spawn_tool = crate::tools::SpawnSubagentTool::new(
-        config,
-        "parent-agent",
-        Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
-    );
-    // The ambient scope a bounded child of a lineage:None parent runs
-    // under: depth 1 (not 0), cap 3 → allowed at 1; construct the
-    // refusal case at the cap instead.
-    let ambient_at_cap = root_lineage().child().child().child();
-    let result = super::AMBIENT_SPAWN_LINEAGE
-        .scope(ambient_at_cap, async {
-            spawn_tool
-                .execute(serde_json::json!({ "prompt": "probe" }))
-                .await
-        })
-        .await
-        .unwrap();
-    assert!(
-        result
-            .error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("lineage depth limit"),
-        "{:?}",
-        result.error
-    );
-}
+// The former `shared_spawn_arc_in_lineage_none_bounded_context_refuses_at_depth`
+// (a lineage-None spawn Arc refusing under an ambient at-cap scope) is
+// covered by the lineage-None half of
+// `ambient_lineage_governs_spawn_arcs` above; its legacy-tool variant
+// retired with the spawn_subagent wall.
 
 // ─────────────────────────────────────────────────────────────────────────
 // Round-4 hardening: nested report hygiene, queue run-scoping,

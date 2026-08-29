@@ -10,9 +10,10 @@
 //! [`HarnessKind::Process`] and must not collide as registry keys.
 //!
 //! [`crate::NativeAgentDriver`] adapts the coordinator's [`ChannelBackend`]
-//! (translating [`AgentRunRequest`] into the native [`ChildRequest`]). Live
-//! spawn callers (`ChannelBackend::spawn`, `spawn_subagent`) are not switched
-//! over yet; a later PR does that, then `JoinMode`, then delegate convergence.
+//! (translating [`AgentRunRequest`] into the native [`ChildRequest`]). The one
+//! live spawn caller (`ChannelBackend::spawn`; the retired `spawn_subagent`
+//! tool was the other) is not switched over yet; a later PR does that, then
+//! `JoinMode` convergence.
 //!
 //! [`ChildRunner`]: crate::state::ChildRunner
 //! [`ChildRequest`]: crate::types::ChildRequest

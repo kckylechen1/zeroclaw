@@ -9,8 +9,9 @@
 //! the in-flight runs that driver still owns; V1 does not offer unregister —
 //! tear the registry down instead.
 //!
-//! This registry is not yet the live spawn path. Existing `ChannelBackend::spawn`
-//! / `spawn_subagent` callers are unchanged; P3 switches them over.
+//! This registry is not yet the live spawn path. The existing `ChannelBackend::spawn`
+//! caller (the retired `spawn_subagent` tool was the other) is unchanged; P3
+//! switches it over.
 
 use std::collections::HashMap;
 use std::fmt;

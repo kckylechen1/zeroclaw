@@ -3,9 +3,9 @@
 //!
 //! `ChildRunner` is the coordinator's only host-specific seam (see that
 //! crate's `state` module doc). Everything in here is translation: a
-//! [`ChildRunRequest`] becomes one call to [`crate::agent::run`] — the same
-//! entry `tools/spawn_subagent.rs` uses — and the turn's `Result<String>`
-//! becomes a [`ChildResult`].
+//! [`ChildRunRequest`] becomes one call to [`crate::agent::run`] (the whole-turn
+//! entry the retired `tools/spawn_subagent.rs` also used) and the turn's
+//! `Result<String>` becomes a [`ChildResult`].
 //!
 //! ## Which execution entry, and why that one
 //!
@@ -13,10 +13,11 @@
 //! `agent/mod.rs`) is the whole-turn entry: it resolves the agent config,
 //! builds the tool registry through the one gated seam
 //! (`ScopedToolRegistry::assemble`), builds memory for the alias, resolves the
-//! model provider, and drives `run_tool_call_loop`. `spawn_subagent.rs` calls
-//! exactly this, and wrapping it — rather than `run_tool_call_loop` directly —
-//! is what keeps a coordinator child identical to a `spawn_subagent` child:
-//! same registry assembly, same prompt build, same memory scope. (The legacy
+//! model provider, and drives `run_tool_call_loop`. Wrapping that — rather than
+//! `run_tool_call_loop` directly — is what keeps a coordinator child identical
+//! to an ordinary child run: same registry assembly, same prompt build, same
+//! memory scope. (The retired `spawn_subagent` tool called exactly this too;
+//! its wall retired the tool but not this host.) (The legacy
 //! `DelegateTool` had its own sub-loop starting from a caller's
 //! already-built registry; that tool is retired with the wall-1 demolition, and with
 //! it the last user of the hosted-run parking seam below.)
@@ -146,8 +147,8 @@ pub fn child_context(config: &Config, child_alias: &str) -> Result<SubAgentConte
 /// `coordinator.rs:545-548`), `loop_task_id`, `run_in_background`,
 /// `await_to_completion`, `surface_completion`. `overrides.spawn_depth` is
 /// also absent: depth is capped structurally instead, by running the child
-/// with `AgentRunOverrides::is_subagent = true`, which makes the child's own
-/// `spawn_subagent` tool refuse to recurse (`tools/spawn_subagent.rs:93-102`).
+/// with a lineage advanced by one, which the spawn surfaces' depth law
+/// (SA-9/SA-12; D1 for the v1 entrypoint) refuses to recurse.
 #[must_use]
 pub fn unsupported_request_fields(request: &ChildRequest) -> Vec<&'static str> {
     let mut unsupported = Vec::new();
@@ -441,9 +442,8 @@ impl ChildRunner for NativeChildRunner {
                 is_subagent: true,
                 suppress_memory_inject: true,
                 memory_free: false,
-                // Same reasoning as `spawn_subagent.rs:236-240`: a child run
-                // has no cross-turn reuse contract, so the per-call
-                // `connect_all` path is the correct one.
+                // A child run has no cross-turn reuse contract, so the
+                // per-call `connect_all` path is the correct one.
                 mcp_registry: None,
                 // SA-9/SA-11: the spawning context threaded the child's
                 // lineage through `ChildOverrides`; the registry built for

@@ -23,7 +23,6 @@ pub mod shell;
 pub mod skill_http;
 pub mod skill_manage;
 pub mod skill_tool;
-pub mod spawn_subagent;
 pub mod todo_write;
 pub mod verifiable_intent;
 
@@ -134,7 +133,6 @@ pub use send_message_to_peer::SendMessageToPeerTool;
 pub use shell::ShellTool;
 pub use skill_http::SkillHttpTool;
 pub use skill_tool::{SkillBuiltinTool, SkillShellTool};
-pub use spawn_subagent::SpawnSubagentTool;
 pub use todo_write::TodoWriteTool;
 pub use verifiable_intent::VerifiableIntentTool;
 
@@ -2170,10 +2168,10 @@ mod tests {
             );
         }
         // The minimal composition fronts the V1 entrypoint; the legacy
-        // `spawn_subagent` belongs to full/legacy composition only.
+        // `spawn_subagent` is retired on every composition.
         assert!(
             !names.contains(&"spawn_subagent"),
-            "minimal profile must drop the legacy spawn_subagent; got: {names:?}"
+            "minimal profile must drop the retired spawn_subagent; got: {names:?}"
         );
         // Fail-closed totality: nothing outside the membership table may be
         // assembled under minimal, whatever flags enabled it.
@@ -2403,9 +2401,9 @@ mod tests {
         // Wall 1: the legacy full-parent-inheritance delegation tool is
         // retired. Neither an agents-configured full-composition registry nor
         // an agents-less one may surface it, and the retired-name guard keeps
-        // plugins from claiming the name. The V1 SubAgent entrypoints
-        // (`reasoning_subagent`; legacy `spawn_subagent` on full/legacy) are
-        // the only spawn-capable model-visible tools.
+        // plugins from claiming the name. The V1 SubAgent entrypoint
+        // (`reasoning_subagent`) is the only spawn-capable model-visible
+        // tool; the legacy `spawn_subagent` retired with its wall.
         let tmp = TempDir::new().unwrap();
         let security = Arc::new(SecurityPolicy::default());
         let mem_cfg = MemoryConfig {
@@ -2490,11 +2488,14 @@ mod tests {
 
     #[tokio::test]
     async fn registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth() {
-        // The census zig-zag GREEN half: a registry built for a context
-        // whose lineage is at the depth cap (exactly what
-        // `agent::run` builds for a `spawn_subagent` child spawned from
-        // a depth-3 parent) refuses at the depth gate — the ONE ledger
-        // survives the rebuild.
+        // The census zig-zag GREEN half: a registry built for a child
+        // context whose lineage is at the depth cap (exactly what
+        // `agent::run` builds for a spawned child of a depth-3 parent)
+        // carries the ONE ledger through the rebuild. The behavioral
+        // refusal at that depth is pinned on the surviving spawn
+        // surface in `subagent_v1::tests`; here the rebuilt registry's
+        // SHAPE is the discrimination: both retired spawn tools are
+        // absent, the V1 entrypoint is present and inherits the depth.
         let tmp = TempDir::new().unwrap();
         let cfg = lineage_registry_config();
         let mut build_cfg = cfg.clone();
@@ -2535,72 +2536,56 @@ mod tests {
             Some(at_cap.clone()),
         );
 
-        // The retired delegate must not reappear in a rebuilt registry
-        // either: the zig-zag chain loses its legacy hop entirely.
+        // The retired legacy spawn tools must not reappear in a rebuilt
+        // registry: the zig-zag chain loses its legacy hops entirely.
         let names: Vec<String> = built.tools.iter().map(|t| t.name().to_string()).collect();
         assert!(
             !names.contains(&"delegate".to_string()),
             "delegate is retired and must be absent from a rebuilt registry"
         );
-
-        // spawn_subagent in the same rebuilt lineage context refuses at
-        // the unified cap (SA-10: one ledger across spawn-capable tools).
-        let tmp2 = TempDir::new().unwrap();
-        let mut build_cfg2 = lineage_registry_config();
-        build_cfg2.data_dir = tmp2.path().join("data");
-        build_cfg2.config_path = tmp2.path().join("config.toml");
-        let security2 = Arc::new(SecurityPolicy::for_agent(&build_cfg2, "parent-agent").unwrap());
-        let spawn_at_cap = SpawnSubagentTool::new(Arc::new(build_cfg2), "parent-agent", security2)
-            .with_lineage(Some(at_cap));
-        let result = spawn_at_cap
-            .execute(serde_json::json!({ "prompt": "probe" }))
-            .await
-            .unwrap();
         assert!(
-            result
-                .error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("lineage depth limit"),
-            "spawn_subagent must refuse at the same unified cap; got {:?}",
-            result.error
+            !names.contains(&"spawn_subagent".to_string()),
+            "spawn_subagent is retired and must be absent from a rebuilt registry"
+        );
+        // The V1 entrypoint is the surviving spawn surface in the same
+        // rebuilt registry (and refuses at depth > 0 per D1 — asserted
+        // behaviorally by `subagent_v1::tests`).
+        assert!(
+            names.contains(&"reasoning_subagent".to_string()),
+            "reasoning_subagent must be the surviving spawn surface in a rebuilt registry"
         );
     }
 
     #[test]
-    fn zigzag_is_counted_by_one_ledger_across_both_tools() {
-        // SA-9/SA-10: the census chain `delegate → spawn_subagent →
-        // delegate` counted by ONE counter. The depth a rebuilt registry
-        // sees is exactly the spawning context's lineage advanced by
-        // one, however many tools the chain hopped through.
+    fn zigzag_is_counted_by_one_ledger_across_spawn_hops() {
+        // SA-9/SA-10: any spawn chain (the census chain was
+        // `delegate → spawn_subagent → delegate`; both legacy hops are
+        // retired) is counted by ONE counter. The depth a rebuilt
+        // registry sees is exactly the spawning context's lineage
+        // advanced by one, however many hops the chain took.
         use zeroclaw_api::subagent_v1::{LineageRef, ParentRunRef};
 
         let root = LineageRef::new_root(ParentRunRef::from_opaque("chain-root"));
         assert_eq!(root.depth(), 0);
 
-        // delegate at root spawns; the child lineage is root.child().
-        let after_delegate = root.child();
-        assert_eq!(after_delegate.depth(), 1);
+        let after_first_hop = root.child();
+        assert_eq!(after_first_hop.depth(), 1);
 
-        // The child's inherited spawn_subagent spawns again; that
-        // child's lineage is after_delegate.child().
-        let after_spawn = after_delegate.child();
-        assert_eq!(after_spawn.depth(), 2);
+        let after_second_hop = after_first_hop.child();
+        assert_eq!(after_second_hop.depth(), 2);
 
-        // The grandchild's rebuilt registry carries the same lineage —
-        // it counts depth 2 against the cap (3) and refuses at the NEXT
-        // hop, never resetting (the historical delegate hops of this
-        // chain are gone; the ledger law is what the test pins):
-        let after_final_delegate = after_spawn.child();
-        assert_eq!(after_final_delegate.depth(), 3);
-        // ...and 3 >= cap is the refusal asserted behaviorally in
-        // `registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth`
-        // (via spawn_subagent, the surviving spawn-capable tool).
-        assert!(after_final_delegate.depth() >= 3);
+        // A rebuilt registry in the grandchild context carries the same
+        // lineage — depth 2 against the cap (3), refusing at the NEXT
+        // hop, never resetting (the ledger law is what the test pins):
+        let after_third_hop = after_second_hop.child();
+        assert_eq!(after_third_hop.depth(), 3);
+        // ...and 3 >= cap is the refusal asserted behaviorally on the
+        // surviving spawn surface in `subagent_v1::tests`.
+        assert!(after_third_hop.depth() >= 3);
 
         // The ledger identity is the root run, shared across the whole
         // chain (SA-11: rebuilds inherit, roots are typed transitions).
-        assert_eq!(root.root_ref(), after_final_delegate.root_ref());
+        assert_eq!(root.root_ref(), after_third_hop.root_ref());
     }
 
     #[test]

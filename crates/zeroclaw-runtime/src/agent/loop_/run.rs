@@ -103,10 +103,10 @@ pub async fn run(
     // that looks like isolation is not one: `zeroclaw_log::scope!`
     // (`crates/zeroclaw-log/src/macro.rs:48-56`) expands to
     // `.instrument(info_span!(session_key = ...))`, a tracing span field, and
-    // never touches `TOOL_LOOP_SESSION_KEY`. So the `scope!(session_key: ...)`
-    // wrapped `crate::agent::run(...)` in `tools/spawn_subagent.rs`, awaited
-    // inline inside the parent's tool-call loop and therefore on the parent's
-    // task, runs under the parent's key. Claiming there would hand the
+    // never touches `TOOL_LOOP_SESSION_KEY`. So a `scope!(session_key: ...)`
+    // wrapped in-turn child run (the retired `tools/spawn_subagent.rs` was the
+    // last producer), awaited inline inside the parent's tool-call loop and
+    // therefore on the parent's task, runs under the parent's key. Claiming there would hand the
     // parent's finished children to the subagent's context and the parent
     // would never hear about them — the loss that
     // `claim_child_announcements_context`'s ordering rules exist to prevent.

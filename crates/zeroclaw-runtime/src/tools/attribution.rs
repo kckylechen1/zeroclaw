@@ -19,7 +19,6 @@ use crate::tools::shell::ShellTool;
 use crate::tools::skill_http::SkillHttpTool;
 use crate::tools::skill_manage::{SkillManageTool, SkillViewTool, SkillsListTool};
 use crate::tools::skill_tool::{SkillBuiltinTool, SkillShellTool};
-use crate::tools::spawn_subagent::SpawnSubagentTool;
 use crate::tools::verifiable_intent::VerifiableIntentTool;
 
 tool_attribution!(CronAddTool, ToolKind::Plugin);
@@ -41,7 +40,6 @@ tool_attribution!(SkillViewTool, ToolKind::Plugin);
 tool_attribution!(SkillManageTool, ToolKind::Plugin);
 tool_attribution!(SkillBuiltinTool, ToolKind::Plugin);
 tool_attribution!(SkillShellTool, ToolKind::Plugin);
-tool_attribution!(SpawnSubagentTool, ToolKind::SpawnSubagent);
 tool_attribution!(ReasoningSubagentTool, ToolKind::SpawnSubagent);
 tool_attribution!(VerifiableIntentTool, ToolKind::Plugin);
 
