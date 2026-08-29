@@ -1619,7 +1619,7 @@ fn bounded_scope_lineage_is_never_a_root() {
     // (depth >= 1), never a fresh depth-0 root.
     let agents: std::collections::HashMap<String, zeroclaw_config::schema::AliasedAgentConfig> =
         std::collections::HashMap::new();
-    let tool = crate::tools::DelegateTool::new_with_options(
+    let tool = crate::tools::delegate::DelegateTool::new_with_options(
         agents,
         None,
         Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),

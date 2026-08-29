@@ -3967,11 +3967,6 @@ async fn assemble_channel_agent_tools(
     let pinned_section = assembled.pinned_section().to_string();
     let zeroclaw_runtime::tools::scoped::ScopedAssembled {
         registry,
-        // `assemble` threads the target's own `delegate_handle` into eager MCP
-        // registration internally (mirroring `run`/`process_message`, which also
-        // discard it here) - the channel path never separately needed it after
-        // that internal registration completes.
-        delegate_handle: _,
         ask_user_handle,
         reaction_handle,
         poll_handle,

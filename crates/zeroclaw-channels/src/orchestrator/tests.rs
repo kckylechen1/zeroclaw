@@ -4202,9 +4202,9 @@ fn channel_path_excluded_tools_drops_denied_mcp_tool() {
     let denied: Arc<dyn Tool> = Arc::new(NamedMockTool("aa_mcp__find_items"));
     let allowed: Arc<dyn Tool> = Arc::new(NamedMockTool("aa_mcp__find_npcs"));
     let registered_denied =
-        register_eager_mcp_tool_if_allowed(denied, &mut built_tools, None, mcp_policy.as_ref());
+        register_eager_mcp_tool_if_allowed(denied, &mut built_tools, mcp_policy.as_ref());
     let registered_allowed =
-        register_eager_mcp_tool_if_allowed(allowed, &mut built_tools, None, mcp_policy.as_ref());
+        register_eager_mcp_tool_if_allowed(allowed, &mut built_tools, mcp_policy.as_ref());
     assert!(
         !registered_denied,
         "an `excluded_tools`-denied MCP tool must not be registered on the channel path"
@@ -4250,7 +4250,6 @@ fn channel_path_excluded_tools_drops_denied_builtin() {
 fn channel_all_tools_result(tools: Vec<Box<dyn Tool>>) -> tools::AllToolsResult {
     tools::AllToolsResult {
         tools,
-        delegate_handle: None,
         ask_user_handle: None,
         reaction_handle: Arc::new(parking_lot::RwLock::new(HashMap::new())),
         poll_handle: None,

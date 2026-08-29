@@ -19,7 +19,7 @@ use crate::agent::loop_::{
 };
 use crate::skills::Skill;
 use crate::tools::{
-    self, ActivatedToolSet, AllToolsResult, DelegateParentToolsHandle, PerToolChannelHandle, Tool,
+    self, ActivatedToolSet, AllToolsResult, PerToolChannelHandle, Tool,
     register_skill_tools_with_context_and_runtime,
 };
 
@@ -96,7 +96,6 @@ pub struct ScopedAssembly<'a> {
 /// side-channel handles + the deferred-MCP prompt section the callers thread on.
 pub struct ScopedAssembled {
     pub registry: ScopedToolRegistry,
-    pub delegate_handle: Option<DelegateParentToolsHandle>,
     pub ask_user_handle: Option<PerToolChannelHandle>,
     pub reaction_handle: PerToolChannelHandle,
     pub poll_handle: Option<PerToolChannelHandle>,
@@ -184,7 +183,6 @@ impl ScopedToolRegistry {
 
         let AllToolsResult {
             tools: mut tools_registry,
-            delegate_handle,
             ask_user_handle,
             reaction_handle,
             poll_handle,
@@ -349,7 +347,6 @@ impl ScopedToolRegistry {
                     if register_eager_mcp_tool_if_allowed(
                         tool,
                         &mut tools_registry,
-                        delegate_handle.as_ref(),
                         mcp_policy.as_ref(),
                     ) {
                         // Capability tools are MCP-origin (built from the
@@ -393,7 +390,6 @@ impl ScopedToolRegistry {
                             register_eager_mcp_tool_if_allowed(
                                 wrapper,
                                 &mut tools_registry,
-                                delegate_handle.as_ref(),
                                 mcp_policy.as_ref(),
                             );
                         }
@@ -442,7 +438,6 @@ impl ScopedToolRegistry {
                             &activated,
                             filter_groups,
                             mcp_policy.as_ref(),
-                            delegate_handle.as_ref(),
                         );
                         if emit_assembly_logs && !preactivated_names.is_empty() {
                             ::zeroclaw_log::record!(
@@ -475,19 +470,6 @@ impl ScopedToolRegistry {
                         if let Some(policy) = mcp_policy {
                             tool_search = tool_search.with_access_policy(policy);
                         }
-                        // Newly-activated deferred tools are also exposed to the
-                        // delegate parent set, matching the run/process_message paths.
-                        if let Some(ref handle) = delegate_handle {
-                            let delegate_tools = Arc::clone(handle);
-                            tool_search = tool_search.with_activation_hook(Arc::new(move |tool| {
-                                let mut tools = delegate_tools.write();
-                                let already =
-                                    tools.iter().any(|existing| existing.name() == tool.name());
-                                if !already {
-                                    tools.push(tool);
-                                }
-                            }));
-                        }
                         tools_registry.push(Box::new(tool_search));
                     }
                 } else {
@@ -508,7 +490,6 @@ impl ScopedToolRegistry {
                             if register_eager_mcp_tool_if_allowed(
                                 wrapper,
                                 &mut tools_registry,
-                                delegate_handle.as_ref(),
                                 mcp_policy.as_ref(),
                             ) {
                                 registered += 1;
@@ -566,7 +547,6 @@ impl ScopedToolRegistry {
 
         ScopedAssembled {
             registry: ScopedToolRegistry(tools_registry),
-            delegate_handle,
             ask_user_handle,
             reaction_handle,
             poll_handle,
@@ -670,7 +650,6 @@ mod tests {
             .collect();
         AllToolsResult {
             tools,
-            delegate_handle: None,
             ask_user_handle: None,
             reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             poll_handle: None,
@@ -989,7 +968,6 @@ mod tests {
     fn built_with(tools: Vec<Box<dyn Tool>>) -> AllToolsResult {
         AllToolsResult {
             tools,
-            delegate_handle: None,
             ask_user_handle: None,
             reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             poll_handle: None,
@@ -1325,7 +1303,6 @@ mod tests {
     fn assembled_with_sections(deferred: &str, pinned: &str) -> ScopedAssembled {
         ScopedAssembled {
             registry: ScopedToolRegistry(Vec::new()),
-            delegate_handle: None,
             ask_user_handle: None,
             reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             poll_handle: None,

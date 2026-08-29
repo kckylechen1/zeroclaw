@@ -134,7 +134,6 @@ pub use cron_remove::CronRemoveTool;
 pub use cron_run::CronRunTool;
 pub use cron_runs::CronRunsTool;
 pub use cron_update::CronUpdateTool;
-pub use delegate::DelegateTool;
 pub use file_read::FileReadTool;
 pub use model_switch::ModelSwitchTool;
 pub use read_skill::ReadSkillTool;
@@ -154,7 +153,6 @@ pub use verifiable_intent::VerifiableIntentTool;
 /// repeat. Unioned with config-provided exemptions in the tool-call loop.
 pub const REENTRANT_AGENT_TOOLS: &[&str] = &[
     SpawnSubagentTool::NAME,
-    DelegateTool::NAME,
     crate::subagent_v1::ReasoningSubagentTool::NAME,
 ];
 
@@ -169,10 +167,6 @@ use zeroclaw_memory::Memory;
 
 pub type PerToolChannelHandle =
     Arc<RwLock<HashMap<String, Arc<dyn zeroclaw_api::channel::Channel>>>>;
-
-/// Shared handle to the delegate tool's parent-tools list.
-/// Callers can push additional tools (e.g. MCP wrappers) after construction.
-pub type DelegateParentToolsHandle = Arc<RwLock<Vec<Arc<dyn Tool>>>>;
 
 /// Thin wrapper that makes an `Arc<dyn Tool>` usable as `Box<dyn Tool>`.
 pub struct ArcToolRef(pub Arc<dyn Tool>);
@@ -482,6 +476,7 @@ pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
     "sop_status",
     "sop_list",
     "sop_workshop",
+    "delegate",
 ];
 
 /// Bundled return values from tool registry construction.
@@ -490,7 +485,6 @@ pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
 #[allow(clippy::type_complexity)]
 pub struct AllToolsResult {
     pub tools: Vec<Box<dyn Tool>>,
-    pub delegate_handle: Option<DelegateParentToolsHandle>,
     pub ask_user_handle: Option<PerToolChannelHandle>,
     pub channel_room_handle: Option<PerToolChannelHandle>,
     pub reaction_handle: PerToolChannelHandle,
@@ -519,8 +513,12 @@ pub fn all_tools(
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
-    agents: &HashMap<String, AliasedAgentConfig>,
-    fallback_api_key: Option<&str>,
+    // Formerly the delegate tool's agent roster / parent fallback key.
+    // `delegate` is retired (wall 1); the parameters stay in the
+    // signature (underscored, intentionally unused) so call sites do not
+    // churn and the registry contract is unchanged for callers.
+    _agents: &HashMap<String, AliasedAgentConfig>,
+    _fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
     canvas_store: Option<CanvasStore>,
     is_subagent_caller: bool,
@@ -539,8 +537,8 @@ pub fn all_tools(
         http_config,
         web_fetch_config,
         workspace_dir,
-        agents,
-        fallback_api_key,
+        _agents,
+        _fallback_api_key,
         root_config,
         canvas_store,
         is_subagent_caller,
@@ -585,8 +583,12 @@ pub fn all_tools_with_runtime(
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
-    agents: &HashMap<String, AliasedAgentConfig>,
-    fallback_api_key: Option<&str>,
+    // Formerly the delegate tool's agent roster / parent fallback key.
+    // `delegate` is retired (wall 1); the parameters stay in the
+    // signature (underscored, intentionally unused) so call sites do not
+    // churn and the registry contract is unchanged for callers.
+    _agents: &HashMap<String, AliasedAgentConfig>,
+    _fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
     canvas_store: Option<CanvasStore>,
     is_subagent_caller: bool,
@@ -597,9 +599,9 @@ pub fn all_tools_with_runtime(
     live_config: Option<Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>>,
     // Unified spawn lineage (SA-9): the lineage of the run this registry
     // is being built for. Spawn-capable tools constructed here carry it,
-    // so depth survives registry rebuilds (SA-11) and is shared across
-    // `delegate`/`spawn_subagent` (SA-10). `None` for top-level origins
-    // (the run mints a root) and legacy test callers.
+    // so depth survives registry rebuilds (SA-11) and hops stay on one
+    // ledger (SA-10). `None` for top-level origins (the run mints a
+    // root) and legacy test callers.
     spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 ) -> AllToolsResult {
     let has_shell_access = runtime.has_shell_access();
@@ -617,10 +619,6 @@ pub fn all_tools_with_runtime(
         sandbox.clone(),
         root_config.runtime.kind == zeroclaw_config::schema::RuntimeKind::Native,
     );
-    // Keep a shared runtime adapter available after constructing ShellTool.
-    // Independent agentic delegates use it later to build the target-owned tool
-    // registry; bounded delegates continue to use the parent `tool_arcs`
-    // snapshot below.
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
         Arc::new(RateLimitedTool::new(
             PathGuardedTool::new(
@@ -1369,7 +1367,6 @@ pub fn all_tools_with_runtime(
                 return AllToolsResult {
                     unfiltered_tool_arcs: tool_arcs.clone(),
                     tools: boxed_registry_from_arcs(tool_arcs),
-                    delegate_handle: None,
                     ask_user_handle,
                     channel_room_handle,
                     reaction_handle,
@@ -1441,55 +1438,11 @@ pub fn all_tools_with_runtime(
         }
     }
 
-    // Add delegation tool when agents are configured
-    let delegate_global_credential = fallback_api_key.and_then(|value| {
-        let trimmed_value = value.trim();
-        (!trimmed_value.is_empty()).then(|| trimmed_value.to_owned())
-    });
-    let provider_runtime_options =
-        zeroclaw_providers::provider_runtime_options_for_agent(root_config, agent_alias);
-
-    let delegate_handle: Option<DelegateParentToolsHandle> = if agents.is_empty() {
-        None
-    } else {
-        let delegate_agents: HashMap<String, AliasedAgentConfig> = agents
-            .iter()
-            .map(|(name, cfg)| (name.clone(), cfg.clone()))
-            .collect();
-        let parent_tools = Arc::new(RwLock::new(tool_arcs.clone()));
-        let delegate_tool = DelegateTool::new_with_options(
-            delegate_agents,
-            delegate_global_credential.clone(),
-            security.clone(),
-            provider_runtime_options.clone(),
-        )
-        .with_lineage(spawn_lineage.clone())
-        .with_parent_tools(Arc::clone(&parent_tools))
-        .with_runtime(runtime.clone())
-        .with_multimodal_config(root_config.multimodal.clone())
-        .with_delegate_config(root_config.delegate.clone())
-        .with_workspace_dir(workspace_dir.to_path_buf())
-        .with_memory(memory.clone())
-        .with_providers_models({
-            let mut m: std::collections::HashMap<
-                String,
-                std::collections::HashMap<String, zeroclaw_config::schema::ModelProviderConfig>,
-            > = std::collections::HashMap::new();
-            for (t, a, base) in root_config.providers.models.iter_entries() {
-                m.entry(t.to_string())
-                    .or_default()
-                    .insert(a.to_string(), base.clone());
-            }
-            m
-        })
-        .with_risk_profiles(root_config.risk_profiles.clone())
-        .with_runtime_profiles(root_config.runtime_profiles.clone())
-        .with_skill_bundles(root_config.skill_bundles.clone())
-        .with_root_config(config.clone())
-        .with_caller_alias(agent_alias);
-        tool_arcs.push(Arc::new(delegate_tool));
-        Some(parent_tools)
-    };
+    // `delegate` is retired (wall 1): the legacy full-parent-inheritance
+    // delegation tool is no longer constructed on any composition. Its
+    // replacement-first surfaces are the V1 `reasoning_subagent` (minimal and
+    // full alike) and the Tachi bridge for durable/heavy work. The name stays
+    // reserved in RETIRED_OPERATOR_TOOL_NAMES so a plugin cannot ride it back.
 
     // `vi_verify` is deliberately absent while no chain verifier exists: it checked
     // caller-supplied constraints against a caller-supplied fulfillment with nothing
@@ -1679,7 +1632,6 @@ pub fn all_tools_with_runtime(
     AllToolsResult {
         unfiltered_tool_arcs: tool_arcs.clone(),
         tools: boxed_registry_from_arcs(tool_arcs),
-        delegate_handle,
         ask_user_handle,
         channel_room_handle,
         reaction_handle,
@@ -2687,7 +2639,13 @@ mod tests {
     }
 
     #[test]
-    fn all_tools_includes_delegate_when_agents_configured() {
+    fn delegate_stays_absent_from_every_registry() {
+        // Wall 1: the legacy full-parent-inheritance delegation tool is
+        // retired. Neither an agents-configured full-composition registry nor
+        // an agents-less one may surface it, and the retired-name guard keeps
+        // plugins from claiming the name. The V1 SubAgent entrypoints
+        // (`reasoning_subagent`; legacy `spawn_subagent` on full/legacy) are
+        // the only spawn-capable model-visible tools.
         let tmp = TempDir::new().unwrap();
         let security = Arc::new(SecurityPolicy::default());
         let mem_cfg = MemoryConfig {
@@ -2710,67 +2668,36 @@ mod tests {
             },
         );
 
-        let tools = all_tools(
-            Arc::new(Config::default()),
-            &security,
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-            "test-agent",
-            mem,
-            None,
-            None,
-            &browser,
-            &http,
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            tmp.path(),
-            &agents,
-            Some("delegate-test-credential"),
-            &cfg,
-            None,
-            false,
-            None,
-        )
-        .tools;
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"delegate"));
-    }
-
-    #[test]
-    fn all_tools_excludes_delegate_when_no_agents() {
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-
-        let browser = BrowserConfig::default();
-        let http = zeroclaw_config::schema::HttpRequestConfig::default();
-        let cfg = test_config(&tmp);
-
-        let tools = all_tools(
-            Arc::new(Config::default()),
-            &security,
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-            "test-agent",
-            mem,
-            None,
-            None,
-            &browser,
-            &http,
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-        )
-        .tools;
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        assert!(!names.contains(&"delegate"));
+        for (label, agents) in [
+            ("agents configured", agents.clone()),
+            ("no agents", HashMap::new()),
+        ] {
+            let tools = all_tools(
+                Arc::new(Config::default()),
+                &security,
+                &zeroclaw_config::schema::RiskProfileConfig::default(),
+                "test-agent",
+                mem.clone(),
+                None,
+                None,
+                &browser,
+                &http,
+                &zeroclaw_config::schema::WebFetchConfig::default(),
+                tmp.path(),
+                &agents,
+                Some("delegate-test-credential"),
+                &cfg,
+                None,
+                false,
+                None,
+            )
+            .tools;
+            let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+            assert!(
+                !names.contains(&"delegate"),
+                "delegate must not be registered ({label}); got {names:?}"
+            );
+        }
     }
 
     // ── Unified lineage (SA-9/SA-10/SA-11): the GREEN side of the
@@ -2846,47 +2773,26 @@ mod tests {
             true, // is_subagent_caller: registry belongs to a child run
             None,
             None,
-            Some(at_cap),
+            Some(at_cap.clone()),
         );
 
-        let rebuilt_delegate = built
-            .tools
-            .into_iter()
-            .find(|t| t.name() == "delegate")
-            .expect("rebuilt registry contains delegate");
-        let result = rebuilt_delegate
-            .execute(serde_json::json!({
-                "agent": "child-target",
-                "prompt": "probe",
-            }))
-            .await
-            .unwrap();
+        // The retired delegate must not reappear in a rebuilt registry
+        // either: the zig-zag chain loses its legacy hop entirely.
+        let names: Vec<String> = built.tools.iter().map(|t| t.name().to_string()).collect();
         assert!(
-            result
-                .error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("depth limit"),
-            "the rebuilt registry's delegate must refuse at the inherited lineage cap; got {:?}",
-            result.error
+            !names.contains(&"delegate".to_string()),
+            "delegate is retired and must be absent from a rebuilt registry"
         );
 
-        // Both tools front the same refusal (SA-10): spawn_subagent in
-        // the same rebuilt registry refuses too.
+        // spawn_subagent in the same rebuilt lineage context refuses at
+        // the unified cap (SA-10: one ledger across spawn-capable tools).
         let tmp2 = TempDir::new().unwrap();
         let mut build_cfg2 = lineage_registry_config();
         build_cfg2.data_dir = tmp2.path().join("data");
         build_cfg2.config_path = tmp2.path().join("config.toml");
         let security2 = Arc::new(SecurityPolicy::for_agent(&build_cfg2, "parent-agent").unwrap());
         let spawn_at_cap = SpawnSubagentTool::new(Arc::new(build_cfg2), "parent-agent", security2)
-            .with_lineage(Some(
-                zeroclaw_api::subagent_v1::LineageRef::new_root(
-                    zeroclaw_api::subagent_v1::ParentRunRef::from_opaque("zigzag-root"),
-                )
-                .child()
-                .child()
-                .child(),
-            ));
+            .with_lineage(Some(at_cap));
         let result = spawn_at_cap
             .execute(serde_json::json!({ "prompt": "probe" }))
             .await
@@ -2923,12 +2829,14 @@ mod tests {
         assert_eq!(after_spawn.depth(), 2);
 
         // The grandchild's rebuilt registry carries the same lineage —
-        // its delegate counts depth 2 against the cap (3), refuses at
-        // the NEXT hop, never resets:
+        // it counts depth 2 against the cap (3) and refuses at the NEXT
+        // hop, never resetting (the historical delegate hops of this
+        // chain are gone; the ledger law is what the test pins):
         let after_final_delegate = after_spawn.child();
         assert_eq!(after_final_delegate.depth(), 3);
         // ...and 3 >= cap is the refusal asserted behaviorally in
-        // `registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth`.
+        // `registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth`
+        // (via spawn_subagent, the surviving spawn-capable tool).
         assert!(after_final_delegate.depth() >= 3);
 
         // The ledger identity is the root run, shared across the whole

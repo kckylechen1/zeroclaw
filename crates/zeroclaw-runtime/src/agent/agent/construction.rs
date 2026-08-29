@@ -302,7 +302,6 @@ impl Agent {
         let pinned_section = assembled.pinned_section().to_string();
         let crate::tools::scoped::ScopedAssembled {
             registry,
-            delegate_handle: _,
             ask_user_handle,
             reaction_handle,
             poll_handle,
