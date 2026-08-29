@@ -77,6 +77,12 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
         "gateway_pairing_dashboard_removed",
     ),
     ("delegate", "delegate_config_removed"),
+    ("claude_code", "raw_launcher_config_removed"),
+    ("claude_code_runner", "raw_launcher_config_removed"),
+    ("codex_cli", "raw_launcher_config_removed"),
+    ("gemini_cli", "raw_launcher_config_removed"),
+    ("opencode_cli", "raw_launcher_config_removed"),
+    ("browser_delegate", "raw_launcher_config_removed"),
 ];
 
 /// Retired config FIELDS: dotted path (one `*` wildcard segment allowed for

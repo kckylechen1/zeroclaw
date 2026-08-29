@@ -542,14 +542,6 @@ timeout_ms = 15000
 allow_remote_endpoint = false
 window_allowlist = []
 
-[browser_delegate]
-enabled = false
-cli_binary = "claude"
-chrome_profile_dir = ""
-allowed_domains = []
-blocked_domains = []
-task_timeout_secs = 120
-
 [http_request]
 enabled = true
 allowed_domains = ["*"]
@@ -744,21 +736,6 @@ enabled = false
 enabled = false
 
 [verifiable_intent]
-
-[claude_code]
-enabled = false
-
-[claude_code_runner]
-enabled = false
-
-[codex_cli]
-enabled = false
-
-[gemini_cli]
-enabled = false
-
-[opencode_cli]
-enabled = false
 
 [sop]
 
