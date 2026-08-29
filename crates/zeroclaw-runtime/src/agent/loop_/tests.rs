@@ -4424,19 +4424,33 @@ async fn run_tool_call_loop_dedup_exempt_allows_repeated_calls() {
 #[tokio::test]
 async fn run_tool_call_loop_reentrant_agent_tools_are_dedup_exempt_by_default() {
     let turn_id = uuid::Uuid::new_v4().to_string();
-    let model_provider = ScriptedModelProvider::from_text_responses(vec![
-        r#"<tool_call>
-{"name":"spawn_subagent","arguments":{"prompt":"same"}}
+    // The retired `spawn_subagent` left `REENTRANT_AGENT_TOOLS` with the
+    // spawn_subagent wall; the V1 `reasoning_subagent` entrypoint is the
+    // surviving re-entrant spawn surface this law pins. The name is
+    // spelled LITERALLY (not derived from the list) so the test stays an
+    // independent pin: if the list is edited, this test must fail until a
+    // human reconciles the two.
+    assert_eq!(
+        crate::tools::REENTRANT_AGENT_TOOLS,
+        &["reasoning_subagent"],
+        "REENTRANT_AGENT_TOOLS drifted; reconcile this test's literal name"
+    );
+    let scripted_calls: &'static str = Box::leak(
+        format!(
+            r#"<tool_call>
+{{"name":"reasoning_subagent","arguments":{{"prompt":"same"}}}}
 </tool_call>
 <tool_call>
-{"name":"spawn_subagent","arguments":{"prompt":"same"}}
-</tool_call>"#,
-        "done",
-    ]);
+{{"name":"reasoning_subagent","arguments":{{"prompt":"same"}}}}
+</tool_call>"#
+        )
+        .into_boxed_str(),
+    );
+    let model_provider = ScriptedModelProvider::from_text_responses(vec![scripted_calls, "done"]);
 
     let invocations = Arc::new(AtomicUsize::new(0));
     let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(
-        "spawn_subagent",
+        "reasoning_subagent",
         Arc::clone(&invocations),
     ))];
 
@@ -4501,7 +4515,7 @@ async fn run_tool_call_loop_reentrant_agent_tools_are_dedup_exempt_by_default() 
     assert_eq!(
         invocations.load(Ordering::SeqCst),
         2,
-        "both identical spawn_subagent calls must execute"
+        "both identical reentrant spawn-tool calls must execute"
     );
 }
 
@@ -11239,13 +11253,13 @@ fn tool_names(tools: &[Box<dyn TestTool>]) -> Vec<&str> {
 fn apply_policy_tool_filter_no_gates_keeps_everything() {
     let mut tools = vec![
         mock_tool("shell"),
-        mock_tool("spawn_subagent"),
+        mock_tool("reasoning_subagent"),
         mock_tool("memory_recall"),
     ];
     super::apply_policy_tool_filter(&mut tools, None, None);
     assert_eq!(
         tool_names(&tools),
-        vec!["shell", "spawn_subagent", "memory_recall"]
+        vec!["shell", "reasoning_subagent", "memory_recall"]
     );
 }
 
@@ -11253,7 +11267,7 @@ fn apply_policy_tool_filter_no_gates_keeps_everything() {
 fn apply_policy_tool_filter_policy_allowlist_restricts() {
     let mut tools = vec![
         mock_tool("shell"),
-        mock_tool("spawn_subagent"),
+        mock_tool("reasoning_subagent"),
         mock_tool("memory_recall"),
     ];
     let policy = TestPolicy {
@@ -11267,9 +11281,9 @@ fn apply_policy_tool_filter_policy_allowlist_restricts() {
 
 #[test]
 fn apply_policy_tool_filter_policy_excluded_subtracts_from_unrestricted() {
-    let mut tools = vec![mock_tool("shell"), mock_tool("spawn_subagent")];
+    let mut tools = vec![mock_tool("shell"), mock_tool("reasoning_subagent")];
     let policy = TestPolicy {
-        excluded_tools: Some(vec!["spawn_subagent".into()]),
+        excluded_tools: Some(vec!["reasoning_subagent".into()]),
         ..TestPolicy::default()
     };
 
@@ -11281,7 +11295,7 @@ fn apply_policy_tool_filter_policy_excluded_subtracts_from_unrestricted() {
 fn apply_policy_tool_filter_caller_filter_alone_restricts() {
     let mut tools = vec![
         mock_tool("shell"),
-        mock_tool("spawn_subagent"),
+        mock_tool("reasoning_subagent"),
         mock_tool("memory_recall"),
     ];
     let caller = vec!["memory_recall".to_string()];
@@ -11294,25 +11308,25 @@ fn apply_policy_tool_filter_caller_filter_alone_restricts() {
 fn apply_policy_tool_filter_policy_and_caller_intersect() {
     let mut tools = vec![
         mock_tool("shell"),
-        mock_tool("spawn_subagent"),
+        mock_tool("reasoning_subagent"),
         mock_tool("memory_recall"),
     ];
     let policy = TestPolicy {
         allowed_tools: Some(vec!["shell".into(), "memory_recall".into()]),
         ..TestPolicy::default()
     };
-    let caller = vec!["shell".to_string(), "spawn_subagent".to_string()];
+    let caller = vec!["shell".to_string(), "reasoning_subagent".to_string()];
 
     super::apply_policy_tool_filter(&mut tools, Some(&policy), Some(&caller));
     // Only `shell` survives — it's the intersection of the policy
     // allowlist {shell, memory_recall} and the caller filter
-    // {shell, spawn_subagent}.
+    // {shell, reasoning_subagent}.
     assert_eq!(tool_names(&tools), vec!["shell"]);
 }
 
 #[test]
 fn apply_policy_tool_filter_policy_deny_all_drops_everything() {
-    let mut tools = vec![mock_tool("shell"), mock_tool("spawn_subagent")];
+    let mut tools = vec![mock_tool("shell"), mock_tool("reasoning_subagent")];
     let policy = TestPolicy {
         allowed_tools: Some(vec![]),
         ..TestPolicy::default()
