@@ -77,6 +77,12 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
         "gateway_pairing_dashboard_removed",
     ),
     ("delegate", "delegate_config_removed"),
+    ("claude_code", "raw_launcher_config_removed"),
+    ("claude_code_runner", "raw_launcher_config_removed"),
+    ("codex_cli", "raw_launcher_config_removed"),
+    ("gemini_cli", "raw_launcher_config_removed"),
+    ("opencode_cli", "raw_launcher_config_removed"),
+    ("browser_delegate", "raw_launcher_config_removed"),
 ];
 
 /// Retired config FIELDS: dotted path (one `*` wildcard segment allowed for
@@ -309,6 +315,26 @@ delegation_policy = { mode = "allow" }
         assert!(retired_section_tombstones("[gateway]\npairing_dashboard = 3\n").is_empty());
         assert!(retired_section_tombstones("default_temperature = 0.7\n").is_empty());
         assert!(retired_section_tombstones("not toml {{{").is_empty());
+    }
+
+    #[test]
+    fn retired_section_tombstones_warn_for_every_table_entry() {
+        // Discriminator for the wall 2 entries: the shared table is only as
+        // good as the detector actually firing for each of its paths. Build
+        // a minimal doc carrying every retired section and require exactly
+        // one warning with that entry's code and path.
+        for (path, code) in RETIRED_CONFIG_SURFACES {
+            let segments: Vec<&str> = path.split('.').collect();
+            let mut doc = String::new();
+            for depth in 1..=segments.len() {
+                doc.push_str(&format!("[{}]\n", segments[..depth].join(".")));
+            }
+            doc.push_str("legacy_key = true\n");
+            let warnings = retired_section_tombstones(&doc);
+            assert_eq!(warnings.len(), 1, "{path}: {warnings:?}");
+            assert_eq!(warnings[0].code, *code);
+            assert_eq!(warnings[0].path, *path);
+        }
     }
 
     #[test]

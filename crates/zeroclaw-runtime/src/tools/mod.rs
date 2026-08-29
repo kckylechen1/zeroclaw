@@ -595,12 +595,15 @@ pub fn all_tools_with_runtime(
     // root) and legacy test callers.
     spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 ) -> AllToolsResult {
-    let has_shell_access = runtime.has_shell_access();
     let persistent_writes = runtime.has_filesystem_access();
     // Composio credentials are only consumed when the SaaS family is compiled
     // in; the parameters stay part of the stable signature for both builds.
     #[cfg(not(feature = "integrations-saas"))]
     let _ = (composio_key, composio_entity_id);
+    // `has_shell_access` gates only the SaaS-family gws integration now; the
+    // raw launcher registrations that consumed it unconditionally are retired.
+    #[cfg(feature = "integrations-saas")]
+    let has_shell_access = runtime.has_shell_access();
     let runtime_kind = root_config.runtime.kind.as_wire();
     let sandbox_cfg = risk_profile.sandbox_config();
     let sandbox = create_sandbox(&sandbox_cfg, runtime_kind, Some(&security.workspace_dir));
@@ -1787,11 +1790,10 @@ mod tests {
 
     #[tokio::test]
     async fn retired_raw_launcher_tools_never_register_even_when_enabled() {
-        // Wall 2 raw-launcher retirement: the Parent-visible raw harness/vendor launch tools
-        // (claude_code, claude_code_runner, codex_cli, gemini_cli,
-        // opencode_cli) are retired. Even with their config sections enabled
-        // and a full-access runtime, no registry path may re-admit them;
-        // harness execution goes through the typed subagent/Tachi paths.
+        // Wall 2 raw-launcher retirement: the Parent-visible raw harness/vendor
+        // launch tools are retired together with their config sections. No
+        // registry path may re-admit them; harness execution goes through the
+        // typed subagent/Tachi paths.
         let tmp = TempDir::new().unwrap();
         let security = Arc::new(SecurityPolicy {
             autonomy: crate::security::AutonomyLevel::Full,
@@ -1808,13 +1810,7 @@ mod tests {
             enabled: false,
             ..BrowserConfig::default()
         };
-        let mut cfg = test_config(&tmp);
-        cfg.claude_code.enabled = true;
-        cfg.claude_code_runner.enabled = true;
-        cfg.codex_cli.enabled = true;
-        cfg.gemini_cli.enabled = true;
-        cfg.opencode_cli.enabled = true;
-        cfg.browser_delegate.enabled = true;
+        let cfg = test_config(&tmp);
         let risk = zeroclaw_config::schema::RiskProfileConfig {
             sandbox_enabled: Some(false),
             sandbox_backend: Some("none".to_string()),
@@ -2125,7 +2121,7 @@ mod tests {
         let mut cfg = test_config(&tmp);
         cfg.composition = Some(zeroclaw_config::composition::Composition::Minimal);
         // Explicitly enabled non-members must not widen the minimal profile.
-        cfg.claude_code.enabled = true;
+        cfg.browser.enabled = true;
 
         let tools = all_tools(
             Arc::new(Config::default()),

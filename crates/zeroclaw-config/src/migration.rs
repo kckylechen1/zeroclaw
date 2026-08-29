@@ -935,6 +935,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn strip_retired_surfaces_removes_every_table_entry_and_keeps_siblings() {
+        // Discriminator: the seed fixture no longer carries the retired
+        // sections, so `generate_never_emits_retired_config_surfaces` in the
+        // integration suite cannot see a stripping regression. Exercise the
+        // strip boundary directly with every retired path injected, and
+        // require live siblings along the parent chain to survive.
+        for (path, _) in crate::validation_warnings::RETIRED_CONFIG_SURFACES {
+            let segments: Vec<&str> = path.split('.').collect();
+            let mut doc = String::new();
+            for depth in 1..=segments.len() {
+                doc.push_str(&format!(
+                    "[{}]\nlive_sibling = 1\n",
+                    segments[..depth].join(".")
+                ));
+            }
+            let mut value: toml::Value = toml::from_str(&doc).unwrap();
+            strip_retired_surfaces(&mut value);
+            let mut table = value.as_table().unwrap();
+            for (i, seg) in segments.iter().enumerate() {
+                if i == segments.len() - 1 {
+                    assert!(
+                        !table.contains_key(*seg),
+                        "retired section {path} must be stripped from generated output"
+                    );
+                } else {
+                    table = table.get(*seg).unwrap().as_table().unwrap();
+                    assert!(
+                        table.contains_key("live_sibling"),
+                        "live sibling beside retired segment {seg} must survive"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn detect_version_missing_is_v1() {
         let v: toml::Value = toml::from_str("foo = 1").unwrap();
         assert_eq!(detect_version(&v).unwrap(), 1);

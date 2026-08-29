@@ -977,7 +977,7 @@ const FieldForm = forwardRef<FieldFormHandle, FieldFormProps>(
     // is the agent whose `channels` list contains `<type>.<alias>` (a reverse
     // lookup the gateway already does and returns as `owning_agent`), so it
     // is NOT the alias in the path. `undefined` for non-channel sections
-    // (risk profiles are shared across agents; pipeline/claude_code are
+    // (risk profiles are shared across agents; pipeline is
     // global) leaves the picker on the default-agent catalog.
     const [toolAgent, setToolAgent] = useState<string | undefined>(undefined);
     useEffect(() => {

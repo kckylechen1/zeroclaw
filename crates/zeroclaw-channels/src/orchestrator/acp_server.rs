@@ -2066,9 +2066,8 @@ fn to_acp_content(name: &str, args: &Value) -> Value {
 
 fn map_tool_kind(name: &str) -> &'static str {
     match name {
-        "ask_user" | "calculator" | "claude_code" | "claude_code_runner" | "codex_cli"
-        | "composio" | "delegate" | "escalate_to_human" | "execute_pipeline" | "gemini_cli"
-        | "jira" | "llm_task" | "opencode_cli" | "schedule" | "security_ops" | "shell"
+        "ask_user" | "calculator" | "composio" | "delegate" | "escalate_to_human"
+        | "execute_pipeline" | "jira" | "llm_task" | "schedule" | "security_ops" | "shell"
         | "vi_verify" => "execute",
         "backup" | "browser_open" | "canvas" | "cloud_ops" | "file_edit" | "file_write"
         | "memory_export" | "memory_store" | "report_template" => "edit",
@@ -2081,7 +2080,6 @@ fn map_tool_kind(name: &str) -> &'static str {
         "content_search" | "discord_search" | "glob_search" | "knowledge" | "search"
         | "tool_search" | "web_search_tool" => "other",
         "browser"
-        | "browser_delegate"
         | "cloud_patterns"
         | "data_management"
         | "file_read"

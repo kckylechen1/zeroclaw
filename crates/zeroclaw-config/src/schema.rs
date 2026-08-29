@@ -354,32 +354,6 @@ pub struct Config {
     #[group = "Tools"]
     pub browser: BrowserConfig,
 
-    /// Browser delegation configuration (`[browser_delegate]`).
-    ///
-    /// Delegates browser-based tasks to a browser-capable CLI subprocess (e.g.
-    /// Claude Code with `claude-in-chrome` MCP tools). Useful for interacting
-    /// with corporate web apps (Teams, Outlook, Jira, Confluence) that lack
-    /// direct API access. A persistent Chrome profile can be configured so SSO
-    /// sessions survive across invocations.
-    ///
-    /// Fields:
-    /// - `enabled` (`bool`, default `false`) — enable the browser delegation tool.
-    /// - `cli_binary` (`String`, default `"claude"`) — CLI binary to spawn for browser tasks.
-    /// - `chrome_profile_dir` (`String`, default `""`) — Chrome user-data directory for
-    ///   persistent SSO sessions. When empty, a fresh profile is used each invocation.
-    /// - `allowed_domains` (`Vec<String>`, default `[]`) — allowlist of domains the browser
-    ///   may navigate to. Empty means all non-blocked domains are permitted.
-    /// - `blocked_domains` (`Vec<String>`, default `[]`) — denylist of domains. Blocked
-    ///   domains take precedence over allowed domains.
-    /// - `task_timeout_secs` (`u64`, default `120`) — per-task timeout in seconds.
-    ///
-    /// Compatibility: additive and disabled by default; existing configs remain valid when omitted.
-    /// Rollback/migration: remove `[browser_delegate]` or keep `enabled = false` to disable.
-    #[serde(default)]
-    #[nested]
-    #[group = "Tools"]
-    pub browser_delegate: crate::scattered_types::BrowserDelegateConfig,
-
     /// HTTP request tool configuration (`[http_request]`).
     #[serde(default)]
     #[nested]
@@ -664,36 +638,6 @@ pub struct Config {
     #[nested]
     #[group = "Agent"]
     pub verifiable_intent: VerifiableIntentConfig,
-
-    /// Claude Code tool configuration (`[claude_code]`).
-    #[serde(default)]
-    #[nested]
-    #[group = "Integrations"]
-    pub claude_code: ClaudeCodeConfig,
-
-    /// Claude Code task runner with Slack progress and SSH session handoff (`[claude_code_runner]`).
-    #[serde(default)]
-    #[nested]
-    #[group = "Integrations"]
-    pub claude_code_runner: ClaudeCodeRunnerConfig,
-
-    /// Codex CLI tool configuration (`[codex_cli]`).
-    #[serde(default)]
-    #[nested]
-    #[group = "Integrations"]
-    pub codex_cli: CodexCliConfig,
-
-    /// Gemini CLI tool configuration (`[gemini_cli]`).
-    #[serde(default)]
-    #[nested]
-    #[group = "Integrations"]
-    pub gemini_cli: GeminiCliConfig,
-
-    /// OpenCode CLI tool configuration (`[opencode_cli]`).
-    #[serde(default)]
-    #[nested]
-    #[group = "Integrations"]
-    pub opencode_cli: OpenCodeCliConfig,
 
     /// Standard Operating Procedures engine configuration (`[sop]`).
     #[serde(default)]
@@ -8899,256 +8843,6 @@ impl Default for FileDownloadConfig {
             max_file_size_bytes: default_file_download_max_size_bytes(),
             timeout_secs: default_file_download_timeout_secs(),
             headers: HashMap::new(),
-        }
-    }
-}
-
-// ── Claude Code ─────────────────────────────────────────────────
-
-/// Claude Code CLI tool configuration (`[claude_code]` section).
-///
-/// Delegates coding tasks to the `claude -p` CLI. Authentication uses the
-/// binary's own OAuth session (Max subscription) by default — no API key
-/// needed unless `env_passthrough` includes `ANTHROPIC_API_KEY`.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "claude_code"]
-pub struct ClaudeCodeConfig {
-    /// Enable the `claude_code` tool
-    #[serde(default)]
-    pub enabled: bool,
-    /// Maximum execution time in seconds (coding tasks can be long)
-    #[serde(default = "default_claude_code_timeout_secs")]
-    pub timeout_secs: u64,
-    /// Claude Code tools the subprocess is allowed to use
-    #[serde(default = "default_claude_code_allowed_tools")]
-    pub allowed_tools: Vec<String>,
-    /// Optional system prompt appended to Claude Code invocations
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-    /// Maximum output size in bytes (2MB default)
-    #[serde(default = "default_claude_code_max_output_bytes")]
-    pub max_output_bytes: usize,
-    /// Extra env vars passed to the claude subprocess (e.g. ANTHROPIC_API_KEY for API-key billing)
-    #[serde(default)]
-    #[credential_class = "legacy_env_path"]
-    pub env_passthrough: Vec<String>,
-}
-
-fn default_claude_code_timeout_secs() -> u64 {
-    600
-}
-
-fn default_claude_code_allowed_tools() -> Vec<String> {
-    vec!["Read".into(), "Edit".into(), "Bash".into(), "Write".into()]
-}
-
-fn default_claude_code_max_output_bytes() -> usize {
-    2_097_152
-}
-
-impl Default for ClaudeCodeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            timeout_secs: default_claude_code_timeout_secs(),
-            allowed_tools: default_claude_code_allowed_tools(),
-            system_prompt: None,
-            max_output_bytes: default_claude_code_max_output_bytes(),
-            env_passthrough: Vec::new(),
-        }
-    }
-}
-
-// ── Claude Code Runner ──────────────────────────────────────────
-
-/// Claude Code task runner configuration (`[claude_code_runner]` section).
-///
-/// Spawns Claude Code in a tmux session with HTTP hooks that POST tool
-/// execution events back to ZeroClaw's gateway, updating a Slack message
-/// in-place with progress plus an SSH handoff link.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "claude_code_runner"]
-pub struct ClaudeCodeRunnerConfig {
-    /// Enable the `claude_code_runner` tool
-    #[serde(default)]
-    pub enabled: bool,
-    /// SSH host for session handoff links (e.g. "myhost.example.com")
-    #[serde(default)]
-    pub ssh_host: Option<String>,
-    /// Prefix for tmux session names (default: "zc-claude-")
-    #[serde(default = "default_claude_code_runner_tmux_prefix")]
-    pub tmux_prefix: String,
-    /// Session time-to-live in seconds before auto-cleanup (default: 3600)
-    #[serde(default = "default_claude_code_runner_session_ttl")]
-    pub session_ttl: u64,
-}
-
-fn default_claude_code_runner_tmux_prefix() -> String {
-    "zc-claude-".into()
-}
-
-fn default_claude_code_runner_session_ttl() -> u64 {
-    3600
-}
-
-impl Default for ClaudeCodeRunnerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            ssh_host: None,
-            tmux_prefix: default_claude_code_runner_tmux_prefix(),
-            session_ttl: default_claude_code_runner_session_ttl(),
-        }
-    }
-}
-
-// ── Codex CLI ───────────────────────────────────────────────────
-
-/// Codex CLI tool configuration (`[codex_cli]` section).
-///
-/// Delegates coding tasks to the `codex exec` CLI. Authentication uses the
-/// binary's own session by default — no API key needed unless
-/// `env_passthrough` includes `OPENAI_API_KEY`.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "codex_cli"]
-pub struct CodexCliConfig {
-    /// Enable the `codex_cli` tool
-    #[serde(default)]
-    pub enabled: bool,
-    /// Maximum execution time in seconds (coding tasks can be long)
-    #[serde(default = "default_codex_cli_timeout_secs")]
-    pub timeout_secs: u64,
-    /// Maximum output size in bytes (2MB default)
-    #[serde(default = "default_codex_cli_max_output_bytes")]
-    pub max_output_bytes: usize,
-    /// Extra env vars passed to the codex subprocess (e.g. OPENAI_API_KEY)
-    #[serde(default)]
-    #[credential_class = "legacy_env_path"]
-    pub env_passthrough: Vec<String>,
-    /// Extra CLI arguments appended to `codex exec` before the prompt.
-    ///
-    /// Values come from operator-controlled config (same trust level as
-    /// `env_passthrough`) and are not validated — the operator is responsible
-    /// for understanding the implications of flags passed here.
-    ///
-    /// **Warning:** `--sandbox=danger-full-access` disables Codex's bubblewrap
-    /// isolation; only use in environments where the container itself provides
-    /// isolation (e.g. Kubernetes pods with restricted PSS).
-    ///
-    /// Example: `["--sandbox=danger-full-access", "--skip-git-repo-check"]`
-    #[serde(default)]
-    pub extra_args: Vec<String>,
-}
-
-fn default_codex_cli_timeout_secs() -> u64 {
-    600
-}
-
-fn default_codex_cli_max_output_bytes() -> usize {
-    2_097_152
-}
-
-impl Default for CodexCliConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            timeout_secs: default_codex_cli_timeout_secs(),
-            max_output_bytes: default_codex_cli_max_output_bytes(),
-            env_passthrough: Vec::new(),
-            extra_args: Vec::new(),
-        }
-    }
-}
-
-// ── Gemini CLI ──────────────────────────────────────────────────
-
-/// Gemini CLI tool configuration (`[gemini_cli]` section).
-///
-/// Delegates coding tasks to the `gemini -p` CLI. Authentication uses the
-/// binary's own session by default — no API key needed unless
-/// `env_passthrough` includes `GOOGLE_API_KEY`.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "gemini_cli"]
-pub struct GeminiCliConfig {
-    /// Enable the `gemini_cli` tool
-    #[serde(default)]
-    pub enabled: bool,
-    /// Maximum execution time in seconds (coding tasks can be long)
-    #[serde(default = "default_gemini_cli_timeout_secs")]
-    pub timeout_secs: u64,
-    /// Maximum output size in bytes (2MB default)
-    #[serde(default = "default_gemini_cli_max_output_bytes")]
-    pub max_output_bytes: usize,
-    /// Extra env vars passed to the gemini subprocess (e.g. GOOGLE_API_KEY)
-    #[serde(default)]
-    #[credential_class = "legacy_env_path"]
-    pub env_passthrough: Vec<String>,
-}
-
-fn default_gemini_cli_timeout_secs() -> u64 {
-    600
-}
-
-fn default_gemini_cli_max_output_bytes() -> usize {
-    2_097_152
-}
-
-impl Default for GeminiCliConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            timeout_secs: default_gemini_cli_timeout_secs(),
-            max_output_bytes: default_gemini_cli_max_output_bytes(),
-            env_passthrough: Vec::new(),
-        }
-    }
-}
-
-// ── OpenCode CLI ───────────────────────────────────────────────
-
-/// OpenCode CLI tool configuration (`[opencode_cli]` section).
-///
-/// Delegates coding tasks to the `opencode run` CLI. Authentication uses the
-/// binary's own session by default — no API key needed unless
-/// `env_passthrough` includes provider-specific keys.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "opencode_cli"]
-pub struct OpenCodeCliConfig {
-    /// Enable the `opencode_cli` tool
-    #[serde(default)]
-    pub enabled: bool,
-    /// Maximum execution time in seconds (coding tasks can be long)
-    #[serde(default = "default_opencode_cli_timeout_secs")]
-    pub timeout_secs: u64,
-    /// Maximum output size in bytes (2MB default)
-    #[serde(default = "default_opencode_cli_max_output_bytes")]
-    pub max_output_bytes: usize,
-    /// Extra env vars passed to the opencode subprocess
-    #[serde(default)]
-    #[credential_class = "legacy_env_path"]
-    pub env_passthrough: Vec<String>,
-}
-
-fn default_opencode_cli_timeout_secs() -> u64 {
-    600
-}
-
-fn default_opencode_cli_max_output_bytes() -> usize {
-    2_097_152
-}
-
-impl Default for OpenCodeCliConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            timeout_secs: default_opencode_cli_timeout_secs(),
-            max_output_bytes: default_opencode_cli_max_output_bytes(),
-            env_passthrough: Vec::new(),
         }
     }
 }
@@ -17532,7 +17226,6 @@ impl Default for Config {
             microsoft365: Microsoft365Config::default(),
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
-            browser_delegate: crate::scattered_types::BrowserDelegateConfig::default(),
             http_request: HttpRequestConfig::default(),
             multimodal: MultimodalConfig::default(),
             media_pipeline: MediaPipelineConfig::default(),
@@ -17576,11 +17269,6 @@ impl Default for Config {
             plugins: PluginsConfig::default(),
             locale: None,
             verifiable_intent: VerifiableIntentConfig::default(),
-            claude_code: ClaudeCodeConfig::default(),
-            claude_code_runner: ClaudeCodeRunnerConfig::default(),
-            codex_cli: CodexCliConfig::default(),
-            gemini_cli: GeminiCliConfig::default(),
-            opencode_cli: OpenCodeCliConfig::default(),
             sop: SopConfig::default(),
             shell_tool: ShellToolConfig::default(),
             escalation: EscalationConfig::default(),
@@ -25300,7 +24988,6 @@ auto_save = true
             microsoft365: Microsoft365Config::default(),
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
-            browser_delegate: crate::scattered_types::BrowserDelegateConfig::default(),
             http_request: HttpRequestConfig::default(),
             multimodal: MultimodalConfig::default(),
             media_pipeline: MediaPipelineConfig::default(),
@@ -25343,11 +25030,6 @@ auto_save = true
             plugins: PluginsConfig::default(),
             locale: None,
             verifiable_intent: VerifiableIntentConfig::default(),
-            claude_code: ClaudeCodeConfig::default(),
-            claude_code_runner: ClaudeCodeRunnerConfig::default(),
-            codex_cli: CodexCliConfig::default(),
-            gemini_cli: GeminiCliConfig::default(),
-            opencode_cli: OpenCodeCliConfig::default(),
             sop: SopConfig::default(),
             shell_tool: ShellToolConfig::default(),
             escalation: EscalationConfig::default(),
@@ -26176,7 +25858,6 @@ default_temperature = 0.7
             microsoft365: Microsoft365Config::default(),
             secrets: SecretsConfig::default(),
             browser: BrowserConfig::default(),
-            browser_delegate: crate::scattered_types::BrowserDelegateConfig::default(),
             http_request: HttpRequestConfig::default(),
             multimodal: MultimodalConfig::default(),
             media_pipeline: MediaPipelineConfig::default(),
@@ -26220,11 +25901,6 @@ default_temperature = 0.7
             plugins: PluginsConfig::default(),
             locale: None,
             verifiable_intent: VerifiableIntentConfig::default(),
-            claude_code: ClaudeCodeConfig::default(),
-            claude_code_runner: ClaudeCodeRunnerConfig::default(),
-            codex_cli: CodexCliConfig::default(),
-            gemini_cli: GeminiCliConfig::default(),
-            opencode_cli: OpenCodeCliConfig::default(),
             sop: SopConfig::default(),
             shell_tool: ShellToolConfig::default(),
             escalation: EscalationConfig::default(),
