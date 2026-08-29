@@ -33,8 +33,8 @@ pub struct AgentRunOverrides {
     /// Unified spawn lineage (SA-9): the ONE depth authority carried by
     /// the spawning context. Spawn sites MUST pass `parent_lineage.child()`
     /// here; a registry rebuild inside the child then cannot reset depth
-    /// (SA-11) and `delegate`/`spawn_subagent` increment the same ledger
-    /// (SA-10). `None` means this run is a genuine root (interactive
+    /// (SA-11) and every spawn surface increments the same ledger (SA-10;
+    /// the retired `delegate`/`spawn_subagent` hopped the same ledger). `None` means this run is a genuine root (interactive
     /// top-level turn, cron job) — the run mints a root lineage from its
     /// session key.
     pub lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,

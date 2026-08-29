@@ -20,8 +20,10 @@ pub struct ControlPlaneHandle {
     pub boot_id: String,
     /// The same store as `store`, kept in its concrete form.
     ///
-    /// `store` is `Arc<dyn TaskRegistry>` — every existing producer
-    /// (`delegate.rs`, `spawn_subagent.rs`) reaches it that way, and changing
+    /// `store` is `Arc<dyn TaskRegistry>` — every existing producer (the
+    /// coordinator persistence path; the retired `delegate.rs` and
+    /// `spawn_subagent.rs` were the tool-level writers) reaches it that way,
+    /// and changing
     /// that field's type would force those call sites to bring the
     /// `TaskRegistry` trait into scope themselves (dyn-trait method calls
     /// resolve without an import; calls on a concrete type do not). The

@@ -13269,10 +13269,10 @@ mod child_announcements {
     /// and leaves its caller's children for the caller.
     ///
     /// It still *sees* the caller's key — a nested `agent::run` shares the
-    /// task-local, because the wrapper that looks like isolation
-    /// (`zeroclaw_log::scope!(session_key: ...)` around
-    /// `crate::agent::run` in `tools/spawn_subagent.rs`) is a tracing span
-    /// field, not a task-local scope. Claiming under a key it merely
+    /// task-local, because a tracing span field is not a task-local scope:
+    /// the retired `tools/spawn_subagent.rs` wrapper
+    /// (`zeroclaw_log::scope!(session_key: ...)` around `crate::agent::run`)
+    /// looked like isolation but was exactly that. Claiming under a key it merely
     /// inherited would hand the parent's finished children to the child's
     /// context, and the parent's own next turn would find the rows already
     /// flagged delivered: the announcements would be gone, read by the
