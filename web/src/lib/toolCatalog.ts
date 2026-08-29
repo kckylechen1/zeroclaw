@@ -3,7 +3,7 @@
 // place that fetches and caches it so the two components (and anything else
 // that needs the catalog) stay in sync instead of hitting the network twice.
 
-import { getTools, getCliTools } from "@/lib/api";
+import { getTools } from "@/lib/api";
 import {
   settleToolCatalogResult,
   type CatalogEntry,
@@ -35,9 +35,9 @@ export function loadToolCatalogResult(agent?: string): Promise<ToolCatalogLoadRe
   if (cached) return Promise.resolve({ entries: cached, warnings: [] });
   const inflight = catalogInflight.get(key);
   if (inflight) return inflight;
-  const promise = Promise.allSettled([getTools(agent), getCliTools()])
-    .then(([toolsResult, cliToolsResult]) => {
-      const result = settleToolCatalogResult(toolsResult, cliToolsResult);
+  const promise = Promise.allSettled([getTools(agent)])
+    .then(([toolsResult]) => {
+      const result = settleToolCatalogResult(toolsResult);
       if (result.warnings.length === 0) {
         catalogCache.set(key, result.entries);
       }

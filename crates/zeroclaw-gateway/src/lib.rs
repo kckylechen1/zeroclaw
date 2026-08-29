@@ -1680,8 +1680,6 @@ pub async fn run_gateway(
         .route("/pair/code", get(handle_pair_code))
         .route("/webhook", post(handle_webhook))
         .merge(optional_channel_routes())
-        // ── Claude Code runner hooks ──
-        .route("/hooks/claude-code", post(api::handle_claude_code_hook))
         // ── Web Dashboard API routes ──
         .route("/api/status", get(api::handle_api_status))
         .route("/api/version/check", get(version::handle_version_check))
@@ -1884,7 +1882,6 @@ pub async fn run_gateway(
         .route("/api/memory", post(api::handle_api_memory_store))
         .route("/api/memory/{key}", delete(api::handle_api_memory_delete))
         .route("/api/cost", get(api::handle_api_cost))
-        .route("/api/cli-tools", get(api::handle_api_cli_tools))
         .route("/api/channels", get(api::handle_api_channels))
         .route(
             "/api/channels/bind",

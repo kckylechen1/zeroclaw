@@ -7,7 +7,6 @@ import type {
   DiagResult,
   MemoryEntry,
   CostSummary,
-  CliTool,
   HealthSnapshot,
   Session,
   ChannelDetail,
@@ -2249,15 +2248,3 @@ export function getLogs(params: LogsQueryParams = {}): Promise<LogsResponse> {
   return apiFetch<LogsResponse>(`/api/logs${qs ? `?${qs}` : ""}`);
 }
 
-// ---------------------------------------------------------------------------
-// CLI Tools
-// ---------------------------------------------------------------------------
-
-export function getCliTools(): Promise<CliTool[]> {
-  return apiFetch<CliTool[] | { cli_tools: CliTool[] }>("/api/cli-tools").then(
-    (data) => {
-      const result = unwrapField(data, "cli_tools");
-      return Array.isArray(result) ? result : [];
-    },
-  );
-}

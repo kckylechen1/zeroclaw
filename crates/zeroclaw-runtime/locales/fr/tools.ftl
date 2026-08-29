@@ -1,5 +1,4 @@
 tool-browser = Automatisation de navigateur avec des backends plugables (agent-browser, rust-native, computer_use). Prend en charge les actions DOM et des actions au niveau du système d'exploitation (mouse_move, mouse_click, mouse_drag, key_type, key_press, screen_capture) via un sidecar d'utilisation de l'ordinateur. Utilisez 'snapshot' pour mapper les éléments interactifs aux refs (@e1, @e2). Applique browser.allowed_domains pour les actions d'ouverture.
-tool-browser-delegate = Déférer les tâches de navigateur vers un outil de ligne de commande compatible navigateur pour interagir avec des applications web comme Teams, Outlook, Jira, Confluence
 tool-browser-open = Ouvrir une URL HTTPS approuvée dans le navigateur du système. Contraintes de sécurité : whitelist de domaines uniquement, aucun hôte local/privé, aucun scraping.
 tool-channel-room = Créez des salons et invitez des utilisateurs via un canal actif. Fournissez une clé de canal telle que 'matrix.default', l'action 'create_room' ou 'invite_user', et les champs de salon spécifiques à l'action.
 tool-channel-room-param-action = Action de gestion de salon à effectuer.
