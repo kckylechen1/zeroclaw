@@ -859,7 +859,10 @@ fn t14c_max_depth_synthesizes_per_agent_runtime_profile() {
         .runtime_profiles
         .get("agent_complex_agent")
         .expect("synthesized runtime_profiles.agent_complex_agent");
-    assert_eq!(profile.max_delegation_depth, 4);
+    // The retired spawn-depth key has no V3 field anymore (spawn wall); the
+    // synthesized profile carries only the surviving tunables (max_iterations
+    // = 25 lands as max_tool_iterations, per t14a).
+    assert_eq!(profile.max_tool_iterations, 25);
 }
 
 #[test]

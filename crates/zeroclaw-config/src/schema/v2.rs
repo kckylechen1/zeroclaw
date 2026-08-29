@@ -1400,7 +1400,20 @@ fn synthesize_agent_brains(
 
         let allowed_tools = agent_table.remove("allowed_tools");
         let agentic_flag = agent_table.remove("agentic");
-        let max_depth = agent_table.remove("max_depth");
+        // The retired spawn-depth key has no V3 destination: the legacy
+        // in-kernel spawn tools it capped are removed (delegate, wall 1;
+        // spawn_subagent, the spawn wall) and the v1 reasoning entrypoint's
+        // recursion law is a fixed D1 depth-0 rule, not a configured cap.
+        // Drop it loudly rather than forwarding an inert key.
+        if agent_table.remove("max_depth").is_some() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"alias": alias, "key": "max_depth"})),
+                "agents.<alias> retired max_depth key dropped: the local spawn depth cap is                  no longer configurable (D1 fixed law); remove the key from the config file"
+            );
+        }
 
         let profile_alias = format!("agent_{}", alias);
 
@@ -1421,13 +1434,10 @@ fn synthesize_agent_brains(
             );
         }
 
-        if agentic_flag.is_some() || max_depth.is_some() || max_iterations.is_some() {
+        if agentic_flag.is_some() || max_iterations.is_some() {
             let mut overrides = toml::Table::new();
             if let Some(v) = agentic_flag {
                 overrides.insert("agentic".to_string(), v);
-            }
-            if let Some(d) = max_depth {
-                overrides.insert("max_delegation_depth".to_string(), d);
             }
             if let Some(mi) = max_iterations {
                 overrides.insert("max_tool_iterations".to_string(), mi);
@@ -1442,7 +1452,7 @@ fn synthesize_agent_brains(
                     .with_attrs(
                         ::serde_json::json!({"alias": alias, "profile_alias": profile_alias})
                     ),
-                "agents.: agentic/max_depth/max_iterations → runtime_profiles."
+                "agents.: agentic/max_iterations → runtime_profiles."
             );
         }
 
@@ -2300,12 +2310,16 @@ fn split_autonomy_into_profile_buckets(
         "max_actions_per_hour",
         "max_cost_per_day_cents",
         "shell_timeout_secs",
-        "max_delegation_depth",
     ];
-    // Retired delegation timeout keys have no V3 destination (the delegate
-    // tool was removed); drop them loudly instead of filing them into a
-    // profile bucket where they would sit inert.
-    const RETIRED: &[&str] = &["delegation_timeout_secs", "agentic_timeout_secs"];
+    // Retired keys have no V3 destination (the delegate tool was removed in
+    // wall 1; the spawn tools the depth key capped followed in the spawn
+    // wall); drop them loudly instead of filing them into a profile bucket
+    // where they would sit inert.
+    const RETIRED: &[&str] = &[
+        "delegation_timeout_secs",
+        "agentic_timeout_secs",
+        "max_depth",
+    ];
     let mut risk = toml::Table::new();
     let mut runtime = toml::Table::new();
     for (k, v) in table {

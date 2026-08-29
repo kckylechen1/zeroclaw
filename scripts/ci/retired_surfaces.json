@@ -325,6 +325,13 @@
       "replacement": "reasoning_subagent"
     },
     {
+      "term": "max_delegation_depth",
+      "kind": "config-key",
+      "retired_in": "PR #256",
+      "notes": "Runtime-profile spawn-depth cap removed with the #197 spawn wall: its only readers were the retired spawn_subagent tool and the retired model_routing_config operator tool. Local recursion is the fixed D1 depth-0 law on the v1 reasoning entrypoint; the coordinator's separate admission cap is `max_spawn_depth`. Legacy files carrying the key are ignored with a load warning.",
+      "replacement": "max_spawn_depth"
+    },
+    {
       "term": "await_sessions",
       "kind": "op",
       "retired_in": "PR #248",

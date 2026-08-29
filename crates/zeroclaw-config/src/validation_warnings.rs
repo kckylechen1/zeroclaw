@@ -105,6 +105,10 @@ pub const RETIRED_CONFIG_FIELDS: &[(&str, &str)] = &[
         "delegate_config_removed",
     ),
     (
+        "runtime_profiles.*.max_delegation_depth",
+        "max_delegation_depth_removed",
+    ),
+    (
         "runtime_profiles.*.agentic_timeout_secs",
         "delegate_config_removed",
     ),

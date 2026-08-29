@@ -18,7 +18,7 @@ There is no `[subagents.*]` block in the schema; SubAgents are not a separate co
 
 ## Recursion
 
-Local recursion stays denied (frozen contract D1): a v1 child cannot spawn a child: the `reasoning_subagent` admission refuses any spawning lineage deeper than the parent's root. One immutable spawn lineage (`LineageRef`, SA-9) still threads every agent boundary, so no future spawn surface can reset depth by rebuilding a registry; the coordinator's own admission cap (`max_delegation_depth`) remains the separate, coordinator-side bound. Cron `JobType::Agent` runs are top-level roots, not continuations of an interactive parent's lineage.
+Local recursion stays denied (frozen contract D1): a v1 child cannot spawn a child: the `reasoning_subagent` admission refuses any spawning lineage deeper than the parent's root. One immutable spawn lineage (`LineageRef`, SA-9) still threads every agent boundary, so no future spawn surface can reset depth by rebuilding a registry; the coordinator's own admission cap (`max_spawn_depth`) remains the separate, coordinator-side bound. The runtime-profile `max_delegation_depth` key retired with the spawn tools: legacy files carrying it are ignored with a load warning. Cron `JobType::Agent` runs are top-level roots, not continuations of an interactive parent's lineage.
 
 ## What a child may and may not reach
 

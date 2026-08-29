@@ -66,9 +66,12 @@ files or running commands. Handing work to a *different* configured agent was
 a way to escape the tool list, so off-profile delegation stays forbidden: the
 legacy tool that did that (`delegate`) was removed in #197 wall 1, and the
 legacy same-identity spawn tool (`spawn_subagent`) was retired later in the
-same epic. Bounded reasoning help goes through the V1 `reasoning_subagent`
-entry point, which grants no parent capabilities and returns a structured
-report only.
+same epic. Note that this profile deliberately does NOT list
+`reasoning_subagent` in `allowed_tools`: under the frozen contract the V1
+entry point grants no parent capabilities and returns a structured report
+only, so allowing it is safe — but an unattended trading agent has no
+reasoning subtask that justifies the extra token surface. Add the name
+explicitly if that changes.
 
 ## The line this does not defend
 

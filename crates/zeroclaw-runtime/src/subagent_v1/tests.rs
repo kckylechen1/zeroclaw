@@ -1554,10 +1554,11 @@ fn admission_refuses_any_parent_registry_tool_name() {
         "calculator",
         "memory_store",
         "memory_recall",
-        // Retired in-kernel spawn tools stay unrepresentable in v1 profiles
-        // (negative-capability retirement discrimination): a v1 profile can
-        // never re-admit them, so no future registry change can resurrect
-        // child-path inheritance through a v1 admission.
+        // Retired in-kernel spawn tools stay unrepresentable in v1 profiles.
+        // For these two names the discriminating arm is the PARSE arm below
+        // (they are banned tokens, refused before admission can ever see
+        // them); the assertion pins that ban so no future edit can re-admit
+        // child-path inheritance through a v1 profile.
         "spawn_subagent",
         "delegate",
     ];
