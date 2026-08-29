@@ -41,7 +41,7 @@ product integrations.
 |---|---|
 | `memory_store`, `memory_recall`, `memory_forget`, `memory_export`, `memory_purge` | Long-term memory is a first-party runtime contract and uses shared memory ownership rules. |
 | `cron_add`, `cron_list`, `cron_remove`, `cron_update`, `cron_run`, `cron_runs`, `schedule` | Scheduling affects autonomous execution, ownership, and run history; keep it policy-visible in core. |
-| `spawn_subagent`, `send_message_to_peer` | Agent-child execution is part of the agent execution model and must share risk profiles, tools, memory, and parent/child constraints. (The retired `delegate` tool was removed; see the delegation retirement record.) |
+| `send_message_to_peer`, `reasoning_subagent` | Agent-child execution and peer messaging are part of the agent execution model and must share risk profiles, tools, memory, and parent/child constraints. (The legacy `spawn_subagent` and `delegate` tools are retired; see the delegation retirement record.) |
 | `ask_user`, `escalate_to_human`, `reaction`, `poll`, `channel_room` | These are channel-bridging operator interaction primitives with late-bound channel handles and receipts. |
 | `sessions_current`, `sessions_list`, `sessions_history`, `sessions_send` | Session visibility and message sending must share the daemon/gateway session backend and agent ownership boundaries. |
 | `model_routing_config`, `model_switch`, `proxy_config` | Retired from the model surface. Routing and proxy configuration belong to the operator config API (`PUT/DELETE /api/config...`), runtime model switching to the channel `/model` command, and proxy application to startup + daemon reload. The tool implementations stay compiled but no assembly path registers them. See "Retired Operator Tools" below. |

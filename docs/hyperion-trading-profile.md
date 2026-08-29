@@ -36,7 +36,7 @@ mcp_discovered_tool_policy = "explicit_only"
 
 # Layer 3 — backstop. If a future edit widens layer 1, these still stop at a
 # prompt, and an unattended prompt is a denial.
-always_ask = ["shell", "file_write", "file_edit", "spawn_subagent"]
+always_ask = ["shell", "file_write", "file_edit"]
 
 # Layer 4 — subtract even if something upstream re-admits them.
 excluded_tools = ["shell", "file_write", "file_edit"]
@@ -62,11 +62,13 @@ most likely to be edited in a hurry.
 ## What this profile deliberately does not contain
 
 `shell`, `file_write`, `file_edit` — a trading agent has no business writing
-files or running commands. `spawn_subagent` — a sub-agent that inherits this
-profile is fine, but handing work to a *different* configured agent was a way
-to escape the tool list, so it stays forbidden (the legacy tool that did that
-was removed in #197 wall 1; the ban on off-profile delegation remains the
-standing intent).
+files or running commands. Handing work to a *different* configured agent was
+a way to escape the tool list, so off-profile delegation stays forbidden: the
+legacy tool that did that (`delegate`) was removed in #197 wall 1, and the
+legacy same-identity spawn tool (`spawn_subagent`) was retired later in the
+same epic. Bounded reasoning help goes through the V1 `reasoning_subagent`
+entry point, which grants no parent capabilities and returns a structured
+report only.
 
 ## The line this does not defend
 
