@@ -1,6 +1,6 @@
 // Reusable multi-select tool picker. Loads the built-in agent tools
-// (GET /api/tools) and the discovered CLI tools (GET /api/cli-tools),
-// groups them, and lets the operator toggle individual tools on/off.
+// (GET /api/tools), groups them, and lets the operator toggle individual
+// tools on/off.
 //
 // Tool identity is the tool `name` — exactly the strings that land in an
 // `allowed_tools` list (e.g. "shell", "file_read", "web_search_tool",
