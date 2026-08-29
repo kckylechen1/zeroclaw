@@ -1603,6 +1603,31 @@ async fn report_json_survives_to_the_parent_visible_text() {
     assert!(text.contains("\"status\": \"completed\""), "{text}");
 }
 
+#[tokio::test]
+async fn carried_child_lineage_refuses_d1_admission() {
+    // SA-9/SA-12 production shape: a registry built for an already-spawned
+    // context threads a depth-1 lineage into the tool (see
+    // `reasoning_spawn_tool_for_registry`); the tool's OWN carried lineage,
+    // not the ambient scope, must drive the D1 refusal here.
+    let tool = reasoning_tool()
+        .with_lineage(Some(root_lineage().child()))
+        .with_model_resolver(StubResolver::json(ok_report_body("never runs")));
+    let result = tool
+        .execute(serde_json::json!({ "objective": "probe" }))
+        .await
+        .unwrap();
+    assert!(!result.success, "a carried child lineage must refuse");
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("SubAgent-to-SubAgent"),
+        "the refusal must be the D1 admission refusal: {:?}",
+        result.error
+    );
+}
+
 // The former `shared_spawn_arc_in_lineage_none_bounded_context_refuses_at_depth`
 // (a lineage-None spawn Arc refusing under an ambient at-cap scope) is
 // covered by the lineage-None half of

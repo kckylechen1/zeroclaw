@@ -1836,6 +1836,16 @@ impl ReasoningSubagentTool {
         self
     }
 
+    /// The spawn lineage this tool instance carries (SA-9). Registry
+    /// builders MUST thread the run's lineage here; a nested registry
+    /// whose reasoning tool reads `None` would admit D1-forbidden
+    /// spawns from depth > 0 contexts. Public so the registry-wiring
+    /// discrimination test can assert the thread-through.
+    #[must_use]
+    pub fn carried_lineage(&self) -> Option<&LineageRef> {
+        self.lineage.as_ref()
+    }
+
     /// Host-side model-resolver override (embedder/test seam). The
     /// opaque-binding boundary is unchanged.
     #[must_use]

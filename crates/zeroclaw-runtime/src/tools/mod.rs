@@ -434,10 +434,28 @@ pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
     ("File System", "Read/write files"),
     ("Weather", "Forecasts & conditions (wttr.in)"),
     (
-        "Spawn SubAgent",
-        "Spawn an ephemeral SubAgent that inherits this agent's identity",
+        "Reasoning SubAgent",
+        "Run one bounded, contract-admitted reasoning child (V1 entry point)",
     ),
 ];
+
+/// The registry's reasoning-spawn construction site. Single point where the
+/// run's spawn lineage (SA-9) is threaded into the surviving spawn-capable
+/// tool, so `registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth`
+/// can discriminate a dropped thread-through.
+fn reasoning_spawn_tool_for_registry(
+    root_config: &zeroclaw_config::schema::Config,
+    agent_alias: &str,
+    security: &Arc<SecurityPolicy>,
+    spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
+) -> crate::subagent_v1::ReasoningSubagentTool {
+    crate::subagent_v1::ReasoningSubagentTool::new(
+        Arc::new(root_config.clone()),
+        agent_alias,
+        security.clone(),
+    )
+    .with_lineage(spawn_lineage)
+}
 
 /// Tool names retired from the ordinary model-visible registry. No assembly
 /// path may register them and no plugin may claim the names. Most entries
@@ -687,14 +705,12 @@ pub fn all_tools_with_runtime(
             root_config.clone(),
             agent_alias,
         )),
-        Arc::new(
-            crate::subagent_v1::ReasoningSubagentTool::new(
-                Arc::new(root_config.clone()),
-                agent_alias,
-                security.clone(),
-            )
-            .with_lineage(spawn_lineage.clone()),
-        ),
+        Arc::new(reasoning_spawn_tool_for_registry(
+            root_config,
+            agent_alias,
+            security,
+            spawn_lineage.clone(),
+        )),
         Arc::new(SendMessageToPeerTool::new(
             Arc::new(root_config.clone()),
             agent_alias,
@@ -2512,6 +2528,26 @@ mod tests {
         .child()
         .child()
         .child(); // depth 3 = default cap
+
+        // The lineage thread-through is discriminated at the construction
+        // site: the helper the registry vec calls must carry the run's
+        // lineage, so dropping the `.with_lineage` thread flips this red
+        // (a lineage-None reasoning tool inside a child registry would
+        // admit D1-forbidden spawns from depth > 0 contexts).
+        let probe = reasoning_spawn_tool_for_registry(
+            &build_cfg,
+            "parent-agent",
+            &security,
+            Some(at_cap.clone()),
+        );
+        assert_eq!(
+            probe
+                .carried_lineage()
+                .map(zeroclaw_api::subagent_v1::LineageRef::depth),
+            Some(3),
+            "the registry construction site must thread the run's spawn lineage \
+             into the surviving spawn tool"
+        );
 
         let built = all_tools_with_runtime(
             Arc::new(build_cfg),
