@@ -39,7 +39,7 @@ export interface ToolPickerProps {
   id?: string;
   /** Scope the agent-tools catalog to this agent (its built-ins plus its
    * `mcp_bundles` MCP tools) via `/api/tools?agent=`. Omit for the gateway's
-   * default-agent listing. CLI tools are always included (not agent-scoped). */
+   * default-agent listing. */
   agent?: string;
 }
 
