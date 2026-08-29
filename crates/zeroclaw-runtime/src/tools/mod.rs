@@ -32,7 +32,6 @@ pub use zeroclaw_tools::ask_user::AskUserTool;
 pub use zeroclaw_tools::ask_user::ChannelMapHandle;
 pub use zeroclaw_tools::backup_tool::BackupTool;
 pub use zeroclaw_tools::browser::{BrowserTool, ComputerUseConfig};
-pub use zeroclaw_tools::browser_delegate::BrowserDelegateTool;
 pub use zeroclaw_tools::browser_open::BrowserOpenTool;
 pub use zeroclaw_tools::calculator::CalculatorTool;
 pub use zeroclaw_tools::canvas::{ALLOWED_CONTENT_TYPES, MAX_CONTENT_SIZE};
@@ -468,6 +467,7 @@ pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
     "codex_cli",
     "gemini_cli",
     "opencode_cli",
+    "browser_delegate",
 ];
 
 /// Bundled return values from tool registry construction.
@@ -866,22 +866,6 @@ pub fn all_tools_with_runtime(
     }
 
     // Browser delegation tool (conditionally registered; requires shell access)
-    if root_config.browser_delegate.enabled {
-        if has_shell_access {
-            tool_arcs.push(Arc::new(BrowserDelegateTool::new(
-                security.clone(),
-                root_config.browser_delegate.clone(),
-            )));
-        } else {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "browser_delegate: skipped registration because the current runtime does not allow shell access"
-            );
-        }
-    }
-
     if http_config.enabled {
         match HttpRequestTool::new_with_config(
             security.clone(),
@@ -1830,6 +1814,7 @@ mod tests {
         cfg.codex_cli.enabled = true;
         cfg.gemini_cli.enabled = true;
         cfg.opencode_cli.enabled = true;
+        cfg.browser_delegate.enabled = true;
         let risk = zeroclaw_config::schema::RiskProfileConfig {
             sandbox_enabled: Some(false),
             sandbox_backend: Some("none".to_string()),
@@ -1867,6 +1852,7 @@ mod tests {
             "codex_cli",
             "gemini_cli",
             "opencode_cli",
+            "browser_delegate",
         ] {
             assert!(
                 !names.contains(&tool_name),

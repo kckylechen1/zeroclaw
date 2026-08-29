@@ -249,7 +249,6 @@ to one provider.
 | `provider:anthropic` | `anthropic.rs` |
 | `provider:azure-openai` | `azure_openai.rs` |
 | `provider:bedrock` | `bedrock.rs` |
-| `provider:claude-code` | `claude_code.rs` |
 | `provider:compatible` | `compatible.rs` |
 | `provider:copilot` | `copilot.rs` |
 | `provider:gemini` | `gemini.rs`, `gemini_cli.rs` |

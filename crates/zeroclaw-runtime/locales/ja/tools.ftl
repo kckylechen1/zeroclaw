@@ -1,5 +1,4 @@
 tool-browser = プラグイン可能なバックエンド（agent-browser、rust-native、computer_use）を使用したWeb/ブラウザオートメーション。DOMアクションに加えて、オプションのOSレベルアクション（mouse_move、mouse_click、mouse_drag、key_type、key_press、screen_capture）をコンピュータユースサイドカー経由でサポート。'snapshot'を使用して対話的要素をref（@e1、@e2）にマップします。openアクション向けにbrowser.allowed_domainsを強制します。
-tool-browser-delegate = ブラウザ対応CLIへのブラウザベースのタスクの委譲。Teams、Outlook、Jira、Confluenceなどのウェブアプリケーションと相互作用するため
 tool-browser-open = 承認されたHTTPS URLをシステムブラウザで開く。セキュリティ制約：許可リストのみのドメイン、ローカル/プライベートホストなし、スクレイピングなし。
 tool-channel-room = アクティブなチャンネルを通じてルームを作成し、ユーザーを招待します。'matrix.default' などのチャンネルキー、アクション 'create_room' または 'invite_user'、およびアクション固有のルームフィールドを指定してください。
 tool-channel-room-param-action = 実行するルーム管理アクション。

@@ -378,6 +378,82 @@
       "retired_in": "wall 1 (SubAgent demolition)",
       "notes": "Runtime-profile agentic delegate run timeout removed with the delegate tool.",
       "match_regex": "`agentic_timeout_secs`|\\bagentic_timeout_secs\\b"
+    },
+    {
+      "term": "claude_code",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Raw Claude Code CLI launch tool removed from the Parent registry. Harness execution goes through the typed subagent/Tachi paths (#197 wall 2).",
+      "replacement": "reasoning_subagent",
+      "allowed_globs": [
+        "docs/maintainers/utf8-truncation-audit-7828.md"
+      ]
+    },
+    {
+      "term": "claude_code_runner",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Claude Code task-runner tool (tmux/SSH handoff + Slack progress) removed from the Parent registry; its unauthenticated /hooks/claude-code webhook is deleted.",
+      "replacement": "reasoning_subagent"
+    },
+    {
+      "term": "codex_cli",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Raw Codex CLI launch tool removed from the Parent registry. Harness execution goes through the typed subagent/Tachi paths (#197 wall 2).",
+      "replacement": "reasoning_subagent",
+      "allowed_globs": [
+        "docs/maintainers/utf8-truncation-audit-7828.md"
+      ]
+    },
+    {
+      "term": "gemini_cli",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Raw Gemini CLI launch tool removed from the Parent registry. Distinct from the providers.models.gemini_cli model provider, which stays.",
+      "replacement": "reasoning_subagent",
+      "match_regex": "^(?!.*providers)(?!.*gemini_cli\\.rs).*\\bgemini_cli\\b",
+      "allowed_globs": [
+        "docs/maintainers/utf8-truncation-audit-7828.md"
+      ]
+    },
+    {
+      "term": "opencode_cli",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Raw OpenCode CLI launch tool removed from the Parent registry. Harness execution goes through the typed subagent/Tachi paths (#197 wall 2).",
+      "replacement": "reasoning_subagent",
+      "allowed_globs": [
+        "docs/maintainers/utf8-truncation-audit-7828.md"
+      ]
+    },
+    {
+      "term": "browser_delegate",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Spawned a configurable coding CLI (default `claude --print`) for browser tasks; removed from the Parent registry as a raw harness launcher (#197 wall 2).",
+      "replacement": "reasoning_subagent"
+    },
+    {
+      "term": "hooks/claude-code",
+      "kind": "op",
+      "retired_in": "PR #250",
+      "notes": "Unauthenticated vendor webhook that existed only for the claude_code_runner; deleted with the runner's registration.",
+      "replacement": "reasoning_subagent"
+    },
+    {
+      "term": "api/cli-tools",
+      "kind": "op",
+      "retired_in": "PR #250",
+      "notes": "CLI PATH-scan discovery endpoint and its dashboard consumers deleted; the discovery plumbing is a retired Parent surface (#197 wall 2).",
+      "replacement": "/api/tools"
+    },
+    {
+      "term": "coding_cli_executor",
+      "kind": "code-path",
+      "retired_in": "PR #250",
+      "notes": "RuntimeCodingCliExecutor raw subprocess seam deleted; no Parent path builds coding-CLI commands anymore.",
+      "replacement": "reasoning_subagent"
     }
   ]
 }

@@ -197,6 +197,7 @@ mod tests {
         "opencode_cli",
         "coding_cli",
         "coding_cli_executor",
+        "browser_delegate",
         // repo/git mutation
         "git_operations",
         "git_forge",
