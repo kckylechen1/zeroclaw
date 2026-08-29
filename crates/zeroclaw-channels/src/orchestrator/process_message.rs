@@ -940,57 +940,6 @@ async fn process_channel_message_body(
         Some(turn_id.clone()),
     );
 
-    // Finished background children, claimed once for this turn and spliced
-    // above the user message, so a Detached completion actually reaches the
-    // person on Telegram/Discord/etc. instead of sitting delivered-to-nobody.
-    //
-    // **Claimed through the scoping entry point, not the ambient one.** This
-    // turn owns `history_key`, but it only scopes it around the tool-loop
-    // future below (`scope_session_key(Some(history_key.clone()), tool_loop)`),
-    // which is built after `history` — so an ambient claim here would read no
-    // key at all and be a silent no-op. The runtime scopes the key for us.
-    //
-    // **Once per turn, not once per model-switch retry.** A retry re-enters the
-    // loop with this same `history`, so the block is still in front of the
-    // model on the second attempt; claiming inside the loop would consume the
-    // next batch of announcements for a turn that already has one.
-    //
-    // **Divergence from the CLI/Agent claim sites, deliberate:** the block goes
-    // into this turn's local `history` only, never into the per-sender
-    // conversation cache — `append_sender_turn` above already persisted the
-    // plain user text, and rewriting that entry would re-show the same
-    // completion at the top of every later turn. The consequence is that later
-    // turns' history does not carry the block; that is accepted, because
-    // delivered-exactly-once is the contract and the assistant's persisted
-    // reply is the durable record of what it was told.
-    //
-    // **Above the turn-context preamble, not between it and the user's text —
-    // and that is a divergence, not a mirror.** The CLI site composes
-    // `{hw_context}{announcements}[{now}] {msg}` (`agent/loop_.rs`), putting the
-    // news closest to the message it is news about. Here the preamble is already
-    // composed onto the user turn by the time this claim runs, because the claim
-    // is deliberately late: it sits below the reply-intent precheck, so a turn
-    // that decides to stay silent never consumes a batch, and the window in
-    // which the guard has to hand rows back is as narrow as this function
-    // allows. The ordering is what that narrower window costs.
-    //
-    // Nothing fallible sits between here and the provider call that the guard
-    // does not already cover: the splice is infallible, and every path from the
-    // retry loop that fails before the provider leaves the guard armed.
-    //
-    // **Two limits of "one claimant per conversation" on this surface, named
-    // rather than assumed away.** First, `history_key` is not the dispatch key:
-    // Matrix folds thread roots into one history key while the interruption
-    // scope keeps them apart, so two workers for the same conversation can
-    // reach this line concurrently. SQLite's single claiming statement keeps
-    // that safe — no row is read twice — but one batch can arrive split across
-    // two turns. Second, settling below on a succeeded turn means the model
-    // read the block, not that the user received anything: an outbound send can
-    // still fail afterwards. That is deliberate. The assistant's reply is
-    // persisted to this conversation's history either way, so the agent keeps
-    // what it was told; handing the rows back on a send failure would
-    // re-announce a completion it has already acted on.
-    //
     let mut fallback_info = None;
     let llm_result = scope_provider_fallback(async {
             let llm_result = loop {

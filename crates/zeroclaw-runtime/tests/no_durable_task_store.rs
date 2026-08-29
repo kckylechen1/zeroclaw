@@ -23,8 +23,8 @@ fn runtime_source_references_no_retired_durable_task_store() {
     assert!(
         offenders.is_empty(),
         "retired durable task-store tokens found; durable task truth is \
-         Tachi's through the bridge (#205 annex rows 1/6) — do not regrow a \
-         second ledger:\n{}",
+         Tachi's through the bridge (frozen contract annex rows 1 and 6) — \
+         do not regrow a second ledger:\n{}",
         offenders.join("\n")
     );
 }
@@ -39,17 +39,54 @@ fn scan(dir: &Path, offenders: &mut Vec<String>) {
         } else if path.extension().is_some_and(|ext| ext == "rs") {
             let content = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            // Comments are stripped before matching: prose that names the
+            // retired store documents its absence and regrows nothing, while
+            // a live `use`, type, constructor, or DDL string — real code —
+            // still trips the guard.
+            let code = strip_line_comments(&content);
             for token in BANNED_TOKENS {
-                if content.contains(token) {
+                if code.contains(token) && !is_exempted(&path, token) {
                     offenders.push(format!(
                         "{}: contains {token:?}",
                         path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
                             .expect("in-crate path")
+                            .display()
                     ));
                 }
             }
         }
     }
+}
+
+/// Remove `//` line comments (including `///`/`//!` doc forms). Deliberately
+/// naive: it can over-strip a `//` inside a string literal, which for these
+/// tokens errs toward silence on prose-shaped strings and never misses a
+/// `use`/type/constructor reference — the references that would constitute
+/// regrowth. Block comments are not used by the retired vocabulary's former
+/// call sites; if one appears with these tokens, the persistence gate's
+/// DDL scan still covers it.
+fn strip_line_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    for line in source.lines() {
+        match line.find("//") {
+            Some(idx) => out.push_str(&line[..idx]),
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The one sanctioned mention: the daemon's boot-absence test names the file
+/// it asserts is never created (`daemon::tests::daemon_boot_creates_no_control_plane_db`).
+/// Only the bare file name is exempted there — any store vocabulary token in
+/// that file, or the file name anywhere else, still trips.
+fn is_exempted(path: &Path, token: &str) -> bool {
+    token == "control_plane.db"
+        && path
+            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+            .expect("in-crate path")
+            == Path::new("src/daemon/mod.rs")
 }
 
 /// The retired control-plane vocabulary. Any of these strings in runtime
