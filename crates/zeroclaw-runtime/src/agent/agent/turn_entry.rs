@@ -78,14 +78,7 @@ impl Agent {
         let date_str =
             format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} {tz}");
 
-        // Same claim-once-per-turn contract as
-        // `append_streamed_user_message_to_history`; `turn` builds its user
-        // message inline instead of going through that helper, so it holds its
-        // own guard and settles it at this function's success exits.
-        let (announcements, announcement_guard) =
-            crate::agent::loop_::claim_announcements_for_turn(true).await;
-        let enriched =
-            format!("{announcements}[CURRENT DATE & TIME: {date_str}]\n\n{user_message}");
+        let enriched = format!("[CURRENT DATE & TIME: {date_str}]\n\n{user_message}");
 
         self.history
             .push(ConversationMessage::Chat(ChatMessage::user(enriched)));
@@ -133,13 +126,7 @@ impl Agent {
                         cached.clone(),
                     )));
                 let _ = self.trim_history(Some(&turn_id));
-                // Cache hit: no provider call, but the block is durably in
-                // `self.history` for the next turn. See the same exit in
-                // `turn_streamed_with_steering_state`.
-                return crate::agent::loop_::settle_announcement_guards(
-                    announcement_guard,
-                    Ok(cached),
-                );
+                return Ok(cached);
             }
             self.observer.record_event(&ObserverEvent::CacheMiss {
                 cache_type: "response".into(),
@@ -296,10 +283,7 @@ impl Agent {
 
         let _ = self.trim_history(Some(&turn_id));
 
-        // Success point: the tool loop returned, so the provider was called
-        // with the history containing the announcement block. Every other exit
-        // above leaves the guard to drop armed.
-        crate::agent::loop_::settle_announcement_guards(announcement_guard, Ok(response))
+        Ok(response)
     }
 
     pub async fn turn_streamed(
@@ -402,16 +386,8 @@ impl Agent {
             self.observer_agent_alias(),
             Some(turn_id.clone()),
         );
-        // One guard per user message claimed into this turn: the opening one
-        // here, plus one for each mid-turn steering message drained below.
-        // They are settled together against this turn's one outcome at every
-        // success exit; any other exit drops them armed and the announcements
-        // go back to the store.
-        let mut announcement_guards: Vec<crate::agent::loop_::UnclaimOnDrop> = Vec::new();
-        announcement_guards.extend(
-            self.append_streamed_user_message_to_history(user_message, &mut new_msgs, &turn_id)
-                .await,
-        );
+        self.append_streamed_user_message_to_history(user_message, &mut new_msgs, &turn_id)
+            .await;
 
         let active_dispatcher = {
             let base_provider_messages = self.tool_dispatcher.to_provider_messages(&self.history);
@@ -468,17 +444,10 @@ impl Agent {
                 forward_history_trim_notice(&event_tx, notice).await;
                 self.observer.record_event(&ObserverEvent::TurnComplete);
                 committed_response.push_str(&cached);
-                // A cache hit is a completed turn: no provider call happened,
-                // but the announcement block is in `self.history`, which this
-                // pipeline carries into the next turn — so the news is not
-                // lost, and returning it to the store would show it twice.
-                return crate::agent::loop_::settle_announcement_guards(
-                    announcement_guards,
-                    Ok(StreamedTurnSuccess {
-                        response: committed_response,
-                        new_messages: new_msgs,
-                    }),
-                );
+                return Ok(StreamedTurnSuccess {
+                    response: committed_response,
+                    new_messages: new_msgs,
+                });
             }
             self.observer.record_event(&ObserverEvent::CacheMiss {
                 cache_type: "response".into(),
@@ -589,16 +558,8 @@ impl Agent {
                         turn_id: Some(turn_id.clone()),
                     });
                 }
-                // Claim finished background children for this steering turn —
-                // same as append_streamed_user_message_to_history, but routed to
-                // round_added instead of self.history.
-                let (announcements, guard) =
-                    crate::agent::loop_::claim_announcements_for_turn(true).await;
-                if let Some(g) = guard {
-                    announcement_guards.push(g);
-                }
                 let now = self.current_turn_datetime().format("%Y-%m-%d %H:%M:%S %Z");
-                let enriched = format!("{announcements}[{now}] {steering_message}");
+                let enriched = format!("[{now}] {steering_message}");
                 round_added.push(ChatMessage::user(enriched));
             }
             let round_loop = crate::agent::loop_::TOOL_LOOP_COST_TRACKING_CONTEXT.scope(
@@ -762,18 +723,10 @@ impl Agent {
                         &event_tx,
                     )
                     .await;
-                    // Success point: the round loop returned, which means the
-                    // provider was called and the model read every user
-                    // message this turn appended — the opening one and each
-                    // steering message. A steering continuation `continue`s
-                    // above without settling, so this runs once per turn.
-                    return crate::agent::loop_::settle_announcement_guards(
-                        announcement_guards,
-                        Ok(StreamedTurnSuccess {
-                            response: committed_response,
-                            new_messages: new_msgs,
-                        }),
-                    );
+                    return Ok(StreamedTurnSuccess {
+                        response: committed_response,
+                        new_messages: new_msgs,
+                    });
                 }
                 Err(error) => {
                     // Model switch requested mid-turn: the unified loop

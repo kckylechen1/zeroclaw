@@ -184,10 +184,7 @@ use zeroclaw_memory::{self, Memory};
 use zeroclaw_providers::{self, ChatMessage, ModelProvider, ProviderDispatch};
 #[cfg(test)]
 use zeroclaw_runtime::agent::loop_::build_tool_instructions_for_names;
-use zeroclaw_runtime::agent::loop_::{
-    TurnOutcome, append_pinned_mcp_section, apply_text_tool_prompt_policy,
-    settle_announcement_guards,
-};
+use zeroclaw_runtime::agent::loop_::{append_pinned_mcp_section, apply_text_tool_prompt_policy};
 use zeroclaw_runtime::approval::ApprovalManager;
 use zeroclaw_runtime::observability::Observer;
 use zeroclaw_runtime::observability::traits::{ObserverEvent, ObserverMetric};
@@ -708,149 +705,16 @@ fn is_stop_command(content: &str) -> bool {
 /// with no separator of our own — the block carries its own trailing newline
 /// from `claim_child_announcements_context`.
 ///
-/// **Only the last message, and only when it is the user turn.** That is this
-/// module's existing convention for "the message this turn is about": the
-/// turn-context preamble is composed onto `history.last_mut()` under the same
-/// `role == "user"` test, and the runtime's claim sites all splice into a user
-/// message they build as the final one. Reaching further back would put the
-/// block above text the model reads earlier, out of order with the news it
-/// describes.
-///
-/// Returns whether the block landed. `false` means the model will never read
-/// it, and the caller must let its `UnclaimOnDrop` guard drop armed so the
-/// announcements go back to the store for a later turn. Takes a slice rather
-/// than a `Vec` on purpose: there is no shape in which pushing a new message
-/// here is right, so the signature refuses it.
-fn prepend_context_to_last_user_turn(history: &mut [ChatMessage], block: &str) -> bool {
-    if block.is_empty() {
-        return false;
-    }
-    match history.last_mut() {
-        Some(last) if last.role == "user" => {
-            last.content = format!("{block}{}", last.content);
-            true
-        }
-        _ => false,
-    }
-}
-
-/// How a channel turn ended. Three levels because this turn shape separates
-/// cancellation from timeout from tool-loop failure, and the three answer the
-/// announcement question differently.
+/// How a channel turn ended: completed (with the tool loop's nested result)
+/// or cancelled.
 ///
 /// Module scope rather than a local inside `process_channel_message_body`
-/// (where it used to live) because
-/// [`run_channel_turn_with_background_announcements`] returns it and the tests
-/// that pin the bracket's settle behaviour have to construct it — a
-/// function-local type is reachable from neither.
+/// (where it used to live) because the result-handling match arms and tests
+/// both need to construct it — a function-local type is reachable from
+/// neither.
 enum LlmExecutionResult {
     Completed(Result<Result<String, anyhow::Error>, tokio::time::error::Elapsed>),
     Cancelled,
-}
-
-/// This turn shape's answer to the one question that decides whether its
-/// claimed announcements stay delivered (`TurnOutcome`, `agent/loop_.rs`).
-///
-/// Only the fully nested `Completed(Ok(Ok(_)))` counts, and each layer it
-/// rejects is a case where the model may never have seen the block:
-/// `Cancelled` (the select fired before or during the call),
-/// `Completed(Err(_))` (the whole tool loop timed out), and
-/// `Completed(Ok(Err(_)))` (it failed — including failing before the
-/// provider call). Flattening this to "is it ok" would keep announcements
-/// nobody read flagged delivered-to-nobody.
-impl TurnOutcome for LlmExecutionResult {
-    fn turn_succeeded(&self) -> bool {
-        matches!(self, LlmExecutionResult::Completed(Ok(Ok(_))))
-    }
-}
-
-/// What [`run_channel_turn_with_background_announcements`] needs of a claim
-/// guard: settle it exactly once, against this turn's outcome, and let it drop
-/// still armed on every path that does not.
-///
-/// The bracket is generic over this rather than over `UnclaimOnDrop` for one
-/// reason: `UnclaimOnDrop` can only be minted by a real claim, and a real claim
-/// in this crate's tests yields nothing. `claim_announcements_for_scoped_turn`
-/// resolves its store through `control_plane()`
-/// (`zeroclaw-runtime/src/control_plane/global.rs`), a `OnceLock` only the
-/// daemon boots, and the bypass hook for it (`CHILD_ANNOUNCEMENT_STORE_TEST_HOOK`,
-/// `agent/loop_.rs`) is `#[cfg(test)]`-private to `zeroclaw-runtime`, so it does
-/// not exist when that crate is compiled as this one's dependency. A test here
-/// can therefore only ever observe an empty claim and no guard. Abstracting the
-/// guard is what lets a stub claim hand the bracket something whose settling is
-/// observable.
-trait ChannelAnnouncementGuard {
-    /// Settle against how the turn ended. The judgement is
-    /// [`TurnOutcome::turn_succeeded`]'s, never this call's.
-    fn settle_against(self, outcome: &LlmExecutionResult);
-}
-
-/// The production guard settles through the runtime's own function, so the
-/// criterion stays the one spelled in `agent/loop_.rs` and is not restated here.
-impl ChannelAnnouncementGuard for zeroclaw_runtime::agent::UnclaimOnDrop {
-    fn settle_against(self, outcome: &LlmExecutionResult) {
-        settle_announcement_guards(Some(self), outcome);
-    }
-}
-
-/// The channel turn's background-announcement bracket: claim under the
-/// conversation's history key, splice the block above the user message, run the
-/// turn, settle the claim against how it ended.
-///
-/// This exists as a seam, not as decomposition.
-/// `process_channel_message_body` needs a whole live orchestrator context
-/// (providers, registries, channel handles, approval manager) that no test
-/// constructs, so with the wiring inline the only thing that could pin it was a
-/// test that read this file's own source text for literals — which cannot catch
-/// a wrong key, a wrong history shape, or a splice that permanently returns
-/// `false`. Taking the turn's execution body as a parameter moves all three
-/// under behavioural test: production passes its model-switch retry loop
-/// unchanged, a test passes a stub that returns a constructed
-/// [`LlmExecutionResult`] and inspects, from inside the stub, exactly the
-/// `history` the model would have been given.
-///
-/// **`history` is `&mut` and reaches the body only after the splice.** That
-/// ordering is the contract — the body is handed the same vector the splice
-/// wrote into, so there is no shape in which the model reads a history the
-/// splice did not touch.
-///
-/// **A failed splice disarms before the body runs.** Nothing was put in front
-/// of the model, so the rows go back to the store and a later turn announces
-/// them again. This is reachable, not theoretical: a cache whose tail is a
-/// `tool` message — an interrupted tool-calling turn, persisted before its
-/// assistant reply — makes `normalize_cached_channel_turns` merge this turn's
-/// user content *into* that tool message, so the last role is `tool` and both
-/// this splice and the turn-context preamble no-op. It costs one turn, not the
-/// announcement.
-///
-/// **Settling happens once, outside the body.** A model-switch retry loops with
-/// the same history, which the model has still not read, so a body that retries
-/// internally settles nothing per attempt; it yields one outcome and that is
-/// what the claim is judged by.
-async fn run_channel_turn_with_background_announcements<Guard, Claim, Body>(
-    history_key: &str,
-    history: &mut Vec<ChatMessage>,
-    claim: Claim,
-    turn_body: Body,
-) -> LlmExecutionResult
-where
-    Guard: ChannelAnnouncementGuard,
-    Claim: AsyncFnOnce(&str) -> (String, Option<Guard>),
-    Body: AsyncFnOnce(&mut Vec<ChatMessage>) -> LlmExecutionResult,
-{
-    let (announcements, mut guard) = claim(history_key).await;
-    if !prepend_context_to_last_user_turn(history, &announcements) {
-        // Nothing was spliced, so the model will never read these. Drop the
-        // guard armed right here, before the turn even starts.
-        guard = None;
-    }
-
-    let outcome = turn_body(history).await;
-
-    if let Some(guard) = guard {
-        guard.settle_against(&outcome);
-    }
-    outcome
 }
 
 fn timestamp_channel_user_content(content: &str) -> String {

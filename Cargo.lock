@@ -13111,20 +13111,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroclaw-coordinator"
-version = "0.8.3"
-dependencies = [
- "async-trait",
- "futures-util",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "zeroclaw-api",
- "zeroclaw-log",
-]
-
-[[package]]
 name = "zeroclaw-desktop"
 version = "0.8.3"
 dependencies = [
@@ -13482,7 +13468,6 @@ dependencies = [
  "wiremock",
  "zeroclaw-api",
  "zeroclaw-config",
- "zeroclaw-coordinator",
  "zeroclaw-infra",
  "zeroclaw-log",
  "zeroclaw-macros",

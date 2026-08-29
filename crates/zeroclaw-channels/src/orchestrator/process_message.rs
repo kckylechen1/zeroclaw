@@ -12,7 +12,6 @@ use zeroclaw_api::channel::{Channel, SendMessage};
 use zeroclaw_providers::ChatMessage;
 use zeroclaw_providers::ModelProvider;
 use zeroclaw_providers::reliable::{scope_provider_fallback, take_last_provider_fallback};
-use zeroclaw_runtime::agent::claim_announcements_for_scoped_turn;
 use zeroclaw_runtime::agent::loop_::{
     LoopKnobs, ResolvedAgentExecution, ResolvedIo, ResolvedModelAccess, ResolvedRuntimeKnobs,
     ToolLoop, is_model_switch_requested, run_tool_call_loop, scope_session_key, scope_thread_id,
@@ -43,13 +42,12 @@ use super::{
     outbound_content_format_for_channel, peer_prompt_channel_ref, provider_cache_key,
     reconcile_early_ack, record_passive_context, refreshed_new_session_system_prompt,
     resolve_channel_ack_reactions, resolve_channel_thinking, resolve_classifier_route,
-    resolve_provider_ref_for_runtime_switch, rollback_orphan_user_turn,
-    run_channel_turn_with_background_announcements, run_draft_updater, runtime_defaults_snapshot,
-    sanitize_channel_response_for_format_with_leak_detection, send_message_to_peer_tool_available,
-    sender_memory_session_ids, set_route_selection, should_bypass_reply_intent_precheck,
-    should_rollback_failed_user_turn, stamp_session_routing_context,
-    strip_inline_data_image_markers, strip_tool_result_content, strip_tool_summary_prefix,
-    take_pending_new_session, timestamped_channel_user_history_content,
+    resolve_provider_ref_for_runtime_switch, rollback_orphan_user_turn, run_draft_updater,
+    runtime_defaults_snapshot, sanitize_channel_response_for_format_with_leak_detection,
+    send_message_to_peer_tool_available, sender_memory_session_ids, set_route_selection,
+    should_bypass_reply_intent_precheck, should_rollback_failed_user_turn,
+    stamp_session_routing_context, strip_inline_data_image_markers, strip_tool_result_content,
+    strip_tool_summary_prefix, take_pending_new_session, timestamped_channel_user_history_content,
 };
 
 /// Merge the durable owner-profile section and the session task-scoped
@@ -993,18 +991,8 @@ async fn process_channel_message_body(
     // what it was told; handing the rows back on a send failure would
     // re-announce a completion it has already acted on.
     //
-    // The claim, the splice and the settle live in
-    // `run_channel_turn_with_background_announcements`; this turn's execution
-    // body — the model-switch retry loop below, unchanged — is what gets handed
-    // to it. That is the only seam through which those three can be asserted
-    // without a live orchestrator context, and the disarm-on-failed-splice case
-    // that used to be spelled here now lives there with its reasoning.
     let mut fallback_info = None;
-    let llm_result = run_channel_turn_with_background_announcements(
-        &history_key,
-        &mut history,
-        async |key| claim_announcements_for_scoped_turn(key).await,
-        async |history| scope_provider_fallback(async {
+    let llm_result = scope_provider_fallback(async {
             let llm_result = loop {
                 let thread_scope_id = msg
                     .interruption_scope_id
@@ -1053,9 +1041,9 @@ async fn process_channel_message_body(
                             knobs: &loop_knobs,
                         },
                     ),
-                    // Reborrow, not move: `history` is the bracket's `&mut` and the
-                    // model-switch loop may take another lap with the same vector.
-                    history: &mut *history,
+                    // Reborrow, not move: the model-switch loop may take
+                    // another lap with the same vector.
+                    history: &mut history,
                     channel_name: msg.channel.as_str(),
                     channel_reply_target: Some(msg.reply_target.as_str()),
                     cancellation_token: Some(cancellation_token.clone()),
@@ -1209,11 +1197,9 @@ async fn process_channel_message_body(
             // handed out through the binding above rather than as part of the
             // body's outcome: the bracket settles against the turn's outcome, and a
             // fallback record is not part of that question.
-            fallback_info = take_last_provider_fallback();
-            llm_result
-        })
-        .await,
-    )
+        fallback_info = take_last_provider_fallback();
+        llm_result
+    })
     .await;
 
     // Attribute the closing event to the final route and attach aggregate
