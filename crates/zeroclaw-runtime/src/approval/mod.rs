@@ -453,10 +453,11 @@ impl ApprovalManager {
 /// Resolve the local_tool boot id, freezing the first answer for the process.
 ///
 /// The boot id is a process-local UUID. It was homologous with the durable
-/// control-plane's boot id until Wall 4 (#197) retired that plane: durable
-/// execution truth moved to Tachi (#205 annex rows 1 and 6), and the grant
-/// namespace never needed the homology — what it needs is one stable id per
-/// process so independently opened managers redeem each other's rows.
+/// control-plane's boot id until Wall 4 (issue 197) retired that plane: durable
+/// execution truth moved to Tachi (frozen contract annex rows 1 and 6), and
+/// the grant namespace never needed the homology — what it needs is one
+/// stable id per process so independently opened managers redeem each
+/// other's rows.
 ///
 /// The `OnceLock` freeze stays: gateway and channel construction can attach
 /// an approval store at different moments of the same process, and flipping

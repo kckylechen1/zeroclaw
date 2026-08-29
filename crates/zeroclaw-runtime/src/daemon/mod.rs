@@ -379,12 +379,12 @@ pub async fn run(
         ));
     }
 
-    // Wall 4 (#197): the durable control-plane is no longer booted. Its only
-    // production writer (the coordinator child host) lost its last spawn
-    // producer with the spawn wall (#255), and durable execution truth is
-    // owned by Tachi through the bridge (#205 annex rows 1 and 6). A legacy
-    // `<data_dir>/control_plane.db` is left exactly as it is; the migration
-    // WARN for it lands with the wall's data-disposition slice.
+    // Wall 4 (issue 197): the durable control-plane is no longer booted. Its
+    // only production writer (the coordinator child host) lost its last spawn
+    // producer with the spawn wall (PR 255), and durable execution truth is
+    // owned by Tachi through the bridge (frozen contract annex rows 1 and 6).
+    // A legacy `<data_dir>/control_plane.db` is left exactly as it is; the
+    // migration WARN for it lands with the wall's data-disposition slice.
 
     if let Some(channels_start) = registry.take_channels_start() {
         if has_supervised_channels(&config) {
@@ -2858,7 +2858,7 @@ mod tests {
     }
 
     /// A daemon boot must not create `<data_dir>/control_plane.db` anymore
-    /// (Wall 4, #197): the durable control-plane is not booted, so the one
+    /// (Wall 4, issue 197): the durable control-plane is not booted, so the one
     /// remaining write path it had — `ControlPlaneHandle::start` creating the
     /// DB file and its recovery pass ledgering rows at every boot — is gone.
     ///
@@ -2901,7 +2901,7 @@ mod tests {
         assert!(
             crate::control_plane::control_plane().is_none(),
             "a daemon boot must not install the durable control plane; \
-             durable task truth is Tachi's through the bridge (#205 annex rows 1/6)"
+             durable task truth is Tachi's through the bridge (annex rows 1 and 6)"
         );
         assert!(
             !tmp.path().join("data").join("control_plane.db").exists(),
