@@ -2,7 +2,7 @@
 
 A SubAgent is an **ephemeral child run** spawned by a parent agent. Under the frozen SubAgent contract (#202), a child receives a bounded, admitted context (never the parent's identity, credentials, registry, memory UUID, or channel handles) and returns a typed result to the parent, which stays the only user-facing persona.
 
-There is no `[subagents.*]` block in the schema; SubAgents are not a separate configuration concept.
+There is no `[subagents.*]` block in the schema (the daemon-wide `[subagents]` coordinator-limit section retired with the control-plane migration wall); SubAgents are not a separate configuration concept.
 
 ## Which spawn tools exist
 
@@ -14,11 +14,11 @@ There is no `[subagents.*]` block in the schema; SubAgents are not a separate co
 
 - **Run a bounded subtask out of the main conversation** → the V1 `reasoning_subagent` entrypoint: profile-admitted, content-only context bundles, typed `SubAgentReportV1` results, run-scoped child identity, no parent credentials or registry.
 - **Run durable/heavy work under another configured agent or an external harness** → the Tachi bridge (Task/Procedure execution), not an in-kernel delegation tool.
-- **Background fan-out with task ids and result polling** → Tachi-owned durable work. ZeroClaw's coordinator child store is legacy migration debt only; after the spawn wall no production writer mints new child rows, and the store's disposition belongs to the control-plane migration wall.
+- **Background fan-out with task ids and result polling** → Tachi-owned durable work. The local coordinator child store was deleted with the control-plane migration wall; durable task/attempt truth lives in Tachi through the bridge.
 
 ## Recursion
 
-Local recursion stays denied (frozen contract D1): a v1 child cannot spawn a child: the `reasoning_subagent` admission refuses any spawning lineage deeper than the parent's root. One immutable spawn lineage (`LineageRef`, SA-9) still threads every agent boundary, so no future spawn surface can reset depth by rebuilding a registry; the coordinator's own admission cap (`max_spawn_depth`) remains the separate, coordinator-side bound. The runtime-profile `max_delegation_depth` key retired with the spawn tools: legacy files carrying it are ignored with a load warning. Cron `JobType::Agent` runs are top-level roots, not continuations of an interactive parent's lineage.
+Local recursion stays denied (frozen contract D1): a v1 child cannot spawn a child: the `reasoning_subagent` admission refuses any spawning lineage deeper than the parent's root. One immutable spawn lineage (`LineageRef`, SA-9) still threads every agent boundary, so no future spawn surface can reset depth by rebuilding a registry. The runtime-profile `max_delegation_depth` key retired with the spawn tools: legacy files carrying it are ignored with a load warning. Cron `JobType::Agent` runs are top-level roots, not continuations of an interactive parent's lineage.
 
 ## What a child may and may not reach
 
@@ -40,4 +40,4 @@ Local recursion stays denied (frozen contract D1): a v1 child cannot spawn a chi
 
 - #197 wall 1 removed the `delegate` tool (live parent-registry handout, credential clones, channel-wired handles; its config surface retired with it).
 - The #197 spawn wall removed the `spawn_subagent` tool (same-alias full-parent-inheritance child; full config clone; detached coordinator producer). The teaching sections that used to document its gates, output strings, and verification greps were deleted with the tool; the tool's own module is gone from the tree.
-- Legacy `control_plane.db` child rows written by the retired tools stay in place, unread by anything new and readable only through the unchanged fail-closed read path, until the control-plane migration wall disposes of them.
+- The control-plane migration wall (wall 4) deleted the durable control plane itself — the `zeroclaw-coordinator` child host, the announce chain, and the `data/control_plane.db` task ledger. Its last production writer died with the spawn wall; durable task/attempt truth is Tachi's through the bridge. Legacy `control_plane.db` files stay in place, never read or rewritten, and are reported by a once-per-boot warning.

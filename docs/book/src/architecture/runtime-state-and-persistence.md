@@ -26,7 +26,7 @@ move it). The current layout is:
 │   │   └── acp-sessions.db     # ACP protocol sessions
 │   ├── cron/jobs.db            # scheduled job state
 │   ├── sop/runs.db             # legacy run store; removed with the run side, left in place
-│   ├── control_plane.db        # task supervision records
+│   ├── control_plane.db        # legacy task ledger; removed with the control plane, left in place
 │   ├── state/
 │   │   ├── runtime-trace.jsonl # persisted logs
 │   │   └── costs.jsonl         # cost ledger
@@ -54,8 +54,8 @@ new runtime state should be described in terms of `<install>/data/`,
 | Live RPC/TUI sessions | RPC `SessionStore` | none by itself | `crates/zeroclaw-runtime/src/rpc/session.rs` in-memory map | Process-local; session history persists only through the chat or ACP backend | Live session handles, uploads, cancel tokens, owners, and overrides are runtime state. |
 | Cron jobs | Declarative config membership plus cron SQLite store | `data/cron/jobs.db` | `zeroclaw-runtime::cron` scheduler/store | Read paths do not create `jobs.db`; scheduler owns due/lock state | Declarative jobs are reconciled from config, while run metadata and locks live in the cron DB. |
 | SOP runs | Removed with the run side | `data/sop/runs.db` only as a leftover from an older install | none | The legacy `SopEngine`/`SopRunStore` pair was demolished; leftover stores are left in place and reported by a boot-time warning | Run truth lives Tachi-side as ProcedureRuns through the procedure_v1 seam. |
-| Background task supervision | Durable task control plane | `data/control_plane.db` | control-plane handle, coordinator persistence, task producers, and reaper | Owner PID/boot ID identifies prior-boot orphans; heartbeat timeout applies only to producers that emit heartbeats | Rows were written by the detached arms of the retired `spawn_subagent`/`delegate` tools; after the spawn wall no production writer mints new child rows (legacy-row disposition is the control-plane migration wall's scope). `parent_id` is the parent session key so the announce chain can claim what exists. Goal APIs exist, but end-to-end goal execution is not yet wired. |
-| Background child results (the retired background `delegate` was the first consumer) | Coordinator child + announce chain | `data/control_plane.db` task row | coordinator actor (query/cancel/list) and parent-turn claim | In-memory query state is process-local; undelivered completions survive restart in the task store until claimed | The workspace `delegate_results/` file store is retired along with the delegate tool. `check_result` reads the live coordinator; leftover JSON files are ignored. |
+| Background task supervision | Removed with the control plane | `data/control_plane.db` only as a leftover from an older install | none | The coordinator child host and the task ledger were deleted; the daemon reports a leftover file once per boot and leaves it in place | Rows came from the detached arms of the retired `spawn_subagent`/`delegate` tools; after the spawn wall no writer minted new child rows. Durable task/attempt truth lives in Tachi through the task-intent bridge. |
+| Background child results (the retired background `delegate` was the first consumer) | Removed with the control plane | `data/control_plane.db` only as a leftover from an older install | none | Same disposition as background task supervision | The workspace `delegate_results/` file store was retired with the delegate tool; leftover JSON files are ignored. |
 | Runtime logs | `zeroclaw-log` event schema and subscriber layer | `data/state/runtime-trace.jsonl` when persistence is enabled | broadcast hook, JSONL writer, `/api/logs` reader, `Observer` bridge | Rolling/full/none persistence is config-controlled; dashboard SSE receives events even when JSONL is disabled | Logs are evidence and observability, not the source of user config or session state. |
 | Cost ledger | `CostTracker` plus rate config | `data/state/costs.jsonl` | process-global `CostTracker` | Reload hot-swaps `CostConfig`; the tracker is constructed on demand if cost tracking becomes enabled | Existing records keep their recorded price; rate edits affect future requests after reload. |
 | Gateway pairing tokens | `PairingGuard` from `gateway.paired_tokens` | token hashes in config | pairing guard | Reload reconstructs the guard from config | Valid bearer tokens are config state, not `devices.db` rows. |
@@ -85,7 +85,7 @@ At minimum, include:
 - `data/sessions/`
 - `data/cron/jobs.db` if cron jobs are configured through runtime surfaces
 - `data/sop/runs.db` - legacy: the SOP run store was removed with the run side; existing files are left in place and reported by a boot-time warning
-- `data/control_plane.db` if supervised task history matters
+- `data/control_plane.db` - legacy: the task control plane was removed with the control-plane migration wall; existing files are left in place and reported by a boot-time warning
 - `data/state/costs.jsonl` if cost history matters
 - `data/state/runtime-trace.jsonl` if logs are needed for incident review
 - `data/devices.db` for paired-device metadata
@@ -102,7 +102,7 @@ the instance.
 - RPC live sessions: `crates/zeroclaw-runtime/src/rpc/session.rs`
 - Cron persistence: `crates/zeroclaw-runtime/src/cron/store.rs`
 - SOP persistence: `crates/zeroclaw-runtime/src/sop/store/`
-- Background task and goal supervision: `crates/zeroclaw-runtime/src/control_plane/`
+- Durable task supervision: removed with the control-plane migration wall; durable work runs through the Tachi bridge (`crates/zeroclaw-runtime/src/tachi_bridge/`)
 - Logs: `crates/zeroclaw-log/`
 - Cost ledger: `crates/zeroclaw-config/src/cost/tracker.rs`
 - Pairing guard: `crates/zeroclaw-config/src/pairing.rs`

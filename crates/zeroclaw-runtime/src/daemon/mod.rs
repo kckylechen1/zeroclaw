@@ -379,12 +379,26 @@ pub async fn run(
         ));
     }
 
-    // Wall 4 (issue 197): the durable control-plane is no longer booted. Its only
-    // production writer (the coordinator child host) lost its last spawn
-    // producer with the spawn wall, and durable execution truth is
-    // owned by Tachi through the bridge (frozen contract annex rows 1 and 6). A legacy
-    // `<data_dir>/control_plane.db` is left exactly as it is; the migration
-    // WARN for it lands with the wall's data-disposition slice.
+    // Wall 4 (issue 197): the durable control-plane is no longer booted. Its
+    // only production writer (the coordinator child host) lost its last spawn
+    // producer with the spawn wall, and durable execution truth is owned by
+    // Tachi through the bridge (frozen contract annex rows 1 and 6). A legacy
+    // `<data_dir>/control_plane.db` is never read, migrated, rewritten, or
+    // deleted — but an existing install is told so, once per boot.
+    let legacy_control_plane = config.data_dir.join("control_plane.db");
+    if legacy_control_plane.exists() {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({
+                    "path": legacy_control_plane.display().to_string(),
+                })),
+            "legacy control-plane database is retired and no longer read; it is \
+             left in place untouched — durable task/attempt truth now lives in \
+             Tachi through the task-intent bridge"
+        );
+    }
 
     if let Some(channels_start) = registry.take_channels_start() {
         if has_supervised_channels(&config) {
