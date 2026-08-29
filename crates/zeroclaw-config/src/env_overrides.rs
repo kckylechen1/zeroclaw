@@ -31,6 +31,48 @@ static RETIRED_ENV_TOMBSTONE_PREFIXES: LazyLock<Vec<(String, &'static str)>> =
             .collect()
     });
 
+/// One retired env path pattern. `segments` come from the dotted retired
+/// path split on the env separator; a `*` segment (from the file lane's
+/// map-key wildcard) matches exactly one env segment. Every pattern is
+/// prefix-matching: children under a retired section AND children under a
+/// retired field (e.g. `delegation_policy__mode`) are ignored with the
+/// same warning instead of erroring as unknown paths.
+struct RetiredEnvPattern {
+    segments: Vec<&'static str>,
+    code: &'static str,
+    prefix: bool,
+}
+
+/// Field-lane patterns derived from `RETIRED_CONFIG_FIELDS`, so an env
+/// override naming a removed field is ignored with the same structured
+/// warning as the file section/field shims instead of hard-erroring as an
+/// unknown path. Same SSOT rationale as the section prefixes above.
+static RETIRED_ENV_FIELD_PATTERNS: LazyLock<Vec<RetiredEnvPattern>> = LazyLock::new(|| {
+    crate::validation_warnings::RETIRED_CONFIG_FIELDS
+        .iter()
+        .map(|(path, code)| RetiredEnvPattern {
+            segments: path.split('.').collect(),
+            code,
+            prefix: true,
+        })
+        .collect()
+});
+
+/// Match one retired env pattern against the `__`-split env tail.
+fn retired_env_pattern_matches(pattern: &RetiredEnvPattern, tail_segments: &[&str]) -> bool {
+    let length_ok = if pattern.prefix {
+        tail_segments.len() >= pattern.segments.len()
+    } else {
+        tail_segments.len() == pattern.segments.len()
+    };
+    length_ok
+        && pattern
+            .segments
+            .iter()
+            .zip(tail_segments)
+            .all(|(expected, actual)| *expected == "*" || expected.eq_ignore_ascii_case(actual))
+}
+
 /// Test-visible view of the derived env-prefix set, so the SSOT guard can
 /// assert the walker carries a prefix for every retired surface.
 #[cfg(test)]
@@ -84,11 +126,32 @@ pub fn apply_env_overrides(config: &mut Config) -> Result<AppliedOverrides> {
         // entry hard-errors and the structured vec is discarded with the
         // Err — deprecation visibility should not depend on the rest of
         // the environment being clean.
-        if let Some((prefix, code)) = RETIRED_ENV_TOMBSTONE_PREFIXES
+        let tail_segments: Vec<&str> = tail.split(SEP).collect();
+        let retired_hit = RETIRED_ENV_TOMBSTONE_PREFIXES
             .iter()
             .find(|(prefix, _)| tail.starts_with(prefix.as_str()))
-        {
-            let dotted = prefix.trim_end_matches(SEP).replace(SEP, ".");
+            .map(|(prefix, code)| {
+                let dotted = prefix.trim_end_matches(SEP).replace(SEP, ".");
+                (dotted, *code)
+            })
+            .or_else(|| {
+                RETIRED_ENV_FIELD_PATTERNS
+                    .iter()
+                    .find(|pattern| retired_env_pattern_matches(pattern, &tail_segments))
+                    .map(|pattern| {
+                        let dotted: Vec<&str> = tail_segments
+                            .iter()
+                            .zip(&pattern.segments)
+                            .map(
+                                |(actual, expected)| {
+                                    if *expected == "*" { *actual } else { expected }
+                                },
+                            )
+                            .collect();
+                        (dotted.join("."), pattern.code)
+                    })
+            });
+        if let Some((dotted, code)) = retired_hit {
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -97,10 +160,10 @@ pub fn apply_env_overrides(config: &mut Config) -> Result<AppliedOverrides> {
                 "env override for retired config surface ignored"
             );
             tombstone_warnings.push(crate::validation_warnings::ValidationWarning::new(
-                *code,
+                code,
                 format!(
-                    "{env_name} targets the retired `[{dotted}]` config section and is \
-                     ignored. The section was removed from the schema and has no runtime \
+                    "{env_name} targets the retired `[{dotted}]` config key and is \
+                     ignored. The key was removed from the schema and has no runtime \
                      consumer; this compatibility shim will be removed in a later \
                      announced window. Remove the env var."
                 ),
@@ -511,6 +574,59 @@ mod tests {
                 .tombstone_warnings
                 .iter()
                 .all(|w| w.code == "gateway_pairing_dashboard_removed"),
+            "all hits carry the stable code"
+        );
+    }
+
+    #[tokio::test]
+    async fn walker_field_tombstone_ignores_retired_delegate_keys() {
+        // Field-lane tombstones (RETIRED_CONFIG_FIELDS): an env override
+        // naming a removed delegate config field is ignored with the
+        // stable structured warning — symmetric with the file lane — and
+        // must not hard-error as an unknown path. The wildcard matches the
+        // actual alias segment; the warning path records it verbatim.
+        let _guard = super::env_test_lock().await;
+        let _v1 = EnvVarGuard::set("ZEROCLAW_agents__lead__delegates", "peer");
+        let _v2 = EnvVarGuard::set("ZEROCLAW_agents__lead__delegate_same_risk_profile", "true");
+        // A child key under the retired field is ignored by the same
+        // prefix semantics as the section lane, not a hard error.
+        let _v3 = EnvVarGuard::set(
+            "ZEROCLAW_risk_profiles__ops__delegation_policy__mode",
+            "allow",
+        );
+
+        let mut config = Config::default();
+        let applied = apply_env_overrides(&mut config).expect("field hits ignored, not fatal");
+        assert!(
+            applied.paths.is_empty(),
+            "no tombstoned var may be applied: {:?}",
+            applied.paths
+        );
+        assert_eq!(
+            applied.tombstone_warnings.len(),
+            3,
+            "one warning per hit: {:?}",
+            applied.tombstone_warnings
+        );
+        let mut paths: Vec<_> = applied
+            .tombstone_warnings
+            .iter()
+            .map(|w| w.path.as_str())
+            .collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec![
+                "agents.lead.delegate_same_risk_profile",
+                "agents.lead.delegates",
+                "risk_profiles.ops.delegation_policy"
+            ]
+        );
+        assert!(
+            applied
+                .tombstone_warnings
+                .iter()
+                .all(|w| w.code == "delegate_config_removed"),
             "all hits carry the stable code"
         );
     }

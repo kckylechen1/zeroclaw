@@ -36,7 +36,7 @@ mcp_discovered_tool_policy = "explicit_only"
 
 # Layer 3 — backstop. If a future edit widens layer 1, these still stop at a
 # prompt, and an unattended prompt is a denial.
-always_ask = ["shell", "file_write", "file_edit", "delegate", "spawn_subagent"]
+always_ask = ["shell", "file_write", "file_edit", "spawn_subagent"]
 
 # Layer 4 — subtract even if something upstream re-admits them.
 excluded_tools = ["shell", "file_write", "file_edit"]
@@ -44,9 +44,6 @@ excluded_tools = ["shell", "file_write", "file_edit"]
 auto_approve = []
 block_high_risk_commands = true
 require_approval_for_medium_risk = true
-
-[risk_profiles.hyperion_trading.delegation_policy]
-mode = "forbidden"
 ```
 
 ## Why each layer is not redundant

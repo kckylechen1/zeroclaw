@@ -2417,7 +2417,14 @@ pub async fn handle_migrate(State(state): State<AppState>, headers: HeaderMap) -
             // warnings field is serde-skip) surface them.
             let mut new_cfg = new_cfg;
             new_cfg.retired_surface_warnings =
-                zeroclaw_config::validation_warnings::retired_section_tombstones(&new_content);
+                zeroclaw_config::validation_warnings::retired_section_tombstones(&new_content)
+                    .into_iter()
+                    .chain(
+                        zeroclaw_config::validation_warnings::retired_field_tombstones(
+                            &new_content,
+                        ),
+                    )
+                    .collect();
             *state.config.write() = new_cfg;
 
             axum::Json(MigrateResponse {

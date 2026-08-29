@@ -860,11 +860,6 @@ fn t14c_max_depth_synthesizes_per_agent_runtime_profile() {
         .get("agent_complex_agent")
         .expect("synthesized runtime_profiles.agent_complex_agent");
     assert_eq!(profile.max_delegation_depth, 4);
-    assert_eq!(
-        profile.agentic_timeout_secs,
-        Some(600),
-        "V2 agent agentic_timeout_secs must land on the agent's runtime_profile"
-    );
 }
 
 #[test]

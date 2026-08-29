@@ -314,7 +314,7 @@
       "kind": "tool",
       "retired_in": "PR #248",
       "notes": "Deleted with #197 wall 1: the legacy delegation tool was constructed from full parent inheritance (per-alias api_key clones, fallback credential, Arc<Config> snapshot, live parent-registry snapshot, channel-wired handles), all forbidden for child paths by the frozen #202 contract SA-7. Replacement: the V1 bounded SubAgent entrypoint reasoning_subagent (minimal composition) and the Tachi bridge for durable/heavy work.",
-      "match_regex": "`delegate`|\\bdelegate tool\\b|\\bDelegateTool\\b",
+      "match_regex": "`delegate`|\\bdelegate tool\\b|\\bDelegateTool\\b|\\[delegate\\]|ZEROCLAW_delegate__|\n\"delegate\"|'delegate'|\"delegate\",|,\\s*\"delegate\"",
       "replacement": "reasoning_subagent"
     },
     {
@@ -343,6 +343,41 @@
       "retired_in": "PR #248",
       "notes": "delegate tool action string deleted with the tool (#197 wall 1).",
       "match_regex": "`cancel_task`|'cancel_task'|\\\"cancel_task\\\""
+    },
+    {
+      "term": "delegates",
+      "kind": "config-key",
+      "retired_in": "wall 1 (SubAgent demolition)",
+      "notes": "`[agents.<alias>].delegates` roster removed with the delegate tool. The bare word also appears as ordinary prose (verb) and in unrelated plugin tables, so only the explicit key forms are matched.",
+      "match_regex": "`delegates`|`agents\\.[^`]*\\.delegates`|\\bdelegates\\s*=|\\bdelegates\\s*:"
+    },
+    {
+      "term": "delegate_same_risk_profile",
+      "kind": "config-key",
+      "retired_in": "wall 1 (SubAgent demolition)",
+      "notes": "Reach flag removed with the delegate tool; its same-profile gate no longer has a consumer.",
+      "match_regex": "`delegate_same_risk_profile`|\\bdelegate_same_risk_profile\\b"
+    },
+    {
+      "term": "delegation_policy",
+      "kind": "config-key",
+      "retired_in": "wall 1 (SubAgent demolition)",
+      "notes": "`[risk_profiles.<alias>].delegation_policy` gate removed with the delegate tool; the recursion-depth cap (`max_delegation_depth`) survives as the unified spawn-lineage cap.",
+      "match_regex": "`delegation_policy`|\\[risk_profiles\\.[^\\]]*\\.delegation_policy\\]|delegation_policy\\b"
+    },
+    {
+      "term": "delegation_timeout_secs",
+      "kind": "config-key",
+      "retired_in": "wall 1 (SubAgent demolition)",
+      "notes": "Runtime-profile delegate call timeout removed with the delegate tool.",
+      "match_regex": "`delegation_timeout_secs`|\\bdelegation_timeout_secs\\b"
+    },
+    {
+      "term": "agentic_timeout_secs",
+      "kind": "config-key",
+      "retired_in": "wall 1 (SubAgent demolition)",
+      "notes": "Runtime-profile agentic delegate run timeout removed with the delegate tool.",
+      "match_regex": "`agentic_timeout_secs`|\\bagentic_timeout_secs\\b"
     }
   ]
 }

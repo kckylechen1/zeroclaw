@@ -65,8 +65,7 @@ async fn v1_path_writes_no_control_plane_rows() {
     );
 
     let mut config = Config::default();
-    let mut risk = RiskProfileConfig::default();
-    risk.delegation_policy.mode = zeroclaw_config::autonomy::DelegationMode::Allow;
+    let risk = RiskProfileConfig::default();
     config.risk_profiles.insert("default".to_string(), risk);
     config.agents.insert(
         "parent-agent".to_string(),

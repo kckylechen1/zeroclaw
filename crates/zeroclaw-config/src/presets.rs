@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::autonomy::AutonomyLevel;
-use crate::autonomy::{DelegationMode, DelegationPolicy, McpDiscoveredToolPolicy};
+use crate::autonomy::McpDiscoveredToolPolicy;
 use crate::policy::{default_allowed_commands, default_forbidden_paths};
 use crate::schema::{RiskProfileConfig, RuntimeProfileConfig};
 
@@ -81,7 +81,6 @@ fn locked_down_risk() -> RiskProfileConfig {
         auto_approve: vec![],
         always_ask: vec![],
         allowed_roots: vec![],
-        delegation_policy: DelegationPolicy::default(),
         approval_route: None,
         allowed_tools: None,
         excluded_tools: vec![],
@@ -104,9 +103,6 @@ fn balanced_risk() -> RiskProfileConfig {
         auto_approve: vec![],
         always_ask: vec![],
         allowed_roots: vec![],
-        delegation_policy: DelegationPolicy {
-            mode: DelegationMode::Allow,
-        },
         approval_route: None,
         allowed_tools: None,
         excluded_tools: vec![],
@@ -129,9 +125,6 @@ fn yolo_risk() -> RiskProfileConfig {
         auto_approve: vec!["*".to_string()],
         always_ask: vec![],
         allowed_roots: vec![],
-        delegation_policy: DelegationPolicy {
-            mode: DelegationMode::Allow,
-        },
         approval_route: None,
         allowed_tools: None,
         excluded_tools: vec![],
@@ -233,8 +226,6 @@ fn tight_runtime() -> RuntimeProfileConfig {
         max_cost_per_day_cents: 100,
         shell_timeout_secs: 30,
         max_delegation_depth: 1,
-        delegation_timeout_secs: Some(60),
-        agentic_timeout_secs: Some(120),
         max_history_messages: Some(20),
         max_context_tokens: Some(8_000),
         compact_context: Some(true),
@@ -257,8 +248,6 @@ fn local_small_runtime() -> RuntimeProfileConfig {
         max_cost_per_day_cents: 100,
         shell_timeout_secs: 30,
         max_delegation_depth: 1,
-        delegation_timeout_secs: Some(60),
-        agentic_timeout_secs: Some(120),
         max_history_messages: Some(20),
         max_context_tokens: Some(8_000),
         compact_context: Some(true),
@@ -288,8 +277,6 @@ fn unbounded_runtime() -> RuntimeProfileConfig {
         max_cost_per_day_cents: u32::MAX,
         shell_timeout_secs: 600,
         max_delegation_depth: 8,
-        delegation_timeout_secs: Some(900),
-        agentic_timeout_secs: Some(1_800),
         max_history_messages: Some(200),
         max_context_tokens: Some(128_000),
         compact_context: Some(false),
@@ -611,8 +598,6 @@ mod tests {
         assert_eq!(values.max_cost_per_day_cents, 100);
         assert_eq!(values.shell_timeout_secs, 30);
         assert_eq!(values.max_delegation_depth, 1);
-        assert_eq!(values.delegation_timeout_secs, Some(60));
-        assert_eq!(values.agentic_timeout_secs, Some(120));
         assert_eq!(values.max_history_messages, Some(20));
         assert_eq!(values.max_context_tokens, Some(8_000));
         assert_eq!(values.compact_context, Some(true));
@@ -723,22 +708,6 @@ mod tests {
             values.always_ask.is_empty(),
             "yolo must never force an approval prompt",
         );
-        assert!(
-            values.delegation_policy.permits(),
-            "yolo must permit delegation",
-        );
-    }
-
-    #[test]
-    fn yolo_and_balanced_permit_delegation() {
-        for name in ["yolo", "balanced"] {
-            let preset = risk_preset(name).unwrap();
-            let values = (preset.values)();
-            assert!(
-                values.delegation_policy.permits(),
-                "{name} must permit delegation",
-            );
-        }
     }
 
     #[test]

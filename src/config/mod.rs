@@ -13,7 +13,7 @@ pub use schema::{
     BrowserConfig, BuiltinHooksConfig, ChannelsConfig, ClassificationRule, ClaudeCodeConfig,
     ClaudeCodeRunnerConfig, CloudOpsConfig, CodexCliConfig, ComposioConfig, Config,
     ConversationalAiConfig, CostConfig, CronJobDecl, CronScheduleDecl, DEFAULT_GWS_SERVICES,
-    DataRetentionConfig, DeepgramSttConfig, DelegateToolConfig, DiscordConfig, DockerRuntimeConfig,
+    DataRetentionConfig, DeepgramSttConfig, DiscordConfig, DockerRuntimeConfig,
     EmbeddingRouteConfig, EstopConfig, GatewayConfig, GeminiCliConfig, GoogleSttConfig,
     GoogleWorkspaceAllowedOperation, GoogleWorkspaceConfig, HardwareConfig, HardwareTransport,
     HeartbeatConfig, HooksConfig, HttpRequestConfig, IMessageConfig, IdentityConfig,

@@ -641,10 +641,6 @@ reserve_percent = 10
 
 [peripherals]
 
-[delegate]
-timeout_secs = 120
-agentic_timeout_secs = 300
-
 [agents.simple_agent]
 provider = "openai"
 model = "gpt-4o-mini"
@@ -659,7 +655,6 @@ agentic = true
 allowed_tools = ["shell", "memory"]
 max_iterations = 25
 timeout_secs = 180
-agentic_timeout_secs = 600
 skills_directory = "/opt/zeroclaw/skills"
 memory_namespace = "complex"
 

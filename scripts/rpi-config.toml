@@ -106,7 +106,6 @@ non_cli_excluded_tools = [
     "channel_ack_config",
     "pushover",
     "composio",
-    "delegate",
     "screenshot",
     "image_info",
 ]

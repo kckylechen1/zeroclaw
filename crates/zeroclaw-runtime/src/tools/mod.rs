@@ -2721,8 +2721,7 @@ mod tests {
 
     fn lineage_registry_config() -> Config {
         let mut config = Config::default();
-        let mut risk = zeroclaw_config::schema::RiskProfileConfig::default();
-        risk.delegation_policy.mode = zeroclaw_config::autonomy::DelegationMode::Allow;
+        let risk = zeroclaw_config::schema::RiskProfileConfig::default();
         config.risk_profiles.insert("default".to_string(), risk);
         config.agents = lineage_agents();
         config
