@@ -5,7 +5,6 @@ import {
   getCronJobs,
   getIntegrations,
   getMemory,
-  getCliTools,
   getHealth,
   runDoctor,
 } from '../lib/api';
@@ -15,7 +14,6 @@ import type {
   CronJob,
   Integration,
   MemoryEntry,
-  CliTool,
   HealthSnapshot,
   DiagResult,
 } from '../types/api';
@@ -111,11 +109,6 @@ export function useMemory(
     [query, category],
   );
   return useApiCall(fetcher, [query, category]);
-}
-
-/** Fetch CLI tools from /api/cli-tools. */
-export function useCliTools(): UseApiResult<CliTool[]> {
-  return useApiCall(getCliTools);
 }
 
 /** Fetch health snapshot from /api/health. */

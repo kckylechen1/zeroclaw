@@ -186,13 +186,6 @@ export interface AgentCostStats {
   request_count: number;
 }
 
-export interface CliTool {
-  name: string;
-  path: string;
-  version: string | null;
-  category: string;
-}
-
 export interface Session {
   /** Display form: `gw_` stripped for gateway sessions, full composite for
    * channel-driven sessions. */

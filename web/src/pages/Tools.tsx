@@ -5,17 +5,15 @@ import {
   Search,
   ChevronDown,
   ChevronRight,
-  Terminal,
   Package,
   ArrowRight,
   ShieldCheck,
   ShieldX,
   ExternalLink,
 } from 'lucide-react';
-import type { ToolSpec, CliTool } from '@/types/api';
+import type { ToolSpec } from '@/types/api';
 import {
   getTools,
-  getCliTools,
   getMapKeys,
   listProps,
   patchConfig,
@@ -70,11 +68,9 @@ function accessReason(tool: string, a: ProfileAccess): string {
 
 export default function Tools() {
   const [tools, setTools] = useState<ToolSpec[]>([]);
-  const [cliTools, setCliTools] = useState<CliTool[]>([]);
   const [search, setSearch] = useState('');
   const [expandedTool, setExpandedTool] = useState<string | null>(null);
   const [agentSectionOpen, setAgentSectionOpen] = useState(true);
-  const [cliSectionOpen, setCliSectionOpen] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -95,13 +91,6 @@ export default function Tools() {
     loadAgentPickerSummaries()
       .then(setAgents)
       .catch(() => setAgents([]));
-  }, []);
-
-  // CLI tools are not agent-scoped, so load them once.
-  useEffect(() => {
-    getCliTools()
-      .then(setCliTools)
-      .catch((err) => setError(err.message));
   }, []);
 
   // Agent tools re-fetch whenever the selected agent changes.
@@ -192,11 +181,6 @@ export default function Tools() {
   const filtered = tools.filter((t) =>
     t.name.toLowerCase().includes(search.toLowerCase()) ||
     t.description.toLowerCase().includes(search.toLowerCase()),
-  );
-
-  const filteredCli = cliTools.filter((t) =>
-    t.name.toLowerCase().includes(search.toLowerCase()) ||
-    t.category.toLowerCase().includes(search.toLowerCase()),
   );
 
   if (error) {
@@ -348,66 +332,6 @@ export default function Tools() {
           ))}
         </div>
       </section>
-
-      {/* CLI Tools Section */}
-      {filteredCli.length > 0 && (
-        <section>
-          <button
-            onClick={() => setCliSectionOpen((v) => !v)}
-            type="button"
-            className="flex items-center gap-2 mb-4 w-full text-left group cursor-pointer"
-            aria-expanded={cliSectionOpen}
-            aria-controls="cli-tools-section"
-          >
-            <Terminal className="h-4 w-4 text-pc-text-muted" />
-            <span className="text-xs font-semibold uppercase tracking-wider flex-1 text-pc-text-secondary" role="heading" aria-level={2}>
-              {t('tools.cli_tools')}
-            </span>
-            <Badge tone="neutral">{filteredCli.length}</Badge>
-            <ChevronDown
-              className="h-4 w-4 text-pc-text-muted transition-transform"
-              style={{ transform: cliSectionOpen ? 'rotate(0deg)' : 'rotate(-90deg)' }}
-            />
-          </button>
-
-          <div id="cli-tools-section">
-            {cliSectionOpen && (
-              <Card padded={false} className="overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm border-collapse">
-                    <thead>
-                      <tr className="border-b border-pc-border text-left text-[11px] font-medium uppercase tracking-wider text-pc-text-faint">
-                        <th className="px-4 py-2.5 font-medium">{t('tools.name')}</th>
-                        <th className="px-4 py-2.5 font-medium">{t('tools.path')}</th>
-                        <th className="px-4 py-2.5 font-medium">{t('tools.version')}</th>
-                        <th className="px-4 py-2.5 font-medium">{t('tools.category')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredCli.map((tool) => (
-                        <tr key={tool.name} className="border-b border-pc-border/60 last:border-0">
-                          <td className="px-4 py-2.5 font-medium text-pc-text">
-                            {tool.name}
-                          </td>
-                          <td className="px-4 py-2.5 font-mono text-xs truncate max-w-[200px] text-pc-text-muted">
-                            {tool.path}
-                          </td>
-                          <td className="px-4 py-2.5 text-pc-text-muted">
-                            {tool.version ?? '-'}
-                          </td>
-                          <td className="px-4 py-2.5">
-                            <Badge tone="neutral" className="capitalize">{tool.category}</Badge>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </Card>
-            )}
-          </div>
-        </section>
-      )}
     </div>
   );
 }

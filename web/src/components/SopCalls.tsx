@@ -129,7 +129,6 @@ function ToolSelect({
   onChange: (next: string) => void;
 }) {
   const agent = (catalog ?? []).filter((e) => e.group === 'agent');
-  const cli = (catalog ?? []).filter((e) => e.group === 'cli');
   const known = (catalog ?? []).some((e) => e.name === value);
 
   return (
@@ -147,15 +146,6 @@ function ToolSelect({
         {agent.length > 0 ? (
           <optgroup label={t('tool_picker.group_agent')}>
             {agent.map((e) => (
-              <option key={e.name} value={e.name}>
-                {e.name}
-              </option>
-            ))}
-          </optgroup>
-        ) : null}
-        {cli.length > 0 ? (
-          <optgroup label={t('tool_picker.group_cli')}>
-            {cli.map((e) => (
               <option key={e.name} value={e.name}>
                 {e.name}
               </option>

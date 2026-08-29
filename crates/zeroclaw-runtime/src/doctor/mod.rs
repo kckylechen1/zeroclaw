@@ -85,7 +85,6 @@ pub fn diagnose(config: &Config) -> Vec<DiagResult> {
     check_workspace(config, &mut items);
     check_daemon_state(config, &mut items);
     check_environment(&mut items);
-    check_cli_tools(&mut items);
 
     items.into_iter().map(DiagItem::into_result).collect()
 }
@@ -1592,32 +1591,6 @@ fn systemd_linger_diag_item(status: crate::service::SystemdUserLinger) -> DiagIt
             cat,
             crate::i18n::get_required_cli_string("cli-doctor-systemd-linger-unknown"),
         ),
-    }
-}
-
-fn check_cli_tools(items: &mut Vec<DiagItem>) {
-    let cat = "cli-tools";
-
-    let discovered = crate::tools::discover_cli_tools(&[], &[]);
-
-    if discovered.is_empty() {
-        items.push(DiagItem::warn(cat, "No CLI tools found in PATH"));
-    } else {
-        for cli in &discovered {
-            let version_info = cli
-                .version
-                .as_deref()
-                .map(|v| truncate_for_display(v, COMMAND_VERSION_PREVIEW_CHARS))
-                .unwrap_or_else(|| "unknown version".to_string());
-            items.push(DiagItem::ok(
-                cat,
-                format!("{} ({}) — {}", cli.name, cli.category, version_info),
-            ));
-        }
-        items.push(DiagItem::ok(
-            cat,
-            format!("{} CLI tools discovered", discovered.len()),
-        ));
     }
 }
 

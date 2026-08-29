@@ -1159,40 +1159,6 @@ pub async fn handle_api_cost(
     }
 }
 
-/// GET /api/cli-tools — discovered CLI tools
-pub async fn handle_api_cli_tools(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    // `discover_cli_tools` spawns child processes and blocks; keep it off the
-    // async executor so a slow PATH scan can't stall other gateway requests.
-    let tools = match tokio::task::spawn_blocking(|| {
-        zeroclaw_tools::cli_discovery::discover_cli_tools(&[], &[])
-    })
-    .await
-    {
-        Ok(tools) => tools,
-        Err(e) => {
-            // The blocking task panicked; degrade to an empty list rather
-            // than failing the request, but record why it was empty.
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                "cli-tools discovery task failed; returning empty list"
-            );
-            Vec::new()
-        }
-    };
-
-    Json(serde_json::json!({"cli_tools": tools})).into_response()
-}
-
 /// GET /api/channels — list configured channels with status
 pub async fn handle_api_channels(
     State(state): State<AppState>,
@@ -2041,22 +2007,6 @@ pub async fn handle_api_session_abort(
     } else {
         Json(serde_json::json!({ "status": "no_active_response" })).into_response()
     }
-}
-
-// ── Claude Code hook endpoint ────────────────────────────────────
-
-pub async fn handle_claude_code_hook(
-    State(state): State<AppState>,
-    Json(payload): Json<zeroclaw_tools::claude_code_runner::ClaudeCodeHookEvent>,
-) -> impl IntoResponse {
-    // Do not require bearer-token auth: Claude Code subprocesses cannot easily
-    // obtain a pairing token, and the hook carries a session_id that ties it
-    // back to a session we spawned.
-    let _ = &state; // retained for future Slack update wiring
-
-    ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"session_id": payload.session_id, "event_type": payload.event_type, "tool_name": payload.tool_name, "summary": payload.summary})), "Claude Code hook event received");
-
-    Json(serde_json::json!({ "ok": true }))
 }
 
 // Shared test helper: `api_config` tests reuse this AppState builder for the
