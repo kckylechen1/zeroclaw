@@ -69,7 +69,6 @@ max_tool_iterations      = 4
 max_actions_per_hour     = 10
 max_cost_per_day_cents   = 100
 shell_timeout_secs       = 30
-max_delegation_depth     = 1
 max_history_messages     = 20
 max_context_tokens       = 8000
 parallel_tools           = false

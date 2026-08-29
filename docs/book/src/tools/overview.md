@@ -41,7 +41,6 @@ Registered alongside the built-ins under `full`/`legacy` composition (the minima
 | `cron_*` | Manage scheduled jobs: `cron_add`, `cron_list`, `cron_remove`, `cron_update`, `cron_run`, `cron_runs` |
 | `schedule` | Shell-only one-shot/recurring scheduling |
 | `memory_forget`, `memory_export`, `memory_purge` | Long-term memory management |
-| `spawn_subagent` | Run a subtask in a child agent (legacy entry point, tracked as migration debt; the retired `delegate` tool was removed) |
 | `reasoning_subagent` | V1 SubAgent entry point: one bounded, contract-admitted ReasoningSubAgent run returning a structured report. Also the SubAgent entry point of the minimal composition. |
 
 Conditionally registered:
@@ -57,7 +56,7 @@ Conditionally registered:
 
 The root `composition` key selects which tool surface an install assembles:
 
-- `composition = "minimal"` assembles only the curated companion primitives: workspace basics (`shell`, `file_read`, `file_write`, `file_edit`, `glob_search`, `content_search`), personal memory (`memory_recall`, `memory_store`), skill discovery (`read_skill`), extension discovery (`tool_search`), universal web primitives (`web_search_tool`, `web_fetch`), bounded interaction (`ask_user`), the V1 SubAgent entry point (`reasoning_subagent`), and scheduling (`schedule`). Individual tool `enabled` flags do not widen it back. The legacy `spawn_subagent` entry point stays available under `full`/`legacy` composition.
+- `composition = "minimal"` assembles only the curated companion primitives: workspace basics (`shell`, `file_read`, `file_write`, `file_edit`, `glob_search`, `content_search`), personal memory (`memory_recall`, `memory_store`), skill discovery (`read_skill`), extension discovery (`tool_search`), universal web primitives (`web_search_tool`, `web_fetch`), bounded interaction (`ask_user`), the V1 SubAgent entry point (`reasoning_subagent`), and scheduling (`schedule`). Individual tool `enabled` flags do not widen it back. The legacy `spawn_subagent` entry point is retired on every composition (see [Delegation & SubAgents](../agents/delegation.md)).
 - `composition = "full"` (alias `"legacy"`) keeps the complete built-in registry. This is a **transitional opt-in compatibility profile**, not a target: new specialist capabilities should stay out of the ordinary provider-wire surface until they are measured in.
 - An absent key behaves as `full`: configs written before the field existed keep today's tool surface across upgrades, and existing installs are not migrated.
 

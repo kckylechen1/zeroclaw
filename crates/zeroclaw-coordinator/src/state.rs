@@ -182,14 +182,15 @@ pub struct CoordinatorConfig {
     ///
     /// The number is inherited from the historical delegation path, which
     /// was the first place in this workspace that enforced a recursion
-    /// depth: the retired delegate tool resolved `3` when the runtime
-    /// profile names no `max_delegation_depth`, and its gate compared the
-    /// caller's depth against it. This gate compares the *child's*
-    /// resolved depth against the same bound (`max_delegation_depth`,
-    /// default 3), so it admits exactly the same set of generations.
+    /// depth: the retired delegate tool resolved `3` as the default cap and
+    /// compared the caller's depth against it. This gate compares the
+    /// *child's* resolved depth against the same bound (default 3), so it
+    /// admits exactly the same set of generations. It is the only surviving
+    /// spawn-depth cap: the runtime-profile key the old tools read
+    /// (`max_delegation_depth`) retired with the spawn wall, and the v1
+    /// reasoning entrypoint's recursion law is the fixed D1 depth-0 rule.
     ///
-    /// `0` disables the gate, matching `resolve_max_depth`'s
-    /// `.filter(|&d| d > 0)` treatment of a zero profile value.
+    /// `0` disables the gate.
     pub max_spawn_depth: u32,
     /// Operating limit: how many children may be pending or active at once,
     /// across this whole process. One actor per daemon owns this count, so
@@ -242,8 +243,8 @@ impl Default for CoordinatorConfig {
 /// field files as the child's own `TaskRecord.depth`
 /// (`zeroclaw-runtime/src/control_plane/subagent_persistence.rs`). A child at
 /// exactly `max` is therefore admitted and only its would-be child is not —
-/// which is the same frontier delegation draws when it refuses a caller whose
-/// own depth has already reached `max_delegation_depth`.
+/// which is the same frontier the retired delegation tools drew when they
+/// refused a caller already at their configured cap.
 #[must_use]
 pub fn exceeds_spawn_depth(depth: u32, max: u32) -> bool {
     max != 0 && depth > max

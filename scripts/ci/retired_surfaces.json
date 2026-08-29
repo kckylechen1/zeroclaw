@@ -318,6 +318,20 @@
       "replacement": "reasoning_subagent"
     },
     {
+      "term": "spawn_subagent",
+      "kind": "tool",
+      "retired_in": "PR #255",
+      "notes": "Deleted with the #197 spawn wall: the legacy same-identity spawn entry ran children under the parent alias with the parent's full Arc<Config> clone, a full registry rebuild under the parent's Arc-shared policy, a fresh memory backend over the parent's same-UUID rows with live memory tools, and (CLI process) a live channel map; its detached arm was the only production CoordinatorCommand::Spawn producer. Replacement: the V1 bounded reasoning_subagent entrypoint on every composition; durable/heavy work via the Tachi bridge.",
+      "replacement": "reasoning_subagent"
+    },
+    {
+      "term": "max_delegation_depth",
+      "kind": "config-key",
+      "retired_in": "PR #256",
+      "notes": "Runtime-profile spawn-depth cap removed with the #197 spawn wall: its only readers were the retired spawn_subagent tool and the retired model_routing_config operator tool. Local recursion is the fixed D1 depth-0 law on the v1 reasoning entrypoint; the coordinator's separate admission cap is `max_spawn_depth`. Legacy files carrying the key are ignored with a load warning.",
+      "replacement": "max_spawn_depth"
+    },
+    {
       "term": "await_sessions",
       "kind": "op",
       "retired_in": "PR #248",
@@ -362,7 +376,7 @@
       "term": "delegation_policy",
       "kind": "config-key",
       "retired_in": "wall 1 (SubAgent demolition)",
-      "notes": "`[risk_profiles.<alias>].delegation_policy` gate removed with the delegate tool; the recursion-depth cap (`max_delegation_depth`) survives as the unified spawn-lineage cap.",
+      "notes": "`[risk_profiles.<alias>].delegation_policy` gate removed with the delegate tool; the old spawn-depth cap (`max_delegation_depth`) retired with the spawn wall — local recursion is the fixed D1 law, and the coordinator's admission cap is `max_spawn_depth`.",
       "match_regex": "`delegation_policy`|\\[risk_profiles\\.[^\\]]*\\.delegation_policy\\]|delegation_policy\\b"
     },
     {

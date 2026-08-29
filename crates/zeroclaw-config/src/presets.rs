@@ -225,7 +225,6 @@ fn tight_runtime() -> RuntimeProfileConfig {
         max_actions_per_hour: 10,
         max_cost_per_day_cents: 100,
         shell_timeout_secs: 30,
-        max_delegation_depth: 1,
         max_history_messages: Some(20),
         max_context_tokens: Some(8_000),
         compact_context: Some(true),
@@ -247,7 +246,6 @@ fn local_small_runtime() -> RuntimeProfileConfig {
         max_actions_per_hour: 10,
         max_cost_per_day_cents: 100,
         shell_timeout_secs: 30,
-        max_delegation_depth: 1,
         max_history_messages: Some(20),
         max_context_tokens: Some(8_000),
         compact_context: Some(true),
@@ -276,7 +274,6 @@ fn unbounded_runtime() -> RuntimeProfileConfig {
         max_actions_per_hour: u32::MAX,
         max_cost_per_day_cents: u32::MAX,
         shell_timeout_secs: 600,
-        max_delegation_depth: 8,
         max_history_messages: Some(200),
         max_context_tokens: Some(128_000),
         compact_context: Some(false),
@@ -597,7 +594,6 @@ mod tests {
         assert_eq!(values.max_actions_per_hour, 10);
         assert_eq!(values.max_cost_per_day_cents, 100);
         assert_eq!(values.shell_timeout_secs, 30);
-        assert_eq!(values.max_delegation_depth, 1);
         assert_eq!(values.max_history_messages, Some(20));
         assert_eq!(values.max_context_tokens, Some(8_000));
         assert_eq!(values.compact_context, Some(true));

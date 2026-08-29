@@ -25,6 +25,12 @@ allowed_tools = [
   "hapi-edge__snapshot",
   "hapi-edge__batch_snapshot",
   "hapi-edge__history_klines",
+  # NOTE (memory contract, #2389/#2432): independent backend-native memory
+  # tool names are withdrawn — all trading-memory access goes through the
+  # typed hapi-edge memory facade (`hapi_memory`) governed by the Tool
+  # Authority Catalog, never backend-native `hapi-memory__*` tools. The
+  # names below are kept from the original example only to illustrate
+  # allowlist shape; do not copy them into a live trading config.
   "hapi-memory__hapi_save",
   "hapi-memory__hapi_search",
   "hapi-memory__hapi_memory",
@@ -36,7 +42,7 @@ mcp_discovered_tool_policy = "explicit_only"
 
 # Layer 3 — backstop. If a future edit widens layer 1, these still stop at a
 # prompt, and an unattended prompt is a denial.
-always_ask = ["shell", "file_write", "file_edit", "spawn_subagent"]
+always_ask = ["shell", "file_write", "file_edit"]
 
 # Layer 4 — subtract even if something upstream re-admits them.
 excluded_tools = ["shell", "file_write", "file_edit"]
@@ -62,11 +68,16 @@ most likely to be edited in a hurry.
 ## What this profile deliberately does not contain
 
 `shell`, `file_write`, `file_edit` — a trading agent has no business writing
-files or running commands. `spawn_subagent` — a sub-agent that inherits this
-profile is fine, but handing work to a *different* configured agent was a way
-to escape the tool list, so it stays forbidden (the legacy tool that did that
-was removed in #197 wall 1; the ban on off-profile delegation remains the
-standing intent).
+files or running commands. Handing work to a *different* configured agent was
+a way to escape the tool list, so off-profile delegation stays forbidden: the
+legacy tool that did that (`delegate`) was removed in #197 wall 1, and the
+legacy same-identity spawn tool (`spawn_subagent`) was retired later in the
+same epic. Note that this profile deliberately does NOT list
+`reasoning_subagent` in `allowed_tools`: under the frozen contract the V1
+entry point grants no parent capabilities and returns a structured report
+only, so allowing it is safe — but an unattended trading agent has no
+reasoning subtask that justifies the extra token surface. Add the name
+explicitly if that changes.
 
 ## The line this does not defend
 

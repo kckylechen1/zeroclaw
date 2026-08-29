@@ -13,7 +13,7 @@ Define each routing target as its own agent, then point channels at the agent th
 
 Each channel binds to one agent. Channels move between agents by editing `channels = [...]` on the agent that should pick them up; `Config::validate()` makes sure references resolve.
 
-For ad-hoc multi-step routing inside a single conversation, the `spawn_subagent` tool lets an agent run an ephemeral child under its own identity. The child inherits the parent's permissions envelope (see `[risk_profiles.<alias>].allowed_tools`) and returns its final response to the parent's tool loop. `spawn_subagent` is a full/legacy-composition surface; fresh installs on `composition = "minimal"` front the V1 `reasoning_subagent` tool instead (see the [Tools overview](../tools/overview.md)).
+For bounded multi-step reasoning inside a single conversation, the `reasoning_subagent` tool runs one contract-admitted child that receives only a bounded context bundle and returns a structured report to the parent's tool loop (see the [Tools overview](../tools/overview.md)). The legacy `spawn_subagent` tool, which ran an ephemeral child under the parent's own identity and permissions envelope, is retired (see [Delegation & SubAgents](../agents/delegation.md)).
 
 ## Hint-based model routes
 

@@ -11443,9 +11443,11 @@ impl Default for RiskProfileConfig {
 /// Named runtime/LLM execution profile (`[runtime_profiles.<alias>]`).
 ///
 /// Reusable operational tuning: agentic mode, iteration caps, context
-/// budget, parallel dispatch, resource ceilings, recursion depth, and
-/// the budget knobs that `SecurityPolicy` enforces with subagent
-/// parent-subset discipline. Anything authorization-shaped (allowed
+/// budget, parallel dispatch, resource ceilings, and the budget knobs
+/// that `SecurityPolicy` enforces with subagent parent-subset
+/// discipline. (The spawn-depth knob retired with the spawn wall:
+/// local recursion is the fixed D1 law, and the coordinator's admission
+/// cap is `CoordinatorConfig::max_spawn_depth`.) Anything authorization-shaped (allowed
 /// commands/tools/paths, approval gates, sandbox) lives on
 /// `[risk_profiles.<alias>]`. Anything model-provider shaped (model,
 /// temperature, max_tokens, timeout_secs) lives on
@@ -11473,11 +11475,6 @@ pub struct RuntimeProfileConfig {
     /// Shell subprocess timeout in seconds. `0` inherits the global timeout.
     /// Parent-subset enforced for subagents.
     pub shell_timeout_secs: u64,
-    // ── Delegation tuning ──
-    /// Maximum delegation recursion depth. `0` inherits the default. Now the
-    /// unified spawn-lineage cap source (SA-9): every local spawn on a run
-    /// counts against it.
-    pub max_delegation_depth: u32,
     // ── Per-agent runtime tunables (also live on AliasedAgentConfig) ─
     /// Maximum conversation history messages retained per session. `None` inherits.
     pub max_history_messages: Option<usize>,
@@ -11532,7 +11529,6 @@ impl Default for RuntimeProfileConfig {
             max_actions_per_hour: 20,
             max_cost_per_day_cents: 500,
             shell_timeout_secs: 60,
-            max_delegation_depth: 0,
             max_history_messages: None,
             max_context_tokens: None,
             compact_context: None,

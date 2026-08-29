@@ -1554,6 +1554,13 @@ fn admission_refuses_any_parent_registry_tool_name() {
         "calculator",
         "memory_store",
         "memory_recall",
+        // Retired in-kernel spawn tools stay unrepresentable in v1 profiles.
+        // For these two names the discriminating arm is the PARSE arm below
+        // (they are banned tokens, refused before admission can ever see
+        // them); the assertion pins that ban so no future edit can re-admit
+        // child-path inheritance through a v1 profile.
+        "spawn_subagent",
+        "delegate",
     ];
     for name in parent_registry_names {
         // Every parent-registry name is refused somewhere structural:

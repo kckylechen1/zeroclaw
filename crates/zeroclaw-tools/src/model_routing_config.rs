@@ -9,7 +9,6 @@ use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::{ClassificationRule, Config, ModelRouteConfig};
 use zeroclaw_providers::ProviderDispatch;
 
-const DEFAULT_AGENT_MAX_DEPTH: u32 = 3;
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 10;
 
 pub struct ModelRoutingConfigTool {
@@ -39,6 +38,28 @@ impl ModelRoutingConfigTool {
                 self.config.config_path.display()
             ))
         })?;
+
+        // This reparse path bypasses the normal load pipeline's tombstone
+        // reporting, so surface retired-surface warnings here too: a legacy
+        // key (e.g. runtime_profiles.*.max_delegation_depth) is dropped by
+        // the parse below and must not vanish silently before save() rewrites
+        // the file.
+        for warning in zeroclaw_config::validation_warnings::retired_field_tombstones(&contents)
+            .into_iter()
+            .chain(zeroclaw_config::validation_warnings::retired_section_tombstones(&contents))
+        {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "code": warning.code,
+                        "path": warning.path,
+                        "message": warning.message,
+                    })),
+                "model_routing_config: retired config surface present in config file"
+            );
+        }
 
         let mut parsed =
             zeroclaw_config::migration::migrate_to_current(&contents).map_err(|error| {
@@ -277,38 +298,6 @@ impl ModelRoutingConfigTool {
         Ok(MaybeSet::Set(value))
     }
 
-    fn parse_optional_u32_update(args: &Value, field: &str) -> anyhow::Result<MaybeSet<u32>> {
-        let Some(raw) = args.get(field) else {
-            return Ok(MaybeSet::Unset);
-        };
-
-        if raw.is_null() {
-            return Ok(MaybeSet::Null);
-        }
-
-        let raw_value = raw.as_u64().ok_or_else(|| {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({"field": field})),
-                "model_routing_config: u32 field must be non-negative integer or null"
-            );
-            anyhow::Error::msg(format!("'{field}' must be a non-negative integer or null"))
-        })?;
-        let value = u32::try_from(raw_value).map_err(|_| {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({"field": field, "raw_value": raw_value})),
-                "model_routing_config: u32 value too large"
-            );
-            anyhow::Error::msg(format!("'{field}' must fit in u32"))
-        })?;
-        Ok(MaybeSet::Set(value))
-    }
-
     fn parse_optional_i32_update(args: &Value, field: &str) -> anyhow::Result<MaybeSet<i32>> {
         let Some(raw) = args.get(field) else {
             return Ok(MaybeSet::Unset);
@@ -424,7 +413,6 @@ impl ModelRoutingConfigTool {
                     "model_provider": agent.model_provider,
                     "risk_profile": agent.risk_profile,
                     "runtime_profile": agent.runtime_profile,
-                    "max_delegation_depth": runtime.map(|r| r.max_delegation_depth),
                     "agentic": runtime.map(|r| r.agentic),
                     "allowed_tools": risk.map(|r| &r.allowed_tools),
                     "max_tool_iterations": runtime.map(|r| r.max_tool_iterations),
@@ -869,7 +857,6 @@ impl ModelRoutingConfigTool {
         let model = Self::parse_non_empty_string(args, "model")?;
 
         let temperature_update = Self::parse_optional_f64_update(args, "temperature")?;
-        let max_depth_update = Self::parse_optional_u32_update(args, "max_depth")?;
         let max_iterations_update = Self::parse_optional_usize_update(args, "max_iterations")?;
         let agentic_update = Self::parse_optional_bool(args, "agentic")?;
 
@@ -926,7 +913,7 @@ impl ModelRoutingConfigTool {
             }
         }
 
-        // synthesize runtime_profiles[name] from agentic/max_iterations/max_depth.
+        // synthesize runtime_profiles[name] from agentic/max_iterations.
         {
             let runtime = cfg.runtime_profiles.entry(name.clone()).or_default();
             if let Some(agentic) = agentic_update {
@@ -939,14 +926,6 @@ impl ModelRoutingConfigTool {
                 runtime.max_tool_iterations = iters;
             } else if runtime.max_tool_iterations == 0 {
                 runtime.max_tool_iterations = DEFAULT_AGENT_MAX_ITERATIONS;
-            }
-            if let MaybeSet::Set(depth) = max_depth_update {
-                if depth == 0 {
-                    anyhow::bail!("'max_depth' must be greater than 0");
-                }
-                runtime.max_delegation_depth = depth;
-            } else if runtime.max_delegation_depth == 0 {
-                runtime.max_delegation_depth = DEFAULT_AGENT_MAX_DEPTH;
             }
         }
 
@@ -1074,11 +1053,6 @@ impl Tool for ModelRoutingConfigTool {
                 "name": {
                     "type": "string",
                     "description": "Aliased agent name for upsert_agent/remove_agent"
-                },
-                "max_depth": {
-                    "type": ["integer", "null"],
-                    "minimum": 1,
-                    "description": "Max spawn recursion depth"
                 },
                 "agentic": {
                     "type": "boolean",
