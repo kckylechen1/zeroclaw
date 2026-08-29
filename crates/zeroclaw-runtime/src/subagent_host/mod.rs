@@ -9,19 +9,17 @@
 //!
 //! ## Which execution entry, and why that one
 //!
-//! [`crate::agent::run`] (`agent/loop_.rs:1141`, re-exported at
-//! `agent/mod.rs:68`) is the whole-turn entry: it resolves the agent config,
+//! [`crate::agent::run`] (`agent/loop_.rs`, re-exported at
+//! `agent/mod.rs`) is the whole-turn entry: it resolves the agent config,
 //! builds the tool registry through the one gated seam
 //! (`ScopedToolRegistry::assemble`), builds memory for the alias, resolves the
-//! model provider, and drives `run_tool_call_loop`. `spawn_subagent.rs:293`
-//! calls exactly this. Wrapping it — rather than `run_tool_call_loop`
-//! directly, the way `delegate.rs:2731` does — is what keeps a coordinator
-//! child identical to a `spawn_subagent` child: same registry assembly, same
-//! prompt build, same memory scope. `delegate.rs`'s path is deliberately
-//! *not* reused: it starts from a caller's already-built registry (bounded
-//! mode) or a target-specific assembly (independent mode) and is welded to
-//! `DelegateTool`'s own fields (`parent_tools`, `workspace_dir`,
-//! `multimodal_config`), none of which a coordinator child has.
+//! model provider, and drives `run_tool_call_loop`. `spawn_subagent.rs` calls
+//! exactly this, and wrapping it — rather than `run_tool_call_loop` directly —
+//! is what keeps a coordinator child identical to a `spawn_subagent` child:
+//! same registry assembly, same prompt build, same memory scope. (The legacy
+//! `DelegateTool` had its own sub-loop starting from a caller's
+//! already-built registry; that tool is retired with the wall-1 demolition, and with
+//! it the last user of the hosted-run parking seam below.)
 //!
 //! `agent::run` is `pub` and takes no tool-loop state, so nothing had to be
 //! opened up for this module. What it does *not* offer is listed under
@@ -64,73 +62,25 @@
 //!   `result.output` when a reference exists (`coordinator.rs:567-569`), and
 //!   blanking it with nothing to load in its place would lose the answer.
 
-use std::collections::HashMap;
 use std::future::{Future, Ready, ready};
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
-use tokio::sync::oneshot;
 use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::Config;
 use zeroclaw_coordinator::{
-    CancelToken, ChildCompletion, ChildControl, ChildOutcome, ChildProgress, ChildReporter,
-    ChildRequest, ChildResult, ChildRunOutput, ChildRunRequest, ChildRunner, ChildTypeSummary,
-    DescribeOutcome, SendBoxFuture, StartedChild, ValidateTypeOutcome,
+    CancelToken, ChildCompletion, ChildControl, ChildOutcome, ChildProgress, ChildRequest,
+    ChildResult, ChildRunOutput, ChildRunRequest, ChildRunner, ChildTypeSummary, DescribeOutcome,
+    SendBoxFuture, StartedChild, ValidateTypeOutcome,
 };
 use zeroclaw_log::scope;
 
 use crate::agent::cost::{TOOL_LOOP_TURN_USAGE, TurnUsage};
 use crate::agent::loop_::AgentRunOverrides;
 use crate::subagent::{SubAgentContext, SubAgentOverrides, SubAgentSpawn};
-
-/// Parked result channels for [`zeroclaw_coordinator::ChildOverrides::hosted_execution`] children.
-///
-/// Background `delegate` inserts the receiver before `Spawn` and keeps the
-/// sender; [`NativeChildRunner`] takes the receiver and waits instead of
-/// calling `agent::run`. That is how execution stays in `DelegateTool`
-/// (bounded policy, timeouts) while admission/persistence/announce stay on
-/// the coordinator.
-static HOSTED_RUNS: LazyLock<Mutex<HashMap<String, oneshot::Receiver<ChildResult>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Register a hosted child the coordinator will admit but not natively run.
-///
-/// Call this *before* sending `CoordinatorCommand::Spawn` with
-/// [`zeroclaw_coordinator::ChildOverrides::hosted_execution`]. The returned
-/// sender is how the host delivers the child's ending; dropping it without a
-/// send is recorded as [`ChildOutcome::Lost`].
-///
-/// Trust boundary: only the background `delegate` worker should call this.
-/// Coordinator Spawn still only enforces duplicate id, spawn depth, and
-/// capacity; policy gates are the caller's responsibility.
-#[must_use]
-pub(crate) fn park_hosted_child(child_id: impl Into<String>) -> oneshot::Sender<ChildResult> {
-    let (tx, rx) = oneshot::channel();
-    HOSTED_RUNS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(child_id.into(), rx);
-    tx
-}
-
-/// Drop a parked hosted child that was never admitted.
-///
-/// Trust boundary: same as [`park_hosted_child`] — only the background
-/// `delegate` worker should call this.
-pub(crate) fn abandon_hosted_child(child_id: &str) {
-    let _ = take_hosted_child(child_id);
-}
-
-pub(crate) fn take_hosted_child(child_id: &str) -> Option<oneshot::Receiver<ChildResult>> {
-    HOSTED_RUNS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(child_id)
-}
 
 /// Tool kinds a described child is reported against, mapped to the tool name
 /// this host actually dispatches.
@@ -362,88 +312,6 @@ fn elapsed_ms(started_at: Instant) -> u64 {
     u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Wait for a host-delivered result instead of calling `agent::run`.
-///
-/// Promotion still happens so Query/Cancel see an active child; the ending
-/// comes from [`park_hosted_child`]'s sender (or cancellation / a dropped
-/// sender).
-async fn run_hosted_child(
-    request: ChildRequest,
-    cancellation: CancelToken,
-    reporter: ChildReporter<NativeChildControl>,
-    started_at: Instant,
-) -> ChildRunOutput<()> {
-    let child_id = request.child_id.clone();
-    let Some(rx) = take_hosted_child(&child_id) else {
-        return preflight_failure(
-            &child_id,
-            "hosted child has no parked result channel; the spawn was admitted \
-             but nothing can deliver an ending"
-                .into(),
-            started_at,
-        );
-    };
-
-    let progress = Arc::new(NativeProgress::default());
-    let child_session_id = format!("hosted-{child_id}");
-    let promoted = reporter
-        .started(StartedChild {
-            child_session_id: child_session_id.clone(),
-            persona: None,
-            resumed_from: None,
-            child_cwd: request.cwd.clone().unwrap_or_default(),
-            worktree_path: None,
-            effective_model_id: String::new(),
-            definition_background: request.run_in_background,
-            control: NativeChildControl {
-                cancel: cancellation.clone(),
-                progress: Arc::clone(&progress),
-            },
-        })
-        .await;
-    if !promoted {
-        return output(ChildResult {
-            outcome: ChildOutcome::Cancelled,
-            detail: Some(
-                "cancelled while the hosted child was being built; promotion refused".to_owned(),
-            ),
-            child_id,
-            child_session_id,
-            duration_ms: elapsed_ms(started_at),
-            ..ChildResult::default()
-        });
-    }
-
-    progress.turns.store(1, Ordering::Relaxed);
-    tokio::select! {
-        biased;
-        result = rx => {
-            let mut result = result.unwrap_or_else(|_| ChildResult {
-                outcome: ChildOutcome::Lost,
-                detail: Some("hosted producer dropped the result channel".into()),
-                child_id: child_id.clone(),
-                ..ChildResult::default()
-            });
-            if result.child_id.is_empty() {
-                result.child_id = child_id;
-            }
-            result.child_session_id = child_session_id;
-            result.duration_ms = elapsed_ms(started_at);
-            output(result)
-        }
-        () = cancellation.cancelled() => {
-            output(ChildResult {
-                outcome: ChildOutcome::Cancelled,
-                detail: Some("cancelled while the hosted child was running".to_owned()),
-                child_id,
-                child_session_id,
-                duration_ms: elapsed_ms(started_at),
-                ..ChildResult::default()
-            })
-        }
-    }
-}
-
 impl ChildRunner for NativeChildRunner {
     type Control = NativeChildControl;
     /// Nothing is carried from the run to `on_completed` beyond the
@@ -474,10 +342,6 @@ impl ChildRunner for NativeChildRunner {
             } = request;
             let started_at = Instant::now();
             let child_id = request.child_id.clone();
-
-            if request.overrides.hosted_run() {
-                return run_hosted_child(request, cancellation, reporter, started_at).await;
-            }
 
             let unsupported = unsupported_request_fields(&request);
             if !unsupported.is_empty() {
@@ -708,7 +572,7 @@ impl ChildRunner for NativeChildRunner {
     /// cover is registry construction: a tool this reports may still be
     /// absent because its feature is off or its MCP server never connected.
     /// A description is therefore an upper bound on reach, which is the safe
-    /// direction for a caller deciding whether to delegate.
+    /// direction for a caller deciding whether to spawn a child.
     ///
     /// `harness_agent_type` is ignored: it selects a harness flavour, and
     /// this host has exactly one.

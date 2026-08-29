@@ -923,12 +923,6 @@ async fn process_channel_message_body(
 
     let tool_receipts_collector: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let receipt_scope = ctx.receipt_generator.as_ref().map(|generator| {
-        zeroclaw_runtime::agent::tool_receipts::ReceiptScope {
-            generator: generator.clone(),
-            collector: std::sync::Arc::clone(&tool_receipts_collector),
-        }
-    });
     let loop_knobs = LoopKnobs::default();
     let turn_id = uuid::Uuid::new_v4().to_string();
     // Bracket the channel turn so lifecycle events
@@ -1107,8 +1101,6 @@ async fn process_channel_message_body(
                     tools::TURN_ROUTING.scope(Some(std::sync::Arc::clone(&turn_routing)), tool_loop);
                 let tool_loop = zeroclaw_api::NATIVE_THINKING_OVERRIDE
                     .scope(thinking.params.native_thinking, tool_loop);
-                let tool_loop = zeroclaw_runtime::agent::tool_receipts::TOOL_LOOP_RECEIPT_CONTEXT
-                    .scope(receipt_scope.clone(), tool_loop);
                 let tool_loop = zeroclaw_runtime::agent::loop_::TOOL_LOOP_COST_TRACKING_CONTEXT
                     .scope(cost_tracking_context.clone(), tool_loop);
                 let tool_loop = scope_session_key(Some(history_key.clone()), tool_loop);

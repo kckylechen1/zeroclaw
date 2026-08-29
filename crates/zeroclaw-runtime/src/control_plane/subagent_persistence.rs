@@ -30,9 +30,11 @@
 //! `parent_session_id`: session identity is what
 //! `claim_undelivered_children` keys children under.
 //!
-//! Background `delegate` children are `TaskKind::Delegate`; `spawn_subagent`
-//! children stay `TaskKind::Subagent`. The discriminator is
-//! [`ChildOverrides::hosted_run`](zeroclaw_coordinator::ChildOverrides::hosted_run).
+//! Everything written today is `TaskKind::Subagent`. `TaskKind::Delegate`
+//! rows are legacy `control_plane.db` debt from the retired delegate tool
+//! (wall 1): no writer mints them anymore, and the read side
+//! (`load_finished`) stays fail-closed on the kind plus a non-NULL
+//! `parent_id` so a legacy row cannot leak across sessions.
 //!
 //! ## Error posture
 //!
@@ -114,16 +116,15 @@ impl ChildPersistence for SubagentPersistence {
     /// non-terminal state a coordinator-spawned child is ever written in.
     ///
     /// This is the production writer of `parent_id`: coordinator-spawned
-    /// children (`spawn_subagent`, background `delegate`) carry a
-    /// caller-supplied parent identity on `ChildRequest`.
+    /// children carry a caller-supplied parent identity on `ChildRequest`.
+    /// The legacy `TaskKind::Delegate` discrimination died with the
+    /// delegate tool (wall 1): no new writer mints it, but the kind
+    /// itself stays resolvable for existing `control_plane.db` rows
+    /// (frozen migration debt; read side stays fail-closed on it).
     fn record_spawn(&mut self, request: &ChildRequest) -> Result<(), PersistenceError> {
         let rec = TaskRecord {
             id: request.child_id.clone(),
-            kind: if request.overrides.hosted_run() {
-                TaskKind::Delegate
-            } else {
-                TaskKind::Subagent
-            },
+            kind: TaskKind::Subagent,
             agent: request.parent_alias.clone(),
             status: TaskStatus::Running,
             owner_pid: std::process::id(),
@@ -401,17 +402,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hosted_run_is_delegate_kind_and_claim_names_the_executor() {
+    async fn legacy_delegate_rows_still_read_fail_closed() {
+        // Wall 1: the delegate tool is gone, but existing
+        // `control_plane.db` rows keep their kind. Simulate one legacy row
+        // (the old writer's exact shape) and pin BOTH halves of the
+        // fail-closed read: parent linkage required, executor claim intact.
         let (mut persistence, store) = harness();
-        let mut req = request("kid", "mum");
-        req.overrides = ChildOverrides::hosted_execution(None);
-        req.agent_type = "researcher".into();
-        persistence.record_spawn(&req).expect("spawn write");
-
-        let rec = store.get("kid").await.unwrap().expect("row");
-        assert_eq!(rec.kind, TaskKind::Delegate);
-        assert_eq!(rec.agent, "parent-alias");
-        assert_eq!(rec.executor.as_deref(), Some("researcher"));
+        store
+            .create(TaskRecord {
+                id: "kid".into(),
+                kind: TaskKind::Delegate,
+                agent: "parent-alias".into(),
+                status: TaskStatus::Running,
+                owner_pid: 1,
+                owner_boot_id: "boot-1".into(),
+                heartbeat_at: None,
+                depth: 0,
+                parent_id: Some("mum".into()),
+                originator_route: None,
+                delivered: false,
+                idem_key: None,
+                principal_id: None,
+                executor: Some("researcher".into()),
+                started_at: "2026-06-18T00:00:00Z".into(),
+                finished_at: None,
+            })
+            .await
+            .unwrap();
 
         persistence
             .record_finish(
@@ -431,7 +448,7 @@ mod tests {
 
         let loaded = persistence
             .load_finished("kid")
-            .expect("hosted Delegate with parent_id must load");
+            .expect("legacy Delegate row with parent_id must load");
         assert_eq!(loaded.parent_session_id, "mum");
         assert_eq!(loaded.agent_type, "researcher");
     }

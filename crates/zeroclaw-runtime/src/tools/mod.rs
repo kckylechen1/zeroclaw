@@ -9,7 +9,6 @@ pub mod cron_remove;
 pub mod cron_run;
 pub mod cron_runs;
 pub mod cron_update;
-pub mod delegate;
 pub mod file_read;
 pub mod model_switch;
 pub mod param_options;

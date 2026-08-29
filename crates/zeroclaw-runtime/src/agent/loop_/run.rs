@@ -301,8 +301,12 @@ pub async fn run(
         } = assembled;
         let tools_registry = registry.into_inner();
 
-        // Populate all channel-driven tool handles from the registered factory.
+        // The SA-7c child gate lives inside `seed_channel_handles`: a
+        // SubAgent child run (`overrides.is_subagent`) seeds nothing, so
+        // its channel tools fail closed and the child reaches the user
+        // only through its typed report.
         let count = seed_channel_handles(
+            is_subagent_caller,
             &ask_user_handle,
             &channel_room_handle,
             &reaction_handle,
@@ -519,12 +523,6 @@ pub async fn run(
             "channel_room",
             "Create channel rooms and invite users through active channels. Use with Matrix channel keys such as matrix.default.",
         ));
-        if !config.agents.is_empty() {
-            tool_descs.push((
-            "delegate",
-            "Delegate a sub-task to a specialized agent. Use when: task needs different model/capability, or to parallelize work.",
-        ));
-        }
         if config.peripherals.enabled && !config.peripherals.boards.is_empty() {
             tool_descs.push((
             "gpio_read",

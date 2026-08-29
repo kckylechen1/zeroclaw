@@ -308,6 +308,41 @@
       "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
       "match_regex": "(?i)\\bSOP runs?\\b",
       "notes": "Prose tripwire for teaching local SOP runs as live behavior: the run side was deleted and runs live Tachi-side as ProcedureRuns through the procedure_v1 seam. Historical/removal context nearby excuses, per the gate discriminator."
+    },
+    {
+      "term": "delegate",
+      "kind": "tool",
+      "retired_in": "PR #248",
+      "notes": "Deleted with #197 wall 1: the legacy delegation tool was constructed from full parent inheritance (per-alias api_key clones, fallback credential, Arc<Config> snapshot, live parent-registry snapshot, channel-wired handles), all forbidden for child paths by the frozen #202 contract SA-7. Replacement: the V1 bounded SubAgent entrypoint reasoning_subagent (minimal composition) and the Tachi bridge for durable/heavy work.",
+      "match_regex": "`delegate`|\\bdelegate tool\\b|\\bDelegateTool\\b",
+      "replacement": "reasoning_subagent"
+    },
+    {
+      "term": "await_sessions",
+      "kind": "op",
+      "retired_in": "PR #248",
+      "notes": "delegate tool action string deleted outright with the tool (#197 wall 1). Background SubAgent work is Tachi-side via the bridge."
+    },
+    {
+      "term": "check_result",
+      "kind": "op",
+      "retired_in": "PR #248",
+      "notes": "delegate tool action string deleted with the tool (#197 wall 1); the coordinator Query path it drove keeps only its fail-closed legacy-row read. The bare phrase collides with ordinary prose, so only code-span/quoted forms match.",
+      "match_regex": "`check_result`|'check_result'|\\\"check_result\\\""
+    },
+    {
+      "term": "list_results",
+      "kind": "op",
+      "retired_in": "PR #248",
+      "notes": "delegate tool action string deleted with the tool (#197 wall 1).",
+      "match_regex": "`list_results`|'list_results'|\\\"list_results\\\""
+    },
+    {
+      "term": "cancel_task",
+      "kind": "op",
+      "retired_in": "PR #248",
+      "notes": "delegate tool action string deleted with the tool (#197 wall 1).",
+      "match_regex": "`cancel_task`|'cancel_task'|\\\"cancel_task\\\""
     }
   ]
 }

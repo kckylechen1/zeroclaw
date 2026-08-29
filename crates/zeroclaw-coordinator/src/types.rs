@@ -99,9 +99,6 @@ pub struct ChildOverrides {
     /// (SA-11). `None` means the spawner did not thread a lineage and
     /// the child run resolves its own root.
     pub lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
-    /// See [`Self::hosted_execution`]. Private so only that constructor can
-    /// turn hosted execution on; other crates read it through [`Self::hosted_run`].
-    hosted_run: bool,
 }
 
 impl ChildOverrides {
@@ -114,29 +111,6 @@ impl ChildOverrides {
             lineage,
             ..Self::default()
         }
-    }
-
-    /// Hosted execution: the coordinator admits, persists, queries, and
-    /// cancels, but the runner does not start a native agent turn. The host
-    /// delivers the [`ChildResult`] (background `delegate` parks a oneshot
-    /// the runner waits on).
-    ///
-    /// Trust boundary: only the background `delegate` worker should construct
-    /// this. Coordinator Spawn still only enforces duplicate id, spawn depth,
-    /// and capacity; policy gates are the constructor's responsibility.
-    #[must_use]
-    pub fn hosted_execution(spawn_depth: Option<u32>) -> Self {
-        Self {
-            spawn_depth,
-            hosted_run: true,
-            ..Self::default()
-        }
-    }
-
-    /// Whether this spawn is hosted execution. See [`Self::hosted_execution`].
-    #[must_use]
-    pub fn hosted_run(&self) -> bool {
-        self.hosted_run
     }
 }
 
