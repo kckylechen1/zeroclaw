@@ -1008,14 +1008,14 @@ mod tests {
         // excluded tools. Through the one seam the filter ALWAYS runs - the leak is fixed
         // by construction, not by remembering to call it.
         let security = Arc::new(SecurityPolicy {
-            excluded_tools: Some(vec!["spawn_subagent".into()]),
+            excluded_tools: Some(vec!["reasoning_subagent".into()]),
             ..SecurityPolicy::default()
         });
         let names = assemble_names(
             security,
             vec![
                 Box::new(MockTool("shell")),
-                Box::new(MockTool("spawn_subagent")),
+                Box::new(MockTool("reasoning_subagent")),
             ],
             None,
         )
@@ -1025,7 +1025,7 @@ mod tests {
             "unlisted tool kept: {names:?}"
         );
         assert!(
-            !names.iter().any(|n| n == "spawn_subagent"),
+            !names.iter().any(|n| n == "reasoning_subagent"),
             "excluded tool dropped: {names:?}"
         );
     }

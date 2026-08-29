@@ -143,7 +143,8 @@ pub use verifiable_intent::VerifiableIntentTool;
 /// (redundancy, sampling, fan-out) is intentional, not an accidental
 /// repeat. Unioned with config-provided exemptions in the tool-call loop.
 pub const REENTRANT_AGENT_TOOLS: &[&str] = &[
-    SpawnSubagentTool::NAME,
+    // `spawn_subagent` retired from this list with the spawn_subagent wall;
+    // the V1 entrypoint is the surviving re-entrant spawn surface.
     crate::subagent_v1::ReasoningSubagentTool::NAME,
 ];
 
@@ -461,6 +462,10 @@ pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
     "sop_list",
     "sop_workshop",
     "delegate",
+    // spawn_subagent wall: the legacy full-Parent-inheritance spawn entry
+    // (same-alias child, full `Arc<Config>` clone, parent memory UUID) —
+    // retired; `reasoning_subagent` is the single spawn surface.
+    "spawn_subagent",
     // Wall 2 prune epic: Parent-visible raw harness/vendor launch surfaces.
     "claude_code",
     "claude_code_runner",
@@ -582,7 +587,12 @@ pub fn all_tools_with_runtime(
     _fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
     canvas_store: Option<CanvasStore>,
-    is_subagent_caller: bool,
+    // Formerly the legacy `spawn_subagent` tool's depth-1 self-cap flag.
+    // `spawn_subagent` is retired (spawn_subagent wall); the parameter
+    // stays in the signature (underscored, intentionally unused) so call
+    // sites do not churn and the registry contract is unchanged for
+    // callers.
+    _is_subagent_caller: bool,
     tui_env: Option<HashMap<String, String>>,
     // Live config handle for `send_via` peer-group authority. `Some` from the
     // channel daemon (so reloads take effect); `None` for one-shot / non-channel
@@ -679,11 +689,6 @@ pub fn all_tools_with_runtime(
             root_config.clone(),
             agent_alias,
         )),
-        Arc::new(
-            SpawnSubagentTool::new(Arc::new(root_config.clone()), agent_alias, security.clone())
-                .with_subagent_caller(is_subagent_caller)
-                .with_lineage(spawn_lineage.clone()),
-        ),
         Arc::new(
             crate::subagent_v1::ReasoningSubagentTool::new(
                 Arc::new(root_config.clone()),
@@ -2233,11 +2238,12 @@ mod tests {
         // retired operator/admin tools, which no composition may re-admit.
         assert!(!names.contains(&"model_routing_config"));
         assert!(!names.contains(&"proxy_config"));
-        // The legacy spawn entrypoint survives the minimal-membership swap:
-        // it is full/legacy-composition debt, not a retired tool.
+        // The legacy full-Parent-inheritance spawn entrypoint is retired
+        // (spawn_subagent wall): no composition registers it, and the
+        // retired-name guard keeps plugins from claiming it.
         assert!(
-            names.contains(&"spawn_subagent"),
-            "full composition must keep the legacy spawn_subagent; got: {names:?}"
+            !names.contains(&"spawn_subagent"),
+            "full composition must not register the retired spawn_subagent; got: {names:?}"
         );
         assert!(
             names.contains(&"reasoning_subagent"),
