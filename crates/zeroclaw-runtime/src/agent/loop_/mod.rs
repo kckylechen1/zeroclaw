@@ -11,8 +11,6 @@ pub(crate) fn format_tokens(n: u64) -> String {
     out.chars().rev().collect()
 }
 
-#[cfg(test)]
-use std::sync::{Arc, LazyLock, Mutex};
 // Test suites under `loop_/tests.rs` pull these through `use super::*`.
 #[cfg(test)]
 pub(crate) use crate::agent::TurnMeta;
