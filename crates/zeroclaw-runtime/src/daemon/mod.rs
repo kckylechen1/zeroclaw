@@ -2861,8 +2861,15 @@ mod tests {
     /// (Wall 4, #197): the durable control-plane is not booted, so the one
     /// remaining write path it had — `ControlPlaneHandle::start` creating the
     /// DB file and its recovery pass ledgering rows at every boot — is gone.
-    /// Red on the pre-slice tree (the boot block created the file on every
-    /// run), green here.
+    ///
+    /// Two assertions, because the file check alone can be satisfied on the
+    /// pre-slice tree for the wrong reason: the plane installs into a
+    /// process-global `OnceLock`, so on a tree that still boots it, a prior
+    /// `daemon::run` in this binary makes the old `is_none()` guard skip the
+    /// boot for THIS test's data dir and the file never appears. The
+    /// `control_plane().is_none()` assertion after the run is the
+    /// order-independent discriminator (red whenever the plane still boots,
+    /// in either test order); the file check is the user-facing property.
     #[tokio::test]
     async fn daemon_boot_creates_no_control_plane_db() {
         use tokio::time::{Duration, timeout};
@@ -2892,9 +2899,13 @@ mod tests {
         assert_eq!(exit, DaemonExit::Reload);
 
         assert!(
-            !tmp.path().join("data").join("control_plane.db").exists(),
-            "a daemon boot must not create the control-plane DB; \
+            crate::control_plane::control_plane().is_none(),
+            "a daemon boot must not install the durable control plane; \
              durable task truth is Tachi's through the bridge (#205 annex rows 1/6)"
+        );
+        assert!(
+            !tmp.path().join("data").join("control_plane.db").exists(),
+            "a daemon boot must not create the control-plane DB"
         );
     }
 
