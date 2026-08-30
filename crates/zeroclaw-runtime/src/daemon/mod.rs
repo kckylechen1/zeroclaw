@@ -384,9 +384,12 @@ pub async fn run(
     // producer with the spawn wall, and durable execution truth is owned by
     // Tachi through the bridge (frozen contract annex rows 1 and 6). A legacy
     // `<data_dir>/control_plane.db` is never read, migrated, rewritten, or
-    // deleted — but an existing install is told so, once per boot.
+    // deleted — but an existing install is told so, once per process (reload
+    // iterations re-run this function; the latch keeps the notice at true
+    // boot frequency).
+    static LEGACY_PLANE_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let legacy_control_plane = config.data_dir.join("control_plane.db");
-    if legacy_control_plane.exists() {
+    if LEGACY_PLANE_WARNED.set(()).is_ok() && legacy_control_plane.exists() {
         ::zeroclaw_log::record!(
             WARN,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)

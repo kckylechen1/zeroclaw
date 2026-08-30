@@ -37,6 +37,27 @@ impl ProxyConfigTool {
             ))
         })?;
 
+        // This reparse path bypasses the normal load pipeline's tombstone
+        // reporting, and the full save() below rewrites the file — so surface
+        // retired-surface warnings here too: a legacy section or key is dropped
+        // by the parse and must not vanish silently before that rewrite.
+        for warning in zeroclaw_config::validation_warnings::retired_field_tombstones(&contents)
+            .into_iter()
+            .chain(zeroclaw_config::validation_warnings::retired_section_tombstones(&contents))
+        {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "code": warning.code,
+                        "path": warning.path,
+                        "message": warning.message,
+                    })),
+                "proxy_config: retired config surface present in config file"
+            );
+        }
+
         let mut parsed: Config = toml::from_str(&contents).map_err(|error| {
             ::zeroclaw_log::record!(
                 ERROR,

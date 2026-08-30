@@ -328,7 +328,7 @@
       "term": "max_delegation_depth",
       "kind": "config-key",
       "retired_in": "PR #256",
-      "notes": "Runtime-profile spawn-depth cap removed with the #197 spawn wall: its only readers were the retired spawn_subagent tool and the retired model_routing_config operator tool. Local recursion is the fixed D1 depth-0 law on the v1 reasoning entrypoint; the coordinator's separate admission cap is `max_spawn_depth`. Legacy files carrying the key are ignored with a load warning. Amended by the control-plane migration wall: the former replacement (the coordinator's max_spawn_depth cap) was itself deleted with the zeroclaw-coordinator child host; local recursion is denied outright by the frozen D1 law on the v1 spawn path."
+      "notes": "Runtime-profile spawn-depth cap removed with the #197 spawn wall: its only readers were the retired spawn_subagent tool and the retired model_routing_config operator tool. Local recursion is the fixed D1 depth-0 law on the v1 reasoning entrypoint. Amended by the control-plane migration wall: the former replacement (the coordinator's max_spawn_depth cap) was itself deleted with the zeroclaw-coordinator child host, so there is no numeric successor — local recursion is denied outright by the frozen D1 law and durable work goes through the Tachi bridge."
     },
     {
       "term": "await_sessions",
@@ -502,7 +502,8 @@
       "term": "[subagents]",
       "kind": "config-key",
       "retired_in": "PR #260",
-      "notes": "The daemon-wide coordinator-limit config section retired with the coordinator actor."
+      "notes": "The daemon-wide coordinator-limit config section retired with the coordinator actor.",
+      "match_regex": "\\[subagents(\\.\\w+)?\\s*\\]"
     },
     {
       "term": "max_spawn_depth",

@@ -41,7 +41,7 @@ The durable control plane itself — the coordinator child host (admission, pers
 
 ## Goal-mode target contract
 
-[ADR-008](./decisions/ADR-008-goal-mode-control-plane-and-usage-accounting.md) accepts the task control plane as the future authority for goal lifecycle, ownership, route, principal, parent relation, and recovery eligibility. The repository contains goal storage and control-plane APIs, but production goal admission and execution are not yet wired end to end.
+[ADR-008](./decisions/ADR-008-goal-mode-control-plane-and-usage-accounting.md) accepted the task control plane as the future authority for goal lifecycle, ownership, route, principal, parent relation, and recovery eligibility; it is now superseded — the ZeroClaw-side control plane it anchored on was deleted by the control-plane migration wall, and durable task truth lives in Tachi through the task-intent bridge. Goal-mode execution is not wired end to end on any surface today.
 
 A background path may participate in goal mode only after it preserves the owning goal relationship and reports terminal state and model usage back to it. Until then, that path is ordinary background work rather than goal-mode execution.
 

@@ -23,7 +23,7 @@ Accepted ADRs are immutable. If the architecture changes, write a new ADR and ma
 | [ADR-005](./ADR-005-pluggable-memory-backends.md) | accepted | Memory storage uses a backend-neutral contract with SQLite as the default. |
 | [ADR-006](./ADR-006-runtime-channel-plugins.md) | proposed | Runtime plugins are the target for optional channels, with explicit capability-based native exceptions during migration. |
 | [ADR-007](./ADR-007-gateway-extraction.md) | proposed | The gateway becomes a separate optional process over a supported local IPC contract. |
-| [ADR-008](./ADR-008-goal-mode-control-plane-and-usage-accounting.md) | accepted | Goal mode uses the durable task control plane and canonical usage ledger. |
+| [ADR-008](./ADR-008-goal-mode-control-plane-and-usage-accounting.md) | superseded | Goal mode was to use the durable task control plane; that plane was deleted (control-plane migration wall) and durable task truth lives in Tachi through the task-intent bridge. |
 | [ADR-009](./ADR-009-wit-wasmtime-plugin-execution.md) | accepted | WIT components and direct `wasmtime` replace the Extism plugin bridge. |
 | [ADR-010](./ADR-010-memory-authority-boundaries.md) | proposed | Session history, curated memory, and enrichment have separate authority boundaries. |
 | [ADR-011](./ADR-011-multi-agent-runtime-boundaries.md) | accepted | Configured agents have explicit runtime boundaries under one daemon. |
