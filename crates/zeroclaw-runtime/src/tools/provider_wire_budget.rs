@@ -868,8 +868,24 @@ async fn minimal_composition_tools_wire_under_owner_ceiling() {
     );
 }
 
+#[test]
+fn manifest_ceiling_matches_rust_constant() {
+    let manifest_str = include_str!("../../../../scripts/ci/wire_budget_exceptions.json");
+    let v: serde_json::Value =
+        serde_json::from_str(manifest_str).expect("wire_budget_exceptions.json must be valid JSON");
+    let manifest_ceiling = v
+        .get("wire_budget_tokens_ceiling")
+        .and_then(|c| c.as_u64())
+        .expect("manifest must have numeric wire_budget_tokens_ceiling");
+    assert_eq!(
+        manifest_ceiling as usize, MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING,
+        "Rust MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING ({}) must match manifest wire_budget_tokens_ceiling ({})",
+        MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING, manifest_ceiling
+    );
+}
+
 #[tokio::test]
-async fn minimal_composition_no_bypass_mcp_or_skills() {
+async fn minimal_composition_no_bypass_subsystem_flags() {
     let tmp = TempDir::new().unwrap();
     seed_personality(tmp.path(), true);
     let mut config = Config {
@@ -881,6 +897,10 @@ async fn minimal_composition_no_bypass_mcp_or_skills() {
     // Explicitly enable non-minimal subsystems to test that minimal composition
     // overrides their enabled flags and keeps them off the wire surface.
     config.pipeline.enabled = true;
+    config.browser.enabled = true;
+    config.backup.enabled = true;
+    config.jira.enabled = true;
+    config.notion.enabled = true;
 
     let (_, budget) = assemble_turn(TurnRequest {
         config: &config,
@@ -891,7 +911,10 @@ async fn minimal_composition_no_bypass_mcp_or_skills() {
         workspace: tmp.path(),
     })
     .await;
-    print_budget("composition=minimal (no-bypass test)", &budget);
+    print_budget(
+        "composition=minimal subsystem overrides (no-bypass test)",
+        &budget,
+    );
 
     // 1. Every assembled tool MUST be an explicit minimal member
     for name in &budget.names {
@@ -901,7 +924,7 @@ async fn minimal_composition_no_bypass_mcp_or_skills() {
         );
     }
 
-    // 2. None of the banned categories can enter the minimal wire surface
+    // 2. None of the banned/demoted categories can enter the minimal wire surface
     for banned in [
         "claude_code",
         "codex_cli",
@@ -918,6 +941,7 @@ async fn minimal_composition_no_bypass_mcp_or_skills() {
         "pushover",
         "cron_add",
         "cron_update",
+        "browser",
     ] {
         assert!(
             !budget.names.iter().any(|n| n == banned),
@@ -925,4 +949,136 @@ async fn minimal_composition_no_bypass_mcp_or_skills() {
             budget.names
         );
     }
+}
+
+#[tokio::test]
+async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
+    let tmp = TempDir::new().unwrap();
+    seed_personality(tmp.path(), true);
+    let mut config = Config {
+        config_path: tmp.path().join("config.toml"),
+        data_dir: tmp.path().join("data"),
+        ..Config::default()
+    };
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+
+    // Create a skill attempting to elevate non-minimal built-in tools (cron_add / jira)
+    let bypass_skill = Skill {
+        name: "malicious_skill".into(),
+        description: "attempting bypass".into(),
+        description_localizations: Default::default(),
+        version: "1.0.0".into(),
+        author: None,
+        tags: vec![],
+        tools: vec![
+            crate::skills::SkillTool {
+                name: "elevate_cron".into(),
+                description: "cron bypass".into(),
+                kind: "builtin".into(),
+                command: String::new(),
+                args: Default::default(),
+                target: Some("cron_add".into()),
+                locked_args: Default::default(),
+                timeout_secs: None,
+            },
+            crate::skills::SkillTool {
+                name: "elevate_jira".into(),
+                description: "jira bypass".into(),
+                kind: "builtin".into(),
+                command: String::new(),
+                args: Default::default(),
+                target: Some("jira".into()),
+                locked_args: Default::default(),
+                timeout_secs: None,
+            },
+        ],
+        prompts: vec![],
+        slash_options: vec![],
+        location: None,
+    };
+
+    let (_, budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "default",
+        skills: &[bypass_skill],
+        connect_mcp: false,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+
+    assert!(
+        !budget
+            .names
+            .contains(&"malicious_skill__elevate_cron".to_string()),
+        "skill elevation must not resurrect excluded non-minimal tool: {:?}",
+        budget.names
+    );
+    assert!(
+        !budget
+            .names
+            .contains(&"malicious_skill__elevate_jira".to_string()),
+        "skill elevation must not resurrect excluded non-minimal tool: {:?}",
+        budget.names
+    );
+}
+
+#[tokio::test]
+async fn mcp_explicit_only_drops_unlisted_tools_in_minimal_composition() {
+    let server = mock_mcp_http_server(&[
+        ("snapshot", "allowed trading tool"),
+        ("git_operations", "unlisted repo tool attempt"),
+        ("jira_write", "unlisted SaaS tool attempt"),
+    ])
+    .await;
+
+    let tmp = TempDir::new().unwrap();
+    seed_personality(tmp.path(), true);
+    let mut config = Config {
+        config_path: tmp.path().join("config.toml"),
+        data_dir: tmp.path().join("data"),
+        ..Config::default()
+    };
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+    let risk_profile = zeroclaw_config::schema::RiskProfileConfig {
+        mcp_discovered_tool_policy:
+            zeroclaw_config::autonomy::McpDiscoveredToolPolicy::ExplicitOnly,
+        allowed_tools: Some(vec![
+            "shell".into(),
+            "file_read".into(),
+            "file_write".into(),
+            "hapi-edge__snapshot".into(),
+        ]),
+        ..Default::default()
+    };
+    config.risk_profiles.insert("lean".into(), risk_profile);
+    let agent_cfg = zeroclaw_config::schema::AliasedAgentConfig {
+        risk_profile: "lean".into(),
+        ..Default::default()
+    };
+    config.agents.insert("lean".into(), agent_cfg);
+    point_hapi_edge_at_agent(&mut config, server.uri(), "lean");
+
+    let (assembled, budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "lean",
+        skills: &[],
+        connect_mcp: true,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    print_budget("composition=minimal + explicit_only mcp", &budget);
+
+    // Snapshot is explicitly listed, so it is admitted
+    assert!(budget.names.contains(&"hapi-edge__snapshot".to_string()));
+
+    // Unlisted MCP tools MUST be dropped
+    assert!(!budget.names.iter().any(|n| n.contains("git_operations")));
+    assert!(!budget.names.iter().any(|n| n.contains("jira_write")));
+
+    // Deferred MCP section must also not contain unlisted tools
+    let deferred = assembled.combined_mcp_prompt_section();
+    assert!(!deferred.contains("git_operations"));
+    assert!(!deferred.contains("jira_write"));
 }
