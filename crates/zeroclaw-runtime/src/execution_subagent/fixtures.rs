@@ -290,11 +290,17 @@ pub struct InMemoryFactSink {
     pub pending_requests: Mutex<Vec<SessionInterventionRequestView>>,
     /// Issued requests: (attachment, request_id, kind, reason).
     pub requests: Mutex<Vec<(String, String, String, String)>>,
+    /// The capability set the attachment declared at attach (the gate the
+    /// spine consults for intervention requests).
+    declared_capabilities: Mutex<Vec<String>>,
     /// The canonical revision high-water (the stale-guard rank).
     pub canonical_revision: Mutex<u64>,
     /// The lifecycle rank high-water: a fact ranked below this is
     /// journaled stale WITHOUT advancing anything (rank+revision guard).
     pub reached_rank: Mutex<i64>,
+    /// Whether a connection dropout was marked (mirrors the attachment
+    /// state transition the real spine performs).
+    pub disconnected: Mutex<bool>,
     pub reconnections: Mutex<u32>,
 }
 
@@ -313,9 +319,12 @@ impl SessionFactSink for InMemoryFactSink {
     async fn attach(
         &self,
         binding: &SessionBinding,
-        _capabilities: &[String],
+        capabilities: &[String],
     ) -> Result<SessionAttachmentRef, SessionFactError> {
         self.unavailable()?;
+        self.declared_capabilities
+            .lock()
+            .append(&mut capabilities.to_vec());
         let mut created = self.attachments_created.lock();
         let mut attachment = self.attachment.lock();
         match attachment.clone() {
@@ -401,6 +410,19 @@ impl SessionFactSink for InMemoryFactSink {
         reason: &str,
     ) -> Result<(), SessionFactError> {
         self.unavailable()?;
+        // Mirror the spine's capability gate: a request the declared set
+        // does not admit is the TYPED unsupported refusal (zero writes).
+        let cancels = self
+            .declared_capabilities
+            .lock()
+            .iter()
+            .any(|name| name == "cancel");
+        if kind == SessionInterventionKindV1::RequestCancel && !cancels {
+            return Err(SessionFactError::Refused(
+                "unsupported_by_lifecycle_owner: cancel is not in the declared capability set"
+                    .to_string(),
+            ));
+        }
         self.requests.lock().push((
             attachment.as_str().to_string(),
             request_id.as_str().to_string(),
@@ -447,6 +469,9 @@ impl SessionFactSink for InMemoryFactSink {
         fact: SessionConnectionFactV1,
     ) -> Result<(), SessionFactError> {
         self.unavailable()?;
+        if fact == SessionConnectionFactV1::Disconnected {
+            *self.disconnected.lock() = true;
+        }
         self.connection_facts.lock().push(fact);
         Ok(())
     }
@@ -462,11 +487,18 @@ impl SessionFactSink for InMemoryFactSink {
             .lock()
             .clone()
             .ok_or_else(|| SessionFactError::Refused("not attached".to_string()))?;
+        // Bind BEFORE the struct literal: a guard temporary inside a
+        // struct expression lives until the end of the literal, and
+        // read_state() re-locks the same mutex (self-deadlock).
+        let resume_from_revision = *self.canonical_revision.lock();
+        let state = self.read_state();
+        let was_disconnected = *self.disconnected.lock();
+        *self.disconnected.lock() = false;
         Ok(SessionReconnectReceiptView {
             attachment_ref: attachment,
-            reconnected: true,
-            resume_from_revision: *self.canonical_revision.lock(),
-            state: self.read_state(),
+            reconnected: was_disconnected,
+            resume_from_revision,
+            state,
         })
     }
 

@@ -153,6 +153,18 @@ impl ExecutionSubagentTool {
         }
     }
 
+    /// Pin a NON-default admitted profile (host embedder seam): the
+    /// profile's digest is frozen at admission. The declared capability
+    /// set MUST match what the bound controller actually supports — the
+    /// spine gates interventions against it.
+    #[must_use]
+    pub fn with_profile(mut self, profile: ExecutionSubagentProfile) -> Self {
+        let mut pinned = profile;
+        pinned.digest = pinned.compute_digest();
+        self.profile = pinned;
+        self
+    }
+
     /// Carry the spawning context's lineage (SubAgent-contract D1: depth-1 — a child
     /// context cannot run execution subagents).
     #[must_use]

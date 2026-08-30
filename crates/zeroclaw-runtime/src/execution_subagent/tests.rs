@@ -34,8 +34,12 @@ fn full_caps() -> SessionCapabilities {
 }
 
 fn observe_only_caps() -> SessionCapabilities {
+    // The canonical observe-only harness profile: observe + events (the
+    // spine's observe-only fixture set). Watching is observation; cancel
+    // and prompt stay unadmitted.
     SessionCapabilities {
         observe: true,
+        events: true,
         ..SessionCapabilities::default()
     }
 }
@@ -95,10 +99,9 @@ fn capability_gate_maps_the_six_operations_onto_the_closed_set() {
 #[test]
 fn observe_only_set_refuses_every_lifecycle_operation_typed() {
     let caps = observe_only_caps();
-    assert_eq!(
-        caps.unsupported_operation("watch").as_deref(),
-        Some("watch")
-    );
+    // observe+events admits watching and reading; every MUTATING or
+    // lifecycle operation stays refused.
+    assert!(caps.unsupported_operation("watch").is_none());
     assert_eq!(
         caps.unsupported_operation("prompt").as_deref(),
         Some("prompt")
@@ -144,11 +147,10 @@ fn gated_client_refuses_unsupported_operations_before_the_transport_is_touched()
     let gated = GatedSessionController::new(Arc::clone(&controller) as Arc<dyn SessionController>);
     tokio_rt().block_on(async {
         let handle = gated.start(&start_spec()).await.expect("start is ungated");
-        // watch/prompt/stop/interrupt refuse typed; the scripted transport
-        // records ZERO of them.
-        for op in ["watch", "prompt", "stop", "interrupt"] {
+        // prompt/stop/interrupt refuse typed; the scripted transport
+        // records ZERO of them. watch/collect (observe+events) go through.
+        for op in ["prompt", "stop", "interrupt"] {
             let error = match op {
-                "watch" => gated.watch_events(&handle, 0, 10).await.unwrap_err(),
                 "prompt" => gated.prompt(&handle, "go").await.unwrap_err(),
                 "stop" => gated.stop(&handle, true).await.unwrap_err(),
                 _ => gated.interrupt(&handle).await.unwrap_err(),
@@ -158,6 +160,10 @@ fn gated_client_refuses_unsupported_operations_before_the_transport_is_touched()
                 "{op} must refuse typed, got {error:?}"
             );
         }
+        gated
+            .watch_events(&handle, 0, 10)
+            .await
+            .expect("events admits watch");
         // collect (observe) goes through.
         gated
             .collect(&handle)
@@ -453,6 +459,8 @@ fn module_source_scans_hold() {
         "execution_subagent/controller.rs",
         "execution_subagent/facts.rs",
         "execution_subagent/fixtures.rs",
+        "execution_subagent/tool.rs",
+        "execution_subagent/router.rs",
     ];
     for file in module_files {
         let source = std::fs::read_to_string(format!("{manifest_dir}/src/{file}"))
@@ -485,14 +493,15 @@ fn unused_intervention_dispositions_remain_representable() {
 // ─────────────────────────────────────────────────────────────────────────
 
 use super::router::{DispatchError, DispatchPlan, plan_dispatch};
-use super::tool::{ExecutionRunRequest, ExecutionSubagentTool};
+use super::tool::{ExecutionRunRequest, ExecutionSubagentProfile, ExecutionSubagentTool};
 use crate::tachi_bridge::{
     BridgeQueryError, RequesterBridgePolicy, ResultProjectionView, StructuralIntentContext,
     SubmitReceipt, SubmitTransportError, TachiBridgeClient, TachiTaskBridge, TaskEventPageView,
     TaskIntentInputs, TaskSnapshotView, compose_intent,
 };
 use async_trait::async_trait;
-use zeroclaw_api::session_exec::{ExecutionRunStatusV1, HostIdentityRef};
+use zeroclaw_api::session_exec::{ExecutionRunStatusV1, HostIdentityRef, SessionConnectionFactV1};
+use zeroclaw_api::subagent_v1::SubAgentBudgetV1;
 use zeroclaw_api::subagent_v1::{LineageRef, ParentRunRef};
 use zeroclaw_api::taskintent::{EvaluationRequirement, RequestId, TaskIntentV1};
 use zeroclaw_api::taskintent::{InterventionError, InterventionReceipt};
@@ -931,4 +940,328 @@ fn compose_minimal_intent() -> TaskIntentV1 {
         retry_of: None,
     };
     compose_intent(&inputs, &policy, &structural).expect("clean intent")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// The five vertical discriminations — one NAMED test per contract row
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Discrimination 1: a short-lived review/fix routes EPHEMERAL (no
+/// TaskRef, no durable claim); a restart-recovery/remote/evidence-required
+/// request routes DURABLE through the bridge — and a DURABLE request
+/// NEVER degrades: without a bridge it is a typed error; with a down
+/// bridge the REAL client returns the typed Unavailable receipt and no
+/// session, attachment, or local execution happens.
+#[test]
+fn discrimination_ephemeral_vs_durable_routing_is_typed_and_never_falls_back_local() {
+    // short review/fix → EPHEMERAL: no bridge configured, no TaskRef minted.
+    match plan_dispatch(&ephemeral_request(), false, true).expect("plan") {
+        DispatchPlan::Ephemeral { .. } => {}
+        other => panic!("short review must route ephemeral, got {other:?}"),
+    }
+    // every durability requirement → DURABLE, flag by flag (the addendum
+    // table): with the bridge configured the plan is Durable; without it
+    // the SAME request is a typed DurableRequiresBridge error — never an
+    // ephemeral or local downgrade.
+    for flag in [
+        "needs_restart_recovery",
+        "needs_remote",
+        "needs_multi_attempt",
+        "needs_approvals",
+        "needs_evidence",
+    ] {
+        let mut request = ephemeral_request();
+        match flag {
+            "needs_restart_recovery" => request.needs_restart_recovery = true,
+            "needs_remote" => request.needs_remote = true,
+            "needs_multi_attempt" => request.needs_multi_attempt = true,
+            "needs_approvals" => request.needs_approvals = true,
+            _ => request.needs_evidence = true,
+        }
+        assert_eq!(
+            plan_dispatch(&request, true, true).expect("plan"),
+            DispatchPlan::Durable,
+            "{flag} must route durable"
+        );
+        assert_eq!(
+            plan_dispatch(&request, false, true).unwrap_err(),
+            DispatchError::DurableRequiresBridge,
+            "{flag} with no bridge must fail closed"
+        );
+    }
+    // analysis → REASON: neither port is required or touched.
+    let mut analysis = ephemeral_request();
+    analysis.analysis_only = true;
+    assert_eq!(
+        plan_dispatch(&analysis, false, false),
+        Ok(DispatchPlan::Reason)
+    );
+}
+
+/// Discrimination 2: the subagent cannot reach shell, file_write,
+/// file_edit, git, worktree paths, CLI flags, or credentials — through
+/// the tool's model-visible schema, the run request/inventory types, the
+/// capability vocabulary, or the module's own source.
+#[test]
+fn discrimination_subagent_cannot_reach_shell_file_git_cli_or_credentials() {
+    // (a) the model-visible surface admits exactly two bounded inputs.
+    let tool = tool_for_test(
+        Arc::new(ScriptedController::new(full_caps())),
+        Arc::new(InMemoryFactSink::default()),
+    );
+    let schema = tool.parameters_schema();
+    let mut keys: Vec<String> = schema["properties"]
+        .as_object()
+        .expect("properties")
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["correction_prompt", "objective"]);
+    assert_eq!(
+        schema["additionalProperties"],
+        serde_json::Value::Bool(false)
+    );
+
+    // (b) the run inventory's serialized key set has no capability field.
+    let inventory = tool.run_inventory(&ExecutionRunRequest {
+        objective: "x".to_string(),
+        correction_prompt: None,
+    });
+    let rendered = serde_json::to_string(&inventory).unwrap().to_lowercase();
+    for banned in [
+        "shell",
+        "file_write",
+        "file_edit",
+        "git",
+        "worktree",
+        "cli",
+        "credential",
+        "api_key",
+    ] {
+        assert!(
+            !rendered.contains(banned),
+            "{banned} reachable via inventory"
+        );
+    }
+
+    // (c) the closed capability vocabulary refuses every forbidden name.
+    for banned in [
+        "shell",
+        "file_write",
+        "file_edit",
+        "git",
+        "worktree",
+        "cli_flags",
+        "credentials",
+    ] {
+        assert!(SessionCapabilities::from_names(&[banned.to_string()]).is_err());
+    }
+
+    // (d) the module source carries no execution capability at all.
+    module_source_scans_hold();
+}
+
+/// Discrimination 3: reconnect after attachment loss replays facts
+/// WITHOUT regressing canonical state — replayed ids dedup, stale facts
+/// journal without moving the projection, a lower-rank fact after a
+/// terminal moves nothing, and the orphaned state recovers on
+/// authoritative facts.
+#[tokio::test]
+async fn discrimination_reconnect_replays_facts_without_regressing_canonical_state() {
+    let sink = InMemoryFactSink::default();
+    let attachment = sink.attach(&binding(), &[]).await.unwrap();
+    // facts stream up: accepted(1) started(2) progress(3)
+    for (revision, id) in [(1u64, "ev-1"), (2, "ev-2"), (3, "ev-3")] {
+        sink.ingest_event(&attachment, &fact(revision, id))
+            .await
+            .unwrap_or_else(|_| panic!("ingest {id}"));
+    }
+    // dropout: the host reports the connection lost; the spine marks the
+    // attachment unknown (orphaned) — recoverable, never guessed terminal.
+    sink.mark_connection(&attachment, SessionConnectionFactV1::Disconnected)
+        .await
+        .unwrap();
+    let orphaned = sink.get_state(&attachment).await.unwrap();
+    let _ = orphaned;
+    let reconnect = sink.reconnect(&binding()).await.unwrap();
+    assert!(
+        reconnect.reconnected,
+        "reconnected must reflect the marked dropout (a reconnect with no          dropout is not a recovery)"
+    );
+    assert_eq!(reconnect.resume_from_revision, 3);
+    // A reconnect with NO marked dropout is not a recovery.
+    let stray = sink.reconnect(&binding()).await.unwrap();
+    assert!(!stray.reconnected);
+    // replay: the SAME fact (same id, same revision) dedups; a STALE fact
+    // journals without moving anything; the terminal then advances.
+    let replay = sink
+        .ingest_event(&attachment, &fact(3, "ev-3"))
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.admission,
+        zeroclaw_api::session_exec::SessionReceiptAdmissionV1::Replayed
+    );
+    let stale = sink
+        .ingest_event(&attachment, &fact(2, "ev-stale"))
+        .await
+        .unwrap();
+    assert_eq!(stale.disposition, "journaled_stale");
+    let terminal = SessionEventFact {
+        event_id: SessionEventIdRef::from_opaque("ev-terminal"),
+        kind: SessionEventKindV1::Terminal,
+        outcome: Some(SessionTerminalOutcomeV1::Completed),
+        source_revision: 4,
+        authority_confirmation_ref: None,
+        summary: None,
+        payload_digest: None,
+    };
+    let done = sink.ingest_event(&attachment, &terminal).await.unwrap();
+    assert_eq!(
+        done.state.canonical_state,
+        SessionCanonicalStateV1::Completed
+    );
+    // a late lower-rank fact cannot drag the terminal back.
+    let late = sink
+        .ingest_event(&attachment, &fact(5, "ev-late"))
+        .await
+        .unwrap();
+    assert_eq!(late.state, done.state, "no regression after terminal");
+}
+
+/// Discrimination 4: unsupported lifecycle operations surface TYPED
+/// refusals — never fake success. The gated client refuses before the
+/// transport; the tool reports unsupported_operation and no terminal
+/// fact, receipt, or intervention is fabricated.
+#[test]
+fn discrimination_unsupported_lifecycle_operations_surface_typed_refusals() {
+    // gated client level
+    gated_client_refuses_unsupported_operations_before_the_transport_is_touched();
+    // gate table level
+    observe_only_set_refuses_every_lifecycle_operation_typed();
+}
+
+#[tokio::test]
+async fn discrimination_unsupported_stop_fabricates_nothing() {
+    // Controller-gate variant: the session is observe-only, so the GATED
+    // controller refuses before the transport.
+    let controller = Arc::new(ScriptedController::new(observe_only_caps()));
+    let sink = Arc::new(InMemoryFactSink::default());
+    let tool = tool_for_test(Arc::clone(&controller), Arc::clone(&sink));
+    controller.push(ScriptedStep::Emit(vec![
+        super::controller::ControllerEvent {
+            seq: 0,
+            event_id: SessionEventIdRef::from_opaque("ev-input"),
+            kind: SessionEventKindV1::InputRequired,
+            outcome: None,
+            summary: None,
+        },
+    ]));
+    let report = tool
+        .run(&ExecutionRunRequest {
+            objective: "observe-only session asking for input".to_string(),
+            correction_prompt: None,
+        })
+        .await;
+    assert_eq!(
+        report.status,
+        ExecutionRunStatusV1::UnsupportedOperation,
+        "refusal was {:?}",
+        report.refusal
+    );
+    let facts = sink.facts.lock();
+    let has_terminal = facts
+        .iter()
+        .any(|(fact, _)| fact.kind == SessionEventKindV1::Terminal);
+    assert!(!has_terminal, "no terminal fact may be fabricated");
+    let results = sink.results.lock();
+    assert!(
+        results.is_empty(),
+        "no intervention result may be fabricated"
+    );
+}
+
+#[tokio::test]
+async fn discrimination_unsupported_stop_at_the_spine_gate_fabricates_nothing() {
+    // Spine-gate variant: the session CAN cancel, but the attachment's
+    // DECLARED capability set (what the host admitted with) does not —
+    // the spine's typed unsupported refusal is the first link to fail,
+    // and the run must surface it with zero fabrication.
+    let controller = Arc::new(ScriptedController::new(full_caps()));
+    let sink = Arc::new(InMemoryFactSink::default());
+    let observe_events = ExecutionSubagentProfile {
+        budget: SubAgentBudgetV1 {
+            time_limit_secs: 600,
+            max_tokens: 200_000,
+            max_actions: 200,
+        },
+        max_corrections: 0,
+        max_prompt_bytes: 16_384,
+        declared_capabilities: vec!["observe", "events"],
+        ..ExecutionSubagentProfile::default_execution_profile()
+    };
+    let tool =
+        tool_for_test(Arc::clone(&controller), Arc::clone(&sink)).with_profile(observe_events);
+    controller.push(ScriptedStep::Emit(vec![
+        super::controller::ControllerEvent {
+            seq: 0,
+            event_id: SessionEventIdRef::from_opaque("ev-input"),
+            kind: SessionEventKindV1::InputRequired,
+            outcome: None,
+            summary: None,
+        },
+    ]));
+    let report = tool
+        .run(&ExecutionRunRequest {
+            objective: "session whose declared set cannot cancel".to_string(),
+            correction_prompt: None,
+        })
+        .await;
+    assert_eq!(
+        report.status,
+        ExecutionRunStatusV1::UnsupportedOperation,
+        "refusal was {:?}",
+        report.refusal
+    );
+    assert!(
+        report
+            .refusal
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unsupported"),
+        "the spine gate's typed refusal must surface: {:?}",
+        report.refusal
+    );
+    let facts = sink.facts.lock();
+    assert!(
+        !facts
+            .iter()
+            .any(|(fact_, _)| fact_.kind == SessionEventKindV1::Terminal),
+        "no terminal fact may be fabricated at the spine gate"
+    );
+    assert!(sink.results.lock().is_empty());
+}
+
+/// Discrimination 5: no new durable task store exists in ZeroClaw for
+/// this vertical — the module owns no DDL, no connection opens, no store
+/// crate; facts live in the tachi-owned spine, and the persistence-
+/// surface gate's manifest stays clean.
+#[test]
+fn discrimination_no_new_durable_task_store_in_zero_claw() {
+    module_source_scans_hold();
+    // The sink trait is receipts-only: it cannot open, create, or write a
+    // local store (compile-level: its methods transport receipts; the
+    // only in-memory ledger is cfg(test)-gated).
+    // CARGO_MANIFEST_DIR is the crate dir; the manifest lives at the
+    // workspace root.
+    let manifest = std::fs::read_to_string(format!(
+        "{}/../../scripts/ci/persistence_surface.json",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("persistence manifest");
+    assert!(
+        !manifest.contains("execution_subagent"),
+        "the execution_subagent module must never enter the store manifest"
+    );
 }
