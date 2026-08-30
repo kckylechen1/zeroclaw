@@ -38,8 +38,8 @@ use zeroclaw_api::session_exec::{
     AdapterConnectionRef, HostIdentityRef, InterventionRequestIdRef, RemoteSessionRef,
     SessionAdvertiseReceiptView, SessionAttachmentRef, SessionConnectionFactV1, SessionEventIdRef,
     SessionEventKindV1, SessionEventReceiptView, SessionFactError,
-    SessionInterventionDispositionV1, SessionInterventionRequestView, SessionReconnectReceiptView,
-    SessionStateView, SessionTerminalOutcomeV1,
+    SessionInterventionDispositionV1, SessionInterventionKindV1, SessionInterventionRequestView,
+    SessionReconnectReceiptView, SessionStateView, SessionTerminalOutcomeV1,
 };
 
 /// The identity/binding facts one session attachment carries. All fields
@@ -100,6 +100,18 @@ pub trait SessionFactSink: Send + Sync {
         attachment: &SessionAttachmentRef,
         fact: &SessionEventFact,
     ) -> Result<SessionEventReceiptView, SessionFactError>;
+
+    /// Issue one intervention request through the spine (the host's own
+    /// cancel/correct ask). The spine gates it against the advertised
+    /// capability set; `SessionUnsupportedRefusalView` cases come back as
+    /// `SessionFactError::Refused`. A request is never a state.
+    async fn request_intervention(
+        &self,
+        attachment: &SessionAttachmentRef,
+        request_id: &InterventionRequestIdRef,
+        kind: SessionInterventionKindV1,
+        reason: &str,
+    ) -> Result<(), SessionFactError>;
 
     /// Pick up one intervention request receipt (an ask issued through
     /// the spine for this attachment). `Ok(None)` when no such request.

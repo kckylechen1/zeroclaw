@@ -432,7 +432,7 @@ fn module_source_scans_hold() {
     //     scan does not itself read as a store site to the TB-22 gate).
     // (c) the agent path does not reference this module yet (nothing
     //     registers it — default closed; the wiring leaf is gated on this
-    //     vertical gate).
+    //     vertical's green per the vertical gate).
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     // Banned tokens are assembled at runtime so this scan list itself
     // never reads as a store site to the persistence-surface gate's
@@ -478,4 +478,457 @@ fn unused_intervention_dispositions_remain_representable() {
     ] {
         assert!(!disposition.as_str().is_empty());
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PR2: tool surface, negative-capability suite, and the router gate
+// ─────────────────────────────────────────────────────────────────────────
+
+use super::router::{DispatchError, DispatchPlan, plan_dispatch};
+use super::tool::{ExecutionRunRequest, ExecutionSubagentTool};
+use crate::tachi_bridge::{
+    BridgeQueryError, RequesterBridgePolicy, ResultProjectionView, StructuralIntentContext,
+    SubmitReceipt, SubmitTransportError, TachiBridgeClient, TachiTaskBridge, TaskEventPageView,
+    TaskIntentInputs, TaskSnapshotView, compose_intent,
+};
+use async_trait::async_trait;
+use zeroclaw_api::session_exec::{ExecutionRunStatusV1, HostIdentityRef};
+use zeroclaw_api::subagent_v1::{LineageRef, ParentRunRef};
+use zeroclaw_api::taskintent::{EvaluationRequirement, RequestId, TaskIntentV1};
+use zeroclaw_api::taskintent::{InterventionError, InterventionReceipt};
+use zeroclaw_api::tool::Tool as _;
+
+fn tool_for_test(
+    controller: Arc<ScriptedController>,
+    sink: Arc<InMemoryFactSink>,
+) -> ExecutionSubagentTool {
+    ExecutionSubagentTool::new(
+        Arc::new(super::controller::GatedSessionController::new(
+            controller as Arc<dyn super::controller::SessionController>,
+        )),
+        sink as Arc<dyn SessionFactSink>,
+        HostIdentityRef::from_opaque("host-test"),
+    )
+}
+
+fn ephemeral_request() -> zeroclaw_api::session_exec::ExecutionRequestV1 {
+    ExecutionRequestV1 {
+        objective: "fix the flaky test".to_string(),
+        needs_restart_recovery: false,
+        needs_remote: false,
+        needs_multi_attempt: false,
+        needs_approvals: false,
+        needs_evidence: false,
+        analysis_only: false,
+    }
+}
+
+fn durable_request() -> zeroclaw_api::session_exec::ExecutionRequestV1 {
+    ExecutionRequestV1 {
+        objective: "recover the failed migration".to_string(),
+        needs_restart_recovery: true,
+        needs_remote: false,
+        needs_multi_attempt: false,
+        needs_approvals: false,
+        needs_evidence: false,
+        analysis_only: false,
+    }
+}
+
+/// A bridge transport that is DOWN (TB-20). Sibling of the bridge's own
+/// test double; defined here (cfg(test)) so the router gate can prove
+/// the durable path fails closed against the REAL client.
+struct UnavailableTachiBridge;
+
+#[async_trait]
+impl TachiTaskBridge for UnavailableTachiBridge {
+    async fn submit(
+        &self,
+        _intent: &TaskIntentV1,
+        _request_id: &RequestId,
+    ) -> Result<SubmitReceipt, SubmitTransportError> {
+        Ok(SubmitReceipt::Unavailable)
+    }
+
+    async fn get(
+        &self,
+        _task_ref: &zeroclaw_api::taskintent::TaskRef,
+    ) -> Result<TaskSnapshotView, BridgeQueryError> {
+        Err(BridgeQueryError::Unavailable)
+    }
+
+    async fn watch(
+        &self,
+        _task_ref: &zeroclaw_api::taskintent::TaskRef,
+        _after_seq: u64,
+        _limit: usize,
+    ) -> Result<TaskEventPageView, BridgeQueryError> {
+        Err(BridgeQueryError::Unavailable)
+    }
+
+    async fn collect(
+        &self,
+        _task_ref: &zeroclaw_api::taskintent::TaskRef,
+        _result_revision: Option<u64>,
+    ) -> Result<ResultProjectionView, BridgeQueryError> {
+        Err(BridgeQueryError::Unavailable)
+    }
+
+    async fn intervene(
+        &self,
+        _task_ref: &zeroclaw_api::taskintent::TaskRef,
+        _intervention: &zeroclaw_api::taskintent::InterventionV1,
+        _requester: &zeroclaw_api::taskintent::RequesterRef,
+        _request_id: &RequestId,
+        _expected_task_revision: Option<u64>,
+    ) -> Result<InterventionReceipt, InterventionError> {
+        Err(InterventionError::Unavailable)
+    }
+
+    async fn request_stop(
+        &self,
+        _task_ref: &zeroclaw_api::taskintent::TaskRef,
+        _mode: zeroclaw_api::taskintent::StopMode,
+        _requester: &zeroclaw_api::taskintent::RequesterRef,
+        _request_id: &RequestId,
+        _expected_task_revision: Option<u64>,
+    ) -> Result<zeroclaw_api::taskintent::StopReceipt, InterventionError> {
+        Err(InterventionError::Unavailable)
+    }
+}
+
+#[test]
+fn tool_parameter_schema_exposes_only_bounded_inputs() {
+    let tool = tool_for_test(
+        Arc::new(ScriptedController::new(full_caps())),
+        Arc::new(InMemoryFactSink::default()),
+    );
+    let schema = tool.parameters_schema();
+    let mut keys: Vec<&str> = schema["properties"]
+        .as_object()
+        .expect("properties object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["correction_prompt", "objective"]);
+    // No extra key can smuggle a shell flag, a path, or a credential.
+    assert_eq!(
+        schema["additionalProperties"],
+        serde_json::Value::Bool(false)
+    );
+    assert_eq!(schema["required"], serde_json::json!(["objective"]));
+}
+
+#[test]
+fn run_inventory_serialized_key_set_pins_the_negative_capability() {
+    let tool = tool_for_test(
+        Arc::new(ScriptedController::new(full_caps())),
+        Arc::new(InMemoryFactSink::default()),
+    );
+    let inventory = tool.run_inventory(&ExecutionRunRequest {
+        objective: "review".to_string(),
+        correction_prompt: Some("run make check".to_string()),
+    });
+    let json = serde_json::to_value(&inventory).expect("serialize");
+    let mut keys: Vec<&str> = json
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    // The exact inventory: objective bytes, whether a correction is
+    // authorized, the frozen profile identity, the budget ceiling, the
+    // declared capability names, the two typed outbound surfaces, and the
+    // lineage depth. A credential/workspace/CLI-flag field would change
+    // this set observably.
+    assert_eq!(
+        keys,
+        vec![
+            "budget_max_actions",
+            "correction_authorized",
+            "declared_capabilities",
+            "lineage_depth",
+            "objective_bytes",
+            "outbound_surfaces",
+            "profile_digest",
+            "profile_id",
+            "profile_revision",
+        ]
+    );
+    assert_eq!(
+        inventory.outbound_surfaces,
+        vec!["session-controller", "fact-sink"]
+    );
+    for banned in [
+        "credential",
+        "shell",
+        "file_write",
+        "file_edit",
+        "git",
+        "worktree",
+        "cli",
+    ] {
+        let rendered = serde_json::to_string(&inventory).unwrap();
+        assert!(
+            !rendered.to_lowercase().contains(banned),
+            "{banned} leaked into inventory"
+        );
+    }
+}
+
+#[tokio::test]
+async fn child_context_cannot_run_execution_subagents_d1() {
+    let controller = Arc::new(ScriptedController::new(full_caps()));
+    let sink = Arc::new(InMemoryFactSink::default());
+    let root = LineageRef::new_root(ParentRunRef::from_opaque("root"));
+    let tool =
+        tool_for_test(Arc::clone(&controller), Arc::clone(&sink)).with_lineage(Some(root.child()));
+    let report = tool
+        .run(&ExecutionRunRequest {
+            objective: "fix".to_string(),
+            correction_prompt: None,
+        })
+        .await;
+    assert_eq!(report.status, ExecutionRunStatusV1::Refused);
+    assert!(report.refusal.unwrap().contains("child context"));
+    assert_eq!(
+        *controller.started_count.lock(),
+        0,
+        "no session was started"
+    );
+    assert_eq!(
+        *sink.attachments_created.lock(),
+        0,
+        "no attachment was created"
+    );
+}
+
+#[test]
+fn short_lived_review_plans_ephemeral_without_minting_a_task_ref() {
+    // The plan itself is pure — but the discrimination is that an
+    // EPHEMERAL request does not require the bridge: no TaskRef path is
+    // involved at all.
+    let plan = plan_dispatch(&ephemeral_request(), false, true).expect("plan");
+    match plan {
+        DispatchPlan::Ephemeral { run } => {
+            assert_eq!(run.objective, "fix the flaky test");
+        }
+        other => panic!("expected ephemeral, got {other:?}"),
+    }
+}
+
+#[test]
+fn durable_request_with_no_bridge_configured_is_a_typed_error_never_ephemeral() {
+    let error = plan_dispatch(&durable_request(), false, true).unwrap_err();
+    assert_eq!(error, DispatchError::DurableRequiresBridge);
+    // And the mirror: an ephemeral request with no tool configured is
+    // also a typed error, never a silent local run.
+    assert_eq!(
+        plan_dispatch(&ephemeral_request(), true, false).unwrap_err(),
+        DispatchError::EphemeralRequiresController
+    );
+}
+
+#[tokio::test]
+async fn durable_request_through_unavailable_bridge_fails_closed_without_local_execution() {
+    let controller = Arc::new(ScriptedController::new(full_caps()));
+    let sink = Arc::new(InMemoryFactSink::default());
+    let tool = tool_for_test(Arc::clone(&controller), Arc::clone(&sink));
+    // The route is DURABLE; a bridge IS configured (but down at runtime).
+    let plan = plan_dispatch(&durable_request(), true, true).expect("plan");
+    assert_eq!(plan, DispatchPlan::Durable);
+    // The caller submits through the real bridge client — typed outage.
+    let client = TachiBridgeClient::new(Arc::new(UnavailableTachiBridge));
+    // The durable path NEVER routes through the ephemeral tool as a
+    // fallback; prove by submitting and checking the typed outage, and
+    // that the controller/session machinery stayed untouched.
+    let intent = compose_minimal_intent();
+    let receipt = client
+        .submit(
+            &intent,
+            &RequestId::new("req-durable-1".to_string()).expect("bounded request id"),
+        )
+        .await;
+    assert!(
+        matches!(receipt, Ok(SubmitReceipt::Unavailable)),
+        "durable outage must surface as the typed Unavailable receipt: {receipt:?}"
+    );
+    assert_eq!(
+        *controller.started_count.lock(),
+        0,
+        "no ephemeral session was started"
+    );
+    assert_eq!(
+        *sink.attachments_created.lock(),
+        0,
+        "no attachment was created"
+    );
+    let _ = &tool; // the tool exists but is not the durable fallback
+}
+
+#[test]
+fn analysis_request_plans_reason_and_never_touches_the_ports() {
+    let request = ExecutionRequestV1 {
+        objective: "compare the two designs".to_string(),
+        needs_restart_recovery: false,
+        needs_remote: false,
+        needs_multi_attempt: false,
+        needs_approvals: false,
+        needs_evidence: false,
+        analysis_only: true,
+    };
+    assert_eq!(
+        plan_dispatch(&request, true, true).expect("plan"),
+        DispatchPlan::Reason
+    );
+}
+
+#[tokio::test]
+async fn ephemeral_run_through_the_tool_reports_a_structured_receipt() {
+    let controller = Arc::new(ScriptedController::new(full_caps()));
+    let sink = Arc::new(InMemoryFactSink::default());
+    let tool = tool_for_test(Arc::clone(&controller), Arc::clone(&sink));
+    controller.push(super::fixtures::ScriptedStep::Emit(vec![
+        super::controller::ControllerEvent {
+            seq: 0,
+            event_id: SessionEventIdRef::from_opaque("ev-started"),
+            kind: SessionEventKindV1::Started,
+            outcome: None,
+            summary: None,
+        },
+        super::controller::ControllerEvent {
+            seq: 0,
+            event_id: SessionEventIdRef::from_opaque("ev-progress"),
+            kind: SessionEventKindV1::Progress,
+            outcome: None,
+            summary: Some("halfway".to_string()),
+        },
+        super::controller::ControllerEvent {
+            seq: 0,
+            event_id: SessionEventIdRef::from_opaque("ev-terminal"),
+            kind: SessionEventKindV1::Terminal,
+            outcome: Some(SessionTerminalOutcomeV1::Completed),
+            summary: Some("done".to_string()),
+        },
+    ]));
+    let report = tool
+        .run(&ExecutionRunRequest {
+            objective: "short review".to_string(),
+            correction_prompt: None,
+        })
+        .await;
+    assert_eq!(report.status, ExecutionRunStatusV1::Completed);
+    assert_eq!(report.route, ExecutionRouteV1::EphemeralExec);
+    assert!(report.attachment_ref.is_some(), "facts flowed to the sink");
+    assert_eq!(
+        report.final_canonical_state,
+        Some(SessionCanonicalStateV1::Completed)
+    );
+    assert!(
+        report.collected_digest.is_some(),
+        "collect produced the bounded projection"
+    );
+    // The harness's facts reached the sink.
+    let facts = sink.facts.lock();
+    let kinds: Vec<SessionEventKindV1> = facts.iter().map(|(fact, _)| fact.kind).collect();
+    assert!(kinds.contains(&SessionEventKindV1::Started));
+    assert!(kinds.contains(&SessionEventKindV1::Terminal));
+    assert!(
+        kinds.contains(&SessionEventKindV1::Cleanup),
+        "cleanup receipt recorded"
+    );
+}
+
+#[tokio::test]
+async fn controller_unavailable_at_start_refuses_without_touching_the_sink() {
+    let controller = Arc::new(ScriptedController::new(full_caps()));
+    let sink = Arc::new(InMemoryFactSink::default());
+    let tool = tool_for_test(Arc::clone(&controller), Arc::clone(&sink));
+    controller.push(super::fixtures::ScriptedStep::TransportDown);
+    let report = tool
+        .run(&ExecutionRunRequest {
+            objective: "short review".to_string(),
+            correction_prompt: None,
+        })
+        .await;
+    assert_eq!(report.status, ExecutionRunStatusV1::Refused);
+    assert!(report.refusal.unwrap().contains("fail closed"));
+    assert_eq!(*sink.attachments_created.lock(), 0);
+}
+
+#[tokio::test]
+async fn sink_unavailable_after_start_stops_the_session_and_refuses() {
+    let controller = Arc::new(ScriptedController::new(full_caps()));
+    let sink = Arc::new(InMemoryFactSink::default());
+    let tool = tool_for_test(Arc::clone(&controller), Arc::clone(&sink));
+    // The controller stays up (start succeeds); the sink is unavailable,
+    // so the attach leg fails and the run must stop the session it
+    // started — nothing may keep running unobserved.
+    *sink.unavailable.lock() = true;
+    let report = tool
+        .run(&ExecutionRunRequest {
+            objective: "short review".to_string(),
+            correction_prompt: None,
+        })
+        .await;
+    assert_eq!(report.status, ExecutionRunStatusV1::Refused);
+    assert!(report.refusal.unwrap().contains("fail closed"));
+    // The session was stopped so nothing runs unobserved.
+    assert!(
+        !controller.stop_requests.lock().is_empty(),
+        "session stopped on abandon"
+    );
+}
+
+/// Compose a minimal clean intent for the durable-path test (the compose
+/// surface's five values; authority fields come from the requester
+/// policy, mirroring the bridge compose tests' own builders).
+fn compose_minimal_intent() -> TaskIntentV1 {
+    use std::collections::BTreeSet;
+    use zeroclaw_api::taskintent::{
+        ApprovalRequirement, ArtifactClass, ArtifactExpectation, BoundedText, Capability,
+        CapabilityRequest, IndependenceClass, PrivacyClass, RoutingPreference, TaskConstraint,
+        WorkspaceSourceRef,
+    };
+    let inputs = TaskIntentInputs {
+        objective: BoundedText::new("recover the failed migration").expect("bounded"),
+        capability_request: CapabilityRequest {
+            capability: Capability::RepositoryImplementation,
+        },
+        constraints: vec![TaskConstraint {
+            description: BoundedText::new("durable recovery; refs, not relay prose")
+                .expect("bounded"),
+        }],
+        expected_artifacts: vec![ArtifactExpectation {
+            artifact_class: ArtifactClass::Diff,
+            description: BoundedText::new("repository diff").expect("bounded"),
+            required: true,
+        }],
+        evaluation_requirement: EvaluationRequirement {
+            independence: IndependenceClass::DeterministicCheck,
+        },
+    };
+    let policy = RequesterBridgePolicy {
+        admitted_capabilities: BTreeSet::from([Capability::RepositoryImplementation]),
+        workspace_source: Some(WorkspaceSourceRef {
+            repo: BoundedText::new("kckylechen1/zeroclaw").expect("bounded"),
+            git_ref: Some(BoundedText::new("master").expect("bounded")),
+        }),
+        routing_preference: Some(RoutingPreference::PreferTachiManaged),
+        approval_requirement: ApprovalRequirement::NotRequired,
+        privacy_class: PrivacyClass::Internal,
+    };
+    let structural = StructuralIntentContext {
+        requester: zeroclaw_api::taskintent::RequesterRef::claim("agent:parent")
+            .expect("bounded requester"),
+        parent_ref: None,
+        supervisor_ref: None,
+        context_bundle_ref: BoundedText::new("bundle-durable-test").expect("bounded"),
+        source_refs: Vec::new(),
+        expiry: None,
+        retry_of: None,
+    };
+    compose_intent(&inputs, &policy, &structural).expect("clean intent")
 }
