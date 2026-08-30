@@ -2088,10 +2088,13 @@ mod tests {
         config.agents.insert(agent_alias.to_string(), agent);
     }
 
-    async fn recv_log_event(
+    /// Wait up to 2s for a log event whose `message` matches, or `None`.
+    /// Retries at 50ms steps because a broadcast receiver only observes new
+    /// sends when polled.
+    async fn try_recv_log_event(
         rx: &mut tokio::sync::broadcast::Receiver<serde_json::Value>,
         message: &str,
-    ) -> serde_json::Value {
+    ) -> Option<serde_json::Value> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -2103,14 +2106,14 @@ mod tests {
                         .and_then(|v| v.as_str())
                         .is_some_and(|candidate| candidate == message) =>
                 {
-                    return value;
+                    return Some(value);
                 }
                 Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
                 Err(_elapsed) => {}
             }
         }
-        panic!("did not find log event: {message}");
+        None
     }
 
     #[test]
@@ -2188,15 +2191,30 @@ mod tests {
         let _hook_guard = zeroclaw_log::__private_test_hook_lock();
         zeroclaw_log::try_install_capture_subscriber();
         let mut rx = zeroclaw_log::subscribe_or_install();
-        while rx.try_recv().is_ok() {}
 
         let tmp = TempDir::new().unwrap();
         let mut config = test_config(&tmp);
         config.gateway.require_pairing = true;
 
-        record_daemon_started(&config, "127.0.0.1", 0);
+        // The process-global broadcast channel this test subscribes to also
+        // carries every log line the other parallel tests emit. Under a heavy
+        // burst the ring can overflow between `record_daemon_started` and the
+        // next poll, the receiver reads `Lagged`, and the one event this test
+        // cares about is gone for good — a timing flake, not a regression
+        // signal. So emit-and-wait is retried: each attempt drains, re-emits
+        // (the event is a synthetic diagnostics record, and this test is its
+        // only matcher), and waits on a fresh 2s window.
+        let mut value = None;
+        for _ in 0..6 {
+            while rx.try_recv().is_ok() {}
+            record_daemon_started(&config, "127.0.0.1", 0);
+            if let Some(found) = try_recv_log_event(&mut rx, "ZeroClaw daemon started").await {
+                value = Some(found);
+                break;
+            }
+        }
+        let value = value.expect("daemon-started diagnostics event must be captured");
 
-        let value = recv_log_event(&mut rx, "ZeroClaw daemon started").await;
         assert_eq!(value["event"]["category"], "system");
         assert_eq!(value["event"]["action"], "start");
         assert_eq!(value["event"]["outcome"], "success");
