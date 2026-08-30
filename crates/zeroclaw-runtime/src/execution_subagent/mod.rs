@@ -46,6 +46,8 @@ pub mod controller;
 pub mod facts;
 #[cfg(test)]
 pub(crate) mod fixtures;
+pub mod router;
+pub mod tool;
 
 #[cfg(test)]
 mod tests;
@@ -56,3 +58,7 @@ pub use controller::{
     SessionStopReceipt,
 };
 pub use facts::{SessionBinding, SessionEventFact, SessionFactSink};
+pub use router::{DispatchError, DispatchPlan, plan_dispatch};
+pub use tool::{
+    ExecutionRunRequest, ExecutionSessionInventory, ExecutionSubagentProfile, ExecutionSubagentTool,
+};

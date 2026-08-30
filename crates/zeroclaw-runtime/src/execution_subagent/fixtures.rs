@@ -14,8 +14,9 @@ use zeroclaw_api::session_exec::{
     AuthorityConfirmationRef, InterventionRequestIdRef, SessionAdvertiseReceiptView,
     SessionAttachmentRef, SessionCanonicalStateV1, SessionConnectionFactV1, SessionEventIdRef,
     SessionEventKindV1, SessionEventReceiptView, SessionFactError,
-    SessionInterventionDispositionV1, SessionInterventionRequestView, SessionReceiptAdmissionV1,
-    SessionReconnectReceiptView, SessionStateView, SessionTerminalOutcomeV1,
+    SessionInterventionDispositionV1, SessionInterventionKindV1, SessionInterventionRequestView,
+    SessionReceiptAdmissionV1, SessionReconnectReceiptView, SessionStateView,
+    SessionTerminalOutcomeV1,
 };
 
 use super::controller::{
@@ -287,6 +288,8 @@ pub struct InMemoryFactSink {
     pub unavailable: Mutex<bool>,
     /// Intervention requests available for pickup.
     pub pending_requests: Mutex<Vec<SessionInterventionRequestView>>,
+    /// Issued requests: (attachment, request_id, kind, reason).
+    pub requests: Mutex<Vec<(String, String, String, String)>>,
     /// The canonical revision high-water (the stale-guard rank).
     pub canonical_revision: Mutex<u64>,
     /// The lifecycle rank high-water: a fact ranked below this is
@@ -388,6 +391,23 @@ impl SessionFactSink for InMemoryFactSink {
             disposition,
             state: self.read_state(),
         })
+    }
+
+    async fn request_intervention(
+        &self,
+        attachment: &SessionAttachmentRef,
+        request_id: &InterventionRequestIdRef,
+        kind: SessionInterventionKindV1,
+        reason: &str,
+    ) -> Result<(), SessionFactError> {
+        self.unavailable()?;
+        self.requests.lock().push((
+            attachment.as_str().to_string(),
+            request_id.as_str().to_string(),
+            kind.as_str().to_string(),
+            reason.to_string(),
+        ));
+        Ok(())
     }
 
     async fn get_intervention(
