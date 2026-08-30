@@ -1,7 +1,6 @@
 //! The Tachi fact-reporting path — the [`SessionFactSink`] port through
 //! which an ephemeral ExecutionSubAgent run reports authoritative session
-//! facts to the tachi attached-session receipt spine (tachi #1678 /
-//! #1878: `ingest_session_event`, `advertise_session_capabilities`,
+//! facts to the tachi attached-session receipt spine (the attached-session receipt spine: `ingest_session_event`, `advertise_session_capabilities`,
 //! `request_intervention` pickup, `record_intervention_result`,
 //! `mark_session_connection`, `reconnect_session`, `get_session_state`).
 //!

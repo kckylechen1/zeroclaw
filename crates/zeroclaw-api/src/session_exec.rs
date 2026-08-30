@@ -1,7 +1,7 @@
 //! Shared domain vocabulary for the ephemeral ExecutionSubAgent vertical
-//! (zeroclaw #261): the typed SessionController seam, the Tachi
-//! attached-session fact spine it reports through (tachi #1678), and the
-//! Parent-level three-path route discriminator (#198 addendum #2).
+//! (the ephemeral-execution vertical): the typed SessionController seam, the
+//! Tachi attached-session fact spine it reports through, and the
+//! Parent-level three-path route discriminator (program addendum 2).
 //!
 //! These types are CONTENT and receipts only — nothing here carries or
 //! grants authority, spawns a process, or opens a store. The controller
@@ -15,7 +15,7 @@
 //!   dispositions are closed enums mirroring the tachi-side spine's own
 //!   closed sets (memcore v34). A string that is not in the set fails
 //!   [`parse`]-style constructors — the consumer cannot invent a fact.
-//! - **Typed refs, non-interchangeable** (#205 vocabulary): host
+//! - **Typed refs, non-interchangeable** (bridge-contract vocabulary): host
 //!   identity, adapter connection, remote session, attachment, and
 //!   session event ids are distinct newtypes. They are decode-side
 //!   wrappers only; the minting authority is the host/tachi side.
@@ -25,7 +25,7 @@
 //!   `cancelled` can never be minted without an authority confirmation
 //!   reference (enforced by the spine; reflected here by requiring the
 //!   ref on the outcome's constructor path).
-//! - **The three paths are typed** (#198 addendum #2):
+//! - **The three paths are typed** (program addendum 2):
 //!   [`ExecutionRouteV1`] has exactly `Reason`, `EphemeralExec`, and
 //!   `DurableExec` variants. There is no `Local` fallback variant to
 //!   degrade into.
@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 // ─────────────────────────────────────────────────────────────────────────
-// Typed refs (#205 vocabulary; decode-side only — never minted here)
+// Typed refs (bridge-contract vocabulary; decode-side only — never minted here)
 // ─────────────────────────────────────────────────────────────────────────
 
 macro_rules! opaque_ref {
@@ -198,7 +198,7 @@ pub enum SessionCanonicalStateV1 {
     Failed,
     Cancelled,
     /// Two authoritative terminal facts disagree. Stuck by design;
-    /// adjudication is tachi-owned (#1623), never guessed here.
+    /// adjudication is tachi-owned, never guessed here.
     InconsistentReconciling,
     /// Session gone without a terminal receipt. Recoverable on reconnect.
     UnknownOrphaned,
@@ -469,7 +469,7 @@ pub struct SessionInterventionResultView {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// The three-path route discriminator (#198 addendum #2)
+// The three-path route discriminator (program addendum 2)
 // ─────────────────────────────────────────────────────────────────────────
 
 /// One Parent-level execution request, before any path is chosen. The
@@ -492,7 +492,7 @@ pub struct ExecutionRequestV1 {
     pub analysis_only: bool,
 }
 
-/// The three execution paths (addendum #2). Exactly three variants: the
+/// The three execution paths (addendum ticket 2). Exactly three variants: the
 /// type cannot express a "local execution" fallback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExecutionRouteV1 {

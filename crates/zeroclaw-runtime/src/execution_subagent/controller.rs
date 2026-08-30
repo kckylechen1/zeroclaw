@@ -1,6 +1,6 @@
 //! The typed SessionController port — the ZeroClaw-owned lifecycle seam
 //! between the ExecutionSubAgent and the ephemeral harness session over
-//! ACPX (zeroclaw #261; tachi #1678's host-side contract).
+//! ACPX (the ephemeral-execution vertical; the tachi attached-session spine's host-side contract).
 //!
 //! ```text
 //! ExecutionSubagentTool (parent-side, bounded)
@@ -114,7 +114,7 @@ impl SessionCapabilities {
         }
     }
 
-    /// The typed operation gate: the SINGLE mapping from the six #261
+    /// The typed operation gate: the SINGLE mapping from the six execution-vertical
     /// operations to the closed capability set. `Some(operation)` when the
     /// set does not admit the operation (typed refusal); `None` when it
     /// does. start/reattach-admission are host-minting operations and are
@@ -239,7 +239,7 @@ impl std::fmt::Display for ControllerError {
 
 impl std::error::Error for ControllerError {}
 
-/// The typed SessionController port. Exactly the six #261 operations
+/// The typed SessionController port. Exactly the six execution-vertical operations
 /// (start / watch / prompt / interrupt+stop / collect) plus the reconnect
 /// consumption op (`reattach`) — no raw process control surface exists on
 /// the trait, so no caller of the port can acquire one.
