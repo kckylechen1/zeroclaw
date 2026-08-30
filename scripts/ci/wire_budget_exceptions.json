@@ -1,0 +1,6 @@
+{
+  "$schema": "./wire_budget_exceptions.schema.json",
+  "version": 1,
+  "wire_budget_tokens_ceiling": 5000,
+  "exceptions": []
+}

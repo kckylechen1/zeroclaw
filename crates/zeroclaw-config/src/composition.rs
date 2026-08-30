@@ -241,4 +241,24 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn no_bypass_via_skill_or_prefixed_names() {
+        // Excluded and banned tools cannot be elevated by skill prefixing or
+        // alias disguising. `is_minimal_member` must reject them.
+        for banned in BANNED_MINIMAL_TOOL_NAMES {
+            assert!(!is_minimal_member(&format!("skill__{banned}")));
+            assert!(!is_minimal_member(&format!("custom__{banned}")));
+        }
+    }
+
+    #[test]
+    fn no_bypass_subagent_and_spawn_surfaces() {
+        // Only the V1 reasoning_subagent is admitted; legacy spawn_subagent,
+        // direct coding runners, and arbitrary subagent elevation stay denied.
+        assert!(is_minimal_member("reasoning_subagent"));
+        assert!(!is_minimal_member("spawn_subagent"));
+        assert!(!is_minimal_member("coding_subagent"));
+        assert!(!is_minimal_member("exec_subagent"));
+    }
 }
