@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WireBudgetExceptions",
+  "type": "object",
+  "required": ["version", "ceiling_tokens", "exceptions"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "ceiling_tokens": {
+      "type": "integer",
+      "const": 5000
+    },
+    "exceptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "owner",
+          "tool_name",
+          "rationale",
+          "wire_tokens",
+          "sunset_decision"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "wire_tokens": {
+            "type": "integer"
+          },
+          "sunset_decision": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

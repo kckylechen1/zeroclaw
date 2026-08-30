@@ -102,7 +102,7 @@ fn copied_skill_fixture_dir() -> PathBuf {
     PathBuf::from(COPIED_SKILL_FIXTURE)
 }
 
-fn attach_copied_skill_fixture(config: &mut Config) {
+fn attach_copied_skill_fixture_for_agent(config: &mut Config, agent_alias: &str) {
     let dir = copied_skill_fixture_dir();
     assert!(
         dir.join("zeroclaw").join("SKILL.md").is_file(),
@@ -119,23 +119,53 @@ fn attach_copied_skill_fixture(config: &mut Config) {
     );
     config
         .agents
-        .get_mut("hyperion")
-        .unwrap()
+        .entry(agent_alias.to_string())
+        .or_default()
         .skill_bundles
         .push("copied_skills".into());
 }
 
-fn point_hapi_edge_at(config: &mut Config, url: String) {
-    config.mcp.servers.retain(|s| s.name == "hapi-edge");
-    config.mcp.servers[0].url = Some(url);
-    config.mcp.servers[0].transport = zeroclaw_config::schema::McpTransport::Http;
+fn attach_copied_skill_fixture(config: &mut Config) {
+    attach_copied_skill_fixture_for_agent(config, "hyperion");
+}
+
+fn point_hapi_edge_at_agent(config: &mut Config, url: String, agent_alias: &str) {
+    if let Some(s) = config
+        .mcp
+        .servers
+        .iter_mut()
+        .find(|s| s.name == "hapi-edge")
+    {
+        s.url = Some(url);
+        s.transport = zeroclaw_config::schema::McpTransport::Http;
+    } else {
+        config
+            .mcp
+            .servers
+            .push(zeroclaw_config::schema::McpServerConfig {
+                name: "hapi-edge".into(),
+                url: Some(url),
+                transport: zeroclaw_config::schema::McpTransport::Http,
+                ..zeroclaw_config::schema::McpServerConfig::default()
+            });
+    }
     config.mcp_bundles.insert(
-        "hyperion".into(),
+        agent_alias.into(),
         zeroclaw_config::schema::McpBundleConfig {
             servers: vec!["hapi-edge".into()],
             exclude: Vec::new(),
         },
     );
+    config
+        .agents
+        .entry(agent_alias.to_string())
+        .or_default()
+        .mcp_bundles
+        .push(agent_alias.into());
+}
+
+fn point_hapi_edge_at(config: &mut Config, url: String) {
+    point_hapi_edge_at_agent(config, url, "hyperion");
 }
 
 fn seed_personality(workspace: &Path, include_memory: bool) {
@@ -836,4 +866,63 @@ async fn minimal_composition_tools_wire_under_owner_ceiling() {
         largest.name,
         largest.native_tokens
     );
+}
+
+#[tokio::test]
+async fn minimal_composition_no_bypass_mcp_or_skills() {
+    let tmp = TempDir::new().unwrap();
+    seed_personality(tmp.path(), true);
+    let mut config = Config {
+        config_path: tmp.path().join("config.toml"),
+        data_dir: tmp.path().join("data"),
+        ..Config::default()
+    };
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+    // Explicitly enable non-minimal subsystems to test that minimal composition
+    // overrides their enabled flags and keeps them off the wire surface.
+    config.pipeline.enabled = true;
+
+    let (_, budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "default",
+        skills: &[],
+        connect_mcp: false,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    print_budget("composition=minimal (no-bypass test)", &budget);
+
+    // 1. Every assembled tool MUST be an explicit minimal member
+    for name in &budget.names {
+        assert!(
+            zeroclaw_config::composition::is_minimal_member(name),
+            "non-member tool penetrated minimal composition: {name}"
+        );
+    }
+
+    // 2. None of the banned categories can enter the minimal wire surface
+    for banned in [
+        "claude_code",
+        "codex_cli",
+        "git_operations",
+        "git_forge",
+        "model_routing_config",
+        "backup",
+        "jira",
+        "notion",
+        "google_workspace",
+        "microsoft365",
+        "linkedin",
+        "composio",
+        "pushover",
+        "cron_add",
+        "cron_update",
+    ] {
+        assert!(
+            !budget.names.iter().any(|n| n == banned),
+            "banned/excluded tool `{banned}` bypassed minimal composition into registry: {:?}",
+            budget.names
+        );
+    }
 }
