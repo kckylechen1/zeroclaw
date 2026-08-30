@@ -326,20 +326,6 @@
       "signals": 6
     },
     {
-      "path": "crates/zeroclaw-runtime/src/control_plane/task_store_sqlite.rs",
-      "store": "control_plane.db",
-      "role": "store",
-      "basis": "#205 annex row 1: tasks/goal_tasks/continuation tables; migrate-delete under #197; NO new writers (TB-22 no-regrowth seam law)",
-      "signals": 19
-    },
-    {
-      "path": "crates/zeroclaw-runtime/src/control_plane/task_store_sqlite/goal.rs",
-      "store": "control_plane.db",
-      "role": "store",
-      "basis": "#205 annex row 1 (goal tables); same freeze-no-growth law",
-      "signals": 26
-    },
-    {
       "path": "crates/zeroclaw-runtime/src/cron/scheduler.rs",
       "store": "cron/jobs.db",
       "role": "test",

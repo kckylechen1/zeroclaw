@@ -11,8 +11,6 @@ pub(crate) fn format_tokens(n: u64) -> String {
     out.chars().rev().collect()
 }
 
-#[cfg(test)]
-use std::sync::{Arc, LazyLock, Mutex};
 // Test suites under `loop_/tests.rs` pull these through `use super::*`.
 #[cfg(test)]
 pub(crate) use crate::agent::TurnMeta;
@@ -94,18 +92,13 @@ pub use super::text_tool_prompt::{
 /// Matches the channel-side constant in `channels/mod.rs`.
 pub(crate) const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
 
-// Session scope + announcement claims moved to `super::announce_claim`.
-#[cfg(test)]
-pub(crate) use super::announce_claim::CHILD_ANNOUNCEMENT_STORE_TEST_HOOK;
+// Session-key scoping lives in `super::announce_claim`; the background-child
+// announcement claim machinery that shared the module retired with the durable
+// control plane (migration wall 4).
 pub use super::announce_claim::{
-    TOOL_LOOP_SESSION_KEY, TOOL_LOOP_THREAD_ID, TurnOutcome, UnclaimOnDrop,
-    claim_announcements_for_scoped_turn, scope_session_key, scope_thread_id,
-    settle_announcement_guards,
+    TOOL_LOOP_SESSION_KEY, TOOL_LOOP_THREAD_ID, scope_session_key, scope_thread_id,
 };
-pub(crate) use super::announce_claim::{
-    claim_announcements_for_turn, current_session_key, session_key_is_scoped,
-    synthetic_session_key_for_run,
-};
+pub(crate) use super::announce_claim::{current_session_key, synthetic_session_key_for_run};
 
 // Re-export tool call parsing from the standalone parser crate.
 pub use zeroclaw_tool_call_parser::{
@@ -117,192 +110,6 @@ pub use zeroclaw_tool_call_parser::{
     looks_like_tool_protocol_example, parse_tool_calls, strip_think_tags, strip_tool_result_blocks,
     tool_protocol_envelope_mentions_known_tool,
 };
-
-/// Test seam: the fully enriched user message a turn is about to send, so the
-/// `run`/`process_message` entry points can be asserted on without a live
-/// model provider (the `Agent` pipeline is covered by capturing providers).
-#[cfg(test)]
-type TurnUserMessageTestHook = Arc<dyn Fn(&str) + Send + Sync>;
-
-#[cfg(test)]
-pub(crate) static TURN_USER_MESSAGE_TEST_HOOK: LazyLock<Mutex<Option<TurnUserMessageTestHook>>> =
-    LazyLock::new(|| Mutex::new(None));
-
-/// Shared fixture for the waker's tests, here rather than in a `mod tests` so
-/// both entry-point suites (`loop_`'s and `agent`'s) install the announce hooks
-/// the same way and take the same lock.
-#[cfg(test)]
-pub(crate) mod announce_test_support {
-    use super::{CHILD_ANNOUNCEMENT_STORE_TEST_HOOK, TURN_USER_MESSAGE_TEST_HOOK};
-    use crate::control_plane::{SqliteTaskStore, TaskKind, TaskRecord, TaskRegistry, TaskStatus};
-    use std::sync::{Arc, Mutex, MutexGuard};
-
-    /// The hooks are process-global, so the tests that install them run one at
-    /// a time.
-    static SERIALIZE: Mutex<()> = Mutex::new(());
-
-    pub(crate) struct AnnounceFixture {
-        _guard: MutexGuard<'static, ()>,
-        pub(crate) store: Arc<SqliteTaskStore>,
-        seen: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl AnnounceFixture {
-        /// Installs a real in-memory control-plane store and a capture hook for
-        /// whatever user message the next turn builds.
-        ///
-        /// The store goes in through the test seam rather than
-        /// `init_control_plane`, which is a `OnceLock`: installing it here
-        /// would leak into every other test in this binary and break
-        /// `control_plane::global`'s `uninitialized_is_none`.
-        pub(crate) fn install() -> Self {
-            let guard = SERIALIZE.lock().unwrap_or_else(|e| e.into_inner());
-            let store = Arc::new(SqliteTaskStore::new_in_memory().expect("in-memory store"));
-            *CHILD_ANNOUNCEMENT_STORE_TEST_HOOK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(store.clone() as Arc<dyn TaskRegistry>);
-            let seen = Arc::new(Mutex::new(Vec::<String>::new()));
-            let sink = Arc::clone(&seen);
-            *TURN_USER_MESSAGE_TEST_HOOK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(move |msg: &str| {
-                sink.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(msg.to_string());
-            }));
-            Self {
-                _guard: guard,
-                store,
-                seen,
-            }
-        }
-
-        /// As [`Self::install`], but with no store at all: the "no daemon" shape.
-        pub(crate) fn install_without_control_plane() -> Self {
-            let fixture = Self::install();
-            *CHILD_ANNOUNCEMENT_STORE_TEST_HOOK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
-            fixture
-        }
-
-        /// A finished, undelivered child filed under `parent` — exactly the row
-        /// shape `claim_undelivered_children` selects on.
-        pub(crate) async fn finished_child(&self, id: &str, parent: &str, output: &str) {
-            let store: &dyn TaskRegistry = self.store.as_ref();
-            store
-                .create(TaskRecord {
-                    id: id.to_string(),
-                    kind: TaskKind::Delegate,
-                    agent: "worker".to_string(),
-                    status: TaskStatus::Running,
-                    owner_pid: std::process::id(),
-                    owner_boot_id: "boot-test".to_string(),
-                    heartbeat_at: None,
-                    depth: 1,
-                    parent_id: Some(parent.to_string()),
-                    originator_route: None,
-                    delivered: false,
-                    idem_key: None,
-                    principal_id: None,
-                    executor: None,
-                    started_at: chrono::Utc::now().to_rfc3339(),
-                    finished_at: None,
-                })
-                .await
-                .expect("create child");
-            store
-                .update_status(id, TaskStatus::Completed, Some(output.to_string()), None)
-                .await
-                .expect("finish child");
-        }
-
-        /// What is still claimable under `parent`, claiming it in the process.
-        pub(crate) async fn claim(
-            &self,
-            parent: &str,
-        ) -> Vec<zeroclaw_api::announce::Announcement> {
-            let store: &dyn TaskRegistry = self.store.as_ref();
-            store
-                .claim_undelivered_children(parent)
-                .await
-                .expect("claim")
-        }
-
-        /// The store as the guard takes it, for tests that drive
-        /// [`super::UnclaimOnDrop`] directly.
-        pub(crate) fn store_handle(&self) -> Arc<dyn TaskRegistry> {
-            Arc::clone(&self.store) as Arc<dyn TaskRegistry>
-        }
-
-        /// Whether `id` currently reads as delivered. Read-only — unlike
-        /// [`Self::claim`] it does not consume the announcement.
-        pub(crate) async fn is_delivered(&self, id: &str) -> bool {
-            let store: &dyn TaskRegistry = self.store.as_ref();
-            store
-                .get(id)
-                .await
-                .expect("get task")
-                .expect("task exists")
-                .delivered
-        }
-
-        /// Wait for `id` to be returned to the store by a dropped guard.
-        ///
-        /// The unclaim rides a detached task (a destructor cannot await), so a
-        /// test has to give the runtime a chance to run it. Bounded: returns
-        /// `false` rather than hanging if it never lands, so a broken guard
-        /// fails the assertion instead of the test timing out.
-        pub(crate) async fn wait_until_returned(&self, id: &str) -> bool {
-            for _ in 0..200 {
-                if !self.is_delivered(id).await {
-                    return true;
-                }
-                tokio::task::yield_now().await;
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-            false
-        }
-
-        /// User messages captured so far that carry `marker`. The filter keeps
-        /// an unrelated concurrently-running turn out of the result.
-        pub(crate) fn messages_containing(&self, marker: &str) -> Vec<String> {
-            self.seen
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .filter(|msg| msg.contains(marker))
-                .cloned()
-                .collect()
-        }
-    }
-
-    impl Drop for AnnounceFixture {
-        fn drop(&mut self) {
-            *CHILD_ANNOUNCEMENT_STORE_TEST_HOOK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
-            *TURN_USER_MESSAGE_TEST_HOOK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
-        }
-    }
-}
-
-/// Report the enriched user message to the test hook, when one is installed.
-#[allow(unused_variables)]
-pub(crate) fn observe_turn_user_message(enriched: &str) {
-    #[cfg(test)]
-    {
-        let hook = TURN_USER_MESSAGE_TEST_HOOK
-            .lock()
-            .expect("turn user-message test hook lock should not be poisoned")
-            .clone();
-        if let Some(hook) = hook {
-            hook(enriched);
-        }
-    }
-}
 
 pub use zeroclaw_api::TOOL_CHOICE_OVERRIDE;
 

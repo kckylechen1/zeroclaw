@@ -20,9 +20,8 @@ use zeroclaw_providers::{ChatMessage, ModelProvider};
 
 use super::{
     agent_turn, apply_text_tool_prompt_policy, build_hardware_context,
-    build_tool_instructions_for_names, claim_announcements_for_turn, compute_excluded_mcp_tools,
-    live_channel_registry, native_tool_specs_present_for_turn, observe_turn_user_message,
-    resolved_agent_for_turn, seed_channel_handles, settle_announcement_guards,
+    build_tool_instructions_for_names, compute_excluded_mcp_tools, live_channel_registry,
+    native_tool_specs_present_for_turn, resolved_agent_for_turn, seed_channel_handles,
 };
 
 /// Process a single message through the full agent (with tools, peripherals, memory).
@@ -483,24 +482,13 @@ pub async fn process_message(
             .unwrap_or_default();
         // `process_message` does not scope a session key of its own — its
         // callers (gateway, peer messaging) do, and they are outer entry
-        // points: nothing calls `process_message` from inside another turn
-        // shape, so it is always the claimant for whatever key it inherits and
-        // needs no ownership gate of the kind `run()` carries. With no key in
-        // scope the claim is a no-op and the turn is unchanged.
-        //
-        // The guard is settled against the turn's own outcome below; every
-        // fallible step between here and the provider call would otherwise
-        // consume these announcements without the model reading them.
-        let (announcements, announcement_guard) = claim_announcements_for_turn(true).await;
-        let context = format!("{hw_context}{announcements}");
+        let context = hw_context;
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
         let enriched = if context.is_empty() {
             format!("[{now}] {effective_message}")
         } else {
             format!("{context}[{now}] {effective_message}")
         };
-        observe_turn_user_message(&enriched);
-
         let mut history = vec![
             ChatMessage::system(&system_prompt),
             ChatMessage::user(&enriched),
@@ -527,7 +515,7 @@ pub async fn process_message(
             .as_ref()
             .map(|c| c as &dyn zeroclaw_api::channel::Channel);
 
-        let turn_result = zeroclaw_api::NATIVE_THINKING_OVERRIDE
+        zeroclaw_api::NATIVE_THINKING_OVERRIDE
             .scope(
                 thinking_params.native_thinking,
                 agent_turn(
@@ -572,11 +560,7 @@ pub async fn process_message(
                     Some(&turn_id),
                 ),
             )
-            .await;
-        // Success point for this entry point: the turn returns `Ok` only after
-        // the provider call, so the announcements have been read. On `Err` the
-        // guard drops still armed and returns them to the store.
-        settle_announcement_guards(announcement_guard, turn_result)
+            .await
     };
     __zc_body
         .instrument(__zc_scope_span)

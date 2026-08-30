@@ -847,24 +847,14 @@ impl Agent {
 
     /// Build this turn's user message and put it in history.
     ///
-    /// Returns the claim guard for any background announcements spliced into
-    /// that message. The caller **must** hold it until the turn has ended and
-    /// settle it against that turn's outcome
-    /// ([`crate::agent::loop_::settle_announcement_guards`]); dropping it
-    /// earlier returns the announcements to the store, which is exactly what
-    /// should happen when the turn dies on one of the fallible steps between
-    /// here and the provider call (`agent/turn/mod.rs` lines 528/535/566/584
-    /// versus :628).
-    ///
     /// Called once per user message, which includes each mid-turn steering
-    /// message: see the steering call site for why a second claim inside one
-    /// turn is deliberate.
+    /// message.
     async fn append_streamed_user_message_to_history(
         &mut self,
         user_message: &str,
         new_msgs: &mut Vec<ConversationMessage>,
         turn_id: &str,
-    ) -> Option<crate::agent::loop_::UnclaimOnDrop> {
+    ) {
         // Memory context is injected once in the engine, keyed on the
         // ingress origin (agent::memory_inject).
         if self.auto_save {
@@ -889,24 +879,12 @@ impl Agent {
             });
         }
 
-        // Finished background children, claimed once for this turn. The
-        // session key is ambient: ACP (`orchestrator/acp_server.rs:1478`), RPC
-        // (`rpc/turn.rs:69`) and gateway-WS (`gateway/ws.rs:995`) each scope it
-        // directly around this call, so this pipeline reads it rather than
-        // inventing one — and each of those is an outer entry point, so this
-        // turn is the claimant for that key and needs no ownership gate of the
-        // kind `agent::run` carries for its nested case.
-        // It rides in the user message, which is what puts it in `history` and
-        // in `new_msgs` — the parent can refer back to what it was told,
-        // exactly like every other per-turn context at this site.
-        let (announcements, guard) = crate::agent::loop_::claim_announcements_for_turn(true).await;
         let now = self.current_turn_datetime().format("%Y-%m-%d %H:%M:%S %Z");
-        let enriched = format!("{announcements}[{now}] {user_message}");
+        let enriched = format!("[{now}] {user_message}");
 
         let user_msg = ConversationMessage::Chat(ChatMessage::user(enriched));
         new_msgs.push(user_msg.clone());
         self.history.push(user_msg);
-        guard
     }
 
     pub fn set_memory_session_id(&mut self, session_id: Option<String>) {

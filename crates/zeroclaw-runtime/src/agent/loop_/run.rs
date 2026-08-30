@@ -26,12 +26,11 @@ use super::{
     LoopKnobs, MAX_INTERACTIVE_INPUT_BYTES, ResolvedAgentExecution, ResolvedIo,
     ResolvedModelAccess, ResolvedRuntimeKnobs, StreamDelta, TOOL_LOOP_COST_TRACKING_CONTEXT,
     ToolLoop, agent_provider_composite, api_key_and_uri_for_provider, autosave_memory_key,
-    build_hardware_context, build_system_prompt_for_turn, claim_announcements_for_turn,
-    compute_excluded_mcp_tools, format_tokens, is_model_switch_requested, is_tool_loop_cancelled,
-    load_interactive_session_history, observe_turn_user_message, read_capped_line,
-    resolved_agent_for_turn, retain_registered_tool_descriptions, run_tool_call_loop,
-    save_interactive_session_history, scope_session_key, seed_channel_handles,
-    session_key_is_scoped, settle_announcement_guards, synthetic_session_key_for_run, trim_history,
+    build_hardware_context, build_system_prompt_for_turn, compute_excluded_mcp_tools,
+    format_tokens, is_model_switch_requested, is_tool_loop_cancelled,
+    load_interactive_session_history, read_capped_line, resolved_agent_for_turn,
+    retain_registered_tool_descriptions, run_tool_call_loop, save_interactive_session_history,
+    scope_session_key, seed_channel_handles, synthetic_session_key_for_run, trim_history,
 };
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -97,20 +96,6 @@ pub async fn run(
     // rather than per-run, and what that trades away.
     //
     // This flag also decides whether this turn *claims* (below): only the run
-    // that named the conversation announces into it. Do not read an inherited
-    // key as "this run is isolated, so claiming here is harmless" — a nested
-    // `agent::run` genuinely shares its caller's task-local key. The wrapper
-    // that looks like isolation is not one: `zeroclaw_log::scope!`
-    // (`crates/zeroclaw-log/src/macro.rs:48-56`) expands to
-    // `.instrument(info_span!(session_key = ...))`, a tracing span field, and
-    // never touches `TOOL_LOOP_SESSION_KEY`. So a `scope!(session_key: ...)`
-    // wrapped in-turn child run (the retired `tools/spawn_subagent.rs` was the
-    // last producer), awaited inline inside the parent's tool-call loop and
-    // therefore on the parent's task, runs under the parent's key. Claiming there would hand the
-    // parent's finished children to the subagent's context and the parent
-    // would never hear about them — the loss that
-    // `claim_child_announcements_context`'s ordering rules exist to prevent.
-    let __zc_session_key_scoped = session_key_is_scoped();
     let __zc_synthetic_session_key = synthetic_session_key_for_run(agent_alias);
     // Root-lineage fallback owned by the async block below without moving
     // `__zc_synthetic_session_key` (still needed after the block).
@@ -127,11 +112,6 @@ pub async fn run(
     );
     let __zc_body = async move {
         let agent_alias: &str = __zc_alias.as_str();
-        // Whether this turn is the one that announces. True only when this
-        // `run()` named the conversation itself; an inherited key means an
-        // outer entry point owns this conversation's claims and will deliver
-        // the children into its own next turn.
-        let owns_session_key = !__zc_session_key_scoped;
         // ── Effective per-agent runtime tunables ──────────────────────
         // Profile values (when set) override the agent's inline fields.
         // See `Config::resolved_agent_config` for precedence rules.
@@ -761,30 +741,12 @@ pub async fn run(
                     )
                 })
                 .unwrap_or_default();
-            // Finished background children, claimed once for this turn and
-            // spliced in directly above the user message — the same site-built
-            // context channel hardware RAG uses, so it lands in the turn's
-            // conversation history and the model can refer back to it.
-            // Only when this run owns the key: see `owns_session_key`.
-            //
-            // The guard lives until the retry loop below has produced this
-            // turn's outcome, and is settled against it there. Until then the
-            // block is only in a local `history` vec, and this turn can still
-            // die before the provider is called (`agent/turn/mod.rs` lines
-            // 528/535/566/584 all `?` ahead of the call at :628) — in which
-            // case the announcements go back to the store rather than being
-            // lost with the turn.
-            let (announcements, announcement_guard) =
-                claim_announcements_for_turn(owns_session_key).await;
-            let context = format!("{hw_context}{announcements}");
             let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-            let enriched = if context.is_empty() {
+            let enriched = if hw_context.is_empty() {
                 format!("[{now}] {effective_msg}")
             } else {
-                format!("{context}[{now}] {effective_msg}")
+                format!("{hw_context}[{now}] {effective_msg}")
             };
-            observe_turn_user_message(&enriched);
-
             let mut history = vec![
                 ChatMessage::system(&system_prompt),
                 ChatMessage::user(&enriched),
@@ -961,11 +923,7 @@ pub async fn run(
                 }
             };
 
-            // Settle this turn's claim, once, against the outcome the retry
-            // loop produced. `Err` propagates exactly as the in-loop `return`
-            // did, with the guard dropping armed and the announcements going
-            // back to the store.
-            let response = settle_announcement_guards(announcement_guard, turn_result)?;
+            let response = turn_result?;
 
             // After successful multi-step execution, attempt autonomous skill creation.
             if config.skills.skill_creation.enabled {
@@ -1304,23 +1262,12 @@ pub async fn run(
                         )
                     })
                     .unwrap_or_default();
-                // One claim per interactive turn (this is the per-turn body;
-                // the prompt rebuilds below only touch the system message),
-                // and only when this run owns the key: see `owns_session_key`.
-                // The guard is settled against the outcome the retry loop
-                // below yields; a turn that dies before the provider call
-                // hands its announcements back for the next `>` prompt.
-                let (announcements, announcement_guard) =
-                    claim_announcements_for_turn(owns_session_key).await;
-                let context = format!("{hw_context}{announcements}");
                 let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-                let enriched = if context.is_empty() {
+                let enriched = if hw_context.is_empty() {
                     format!("[{now}] {effective_input}")
                 } else {
-                    format!("{context}[{now}] {effective_input}")
+                    format!("{hw_context}[{now}] {effective_input}")
                 };
-                observe_turn_user_message(&enriched);
-
                 history.push(ChatMessage::user(&enriched));
 
                 // Set up streaming channel so tool progress and response
@@ -1654,9 +1601,7 @@ pub async fn run(
                     }
                 };
 
-                // Settle this turn's claim, once, outside the retry loop.
-                let response = settle_announcement_guards(announcement_guard, turn_outcome)
-                    .unwrap_or_else(|failed_turn_output| failed_turn_output);
+                let response = turn_outcome.unwrap_or_else(|failed_turn_output| failed_turn_output);
 
                 // Clean up: stop the Ctrl+C listener and flush streaming events.
                 ctrlc_handle.abort();
@@ -1750,7 +1695,7 @@ pub async fn run(
     let __zc_instrumented = __zc_body
         .instrument(__zc_scope_span)
         .instrument(__zc_attribution_span);
-    if __zc_session_key_scoped {
+    if crate::agent::loop_::current_session_key().is_some() {
         // A caller already named this conversation; leave it alone.
         __zc_instrumented.await
     } else {
