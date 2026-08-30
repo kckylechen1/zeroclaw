@@ -29,3 +29,4 @@ else
 fi
 
 "$(dirname "${BASH_SOURCE[0]}")/provider_dispatch_gate.sh"
+"$(dirname "${BASH_SOURCE[0]}")/wire_budget_exception_gate.sh"

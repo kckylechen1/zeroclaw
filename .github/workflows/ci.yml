@@ -185,6 +185,11 @@ jobs:
           bash scripts/ci/comment_hygiene_gate.sh
       - name: Provider dispatch gate (no direct ModelProvider method calls outside ProviderDispatch)
         run: bash scripts/ci/provider_dispatch_gate.sh
+      - name: Wire budget exception gate (explicit token ceiling manifest)
+        run: |
+          bash scripts/ci/wire_budget_exception_gate.test.sh
+          bash scripts/ci/wire_budget_exception_gate.sh
+
 
   windows-clippy-tools-changes:
     name: Detect Windows Clippy changes
