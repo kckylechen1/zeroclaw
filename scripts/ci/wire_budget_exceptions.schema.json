@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WireBudgetExceptions",
+  "type": "object",
+  "required": [
+    "version",
+    "wire_budget_tokens_ceiling",
+    "exceptions"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "wire_budget_tokens_ceiling": {
+      "type": "integer",
+      "const": 5000
+    },
+    "exceptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "owner",
+          "tool_name",
+          "rationale",
+          "wire_tokens",
+          "sunset_decision",
+          "security_privacy_impact",
+          "dependency_cost_rationale",
+          "pr"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "wire_tokens": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "sunset_decision": {
+            "type": "string"
+          },
+          "security_privacy_impact": {
+            "type": "string"
+          },
+          "dependency_cost_rationale": {
+            "type": "string"
+          },
+          "pr": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
