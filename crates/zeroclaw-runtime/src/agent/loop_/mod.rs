@@ -12,25 +12,25 @@ pub(crate) fn format_tokens(n: u64) -> String {
 }
 
 // Test suites under `loop_/tests.rs` pull these through `use super::*`.
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use crate::agent::TurnMeta;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use crate::approval::ApprovalManager;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use crate::observability::{self as observability, Observer, ObserverEvent};
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use crate::tools;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use crate::tools::Tool;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use std::collections::HashSet;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use tokio_util::sync::CancellationToken;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use zeroclaw_api::ingress::{IngressContext, TurnOrigin};
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use zeroclaw_config::schema::Config;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use zeroclaw_providers::{ChatRequest, ModelProvider};
 
 mod agent_turn;
@@ -52,7 +52,7 @@ pub use super::history::{
 };
 
 // Tool / MCP filter admission moved to `super::tool_filter`.
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use super::tool_filter::glob_match;
 pub use super::tool_filter::{
     append_pinned_mcp_section, apply_policy_tool_filter, eager_mcp_tool_allowed,
@@ -77,7 +77,7 @@ pub use super::channel_factories::{
 pub(crate) use super::channel_factories::{live_channel_registry, seed_channel_handles};
 
 // Prompt / export helpers moved to `super::prompt_helpers`.
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use super::prompt_helpers::tools_to_openai_format;
 pub(crate) use super::prompt_helpers::{
     autosave_memory_key, build_hardware_context, build_system_prompt_for_turn, capture_llm_messages,
@@ -123,7 +123,7 @@ pub use self::agent_turn::agent_turn;
 pub use self::process_message::process_message;
 pub use self::run::run;
 pub use self::run_overrides::AgentRunOverrides;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use self::run_overrides::RESOLVED_AGENT_FOR_TURN_TEST_HOOK;
 pub(crate) use self::run_overrides::{
     agent_provider_composite, api_key_and_uri_for_provider, resolved_agent_for_turn,
@@ -134,7 +134,7 @@ pub(crate) use self::run_overrides::{
 // file per step (run sheet in agent/turn/mod.rs). `crate::agent::loop_`
 // stays the canonical public path via these re-exports.
 pub(crate) use super::turn::StreamCancelledAfterOutput;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use super::turn::{
     DEFAULT_MAX_TOOL_ITERATIONS, MAX_MALFORMED_TOOL_PROTOCOL_RETRIES,
     build_native_assistant_history, consume_provider_streaming_response,

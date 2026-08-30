@@ -22,7 +22,7 @@ use zeroclaw_api::jsonrpc::{
     JSONRPC_VERSION, JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
     RpcOutbound, SopSaveRequest, SopSelectRequest,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 use zeroclaw_api::model_provider::ChatMessage;
 use zeroclaw_api::runtime_status::RuntimeConfigKind;
 
@@ -365,7 +365,7 @@ fn personality_template_context(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use super::config_handlers::{
     agent_alias_from_model_provider_prop, agent_scoped_refresh_selects,
     memory_embeddings_use_provider, provider_scoped_refresh_selects,

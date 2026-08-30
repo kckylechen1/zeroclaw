@@ -7,7 +7,7 @@ use crate::approval::ApprovalManager;
 #[cfg(test)]
 use crate::observability;
 use crate::observability::{Observer, ObserverEvent};
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 use crate::security::SecurityPolicy;
 use crate::tools::{self, Tool};
 use anyhow::Result;
@@ -379,7 +379,7 @@ impl AgentBuilder {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "heavy-tests"))]
     fn structured_max_history_messages(self, max: usize) -> Self {
         self.structured_history_cap_resolver(Arc::new(move || max))
     }
@@ -536,7 +536,7 @@ impl AgentBuilder {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "heavy-tests"))]
     fn turn_datetime<F>(mut self, provider: F) -> Self
     where
         F: Fn() -> chrono::DateTime<chrono::Local> + Send + Sync + 'static,

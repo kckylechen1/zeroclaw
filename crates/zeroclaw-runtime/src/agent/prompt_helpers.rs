@@ -196,7 +196,7 @@ pub fn make_query_summary(raw: &str) -> Option<String> {
     Some(truncate_with_ellipsis(&scrub_credentials(raw), 200))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) fn tools_to_openai_format(tools_registry: &[Box<dyn Tool>]) -> Vec<serde_json::Value> {
     tools_registry
         .iter()

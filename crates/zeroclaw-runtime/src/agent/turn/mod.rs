@@ -27,7 +27,7 @@ pub(crate) mod vision_route;
 pub(crate) use call_prep::{PreparedToolCalls, prepare_tool_calls};
 pub(crate) use context::{TurnCtx, TurnMeta};
 pub(crate) use context_recovery::{record_llm_failure, try_recover_context_overflow};
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use delivery_defaults::maybe_inject_channel_delivery_defaults;
 pub use events::{DraftEvent, PROGRESS_MIN_INTERVAL_MS, StreamDelta};
 pub use execution::{
@@ -42,7 +42,7 @@ pub use outcome::{
     is_tool_loop_cancelled,
 };
 pub(crate) use outcome::{current_model_switch_state, scope_model_switch_state};
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use parse_response::build_native_assistant_history;
 pub(crate) use parse_response::{
     interpret_chat_response, resolve_display_text, unforwarded_narration,
@@ -56,7 +56,7 @@ pub(crate) use results_collect::{
     CollectedResults, check_identical_output_abort, collect_tool_results,
 };
 pub use steering::drain_steering_messages;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use stream_consume::consume_provider_streaming_response;
 pub(crate) use tool_specs::{IterationToolSpecs, build_iteration_tool_specs};
 pub(crate) use vision_route::{prepare_messages_for_iteration, resolve_vision_provider};

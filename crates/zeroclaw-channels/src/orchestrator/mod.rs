@@ -11,22 +11,22 @@ pub(crate) use channel_system_prompt::{
 };
 
 mod reply_intent;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use reply_intent::NoReplyKind;
 pub(crate) use reply_intent::{AssistantChannelOutcome, parse_reply_intent};
 // Test suites under `orchestrator::tests` pull these through `use super::*`.
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use channel_system_prompt::{
     build_channel_system_prompt, build_channel_system_prompt_for_message,
     channel_delivery_instructions,
 };
 
 mod outbound_sanitize;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use outbound_sanitize::strip_think_tags_inline;
 #[cfg(feature = "channel-telegram")]
 pub(crate) use outbound_sanitize::strip_tool_call_tags;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use outbound_sanitize::{
     EMPTY_CHANNEL_REPLY_FALLBACK, OutboundContentFormat, channel_outbound_protected_spans,
     sanitize_channel_response, sanitize_channel_response_with_leak_detection,
@@ -61,7 +61,7 @@ use process_message::process_channel_message;
 
 mod channel_build;
 use channel_build::build_channel_by_id;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 use channel_build::one_shot_channel_workspace_dir;
 
 mod start_channels;
@@ -169,7 +169,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 use std::time::Instant;
 use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
@@ -178,11 +178,11 @@ use zeroclaw_api::memory_traits::MemoryStrategy;
 use zeroclaw_api::session_keys::sanitize_session_key;
 use zeroclaw_config::scattered_types::{ThinkingConfig, ThinkingLevel};
 use zeroclaw_config::schema::Config;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 use zeroclaw_memory::MEMORY_CONTEXT_OPEN;
 use zeroclaw_memory::{self, Memory};
 use zeroclaw_providers::{self, ChatMessage, ModelProvider, ProviderDispatch};
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 use zeroclaw_runtime::agent::loop_::build_tool_instructions_for_names;
 use zeroclaw_runtime::agent::loop_::{append_pinned_mcp_section, apply_text_tool_prompt_policy};
 use zeroclaw_runtime::approval::ApprovalManager;
@@ -310,7 +310,7 @@ fn effective_channel_message_timeout_secs(configured: u64) -> u64 {
     configured.max(MIN_CHANNEL_MESSAGE_TIMEOUT_SECS)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 fn channel_message_timeout_budget_secs(
     message_timeout_secs: u64,
     max_tool_iterations: usize,
@@ -2081,7 +2081,7 @@ fn sender_memory_session_ids(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 fn extract_tool_context_summary(history: &[ChatMessage], start_index: usize) -> String {
     fn push_unique_tool_name(tool_names: &mut Vec<String>, name: &str) {
         let candidate = name.trim();
@@ -2895,7 +2895,7 @@ pub(crate) struct AgentRouter {
 }
 
 impl AgentRouter {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "heavy-tests"))]
     fn single(ctx: Arc<ChannelRuntimeContext>) -> Self {
         Self {
             by_agent: Arc::new(HashMap::new()),
