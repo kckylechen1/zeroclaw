@@ -2875,19 +2875,12 @@ mod tests {
         );
     }
 
-    /// A daemon boot must not create `<data_dir>/control_plane.db` anymore
-    /// (Wall 4, issue 197): the durable control-plane is not booted, so the one
-    /// remaining write path it had — `ControlPlaneHandle::start` creating the
-    /// DB file and its recovery pass ledgering rows at every boot — is gone.
-    ///
-    /// Two assertions, because the file check alone can be satisfied on the
-    /// pre-slice tree for the wrong reason: the plane installs into a
-    /// process-global `OnceLock`, so on a tree that still boots it, a prior
-    /// `daemon::run` in this binary makes the old `is_none()` guard skip the
-    /// boot for THIS test's data dir and the file never appears. The
-    /// `control_plane().is_none()` assertion after the run is the
-    /// order-independent discriminator (red whenever the plane still boots,
-    /// in either test order); the file check is the user-facing property.
+    /// A daemon boot must not create `<data_dir>/control_plane.db` (Wall 4,
+    /// issue 197): the durable control-plane is deleted, so no boot path can
+    /// open or create the store. Discrimination against the pre-slice trees
+    /// is recorded on the wall-4 PR: the equivalent assertion (including a
+    /// `control_plane().is_none()` probe, possible while the module existed)
+    /// ran RED against the slice-1 base's boot block and GREEN after.
     #[tokio::test]
     async fn daemon_boot_creates_no_control_plane_db() {
         use tokio::time::{Duration, timeout};
@@ -2917,13 +2910,9 @@ mod tests {
         assert_eq!(exit, DaemonExit::Reload);
 
         assert!(
-            crate::control_plane::control_plane().is_none(),
-            "a daemon boot must not install the durable control plane; \
-             durable task truth is Tachi's through the bridge (annex rows 1 and 6)"
-        );
-        assert!(
             !tmp.path().join("data").join("control_plane.db").exists(),
-            "a daemon boot must not create the control-plane DB"
+            "a daemon boot must not create the control-plane DB; \
+             durable task truth is Tachi's through the bridge (annex rows 1 and 6)"
         );
     }
 
