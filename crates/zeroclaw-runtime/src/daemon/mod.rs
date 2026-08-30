@@ -379,12 +379,12 @@ pub async fn run(
         ));
     }
 
-    // Wall 4 (issue 197): the durable control-plane is no longer booted. Its only
-    // production writer (the coordinator child host) lost its last spawn
-    // producer with the spawn wall, and durable execution truth is
-    // owned by Tachi through the bridge (frozen contract annex rows 1 and 6). A legacy
-    // `<data_dir>/control_plane.db` is left exactly as it is; the migration
-    // WARN for it lands with the wall's data-disposition slice.
+    // Wall 4 (issue 197): the durable control-plane is no longer booted. Its
+    // only production writer (the coordinator child host) lost its last spawn
+    // producer with the spawn wall (PR 255), and durable execution truth is
+    // owned by Tachi through the bridge (frozen contract annex rows 1 and 6).
+    // A legacy `<data_dir>/control_plane.db` is left exactly as it is; the
+    // migration WARN for it lands with the wall's data-disposition slice.
 
     if let Some(channels_start) = registry.take_channels_start() {
         if has_supervised_channels(&config) {
@@ -2071,10 +2071,13 @@ mod tests {
         config.agents.insert(agent_alias.to_string(), agent);
     }
 
-    async fn recv_log_event(
+    /// Wait up to 2s for a log event whose `message` matches, or `None`.
+    /// Retries at 50ms steps because a broadcast receiver only observes new
+    /// sends when polled.
+    async fn try_recv_log_event(
         rx: &mut tokio::sync::broadcast::Receiver<serde_json::Value>,
         message: &str,
-    ) -> serde_json::Value {
+    ) -> Option<serde_json::Value> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -2086,14 +2089,14 @@ mod tests {
                         .and_then(|v| v.as_str())
                         .is_some_and(|candidate| candidate == message) =>
                 {
-                    return value;
+                    return Some(value);
                 }
                 Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
                 Err(_elapsed) => {}
             }
         }
-        panic!("did not find log event: {message}");
+        None
     }
 
     #[test]
@@ -2171,15 +2174,30 @@ mod tests {
         let _hook_guard = zeroclaw_log::__private_test_hook_lock();
         zeroclaw_log::try_install_capture_subscriber();
         let mut rx = zeroclaw_log::subscribe_or_install();
-        while rx.try_recv().is_ok() {}
 
         let tmp = TempDir::new().unwrap();
         let mut config = test_config(&tmp);
         config.gateway.require_pairing = true;
 
-        record_daemon_started(&config, "127.0.0.1", 0);
+        // The process-global broadcast channel this test subscribes to also
+        // carries every log line the other parallel tests emit. Under a heavy
+        // burst the ring can overflow between `record_daemon_started` and the
+        // next poll, the receiver reads `Lagged`, and the one event this test
+        // cares about is gone for good — a timing flake, not a regression
+        // signal. So emit-and-wait is retried: each attempt drains, re-emits
+        // (the event is a synthetic diagnostics record, and this test is its
+        // only matcher), and waits on a fresh 2s window.
+        let mut value = None;
+        for _ in 0..6 {
+            while rx.try_recv().is_ok() {}
+            record_daemon_started(&config, "127.0.0.1", 0);
+            if let Some(found) = try_recv_log_event(&mut rx, "ZeroClaw daemon started").await {
+                value = Some(found);
+                break;
+            }
+        }
+        let value = value.expect("daemon-started diagnostics event must be captured");
 
-        let value = recv_log_event(&mut rx, "ZeroClaw daemon started").await;
         assert_eq!(value["event"]["category"], "system");
         assert_eq!(value["event"]["action"], "start");
         assert_eq!(value["event"]["outcome"], "success");
@@ -2857,12 +2875,19 @@ mod tests {
         );
     }
 
-    /// A daemon boot must not create `<data_dir>/control_plane.db` (Wall 4,
-    /// issue 197): the durable control-plane is deleted, so no boot path can open
-    /// or create the store. Discrimination against the pre-slice trees is
-    /// recorded on the wall-4 PR: the equivalent assertion (including a
-    /// `control_plane().is_none()` probe, possible while the module existed)
-    /// ran RED against the slice-1 base's boot block and GREEN here.
+    /// A daemon boot must not create `<data_dir>/control_plane.db` anymore
+    /// (Wall 4, issue 197): the durable control-plane is not booted, so the one
+    /// remaining write path it had — `ControlPlaneHandle::start` creating the
+    /// DB file and its recovery pass ledgering rows at every boot — is gone.
+    ///
+    /// Two assertions, because the file check alone can be satisfied on the
+    /// pre-slice tree for the wrong reason: the plane installs into a
+    /// process-global `OnceLock`, so on a tree that still boots it, a prior
+    /// `daemon::run` in this binary makes the old `is_none()` guard skip the
+    /// boot for THIS test's data dir and the file never appears. The
+    /// `control_plane().is_none()` assertion after the run is the
+    /// order-independent discriminator (red whenever the plane still boots,
+    /// in either test order); the file check is the user-facing property.
     #[tokio::test]
     async fn daemon_boot_creates_no_control_plane_db() {
         use tokio::time::{Duration, timeout};
@@ -2892,9 +2917,13 @@ mod tests {
         assert_eq!(exit, DaemonExit::Reload);
 
         assert!(
+            crate::control_plane::control_plane().is_none(),
+            "a daemon boot must not install the durable control plane; \
+             durable task truth is Tachi's through the bridge (annex rows 1 and 6)"
+        );
+        assert!(
             !tmp.path().join("data").join("control_plane.db").exists(),
-            "a daemon boot must not create the control-plane DB; \
-             durable task truth is Tachi's through the bridge (#205 annex rows 1/6)"
+            "a daemon boot must not create the control-plane DB"
         );
     }
 
