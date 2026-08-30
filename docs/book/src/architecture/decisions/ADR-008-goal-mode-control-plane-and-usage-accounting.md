@@ -2,7 +2,7 @@
 id: ADR-008
 title: Anchor goal mode in the durable task control plane
 date: 2026-06-25
-status: superseded (durable task/attempt truth moved to Tachi through the task-intent bridge; the ZeroClaw-side control plane this ADR anchored goal mode in was deleted by the control-plane migration wall — the goal-mode target contract survives, now anchored on the bridge)
+status: superseded (durable task/attempt truth moved to Tachi through the task-intent bridge; the ZeroClaw-side control plane this ADR anchored goal mode in was deleted by the control-plane migration wall, and the goal-mode target contract survives, now anchored on the bridge)
 relates-to:
   - https://github.com/zeroclaw-labs/zeroclaw/issues/8303
   - https://github.com/zeroclaw-labs/zeroclaw/issues/7929
