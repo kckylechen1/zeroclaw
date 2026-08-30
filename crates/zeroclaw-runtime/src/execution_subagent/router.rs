@@ -1,4 +1,4 @@
-//! The Parent-level three-path dispatch gate (#198 addendum #2; #261's
+//! The Parent-level three-path dispatch gate (the program addendum ticket 2; the vertical's
 //! router discrimination).
 //!
 //! ```text

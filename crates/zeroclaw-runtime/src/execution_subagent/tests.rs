@@ -432,7 +432,7 @@ fn module_source_scans_hold() {
     //     scan does not itself read as a store site to the TB-22 gate).
     // (c) the agent path does not reference this module yet (nothing
     //     registers it — default closed; the wiring leaf is gated on this
-    //     vertical's green per #261).
+    //     vertical's green per the vertical gate).
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     // Banned tokens are assembled at runtime so this scan list itself
     // never reads as a store site to the persistence-surface gate's

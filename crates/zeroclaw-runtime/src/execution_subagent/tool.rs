@@ -1,6 +1,6 @@
 //! The ExecutionSubAgent tool surface — the Parent-side bounded
 //! supervisor that runs one ephemeral harness session end to end
-//! (zeroclaw #261; the V1 #202 pattern: bounded profile, digest-bound
+//! (zeroclaw the vertical; the V1 the SubAgent freeze pattern: bounded profile, digest-bound
 //! bundle, per-run meters, lineage depth 1, structured report).
 //!
 //! The run's ONLY outbound surfaces are the typed [`GatedSessionController`]
@@ -45,11 +45,11 @@ use super::controller::{
 use super::facts::{SessionBinding, SessionEventFact, SessionFactSink};
 
 // ─────────────────────────────────────────────────────────────────────────
-// The frozen execution profile (#202 pattern: admitted, immutable)
+// The frozen execution profile (the SubAgent freeze pattern: admitted, immutable)
 // ─────────────────────────────────────────────────────────────────────────
 
 /// The frozen v1 execution profile. Immutable for one run; any capability
-/// change is a new revision with a new digest (#202 capability law).
+/// change is a new revision with a new digest (the SubAgent freeze capability law).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionSubagentProfile {
     pub profile_id: String,
@@ -126,7 +126,7 @@ impl ExecutionSubagentProfile {
 /// The Parent-side ephemeral execution tool. Constructed by the host with
 /// the typed ports; NOT auto-registered in the model-visible registry in
 /// this vertical (default closed — wiring is gated on this vertical's
-/// green per #261).
+/// green per the vertical gate).
 pub struct ExecutionSubagentTool {
     controller: Arc<GatedSessionController>,
     sink: Arc<dyn SessionFactSink>,
@@ -153,7 +153,7 @@ impl ExecutionSubagentTool {
         }
     }
 
-    /// Carry the spawning context's lineage (#202 D1: depth-1 — a child
+    /// Carry the spawning context's lineage (SubAgent-contract D1: depth-1 — a child
     /// context cannot run execution subagents).
     #[must_use]
     pub fn with_lineage(mut self, lineage: Option<LineageRef>) -> Self {
@@ -212,7 +212,7 @@ impl ExecutionSubagentTool {
         // ephemeral (the router sends durable work to the bridge).
         let report_route = ExecutionRouteV1::EphemeralExec;
 
-        // #202 D1: depth-1 — a child context cannot run execution
+        // the SubAgent freeze D1: depth-1 — a child context cannot run execution
         // subagents. Refused before any port is touched.
         if lineage.depth() > 0 {
             return self.refused_report(

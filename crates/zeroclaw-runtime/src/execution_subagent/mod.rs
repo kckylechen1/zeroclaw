@@ -1,11 +1,11 @@
-//! Ephemeral ExecutionSubAgent vertical (zeroclaw #261; frozen contracts
-//! #202 rev 3 / #205 rev 3 / the three-path addendum on #198/#199/#197;
-//! consuming tachi #1678's attached-session receipt spine).
+//! Ephemeral ExecutionSubAgent vertical (the frozen SubAgent and bridge
+//! contracts at rev 3, the three-path addendum, and the tachi
+//! attached-session receipt spine).
 //!
 //! ```text
 //! Parent
-//!   → ExecutionRouteV1          typed three-path selection      (addendum #2)
-//!   → ExecutionSubagentTool     bounded parent-side run         (#202 pattern)
+//!   → ExecutionRouteV1          typed three-path selection      (addendum ticket 2)
+//!   → ExecutionSubagentTool     bounded parent-side run         (the frozen SubAgent pattern)
 //!       → SessionController     typed lifecycle seam over ACPX  (controller.rs)
 //!           start / watch / prompt / interrupt / stop / collect / reattach
 //!       → SessionFactSink       receipts-only fact reporting    (facts.rs)
@@ -18,7 +18,7 @@
 //!
 //! - **The subagent is a typed supervisor, not a shell.** Its only
 //!   operations are start / watch / prompt-correct / interrupt / stop /
-//!   collect (#261 capability boundary). The harness behind the session
+//!   collect (the capability boundary). The harness behind the session
 //!   operates the repository; the subagent context holds no filesystem,
 //!   process, git, credential, or CLI-flag capability (the context
 //!   inventory type is the structural proof; the negative-capability
@@ -26,7 +26,7 @@
 //! - **The host owns the session lifecycle.** The controller port carries
 //!   lifecycle vocabulary; the transport implementation is constructed
 //!   with the host's own workspace/transport binding, which no port
-//!   request can widen. Tachi never owns an ACP process (#1678:
+//!   request can widen. Tachi never owns an ACP process (the spine is receipts-only:
 //!   receipts-only spine).
 //! - **Facts flow, they are not mutated.** The sink port is receipts-only
 //!   (record/read/reconnect-bind); no operation can signal a process or
