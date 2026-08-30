@@ -895,6 +895,7 @@ async fn minimal_composition_no_bypass_subsystem_flags() {
     };
     // Explicitly configure and enable non-minimal subsystems with valid credentials
     config.pipeline.enabled = true;
+    config.pipeline.allowed_tools = vec!["shell".to_string(), "file_read".to_string()];
     config.browser.enabled = true;
     config.http_request.enabled = true;
     config.web_search.enabled = true;
@@ -903,8 +904,9 @@ async fn minimal_composition_no_bypass_subsystem_flags() {
     config.jira.api_token = "dummy_jira_token".into();
     config.notion.enabled = true;
     config.notion.api_key = "secret_notion_key".into();
+    config.notion.database_id = "00000000-0000-0000-0000-000000000000".into();
 
-    // Positive control: under full composition, enabled subsystems DO enter the wire surface
+    // Positive control: under full composition, EVERY enabled non-minimal subsystem tool is registered
     config.composition = Some(zeroclaw_config::composition::Composition::Full);
     let (_, full_budget) = assemble_turn(TurnRequest {
         config: &config,
@@ -916,10 +918,33 @@ async fn minimal_composition_no_bypass_subsystem_flags() {
     })
     .await;
     assert!(
-        full_budget.names.contains(&"browser".to_string())
-            || full_budget.names.contains(&"browser_open".to_string())
-            || full_budget.names.contains(&"http_request".to_string()),
-        "full composition must register enabled subsystem tools: {:?}",
+        full_budget.names.contains(&"execute_pipeline".to_string()),
+        "execute_pipeline must be registered under full composition: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget.names.contains(&"browser".to_string()),
+        "browser must be registered under full composition: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget.names.contains(&"browser_open".to_string()),
+        "browser_open must be registered under full composition: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget.names.contains(&"http_request".to_string()),
+        "http_request must be registered under full composition: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget.names.contains(&"jira".to_string()),
+        "jira must be registered under full composition: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget.names.contains(&"notion".to_string()),
+        "notion must be registered under full composition: {:?}",
         full_budget.names
     );
 
@@ -967,6 +992,8 @@ async fn minimal_composition_no_bypass_subsystem_flags() {
         "browser",
         "browser_open",
         "http_request",
+        "pipeline",
+        "execute_pipeline",
     ] {
         assert!(
             !budget.names.iter().any(|n| n == banned),
@@ -1024,7 +1051,7 @@ async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
         location: None,
     };
 
-    // Positive control: under full composition, skill elevation of available built-in tools succeeds
+    // Positive control: under full composition, skill elevation of available built-in tools succeeds for both cron_add and jira
     config.composition = Some(zeroclaw_config::composition::Composition::Full);
     let (_, full_budget) = assemble_turn(TurnRequest {
         config: &config,
@@ -1039,7 +1066,14 @@ async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
         full_budget
             .names
             .contains(&"malicious_skill__elevate_cron".to_string()),
-        "full composition must permit skill elevation of available built-in tool: {:?}",
+        "full composition must permit skill elevation of available cron_add tool: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget
+            .names
+            .contains(&"malicious_skill__elevate_jira".to_string()),
+        "full composition must permit skill elevation of available jira tool: {:?}",
         full_budget.names
     );
 

@@ -49,8 +49,45 @@ if schema_path:
         print(f"FAIL: invalid JSON in schema file '{schema_path}': {e}", file=sys.stderr)
         sys.exit(1)
 
-    if not isinstance(schema_data, dict) or schema_data.get("title") != "WireBudgetExceptions" or "properties" not in schema_data:
-        print(f"FAIL: schema file '{schema_path}' is not a valid WireBudgetExceptions schema", file=sys.stderr)
+    if not isinstance(schema_data, dict):
+        print(f"FAIL: schema file '{schema_path}' root must be an object", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate schema itself against fixed governance invariants
+    if schema_data.get("title") != "WireBudgetExceptions":
+        print(f"FAIL: schema file '{schema_path}' title must equal 'WireBudgetExceptions'", file=sys.stderr)
+        sys.exit(1)
+    if schema_data.get("type") != "object":
+        print(f"FAIL: schema file '{schema_path}' type must equal 'object'", file=sys.stderr)
+        sys.exit(1)
+    if schema_data.get("additionalProperties") is not False:
+        print(f"FAIL: schema file '{schema_path}' must have additionalProperties: false", file=sys.stderr)
+        sys.exit(1)
+    if set(schema_data.get("required", [])) != {"version", "wire_budget_tokens_ceiling", "exceptions"}:
+        print(f"FAIL: schema file '{schema_path}' required root fields mismatch", file=sys.stderr)
+        sys.exit(1)
+    if schema_data.get("properties", {}).get("version", {}).get("const") != 1:
+        print(f"FAIL: schema file '{schema_path}' version const must equal 1", file=sys.stderr)
+        sys.exit(1)
+    if schema_data.get("properties", {}).get("wire_budget_tokens_ceiling", {}).get("const") != 5000:
+        print(f"FAIL: schema file '{schema_path}' wire_budget_tokens_ceiling const must equal 5000", file=sys.stderr)
+        sys.exit(1)
+    items_schema = schema_data.get("properties", {}).get("exceptions", {}).get("items", {})
+    if not isinstance(items_schema, dict) or items_schema.get("type") != "object" or items_schema.get("additionalProperties") is not False:
+        print(f"FAIL: schema file '{schema_path}' exceptions.items must be an object with additionalProperties: false", file=sys.stderr)
+        sys.exit(1)
+    expected_entry_fields = {
+        "owner", "tool_name", "rationale", "wire_tokens",
+        "sunset_decision", "security_privacy_impact", "dependency_cost_rationale", "pr"
+    }
+    if set(items_schema.get("required", [])) != expected_entry_fields:
+        print(f"FAIL: schema file '{schema_path}' exceptions.items.required mismatch", file=sys.stderr)
+        sys.exit(1)
+    if set(items_schema.get("properties", {}).keys()) != expected_entry_fields:
+        print(f"FAIL: schema file '{schema_path}' exceptions.items.properties mismatch", file=sys.stderr)
+        sys.exit(1)
+    if items_schema.get("properties", {}).get("wire_tokens", {}).get("minimum") != 1:
+        print(f"FAIL: schema file '{schema_path}' exceptions.items.properties.wire_tokens.minimum must equal 1", file=sys.stderr)
         sys.exit(1)
 
 try:
