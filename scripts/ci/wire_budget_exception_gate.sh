@@ -66,13 +66,28 @@ if schema_path:
     if set(schema_data.get("required", [])) != {"version", "wire_budget_tokens_ceiling", "exceptions"}:
         print(f"FAIL: schema file '{schema_path}' required root fields mismatch", file=sys.stderr)
         sys.exit(1)
-    if schema_data.get("properties", {}).get("version", {}).get("const") != 1:
-        print(f"FAIL: schema file '{schema_path}' version const must equal 1", file=sys.stderr)
+
+    root_props = schema_data.get("properties", {})
+    if not isinstance(root_props, dict) or set(root_props.keys()) != {"$schema", "version", "wire_budget_tokens_ceiling", "exceptions"}:
+        print(f"FAIL: schema file '{schema_path}' properties keys mismatch", file=sys.stderr)
         sys.exit(1)
-    if schema_data.get("properties", {}).get("wire_budget_tokens_ceiling", {}).get("const") != 5000:
-        print(f"FAIL: schema file '{schema_path}' wire_budget_tokens_ceiling const must equal 5000", file=sys.stderr)
+
+    dollar_schema_type = root_props.get("$schema", {}).get("type")
+    if dollar_schema_type != "string":
+        print(f"FAIL: schema file '{schema_path}' $schema type must equal 'string', got {dollar_schema_type!r}", file=sys.stderr)
         sys.exit(1)
-    items_schema = schema_data.get("properties", {}).get("exceptions", {}).get("items", {})
+
+    version_const = root_props.get("version", {}).get("const")
+    if type(version_const) is not int or type(version_const) is bool or version_const != 1:
+        print(f"FAIL: schema file '{schema_path}' version const must be integer 1, got {version_const!r}", file=sys.stderr)
+        sys.exit(1)
+
+    ceiling_const = root_props.get("wire_budget_tokens_ceiling", {}).get("const")
+    if type(ceiling_const) is not int or type(ceiling_const) is bool or ceiling_const != 5000:
+        print(f"FAIL: schema file '{schema_path}' wire_budget_tokens_ceiling const must be integer 5000, got {ceiling_const!r}", file=sys.stderr)
+        sys.exit(1)
+
+    items_schema = root_props.get("exceptions", {}).get("items", {})
     if not isinstance(items_schema, dict) or items_schema.get("type") != "object" or items_schema.get("additionalProperties") is not False:
         print(f"FAIL: schema file '{schema_path}' exceptions.items must be an object with additionalProperties: false", file=sys.stderr)
         sys.exit(1)
@@ -86,8 +101,9 @@ if schema_path:
     if set(items_schema.get("properties", {}).keys()) != expected_entry_fields:
         print(f"FAIL: schema file '{schema_path}' exceptions.items.properties mismatch", file=sys.stderr)
         sys.exit(1)
-    if items_schema.get("properties", {}).get("wire_tokens", {}).get("minimum") != 1:
-        print(f"FAIL: schema file '{schema_path}' exceptions.items.properties.wire_tokens.minimum must equal 1", file=sys.stderr)
+    min_wire = items_schema.get("properties", {}).get("wire_tokens", {}).get("minimum")
+    if type(min_wire) is not int or type(min_wire) is bool or min_wire != 1:
+        print(f"FAIL: schema file '{schema_path}' exceptions.items.properties.wire_tokens.minimum must be integer 1, got {min_wire!r}", file=sys.stderr)
         sys.exit(1)
 
 try:
