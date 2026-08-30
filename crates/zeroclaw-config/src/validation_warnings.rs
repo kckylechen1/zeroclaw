@@ -83,6 +83,7 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("gemini_cli", "raw_launcher_config_removed"),
     ("opencode_cli", "raw_launcher_config_removed"),
     ("browser_delegate", "raw_launcher_config_removed"),
+    ("subagents", "subagents_config_removed"),
 ];
 
 /// Retired config FIELDS: dotted path (one `*` wildcard segment allowed for

@@ -428,14 +428,6 @@ pub struct Config {
     #[group = "Operations"]
     pub peripherals: PeripheralsConfig,
 
-    /// Daemon-wide subagent limits (`[subagents]`). Governs the single
-    /// coordinator actor this process boots, so it is a whole-process limit,
-    /// not a per-agent one. See `crate::subagents::SubagentsConfig`.
-    #[serde(default)]
-    #[nested]
-    #[group = "Multi-agent"]
-    pub subagents: crate::subagents::SubagentsConfig,
-
     /// Aliased agents in this install. Each entry under `[agents.<alias>]`
     /// is one user-facing agent with its own identity, channels, model
     /// provider, risk profile, workspace, and memory scope.
@@ -11446,8 +11438,9 @@ impl Default for RiskProfileConfig {
 /// budget, parallel dispatch, resource ceilings, and the budget knobs
 /// that `SecurityPolicy` enforces with subagent parent-subset
 /// discipline. (The spawn-depth knob retired with the spawn wall:
-/// local recursion is the fixed D1 law, and the coordinator's admission
-/// cap is `CoordinatorConfig::max_spawn_depth`.) Anything authorization-shaped (allowed
+/// local recursion is the fixed D1 law, and the coordinator child host
+/// that had its own admission cap was deleted with the control-plane
+/// migration wall.) Anything authorization-shaped (allowed
 /// commands/tools/paths, approval gates, sandbox) lives on
 /// `[risk_profiles.<alias>]`. Anything model-provider shaped (model,
 /// temperature, max_tokens, timeout_secs) lives on
@@ -17234,7 +17227,6 @@ impl Default for Config {
             proxy: ProxyConfig::default(),
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
-            subagents: crate::subagents::SubagentsConfig::default(),
             agents: HashMap::new(),
             risk_profiles: HashMap::new(),
             runtime_profiles: HashMap::new(),
@@ -24997,7 +24989,6 @@ auto_save = true
             pacing: PacingConfig::default(),
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
-            subagents: crate::subagents::SubagentsConfig::default(),
             agents: HashMap::new(),
             runtime_profiles: HashMap::new(),
             personas: HashMap::new(),
@@ -25867,7 +25858,6 @@ default_temperature = 0.7
             pacing: PacingConfig::default(),
             cost: CostConfig::default(),
             peripherals: PeripheralsConfig::default(),
-            subagents: crate::subagents::SubagentsConfig::default(),
             agents: HashMap::new(),
             risk_profiles: HashMap::new(),
             runtime_profiles: HashMap::new(),

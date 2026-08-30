@@ -381,10 +381,27 @@ pub async fn run(
 
     // Wall 4 (issue 197): the durable control-plane is no longer booted. Its
     // only production writer (the coordinator child host) lost its last spawn
-    // producer with the spawn wall (PR 255), and durable execution truth is
-    // owned by Tachi through the bridge (frozen contract annex rows 1 and 6).
-    // A legacy `<data_dir>/control_plane.db` is left exactly as it is; the
-    // migration WARN for it lands with the wall's data-disposition slice.
+    // producer with the spawn wall, and durable execution truth is owned by
+    // Tachi through the bridge (frozen contract annex rows 1 and 6). A legacy
+    // `<data_dir>/control_plane.db` is never read, migrated, rewritten, or
+    // deleted — but an existing install is told so, once per process (reload
+    // iterations re-run this function; the latch keeps the notice at true
+    // boot frequency).
+    static LEGACY_PLANE_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let legacy_control_plane = config.data_dir.join("control_plane.db");
+    if LEGACY_PLANE_WARNED.set(()).is_ok() && legacy_control_plane.exists() {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({
+                    "path": legacy_control_plane.display().to_string(),
+                })),
+            "legacy control-plane database is retired and no longer read; it is \
+             left in place untouched — durable task/attempt truth now lives in \
+             Tachi through the task-intent bridge"
+        );
+    }
 
     if let Some(channels_start) = registry.take_channels_start() {
         if has_supervised_channels(&config) {
@@ -2878,11 +2895,11 @@ mod tests {
     }
 
     /// A daemon boot must not create `<data_dir>/control_plane.db` (Wall 4,
-    /// issue 197): the durable control-plane is deleted, so no boot path can
-    /// open or create the store. Discrimination against the pre-slice trees
-    /// is recorded on the wall-4 PR: the equivalent assertion (including a
+    /// issue 197): the durable control-plane is deleted, so no boot path can open
+    /// or create the store. Discrimination against the pre-slice trees is
+    /// recorded on the wall-4 PR: the equivalent assertion (including a
     /// `control_plane().is_none()` probe, possible while the module existed)
-    /// ran RED against the slice-1 base's boot block and GREEN after.
+    /// ran RED against the slice-1 base's boot block and GREEN here.
     #[tokio::test]
     async fn daemon_boot_creates_no_control_plane_db() {
         use tokio::time::{Duration, timeout};
@@ -2914,7 +2931,7 @@ mod tests {
         assert!(
             !tmp.path().join("data").join("control_plane.db").exists(),
             "a daemon boot must not create the control-plane DB; \
-             durable task truth is Tachi's through the bridge (annex rows 1 and 6)"
+             durable task truth is Tachi's through the bridge (#205 annex rows 1/6)"
         );
     }
 
