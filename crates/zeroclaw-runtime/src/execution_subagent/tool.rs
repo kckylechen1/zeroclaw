@@ -400,6 +400,12 @@ impl ExecutionSubagentTool {
                 .await;
         }
 
+        // The host-side revision of each FACT (event id -> source
+        // revision). A replayed fact keeps its ORIGINAL revision — it is
+        // the same fact; a fresh fact takes the next one. In-memory only.
+        let mut fact_revisions: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+
         // 5. WATCH LOOP — facts mirrored as they happen; corrections
         // bounded by the profile; terminal honored from the harness.
         let deadline = started + Duration::from_secs(self.profile.budget.time_limit_secs);
@@ -442,7 +448,11 @@ impl ExecutionSubagentTool {
                         .await;
                     match self.sink.reconnect(&binding).await {
                         Ok(receipt) => {
-                            cursor = receipt.resume_from_revision;
+                            // The watch cursor is CONTROLLER-scoped: facts
+                            // already consumed stay consumed; the spine's
+                            // resume_from_revision scopes its own replay
+                            // dedup window, not our stream position.
+                            let _ = receipt.resume_from_revision;
                             facts_reported += 1;
                             final_state = Some(receipt.state.canonical_state);
                             continue;
@@ -466,7 +476,15 @@ impl ExecutionSubagentTool {
             let mut saw_terminal = false;
             for event in &page.events {
                 usage.events_observed += 1;
-                source_revision += 1;
+                let spine_event_id = format!("{}-{}", run_ref, event.event_id.as_str());
+                let fact_revision = match fact_revisions.get(&spine_event_id) {
+                    Some(revision) => *revision,
+                    None => {
+                        source_revision += 1;
+                        fact_revisions.insert(spine_event_id.clone(), source_revision);
+                        source_revision
+                    }
+                };
                 // Harness-emitted `accepted`/cleanup-derived facts map 1:1;
                 // the host never mints a lifecycle kind it did not observe.
                 meter.try_record_action();
@@ -476,14 +494,10 @@ impl ExecutionSubagentTool {
                     .ingest_event(
                         &attachment,
                         &SessionEventFact {
-                            event_id: SessionEventIdRef::from_opaque(format!(
-                                "{}-{}",
-                                run_ref,
-                                event.event_id.as_str()
-                            )),
+                            event_id: SessionEventIdRef::from_opaque(spine_event_id),
                             kind: event.kind,
                             outcome: event.outcome.clone(),
-                            source_revision,
+                            source_revision: fact_revision,
                             authority_confirmation_ref: event
                                 .outcome
                                 .as_ref()
@@ -657,6 +671,8 @@ impl ExecutionSubagentTool {
         let request_id = InterventionRequestIdRef::from_opaque(format!("{run_ref}-cancel"));
         // (a) the request receipt — zero-fabrication: if the spine
         // refuses the request, there is no chain and no terminal fact.
+        // A typed unsupported-by-lifecycle-owner refusal surfaces as the
+        // typed unsupported_operation status (never fake success).
         if let Err(error) = self
             .sink
             .request_intervention(
@@ -667,6 +683,16 @@ impl ExecutionSubagentTool {
             )
             .await
         {
+            if error.to_string().contains("unsupported_by_lifecycle_owner") {
+                return (
+                    ExecutionRunStatusV1::UnsupportedOperation,
+                    Some(format!(
+                        "stop unsupported by the session's lifecycle owner (cancel); \
+                         no terminal fact fabricated ({error})"
+                    )),
+                    Vec::new(),
+                );
+            }
             return (
                 ExecutionRunStatusV1::Failed,
                 Some(format!("cancel request refused by spine: {error}")),
