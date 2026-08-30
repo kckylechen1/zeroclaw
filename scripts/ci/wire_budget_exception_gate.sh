@@ -28,12 +28,25 @@ if [ ! -f "$manifest_file" ]; then
     exit 1
 fi
 
+if [ -n "$schema_file" ] && [ ! -f "$schema_file" ]; then
+    echo "FAIL: schema file '$schema_file' does not exist." >&2
+    exit 1
+fi
+
 python3 - "$manifest_file" "$schema_file" <<'PYEOF'
 import json
 import sys
 
 manifest_path = sys.argv[1]
-schema_path = sys.argv[2] if len(sys.argv) > 2 else ""
+schema_path = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else ""
+
+if schema_path:
+    try:
+        with open(schema_path, 'r', encoding='utf-8') as f:
+            schema_data = json.load(f)
+    except Exception as e:
+        print(f"FAIL: invalid JSON in schema file '{schema_path}': {e}", file=sys.stderr)
+        sys.exit(1)
 
 try:
     with open(manifest_path, 'r', encoding='utf-8') as f:
@@ -54,12 +67,12 @@ if extra_root:
     sys.exit(1)
 
 version = data.get("version")
-if type(version) is not int or version != 1:
+if type(version) is not int or type(version) is bool or version != 1:
     print(f"FAIL: manifest version must be integer 1, got {version}", file=sys.stderr)
     sys.exit(1)
 
 ceiling = data.get("wire_budget_tokens_ceiling")
-if type(ceiling) is not int or ceiling != 5000:
+if type(ceiling) is not int or type(ceiling) is bool or ceiling != 5000:
     print(f"FAIL: manifest wire_budget_tokens_ceiling must equal 5000 (owner-ratified ceiling), got {ceiling}", file=sys.stderr)
     sys.exit(1)
 
@@ -114,4 +127,3 @@ for idx, exc in enumerate(exceptions):
 print(f"wire_budget_exception_gate: valid manifest '{manifest_path}' ({len(exceptions)} active exceptions)")
 sys.exit(0)
 PYEOF
-

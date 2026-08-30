@@ -4,13 +4,17 @@
 # Asserts that:
 # 1. Default scripts/ci/wire_budget_exceptions.json passes.
 # 2. Missing manifest fails.
-# 3. Invalid JSON fails.
-# 4. Altered wire_budget_tokens_ceiling fails.
-# 5. Exception entries missing required fields fail.
-# 6. Exception entry with boolean wire_tokens fails.
-# 7. Disallowed additional properties fail.
-# 8. Duplicate exception tool entries fail.
-# 9. Valid exception entry with all required fields passes.
+# 3. Missing schema argument fails.
+# 4. Invalid JSON fails.
+# 5. Altered wire_budget_tokens_ceiling fails.
+# 6. Non-integer / boolean wire_budget_tokens_ceiling fails.
+# 7. Non-integer / boolean version fails.
+# 8. Individual missing required fields fail (one-fault tests for all 8 fields).
+# 9. Boolean wire_tokens fails.
+# 10. Disallowed additional root properties fail.
+# 11. Disallowed additional entry properties fail.
+# 12. Duplicate exception tool entries fail.
+# 13. Valid exception entry with all required fields passes.
 #
 # Exit status: 0 = all test assertions pass, nonzero = test failure.
 
@@ -31,14 +35,20 @@ if bash "$gate" "${tmp_dir}/nonexistent.json" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 3: Invalid JSON fails ==="
+echo "=== Test 3: Missing schema file argument fails ==="
+if bash "$gate" "scripts/ci/wire_budget_exceptions.json" "${tmp_dir}/nonexistent_schema.json" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure on nonexistent schema file" >&2
+    exit 1
+fi
+
+echo "=== Test 4: Invalid JSON fails ==="
 echo "{ invalid json" > "${tmp_dir}/invalid.json"
 if bash "$gate" "${tmp_dir}/invalid.json" >/dev/null 2>&1; then
     echo "FAIL: Expected failure on invalid JSON" >&2
     exit 1
 fi
 
-echo "=== Test 4: Loosened ceiling fails ==="
+echo "=== Test 5: Loosened ceiling fails ==="
 cat > "${tmp_dir}/loosened.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
@@ -52,26 +62,73 @@ if bash "$gate" "${tmp_dir}/loosened.json" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 5: Incomplete exception entry fails ==="
-cat > "${tmp_dir}/incomplete.json" << 'EOF'
+echo "=== Test 6: Boolean ceiling fails ==="
+cat > "${tmp_dir}/bool_ceiling.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
   "version": 1,
-  "wire_budget_tokens_ceiling": 5000,
-  "exceptions": [
-    {
-      "owner": "alice",
-      "tool_name": "custom_tool"
-    }
-  ]
+  "wire_budget_tokens_ceiling": true,
+  "exceptions": []
 }
 EOF
-if bash "$gate" "${tmp_dir}/incomplete.json" >/dev/null 2>&1; then
-    echo "FAIL: Expected failure on incomplete exception entry" >&2
+if bash "$gate" "${tmp_dir}/bool_ceiling.json" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure when wire_budget_tokens_ceiling is boolean" >&2
     exit 1
 fi
 
-echo "=== Test 6: Boolean wire_tokens fails ==="
+echo "=== Test 7: Boolean version fails ==="
+cat > "${tmp_dir}/bool_version.json" << 'EOF'
+{
+  "$schema": "./wire_budget_exceptions.schema.json",
+  "version": true,
+  "wire_budget_tokens_ceiling": 5000,
+  "exceptions": []
+}
+EOF
+if bash "$gate" "${tmp_dir}/bool_version.json" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure when version is boolean" >&2
+    exit 1
+fi
+
+echo "=== Test 8: One-fault missing required field tests ==="
+required_fields=("owner" "tool_name" "rationale" "wire_tokens" "sunset_decision" "security_privacy_impact" "dependency_cost_rationale" "pr")
+
+for missing in "${required_fields[@]}"; do
+    python3 - "$missing" "${tmp_dir}/missing_${missing}.json" <<'PYEOF'
+import json, sys
+missing_field = sys.argv[1]
+out_path = sys.argv[2]
+
+entry = {
+    "owner": "alice",
+    "tool_name": "test_tool",
+    "rationale": "Kernel core residency",
+    "wire_tokens": 100,
+    "sunset_decision": "Permanent",
+    "security_privacy_impact": "None",
+    "dependency_cost_rationale": "Zero cost",
+    "pr": "262"
+}
+del entry[missing_field]
+
+data = {
+    "$schema": "./wire_budget_exceptions.schema.json",
+    "version": 1,
+    "wire_budget_tokens_ceiling": 5000,
+    "exceptions": [entry]
+}
+
+with open(out_path, 'w', encoding='utf-8') as f:
+    json.dump(data, f)
+PYEOF
+
+    if bash "$gate" "${tmp_dir}/missing_${missing}.json" >/dev/null 2>&1; then
+        echo "FAIL: Expected failure when field '${missing}' is missing from exception entry" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 9: Boolean wire_tokens fails ==="
 cat > "${tmp_dir}/bool_tokens.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
@@ -96,8 +153,8 @@ if bash "$gate" "${tmp_dir}/bool_tokens.json" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 7: Disallowed additional property fails ==="
-cat > "${tmp_dir}/extra_prop.json" << 'EOF'
+echo "=== Test 10: Disallowed additional root property fails ==="
+cat > "${tmp_dir}/extra_root_prop.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
   "version": 1,
@@ -106,12 +163,38 @@ cat > "${tmp_dir}/extra_prop.json" << 'EOF'
   "exceptions": []
 }
 EOF
-if bash "$gate" "${tmp_dir}/extra_prop.json" >/dev/null 2>&1; then
+if bash "$gate" "${tmp_dir}/extra_root_prop.json" >/dev/null 2>&1; then
     echo "FAIL: Expected failure on disallowed root properties" >&2
     exit 1
 fi
 
-echo "=== Test 8: Duplicate tool name fails ==="
+echo "=== Test 11: Disallowed additional entry property fails ==="
+cat > "${tmp_dir}/extra_entry_prop.json" << 'EOF'
+{
+  "$schema": "./wire_budget_exceptions.schema.json",
+  "version": 1,
+  "wire_budget_tokens_ceiling": 5000,
+  "exceptions": [
+    {
+      "owner": "maintainer1",
+      "tool_name": "tool1",
+      "rationale": "Rationale",
+      "wire_tokens": 100,
+      "sunset_decision": "Decision",
+      "security_privacy_impact": "None",
+      "dependency_cost_rationale": "Zero cost",
+      "pr": "123",
+      "unauthorized_entry_field": "leak"
+    }
+  ]
+}
+EOF
+if bash "$gate" "${tmp_dir}/extra_entry_prop.json" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure on disallowed entry properties" >&2
+    exit 1
+fi
+
+echo "=== Test 12: Duplicate tool name fails ==="
 cat > "${tmp_dir}/duplicate.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
@@ -146,7 +229,7 @@ if bash "$gate" "${tmp_dir}/duplicate.json" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 9: Valid exception entry passes ==="
+echo "=== Test 13: Valid exception entry passes ==="
 cat > "${tmp_dir}/valid_exc.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
@@ -170,4 +253,3 @@ bash "$gate" "${tmp_dir}/valid_exc.json"
 
 echo "wire_budget_exception_gate self-tests passed cleanly."
 exit 0
-

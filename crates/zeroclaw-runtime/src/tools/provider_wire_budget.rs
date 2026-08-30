@@ -1024,7 +1024,7 @@ async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
 }
 
 #[tokio::test]
-async fn mcp_explicit_only_drops_unlisted_tools_in_minimal_composition() {
+async fn mcp_explicit_only_eager_drops_unlisted_tools_in_minimal_composition() {
     let server = mock_mcp_http_server(&[
         ("snapshot", "allowed trading tool"),
         ("git_operations", "unlisted repo tool attempt"),
@@ -1040,6 +1040,65 @@ async fn mcp_explicit_only_drops_unlisted_tools_in_minimal_composition() {
         ..Config::default()
     };
     config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+    config.mcp.enabled = true;
+    config.mcp.deferred_loading = false;
+    let risk_profile = zeroclaw_config::schema::RiskProfileConfig {
+        mcp_discovered_tool_policy:
+            zeroclaw_config::autonomy::McpDiscoveredToolPolicy::ExplicitOnly,
+        allowed_tools: Some(vec![
+            "shell".into(),
+            "file_read".into(),
+            "file_write".into(),
+            "hapi-edge__snapshot".into(),
+        ]),
+        ..Default::default()
+    };
+    config.risk_profiles.insert("lean".into(), risk_profile);
+    let agent_cfg = zeroclaw_config::schema::AliasedAgentConfig {
+        risk_profile: "lean".into(),
+        ..Default::default()
+    };
+    config.agents.insert("lean".into(), agent_cfg);
+    point_hapi_edge_at_agent(&mut config, server.uri(), "lean");
+
+    let (_, budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "lean",
+        skills: &[],
+        connect_mcp: true,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    print_budget("composition=minimal + eager explicit_only mcp", &budget);
+
+    // Snapshot is explicitly listed, so it is admitted on the wire
+    assert!(budget.names.contains(&"hapi-edge__snapshot".to_string()));
+
+    // Unlisted MCP tools MUST be dropped from eager registration
+    assert!(!budget.names.iter().any(|n| n.contains("git_operations")));
+    assert!(!budget.names.iter().any(|n| n.contains("jira_write")));
+}
+
+#[tokio::test]
+async fn mcp_explicit_only_deferred_drops_unlisted_tools_in_minimal_composition() {
+    let server = mock_mcp_http_server(&[
+        ("snapshot", "allowed trading tool"),
+        ("git_operations", "unlisted repo tool attempt"),
+        ("jira_write", "unlisted SaaS tool attempt"),
+    ])
+    .await;
+
+    let tmp = TempDir::new().unwrap();
+    seed_personality(tmp.path(), true);
+    let mut config = Config {
+        config_path: tmp.path().join("config.toml"),
+        data_dir: tmp.path().join("data"),
+        ..Config::default()
+    };
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+    config.mcp.enabled = true;
+    config.mcp.deferred_loading = true;
     let risk_profile = zeroclaw_config::schema::RiskProfileConfig {
         mcp_discovered_tool_policy:
             zeroclaw_config::autonomy::McpDiscoveredToolPolicy::ExplicitOnly,
@@ -1068,17 +1127,61 @@ async fn mcp_explicit_only_drops_unlisted_tools_in_minimal_composition() {
         workspace: tmp.path(),
     })
     .await;
-    print_budget("composition=minimal + explicit_only mcp", &budget);
+    print_budget("composition=minimal + deferred explicit_only mcp", &budget);
 
-    // Snapshot is explicitly listed, so it is admitted
-    assert!(budget.names.contains(&"hapi-edge__snapshot".to_string()));
+    // 1. Under deferred loading, tool_search is registered instead of eager snapshot
+    assert!(budget.names.contains(&"tool_search".to_string()));
+    assert!(!budget.names.contains(&"hapi-edge__snapshot".to_string()));
 
-    // Unlisted MCP tools MUST be dropped
-    assert!(!budget.names.iter().any(|n| n.contains("git_operations")));
-    assert!(!budget.names.iter().any(|n| n.contains("jira_write")));
-
-    // Deferred MCP section must also not contain unlisted tools
+    // 2. Deferred prompt section advertises allowed tool and strictly omits unlisted tools
     let deferred = assembled.combined_mcp_prompt_section();
+    assert!(deferred.contains("hapi-edge__snapshot"));
     assert!(!deferred.contains("git_operations"));
     assert!(!deferred.contains("jira_write"));
+
+    // 3. Search and activation boundaries: allowed tool resolves, unlisted tools return not found
+    let tool_search = assembled
+        .registry
+        .iter()
+        .find(|t| t.name() == "tool_search")
+        .expect("tool_search must be assembled under deferred loading with admitted tools");
+
+    let allowed_res = tool_search
+        .execute(serde_json::json!({"query": "select:hapi-edge__snapshot"}))
+        .await
+        .expect("tool_search must execute");
+    assert!(
+        allowed_res
+            .output
+            .contains("\"name\": \"hapi-edge__snapshot\""),
+        "allowed tool must resolve in tool_search: {}",
+        allowed_res.output
+    );
+
+    let unlisted_res = tool_search
+        .execute(serde_json::json!({"query": "select:hapi-edge__git_operations"}))
+        .await
+        .expect("tool_search must execute");
+    assert!(
+        !unlisted_res
+            .output
+            .contains("\"name\": \"hapi-edge__git_operations\""),
+        "unlisted tool must not resolve in tool_search: {}",
+        unlisted_res.output
+    );
+    assert!(
+        unlisted_res
+            .output
+            .contains("Not found: hapi-edge__git_operations"),
+        "unlisted tool must report not found: {}",
+        unlisted_res.output
+    );
+
+    // 4. Activation set verification
+    if let Some(activated_handle) = assembled.activated_handle {
+        let guard = activated_handle.lock().unwrap();
+        assert!(guard.is_activated("hapi-edge__snapshot"));
+        assert!(!guard.is_activated("hapi-edge__git_operations"));
+        assert!(!guard.is_activated("hapi-edge__jira_write"));
+    }
 }

@@ -8,6 +8,9 @@
     "exceptions"
   ],
   "properties": {
+    "$schema": {
+      "type": "string"
+    },
     "version": {
       "type": "integer",
       "const": 1
@@ -63,4 +66,3 @@
   },
   "additionalProperties": false
 }
-
