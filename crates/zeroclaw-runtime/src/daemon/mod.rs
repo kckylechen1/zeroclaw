@@ -2190,22 +2190,24 @@ mod tests {
         let _writer_guard = zeroclaw_log::__private_test_writer_lock();
         let _hook_guard = zeroclaw_log::__private_test_hook_lock();
         zeroclaw_log::try_install_capture_subscriber();
-        let mut rx = zeroclaw_log::subscribe_or_install();
 
         let tmp = TempDir::new().unwrap();
         let mut config = test_config(&tmp);
         config.gateway.require_pairing = true;
 
         // The process-global broadcast channel this test subscribes to also
-        // carries every log line the other parallel tests emit. Under a heavy
-        // burst the ring can overflow between `record_daemon_started` and the
-        // next poll, the receiver reads `Lagged`, and the one event this test
-        // cares about is gone for good — a timing flake, not a regression
-        // signal. So emit-and-wait is retried: each attempt drains, re-emits
-        // (the event is a synthetic diagnostics record, and this test is its
-        // only matcher), and waits on a fresh 2s window.
+        // carries every log line the other parallel tests emit, and the hook
+        // it rides on is process-global mutable state that other tests'
+        // fixtures legitimately replace and clear. Either hazard can make the
+        // one event this test cares about never arrive on a given receiver —
+        // a timing/interference flake, not a regression signal. So
+        // subscribe-emit-wait is retried: each attempt takes a FRESH
+        // subscription, drains, re-emits (the event is a synthetic
+        // diagnostics record, and this test is its only matcher), and waits
+        // on a fresh 2s window.
         let mut value = None;
         for _ in 0..6 {
+            let mut rx = zeroclaw_log::subscribe_or_install();
             while rx.try_recv().is_ok() {}
             record_daemon_started(&config, "127.0.0.1", 0);
             if let Some(found) = try_recv_log_event(&mut rx, "ZeroClaw daemon started").await {
