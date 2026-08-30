@@ -1173,11 +1173,10 @@ fn digest_only_kp18_candidate_cannot_be_routed_into_promotion() {
 
 // ─────────────────────────────────────────────────────────────────────────
 // DoD row 14 / SA-26: nothing durable — the executable no-control-plane-rows
-// proof runs in the dedicated integration binary
-// `tests/subagent_v1_no_durable_writes.rs` (its own process, so the
-// process-global control-plane install cannot poison this binary's other
-// tests). Structurally, this module imports nothing from
-// `crate::control_plane` and performs no I/O: the run is in-memory only.
+// proof now runs as the `tests/no_durable_task_store.rs` source scan: the
+// durable control plane was deleted with the control-plane migration wall,
+// so there is no store this path could write to and no import that could
+// regrow one without tripping that guard.
 // ─────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────
