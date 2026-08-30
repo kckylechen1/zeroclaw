@@ -40,12 +40,17 @@ import sys
 manifest_path = sys.argv[1]
 schema_path = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else ""
 
+schema_data = None
 if schema_path:
     try:
         with open(schema_path, 'r', encoding='utf-8') as f:
             schema_data = json.load(f)
     except Exception as e:
         print(f"FAIL: invalid JSON in schema file '{schema_path}': {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not isinstance(schema_data, dict) or schema_data.get("title") != "WireBudgetExceptions" or "properties" not in schema_data:
+        print(f"FAIL: schema file '{schema_path}' is not a valid WireBudgetExceptions schema", file=sys.stderr)
         sys.exit(1)
 
 try:
@@ -59,21 +64,58 @@ if not isinstance(data, dict):
     print("FAIL: manifest root must be a JSON object", file=sys.stderr)
     sys.exit(1)
 
+if schema_data:
+    allowed_root_keys = set(schema_data.get("properties", {}).keys())
+    required_root_keys = list(schema_data.get("required", ["version", "wire_budget_tokens_ceiling", "exceptions"]))
+    schema_version = schema_data["properties"]["version"]["const"]
+    schema_ceiling = schema_data["properties"]["wire_budget_tokens_ceiling"]["const"]
+    items_schema = schema_data["properties"]["exceptions"]["items"]
+    required_fields = list(items_schema.get("required", []))
+    allowed_entry_keys = set(items_schema.get("properties", {}).keys())
+    min_wire_tokens = items_schema.get("properties", {}).get("wire_tokens", {}).get("minimum", 1)
+else:
+    allowed_root_keys = {"$schema", "version", "wire_budget_tokens_ceiling", "exceptions"}
+    required_root_keys = ["version", "wire_budget_tokens_ceiling", "exceptions"]
+    schema_version = 1
+    schema_ceiling = 5000
+    required_fields = [
+        "owner",
+        "tool_name",
+        "rationale",
+        "wire_tokens",
+        "sunset_decision",
+        "security_privacy_impact",
+        "dependency_cost_rationale",
+        "pr",
+    ]
+    allowed_entry_keys = set(required_fields)
+    min_wire_tokens = 1
+
 # Check root properties (additionalProperties: false)
-allowed_root_keys = {"$schema", "version", "wire_budget_tokens_ceiling", "exceptions"}
 extra_root = set(data.keys()) - allowed_root_keys
 if extra_root:
     print(f"FAIL: disallowed additional properties at root: {sorted(extra_root)}", file=sys.stderr)
     sys.exit(1)
 
+for req in required_root_keys:
+    if req not in data:
+        print(f"FAIL: manifest root missing required property '{req}'", file=sys.stderr)
+        sys.exit(1)
+
+if "$schema" in data:
+    schema_val = data["$schema"]
+    if type(schema_val) is not str or not schema_val.strip():
+        print(f"FAIL: manifest '$schema' must be a non-empty string, got {schema_val!r}", file=sys.stderr)
+        sys.exit(1)
+
 version = data.get("version")
-if type(version) is not int or type(version) is bool or version != 1:
-    print(f"FAIL: manifest version must be integer 1, got {version}", file=sys.stderr)
+if type(version) is not int or type(version) is bool or version != schema_version:
+    print(f"FAIL: manifest version must be integer {schema_version}, got {version}", file=sys.stderr)
     sys.exit(1)
 
 ceiling = data.get("wire_budget_tokens_ceiling")
-if type(ceiling) is not int or type(ceiling) is bool or ceiling != 5000:
-    print(f"FAIL: manifest wire_budget_tokens_ceiling must equal 5000 (owner-ratified ceiling), got {ceiling}", file=sys.stderr)
+if type(ceiling) is not int or type(ceiling) is bool or ceiling != schema_ceiling:
+    print(f"FAIL: manifest wire_budget_tokens_ceiling must equal {schema_ceiling} (owner-ratified ceiling), got {ceiling}", file=sys.stderr)
     sys.exit(1)
 
 exceptions = data.get("exceptions")
@@ -81,17 +123,6 @@ if not isinstance(exceptions, list):
     print("FAIL: exceptions field must be a list", file=sys.stderr)
     sys.exit(1)
 
-required_fields = [
-    "owner",
-    "tool_name",
-    "rationale",
-    "wire_tokens",
-    "sunset_decision",
-    "security_privacy_impact",
-    "dependency_cost_rationale",
-    "pr",
-]
-allowed_entry_keys = set(required_fields)
 seen_tools = set()
 
 for idx, exc in enumerate(exceptions):
@@ -110,8 +141,8 @@ for idx, exc in enumerate(exceptions):
             sys.exit(1)
         val = exc[field]
         if field == "wire_tokens":
-            if type(val) is not int or type(val) is bool or val <= 0:
-                print(f"FAIL: exception entry [{idx}] 'wire_tokens' must be a positive integer, got {val!r}", file=sys.stderr)
+            if type(val) is not int or type(val) is bool or val < min_wire_tokens:
+                print(f"FAIL: exception entry [{idx}] 'wire_tokens' must be an integer >= {min_wire_tokens}, got {val!r}", file=sys.stderr)
                 sys.exit(1)
         else:
             if type(val) is not str or not val.strip():

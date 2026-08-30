@@ -893,15 +893,38 @@ async fn minimal_composition_no_bypass_subsystem_flags() {
         data_dir: tmp.path().join("data"),
         ..Config::default()
     };
-    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
-    // Explicitly enable non-minimal subsystems to test that minimal composition
-    // overrides their enabled flags and keeps them off the wire surface.
+    // Explicitly configure and enable non-minimal subsystems with valid credentials
     config.pipeline.enabled = true;
     config.browser.enabled = true;
-    config.backup.enabled = true;
+    config.http_request.enabled = true;
+    config.web_search.enabled = true;
     config.jira.enabled = true;
+    config.jira.base_url = "https://example.atlassian.net".into();
+    config.jira.api_token = "dummy_jira_token".into();
     config.notion.enabled = true;
+    config.notion.api_key = "secret_notion_key".into();
 
+    // Positive control: under full composition, enabled subsystems DO enter the wire surface
+    config.composition = Some(zeroclaw_config::composition::Composition::Full);
+    let (_, full_budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "default",
+        skills: &[],
+        connect_mcp: false,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    assert!(
+        full_budget.names.contains(&"browser".to_string())
+            || full_budget.names.contains(&"browser_open".to_string())
+            || full_budget.names.contains(&"http_request".to_string()),
+        "full composition must register enabled subsystem tools: {:?}",
+        full_budget.names
+    );
+
+    // Negative assertion: under minimal composition, all non-minimal subsystems are excluded
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
     let (_, budget) = assemble_turn(TurnRequest {
         config: &config,
         agent_alias: "default",
@@ -942,6 +965,8 @@ async fn minimal_composition_no_bypass_subsystem_flags() {
         "cron_add",
         "cron_update",
         "browser",
+        "browser_open",
+        "http_request",
     ] {
         assert!(
             !budget.names.iter().any(|n| n == banned),
@@ -960,7 +985,9 @@ async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
         data_dir: tmp.path().join("data"),
         ..Config::default()
     };
-    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+    config.jira.enabled = true;
+    config.jira.base_url = "https://example.atlassian.net".into();
+    config.jira.api_token = "dummy_jira_token".into();
 
     // Create a skill attempting to elevate non-minimal built-in tools (cron_add / jira)
     let bypass_skill = Skill {
@@ -997,6 +1024,27 @@ async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
         location: None,
     };
 
+    // Positive control: under full composition, skill elevation of available built-in tools succeeds
+    config.composition = Some(zeroclaw_config::composition::Composition::Full);
+    let (_, full_budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "default",
+        skills: std::slice::from_ref(&bypass_skill),
+        connect_mcp: false,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    assert!(
+        full_budget
+            .names
+            .contains(&"malicious_skill__elevate_cron".to_string()),
+        "full composition must permit skill elevation of available built-in tool: {:?}",
+        full_budget.names
+    );
+
+    // Negative assertion: under minimal composition, non-minimal built-ins are never in resolution registry
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
     let (_, budget) = assemble_turn(TurnRequest {
         config: &config,
         agent_alias: "default",
@@ -1158,30 +1206,59 @@ async fn mcp_explicit_only_deferred_drops_unlisted_tools_in_minimal_composition(
         allowed_res.output
     );
 
-    let unlisted_res = tool_search
+    let unlisted_git_res = tool_search
         .execute(serde_json::json!({"query": "select:hapi-edge__git_operations"}))
         .await
         .expect("tool_search must execute");
     assert!(
-        !unlisted_res
+        !unlisted_git_res
             .output
             .contains("\"name\": \"hapi-edge__git_operations\""),
         "unlisted tool must not resolve in tool_search: {}",
-        unlisted_res.output
+        unlisted_git_res.output
     );
     assert!(
-        unlisted_res
+        unlisted_git_res
             .output
             .contains("Not found: hapi-edge__git_operations"),
         "unlisted tool must report not found: {}",
-        unlisted_res.output
+        unlisted_git_res.output
+    );
+
+    let unlisted_jira_res = tool_search
+        .execute(serde_json::json!({"query": "select:hapi-edge__jira_write"}))
+        .await
+        .expect("tool_search must execute");
+    assert!(
+        !unlisted_jira_res
+            .output
+            .contains("\"name\": \"hapi-edge__jira_write\""),
+        "unlisted tool must not resolve in tool_search: {}",
+        unlisted_jira_res.output
+    );
+    assert!(
+        unlisted_jira_res
+            .output
+            .contains("Not found: hapi-edge__jira_write"),
+        "unlisted tool must report not found: {}",
+        unlisted_jira_res.output
     );
 
     // 4. Activation set verification
-    if let Some(activated_handle) = assembled.activated_handle {
-        let guard = activated_handle.lock().unwrap();
-        assert!(guard.is_activated("hapi-edge__snapshot"));
-        assert!(!guard.is_activated("hapi-edge__git_operations"));
-        assert!(!guard.is_activated("hapi-edge__jira_write"));
-    }
+    let activated_handle = assembled
+        .activated_handle
+        .expect("tool_search registers the activation handle");
+    let guard = activated_handle.lock().unwrap();
+    assert!(
+        guard.is_activated("hapi-edge__snapshot"),
+        "allowed tool must be activated"
+    );
+    assert!(
+        !guard.is_activated("hapi-edge__git_operations"),
+        "unlisted git tool must not be activated"
+    );
+    assert!(
+        !guard.is_activated("hapi-edge__jira_write"),
+        "unlisted jira tool must not be activated"
+    );
 }

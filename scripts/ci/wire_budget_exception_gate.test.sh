@@ -2,19 +2,22 @@
 
 # Test harness for wire_budget_exception_gate.sh.
 # Asserts that:
-# 1. Default scripts/ci/wire_budget_exceptions.json passes.
+# 1. Default scripts/ci/wire_budget_exceptions.json passes with default schema.
 # 2. Missing manifest fails.
 # 3. Missing schema argument fails.
-# 4. Invalid JSON fails.
-# 5. Altered wire_budget_tokens_ceiling fails.
-# 6. Non-integer / boolean wire_budget_tokens_ceiling fails.
-# 7. Non-integer / boolean version fails.
-# 8. Individual missing required fields fail (one-fault tests for all 8 fields).
-# 9. Boolean wire_tokens fails.
-# 10. Disallowed additional root properties fail.
-# 11. Disallowed additional entry properties fail.
-# 12. Duplicate exception tool entries fail.
-# 13. Valid exception entry with all required fields passes.
+# 4. Invalid JSON in manifest fails.
+# 5. Invalid JSON in schema file fails.
+# 6. Unrelated schema JSON fails schema title validation.
+# 7. Non-string / boolean $schema in manifest fails.
+# 8. Altered wire_budget_tokens_ceiling fails.
+# 9. Non-integer / boolean wire_budget_tokens_ceiling fails.
+# 10. Non-integer / boolean version fails.
+# 11. Individual missing required fields fail (one-fault tests for all 8 fields).
+# 12. Boolean wire_tokens fails.
+# 13. Disallowed additional root properties fail.
+# 14. Disallowed additional entry properties fail.
+# 15. Duplicate exception tool entries fail.
+# 16. Valid exception entry with all required fields passes.
 #
 # Exit status: 0 = all test assertions pass, nonzero = test failure.
 
@@ -23,7 +26,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 gate="${script_dir}/wire_budget_exception_gate.sh"
 
-tmp_dir="$(mktemp -d)"
+tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t 'wb_gate')"
 trap 'rm -rf "$tmp_dir"' EXIT
 
 echo "=== Test 1: Production manifest passes ==="
@@ -41,14 +44,41 @@ if bash "$gate" "scripts/ci/wire_budget_exceptions.json" "${tmp_dir}/nonexistent
     exit 1
 fi
 
-echo "=== Test 4: Invalid JSON fails ==="
-echo "{ invalid json" > "${tmp_dir}/invalid.json"
-if bash "$gate" "${tmp_dir}/invalid.json" >/dev/null 2>&1; then
-    echo "FAIL: Expected failure on invalid JSON" >&2
+echo "=== Test 4: Invalid JSON in manifest fails ==="
+echo "{ invalid json" > "${tmp_dir}/invalid_manifest.json"
+if bash "$gate" "${tmp_dir}/invalid_manifest.json" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure on invalid manifest JSON" >&2
     exit 1
 fi
 
-echo "=== Test 5: Loosened ceiling fails ==="
+echo "=== Test 5: Invalid JSON in schema file fails ==="
+echo "{ invalid schema json" > "${tmp_dir}/invalid_schema.json"
+if bash "$gate" "scripts/ci/wire_budget_exceptions.json" "${tmp_dir}/invalid_schema.json" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure on invalid schema JSON" >&2
+    exit 1
+fi
+
+echo "=== Test 6: Unrelated schema JSON fails ==="
+if bash "$gate" "scripts/ci/wire_budget_exceptions.json" "dev/ci/test-partition.json" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure on unrelated schema JSON" >&2
+    exit 1
+fi
+
+echo "=== Test 7: Non-string \$schema in manifest fails ==="
+cat > "${tmp_dir}/bool_dollar_schema.json" << 'EOF'
+{
+  "$schema": false,
+  "version": 1,
+  "wire_budget_tokens_ceiling": 5000,
+  "exceptions": []
+}
+EOF
+if bash "$gate" "${tmp_dir}/bool_dollar_schema.json" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure when \$schema is boolean" >&2
+    exit 1
+fi
+
+echo "=== Test 8: Loosened ceiling fails ==="
 cat > "${tmp_dir}/loosened.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
@@ -62,7 +92,7 @@ if bash "$gate" "${tmp_dir}/loosened.json" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 6: Boolean ceiling fails ==="
+echo "=== Test 9: Boolean ceiling fails ==="
 cat > "${tmp_dir}/bool_ceiling.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
@@ -76,7 +106,7 @@ if bash "$gate" "${tmp_dir}/bool_ceiling.json" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 7: Boolean version fails ==="
+echo "=== Test 10: Boolean version fails ==="
 cat > "${tmp_dir}/bool_version.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
@@ -90,7 +120,7 @@ if bash "$gate" "${tmp_dir}/bool_version.json" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 8: One-fault missing required field tests ==="
+echo "=== Test 11: One-fault missing required field tests ==="
 required_fields=("owner" "tool_name" "rationale" "wire_tokens" "sunset_decision" "security_privacy_impact" "dependency_cost_rationale" "pr")
 
 for missing in "${required_fields[@]}"; do
@@ -128,7 +158,7 @@ PYEOF
     fi
 done
 
-echo "=== Test 9: Boolean wire_tokens fails ==="
+echo "=== Test 12: Boolean wire_tokens fails ==="
 cat > "${tmp_dir}/bool_tokens.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
@@ -153,7 +183,7 @@ if bash "$gate" "${tmp_dir}/bool_tokens.json" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 10: Disallowed additional root property fails ==="
+echo "=== Test 13: Disallowed additional root property fails ==="
 cat > "${tmp_dir}/extra_root_prop.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
@@ -168,7 +198,7 @@ if bash "$gate" "${tmp_dir}/extra_root_prop.json" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 11: Disallowed additional entry property fails ==="
+echo "=== Test 14: Disallowed additional entry property fails ==="
 cat > "${tmp_dir}/extra_entry_prop.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
@@ -194,7 +224,7 @@ if bash "$gate" "${tmp_dir}/extra_entry_prop.json" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 12: Duplicate tool name fails ==="
+echo "=== Test 15: Duplicate tool name fails ==="
 cat > "${tmp_dir}/duplicate.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
@@ -229,7 +259,7 @@ if bash "$gate" "${tmp_dir}/duplicate.json" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 13: Valid exception entry passes ==="
+echo "=== Test 16: Valid exception entry passes ==="
 cat > "${tmp_dir}/valid_exc.json" << 'EOF'
 {
   "$schema": "./wire_budget_exceptions.schema.json",
