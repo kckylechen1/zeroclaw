@@ -1,8 +1,8 @@
 //! The production fact-sink transport — a real [`SessionFactSink`] that
-//! consumes the PUBLIC tachi MCP facade (`tachi_agent_eval`, the #1678
+//! consumes the PUBLIC tachi MCP facade (`tachi_agent_eval`, the
 //! attached-session receipt spine) over the existing MCP stdio client.
 //! This is the production wire the stage-b JSON stand-in pointed at
-//! (#261's honest gap); every sink operation is a real MCP `tools/call`
+//! (the 261-vertical's honest gap); every sink operation is a real MCP `tools/call`
 //! to a spawned `tachi serve` child.
 //!
 //! ```text
@@ -57,7 +57,8 @@ use zeroclaw_tools::mcp_transport::{McpTransportConn, create_transport};
 
 use super::facts::{SessionBinding, SessionEventFact, SessionFactSink};
 
-/// The tachi facade tool this carrier consumes (the #1678 spine surface).
+/// The tachi facade tool this carrier consumes (the attached-session
+/// receipt spine surface).
 const TACHI_AGENT_EVAL_TOOL: &str = "tachi_agent_eval";
 /// The refusal-text ceiling (mirrors the fact-summary bound).
 const SUMMARY_CEILING: usize = 2000;

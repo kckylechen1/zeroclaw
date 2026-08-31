@@ -1,7 +1,7 @@
 //! The production ACPX carrier — a real [`SessionController`] over the
 //! Agent Client Protocol (ACP) JSON-RPC wire to an agent-side adapter
 //! process (Codex first: the `codex-acp` adapter shipped with the Codex
-//! CLI). This is the transport the scripted fixture stood in for (#261's
+//! CLI). This is the transport the scripted fixture stood in for (the 261-vertical's
 //! honest gap); every lifecycle operation here is a real process/protocol
 //! operation observed by this controller.
 //!
