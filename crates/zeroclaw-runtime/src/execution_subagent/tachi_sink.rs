@@ -39,7 +39,6 @@
 //!   DDL; the only persistence is the tachi-owned spine across the wire.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -52,12 +51,17 @@ use zeroclaw_api::session_exec::{
     SessionReconnectReceiptView, SessionStateView,
 };
 use zeroclaw_config::schema::McpServerConfig;
-use zeroclaw_tools::mcp_client::McpServer;
+use zeroclaw_tools::mcp_protocol::JsonRpcRequest;
+use zeroclaw_tools::mcp_transport::{McpTransportConn, create_transport};
 
 use super::facts::{SessionBinding, SessionEventFact, SessionFactSink};
 
 /// The tachi facade tool this carrier consumes (the #1678 spine surface).
 const TACHI_AGENT_EVAL_TOOL: &str = "tachi_agent_eval";
+/// The refusal-text ceiling (mirrors the fact-summary bound).
+const SUMMARY_CEILING: usize = 2000;
+/// The MCP protocol revision the spine handshake negotiates.
+const SPINE_PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// Operator/embedder-constructed admission and transport binding. The
 /// port cannot widen any field; values here are configuration facts.
@@ -172,11 +176,12 @@ struct SpineReceipt {
 /// The production [`SessionFactSink`] over the tachi MCP facade.
 pub struct TachiSessionFactSink {
     config: TachiFactSinkConfig,
-    server: RwLock<Option<Arc<McpServer>>>,
+    conn: tokio::sync::Mutex<Option<Box<dyn McpTransportConn>>>,
     attachment: RwLock<Option<String>>,
     /// Last observed canonical revision (the intervention gate's
     /// expected-session-revision input).
     last_revision: RwLock<u64>,
+    next_id: RwLock<u64>,
 }
 
 impl TachiSessionFactSink {
@@ -186,33 +191,65 @@ impl TachiSessionFactSink {
         config.verify()?;
         Ok(Self {
             config,
-            server: RwLock::new(None),
+            conn: tokio::sync::Mutex::new(None),
             attachment: RwLock::new(None),
             last_revision: RwLock::new(0),
+            next_id: RwLock::new(1),
         })
     }
 
-    /// The connected MCP client, spawning the spine child on demand.
-    async fn server(&self) -> Result<Arc<McpServer>, SessionFactError> {
-        if let Some(server) = self.server.read().clone()
-            && server.health_check()
+    /// The live transport, spawning the spine child and running the
+    /// initialize-FIRST handshake on demand. The handshake initializes
+    /// before anything else because strict rmcp peers (tachi among them)
+    /// abort on any pre-initialize request — the generic client's
+    /// `server/discover` era probe is not tolerated on this surface.
+    async fn conn(&self) -> Result<(), SessionFactError> {
+        if let Some(conn) = self.conn.lock().await.as_mut()
+            && conn.health_check()
         {
-            return Ok(server);
+            return Ok(());
         }
-        let server = Arc::new(
-            McpServer::connect(self.config.mcp_server_config())
-                .await
-                .map_err(|_| SessionFactError::Unavailable)?,
+        let mut conn = create_transport(&self.config.mcp_server_config()).map_err(|error| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(serde_json::json!({ "detail": error.to_string() })),
+                "tachi spine transport spawn failed",
+            );
+            SessionFactError::Unavailable
+        })?;
+        let initialize = JsonRpcRequest::new(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": SPINE_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "zeroclaw-exec-subagent", "version": env!("CARGO_PKG_VERSION")},
+            }),
         );
-        *self.server.write() = Some(server.clone());
-        Ok(server)
+        let response = conn
+            .send_and_recv(&initialize)
+            .await
+            .map_err(|_| SessionFactError::Unavailable)?;
+        if response.error.is_some() {
+            return Err(SessionFactError::Refused(
+                "the spine refused the MCP initialize handshake".to_string(),
+            ));
+        }
+        // notifications expect no response; the stdio transport returns
+        // immediately for id-less writes.
+        let initialized = JsonRpcRequest::notification("notifications/initialized", json!({}));
+        let _ = conn.send_and_recv(&initialized).await;
+        *self.conn.lock().await = Some(conn);
+        Ok(())
     }
 
     /// Drop the transport (the child is the client's ownership). The next
     /// call re-spawns; every operation is replay-idempotent, so the ONE
     /// retry after a drop re-delivers exactly the un-acked fact.
-    fn drop_transport(&self) {
-        *self.server.write() = None;
+    async fn drop_transport(&self) {
+        *self.conn.lock().await = None;
     }
 
     /// Call one facade action. The first argument list is the fixed
@@ -235,7 +272,7 @@ impl TachiSessionFactSink {
                 // ONCE. Safe because every action here is
                 // replay-idempotent at the spine (attach by idempotency
                 // key, events by event id, receipts by request id).
-                self.drop_transport();
+                self.drop_transport().await;
                 self.call_once(action, params).await
             }
             Err(error) => Err(error),
@@ -247,26 +284,70 @@ impl TachiSessionFactSink {
         action: &str,
         params: Value,
     ) -> Result<SpineReceipt, SessionFactError> {
-        let server = self.server().await?;
-        let result = tokio::time::timeout(
-            self.config.call_timeout,
-            server.call_tool(TACHI_AGENT_EVAL_TOOL, params),
-        )
-        .await
-        .map_err(|_| SessionFactError::Unavailable)
-        .and_then(|inner| inner.map_err(map_spine_error));
-        let result = result?;
-        // The facade answers with one JSON document in content[0].text.
+        self.conn().await?;
+        let request = JsonRpcRequest::new(
+            self.next_call_id(),
+            "tools/call",
+            json!({
+                "name": TACHI_AGENT_EVAL_TOOL,
+                "arguments": params,
+            }),
+        );
+        let response = {
+            let mut conn = self.conn.lock().await;
+            match conn.as_mut() {
+                Some(conn) => {
+                    tokio::time::timeout(self.config.call_timeout, conn.send_and_recv(&request))
+                        .await
+                        .map_err(|_| SessionFactError::Unavailable)?
+                        .map_err(|error| {
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Fail,
+                                )
+                                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                .with_attrs(serde_json::json!({
+                                    "spine_action": action,
+                                    "detail": error.to_string(),
+                                })),
+                                "tachi facade call failed",
+                            );
+                            map_spine_error(error)
+                        })?
+                }
+                None => return Err(SessionFactError::Unavailable),
+            }
+        };
+        if let Some(error) = &response.error {
+            return Err(SessionFactError::Refused(format!(
+                "spine action {action} failed: {}",
+                bounded_reason(&error.message)
+            )));
+        }
+        // The facade answers with one JSON document in content[0].text;
+        // tool-level failures arrive as isError envelopes and surface as
+        // typed refusals carrying the facade's own reason.
+        let result = response.result.clone().unwrap_or(Value::Null);
+        let is_error = result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let text = result
             .pointer("/content/0/text")
             .and_then(Value::as_str)
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
+        if is_error {
+            return Err(SessionFactError::Refused(bounded_reason(&text)));
+        }
         if text.is_empty() {
             return Err(SessionFactError::Refused(format!(
                 "spine action {action} returned no receipt"
             )));
         }
-        let body: Value = serde_json::from_str(text).map_err(|_| {
+        let body: Value = serde_json::from_str(&text).map_err(|_| {
             SessionFactError::Refused(format!(
                 "spine action {action} returned an unparseable receipt"
             ))
@@ -277,6 +358,13 @@ impl TachiSessionFactSink {
             .unwrap_or_default()
             .to_string();
         Ok(SpineReceipt { status, body })
+    }
+
+    /// Monotone per-connection JSON-RPC id (1 is the initialize).
+    fn next_call_id(&self) -> u64 {
+        let mut id = self.next_id.write();
+        *id += 1;
+        *id
     }
 
     fn parse_state(body: &Value) -> Result<SessionStateView, SessionFactError> {
@@ -333,6 +421,16 @@ fn map_spine_error(error: anyhow::Error) -> SessionFactError {
     } else {
         SessionFactError::Unavailable
     }
+}
+
+/// Bound a facade refusal text at the fact-summary ceiling (refusal
+/// texts are spine-authored and bounded at the same law as summaries).
+fn bounded_reason(text: &str) -> String {
+    let mut boundary = text.len().min(SUMMARY_CEILING);
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    text[..boundary].to_string()
 }
 
 fn now_rfc3339() -> String {

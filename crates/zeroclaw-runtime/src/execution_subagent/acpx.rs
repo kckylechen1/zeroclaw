@@ -176,8 +176,10 @@ struct SessionState {
     process: Mutex<Option<Arc<AcpxProcess>>>,
     events: Mutex<Vec<ControllerEvent>>,
     next_seq: AtomicU64,
-    /// Final text of the last completed turn (the collect source).
+    /// Accumulating text of the turn in flight.
     last_turn_text: Mutex<String>,
+    /// Final text of the last COMPLETED turn (the collect source).
+    completed_turn_text: Mutex<String>,
     /// Armed stop: the next observed `cancelled` stop reason binds this
     /// confirmation reference to the terminal fact.
     stop_armed: Mutex<Option<AuthorityConfirmationRef>>,
@@ -406,7 +408,13 @@ impl AcpxController {
         command
             .args(&self.config.args)
             .current_dir(&self.config.workspace_root)
+            // Minimal env allowlist (the adapter child needs a resolver
+            // and a home to start) plus the operator-configured map.
+            // Nothing else from this process leaks into the harness.
             .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", std::env::var("HOME").unwrap_or_default())
+            .env("TMPDIR", std::env::var("TMPDIR").unwrap_or_default())
             .envs(&self.config.env)
             .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
@@ -627,6 +635,7 @@ impl SessionController for AcpxController {
             events: Mutex::new(Vec::new()),
             next_seq: AtomicU64::new(0),
             last_turn_text: Mutex::new(String::new()),
+            completed_turn_text: Mutex::new(String::new()),
             stop_armed: Mutex::new(None),
             objective_done: AtomicU8::new(UNSET),
             correction_legs: AtomicU64::new(0),
@@ -804,7 +813,7 @@ impl SessionController for AcpxController {
         let state = self.state(handle)?;
         let mut hasher = Sha256::new();
         let summary = {
-            let text = state.last_turn_text.lock();
+            let text = state.completed_turn_text.lock();
             hasher.update(text.as_bytes());
             if text.is_empty() {
                 None
@@ -959,11 +968,12 @@ async fn reader_task(
 /// cancel binds its confirmation; anything else fails.
 async fn handle_turn_end(state: &Arc<SessionState>, stop_reason: &str) {
     let armed = state.stop_armed.lock().clone();
+    let final_text = std::mem::take(&mut *state.last_turn_text.lock());
+    *state.completed_turn_text.lock() = final_text.clone();
+    let summary = (!final_text.is_empty()).then_some(final_text);
     if let Some(confirmation) = armed
         && stop_reason == "cancelled"
     {
-        let final_text = std::mem::take(&mut *state.last_turn_text.lock());
-        let summary = (!final_text.is_empty()).then_some(final_text);
         state.push_event(
             SessionEventKindV1::Terminal,
             Some(SessionTerminalOutcomeV1::Cancelled { confirmation }),
@@ -971,8 +981,6 @@ async fn handle_turn_end(state: &Arc<SessionState>, stop_reason: &str) {
         );
         return;
     }
-    let final_text = std::mem::take(&mut *state.last_turn_text.lock());
-    let summary = (!final_text.is_empty()).then_some(final_text);
     match stop_reason {
         "end_turn" => {
             if state.objective_done.load(Ordering::SeqCst) == UNSET {
