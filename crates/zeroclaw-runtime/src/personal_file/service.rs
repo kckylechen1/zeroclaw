@@ -4,7 +4,7 @@
 //! Nothing in this module registers a model-visible tool, joins a
 //! composition, or reads configuration. The service is constructed
 //! explicitly with already-admitted root descriptors by a trusted
-//! composition root (or a test fixture); #272 owns any later wiring.
+//! composition root (or a test fixture); a later slice owns any wiring.
 //!
 //! On platforms without the descriptor primitives every admission and
 //! every operation answers [`PersonalFileError::UnsupportedSafely`] —

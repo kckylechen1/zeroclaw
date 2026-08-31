@@ -1,4 +1,4 @@
-//! LA1 boundary discriminations (#271) and negative-capability scans.
+//! personal_file boundary discriminations and negative-capability scans.
 //!
 //! Each required discrimination from the issue appears here under its
 //! exact name. The race test injects attacker steps through the
@@ -1016,11 +1016,11 @@ fn module_source_scans_hold() {
     }
 }
 
-/// R2 finding #2 and the additive law: nothing anywhere registers a
+/// Additive law (and the review finding that raised it): nothing registers a
 /// `personal_file` tool. The minimal membership table, the runtime tool
 /// assembly, and the Reasoning/Supervisor exact-capability surfaces must
-/// not name the capability (LA1 is model-unregistered; LA2/LA3 own any
-/// later wiring).
+/// not name the capability (this slice is model-unregistered; later slices
+/// own any wiring).
 #[test]
 fn personal_file_is_registered_nowhere() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");

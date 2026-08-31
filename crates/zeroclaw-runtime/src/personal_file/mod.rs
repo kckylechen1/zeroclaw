@@ -1,5 +1,5 @@
-//! The model-unregistered `personal_file` safe core (LAST-A LA1,
-//! #271).
+//! The model-unregistered `personal_file` safe core
+//! (the personal_file slice of the LAST-A capability split).
 //!
 //! A typed filesystem kernel for personal documents (notes, config
 //! drafts) that can operate **only** inside explicitly admitted root
@@ -13,7 +13,7 @@
 //! no shell/file_write/file_edit change
 //! ```
 //!
-//! The frozen authority law (owner decisions D1–D7 in #266):
+//! The frozen authority law (the owner-ratified personal-file decisions):
 //!
 //! - **No ambient authority.** Roots enter only through explicit
 //!   admission of an absolute, normal, non-symlink directory. No
@@ -59,7 +59,7 @@
 //! service.rs   operation semantics over the safety core
 //! ```
 //!
-//! #272 owns root/read wiring and migration closure; #273 owns the
+//! Follow-up slices own root/read wiring, migration closure, and the
 //! atomic authority cutover. Until then nothing outside this module may
 //! reference it.
 
