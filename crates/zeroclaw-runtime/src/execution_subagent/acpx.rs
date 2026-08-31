@@ -725,9 +725,23 @@ impl SessionController for AcpxController {
         let key = format!("pending-{}", Uuid::new_v4().simple());
         self.sessions.lock().insert(key.clone(), state.clone());
 
-        if let Err(error) = self.open_session(&state, &spec.prompt).await {
-            self.sessions.lock().remove(&key);
+        // The whole open (handshake + session/new + mode + objective
+        // turn) runs under ONE adapter-owned bound: even if the caller
+        // cancels the start future outright, the child never outlives
+        // this bound plus the state slot it is registered in.
+        let open_budget = self.config.startup_timeout * 3 + self.config.turn_timeout;
+        let opened = match tokio::time::timeout(
+            open_budget,
+            self.open_session(&state, &spec.prompt),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(ControllerError::Unavailable),
+        };
+        if let Err(error) = opened {
             Self::terminate(&state).await;
+            self.sessions.lock().remove(&key);
             return Err(error);
         }
         self.sessions.lock().remove(&key);
@@ -974,8 +988,11 @@ impl SessionController for AcpxController {
 impl Drop for AcpxController {
     fn drop(&mut self) {
         // Synchronous last-resort kill: no harness child may outlive the
-        // controller that owns it (group-signalled, then start_kill; the
-        // tokio orphan reaper collects the zombie).
+        // LAST controller that owns it. Clones share the session map —
+        // only the final owner runs the kill sweep.
+        if Arc::strong_count(&self.sessions) > 1 {
+            return;
+        }
         for state in self.sessions.lock().values() {
             state.alive.store(UNSET, Ordering::SeqCst);
             let process = state.process.lock().take();
