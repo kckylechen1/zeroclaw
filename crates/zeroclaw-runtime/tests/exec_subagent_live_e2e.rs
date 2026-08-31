@@ -97,7 +97,7 @@ fn acpx_config(workspace: PathBuf, declared: Vec<&'static str>) -> AcpxControlle
         session_mode: std::env::var("ZC_A2_SESSION_MODE")
             .ok()
             .filter(|value| !value.is_empty()),
-        startup_timeout: Duration::from_secs(120),
+        startup_timeout: Duration::from_secs(90),
         turn_timeout: Duration::from_secs(300),
         max_line_bytes: 256 * 1024,
         declared_capabilities: declared,

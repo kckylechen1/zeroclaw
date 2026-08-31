@@ -38,6 +38,7 @@
 //! - **No new durable store.** This adapter opens no database and owns no
 //!   DDL; the only persistence is the tachi-owned spine across the wire.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -178,9 +179,11 @@ pub struct TachiSessionFactSink {
     config: TachiFactSinkConfig,
     conn: tokio::sync::Mutex<Option<Box<dyn McpTransportConn>>>,
     attachment: RwLock<Option<String>>,
-    /// Last observed canonical revision (the intervention gate's
-    /// expected-session-revision input).
-    last_revision: RwLock<u64>,
+    /// Last observed canonical revision PER ATTACHMENT (the intervention
+    /// gate's expected-session-revision input). Keyed by attachment id so
+    /// a second run on the same sink can never inherit another session's
+    /// revision high-water.
+    last_revisions: RwLock<HashMap<String, u64>>,
     next_id: RwLock<u64>,
 }
 
@@ -193,7 +196,7 @@ impl TachiSessionFactSink {
             config,
             conn: tokio::sync::Mutex::new(None),
             attachment: RwLock::new(None),
-            last_revision: RwLock::new(0),
+            last_revisions: RwLock::new(HashMap::new()),
             next_id: RwLock::new(1),
         })
     }
@@ -408,8 +411,20 @@ impl TachiSessionFactSink {
         })
     }
 
-    fn note_revision(&self, view: &SessionStateView) {
-        *self.last_revision.write() = view.canonical_revision.max(*self.last_revision.read());
+    fn note_revision(&self, attachment: &SessionAttachmentRef, view: &SessionStateView) {
+        self.last_revisions
+            .write()
+            .entry(attachment.as_str().to_string())
+            .and_modify(|current| *current = (*current).max(view.canonical_revision))
+            .or_insert(view.canonical_revision);
+    }
+
+    fn revision_for(&self, attachment: &SessionAttachmentRef) -> u64 {
+        self.last_revisions
+            .read()
+            .get(attachment.as_str())
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -568,7 +583,7 @@ impl SessionFactSink for TachiSessionFactSink {
                 .to_string(),
             state: {
                 let state = Self::parse_state(&receipt.body)?;
-                self.note_revision(&state);
+                self.note_revision(attachment, &state);
                 state
             },
         })
@@ -589,7 +604,7 @@ impl SessionFactSink for TachiSessionFactSink {
                     "intervention_request_id": request_id.as_str(),
                     "intervention_kind": kind.as_str(),
                     "intervention_reason": reason,
-                    "expected_session_revision": *self.last_revision.read(),
+                    "expected_session_revision": self.revision_for(attachment),
                 }),
             )
             .await?;
@@ -716,7 +731,7 @@ impl SessionFactSink for TachiSessionFactSink {
                 .unwrap_or(0),
             state: {
                 let state = Self::parse_state(&receipt.body)?;
-                self.note_revision(&state);
+                self.note_revision(&SessionAttachmentRef::from_opaque(attachment_id), &state);
                 state
             },
         })
@@ -739,7 +754,7 @@ impl SessionFactSink for TachiSessionFactSink {
             )));
         }
         let state = Self::parse_state(&receipt.body)?;
-        self.note_revision(&state);
+        self.note_revision(attachment, &state);
         Ok(state)
     }
 }

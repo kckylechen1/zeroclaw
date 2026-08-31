@@ -599,8 +599,9 @@ impl ExecutionSubagentTool {
                         usage.actions += 1;
                         if deadline_hit {
                             // No new correction legs past the ceiling: the
-                            // next loop pass ends the run typed.
-                            saw_terminal = true;
+                            // fact is already ingested above; the bottom of
+                            // the loop ends the run typed (TimedOut) — no
+                            // fabricated Failed.
                             break;
                         }
                         // Deliberately NOT wrapped in the remaining-budget
@@ -656,12 +657,18 @@ impl ExecutionSubagentTool {
             }
         }
 
-        // Nonterminal exits do NOT stop the session here: a stop would
-        // mint a second (cancellation) terminal after the outcome the
-        // harness already reported, and the port has no kill-without-
-        // receipt operation. The controller's Drop is the kill authority
-        // (group-kill at ownership release); the spine keeps its honest
-        // state — no contradictory terminal is minted.
+        // Nonterminal exits still kill the carrier — an immediate host
+        // stop terminates and reaps the process group but mints NO event
+        // into the fact stream (best-effort; the spine keeps its honest
+        // state instead of a fabricated terminal).
+        if matches!(
+            status,
+            ExecutionRunStatusV1::TimedOut
+                | ExecutionRunStatusV1::Aborted
+                | ExecutionRunStatusV1::Failed
+        ) {
+            let _ = self.controller.stop(&handle, false).await;
+        }
 
         // 6. CLEANUP + COLLECT for non-cancelled endings (the cancel chain
         // already reported its own terminal; cleanup is still ours to

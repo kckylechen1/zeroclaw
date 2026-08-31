@@ -732,36 +732,46 @@ impl SessionController for AcpxController {
 
         // The open is guarded by a cancellation-safe watchdog: if the
         // caller's own ceiling cancels the start future mid-open, the
-        // future's cleanup arms never run — the watchdog still does. It
-        // kills the child and removes the pending map entry, so a
-        // cancelled start leaks neither a process nor state.
-        let open_budget = self.config.startup_timeout * 2 + self.config.turn_timeout;
+        // future's cleanup arms never run — the watchdog still does. The
+        // settled flag is claimed with a compare-exchange so the watchdog
+        // and the completing open can never BOTH own the teardown, it
+        // kills the child through the state slot, and it removes the
+        // exact pending entry — a cancelled start leaks neither a process
+        // nor state.
+        let open_budget = self.config.startup_timeout * 3 + self.config.turn_timeout;
         let watchdog_state = Arc::downgrade(&state);
         let watchdog_sessions = Arc::clone(&self.sessions);
         zeroclaw_spawn::spawn!(async move {
             tokio::time::sleep(open_budget).await;
             if let Some(state) = watchdog_state.upgrade()
-                && state.settled.load(Ordering::SeqCst) == UNSET
+                && state
+                    .settled
+                    .compare_exchange(UNSET, SET, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
             {
-                if state.alive.load(Ordering::SeqCst) == ALIVE_YES {
-                    Self::terminate(&state).await;
-                }
-                state.settled.store(SET, Ordering::SeqCst);
-                let session_id = state.session_id();
-                // A cancelled open leaves the state behind only in this
-                // dead entry; remove it so the map never accumulates.
-                watchdog_sessions.lock().remove(&session_id);
-                watchdog_sessions
-                    .lock()
-                    .remove(&format!("pending-{}", &session_id));
+                Self::terminate(&state).await;
+                watchdog_sessions.lock().remove(&state.session_id());
             }
         });
         let opened = self.open_session(&state, &spec.prompt).await;
-        state.settled.store(SET, Ordering::SeqCst);
+        let settled_first = state
+            .settled
+            .compare_exchange(UNSET, SET, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
         if let Err(error) = opened {
             Self::terminate(&state).await;
+            if !settled_first {
+                // The watchdog already tore this open down (over ceiling):
+                // surface the typed failure instead of a possibly-published
+                // handle.
+                return Err(ControllerError::Unavailable);
+            }
             self.sessions.lock().remove(&key);
             return Err(error);
+        }
+        if !settled_first {
+            self.sessions.lock().remove(&key);
+            return Err(ControllerError::Unavailable);
         }
         self.sessions.lock().remove(&key);
         let session_id = state.session_id();
