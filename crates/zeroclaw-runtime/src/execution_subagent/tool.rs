@@ -766,6 +766,10 @@ impl ExecutionSubagentTool {
         if let (true, Some(confirmation)) = (receipt.confirmed, confirmation.clone()) {
             *source_revision += 1;
             let revision = *source_revision;
+            // The spine REFUSES a cancelled terminal whose top-level
+            // confirmation reference is absent: the binding is carried on
+            // the fact itself, not only inside the typed outcome.
+            let bound_confirmation = confirmation.as_str().to_string();
             if let Err(error) = self
                 .sink
                 .ingest_event(
@@ -775,7 +779,7 @@ impl ExecutionSubagentTool {
                         kind: SessionEventKindV1::Terminal,
                         outcome: Some(SessionTerminalOutcomeV1::Cancelled { confirmation }),
                         source_revision: revision,
-                        authority_confirmation_ref: None,
+                        authority_confirmation_ref: Some(bound_confirmation),
                         summary: None,
                         payload_digest: None,
                     },

@@ -392,24 +392,35 @@ async fn live_transport_drop_then_resume_keeps_the_same_harness_session() {
             &handle.remote_session,
             0,
         )
-        .await;
-    match resumed {
-        Ok(handle) => {
-            assert_eq!(
-                handle.remote_session.as_str(),
-                original,
-                "resume must reuse the harness-minted identity, never mint a new one"
-            );
-            println!("LIVE resume: same session id after transport drop — PASS");
-        }
-        Err(ControllerError::Unavailable) => {
-            // The harness adapter declined the resume (session already
-            // reaped). That is a typed, honest outcome — but it must not
-            // be a NEW session.
-            println!("LIVE resume: adapter declined resume (typed unavailable) — accepted");
-        }
-        Err(error) => panic!("unexpected resume error: {error}"),
-    }
+        .await
+        .expect("reattach must resume the SAME harness session (typed failure would mean recovery is broken)");
+    assert_eq!(
+        resumed.remote_session.as_str(),
+        original,
+        "resume must reuse the harness-minted identity, never mint a new one"
+    );
+    // Usability, not just identity: the resumed session answers a real
+    // turn through the port.
+    let prompt = revived
+        .prompt(
+            &resumed,
+            "Reply with exactly: RESUME-USABLE. Do not use any tools.",
+        )
+        .await
+        .expect("the resumed session must accept a prompt");
+    assert!(prompt.accepted);
+    let page = revived
+        .watch(&resumed, 0, 64)
+        .await
+        .expect("the resumed session's event stream is readable");
+    assert!(
+        page.events.iter().any(|event| event
+            .summary
+            .as_deref()
+            .is_some_and(|text| text.contains("RESUME-USABLE"))),
+        "the resumed session must produce observable facts"
+    );
+    println!("LIVE resume: same session id after transport drop, usable — PASS");
     let _ = std::fs::remove_dir_all(&workspace);
 }
 
@@ -715,9 +726,13 @@ async fn live_report_surface_carries_no_secrets_or_paths() {
     )));
     let sink = Arc::new(RecordingSink::default());
     let tool = ExecutionSubagentTool::new(controller, sink, host());
+    // Discriminating by construction: the objective makes the harness
+    // echo the workspace path itself, so the raw string WOULD reach the
+    // report unless the transport scrubs it.
     let report = tool
         .run(&ExecutionRunRequest {
-            objective: "Reply with exactly: CLEAN. Do not use any tools.".to_string(),
+            objective: "Reply with exactly the absolute path of the current working directory and nothing else. Do not use any tools."
+                .to_string(),
             correction_prompt: None,
         })
         .await;
@@ -725,7 +740,11 @@ async fn live_report_surface_carries_no_secrets_or_paths() {
     let workspace_text = workspace.display().to_string();
     assert!(
         !serialized.contains(&workspace_text),
-        "the report surface must not carry the repository path"
+        "the report surface must not carry the repository path even when the harness echoes it"
+    );
+    assert!(
+        serialized.contains("<workspace>"),
+        "the echoed path must arrive scrubbed"
     );
     let operator_env = env_json_map("ZC_A2_ACPX_ENV_JSON");
     assert!(

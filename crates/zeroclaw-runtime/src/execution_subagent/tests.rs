@@ -496,7 +496,11 @@ fn module_source_scans_hold() {
         );
     }
     // Every OTHER module file (including the tachi facade sink) stays
-    // process-free: the spawn capability has exactly one home.
+    // free of DIRECT spawn tokens. This is a lexical per-file law, not a
+    // reachability proof: tachi_sink reaches process spawning indirectly
+    // through the shared zeroclaw-tools MCP transport factory — that
+    // capability is owned (and environment/stderr-scoped) by the tools
+    // crate, not re-declared here.
     let other_files = [
         "execution_subagent/mod.rs",
         "execution_subagent/controller.rs",

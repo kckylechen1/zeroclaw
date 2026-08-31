@@ -182,7 +182,13 @@ struct SessionState {
     /// every event id distinct (two real tool calls are two facts) while
     /// staying stable across a transport drop (the state, and therefore
     /// the ordinal space, survives the drop), so the spine's replay dedup
-    /// stays exact.
+    /// stays exact. The salt is per state instance: a controller-restart
+    /// resume opens a fresh ordinal namespace, so facts observed by the
+    /// new instance can never collide with (and be silently dropped
+    /// against) the pre-restart stream — they are distinct ids at the
+    /// spine, and the rank/revision guard owns ordering.
+    ordinal_salt: u64,
+    /// Monotone counter over this state's observed facts.
     update_ordinal: AtomicU64,
     /// Accumulating text of the turn in flight.
     last_turn_text: Mutex<String>,
@@ -223,7 +229,11 @@ impl SessionState {
         // spine's replay dedup sees identical ids exactly once. History
         // replayed by `session/load` never reaches here (the load gate).
         let ordinal = self.update_ordinal.fetch_add(1, Ordering::SeqCst);
-        let event_id = event_identity(kind.as_str(), summary.as_deref(), ordinal);
+        let event_id = event_identity(
+            kind.as_str(),
+            summary.as_deref(),
+            (self.ordinal_salt, ordinal),
+        );
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst) + 1;
         self.events.lock().push(ControllerEvent {
             seq,
@@ -239,12 +249,17 @@ impl SessionState {
 /// Event identity: ordinal-scoped (distinct real facts never collide)
 /// and stable across a transport drop (the ordinal space lives in the
 /// session state, which outlives the child).
-fn event_identity(kind: &str, summary: Option<&str>, ordinal: u64) -> SessionEventIdRef {
+fn event_identity(
+    kind: &str,
+    summary: Option<&str>,
+    (salt, ordinal): (u64, u64),
+) -> SessionEventIdRef {
     let mut hasher = Sha256::new();
     hasher.update(kind.as_bytes());
     hasher.update([0x1f]);
     hasher.update(summary.unwrap_or_default().as_bytes());
     hasher.update([0x1f]);
+    hasher.update(salt.to_le_bytes());
     hasher.update(ordinal.to_le_bytes());
     let digest = hasher.finalize();
     SessionEventIdRef::from_opaque(format!(
@@ -690,6 +705,9 @@ impl SessionController for AcpxController {
             events: Mutex::new(Vec::new()),
             next_seq: AtomicU64::new(0),
             update_ordinal: AtomicU64::new(0),
+            ordinal_salt: u64::from_le_bytes(
+                Uuid::new_v4().as_bytes()[..8].try_into().unwrap_or([0; 8]),
+            ),
             last_turn_text: Mutex::new(String::new()),
             completed_turn_text: Mutex::new(String::new()),
             stop_armed: Mutex::new(None),
@@ -917,6 +935,9 @@ impl SessionController for AcpxController {
                 events: Mutex::new(Vec::new()),
                 next_seq: AtomicU64::new(0),
                 update_ordinal: AtomicU64::new(0),
+                ordinal_salt: u64::from_le_bytes(
+                    Uuid::new_v4().as_bytes()[..8].try_into().unwrap_or([0; 8]),
+                ),
                 last_turn_text: Mutex::new(String::new()),
                 completed_turn_text: Mutex::new(String::new()),
                 stop_armed: Mutex::new(None),
