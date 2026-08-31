@@ -42,16 +42,19 @@
 //!   spine-issued revision and authoritative facts replay exactly once
 //!   (dedup by event id) without regressing canonical state.
 
+pub mod acpx;
 pub mod controller;
 pub mod facts;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub mod router;
+pub mod tachi_sink;
 pub mod tool;
 
 #[cfg(test)]
 mod tests;
 
+pub use acpx::{AcpxController, AcpxControllerConfig};
 pub use controller::{
     ControllerError, ControllerEvent, GatedSessionController, PromptReceipt, SessionCapabilities,
     SessionCollectView, SessionController, SessionEventPage, SessionHandle, SessionStartSpec,
@@ -59,6 +62,7 @@ pub use controller::{
 };
 pub use facts::{SessionBinding, SessionEventFact, SessionFactSink};
 pub use router::{DispatchError, DispatchPlan, plan_dispatch};
+pub use tachi_sink::{TachiFactSinkConfig, TachiSessionFactSink};
 pub use tool::{
     ExecutionRunRequest, ExecutionSessionInventory, ExecutionSubagentProfile, ExecutionSubagentTool,
 };

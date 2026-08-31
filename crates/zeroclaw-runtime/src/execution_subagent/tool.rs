@@ -308,9 +308,17 @@ impl ExecutionSubagentTool {
         };
         meter.try_record_action();
         usage.actions += 1;
-        let handle = match self.controller.start(&spec).await {
-            Ok(handle) => handle,
-            Err(error) => {
+        // The frozen run ceiling bounds STARTUP too: a transport that
+        // cannot open a session inside the budget ends the run typed
+        // instead of stretching it.
+        let handle = match tokio::time::timeout(
+            Duration::from_secs(self.profile.budget.time_limit_secs),
+            self.controller.start(&spec),
+        )
+        .await
+        {
+            Ok(Ok(handle)) => handle,
+            Ok(Err(error)) => {
                 return self.typed_failure_report(
                     &run_ref,
                     report_route,
@@ -322,11 +330,27 @@ impl ExecutionSubagentTool {
                     format!("controller refused start (fail closed): {error}"),
                 );
             }
+            Err(_) => {
+                return self.typed_failure_report(
+                    &run_ref,
+                    report_route,
+                    &mut usage,
+                    started,
+                    0,
+                    None,
+                    ExecutionRunStatusV1::TimedOut,
+                    "controller start exceeded the frozen run ceiling (fail closed)".to_string(),
+                );
+            }
         };
 
         // 2. ATTACH — bind the minted session to the spine (fail closed:
         // an unavailable sink means the facts cannot flow, and facts ARE
         // the product; the session is stopped, never left unobserved).
+        // The spine attachment carries the HOST-ADMITTED set (the
+        // profile): that is the upward capability plane. The handle's
+        // narrower intersection governs the downward plane (what the
+        // gated client may exercise against the transport).
         let binding = SessionBinding {
             host_identity: self.host_identity.clone(),
             adapter_connection: spec.adapter_connection.clone(),
@@ -437,10 +461,16 @@ impl ExecutionSubagentTool {
         // paths report their own spine terminal.
         let mut decided_status: Option<ExecutionRunStatusV1> = None;
 
+        let mut deadline_hit = false;
         loop {
             if Instant::now() >= deadline {
-                status = ExecutionRunStatusV1::TimedOut;
-                break;
+                if deadline_hit {
+                    // Already drained once past the deadline with no
+                    // authoritative terminal: end typed.
+                    status = ExecutionRunStatusV1::TimedOut;
+                    break;
+                }
+                deadline_hit = true;
             }
             if meter.exhausted() {
                 status = ExecutionRunStatusV1::Aborted;
@@ -571,6 +601,21 @@ impl ExecutionSubagentTool {
                         };
                         corrections_used += 1;
                         usage.actions += 1;
+                        if deadline_hit {
+                            // No new correction legs past the ceiling: the
+                            // fact is already ingested above; the bottom of
+                            // the loop ends the run typed (TimedOut) — no
+                            // fabricated Failed.
+                            break;
+                        }
+                        // Deliberately NOT wrapped in the remaining-budget
+                        // timeout: cancelling a mid-turn prompt races the
+                        // remote completion and can mint a contradictory
+                        // terminal. The delivery is bounded by the
+                        // transport's own turn ceiling instead; the wall
+                        // clock may overshoot the budget by at most one
+                        // turn, and the deadline law above still ends the
+                        // run typed at the next loop check.
                         match self.controller.prompt(&handle, correction).await {
                             Ok(_) => {}
                             Err(error) => {
@@ -607,6 +652,29 @@ impl ExecutionSubagentTool {
                 let _ = reason;
                 break;
             }
+            if deadline_hit {
+                // One drain pass already ran past the deadline with no
+                // authoritative terminal: lifecycle truth preserved, the
+                // ceiling still ends the run typed.
+                status = ExecutionRunStatusV1::TimedOut;
+                break;
+            }
+        }
+
+        // Nonterminal exits still kill the carrier — an immediate host
+        // stop terminates and reaps the process group but mints NO event
+        // into the fact stream (best-effort; the spine keeps its honest
+        // state instead of a fabricated terminal). The gated client may
+        // TYPE-REFUSE this stop when the profile did not declare cancel —
+        // that refusal is the frozen capability law, not a fallback path:
+        // such a session is reclaimed when the controller is released.
+        if matches!(
+            status,
+            ExecutionRunStatusV1::TimedOut
+                | ExecutionRunStatusV1::Aborted
+                | ExecutionRunStatusV1::Failed
+        ) {
+            let _ = self.controller.stop(&handle, false).await;
         }
 
         // 6. CLEANUP + COLLECT for non-cancelled endings (the cancel chain
@@ -760,27 +828,41 @@ impl ExecutionSubagentTool {
         *facts_reported += 1;
         // (d) the bound terminal fact — only when the receipt chain is
         // complete; otherwise no terminal fact exists (honest absence).
+        // A FAILED terminal-fact write can never surface as graceful: the
+        // facts ARE the product, so the run ends failed (zero fabricated
+        // completion at the parent boundary).
         if let (true, Some(confirmation)) = (receipt.confirmed, confirmation.clone()) {
+            *source_revision += 1;
+            let revision = *source_revision;
+            // The spine REFUSES a cancelled terminal whose top-level
+            // confirmation reference is absent: the binding is carried on
+            // the fact itself, not only inside the typed outcome.
+            let bound_confirmation = confirmation.as_str().to_string();
+            if let Err(error) = self
+                .sink
+                .ingest_event(
+                    attachment,
+                    &SessionEventFact {
+                        event_id: SessionEventIdRef::from_opaque(format!("{run_ref}-terminal")),
+                        kind: SessionEventKindV1::Terminal,
+                        outcome: Some(SessionTerminalOutcomeV1::Cancelled { confirmation }),
+                        source_revision: revision,
+                        authority_confirmation_ref: Some(bound_confirmation),
+                        summary: None,
+                        payload_digest: None,
+                    },
+                )
+                .await
             {
-                *source_revision += 1;
-                let revision = *source_revision;
-                let _ = self
-                    .sink
-                    .ingest_event(
-                        attachment,
-                        &SessionEventFact {
-                            event_id: SessionEventIdRef::from_opaque(format!("{run_ref}-terminal")),
-                            kind: SessionEventKindV1::Terminal,
-                            outcome: Some(SessionTerminalOutcomeV1::Cancelled { confirmation }),
-                            source_revision: revision,
-                            authority_confirmation_ref: None,
-                            summary: None,
-                            payload_digest: None,
-                        },
-                    )
-                    .await;
-                *facts_reported += 1;
+                return (
+                    ExecutionRunStatusV1::Failed,
+                    Some(format!(
+                        "fact sink refused the bound terminal fact (no graceful fabrication): {error}"
+                    )),
+                    Vec::new(),
+                );
             }
+            *facts_reported += 1;
         }
         let record = ExecutionInterventionRecordV1 {
             request_id: request_id.as_str().to_string(),
