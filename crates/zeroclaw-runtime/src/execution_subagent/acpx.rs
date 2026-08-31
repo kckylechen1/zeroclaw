@@ -326,7 +326,7 @@ impl AcpxProcess {
     fn kill_now(&self) {
         self.pending.lock().clear();
         let child = self.child.lock().take();
-        if let Some(mut child) = child {
+        if let Some(child) = child {
             #[cfg(unix)]
             if let Some(pid) = child.id() {
                 let pgid = pid as libc::pid_t;
@@ -336,6 +336,7 @@ impl AcpxProcess {
             }
             #[cfg(not(unix))]
             {
+                let mut child = child;
                 let _ = child.start_kill();
             }
         }
@@ -1158,14 +1159,12 @@ impl SessionController for AcpxController {
                 scrub: self.scrub.clone(),
             }),
         };
-        if let Err(error) = self.resume_session(&state).await {
-            // resume_session self-cleans its own child on every failure
-            // leg. The map entry is deliberately NOT removed: for an
-            // existing state it is shared with any concurrent recovery
-            // (Arc-identity cannot prove exclusive ownership), and a dead
-            // retained state is simply retryable.
-            return Err(error);
-        }
+        // resume_session self-cleans its own child on every failure leg.
+        // The map entry is deliberately NOT removed: for an existing state
+        // it is shared with any concurrent recovery (Arc-identity cannot
+        // prove exclusive ownership), and a dead retained state is simply
+        // retryable.
+        self.resume_session(&state).await?;
         self.sessions
             .lock()
             .insert(remote_session.as_str().to_string(), state.clone());
