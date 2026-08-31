@@ -67,6 +67,10 @@ ignore = [
     # Direct deps and ratatui-core upgraded to 0.18.2; remaining 0.16.4 pinned by
     # nostr-sdk 0.44 (nostr-database / nostr-relay-pool) behind channel-nostr.
     { id = "RUSTSEC-2026-0253", reason = "lru unsound LruCache::pop panic-safety; direct+ratatui upgraded to >=0.18.2; remaining 0.16.4 pinned transitively by nostr-sdk 0.44; upstream fix pending" },
+    # wasmtime 47.0.3 type confusion + sandbox escape; fix in wasmtime 48;
+    # transitive via zeroclaw-plugins; upgrade tracked separately.
+    { id = "RUSTSEC-2026-0268", reason = "wasmtime type confusion; transitive via zeroclaw-plugins; fix in wasmtime 48; upgrade tracked" },
+    { id = "RUSTSEC-2026-0269", reason = "wasmtime sandbox escape; transitive via zeroclaw-plugins; fix in wasmtime 48; upgrade tracked" },
 ]
 
 [licenses]
