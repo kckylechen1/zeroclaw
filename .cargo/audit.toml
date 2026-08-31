@@ -17,7 +17,9 @@ ignore = [
     "RUSTSEC-2026-0099",  # rustls-webpki wildcard name constraints; 0.102.x copy via rumqttc v0.25.1; 0.103.x copy is patched; awaiting rumqttc upgrade
 
     # ── Informational only (no tracking issue required) ────────────────────
-    "RUSTSEC-2024-0384",  # instant unmaintained; informational advisory; transitive dep
+    "RUSTSEC-2024-0384",
+    "RUSTSEC-2026-0268",  # wasmtime type confusion; fix in wasmtime 48; upgrade tracked
+    "RUSTSEC-2026-0269",  # wasmtime sandbox escape; fix in wasmtime 48; upgrade tracked  # instant unmaintained; informational advisory; transitive dep
 
     # ── audit.toml/deny.toml drift reconcile + wasmtime CVEs; tracking #8519 ──
     # cargo-audit reads the whole Cargo.lock, so it flags advisories cargo-deny
