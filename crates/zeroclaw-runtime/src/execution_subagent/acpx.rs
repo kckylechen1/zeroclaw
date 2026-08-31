@@ -689,10 +689,19 @@ impl AcpxController {
         match load {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(_)) | Err(_) => {
-                // The load refused or timed out: the freshly spawned child
-                // is registered in the state slot — tear it down so a
-                // failed resume never strands a live process.
-                Self::terminate(state).await;
+                // The load refused or timed out: tear down THIS attempt's
+                // child — and only this attempt's. A newer recovery that
+                // has already replaced the state slot owns its own child;
+                // the generic terminate would kill that one instead.
+                let slot = state.process.lock().clone();
+                match slot {
+                    Some(current) if Arc::ptr_eq(&current, &process) => {
+                        Self::terminate(state).await;
+                    }
+                    _ => {
+                        process.pending.lock().clear();
+                    }
+                }
                 Err(ControllerError::Unavailable)
             }
         }
@@ -1122,19 +1131,12 @@ impl SessionController for AcpxController {
             }),
         };
         if let Err(error) = self.resume_session(&state).await {
-            // A failed resume must not strand the freshly spawned child:
-            // it is registered in the state slot (pre-handshake), so the
-            // terminate path owns it. The map entry is removed only when
-            // it is still THIS state (ownership-checked): a concurrent
-            // successful recovery is never deleted.
+            // A failed resume must not strand the freshly spawned child
+            // (terminate path owns it). The map entry is deliberately NOT
+            // removed: for an existing state it is shared with any
+            // concurrent recovery (Arc-identity cannot prove exclusive
+            // ownership), and a dead retained state is simply retryable.
             Self::terminate(&state).await;
-            let mut sessions = self.sessions.lock();
-            if sessions
-                .get(remote_session.as_str())
-                .is_some_and(|entry| Arc::ptr_eq(entry, &state))
-            {
-                sessions.remove(remote_session.as_str());
-            }
             return Err(error);
         }
         self.sessions
@@ -1193,6 +1195,16 @@ impl AcpxController {
                 .map(|name| (*name).to_string())
                 .collect::<Vec<String>>(),
         )
+    }
+
+    /// Test/observability accessor: whether the harness child behind this
+    /// handle is still alive. Doc-hidden: not part of the port contract.
+    #[doc(hidden)]
+    pub fn session_alive_for_test(&self, handle: &SessionHandle) -> bool {
+        match self.state(handle) {
+            Ok(state) => state.alive.load(Ordering::SeqCst) == ALIVE_YES,
+            Err(_) => false,
+        }
     }
 
     fn terminal_observed(state: &SessionState, confirmation: &AuthorityConfirmationRef) -> bool {
