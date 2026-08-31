@@ -591,26 +591,18 @@ impl ExecutionSubagentTool {
                         };
                         corrections_used += 1;
                         usage.actions += 1;
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        let delivery = tokio::time::timeout(
-                            remaining,
-                            self.controller.prompt(&handle, correction),
-                        )
-                        .await;
-                        match delivery {
-                            Ok(Ok(_)) => {}
-                            Ok(Err(error)) => {
+                        // Deliberately NOT wrapped in the remaining-budget
+                        // timeout: cancelling a mid-turn prompt races the
+                        // remote completion and can mint a contradictory
+                        // terminal. The delivery is bounded by the
+                        // transport's own turn ceiling instead; the wall
+                        // clock may overshoot the budget by at most one
+                        // turn, and the deadline law above still ends the
+                        // run typed at the next loop check.
+                        match self.controller.prompt(&handle, correction).await {
+                            Ok(_) => {}
+                            Err(error) => {
                                 refusal = Some(format!("correction delivery failed: {error}"));
-                                saw_terminal = true;
-                                break;
-                            }
-                            Err(_) => {
-                                // The ceiling is the ceiling: report failed
-                                // rather than fabricate a graceful end.
-                                refusal = Some(
-                                    "correction delivery exceeded the frozen run ceiling"
-                                        .to_string(),
-                                );
                                 saw_terminal = true;
                                 break;
                             }
@@ -645,18 +637,12 @@ impl ExecutionSubagentTool {
             }
         }
 
-        // Nonterminal exits must not leave a live harness behind: the
-        // transport is stopped best-effort (local terminate; no spine
-        // terminal fact is minted — the spine stays honest with
-        // unknown_orphaned/reconnect instead of a fabricated outcome).
-        if matches!(
-            status,
-            ExecutionRunStatusV1::TimedOut
-                | ExecutionRunStatusV1::Aborted
-                | ExecutionRunStatusV1::Failed
-        ) {
-            let _ = self.controller.stop(&handle, false).await;
-        }
+        // Nonterminal exits do NOT stop the session here: a stop would
+        // mint a second (cancellation) terminal after the outcome the
+        // harness already reported, and the port has no kill-without-
+        // receipt operation. The controller's Drop is the kill authority
+        // (group-kill at ownership release); the spine keeps its honest
+        // state — no contradictory terminal is minted.
 
         // 6. CLEANUP + COLLECT for non-cancelled endings (the cancel chain
         // already reported its own terminal; cleanup is still ours to

@@ -205,6 +205,10 @@ struct SessionState {
     /// but not appended (already-observed facts).
     load_in_flight: AtomicU8,
     alive: AtomicU8,
+    /// The open sequence has settled (success or typed failure). A
+    /// cancelled `start` future never sets this; the open watchdog reads
+    /// it to decide whether a stranded child must be killed.
+    settled: AtomicU8,
     /// Bounded, secret-free fact projection: occurrences of these strings
     /// (workspace path, operator env values) are replaced before any
     /// summary leaves the transport.
@@ -720,25 +724,31 @@ impl SessionController for AcpxController {
             correction_legs: AtomicU64::new(0),
             load_in_flight: AtomicU8::new(UNSET),
             alive: AtomicU8::new(UNSET),
+            settled: AtomicU8::new(UNSET),
             scrub: self.scrub.clone(),
         });
         let key = format!("pending-{}", Uuid::new_v4().simple());
         self.sessions.lock().insert(key.clone(), state.clone());
 
-        // The whole open (handshake + session/new + mode + objective
-        // turn) runs under ONE adapter-owned bound: even if the caller
-        // cancels the start future outright, the child never outlives
-        // this bound plus the state slot it is registered in.
+        // The open is guarded by a cancellation-safe watchdog: if the
+        // caller's own ceiling cancels the start future mid-open, the
+        // future's cleanup arms never run — the watchdog still does. It
+        // fires only when the open never settled, and kills through the
+        // state slot the child is registered in.
         let open_budget = self.config.startup_timeout * 3 + self.config.turn_timeout;
-        let opened = match tokio::time::timeout(
-            open_budget,
-            self.open_session(&state, &spec.prompt),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(ControllerError::Unavailable),
-        };
+        let watchdog_state = Arc::downgrade(&state);
+        let watchdog_budget = open_budget + Duration::from_secs(5);
+        zeroclaw_spawn::spawn!(async move {
+            tokio::time::sleep(watchdog_budget).await;
+            if let Some(state) = watchdog_state.upgrade()
+                && state.settled.load(Ordering::SeqCst) == UNSET
+                && state.alive.load(Ordering::SeqCst) == ALIVE_YES
+            {
+                Self::terminate(&state).await;
+            }
+        });
+        let opened = self.open_session(&state, &spec.prompt).await;
+        state.settled.store(SET, Ordering::SeqCst);
         if let Err(error) = opened {
             Self::terminate(&state).await;
             self.sessions.lock().remove(&key);
@@ -964,6 +974,7 @@ impl SessionController for AcpxController {
                 correction_legs: AtomicU64::new(0),
                 load_in_flight: AtomicU8::new(UNSET),
                 alive: AtomicU8::new(UNSET),
+                settled: AtomicU8::new(SET),
                 scrub: self.scrub.clone(),
             }),
         };
