@@ -395,8 +395,11 @@ pub enum PersonalFileRefusal {
         /// The offending input.
         path: String,
     },
-    /// The root (or an ancestor of it) is a symlink; no-follow admission
-    /// refused it.
+    /// The root itself is a symlink; no-follow admission refused it.
+    /// (Symlinked ancestors *above* the root are resolved by admission's
+    /// canonicalization by design — see `safety::admit_root` for the
+    /// ground-truth caveat; the canonical path is then walked no-follow,
+    /// so a symlink planted on it refuses there.)
     SymlinkedRoot {
         /// The offending path.
         path: String,

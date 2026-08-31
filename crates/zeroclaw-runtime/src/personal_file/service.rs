@@ -338,11 +338,11 @@ impl PersonalFileService {
             let parent = safety::walk_parents(&root.inner, path, true, true)?;
             let display = safety::display_path(&root.inner, path);
             safety::run_race_hook();
-            // Stage under a freshly minted (unobservable) name, verify
-            // the staged inode is unshared on its held descriptor, then
-            // publish atomically with no-clobber semantics. The final
-            // leaf name never carries partially written content and is
-            // not visible to watch-and-link before publication.
+            // Stage under a freshly minted name, verify the staged
+            // inode is unshared on its held descriptor, then publish
+            // atomically with no-clobber semantics. The final leaf name
+            // never carries partially written content; see the module
+            // residual for the documented staging window.
             let staged_name = safety::staged_name_for(path.leaf());
             let publish = (|| {
                 let staged = safety::write_staged_file(&parent, &staged_name, content.as_bytes())?;

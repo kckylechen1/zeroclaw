@@ -554,6 +554,20 @@ fn bind_trash_slot(trash: &OwnedFd, slot: &str, trash_id: ObjectId) -> SafetyRes
         }
         .into());
     }
+    // The bind must prove the object is the freshly created, empty
+    // directory (nlink == 2: parent + "."; no entries). A substituted
+    // directory that already carries planted content fails here, and a
+    // failed bind performs no name-based cleanup, so foreign content is
+    // never adopted or removed through this module.
+    let stat = fstat(&dir).map_err(errno_to_io)?;
+    #[allow(clippy::unnecessary_cast)]
+    let links = stat.st_nlink as u64;
+    if links != 2 || !directory_is_empty(&dir)? {
+        return Err(PersonalFileRefusal::TrashUnavailable {
+            reason: "the fresh trash slot is not the freshly created empty directory".to_string(),
+        }
+        .into());
+    }
     Ok(TrashSlot {
         name: slot.to_string(),
         dir,
@@ -561,8 +575,27 @@ fn bind_trash_slot(trash: &OwnedFd, slot: &str, trash_id: ObjectId) -> SafetyRes
     })
 }
 
-/// Remove the named trash directory only while it still names an object
-/// with the given identity; a no-op otherwise.
+/// True when the directory held by `dir` contains no entries besides
+/// `.` and `..`.
+fn directory_is_empty(dir: &OwnedFd) -> SafetyResult<bool> {
+    let mut listing = rustix::fs::Dir::read_from(dir).map_err(errno_to_io)?;
+    while let Some(entry) = listing.read() {
+        let entry = entry.map_err(errno_to_io)?;
+        let name = entry.file_name();
+        if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Remove the named trash directory only while it still names an
+/// object with the given identity; a no-op otherwise. The check and
+/// the removal are two syscalls: a rename landing between them can at
+/// worst leave this module's own orphan in place or remove an empty
+/// same-named directory planted by an in-root-writable adversary (who
+/// per the adversary model already holds broader direct authority);
+/// it cannot remove non-empty foreign data.
 fn identity_checked_rmdir(trash: &OwnedFd, slot: &str, probe: &ObjectId) -> bool {
     match statat(trash, slot, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) if ObjectId::of(&stat) == *probe => {
