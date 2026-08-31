@@ -26,6 +26,7 @@ pub mod integrations;
 pub mod nodes;
 pub mod observability;
 pub mod peers;
+pub mod personal_file;
 pub mod platform;
 pub mod procedure_v1;
 pub mod process_stats;
