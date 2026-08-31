@@ -414,10 +414,6 @@ impl AcpxController {
         })
     }
 
-    fn open_attempt_token(&self) -> u64 {
-        u64::from_le_bytes(Uuid::new_v4().as_bytes()[..8].try_into().unwrap_or([0; 8]))
-    }
-
     fn state(&self, handle: &SessionHandle) -> Result<Arc<SessionState>, ControllerError> {
         let id = handle.remote_session.as_str().to_string();
         self.sessions
@@ -492,9 +488,8 @@ impl AcpxController {
     /// the reader/writer tasks wired to `state`.
     async fn spawn_and_initialize(
         &self,
-        state: &Arc<SessionState>,
-        attempt_token: u64,
-    ) -> Result<Arc<AcpxProcess>, ControllerError> {
+        recovery: &mut RecoveryGuard<'_>,
+    ) -> Result<(), ControllerError> {
         // Direct argv exec — no shell anywhere on this path. The child is
         // killed when its handle drops (no orphaned harness sessions).
         #[cfg(unix)]
@@ -541,21 +536,25 @@ impl AcpxController {
             Arc::new(Mutex::new(HashMap::new()));
         let process = Arc::new(AcpxProcess {
             child: Mutex::new(Some(child)),
-            attempt_token,
+            attempt_token: recovery.attempt_token,
             stdin_tx,
             pending: pending.clone(),
             next_id: AtomicU64::new(1),
         });
+        // Registered with the guard BEFORE the handshake: any failure or
+        // cancellation after this point is cleaned by the guard's Drop
+        // (token-matched kill), never skipped.
+        recovery.process = Some(process.clone());
 
         // The child is owned by the state from this moment: every
         // failure path below (and the tool's own fail-closed arms) kills
         // it through the state slot.
-        state.alive.store(ALIVE_YES, Ordering::SeqCst);
-        *state.process.lock() = Some(process.clone());
+        recovery.state.alive.store(ALIVE_YES, Ordering::SeqCst);
+        *recovery.state.process.lock() = Some(process.clone());
 
         // Reader: owns stdout until EOF.
         let reader_process = process.clone();
-        let reader_state = state.clone();
+        let reader_state = recovery.state.clone();
         let line_ceiling = self.config.max_line_bytes;
         zeroclaw_spawn::spawn!(async move {
             reader_task(stdout, reader_process, reader_state, pending, line_ceiling).await;
@@ -584,7 +583,7 @@ impl AcpxController {
                 "acpx adapter negotiated an unexpected protocol version".to_string(),
             ));
         }
-        Ok(process)
+        Ok(())
     }
 
     /// Create the harness session and run the objective turn. The remote
@@ -594,9 +593,17 @@ impl AcpxController {
         state: &Arc<SessionState>,
         prompt: &str,
     ) -> Result<(), ControllerError> {
-        let process = self
-            .spawn_and_initialize(state, self.open_attempt_token())
-            .await?;
+        let process = {
+            let mut recovery = RecoveryGuard::new(state, self.config.startup_timeout);
+            recovery.spawn_and_initialize(self).await?;
+            // The open settled successfully: the guard must NOT kill the
+            // child at drop — the session is live and owned by the state.
+            recovery.done = true;
+            recovery
+                .process
+                .clone()
+                .ok_or(ControllerError::Unavailable)?
+        };
         let result = tokio::time::timeout(
             self.config.startup_timeout,
             Self::request(
@@ -812,11 +819,7 @@ impl<'a> RecoveryGuard<'a> {
         controller: &AcpxController,
     ) -> Result<(), ControllerError> {
         self.state.load_in_flight.store(SET, Ordering::SeqCst);
-        self.process = Some(
-            controller
-                .spawn_and_initialize(self.state, self.attempt_token)
-                .await?,
-        );
+        controller.spawn_and_initialize(self).await?;
         Ok(())
     }
 
