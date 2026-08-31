@@ -410,9 +410,18 @@ pub(crate) fn write_staged_file(
     name: &str,
     bytes: &[u8],
 ) -> SafetyResult<OwnedFd> {
+    // O_CREAT|O_EXCL returns the descriptor of the object THIS call
+    // created, atomically: the identity below is ours by construction.
     let file = match open_leaf(parent, name, true, true) {
         Ok(file) => file,
         Err(error) => return Err(errno_to_io(error)),
+    };
+    let identity = match fstat(&file) {
+        Ok(stat) => ObjectId::of(&stat),
+        Err(error) => {
+            drop(file);
+            return Err(errno_to_io(error));
+        }
     };
     let write = (|| -> SafetyResult<()> {
         {
@@ -432,7 +441,11 @@ pub(crate) fn write_staged_file(
         Ok(()) => Ok(file),
         Err(error) => {
             drop(file);
-            let _ = unlinkat(parent, name, AtFlags::empty());
+            // Identity-checked: if the name was swapped for a foreign
+            // object before this removal, the foreign object is left
+            // untouched; our own (unlinked) inode simply stays orphaned
+            // under its attacker-chosen name inside the same directory.
+            identity_checked_unlink(parent, name, &identity);
             Err(error)
         }
     }
@@ -589,17 +602,32 @@ fn directory_is_empty(dir: &OwnedFd) -> SafetyResult<bool> {
     Ok(true)
 }
 
-/// Remove the named trash directory only while it still names an
-/// object with the given identity; a no-op otherwise. The check and
-/// the removal are two syscalls: a rename landing between them can at
-/// worst leave this module's own orphan in place or remove an empty
-/// same-named directory planted by an in-root-writable adversary (who
-/// per the adversary model already holds broader direct authority);
-/// it cannot remove non-empty foreign data.
+/// Remove the named directory only while it still names an object with
+/// the given identity; a no-op otherwise. The check and the removal
+/// are two syscalls: a rename landing between them can at worst leave
+/// this module's own orphan in place or remove an empty same-named
+/// directory planted by an in-root-writable adversary (who per the
+/// adversary model already holds broader direct authority); it cannot
+/// remove non-empty foreign data.
 fn identity_checked_rmdir(trash: &OwnedFd, slot: &str, probe: &ObjectId) -> bool {
-    match statat(trash, slot, AtFlags::SYMLINK_NOFOLLOW) {
+    identity_checked_remove(trash, slot, probe, true)
+}
+
+/// Unlink the named file only while it still names an object with the
+/// given identity; a no-op otherwise (same documented window class).
+fn identity_checked_unlink(dir: &OwnedFd, name: &str, probe: &ObjectId) -> bool {
+    identity_checked_remove(dir, name, probe, false)
+}
+
+fn identity_checked_remove(dir: &OwnedFd, name: &str, probe: &ObjectId, directory: bool) -> bool {
+    match statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) if ObjectId::of(&stat) == *probe => {
-            unlinkat(trash, slot, AtFlags::REMOVEDIR).is_ok()
+            let flags = if directory {
+                AtFlags::REMOVEDIR
+            } else {
+                AtFlags::empty()
+            };
+            unlinkat(dir, name, flags).is_ok()
         }
         _ => false,
     }
