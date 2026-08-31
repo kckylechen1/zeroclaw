@@ -481,7 +481,7 @@ impl std::fmt::Display for PersonalFileRefusal {
                 write!(f, "root must be an absolute, normal path: {path}")
             }
             PersonalFileRefusal::SymlinkedRoot { path } => {
-                write!(f, "root or its ancestor is a symlink: {path}")
+                write!(f, "root itself is a symlink: {path}")
             }
             PersonalFileRefusal::Symlink { path } => {
                 write!(f, "symlink refused (no-follow): {path}")

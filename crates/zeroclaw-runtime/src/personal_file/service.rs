@@ -417,12 +417,26 @@ impl PersonalFileService {
             let trash = safety::open_trash(&root.inner)?;
             let slot = safety::fresh_trash_slot(&trash)?;
             let recovery_name = safety::recovery_name_for(path.leaf());
-            if let Err(error) = safety::write_staged_file(&slot.dir, &recovery_name, &prior_bytes) {
-                safety::discard_trash_slot(&trash, &slot, &[recovery_name]);
+            // Hold the recovery write's identity: cleanup may only
+            // remove a file whose name still resolves to what THIS
+            // module wrote. A failed write owns nothing in the slot, so
+            // no file is removed at all.
+            let recovery = safety::write_staged_file(&slot.dir, &recovery_name, &prior_bytes);
+            let recovery_identity = match &recovery {
+                Ok(file) => fstat(file).ok().map(|stat| ObjectId::of(&stat)),
+                Err(_) => None,
+            };
+            if let Err(error) = recovery {
+                safety::discard_trash_slot(&trash, &slot, &[]);
                 return Err(error);
             }
+            drop(recovery);
             safety::fsync_dir_best_effort(&slot.dir);
             let prior_in_trash = format!("{TRASH_NAMESPACE}/{}/{recovery_name}", slot.name);
+            let recovery_file = safety::SlotFile {
+                name: recovery_name.clone(),
+                identity: recovery_identity,
+            };
 
             // Test-only race window: an attacker step may now swap the leaf.
             safety::run_race_hook();
@@ -441,7 +455,7 @@ impl PersonalFileService {
                     Ok(())
                 });
             if let Err(error) = recheck {
-                safety::discard_trash_slot(&trash, &slot, &[recovery_name]);
+                safety::discard_trash_slot(&trash, &slot, &[recovery_file]);
                 return Err(error);
             }
 
@@ -453,7 +467,7 @@ impl PersonalFileService {
                 match safety::write_staged_file(&parent, &staged_name, new_content.as_bytes()) {
                     Ok(staged) => staged,
                     Err(error) => {
-                        safety::discard_trash_slot(&trash, &slot, &[recovery_name]);
+                        safety::discard_trash_slot(&trash, &slot, &[recovery_file]);
                         return Err(error);
                     }
                 };
@@ -472,12 +486,12 @@ impl PersonalFileService {
                 }
                 Err(rustix::io::Errno::NOENT) => {
                     safety::remove_staged(&parent, &staged_name);
-                    safety::discard_trash_slot(&trash, &slot, &[recovery_name]);
+                    safety::discard_trash_slot(&trash, &slot, &[recovery_file]);
                     Err(PersonalFileRefusal::ConcurrentModification { path: display }.into())
                 }
                 Err(error) => {
                     safety::remove_staged(&parent, &staged_name);
-                    safety::discard_trash_slot(&trash, &slot, &[recovery_name]);
+                    safety::discard_trash_slot(&trash, &slot, &[recovery_file]);
                     Err(rustix_errno_to_io(error))
                 }
             }

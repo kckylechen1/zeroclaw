@@ -605,14 +605,38 @@ fn identity_checked_rmdir(trash: &OwnedFd, slot: &str, probe: &ObjectId) -> bool
     }
 }
 
+/// A file this module wrote into a trash slot, named by the identity
+/// captured from its own held descriptor at write time.
+pub(crate) struct SlotFile {
+    /// The name the file was written under.
+    pub name: String,
+    /// The identity captured from the held descriptor after the write.
+    /// `None` means the write failed: the name is never removed.
+    pub identity: Option<ObjectId>,
+}
+
 /// Remove a trash slot that a failed operation left behind (best
-/// effort): unlink the given file names inside the bound slot, then
-/// remove the slot directory — but only while the name still resolves
-/// to the object bound at creation. All names are freshly minted by
-/// this module, so the cleanup cannot hit foreign data.
-pub(crate) fn discard_trash_slot(trash: &OwnedFd, slot: &TrashSlot, file_names: &[String]) {
-    for name in file_names {
-        let _ = unlinkat(&slot.dir, name.as_str(), AtFlags::empty());
+/// effort). A file name is unlinked ONLY while it still resolves to
+/// the identity this module captured when it wrote that file: content
+/// this module never wrote (e.g. planted after an adopted-slot
+/// substitution) has no captured identity and is never removed. The
+/// slot directory itself is then removed only while its name still
+/// resolves to the object bound at creation. The stat/unlink pairing
+/// per name is a documented best-effort window (see
+/// `identity_checked_rmdir`).
+pub(crate) fn discard_trash_slot(trash: &OwnedFd, slot: &TrashSlot, files: &[SlotFile]) {
+    for file in files {
+        let owned = file
+            .identity
+            .map(|identity| {
+                statat(&slot.dir, file.name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+                    .map(|stat| ObjectId::of(&stat) == identity)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if owned {
+            let _ = unlinkat(&slot.dir, file.name.as_str(), AtFlags::empty());
+        }
     }
     let _ = identity_checked_rmdir(trash, &slot.name, &slot.identity);
 }
