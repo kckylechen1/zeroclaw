@@ -52,6 +52,11 @@ process.stdin.on("data", (d) => {{
       }}
       send({{ id: msg.id, result: {{}} }});
       if (mode === "flap") process.exit(0);
+      if (mode === "load-emit") {{
+        setTimeout(() => {{
+          send({{ jsonrpc: "2.0", method: "session/update", params: {{ update: {{ sessionUpdate: "tool_call", toolCallId: `tc-${{Date.now()}}` }} }} }});
+        }}, 300);
+      }}
     }} else if (msg.method === "session/prompt") {{
       send({{ jsonrpc: "2.0", method: "session/update", params: {{ update: {{ sessionUpdate: "agent_message_chunk", content: {{ type: "text", text: "FAKE-DONE" }} }} }} }});
       send({{ id: msg.id, result: {{ stopReason: "end_turn" }} }});
@@ -479,35 +484,35 @@ async fn fake_adapter_failed_load_teardown_kills_only_own_child() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Repeated productive reattach cycles: recovery → prompt (observed
-/// events) → transport drop → recovery … The flapping budget must reset
-/// on observed progress, so productive cycles never exhaust it.
+/// The flapping budget must not exhaust across productive cycles: six
+/// real drop → same-session recovery cycles on ONE session state, each
+/// recovery followed by observed progress (the adapter's post-load
+/// tool activity). Without the streak reset the fourth cycle would hit
+/// the bound and fail typed.
 #[tokio::test]
 async fn fake_adapter_productive_cycles_keep_the_budget_alive() {
     let dir = scratch("zc-fake-cycles");
-    let adapter = write_fake_adapter(&dir, "normal", "auto");
+    let adapter = write_fake_adapter(&dir, "load-emit", "fake-cycles-1");
     let controller = Arc::new(
-        AcpxController::new(fake_config(&dir, &adapter, "normal", "fake-cycles-1"))
+        AcpxController::new(fake_config(&dir, &adapter, "load-emit", "fake-cycles-1"))
             .expect("controller constructs"),
     );
-    for cycle in 0..6 {
-        let handle = controller
-            .start(&spec_for(
-                &dir,
-                "Reply with CYCLE. Do not use any tools.",
-                "conn-fake-cycles",
-            ))
-            .await
-            .expect("cycle start");
-        assert!(controller.session_alive_for_test(&handle));
+    let handle = controller
+        .start(&spec_for(
+            &dir,
+            "Reply with anything. Do not use any tools.",
+            "conn-fake-cycles",
+        ))
+        .await
+        .expect("cycle start");
+    assert!(controller.session_alive_for_test(&handle));
 
+    let mut cursor = 0;
+    for cycle in 0..6 {
         // A REAL transport drop each cycle (immediate host kill, no event
         // minted), so every recovery exercises a genuine `session/load`.
         let _ = controller.stop(&handle, false).await;
-        assert!(
-            !controller.session_alive_for_test(&handle),
-            "cycle {cycle}: the transport must be dead before recovery"
-        );
+        assert!(!controller.session_alive_for_test(&handle));
 
         let resumed = controller
             .reattach(
@@ -522,24 +527,15 @@ async fn fake_adapter_productive_cycles_keep_the_budget_alive() {
             handle.remote_session.as_str()
         );
 
-        // The recovered session is productive: a real prompt turn whose
-        // events are observed through the port.
-        controller
-            .prompt(&resumed, "Reply with CYCLE. Do not use any tools.")
-            .await
-            .expect("the recovered session must accept a prompt");
+        // The recovered session shows observable progress (the adapter's
+        // post-load tool activity) — which also resets the flapping
+        // streak via the watch return path.
         let page = controller
-            .watch(&resumed, 0, 64)
+            .watch(&resumed, cursor, 64)
             .await
             .expect("events after recovery");
-        assert!(
-            page.events.iter().any(|event| event
-                .summary
-                .as_deref()
-                .is_some_and(|text| text.contains("FAKE-DONE"))),
-            "the recovered session must produce observable events"
-        );
+        assert!(!page.events.is_empty(), "cycle {cycle}: events must flow");
+        cursor = page.next_seq;
     }
-    println!("LIVE cycles: 6 productive reattach cycles completed");
     let _ = std::fs::remove_dir_all(&dir);
 }
