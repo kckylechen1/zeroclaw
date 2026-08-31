@@ -494,27 +494,11 @@ impl SessionFactSink for TachiSessionFactSink {
                 SessionFactError::Refused("attach receipt carries no attachment id".to_string())
             })?;
         *self.attachment.write() = Some(attachment_id.to_string());
-        // Bound the revision map WITHOUT dropping live entries: overlapping
-        // runs keep their own revision high-waters; the bound only retires
-        // the OLDEST attachments once the map exceeds a generous window
-        // (an evicted attachment's next fact re-seeds its entry from the
-        // spine's receipt, and its intervention gate degrades to a typed
-        // refusal, never to a wrong revision).
-        {
-            let mut revisions = self.last_revisions.write();
-            const REVISION_MAP_BOUND: usize = 16;
-            if !revisions.contains_key(attachment_id) && revisions.len() >= REVISION_MAP_BOUND {
-                let oldest = revisions
-                    .iter()
-                    .min_by_key(|(_, revision)| **revision)
-                    .map(|(key, _)| key.clone());
-                if let Some(oldest) = oldest
-                    && oldest.as_str() != attachment_id
-                {
-                    revisions.remove(&oldest);
-                }
-            }
-        }
+        // The revision map grows by ONE u64 per attachment (per run): no
+        // eviction heuristic here — evicting by a revision-derived key can
+        // retire a LIVE attachment and degrade its intervention gate. The
+        // per-run footprint is a single integer; long-lived daemons bound
+        // it by the number of runs they host.
         Ok(SessionAttachmentRef::from_opaque(attachment_id))
     }
 

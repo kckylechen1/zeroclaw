@@ -77,6 +77,10 @@ const CANCEL_GRACE: Duration = Duration::from_secs(10);
 /// One watch long-poll window.
 const WATCH_POLL_WINDOW: Duration = Duration::from_secs(5);
 const ALIVE_YES: u8 = 1;
+/// How long a terminal-reached session stays retrievable: the owning
+/// run's collect happens immediately after the loop; reattaching to a
+/// terminal session is not meaningful for the ephemeral vertical.
+const TERMINAL_RETENTION: Duration = Duration::from_secs(120);
 const UNSET: u8 = 0;
 const SET: u8 = 1;
 
@@ -209,9 +213,12 @@ struct SessionState {
     /// cancelled `start` future never sets this; the open watchdog reads
     /// it to decide whether a stranded child must be killed.
     settled: AtomicU8,
-    /// A terminal fact was observed: the run is over, the state is
-    /// evictable (the spine owns canonical truth from here).
+    /// A terminal fact was observed: the run is over, the state becomes
+    /// evictable after a retention window long enough for the owning run
+    /// to finish collect (the spine owns canonical truth from here).
     terminal_reached: AtomicU8,
+    /// When this state becomes evictable (`None` = window not started).
+    evict_after: Mutex<Option<std::time::Instant>>,
     /// Bounded, secret-free fact projection: occurrences of these strings
     /// (workspace path, operator env values) are replaced before any
     /// summary leaves the transport.
@@ -237,6 +244,7 @@ impl SessionState {
         // replayed by `session/load` never reaches here (the load gate).
         if matches!(kind, SessionEventKindV1::Terminal) {
             self.terminal_reached.store(SET, Ordering::SeqCst);
+            *self.evict_after.lock() = Some(std::time::Instant::now() + TERMINAL_RETENTION);
         }
         let ordinal = self.update_ordinal.fetch_add(1, Ordering::SeqCst);
         let event_id = event_identity(
@@ -732,14 +740,25 @@ impl SessionController for AcpxController {
             alive: AtomicU8::new(UNSET),
             settled: AtomicU8::new(UNSET),
             terminal_reached: AtomicU8::new(UNSET),
+            evict_after: Mutex::new(None),
             scrub: self.scrub.clone(),
         });
-        // Evict terminal-reached sessions: their runs are over, the spine
-        // owns canonical truth, and a shared controller must not retain
-        // every completed run's projection forever.
-        self.sessions
-            .lock()
-            .retain(|_, state| state.terminal_reached.load(Ordering::SeqCst) == UNSET);
+        // Evict terminal-reached sessions past their retention window:
+        // the spine owns canonical truth, and a shared controller must not
+        // retain every completed run's projection forever. The window
+        // keeps the owning run's collect (and any concurrent reader) safe;
+        // transport-dead sessions (no terminal) stay retained for
+        // reattach.
+        let now = std::time::Instant::now();
+        self.sessions.lock().retain(|_, state| {
+            if state.terminal_reached.load(Ordering::SeqCst) == UNSET {
+                return true;
+            }
+            match *state.evict_after.lock() {
+                Some(at) => now < at,
+                None => false,
+            }
+        });
         let key = format!("pending-{}", Uuid::new_v4().simple());
         self.sessions.lock().insert(key.clone(), state.clone());
 
@@ -807,6 +826,23 @@ impl SessionController for AcpxController {
         }
         self.sessions.lock().remove(&key);
         let session_id = state.session_id();
+        // Take the lock ONLY to inspect: the decision (and the possible
+        // kill) happens outside the guard, so no lock guard is ever held
+        // across an await.
+        let collision = {
+            let sessions = self.sessions.lock();
+            sessions
+                .get(&session_id)
+                .is_some_and(|existing| !Arc::ptr_eq(existing, &state))
+        };
+        if collision {
+            // The harness repeated a live session identity: refuse rather
+            // than silently re-point an existing binding.
+            Self::terminate(&state).await;
+            return Err(ControllerError::Refused(
+                "acpx adapter repeated a live session identity (fail closed)".to_string(),
+            ));
+        }
         self.sessions
             .lock()
             .insert(session_id.clone(), state.clone());
@@ -1029,7 +1065,8 @@ impl SessionController for AcpxController {
                 load_in_flight: AtomicU8::new(UNSET),
                 alive: AtomicU8::new(UNSET),
                 settled: AtomicU8::new(SET),
-                terminal_reached: AtomicU8::new(SET),
+                terminal_reached: AtomicU8::new(UNSET),
+                evict_after: Mutex::new(None),
                 scrub: self.scrub.clone(),
             }),
         };
@@ -1039,14 +1076,10 @@ impl SessionController for AcpxController {
             .insert(remote_session.as_str().to_string(), state.clone());
         Ok(SessionHandle {
             remote_session: remote_session.clone(),
-            capabilities: SessionCapabilities::from_names(
-                &self
-                    .config
-                    .declared_capabilities
-                    .iter()
-                    .map(|name| (*name).to_string())
-                    .collect::<Vec<String>>(),
-            )?,
+            // Same single enforcement boundary as start: the transport's
+            // supported set intersected with its configured declaration.
+            capabilities: AcpxControllerConfig::supported_capabilities()
+                .intersection(self.config_declared()?),
         })
     }
 }
@@ -1083,9 +1116,8 @@ impl Drop for AcpxController {
 }
 
 impl AcpxController {
-    /// The capability set a started session actually carries: the
-    /// intersection of the host's requested set and this transport's
-    /// configured declared set (both sources enforced, not trusted).
+    /// The transport's configured declared set (one side of the
+    /// capability intersection enforced at start/reattach).
     fn config_declared(&self) -> Result<SessionCapabilities, ControllerError> {
         SessionCapabilities::from_names(
             &self
