@@ -225,6 +225,9 @@ struct SessionState {
     /// Consecutive resume attempts without intervening events (the
     /// flapping-transport bound for `watch`).
     resume_streak: AtomicU64,
+    /// Serializes resume attempts on this state: two concurrent
+    /// recoveries can no longer interleave spawn/publish/teardown.
+    resume_lock: tokio::sync::Mutex<()>,
     /// Bounded, secret-free fact projection: occurrences of these strings
     /// (workspace path, operator env values) are replaced before any
     /// summary leaves the transport.
@@ -684,6 +687,9 @@ impl AcpxController {
     /// Bring a dead transport back to the SAME harness session through
     /// ACP `session/load` (no new session is minted).
     async fn resume_session(&self, state: &Arc<SessionState>) -> Result<(), ControllerError> {
+        // One recovery at a time per session: concurrent attempts would
+        // race the process slot and the alive flag.
+        let _resume_guard = state.resume_lock.lock().await;
         state.load_in_flight.store(SET, Ordering::SeqCst);
         let spawned = self.spawn_and_initialize(state).await;
         let process = match spawned {
@@ -793,6 +799,7 @@ impl SessionController for AcpxController {
             terminal_reached: AtomicU8::new(UNSET),
             evict_after: Mutex::new(None),
             resume_streak: AtomicU64::new(0),
+            resume_lock: tokio::sync::Mutex::new(()),
             scrub: self.scrub.clone(),
         });
         // Evict terminal-reached sessions past their retention window:
@@ -1156,6 +1163,7 @@ impl SessionController for AcpxController {
                 terminal_reached: AtomicU8::new(UNSET),
                 evict_after: Mutex::new(None),
                 resume_streak: AtomicU64::new(0),
+                resume_lock: tokio::sync::Mutex::new(()),
                 scrub: self.scrub.clone(),
             }),
         };
@@ -1354,15 +1362,17 @@ async fn reader_task(
             (None, None) => {}
         }
     }
-    // EOF: the transport is gone. Clear the slot ONLY if it still holds
-    // this reader's process (a newer resume's child must survive).
-    state.alive.store(UNSET, Ordering::SeqCst);
-    let mut slot = state.process.lock();
-    if slot
-        .as_ref()
-        .is_some_and(|current| Arc::ptr_eq(current, &process))
-    {
-        *slot = None;
+    // EOF: the transport is gone. Retirement is ownership-scoped: the
+    // alive flag drops only when the slot still holds THIS reader's
+    // process (a newer resume's child owns its own liveness).
+    let owns_slot = {
+        let slot = state.process.lock();
+        slot.as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &process))
+    };
+    if owns_slot {
+        state.alive.store(UNSET, Ordering::SeqCst);
+        *state.process.lock() = None;
     }
     // Resolve every pending waiter with nothing: they surface as
     // Unavailable (fail closed).
