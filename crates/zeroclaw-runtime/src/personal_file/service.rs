@@ -343,7 +343,7 @@ impl PersonalFileService {
             // publish atomically with no-clobber semantics. The final
             // leaf name never carries partially written content and is
             // not visible to watch-and-link before publication.
-            let staged_name = format!(".{}.{}", path.leaf(), uuid::Uuid::new_v4());
+            let staged_name = safety::staged_name_for(path.leaf());
             let publish = (|| {
                 let staged = safety::write_staged_file(&parent, &staged_name, content.as_bytes())?;
                 drop(staged);
@@ -414,7 +414,7 @@ impl PersonalFileService {
             // unpredictable name with its own unshared-inode check.
             let trash = safety::open_trash(&root.inner)?;
             let (slot, slot_dir) = safety::fresh_trash_slot(&trash)?;
-            let recovery_name = format!("{}.pre", path.leaf());
+            let recovery_name = safety::recovery_name_for(path.leaf());
             if let Err(error) = safety::write_staged_file(&slot_dir, &recovery_name, &prior_bytes) {
                 safety::discard_trash_slot(&trash, &slot, &slot_dir, &[recovery_name]);
                 return Err(error);
@@ -446,7 +446,7 @@ impl PersonalFileService {
             // Stage the new content under a freshly minted name, then
             // publish atomically. The staged write already fsynced and
             // proved its inode unshared on the held descriptor.
-            let staged_name = format!(".{}.{}", path.leaf(), uuid::Uuid::new_v4());
+            let staged_name = safety::staged_name_for(path.leaf());
             let staged =
                 match safety::write_staged_file(&parent, &staged_name, new_content.as_bytes()) {
                     Ok(staged) => staged,
@@ -587,31 +587,40 @@ impl PersonalFileService {
             }
             let trash = safety::open_trash(&root.inner)?;
             let (slot, slot_dir) = safety::fresh_trash_slot(&trash)?;
-            safety::run_race_hook();
-            // Re-verify immediately before the rename: still the exact
-            // object that was classified, still unshared (files).
-            match safety::stat_leaf(&parent, path.leaf())? {
-                Some(restat) if ObjectId::of(&restat) == ObjectId::of(&stat) => {
-                    if FileType::from_raw_mode(restat.st_mode) == FileType::RegularFile {
-                        safety::require_unshared_inode(&restat, &display)?;
+            // Everything after slot creation rolls the slot back on any
+            // failure: a refused delete publishes nothing.
+            let outcome = (|| -> SafetyResult<PersonalFileResult> {
+                safety::run_race_hook();
+                // Re-verify immediately before the rename: still the
+                // exact object that was classified, still unshared
+                // (files).
+                match safety::stat_leaf(&parent, path.leaf())? {
+                    Some(restat) if ObjectId::of(&restat) == ObjectId::of(&stat) => {
+                        if FileType::from_raw_mode(restat.st_mode) == FileType::RegularFile {
+                            safety::require_unshared_inode(&restat, &display)?;
+                        }
+                    }
+                    _ => {
+                        return Err(PersonalFileRefusal::ConcurrentModification {
+                            path: display.clone(),
+                        }
+                        .into());
                     }
                 }
-                _ => {
+                safety::move_into_trash(&parent, path.leaf(), &trash, &slot_dir)?;
+                safety::fsync_dir_best_effort(&parent);
+                safety::fsync_dir_best_effort(&slot_dir);
+                Ok(PersonalFileResult::Trashed {
+                    trash_location: format!("{TRASH_NAMESPACE}/{slot}/{}", path.leaf()),
+                })
+            })();
+            match outcome {
+                Ok(result) => Ok(result),
+                Err(error) => {
                     safety::discard_trash_slot(&trash, &slot, &slot_dir, &[]);
-                    return Err(
-                        PersonalFileRefusal::ConcurrentModification { path: display }.into(),
-                    );
+                    Err(error)
                 }
             }
-            if let Err(error) = safety::move_into_trash(&parent, path.leaf(), &slot_dir) {
-                safety::discard_trash_slot(&trash, &slot, &slot_dir, &[]);
-                return Err(error);
-            }
-            safety::fsync_dir_best_effort(&parent);
-            safety::fsync_dir_best_effort(&slot_dir);
-            Ok(PersonalFileResult::Trashed {
-                trash_location: format!("{TRASH_NAMESPACE}/{slot}/{}", path.leaf()),
-            })
         }
     }
 
@@ -743,6 +752,8 @@ impl PersonalFileService {
 use crate::personal_file::domain::PersonalRootRef;
 #[cfg(unix)]
 use crate::personal_file::safety;
+#[cfg(unix)]
+use crate::personal_file::safety::SafetyResult;
 
 fn join_error(error: tokio::task::JoinError) -> PersonalFileError {
     PersonalFileError::Io(std::io::Error::from(error))

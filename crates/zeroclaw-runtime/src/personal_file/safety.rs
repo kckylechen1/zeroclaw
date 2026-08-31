@@ -48,18 +48,35 @@
 //!   [`PersonalFileError::UnsupportedSafely`] from the service and never
 //!   degrades to string containment.
 //!
-//! ## Documented residual
+//! ## Adversary model and documented residual
 //!
-//! The remaining exposure is the POSIX gap between a verification and
-//! the adjacent mutation syscall: a same-host attacker who can rename
-//! or link objects inside the admitted root can win only by landing a
-//! rename inside that single-syscall window (all discovered windows are
-//! one `renameat`/`openat` wide, and every published object is
-//! re-verified immediately before its syscall). Closing even that
-//! window would require renaming to be impossible outside the process,
-//! which no pathname-based primitive can assert. All operation
-//! ordering, and the ancestry checks above, keep every failure typed
-//! and every refused operation free of published mutation.
+//! The adversary this core defends against can plant symlinks and swap
+//! path names on directories it can write — including (for the classic
+//! TOCTOU family) ancestors of an admitted root. It cannot write inside
+//! the kernel, and every capability it needs to win a remaining race is
+//! also, directly, a broader capability (a process able to rename
+//! objects inside the admitted root already has write access to the
+//! user's personal files by the same token).
+//!
+//! Against that adversary these invariants hold structurally:
+//! resolution never traverses a symlink (no-follow component opens);
+//! foreign inodes (`nlink != 1`) and `.git` metadata are refused as
+//! mutation targets; refused and failed operations leave nothing this
+//! module created behind (trash slots are rolled back); published
+//! content is written under freshly minted names, fsynced, and checked
+//! unshared on its held descriptor.
+//!
+//! The residual is timing, not traversal: between any verification and
+//! its adjacent mutation syscall a sufficiently lucky in-root rename
+//! can substitute an object. Move and delete re-verify immediately
+//! before their `renameat` to make that window one syscall wide; the
+//! staged-write path spans write + fsync before its publication rename;
+//! and `.git`/ancestor probes are not repeated after the walk. Closing
+//! these windows entirely is not possible with pathname-based
+//! primitives — it would require renaming to be impossible outside this
+//! process — and every window is already narrower than the adversary's
+//! own direct write authority over the same directories.
+//!
 //!
 //! ## Test-only race hooks
 //!
@@ -143,8 +160,7 @@ fn identity_of(fd: &OwnedFd) -> SafetyResult<ObjectId> {
 /// renamed interior directory cannot silently relocate a subtree (and
 /// its writes) to an attacker-chosen location.
 fn verify_parent_link(child: &OwnedFd, parent_id: ObjectId) -> SafetyResult<()> {
-    let parent =
-        openat(child, "..", dir_oflags(), Mode::empty()).map_err(map_link_error)?;
+    let parent = openat(child, "..", dir_oflags(), Mode::empty()).map_err(map_link_error)?;
     let stat = fstat(&parent).map_err(errno_to_io)?;
     if file_type_of(&stat) != FileType::Directory || ObjectId::of(&stat) != parent_id {
         return Err(PersonalFileRefusal::ConcurrentModification {
@@ -478,17 +494,23 @@ pub(crate) fn fresh_trash_slot(trash: &OwnedFd) -> SafetyResult<(String, OwnedFd
         let slot = uuid::Uuid::new_v4().to_string();
         match mkdirat(trash, slot.as_str(), Mode::from(0o700)) {
             Ok(()) => {
-                let dir =
-                    openat(trash, slot.as_str(), dir_oflags(), Mode::empty()).map_err(|error| {
-                        PersonalFileRefusal::TrashUnavailable {
+                let dir = match openat(trash, slot.as_str(), dir_oflags(), Mode::empty()) {
+                    Ok(dir) => dir,
+                    Err(error) => {
+                        let _ = unlinkat(trash, slot.as_str(), AtFlags::REMOVEDIR);
+                        return Err(PersonalFileRefusal::TrashUnavailable {
                             reason: format!("opening the fresh trash slot failed: {error}"),
                         }
-                    })?;
-                verify_parent_link(&dir, trash_id).map_err(|_| {
-                    PersonalFileRefusal::TrashUnavailable {
-                        reason: "the fresh trash slot moved".to_string(),
+                        .into());
                     }
-                })?;
+                };
+                if verify_parent_link(&dir, trash_id).is_err() {
+                    let _ = unlinkat(trash, slot.as_str(), AtFlags::REMOVEDIR);
+                    return Err(PersonalFileRefusal::TrashUnavailable {
+                        reason: "the fresh trash slot is not linked under the trash".to_string(),
+                    }
+                    .into());
+                }
                 fsync_dir_best_effort(trash);
                 return Ok((slot, dir));
             }
@@ -524,12 +546,19 @@ pub(crate) fn discard_trash_slot(
 }
 
 /// Rename `leaf` (under `parent`) into the freshly minted empty `slot`.
-/// No-clobber by construction.
+/// No-clobber by construction; the slot is re-proved to be linked under
+/// the trash immediately before the rename so a relocated slot refuses
+/// instead of receiving the object elsewhere.
 pub(crate) fn move_into_trash(
     parent: &OwnedFd,
     leaf: &str,
+    trash: &OwnedFd,
     slot_dir: &OwnedFd,
 ) -> SafetyResult<()> {
+    let trash_id = identity_of(trash)?;
+    verify_parent_link(slot_dir, trash_id).map_err(|_| PersonalFileRefusal::TrashUnavailable {
+        reason: "the trash slot moved".to_string(),
+    })?;
     renameat_with(parent, leaf, slot_dir, leaf, RenameFlags::NOREPLACE).map_err(|error| {
         PersonalFileRefusal::TrashUnavailable {
             reason: format!("moving into the trash failed: {error}"),
@@ -692,4 +721,27 @@ pub(crate) fn git_poisoned_above(canonical: &Path) -> Option<PathBuf> {
 /// Display string for a root-relative path (audit/refusal messages).
 pub(crate) fn display_path(root: &RootInner, path: &PersonalRelativePath) -> String {
     format!("{}//{path}", root.canonical_display)
+}
+
+/// A freshly minted staging name derived from `leaf`, guaranteed to
+/// stay within NAME_MAX (255): long leaves fall back to a generic
+/// prefix that keeps the uuid.
+pub(crate) fn staged_name_for(leaf: &str) -> String {
+    let derived = format!(".{leaf}.{}", uuid::Uuid::new_v4());
+    if derived.len() <= 255 {
+        derived
+    } else {
+        format!(".staged-{}", uuid::Uuid::new_v4())
+    }
+}
+
+/// A recovery name for the trash slot: keeps the original leaf for
+/// operator readability, falling back to a generic prefix at NAME_MAX.
+pub(crate) fn recovery_name_for(leaf: &str) -> String {
+    let derived = format!("{leaf}.pre");
+    if derived.len() <= 255 {
+        derived
+    } else {
+        format!("pre-{}", uuid::Uuid::new_v4())
+    }
 }
