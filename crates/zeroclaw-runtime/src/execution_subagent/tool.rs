@@ -347,6 +347,10 @@ impl ExecutionSubagentTool {
         // 2. ATTACH — bind the minted session to the spine (fail closed:
         // an unavailable sink means the facts cannot flow, and facts ARE
         // the product; the session is stopped, never left unobserved).
+        // The spine attachment carries the HOST-ADMITTED set (the
+        // profile): that is the upward capability plane. The handle's
+        // narrower intersection governs the downward plane (what the
+        // gated client may exercise against the transport).
         let binding = SessionBinding {
             host_identity: self.host_identity.clone(),
             adapter_connection: spec.adapter_connection.clone(),

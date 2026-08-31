@@ -76,11 +76,14 @@ const SUMMARY_CEILING: usize = 2000;
 const CANCEL_GRACE: Duration = Duration::from_secs(10);
 /// One watch long-poll window.
 const WATCH_POLL_WINDOW: Duration = Duration::from_secs(5);
+/// Consecutive dead-transport resume attempts before `watch` fails
+/// closed (a flapping adapter must not trap the run).
+const MAX_WATCH_RESUMES: u64 = 3;
 const ALIVE_YES: u8 = 1;
 /// How long a terminal-reached session stays retrievable: the owning
 /// run's collect happens immediately after the loop; reattaching to a
 /// terminal session is not meaningful for the ephemeral vertical.
-const TERMINAL_RETENTION: Duration = Duration::from_secs(120);
+const TERMINAL_RETENTION: Duration = Duration::from_secs(300);
 const UNSET: u8 = 0;
 const SET: u8 = 1;
 
@@ -219,6 +222,9 @@ struct SessionState {
     terminal_reached: AtomicU8,
     /// When this state becomes evictable (`None` = window not started).
     evict_after: Mutex<Option<std::time::Instant>>,
+    /// Consecutive resume attempts without intervening events (the
+    /// flapping-transport bound for `watch`).
+    resume_streak: AtomicU64,
     /// Bounded, secret-free fact projection: occurrences of these strings
     /// (workspace path, operator env values) are replaced before any
     /// summary leaves the transport.
@@ -659,6 +665,7 @@ impl AcpxController {
             Ok(process) => process,
             Err(error) => {
                 state.load_in_flight.store(UNSET, Ordering::SeqCst);
+                Self::terminate(state).await;
                 return Err(error);
             }
         };
@@ -741,6 +748,7 @@ impl SessionController for AcpxController {
             settled: AtomicU8::new(UNSET),
             terminal_reached: AtomicU8::new(UNSET),
             evict_after: Mutex::new(None),
+            resume_streak: AtomicU64::new(0),
             scrub: self.scrub.clone(),
         });
         // Evict terminal-reached sessions past their retention window:
@@ -800,10 +808,9 @@ impl SessionController for AcpxController {
                 }
             }
         });
-        // The verbatim start fact opens the stream (mirrors the spine's
-        // attach→accepted opening pair) BEFORE the objective turn, so the
-        // fact order matches the lifecycle order.
-        state.push_event(SessionEventKindV1::Accepted, None, None);
+        // NOTE: no adapter-side Accepted fact — the TOOL authors the
+        // accepted fact (its own verbatim attach fact), and a second
+        // adapter-emitted Accepted could never be deduped by id.
         let opened = self.open_session(&state, &spec.prompt).await;
         let settled_first = state
             .settled
@@ -829,23 +836,35 @@ impl SessionController for AcpxController {
         // Take the lock ONLY to inspect: the decision (and the possible
         // kill) happens outside the guard, so no lock guard is ever held
         // across an await.
+        // Check-then-insert under ONE lock acquisition (no await inside):
+        // concurrent starts receiving the same identity cannot overwrite
+        // each other.
         let collision = {
-            let sessions = self.sessions.lock();
-            sessions
+            let mut sessions = self.sessions.lock();
+            if sessions
                 .get(&session_id)
                 .is_some_and(|existing| !Arc::ptr_eq(existing, &state))
+            {
+                Some(true)
+            } else {
+                sessions.insert(session_id.clone(), state.clone());
+                None
+            }
         };
-        if collision {
+        if collision.is_some() {
             // The harness repeated a live session identity: refuse rather
-            // than silently re-point an existing binding.
-            Self::terminate(&state).await;
+            // than silently re-point an existing binding. The kill is
+            // synchronous (start_kill) — no lock guard is held here.
+            if let Some(process) = state.process.lock().take() {
+                process.pending.lock().clear();
+                if let Some(mut child) = process.child.lock().take() {
+                    let _ = child.start_kill();
+                }
+            }
             return Err(ControllerError::Refused(
                 "acpx adapter repeated a live session identity (fail closed)".to_string(),
             ));
         }
-        self.sessions
-            .lock()
-            .insert(session_id.clone(), state.clone());
 
         // The handle advertises the INTERSECTION of what the host asked
         // for and what this transport was configured to declare: both
@@ -916,12 +935,18 @@ impl SessionController for AcpxController {
         if state.alive.load(Ordering::SeqCst) == ALIVE_YES || !page.events.is_empty() {
             return Ok(page);
         }
-        // Dead transport: one resume attempt so the tool's reconnect-
-        // retry path (post `sink.reconnect`) brings the SAME session back
-        // instead of spinning unavailable. Backfill arrives through the
-        // spine's replay, never by re-minting the stream.
+        // Dead transport: bounded resume attempts so the tool's
+        // reconnect-retry path (post `sink.reconnect`) brings the SAME
+        // session back instead of spinning unavailable — while a
+        // flapping adapter (load succeeds, then closes) can never trap
+        // the watch in an endless success/fail cycle.
+        if state.resume_streak.fetch_add(1, Ordering::SeqCst) >= MAX_WATCH_RESUMES {
+            return Err(ControllerError::Unavailable);
+        }
         self.resume_session(&state).await?;
-        self.watch(handle, after_seq, limit).await
+        let page = self.watch(handle, after_seq, limit).await?;
+        state.resume_streak.store(0, Ordering::SeqCst);
+        Ok(page)
     }
 
     async fn prompt(
@@ -1045,6 +1070,20 @@ impl SessionController for AcpxController {
             let sessions = self.sessions.lock();
             sessions.get(remote_session.as_str()).cloned()
         };
+        if let Some(existing) = {
+            let sessions = self.sessions.lock();
+            sessions.get(remote_session.as_str()).cloned()
+        } {
+            // Already live in this controller: an idempotent reattach —
+            // never spawn a second transport over a live session.
+            if existing.alive.load(Ordering::SeqCst) == ALIVE_YES {
+                return Ok(SessionHandle {
+                    remote_session: remote_session.clone(),
+                    capabilities: AcpxControllerConfig::supported_capabilities()
+                        .intersection(self.config_declared()?),
+                });
+            }
+        }
         let state = match state {
             Some(state) => state,
             None => Arc::new(SessionState {
@@ -1067,10 +1106,18 @@ impl SessionController for AcpxController {
                 settled: AtomicU8::new(SET),
                 terminal_reached: AtomicU8::new(UNSET),
                 evict_after: Mutex::new(None),
+                resume_streak: AtomicU64::new(0),
                 scrub: self.scrub.clone(),
             }),
         };
-        self.resume_session(&state).await?;
+        if let Err(error) = self.resume_session(&state).await {
+            // A failed resume must not strand the freshly spawned child:
+            // it is registered in the state slot (pre-handshake), so the
+            // terminate path owns it.
+            Self::terminate(&state).await;
+            self.sessions.lock().remove(remote_session.as_str());
+            return Err(error);
+        }
         self.sessions
             .lock()
             .insert(remote_session.as_str().to_string(), state.clone());
