@@ -45,6 +45,10 @@ process.stdin.on("data", (d) => {{
     }} else if (msg.method === "session/new") {{
       send({{ id: msg.id, result: {{ sessionId }} }});
     }} else if (msg.method === "session/load") {{
+      if (mode === "refuse-load") {{
+        send({{ id: msg.id, error: {{ code: -32000, message: "load refused by fake adapter" }} }});
+        process.exit(0);
+      }}
       send({{ id: msg.id, result: {{}} }});
       if (mode === "flap") process.exit(0);
     }} else if (msg.method === "session/prompt") {{
@@ -431,6 +435,45 @@ async fn fake_adapter_tool_run_completes_with_clean_fact_order() {
             .map(|remote| remote.as_str())
             .unwrap_or_default(),
         "fake-tool-1"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A refused or timed-out `session/load` tears down THIS attempt's child
+/// (self-scoped kill) and fails typed — the state is left retryable and
+/// no live process survives the failed resume.
+#[tokio::test]
+async fn fake_adapter_failed_load_teardown_kills_only_own_child() {
+    let dir = scratch("zc-fake-refuse");
+    let adapter = write_fake_adapter(&dir, "refuse-load", "fake-refuse-1");
+    let controller = Arc::new(
+        AcpxController::new(fake_config(&dir, &adapter, "refuse-load", "fake-refuse-1"))
+            .expect("controller constructs"),
+    );
+    let handle = controller
+        .start(&spec_for(&dir, "Say anything.", "conn-fake-r"))
+        .await
+        .expect("session starts");
+    let _ = controller.stop(&handle, false).await;
+    let mut cursor = 0;
+    let error = {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            assert!(attempts <= 40, "the watch must terminate, not spin");
+            match controller.watch(&handle, cursor, 64).await {
+                Ok(page) => cursor = page.next_seq,
+                Err(error) => break error,
+            }
+        }
+    };
+    assert!(
+        matches!(error, ControllerError::Unavailable),
+        "the refused load must end typed (Unavailable), got {error:?}"
+    );
+    assert!(
+        !controller.session_alive_for_test(&handle),
+        "no child may survive the failed resume teardown"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

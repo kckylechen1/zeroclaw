@@ -318,6 +318,30 @@ fn bounded_text(text: &str, ceiling: usize, scrub: &[String]) -> String {
 // The controller
 // ─────────────────────────────────────────────────────────────────────────
 
+impl AcpxProcess {
+    /// Synchronously kill THIS process's own child (group-signalled).
+    /// Idempotent and self-scoped: whatever else occupies a state slot is
+    /// never touched, so superseded recovery attempts cannot kill a
+    /// newer attempt's child.
+    fn kill_now(&self) {
+        self.pending.lock().clear();
+        let child = self.child.lock().take();
+        if let Some(mut child) = child {
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                let pgid = pid as libc::pid_t;
+                unsafe {
+                    libc::killpg(pgid, libc::SIGKILL);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = child.start_kill();
+            }
+        }
+    }
+}
+
 /// The real ACPX [`SessionController`]. Deliberately NOT `Clone`: one
 /// controller owns its sessions' lifecycles, and its `Drop` is the
 /// last-resort kill. Share it through an `Arc` at the wiring layer.
@@ -689,19 +713,23 @@ impl AcpxController {
         match load {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(_)) | Err(_) => {
-                // The load refused or timed out: tear down THIS attempt's
-                // child — and only this attempt's. A newer recovery that
-                // has already replaced the state slot owns its own child;
-                // the generic terminate would kill that one instead.
-                let slot = state.process.lock().clone();
-                match slot {
-                    Some(current) if Arc::ptr_eq(&current, &process) => {
-                        Self::terminate(state).await;
-                    }
-                    _ => {
-                        process.pending.lock().clear();
-                    }
+                // The load refused or timed out: kill THIS attempt's own
+                // child (self-scoped — a newer recovery that replaced the
+                // state slot owns its own child and is never touched),
+                // then retire the slot only if it still holds this
+                // attempt's process.
+                process.kill_now();
+                let mut slot_guard = state.process.lock();
+                if slot_guard
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &process))
+                {
+                    // The retired process IS the slot's occupant: the
+                    // state goes dead with it.
+                    state.alive.store(UNSET, Ordering::SeqCst);
+                    *slot_guard = None;
                 }
+                drop(slot_guard);
                 Err(ControllerError::Unavailable)
             }
         }
@@ -1131,12 +1159,11 @@ impl SessionController for AcpxController {
             }),
         };
         if let Err(error) = self.resume_session(&state).await {
-            // A failed resume must not strand the freshly spawned child
-            // (terminate path owns it). The map entry is deliberately NOT
-            // removed: for an existing state it is shared with any
-            // concurrent recovery (Arc-identity cannot prove exclusive
-            // ownership), and a dead retained state is simply retryable.
-            Self::terminate(&state).await;
+            // resume_session self-cleans its own child on every failure
+            // leg. The map entry is deliberately NOT removed: for an
+            // existing state it is shared with any concurrent recovery
+            // (Arc-identity cannot prove exclusive ownership), and a dead
+            // retained state is simply retryable.
             return Err(error);
         }
         self.sessions
@@ -1328,9 +1355,16 @@ async fn reader_task(
             (None, None) => {}
         }
     }
-    // EOF: the transport is gone.
+    // EOF: the transport is gone. Clear the slot ONLY if it still holds
+    // this reader's process (a newer resume's child must survive).
     state.alive.store(UNSET, Ordering::SeqCst);
-    *state.process.lock() = None;
+    let mut slot = state.process.lock();
+    if slot
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, &process))
+    {
+        *slot = None;
+    }
     // Resolve every pending waiter with nothing: they surface as
     // Unavailable (fail closed).
     pending.lock().clear();
