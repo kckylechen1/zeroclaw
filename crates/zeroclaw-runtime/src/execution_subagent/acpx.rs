@@ -173,6 +173,9 @@ struct AcpxProcess {
     /// and is killed when the process slot is terminated — no orphaned
     /// harness survives a transport drop or a stop.
     child: Mutex<Option<tokio::process::Child>>,
+    /// The recovery attempt that spawned this child (ownership token for
+    /// exact teardown).
+    attempt_token: u64,
     stdin_tx: mpsc::Sender<String>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
     next_id: AtomicU64,
@@ -411,6 +414,10 @@ impl AcpxController {
         })
     }
 
+    fn open_attempt_token(&self) -> u64 {
+        u64::from_le_bytes(Uuid::new_v4().as_bytes()[..8].try_into().unwrap_or([0; 8]))
+    }
+
     fn state(&self, handle: &SessionHandle) -> Result<Arc<SessionState>, ControllerError> {
         let id = handle.remote_session.as_str().to_string();
         self.sessions
@@ -486,6 +493,7 @@ impl AcpxController {
     async fn spawn_and_initialize(
         &self,
         state: &Arc<SessionState>,
+        attempt_token: u64,
     ) -> Result<Arc<AcpxProcess>, ControllerError> {
         // Direct argv exec — no shell anywhere on this path. The child is
         // killed when its handle drops (no orphaned harness sessions).
@@ -533,6 +541,7 @@ impl AcpxController {
             Arc::new(Mutex::new(HashMap::new()));
         let process = Arc::new(AcpxProcess {
             child: Mutex::new(Some(child)),
+            attempt_token,
             stdin_tx,
             pending: pending.clone(),
             next_id: AtomicU64::new(1),
@@ -585,7 +594,9 @@ impl AcpxController {
         state: &Arc<SessionState>,
         prompt: &str,
     ) -> Result<(), ControllerError> {
-        let process = self.spawn_and_initialize(state).await?;
+        let process = self
+            .spawn_and_initialize(state, self.open_attempt_token())
+            .await?;
         let result = tokio::time::timeout(
             self.config.startup_timeout,
             Self::request(
@@ -706,15 +717,16 @@ impl AcpxController {
         let _resume_guard = tokio::time::timeout(RECOVERY_WAIT, state.resume_lock.lock())
             .await
             .map_err(|_| ControllerError::Unavailable)?;
-        state.load_in_flight.store(SET, Ordering::SeqCst);
         // Coalesce: a COMPLETED preceding recovery that left a live
-        // transport makes this attempt a no-op. A cancelled predecessor
-        // cleared both the marker (guard Drop) and liveness (kill_now),
-        // so this check can only pass for a genuinely settled transport.
+        // transport makes this attempt a no-op. Under the resume lock the
+        // in-flight marker can only be SET from a CANCELLED predecessor
+        // (whose guard already cleared it) or a genuinely running one —
+        // either way, coalescing on liveness here is exact.
         if state.alive.load(Ordering::SeqCst) == ALIVE_YES {
             return Ok(());
         }
-        let mut recovery = RecoveryGuard::new(state);
+        state.load_in_flight.store(SET, Ordering::SeqCst);
+        let mut recovery = RecoveryGuard::new(state, self.config.startup_timeout);
         recovery.spawn_and_initialize(self).await?;
         let session_id = state.session_id();
         let load = tokio::time::timeout(
@@ -776,14 +788,22 @@ struct RecoveryGuard<'a> {
     state: &'a Arc<SessionState>,
     process: Option<Arc<AcpxProcess>>,
     done: bool,
+    request_timeout: Duration,
+    /// Identity of this attempt: the child spawned for it is tagged with
+    /// the same token, so teardown can prove ownership exactly.
+    attempt_token: u64,
 }
 
 impl<'a> RecoveryGuard<'a> {
-    fn new(state: &'a Arc<SessionState>) -> Self {
+    fn new(state: &'a Arc<SessionState>, request_timeout: Duration) -> Self {
         Self {
             state,
             process: None,
             done: false,
+            request_timeout,
+            attempt_token: u64::from_le_bytes(
+                Uuid::new_v4().as_bytes()[..8].try_into().unwrap_or([0; 8]),
+            ),
         }
     }
 
@@ -792,7 +812,11 @@ impl<'a> RecoveryGuard<'a> {
         controller: &AcpxController,
     ) -> Result<(), ControllerError> {
         self.state.load_in_flight.store(SET, Ordering::SeqCst);
-        self.process = Some(controller.spawn_and_initialize(self.state).await?);
+        self.process = Some(
+            controller
+                .spawn_and_initialize(self.state, self.attempt_token)
+                .await?,
+        );
         Ok(())
     }
 
@@ -802,7 +826,7 @@ impl<'a> RecoveryGuard<'a> {
             process,
             method,
             params,
-            Duration::from_secs(30),
+            self.request_timeout,
             &self.state.scrub,
         )
         .await
@@ -814,17 +838,17 @@ impl Drop for RecoveryGuard<'_> {
         self.state.load_in_flight.store(UNSET, Ordering::SeqCst);
         if !self.done {
             // The recovery did not complete: kill THIS attempt's own child
-            // (self-scoped), retire the slot only if it still holds this
-            // process, and mark the state dead.
+            // (token-matched, self-scoped — a newer recovery that replaced
+            // the slot owns its own child and is never touched), then
+            // retire the slot only if it still holds this attempt's
+            // process, marking the state dead.
             if let Some(process) = &self.process {
                 process.kill_now();
             }
             let mut slot = self.state.process.lock();
-            let owned = slot.as_ref().is_some_and(|current| {
-                self.process
-                    .as_ref()
-                    .is_some_and(|p| Arc::ptr_eq(current, p))
-            });
+            let owned = slot
+                .as_ref()
+                .is_some_and(|current| current.attempt_token == self.attempt_token);
             if owned {
                 self.state.alive.store(UNSET, Ordering::SeqCst);
                 *slot = None;
@@ -1051,9 +1075,9 @@ impl SessionController for AcpxController {
         // reconnect-retry path (post `sink.reconnect`) brings the SAME
         // session back instead of spinning unavailable — while a
         // flapping adapter (load succeeds, then closes) can never trap
-        // the watch in an endless success/fail cycle. The streak is
-        // consumed here (one per attempt) and decays only on observed
-        // progress below.
+        // the watch in an endless success/fail cycle. The budget is
+        // consumed inside the serialized recovery (coalesced waiters
+        // never spend it).
         if state.resume_streak.fetch_add(1, Ordering::SeqCst) >= MAX_WATCH_RESUMES {
             return Err(ControllerError::Unavailable);
         }
