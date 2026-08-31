@@ -760,27 +760,37 @@ impl ExecutionSubagentTool {
         *facts_reported += 1;
         // (d) the bound terminal fact — only when the receipt chain is
         // complete; otherwise no terminal fact exists (honest absence).
+        // A FAILED terminal-fact write can never surface as graceful: the
+        // facts ARE the product, so the run ends failed (zero fabricated
+        // completion at the parent boundary).
         if let (true, Some(confirmation)) = (receipt.confirmed, confirmation.clone()) {
+            *source_revision += 1;
+            let revision = *source_revision;
+            if let Err(error) = self
+                .sink
+                .ingest_event(
+                    attachment,
+                    &SessionEventFact {
+                        event_id: SessionEventIdRef::from_opaque(format!("{run_ref}-terminal")),
+                        kind: SessionEventKindV1::Terminal,
+                        outcome: Some(SessionTerminalOutcomeV1::Cancelled { confirmation }),
+                        source_revision: revision,
+                        authority_confirmation_ref: None,
+                        summary: None,
+                        payload_digest: None,
+                    },
+                )
+                .await
             {
-                *source_revision += 1;
-                let revision = *source_revision;
-                let _ = self
-                    .sink
-                    .ingest_event(
-                        attachment,
-                        &SessionEventFact {
-                            event_id: SessionEventIdRef::from_opaque(format!("{run_ref}-terminal")),
-                            kind: SessionEventKindV1::Terminal,
-                            outcome: Some(SessionTerminalOutcomeV1::Cancelled { confirmation }),
-                            source_revision: revision,
-                            authority_confirmation_ref: None,
-                            summary: None,
-                            payload_digest: None,
-                        },
-                    )
-                    .await;
-                *facts_reported += 1;
+                return (
+                    ExecutionRunStatusV1::Failed,
+                    Some(format!(
+                        "fact sink refused the bound terminal fact (no graceful fabrication): {error}"
+                    )),
+                    Vec::new(),
+                );
             }
+            *facts_reported += 1;
         }
         let record = ExecutionInterventionRecordV1 {
             request_id: request_id.as_str().to_string(),

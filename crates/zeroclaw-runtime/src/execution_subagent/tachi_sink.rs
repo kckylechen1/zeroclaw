@@ -228,10 +228,13 @@ impl TachiSessionFactSink {
                 "clientInfo": {"name": "zeroclaw-exec-subagent", "version": env!("CARGO_PKG_VERSION")},
             }),
         );
-        let response = conn
-            .send_and_recv(&initialize)
-            .await
-            .map_err(|_| SessionFactError::Unavailable)?;
+        // The handshake shares the per-call ceiling: a child that never
+        // answers initialize fails closed instead of hanging the run.
+        let response =
+            tokio::time::timeout(self.config.call_timeout, conn.send_and_recv(&initialize))
+                .await
+                .map_err(|_| SessionFactError::Unavailable)?
+                .map_err(|_| SessionFactError::Unavailable)?;
         if response.error.is_some() {
             return Err(SessionFactError::Refused(
                 "the spine refused the MCP initialize handshake".to_string(),

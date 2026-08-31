@@ -457,6 +457,16 @@ async fn live_unsupported_stop_surfaces_typed_refusal_without_terminal() {
         matches!(error, ControllerError::UnsupportedByLifecycleOwner { .. }),
         "expected the typed unsupported refusal, got {error:?}"
     );
+    // Zero fabrication, observed through the port: no terminal fact may
+    // exist in the session's event stream after the refused stop.
+    let page = controller
+        .watch_events(&handle, 0, 128)
+        .await
+        .expect("event stream readable");
+    assert!(
+        page.events.iter().all(|event| event.outcome.is_none()),
+        "a refused stop must fabricate no terminal fact"
+    );
     let _ = std::fs::remove_dir_all(&workspace);
 }
 
@@ -540,6 +550,13 @@ async fn live_fail_closed_refuses_before_any_session_or_fact() {
         report.status, report.refusal
     );
     assert_eq!(report.status, ExecutionRunStatusV1::Refused);
+    assert!(
+        report
+            .refusal
+            .as_deref()
+            .is_some_and(|text| text.contains("Authentication required")),
+        "the harness's real credential refusal must surface verbatim"
+    );
     assert!(report.remote_session_ref.is_none());
     assert!(
         sink.facts.lock().is_empty(),
@@ -605,7 +622,7 @@ async fn live_fact_sink_reaches_the_real_tachi_facade_and_reports_typed() {
                 attachment.as_str()
             );
             // Full admission configured: prove the receipt surface end to
-            // end (advertise → ingest → reconnect → state).
+            // end (advertise → ingest → replay-exactly-once → state).
             sink.advertise_capabilities(
                 &attachment,
                 &["observe".to_string(), "prompt".to_string()],
@@ -651,6 +668,11 @@ async fn live_fact_sink_reaches_the_real_tachi_facade_and_reports_typed() {
                 SessionReceiptAdmissionV1::Replayed,
                 "the same fact must replay exactly once (dedup by id)"
             );
+            let state = sink.get_state(&attachment).await.expect("state");
+            println!(
+                "LIVE spine: canonical state read back: {:?}",
+                state.canonical_state
+            );
         }
         Err(SessionFactError::Refused(reason)) => {
             // The documented admission blocker: the identity carries no
@@ -660,10 +682,9 @@ async fn live_fact_sink_reaches_the_real_tachi_facade_and_reports_typed() {
             println!("LIVE spine: typed refusal from the real facade: {reason}");
             assert!(
                 reason.contains("capability grant")
-                    || reason.contains("admission")
-                    || reason.contains("host identity")
-                    || reason.contains("unsupported_by_lifecycle_owner"),
-                "expected a typed spine admission refusal, got: {reason}"
+                    || reason.contains("host admission")
+                    || reason.contains("host identity"),
+                "expected the typed spine admission refusal, got: {reason}"
             );
         }
         Err(SessionFactError::Unavailable) => {
@@ -706,7 +727,12 @@ async fn live_report_surface_carries_no_secrets_or_paths() {
         !serialized.contains(&workspace_text),
         "the report surface must not carry the repository path"
     );
-    for (key, value) in env_json_map("ZC_A2_ACPX_ENV_JSON") {
+    let operator_env = env_json_map("ZC_A2_ACPX_ENV_JSON");
+    assert!(
+        operator_env.values().any(|value| !value.is_empty()),
+        "this live gate is only meaningful with an operator env value configured"
+    );
+    for (key, value) in operator_env {
         assert!(
             !value.is_empty() && !serialized.contains(&value),
             "the report surface must not carry operator env value for {key}"

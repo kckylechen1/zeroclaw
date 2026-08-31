@@ -57,8 +57,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::io::BufReader;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 use zeroclaw_api::session_exec::{
@@ -73,8 +72,6 @@ use super::controller::{
 
 /// The fact-summary ceiling (the spine's bounded-summary law).
 const SUMMARY_CEILING: usize = 2000;
-/// Default ceiling for one child stdout line (bounded buffering).
-const DEFAULT_MAX_LINE_BYTES: usize = 256 * 1024;
 /// Grace period between `session/cancel` and the child kill.
 const CANCEL_GRACE: Duration = Duration::from_secs(10);
 /// One watch long-poll window.
@@ -161,6 +158,11 @@ impl AcpxControllerConfig {
 // ─────────────────────────────────────────────────────────────────────────
 
 struct AcpxProcess {
+    /// The direct child handle. Ownership lives HERE (not in a local) so
+    /// the harness process is alive exactly as long as the session is,
+    /// and is killed when the process slot is terminated — no orphaned
+    /// harness survives a transport drop or a stop.
+    child: Mutex<Option<tokio::process::Child>>,
     stdin_tx: mpsc::Sender<String>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
     next_id: AtomicU64,
@@ -176,6 +178,12 @@ struct SessionState {
     process: Mutex<Option<Arc<AcpxProcess>>>,
     events: Mutex<Vec<ControllerEvent>>,
     next_seq: AtomicU64,
+    /// Monotone ordinal of harness facts observed by this state. It makes
+    /// every event id distinct (two real tool calls are two facts) while
+    /// staying stable across a transport drop (the state, and therefore
+    /// the ordinal space, survives the drop), so the spine's replay dedup
+    /// stays exact.
+    update_ordinal: AtomicU64,
     /// Accumulating text of the turn in flight.
     last_turn_text: Mutex<String>,
     /// Final text of the last COMPLETED turn (the collect source).
@@ -191,9 +199,10 @@ struct SessionState {
     /// but not appended (already-observed facts).
     load_in_flight: AtomicU8,
     alive: AtomicU8,
-    /// Workspace path scrubbed from every summary (no repository paths on
-    /// any fact surface).
-    path_scrub: String,
+    /// Bounded, secret-free fact projection: occurrences of these strings
+    /// (workspace path, operator env values) are replaced before any
+    /// summary leaves the transport.
+    scrub: std::sync::Arc<Vec<String>>,
 }
 
 impl SessionState {
@@ -207,39 +216,36 @@ impl SessionState {
         outcome: Option<SessionTerminalOutcomeV1>,
         summary: Option<String>,
     ) {
-        let summary = summary.map(|text| bounded_text(&text, SUMMARY_CEILING, &self.path_scrub));
-        let event_id = content_stable_event_id(kind.as_str(), summary.as_deref());
-        let mut events = self.events.lock();
-        // Content-stable dedup: the same observed fact (same id) is kept
-        // once, so ACP history replays after `session/load` cannot
-        // duplicate the fact stream.
-        if events
-            .iter()
-            .any(|event| event.event_id.as_str() == event_id.as_str())
-        {
-            return;
-        }
+        let summary = summary.map(|text| bounded_text(&text, SUMMARY_CEILING, &self.scrub));
+        // The ordinal is part of the identity: two distinct harness facts
+        // with the same projected summary are STILL two facts, and the
+        // ordinal space survives a transport drop (same state), so the
+        // spine's replay dedup sees identical ids exactly once. History
+        // replayed by `session/load` never reaches here (the load gate).
+        let ordinal = self.update_ordinal.fetch_add(1, Ordering::SeqCst);
+        let event_id = event_identity(kind.as_str(), summary.as_deref(), ordinal);
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst) + 1;
-        events.push(ControllerEvent {
+        self.events.lock().push(ControllerEvent {
             seq,
             event_id,
             kind,
             outcome,
             summary,
         });
-        drop(events);
         self.event_signal.notify_waiters();
     }
 }
 
-/// Content-stable event identity: the same harness fact replays to the
-/// SAME event id after a reconnect, so the spine's replay-idempotent
-/// ingest (dedup by event id) holds across transport drops.
-fn content_stable_event_id(kind: &str, summary: Option<&str>) -> SessionEventIdRef {
+/// Event identity: ordinal-scoped (distinct real facts never collide)
+/// and stable across a transport drop (the ordinal space lives in the
+/// session state, which outlives the child).
+fn event_identity(kind: &str, summary: Option<&str>, ordinal: u64) -> SessionEventIdRef {
     let mut hasher = Sha256::new();
     hasher.update(kind.as_bytes());
     hasher.update([0x1f]);
     hasher.update(summary.unwrap_or_default().as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(ordinal.to_le_bytes());
     let digest = hasher.finalize();
     SessionEventIdRef::from_opaque(format!(
         "acpx-{:016x}",
@@ -249,12 +255,13 @@ fn content_stable_event_id(kind: &str, summary: Option<&str>) -> SessionEventIdR
 
 /// Bound text at a char boundary and scrub the workspace path (receipt
 /// surfaces carry no repository path).
-fn bounded_text(text: &str, ceiling: usize, scrub: &str) -> String {
-    let scrubbed = if scrub.is_empty() {
-        text.to_string()
-    } else {
-        text.replace(scrub, "<workspace>")
-    };
+fn bounded_text(text: &str, ceiling: usize, scrub: &[String]) -> String {
+    let mut scrubbed = text.to_string();
+    for needle in scrub {
+        if !needle.is_empty() {
+            scrubbed = scrubbed.replace(needle.as_str(), "<workspace>");
+        }
+    }
     let mut boundary = scrubbed.len().min(ceiling);
     while boundary > 0 && !scrubbed.is_char_boundary(boundary) {
         boundary -= 1;
@@ -277,6 +284,9 @@ fn bounded_text(text: &str, ceiling: usize, scrub: &str) -> String {
 pub struct AcpxController {
     config: Arc<AcpxControllerConfig>,
     sessions: Arc<Mutex<HashMap<String, Arc<SessionState>>>>,
+    /// Redaction needles: the workspace root plus every operator env
+    /// value (the values are secrets; the list lives behind Arc).
+    scrub: std::sync::Arc<Vec<String>>,
 }
 
 impl AcpxController {
@@ -321,9 +331,12 @@ impl AcpxController {
                 )));
             }
         }
+        let mut scrub = vec![config.workspace_root.display().to_string()];
+        scrub.extend(config.env.values().cloned());
         Ok(Self {
             config: Arc::new(config),
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            scrub: std::sync::Arc::new(scrub),
         })
     }
 
@@ -363,6 +376,7 @@ impl AcpxController {
         method: &str,
         params: Value,
         timeout: Duration,
+        scrub: &[String],
     ) -> Result<Value, ControllerError> {
         let id = process.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
@@ -381,7 +395,7 @@ impl AcpxController {
                             .and_then(Value::as_str)
                             .unwrap_or("acpx request failed"),
                         SUMMARY_CEILING,
-                        "",
+                        scrub,
                     );
                     return Err(ControllerError::Refused(format!(
                         "{method} refused by harness: {detail}"
@@ -404,6 +418,16 @@ impl AcpxController {
     ) -> Result<Arc<AcpxProcess>, ControllerError> {
         // Direct argv exec — no shell anywhere on this path. The child is
         // killed when its handle drops (no orphaned harness sessions).
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = tokio::process::Command::new(&self.config.command);
+            // Own process group: the terminate path kills the whole tree
+            // (adapter wrappers often exec platform binaries that would
+            // otherwise survive as orphans).
+            command.process_group(0);
+            command
+        };
+        #[cfg(not(unix))]
         let mut command = tokio::process::Command::new(&self.config.command);
         command
             .args(&self.config.args)
@@ -437,6 +461,7 @@ impl AcpxController {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let process = Arc::new(AcpxProcess {
+            child: Mutex::new(Some(child)),
             stdin_tx,
             pending: pending.clone(),
             next_id: AtomicU64::new(1),
@@ -445,8 +470,9 @@ impl AcpxController {
         // Reader: owns stdout until EOF.
         let reader_process = process.clone();
         let reader_state = state.clone();
+        let line_ceiling = self.config.max_line_bytes;
         zeroclaw_spawn::spawn!(async move {
-            reader_task(stdout, reader_process, reader_state, pending).await;
+            reader_task(stdout, reader_process, reader_state, pending, line_ceiling).await;
         });
 
         // Handshake: the client declares NO filesystem authority.
@@ -462,6 +488,7 @@ impl AcpxController {
                     },
                 }),
                 self.config.startup_timeout,
+                &self.scrub,
             ),
         )
         .await
@@ -491,6 +518,7 @@ impl AcpxController {
                 "session/new",
                 json!({"cwd": self.config.workspace_root, "mcpServers": []}),
                 self.config.startup_timeout,
+                &self.scrub,
             ),
         )
         .await
@@ -516,13 +544,21 @@ impl AcpxController {
                     "session/set_mode",
                     json!({"sessionId": session_id, "modeId": mode}),
                     self.config.startup_timeout,
+                    &self.scrub,
                 ),
             )
             .await
             .map_err(|_| ControllerError::Unavailable)??;
         }
         // The objective prompt opens the session's first turn.
-        Self::start_turn(&process, state, prompt, self.config.turn_timeout).await
+        Self::start_turn(
+            &process,
+            state,
+            prompt,
+            self.config.turn_timeout,
+            &self.scrub,
+        )
+        .await
     }
 
     /// Send `session/prompt` for one turn and wait (bounded) for its
@@ -533,6 +569,7 @@ impl AcpxController {
         state: &Arc<SessionState>,
         text: &str,
         timeout: Duration,
+        scrub: &[String],
     ) -> Result<(), ControllerError> {
         let id = process.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
@@ -560,7 +597,7 @@ impl AcpxController {
                             .and_then(Value::as_str)
                             .unwrap_or("session/prompt failed"),
                         SUMMARY_CEILING,
-                        "",
+                        scrub,
                     );
                     return Err(ControllerError::Refused(format!(
                         "session/prompt refused by harness: {detail}"
@@ -599,6 +636,7 @@ impl AcpxController {
                     "mcpServers": [],
                 }),
                 self.config.startup_timeout,
+                &self.scrub,
             ),
         )
         .await;
@@ -610,14 +648,31 @@ impl AcpxController {
     }
 
     /// Kill the transport child and mark the state dead. Idempotent.
+    /// The kill is real (the child handle is owned here) and the child
+    /// is reaped, so no harness process outlives the session state.
     async fn terminate(state: &SessionState) {
         state.alive.store(UNSET, Ordering::SeqCst);
-        if let Some(process) = state.process.lock().take() {
-            // Dropping the process drops the child handle; with
-            // kill_on_drop(true) the harness child is killed, not
-            // orphaned. Pending waiters resolve to Unavailable.
+        // Take the slot OUT of the lock before awaiting: no guard may be
+        // held across the kill.
+        let process = state.process.lock().take();
+        if let Some(process) = process {
             process.pending.lock().clear();
-            drop(process);
+            let child = process.child.lock().take();
+            if let Some(mut child) = child {
+                // The child leads its own process group: signal the whole
+                // tree so wrapper-spawned platform binaries die too, then
+                // reap the direct child.
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    let pgid = pid as libc::pid_t;
+                    if unsafe { libc::killpg(pgid, libc::SIGKILL) } != 0 {
+                        let _ = child.start_kill();
+                    }
+                }
+                #[cfg(not(unix))]
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+            }
         }
     }
 }
@@ -634,6 +689,7 @@ impl SessionController for AcpxController {
             process: Mutex::new(None),
             events: Mutex::new(Vec::new()),
             next_seq: AtomicU64::new(0),
+            update_ordinal: AtomicU64::new(0),
             last_turn_text: Mutex::new(String::new()),
             completed_turn_text: Mutex::new(String::new()),
             stop_armed: Mutex::new(None),
@@ -641,7 +697,7 @@ impl SessionController for AcpxController {
             correction_legs: AtomicU64::new(0),
             load_in_flight: AtomicU8::new(UNSET),
             alive: AtomicU8::new(UNSET),
-            path_scrub: self.config.workspace_root.display().to_string(),
+            scrub: self.scrub.clone(),
         });
         let key = format!("pending-{}", Uuid::new_v4().simple());
         self.sessions.lock().insert(key.clone(), state.clone());
@@ -736,7 +792,14 @@ impl SessionController for AcpxController {
         let state = self.state(handle)?;
         let process = Self::process(&state)?;
         state.correction_legs.fetch_add(1, Ordering::SeqCst);
-        Self::start_turn(&process, &state, text, self.config.turn_timeout).await?;
+        Self::start_turn(
+            &process,
+            &state,
+            text,
+            self.config.turn_timeout,
+            &self.scrub,
+        )
+        .await?;
         Ok(PromptReceipt {
             accepted: true,
             detail: None,
@@ -818,7 +881,7 @@ impl SessionController for AcpxController {
             if text.is_empty() {
                 None
             } else {
-                Some(bounded_text(&text, SUMMARY_CEILING, &state.path_scrub))
+                Some(bounded_text(&text, SUMMARY_CEILING, &state.scrub))
             }
         };
         let digest = format!("{:x}", hasher.finalize());
@@ -836,14 +899,38 @@ impl SessionController for AcpxController {
         remote_session: &RemoteSessionRef,
         _resume_from_revision: u64,
     ) -> Result<SessionHandle, ControllerError> {
+        // The session state may live in THIS controller (in-process
+        // recovery) or nowhere (the controller was restarted with the
+        // host): both resume to the SAME harness session id — the remote
+        // identity the host already holds is the only input, and no new
+        // session is minted.
         let state = {
             let sessions = self.sessions.lock();
-            sessions
-                .get(remote_session.as_str())
-                .cloned()
-                .ok_or(ControllerError::Unavailable)?
+            sessions.get(remote_session.as_str()).cloned()
+        };
+        let state = match state {
+            Some(state) => state,
+            None => Arc::new(SessionState {
+                session_id: Mutex::new(remote_session.as_str().to_string()),
+                event_signal: Arc::new(tokio::sync::Notify::new()),
+                process: Mutex::new(None),
+                events: Mutex::new(Vec::new()),
+                next_seq: AtomicU64::new(0),
+                update_ordinal: AtomicU64::new(0),
+                last_turn_text: Mutex::new(String::new()),
+                completed_turn_text: Mutex::new(String::new()),
+                stop_armed: Mutex::new(None),
+                objective_done: AtomicU8::new(SET),
+                correction_legs: AtomicU64::new(0),
+                load_in_flight: AtomicU8::new(UNSET),
+                alive: AtomicU8::new(UNSET),
+                scrub: self.scrub.clone(),
+            }),
         };
         self.resume_session(&state).await?;
+        self.sessions
+            .lock()
+            .insert(remote_session.as_str().to_string(), state.clone());
         Ok(SessionHandle {
             remote_session: remote_session.clone(),
             capabilities: SessionCapabilities::from_names(
@@ -869,6 +956,31 @@ impl AcpxController {
     }
 }
 
+impl Drop for AcpxProcess {
+    fn drop(&mut self) {
+        // Drop-path kill: the process group is signalled even when the
+        // session dies without an explicit terminate (controller dropped,
+        // run abandoned), so no adapter wrapper or its platform-binary
+        // child survives the session.
+        if let Some(child) = self.child.lock().take() {
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                let pgid = pid as libc::pid_t;
+                unsafe {
+                    libc::killpg(pgid, libc::SIGKILL);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let mut child = child;
+                let _ = child.start_kill();
+            }
+            // The (already signalled) direct child is dropped here; tokio
+            // hands the zombie to its orphan reaper.
+        }
+    }
+}
+
 /// The reader task: frames bounded lines, resolves pending responses,
 /// answers harness requests, maps notifications. Owns the turn-contract
 /// event mapping. At EOF the state goes dead (fail closed).
@@ -877,12 +989,13 @@ async fn reader_task(
     process: Arc<AcpxProcess>,
     state: Arc<SessionState>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
+    line_ceiling: usize,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut line = Vec::new();
     loop {
         line.clear();
-        match read_bounded_line(&mut reader, &mut line, DEFAULT_MAX_LINE_BYTES).await {
+        match read_bounded_line(&mut reader, &mut line, line_ceiling).await {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
@@ -1050,8 +1163,7 @@ fn handle_session_update(state: &Arc<SessionState>, message: &Value) {
                 if buffer.len() < TURN_TEXT_CEILING {
                     buffer.push_str(text);
                     if buffer.len() > TURN_TEXT_CEILING {
-                        let scrub = state.path_scrub.clone();
-                        *buffer = bounded_text(&buffer.clone(), TURN_TEXT_CEILING, &scrub);
+                        *buffer = bounded_text(&buffer.clone(), TURN_TEXT_CEILING, &state.scrub);
                     }
                 }
             }
@@ -1123,13 +1235,12 @@ async fn writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiv
     }
 }
 
-/// Bounded stderr drain: consumes, keeps nothing, logs nothing.
-async fn drain_task(stderr: tokio::process::ChildStderr) {
-    let mut reader = BufReader::new(stderr);
-    let mut sink = Vec::new();
+/// Bounded stderr drain: fixed-buffer reads, keeps nothing, logs
+/// nothing, and never accumulates regardless of newline framing.
+async fn drain_task(mut stderr: tokio::process::ChildStderr) {
+    let mut sink = [0u8; 8192];
     loop {
-        sink.clear();
-        match reader.read_until(b'\n', &mut sink).await {
+        match stderr.read(&mut sink).await {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
