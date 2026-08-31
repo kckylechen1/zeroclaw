@@ -501,7 +501,14 @@ async fn fake_adapter_productive_cycles_keep_the_budget_alive() {
             .expect("cycle start");
         assert!(controller.session_alive_for_test(&handle));
 
-        // Transport drop + same-session recovery.
+        // A REAL transport drop each cycle (immediate host kill, no event
+        // minted), so every recovery exercises a genuine `session/load`.
+        let _ = controller.stop(&handle, false).await;
+        assert!(
+            !controller.session_alive_for_test(&handle),
+            "cycle {cycle}: the transport must be dead before recovery"
+        );
+
         let resumed = controller
             .reattach(
                 &AdapterConnectionRef::from_opaque("conn-fake-cycles"),
@@ -515,12 +522,23 @@ async fn fake_adapter_productive_cycles_keep_the_budget_alive() {
             handle.remote_session.as_str()
         );
 
-        // The recovered session is productive: events observed.
+        // The recovered session is productive: a real prompt turn whose
+        // events are observed through the port.
+        controller
+            .prompt(&resumed, "Reply with CYCLE. Do not use any tools.")
+            .await
+            .expect("the recovered session must accept a prompt");
         let page = controller
             .watch(&resumed, 0, 64)
             .await
             .expect("events after recovery");
-        assert!(!page.events.is_empty(), "cycle {cycle}: events must flow");
+        assert!(
+            page.events.iter().any(|event| event
+                .summary
+                .as_deref()
+                .is_some_and(|text| text.contains("FAKE-DONE"))),
+            "the recovered session must produce observable events"
+        );
     }
     println!("LIVE cycles: 6 productive reattach cycles completed");
     let _ = std::fs::remove_dir_all(&dir);

@@ -1071,6 +1071,11 @@ impl SessionController for AcpxController {
                 .map(|event| event.seq)
                 .unwrap_or(after_seq)
                 .max(after_seq);
+            // Observed progress resets the flapping budget — on EVERY
+            // return path (long-poll wake-up included).
+            if !pending.is_empty() {
+                state.resume_streak.store(0, Ordering::SeqCst);
+            }
             return Ok(SessionEventPage {
                 events: pending,
                 next_seq,
