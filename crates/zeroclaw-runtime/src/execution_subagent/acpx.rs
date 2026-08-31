@@ -690,6 +690,11 @@ impl AcpxController {
         // One recovery at a time per session: concurrent attempts would
         // race the process slot and the alive flag.
         let _resume_guard = state.resume_lock.lock().await;
+        if state.alive.load(Ordering::SeqCst) == ALIVE_YES {
+            // A preceding waiter already restored a live transport:
+            // coalesce instead of spawning a second carrier.
+            return Ok(());
+        }
         state.load_in_flight.store(SET, Ordering::SeqCst);
         let spawned = self.spawn_and_initialize(state).await;
         let process = match spawned {
@@ -1365,14 +1370,15 @@ async fn reader_task(
     // EOF: the transport is gone. Retirement is ownership-scoped: the
     // alive flag drops only when the slot still holds THIS reader's
     // process (a newer resume's child owns its own liveness).
-    let owns_slot = {
-        let slot = state.process.lock();
-        slot.as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, &process))
-    };
-    if owns_slot {
+    let mut slot = state.process.lock();
+    if slot
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, &process))
+    {
+        // Same guard scope: the slot retirement and the alive transition
+        // are one atomic step (no TOCTOU against a newer resume).
         state.alive.store(UNSET, Ordering::SeqCst);
-        *state.process.lock() = None;
+        *slot = None;
     }
     // Resolve every pending waiter with nothing: they surface as
     // Unavailable (fail closed).
