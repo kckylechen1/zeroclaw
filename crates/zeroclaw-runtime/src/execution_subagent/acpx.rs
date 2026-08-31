@@ -79,6 +79,9 @@ const WATCH_POLL_WINDOW: Duration = Duration::from_secs(5);
 /// Consecutive dead-transport resume attempts before `watch` fails
 /// closed (a flapping adapter must not trap the run).
 const MAX_WATCH_RESUMES: u64 = 3;
+/// How long a recovery waiter waits for an in-flight recovery to settle
+/// before failing typed.
+const RECOVERY_WAIT: Duration = Duration::from_secs(60);
 const ALIVE_YES: u8 = 1;
 /// How long a terminal-reached session stays retrievable: the owning
 /// run's collect happens immediately after the loop; reattaching to a
@@ -320,31 +323,6 @@ fn bounded_text(text: &str, ceiling: usize, scrub: &[String]) -> String {
 // ─────────────────────────────────────────────────────────────────────────
 // The controller
 // ─────────────────────────────────────────────────────────────────────────
-
-impl AcpxProcess {
-    /// Synchronously kill THIS process's own child (group-signalled).
-    /// Idempotent and self-scoped: whatever else occupies a state slot is
-    /// never touched, so superseded recovery attempts cannot kill a
-    /// newer attempt's child.
-    fn kill_now(&self) {
-        self.pending.lock().clear();
-        let child = self.child.lock().take();
-        if let Some(child) = child {
-            #[cfg(unix)]
-            if let Some(pid) = child.id() {
-                let pgid = pid as libc::pid_t;
-                unsafe {
-                    libc::killpg(pgid, libc::SIGKILL);
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let mut child = child;
-                let _ = child.start_kill();
-            }
-        }
-    }
-}
 
 /// The real ACPX [`SessionController`]. Deliberately NOT `Clone`: one
 /// controller owns its sessions' lifecycles, and its `Drop` is the
@@ -686,30 +664,48 @@ impl AcpxController {
 
     /// Bring a dead transport back to the SAME harness session through
     /// ACP `session/load` (no new session is minted).
+    /// Recovery is serialized per state and CANCELLATION-SAFE: the
+    /// in-flight marker lives in a guard whose `Drop` clears it, so even
+    /// a cancelled caller future can never leave the marker stuck (which
+    /// would suppress all later updates) nor fool a coalescing waiter
+    /// into treating a half-open transport as recovered. The flapping
+    /// budget is consumed only by attempts this waiter actually makes.
     async fn resume_session(&self, state: &Arc<SessionState>) -> Result<(), ControllerError> {
-        // One recovery at a time per session: concurrent attempts would
-        // race the process slot and the alive flag.
-        let _resume_guard = state.resume_lock.lock().await;
+        // Wait (bounded) for any in-flight recovery to settle, holding the
+        // per-state serialization lock across the whole attempt.
+        let wait_deadline = std::time::Instant::now() + RECOVERY_WAIT;
+        let _resume_guard = loop {
+            let guard = state.resume_lock.lock().await;
+            if state.load_in_flight.load(Ordering::SeqCst) == UNSET {
+                break guard;
+            }
+            if std::time::Instant::now() >= wait_deadline {
+                return Err(ControllerError::Unavailable);
+            }
+            drop(guard);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        // Coalesce: a COMPLETED preceding recovery that left a live
+        // transport makes this attempt a no-op. (A cancelled predecessor
+        // cleared the in-flight marker via its guard's Drop, so this
+        // check can only pass for a genuinely settled transport.)
         if state.alive.load(Ordering::SeqCst) == ALIVE_YES {
-            // A preceding waiter already restored a live transport:
-            // coalesce instead of spawning a second carrier.
+            // A preceding waiter restored a live transport: coalesced.
             return Ok(());
         }
+        if state.resume_streak.fetch_add(1, Ordering::SeqCst) >= MAX_WATCH_RESUMES {
+            return Err(ControllerError::Unavailable);
+        }
+        // The in-flight marker is guard-protected: every exit path
+        // (success, typed failure, CANCELLATION) clears it.
         state.load_in_flight.store(SET, Ordering::SeqCst);
-        let spawned = self.spawn_and_initialize(state).await;
-        let process = match spawned {
-            Ok(process) => process,
-            Err(error) => {
-                state.load_in_flight.store(UNSET, Ordering::SeqCst);
-                Self::terminate(state).await;
-                return Err(error);
-            }
-        };
+        let _in_flight = InFlightGuard(state);
+        self.spawn_and_initialize(state).await?;
         let session_id = state.session_id();
         let load = tokio::time::timeout(
             self.config.startup_timeout,
             Self::request(
-                &process,
+                &(*Self::process(state)?),
                 "session/load",
                 json!({
                     "sessionId": session_id,
@@ -723,33 +719,18 @@ impl AcpxController {
         .await;
         state.load_in_flight.store(UNSET, Ordering::SeqCst);
         match load {
-            Ok(Ok(_)) => Ok(()),
+            Ok(Ok(_)) => {}
             Ok(Err(_)) | Err(_) => {
-                // The load refused or timed out: kill THIS attempt's own
-                // child (self-scoped — a newer recovery that replaced the
-                // state slot owns its own child and is never touched),
-                // then retire the slot only if it still holds this
-                // attempt's process.
-                process.kill_now();
-                let mut slot_guard = state.process.lock();
-                if slot_guard
-                    .as_ref()
-                    .is_some_and(|current| Arc::ptr_eq(current, &process))
-                {
-                    // The retired process IS the slot's occupant: the
-                    // state goes dead with it.
-                    state.alive.store(UNSET, Ordering::SeqCst);
-                    *slot_guard = None;
-                }
-                drop(slot_guard);
-                Err(ControllerError::Unavailable)
+                Self::terminate(state).await;
+                return Err(ControllerError::Unavailable);
             }
         }
+        Ok(())
     }
 
-    /// Kill the transport child and mark the state dead. Idempotent.
-    /// The kill is real (the child handle is owned here) and the child
-    /// is reaped, so no harness process outlives the session state.
+    /// Kill the transport child and mark the state dead. Idempotent. The
+    /// kill is real (the child handle is owned here) and the child is
+    /// reaped, so no harness process outlives the session state.
     async fn terminate(state: &SessionState) {
         state.alive.store(UNSET, Ordering::SeqCst);
         // Take the slot OUT of the lock before awaiting: no guard may be
@@ -759,21 +740,30 @@ impl AcpxController {
             process.pending.lock().clear();
             let child = process.child.lock().take();
             if let Some(mut child) = child {
-                // The child leads its own process group: signal the whole
-                // tree so wrapper-spawned platform binaries die too, then
-                // reap the direct child.
                 #[cfg(unix)]
                 if let Some(pid) = child.id() {
                     let pgid = pid as libc::pid_t;
-                    if unsafe { libc::killpg(pgid, libc::SIGKILL) } != 0 {
-                        let _ = child.start_kill();
+                    unsafe {
+                        libc::killpg(pgid, libc::SIGKILL);
                     }
                 }
                 #[cfg(not(unix))]
-                let _ = child.start_kill();
+                {
+                    let _ = child.start_kill();
+                }
                 let _ = child.wait().await;
             }
         }
+    }
+}
+
+/// Drops the in-flight recovery marker on EVERY exit path, including
+/// future cancellation (the cancellation-safety core of `resume_session`).
+struct InFlightGuard<'a>(&'a SessionState);
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.load_in_flight.store(UNSET, Ordering::SeqCst);
     }
 }
 
@@ -996,9 +986,6 @@ impl SessionController for AcpxController {
         // session back instead of spinning unavailable — while a
         // flapping adapter (load succeeds, then closes) can never trap
         // the watch in an endless success/fail cycle.
-        if state.resume_streak.fetch_add(1, Ordering::SeqCst) >= MAX_WATCH_RESUMES {
-            return Err(ControllerError::Unavailable);
-        }
         self.resume_session(&state).await?;
         let page = self.watch(handle, after_seq, limit).await?;
         // The streak decays only on OBSERVED progress: a resume that
