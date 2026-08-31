@@ -114,6 +114,22 @@ impl SessionCapabilities {
         }
     }
 
+    /// The intersection of two capability sets: a session carries a
+    /// capability only when BOTH sources admit it.
+    #[must_use]
+    pub fn intersection(self, other: Self) -> Self {
+        Self {
+            observe: self.observe && other.observe,
+            wait: self.wait && other.wait,
+            prompt: self.prompt && other.prompt,
+            cancel: self.cancel && other.cancel,
+            resume: self.resume && other.resume,
+            load: self.load && other.load,
+            events: self.events && other.events,
+            artifacts: self.artifacts && other.artifacts,
+        }
+    }
+
     /// The typed operation gate: the SINGLE mapping from the six execution-vertical
     /// operations to the closed capability set. `Some(operation)` when the
     /// set does not admit the operation (typed refusal); `None` when it

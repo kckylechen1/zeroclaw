@@ -769,11 +769,22 @@ impl SessionController for AcpxController {
                 // the minted remote identity.
                 watchdog_sessions.lock().remove(&watchdog_key);
                 let minted = state.session_id();
-                if !minted.is_empty() {
+                if !minted.is_empty()
+                    && watchdog_sessions
+                        .lock()
+                        .get(&minted)
+                        .is_some_and(|entry| Arc::ptr_eq(entry, &state))
+                {
+                    // Ownership-checked: a repeated/foreign session id can
+                    // never be evicted by this teardown.
                     watchdog_sessions.lock().remove(&minted);
                 }
             }
         });
+        // The verbatim start fact opens the stream (mirrors the spine's
+        // attach→accepted opening pair) BEFORE the objective turn, so the
+        // fact order matches the lifecycle order.
+        state.push_event(SessionEventKindV1::Accepted, None, None);
         let opened = self.open_session(&state, &spec.prompt).await;
         let settled_first = state
             .settled
@@ -800,12 +811,18 @@ impl SessionController for AcpxController {
             .lock()
             .insert(session_id.clone(), state.clone());
 
-        // The verbatim start fact opens the stream (mirrors the spine's
-        // attach→accepted opening pair).
-        state.push_event(SessionEventKindV1::Accepted, None, None);
+        // The handle advertises the INTERSECTION of what the host asked
+        // for and what this transport was configured to declare: both
+        // sources must admit a capability before the gated client can
+        // ever exercise it (single enforcement boundary, no unchecked
+        // second source).
+        let effective = spec
+            .capabilities
+            .intersection(AcpxControllerConfig::supported_capabilities())
+            .intersection(self.config_declared()?);
         Ok(SessionHandle {
             remote_session: RemoteSessionRef::from_opaque(session_id),
-            capabilities: spec.capabilities,
+            capabilities: effective,
         })
     }
 
@@ -1066,6 +1083,20 @@ impl Drop for AcpxController {
 }
 
 impl AcpxController {
+    /// The capability set a started session actually carries: the
+    /// intersection of the host's requested set and this transport's
+    /// configured declared set (both sources enforced, not trusted).
+    fn config_declared(&self) -> Result<SessionCapabilities, ControllerError> {
+        SessionCapabilities::from_names(
+            &self
+                .config
+                .declared_capabilities
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<String>>(),
+        )
+    }
+
     fn terminal_observed(state: &SessionState, confirmation: &AuthorityConfirmationRef) -> bool {
         state.events.lock().iter().any(|event| {
             event.outcome.as_ref().is_some_and(|outcome| {
