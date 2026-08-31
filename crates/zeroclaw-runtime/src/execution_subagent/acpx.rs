@@ -324,6 +324,31 @@ fn bounded_text(text: &str, ceiling: usize, scrub: &[String]) -> String {
 // The controller
 // ─────────────────────────────────────────────────────────────────────────
 
+impl AcpxProcess {
+    /// Synchronously kill THIS process's own child (group-signalled).
+    /// Idempotent and self-scoped: whatever else occupies a state slot is
+    /// never touched, so superseded recovery attempts cannot kill a
+    /// newer attempt's child.
+    fn kill_now(&self) {
+        self.pending.lock().clear();
+        let child = self.child.lock().take();
+        if let Some(child) = child {
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                let pgid = pid as libc::pid_t;
+                unsafe {
+                    libc::killpg(pgid, libc::SIGKILL);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let mut child = child;
+                let _ = child.start_kill();
+            }
+        }
+    }
+}
+
 /// The real ACPX [`SessionController`]. Deliberately NOT `Clone`: one
 /// controller owns its sessions' lifecycles, and its `Drop` is the
 /// last-resort kill. Share it through an `Arc` at the wiring layer.
@@ -671,61 +696,46 @@ impl AcpxController {
     /// into treating a half-open transport as recovered. The flapping
     /// budget is consumed only by attempts this waiter actually makes.
     async fn resume_session(&self, state: &Arc<SessionState>) -> Result<(), ControllerError> {
-        // Wait (bounded) for any in-flight recovery to settle, holding the
-        // per-state serialization lock across the whole attempt.
-        let wait_deadline = std::time::Instant::now() + RECOVERY_WAIT;
-        let _resume_guard = loop {
-            let guard = state.resume_lock.lock().await;
-            if state.load_in_flight.load(Ordering::SeqCst) == UNSET {
-                break guard;
-            }
-            if std::time::Instant::now() >= wait_deadline {
-                return Err(ControllerError::Unavailable);
-            }
-            drop(guard);
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
+        // The recovery is owned by ONE guard: the per-state lock (serializing
+        // attempts), the in-flight marker, and the child kill on every
+        // non-success exit — including future CANCELLATION. There is no
+        // cleanup path that can be skipped by a cancelled caller. The lock
+        // wait is bounded: an in-flight recovery that never settles fails
+        // the attempt typed instead of hanging the run.
+        // Held to the end of the attempt: the recovery is serialized.
+        let _resume_guard = tokio::time::timeout(RECOVERY_WAIT, state.resume_lock.lock())
+            .await
+            .map_err(|_| ControllerError::Unavailable)?;
+        state.load_in_flight.store(SET, Ordering::SeqCst);
         // Coalesce: a COMPLETED preceding recovery that left a live
-        // transport makes this attempt a no-op. (A cancelled predecessor
-        // cleared the in-flight marker via its guard's Drop, so this
-        // check can only pass for a genuinely settled transport.)
+        // transport makes this attempt a no-op. A cancelled predecessor
+        // cleared both the marker (guard Drop) and liveness (kill_now),
+        // so this check can only pass for a genuinely settled transport.
         if state.alive.load(Ordering::SeqCst) == ALIVE_YES {
-            // A preceding waiter restored a live transport: coalesced.
             return Ok(());
         }
-        if state.resume_streak.fetch_add(1, Ordering::SeqCst) >= MAX_WATCH_RESUMES {
-            return Err(ControllerError::Unavailable);
-        }
-        // The in-flight marker is guard-protected: every exit path
-        // (success, typed failure, CANCELLATION) clears it.
-        state.load_in_flight.store(SET, Ordering::SeqCst);
-        let _in_flight = InFlightGuard(state);
-        self.spawn_and_initialize(state).await?;
+        let mut recovery = RecoveryGuard::new(state);
+        recovery.spawn_and_initialize(self).await?;
         let session_id = state.session_id();
         let load = tokio::time::timeout(
             self.config.startup_timeout,
-            Self::request(
-                &(*Self::process(state)?),
+            recovery.request(
                 "session/load",
                 json!({
                     "sessionId": session_id,
                     "cwd": self.config.workspace_root,
                     "mcpServers": [],
                 }),
-                self.config.startup_timeout,
-                &self.scrub,
             ),
         )
         .await;
-        state.load_in_flight.store(UNSET, Ordering::SeqCst);
         match load {
-            Ok(Ok(_)) => {}
-            Ok(Err(_)) | Err(_) => {
-                Self::terminate(state).await;
-                return Err(ControllerError::Unavailable);
+            Ok(Ok(_)) => {
+                recovery.done = true;
+                Ok(())
             }
+            Ok(Err(_)) | Err(_) => Err(ControllerError::Unavailable),
         }
-        Ok(())
     }
 
     /// Kill the transport child and mark the state dead. Idempotent. The
@@ -757,13 +767,69 @@ impl AcpxController {
     }
 }
 
-/// Drops the in-flight recovery marker on EVERY exit path, including
-/// future cancellation (the cancellation-safety core of `resume_session`).
-struct InFlightGuard<'a>(&'a SessionState);
+/// The single owner of one recovery attempt: holds the per-state resume
+/// lock, marks the in-flight marker, and — unless the recovery completed
+/// successfully — kills the attempt's own child on EVERY exit path,
+/// including future CANCELLATION. There is no cleanup that a cancelled
+/// caller future can skip.
+struct RecoveryGuard<'a> {
+    state: &'a Arc<SessionState>,
+    process: Option<Arc<AcpxProcess>>,
+    done: bool,
+}
 
-impl Drop for InFlightGuard<'_> {
+impl<'a> RecoveryGuard<'a> {
+    fn new(state: &'a Arc<SessionState>) -> Self {
+        Self {
+            state,
+            process: None,
+            done: false,
+        }
+    }
+
+    async fn spawn_and_initialize(
+        &mut self,
+        controller: &AcpxController,
+    ) -> Result<(), ControllerError> {
+        self.state.load_in_flight.store(SET, Ordering::SeqCst);
+        self.process = Some(controller.spawn_and_initialize(self.state).await?);
+        Ok(())
+    }
+
+    async fn request(&self, method: &str, params: Value) -> Result<Value, ControllerError> {
+        let process = self.process.as_ref().ok_or(ControllerError::Unavailable)?;
+        AcpxController::request(
+            process,
+            method,
+            params,
+            Duration::from_secs(30),
+            &self.state.scrub,
+        )
+        .await
+    }
+}
+
+impl Drop for RecoveryGuard<'_> {
     fn drop(&mut self) {
-        self.0.load_in_flight.store(UNSET, Ordering::SeqCst);
+        self.state.load_in_flight.store(UNSET, Ordering::SeqCst);
+        if !self.done {
+            // The recovery did not complete: kill THIS attempt's own child
+            // (self-scoped), retire the slot only if it still holds this
+            // process, and mark the state dead.
+            if let Some(process) = &self.process {
+                process.kill_now();
+            }
+            let mut slot = self.state.process.lock();
+            let owned = slot.as_ref().is_some_and(|current| {
+                self.process
+                    .as_ref()
+                    .is_some_and(|p| Arc::ptr_eq(current, p))
+            });
+            if owned {
+                self.state.alive.store(UNSET, Ordering::SeqCst);
+                *slot = None;
+            }
+        }
     }
 }
 
@@ -985,7 +1051,12 @@ impl SessionController for AcpxController {
         // reconnect-retry path (post `sink.reconnect`) brings the SAME
         // session back instead of spinning unavailable — while a
         // flapping adapter (load succeeds, then closes) can never trap
-        // the watch in an endless success/fail cycle.
+        // the watch in an endless success/fail cycle. The streak is
+        // consumed here (one per attempt) and decays only on observed
+        // progress below.
+        if state.resume_streak.fetch_add(1, Ordering::SeqCst) >= MAX_WATCH_RESUMES {
+            return Err(ControllerError::Unavailable);
+        }
         self.resume_session(&state).await?;
         let page = self.watch(handle, after_seq, limit).await?;
         // The streak decays only on OBSERVED progress: a resume that
