@@ -688,7 +688,13 @@ impl AcpxController {
         state.load_in_flight.store(UNSET, Ordering::SeqCst);
         match load {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(_)) | Err(_) => Err(ControllerError::Unavailable),
+            Ok(Err(_)) | Err(_) => {
+                // The load refused or timed out: the freshly spawned child
+                // is registered in the state slot — tear it down so a
+                // failed resume never strands a live process.
+                Self::terminate(state).await;
+                Err(ControllerError::Unavailable)
+            }
         }
     }
 
@@ -945,7 +951,12 @@ impl SessionController for AcpxController {
         }
         self.resume_session(&state).await?;
         let page = self.watch(handle, after_seq, limit).await?;
-        state.resume_streak.store(0, Ordering::SeqCst);
+        // The streak decays only on OBSERVED progress: a resume that
+        // succeeds and then dies again before any event keeps the streak
+        // climbing until the bound fails the run typed.
+        if !page.events.is_empty() {
+            state.resume_streak.store(0, Ordering::SeqCst);
+        }
         Ok(page)
     }
 
@@ -1113,9 +1124,17 @@ impl SessionController for AcpxController {
         if let Err(error) = self.resume_session(&state).await {
             // A failed resume must not strand the freshly spawned child:
             // it is registered in the state slot (pre-handshake), so the
-            // terminate path owns it.
+            // terminate path owns it. The map entry is removed only when
+            // it is still THIS state (ownership-checked): a concurrent
+            // successful recovery is never deleted.
             Self::terminate(&state).await;
-            self.sessions.lock().remove(remote_session.as_str());
+            let mut sessions = self.sessions.lock();
+            if sessions
+                .get(remote_session.as_str())
+                .is_some_and(|entry| Arc::ptr_eq(entry, &state))
+            {
+                sessions.remove(remote_session.as_str());
+            }
             return Err(error);
         }
         self.sessions
