@@ -653,6 +653,31 @@ async fn same_root_move_is_no_clobber_and_cross_root_is_unsupported() {
         "the destination must be intact after a refused move"
     );
 
+    // a refused move (missing source) leaves NO freshly created
+    // destination parents behind (no litter law)
+    let absent = PersonalRelativePath::parse("does-not-exist.txt").expect("path");
+    let deep_dst = PersonalRelativePath::parse("new/a/final.txt").expect("path");
+    match service
+        .move_no_clobber(
+            MoveSource {
+                root: &root,
+                path: &absent,
+            },
+            MoveDestination {
+                root: &root,
+                path: &deep_dst,
+            },
+        )
+        .await
+    {
+        Err(PersonalFileError::NotFound(_)) => {}
+        other => panic!("missing source must be not-found, got {other:?}"),
+    }
+    assert!(
+        !tmp.path().join("new").exists(),
+        "a refused move must not create destination parents"
+    );
+
     // cross-root move is typed unsupported
     let tmp2 = tempfile::tempdir().expect("tempdir 2");
     let (_service2, root2) = service_with_rw_root(tmp2.path());

@@ -21,18 +21,21 @@
 //!   every operation. A relocated directory answers a typed refusal
 //!   instead of inheriting the root's authority.
 //! - **The admitted root is captured once**: the canonical path is
-//!   walked component-by-component with no-follow opens at admission,
-//!   identity (device + inode) and parent identity are recorded, and
-//!   both are re-verified against the held descriptor before every
-//!   operation. The canonical path string is kept for display only and
-//!   is never opened through again.
-//! - **Staged names are unobservable.** Every intermediate write (new
-//!   file, replacement content, trash recovery copy) is created under a
-//!   freshly minted unpredictable name, written through a held
-//!   descriptor, fsynced, and checked for `nlink == 1` on that held
-//!   descriptor before publication. An attacker cannot watch-and-link
-//!   a name it cannot predict, and a link planted anyway is detected
-//!   on the held fd before the object is published or reused.
+//!   walked component-by-component with no-follow opens at admission
+//!   (canonicalization itself resolves the caller path by design — the
+//!   ground-truth caveat is documented at `admit_root`), identity
+//!   (device + inode) and parent identity are recorded, and both are
+//!   re-verified against the held descriptor before every operation.
+//!   The canonical path string is kept for display only and is never
+//!   opened through again.
+//! - **Staged writes are verified on their held descriptor.** Every
+//!   intermediate write (new file, replacement content, trash recovery
+//!   copy) is created under a freshly minted name (not derivable from
+//!   the target name alone; recovery names sit inside a freshly minted
+//!   slot), written through a held descriptor, fsynced, and checked for
+//!   `nlink == 1` on that held descriptor before publication. A link
+//!   planted between the check and the publication is a documented
+//!   timing window (below), not a silent success.
 //! - **Hard-link containment**: any file targeted for mutation must
 //!   have `nlink == 1`; a shared inode answers
 //!   [`PersonalFileRefusal::Hardlinked`].
@@ -58,13 +61,16 @@
 //! objects inside the admitted root already has write access to the
 //! user's personal files by the same token).
 //!
-//! Against that adversary these invariants hold structurally:
-//! resolution never traverses a symlink (no-follow component opens);
-//! foreign inodes (`nlink != 1`) and `.git` metadata are refused as
-//! mutation targets; refused and failed operations leave nothing this
-//! module created behind (trash slots are rolled back); published
-//! content is written under freshly minted names, fsynced, and checked
-//! unshared on its held descriptor.
+//! Against that adversary these invariants hold structurally: every
+//! operation resolves paths only through no-follow component opens of
+//! held descriptors (admission resolves the caller path to its
+//! canonical form first — see `admit_root` for the ground-truth
+//! caveat); foreign inodes (`nlink != 1`) and `.git` metadata are
+//! refused as mutation targets; refused and failed operations roll
+//! back what they created (trash slots are removed, best effort, only
+//! while the name still names the object bound at creation); staged
+//! content is fsynced and checked unshared on its held descriptor
+//! before publication.
 //!
 //! The residual is timing, not traversal: between any verification and
 //! its adjacent mutation syscall a sufficiently lucky in-root rename
@@ -432,12 +438,10 @@ pub(crate) fn write_staged_file(
     }
 }
 
-/// fsync a directory descriptor (durability of a name change).
-pub(crate) fn fsync_dir(dir: &OwnedFd) -> SafetyResult<()> {
-    fsync(dir).map_err(errno_to_io)
-}
-
-/// Best-effort fsync after a completed rename-class mutation.
+/// Best-effort fsync of a directory descriptor after a completed
+/// rename-class mutation. Publication is already complete when this
+/// runs; a flushing failure must not turn a published, recoverable
+/// outcome into an error that hides it.
 pub(crate) fn fsync_dir_best_effort(dir: &OwnedFd) {
     let _ = fsync(dir);
 }
@@ -481,39 +485,40 @@ pub(crate) fn open_trash(root: &RootInner) -> SafetyResult<OwnedFd> {
     }
 }
 
+/// A trash slot bound at creation: name, held descriptor, and the
+/// identity captured while the slot was proved linked under the trash.
+pub(crate) struct TrashSlot {
+    /// The freshly minted slot directory name.
+    pub name: String,
+    /// The slot's held descriptor (linkage-verified at bind time).
+    pub dir: OwnedFd,
+    /// The slot's identity captured at bind time; cleanup removes the
+    /// name only while it still names this object.
+    pub identity: ObjectId,
+}
+
 /// Create a fresh per-operation slot directory inside the trash and
-/// return `(slot name, slot descriptor)`. Slot names are freshly minted
-/// per operation and re-minted on the (astronomically unlikely) `EEXIST`
-/// (deterministic collision handling by construction), the slot is
-/// verified to still be linked under the trash, and the trash
-/// directory's dirent is fsynced so recovery copies are
-/// crash-reachable.
-pub(crate) fn fresh_trash_slot(trash: &OwnedFd) -> SafetyResult<(String, OwnedFd)> {
+/// bind it: the descriptor is opened, its `..` linkage under the trash
+/// is verified, and its identity is captured — all on one held
+/// descriptor — before the caller uses it. Slot names are freshly
+/// minted per operation and re-minted on `EEXIST` (deterministic
+/// collision handling by construction); the trash directory's dirent is
+/// fsynced so recovery copies are crash-reachable. A substitution
+/// between `mkdirat` and the bind sequence fails the bind and is
+/// reported WITHOUT removing the name (nothing was bound, so nothing
+/// is removed by name).
+pub(crate) fn fresh_trash_slot(trash: &OwnedFd) -> SafetyResult<TrashSlot> {
     let trash_id = identity_of(trash)?;
     for _ in 0..8 {
         let slot = uuid::Uuid::new_v4().to_string();
         match mkdirat(trash, slot.as_str(), Mode::from(0o700)) {
-            Ok(()) => {
-                let dir = match openat(trash, slot.as_str(), dir_oflags(), Mode::empty()) {
-                    Ok(dir) => dir,
-                    Err(error) => {
-                        let _ = unlinkat(trash, slot.as_str(), AtFlags::REMOVEDIR);
-                        return Err(PersonalFileRefusal::TrashUnavailable {
-                            reason: format!("opening the fresh trash slot failed: {error}"),
-                        }
-                        .into());
-                    }
-                };
-                if verify_parent_link(&dir, trash_id).is_err() {
-                    let _ = unlinkat(trash, slot.as_str(), AtFlags::REMOVEDIR);
-                    return Err(PersonalFileRefusal::TrashUnavailable {
-                        reason: "the fresh trash slot is not linked under the trash".to_string(),
-                    }
-                    .into());
+            Ok(()) => match bind_trash_slot(trash, &slot, trash_id) {
+                Ok(bound) => {
+                    fsync_dir_best_effort(trash);
+                    return Ok(bound);
                 }
-                fsync_dir_best_effort(trash);
-                return Ok((slot, dir));
-            }
+                Err(error) => return Err(error),
+            },
             Err(rustix::io::Errno::EXIST) => continue,
             Err(error) => {
                 return Err(PersonalFileRefusal::TrashUnavailable {
@@ -529,20 +534,54 @@ pub(crate) fn fresh_trash_slot(trash: &OwnedFd) -> SafetyResult<(String, OwnedFd
     .into())
 }
 
-/// Remove a trash slot that a failed operation left behind (best
-/// effort): unlink the given file names inside the slot, then remove
-/// the now-empty slot directory. All names are freshly minted by this
-/// module, so the cleanup cannot hit foreign data.
-pub(crate) fn discard_trash_slot(
-    trash: &OwnedFd,
-    slot: &str,
-    slot_dir: &OwnedFd,
-    file_names: &[String],
-) {
-    for name in file_names {
-        let _ = unlinkat(slot_dir, name.as_str(), AtFlags::empty());
+/// Open the named slot, verify its `..` linkage under the trash, and
+/// capture its identity — the bind. Every failure path either cleans
+/// up by name only while the name still names the object this call
+/// opened and identified, or leaves the freshly created directory in
+/// place (an orphan inside the reserved trash namespace, harmless and
+/// operator-cleanable); a substituted name is never removed.
+fn bind_trash_slot(trash: &OwnedFd, slot: &str, trash_id: ObjectId) -> SafetyResult<TrashSlot> {
+    let dir = openat(trash, slot, dir_oflags(), Mode::empty()).map_err(|error| {
+        PersonalFileRefusal::TrashUnavailable {
+            reason: format!("opening the fresh trash slot failed: {error}"),
+        }
+    })?;
+    let identity = identity_of(&dir)?;
+    if verify_parent_link(&dir, trash_id).is_err() {
+        identity_checked_rmdir(trash, slot, &identity);
+        return Err(PersonalFileRefusal::TrashUnavailable {
+            reason: "the fresh trash slot is not linked under the trash".to_string(),
+        }
+        .into());
     }
-    let _ = unlinkat(trash, slot, AtFlags::REMOVEDIR);
+    Ok(TrashSlot {
+        name: slot.to_string(),
+        dir,
+        identity,
+    })
+}
+
+/// Remove the named trash directory only while it still names an object
+/// with the given identity; a no-op otherwise.
+fn identity_checked_rmdir(trash: &OwnedFd, slot: &str, probe: &ObjectId) -> bool {
+    match statat(trash, slot, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) if ObjectId::of(&stat) == *probe => {
+            unlinkat(trash, slot, AtFlags::REMOVEDIR).is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// Remove a trash slot that a failed operation left behind (best
+/// effort): unlink the given file names inside the bound slot, then
+/// remove the slot directory — but only while the name still resolves
+/// to the object bound at creation. All names are freshly minted by
+/// this module, so the cleanup cannot hit foreign data.
+pub(crate) fn discard_trash_slot(trash: &OwnedFd, slot: &TrashSlot, file_names: &[String]) {
+    for name in file_names {
+        let _ = unlinkat(&slot.dir, name.as_str(), AtFlags::empty());
+    }
+    let _ = identity_checked_rmdir(trash, &slot.name, &slot.identity);
 }
 
 /// Rename `leaf` (under `parent`) into the freshly minted empty `slot`.
@@ -553,13 +592,13 @@ pub(crate) fn move_into_trash(
     parent: &OwnedFd,
     leaf: &str,
     trash: &OwnedFd,
-    slot_dir: &OwnedFd,
+    slot: &TrashSlot,
 ) -> SafetyResult<()> {
     let trash_id = identity_of(trash)?;
-    verify_parent_link(slot_dir, trash_id).map_err(|_| PersonalFileRefusal::TrashUnavailable {
+    verify_parent_link(&slot.dir, trash_id).map_err(|_| PersonalFileRefusal::TrashUnavailable {
         reason: "the trash slot moved".to_string(),
     })?;
-    renameat_with(parent, leaf, slot_dir, leaf, RenameFlags::NOREPLACE).map_err(|error| {
+    renameat_with(parent, leaf, &slot.dir, leaf, RenameFlags::NOREPLACE).map_err(|error| {
         PersonalFileRefusal::TrashUnavailable {
             reason: format!("moving into the trash failed: {error}"),
         }

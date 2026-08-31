@@ -361,7 +361,9 @@ impl PersonalFileService {
             })();
             match publish {
                 Ok(()) => {
-                    safety::fsync_dir(&parent)?;
+                    // Publication is complete; see the replace note on
+                    // best-effort directory-dirent durability.
+                    safety::fsync_dir_best_effort(&parent);
                     Ok(PersonalFileResult::Created {
                         identity: ExpectedContentIdentity::of_content(content.as_bytes()),
                     })
@@ -413,14 +415,14 @@ impl PersonalFileService {
             // collision-free and the recovery copy is written under an
             // unpredictable name with its own unshared-inode check.
             let trash = safety::open_trash(&root.inner)?;
-            let (slot, slot_dir) = safety::fresh_trash_slot(&trash)?;
+            let slot = safety::fresh_trash_slot(&trash)?;
             let recovery_name = safety::recovery_name_for(path.leaf());
-            if let Err(error) = safety::write_staged_file(&slot_dir, &recovery_name, &prior_bytes) {
-                safety::discard_trash_slot(&trash, &slot, &slot_dir, &[recovery_name]);
+            if let Err(error) = safety::write_staged_file(&slot.dir, &recovery_name, &prior_bytes) {
+                safety::discard_trash_slot(&trash, &slot, &[recovery_name]);
                 return Err(error);
             }
-            safety::fsync_dir_best_effort(&slot_dir);
-            let prior_in_trash = format!("{TRASH_NAMESPACE}/{slot}/{recovery_name}");
+            safety::fsync_dir_best_effort(&slot.dir);
+            let prior_in_trash = format!("{TRASH_NAMESPACE}/{}/{recovery_name}", slot.name);
 
             // Test-only race window: an attacker step may now swap the leaf.
             safety::run_race_hook();
@@ -439,7 +441,7 @@ impl PersonalFileService {
                     Ok(())
                 });
             if let Err(error) = recheck {
-                safety::discard_trash_slot(&trash, &slot, &slot_dir, &[recovery_name]);
+                safety::discard_trash_slot(&trash, &slot, &[recovery_name]);
                 return Err(error);
             }
 
@@ -451,14 +453,18 @@ impl PersonalFileService {
                 match safety::write_staged_file(&parent, &staged_name, new_content.as_bytes()) {
                     Ok(staged) => staged,
                     Err(error) => {
-                        safety::discard_trash_slot(&trash, &slot, &slot_dir, &[recovery_name]);
+                        safety::discard_trash_slot(&trash, &slot, &[recovery_name]);
                         return Err(error);
                     }
                 };
             drop(staged);
             match safety::rename_publish(&parent, &staged_name, path.leaf()) {
                 Ok(()) => {
-                    safety::fsync_dir(&parent)?;
+                    // The publication is complete; the directory-dirent
+                    // fsync is best-effort so a flushing failure cannot
+                    // turn a published, recoverable replacement into an
+                    // error that hides it.
+                    safety::fsync_dir_best_effort(&parent);
                     Ok(PersonalFileResult::Replaced {
                         identity: new_identity,
                         prior_in_trash,
@@ -466,12 +472,12 @@ impl PersonalFileService {
                 }
                 Err(rustix::io::Errno::NOENT) => {
                     safety::remove_staged(&parent, &staged_name);
-                    safety::discard_trash_slot(&trash, &slot, &slot_dir, &[recovery_name]);
+                    safety::discard_trash_slot(&trash, &slot, &[recovery_name]);
                     Err(PersonalFileRefusal::ConcurrentModification { path: display }.into())
                 }
                 Err(error) => {
                     safety::remove_staged(&parent, &staged_name);
-                    safety::discard_trash_slot(&trash, &slot, &slot_dir, &[recovery_name]);
+                    safety::discard_trash_slot(&trash, &slot, &[recovery_name]);
                     Err(rustix_errno_to_io(error))
                 }
             }
@@ -503,8 +509,10 @@ impl PersonalFileService {
         {
             safety::verify_root_identity(&src_root.inner)?;
             safety::probe_git_at_root(&src_root.inner)?;
+            // Validate the source strictly BEFORE any destination work:
+            // a refused or missing source must not leave freshly created
+            // destination directories behind.
             let src_parent = safety::walk_parents(&src_root.inner, src_path, false, true)?;
-            let dst_parent = safety::walk_parents(&src_root.inner, dst_path, true, true)?;
             let src_display = safety::display_path(&src_root.inner, src_path);
             let src_stat = match safety::stat_leaf(&src_parent, src_path.leaf())? {
                 Some(stat) => stat,
@@ -520,6 +528,7 @@ impl PersonalFileService {
                     return Err(PersonalFileRefusal::NotRegularFile { path: src_display }.into());
                 }
             }
+            let dst_parent = safety::walk_parents(&src_root.inner, dst_path, true, true)?;
             safety::run_race_hook();
             // Re-verify the source immediately before the rename: still
             // the exact object that was classified, still unshared.
@@ -586,7 +595,7 @@ impl PersonalFileService {
                 _ => return Err(PersonalFileRefusal::NotRegularFile { path: display }.into()),
             }
             let trash = safety::open_trash(&root.inner)?;
-            let (slot, slot_dir) = safety::fresh_trash_slot(&trash)?;
+            let slot = safety::fresh_trash_slot(&trash)?;
             // Everything after slot creation rolls the slot back on any
             // failure: a refused delete publishes nothing.
             let outcome = (|| -> SafetyResult<PersonalFileResult> {
@@ -607,17 +616,17 @@ impl PersonalFileService {
                         .into());
                     }
                 }
-                safety::move_into_trash(&parent, path.leaf(), &trash, &slot_dir)?;
+                safety::move_into_trash(&parent, path.leaf(), &trash, &slot)?;
                 safety::fsync_dir_best_effort(&parent);
-                safety::fsync_dir_best_effort(&slot_dir);
+                safety::fsync_dir_best_effort(&slot.dir);
                 Ok(PersonalFileResult::Trashed {
-                    trash_location: format!("{TRASH_NAMESPACE}/{slot}/{}", path.leaf()),
+                    trash_location: format!("{TRASH_NAMESPACE}/{}/{}", slot.name, path.leaf()),
                 })
             })();
             match outcome {
                 Ok(result) => Ok(result),
                 Err(error) => {
-                    safety::discard_trash_slot(&trash, &slot, &slot_dir, &[]);
+                    safety::discard_trash_slot(&trash, &slot, &[]);
                     Err(error)
                 }
             }
