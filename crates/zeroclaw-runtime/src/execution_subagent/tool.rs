@@ -308,9 +308,17 @@ impl ExecutionSubagentTool {
         };
         meter.try_record_action();
         usage.actions += 1;
-        let handle = match self.controller.start(&spec).await {
-            Ok(handle) => handle,
-            Err(error) => {
+        // The frozen run ceiling bounds STARTUP too: a transport that
+        // cannot open a session inside the budget ends the run typed
+        // instead of stretching it.
+        let handle = match tokio::time::timeout(
+            Duration::from_secs(self.profile.budget.time_limit_secs),
+            self.controller.start(&spec),
+        )
+        .await
+        {
+            Ok(Ok(handle)) => handle,
+            Ok(Err(error)) => {
                 return self.typed_failure_report(
                     &run_ref,
                     report_route,
@@ -320,6 +328,18 @@ impl ExecutionSubagentTool {
                     None,
                     ExecutionRunStatusV1::Refused,
                     format!("controller refused start (fail closed): {error}"),
+                );
+            }
+            Err(_) => {
+                return self.typed_failure_report(
+                    &run_ref,
+                    report_route,
+                    &mut usage,
+                    started,
+                    0,
+                    None,
+                    ExecutionRunStatusV1::TimedOut,
+                    "controller start exceeded the frozen run ceiling (fail closed)".to_string(),
                 );
             }
         };

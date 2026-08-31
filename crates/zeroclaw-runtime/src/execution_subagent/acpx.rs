@@ -271,22 +271,23 @@ fn event_identity(
 /// Bound text at a char boundary and scrub the workspace path (receipt
 /// surfaces carry no repository path).
 fn bounded_text(text: &str, ceiling: usize, scrub: &[String]) -> String {
+    const SUFFIX: &str = "…[truncated]";
     let mut scrubbed = text.to_string();
     for needle in scrub {
         if !needle.is_empty() {
             scrubbed = scrubbed.replace(needle.as_str(), "<workspace>");
         }
     }
-    let mut boundary = scrubbed.len().min(ceiling);
+    if scrubbed.len() <= ceiling {
+        return scrubbed;
+    }
+    // The suffix counts against the ceiling: the bound is the bound.
+    let hard = ceiling.saturating_sub(SUFFIX.len());
+    let mut boundary = hard.min(scrubbed.len());
     while boundary > 0 && !scrubbed.is_char_boundary(boundary) {
         boundary -= 1;
     }
-    let cut = &scrubbed[..boundary];
-    if scrubbed.len() > ceiling {
-        format!("{cut}…[truncated]")
-    } else {
-        cut.to_string()
-    }
+    format!("{}{SUFFIX}", &scrubbed[..boundary])
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -482,6 +483,12 @@ impl AcpxController {
             next_id: AtomicU64::new(1),
         });
 
+        // The child is owned by the state from this moment: every
+        // failure path below (and the tool's own fail-closed arms) kills
+        // it through the state slot.
+        state.alive.store(ALIVE_YES, Ordering::SeqCst);
+        *state.process.lock() = Some(process.clone());
+
         // Reader: owns stdout until EOF.
         let reader_process = process.clone();
         let reader_state = state.clone();
@@ -513,8 +520,6 @@ impl AcpxController {
                 "acpx adapter negotiated an unexpected protocol version".to_string(),
             ));
         }
-        state.alive.store(ALIVE_YES, Ordering::SeqCst);
-        *state.process.lock() = Some(process.clone());
         Ok(process)
     }
 
@@ -966,6 +971,36 @@ impl SessionController for AcpxController {
     }
 }
 
+impl Drop for AcpxController {
+    fn drop(&mut self) {
+        // Synchronous last-resort kill: no harness child may outlive the
+        // controller that owns it (group-signalled, then start_kill; the
+        // tokio orphan reaper collects the zombie).
+        for state in self.sessions.lock().values() {
+            state.alive.store(UNSET, Ordering::SeqCst);
+            let process = state.process.lock().take();
+            if let Some(process) = process {
+                process.pending.lock().clear();
+                let child = process.child.lock().take();
+                if let Some(child) = child {
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id() {
+                        let pgid = pid as libc::pid_t;
+                        unsafe {
+                            libc::killpg(pgid, libc::SIGKILL);
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let mut child = child;
+                        let _ = child.start_kill();
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl AcpxController {
     fn terminal_observed(state: &SessionState, confirmation: &AuthorityConfirmationRef) -> bool {
         state.events.lock().iter().any(|event| {
@@ -1042,7 +1077,7 @@ async fn reader_task(
                     let _ = waiter.send(message);
                 }
                 if let Some(stop_reason) = stop_reason {
-                    handle_turn_end(&state, &stop_reason).await;
+                    handle_turn_end(&state, &process, &stop_reason).await;
                 }
             }
             // Server→client request: the harness may ask the CLIENT for
@@ -1096,11 +1131,32 @@ async fn reader_task(
     pending.lock().clear();
 }
 
+/// Kill the child and clear the process slot (called from the reader
+/// when the run's terminal is observed: the host-owned session is over).
+async fn shutdown_transport(process: &AcpxProcess, state: &SessionState) {
+    state.alive.store(UNSET, Ordering::SeqCst);
+    process.pending.lock().clear();
+    let child = process.child.lock().take();
+    if let Some(mut child) = child {
+        #[cfg(unix)]
+        if let Some(pid) = child.id() {
+            let pgid = pid as libc::pid_t;
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+    *state.process.lock() = None;
+}
+
 /// The turn contract: the objective turn's end is `InputRequired` (the
 /// session is genuinely awaiting the next instruction); an answered
 /// correction leg closes the host-owned run (`completed`); a host-armed
 /// cancel binds its confirmation; anything else fails.
-async fn handle_turn_end(state: &Arc<SessionState>, stop_reason: &str) {
+async fn handle_turn_end(state: &Arc<SessionState>, process: &Arc<AcpxProcess>, stop_reason: &str) {
     let armed = state.stop_armed.lock().clone();
     let final_text = std::mem::take(&mut *state.last_turn_text.lock());
     *state.completed_turn_text.lock() = final_text.clone();
@@ -1113,6 +1169,7 @@ async fn handle_turn_end(state: &Arc<SessionState>, stop_reason: &str) {
             Some(SessionTerminalOutcomeV1::Cancelled { confirmation }),
             summary,
         );
+        shutdown_transport(process, state).await;
         return;
     }
     match stop_reason {
@@ -1127,6 +1184,7 @@ async fn handle_turn_end(state: &Arc<SessionState>, stop_reason: &str) {
                     Some(SessionTerminalOutcomeV1::Completed),
                     summary,
                 );
+                shutdown_transport(process, state).await;
             } else {
                 state.push_event(SessionEventKindV1::InputRequired, None, summary);
             }
@@ -1148,6 +1206,7 @@ async fn handle_turn_end(state: &Arc<SessionState>, stop_reason: &str) {
                 Some(SessionTerminalOutcomeV1::Failed),
                 Some(format!("turn ended: {other}")),
             );
+            shutdown_transport(process, state).await;
         }
     }
 }
