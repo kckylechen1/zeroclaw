@@ -401,15 +401,16 @@ pub(crate) fn read_bounded(file: OwnedFd, limit: u64) -> SafetyResult<Vec<u8>> {
 
 /// Write bytes to a freshly created exclusive (no-clobber, no-follow,
 /// non-blocking) file under `parent`, fsync it, verify `nlink == 1` on
-/// the held descriptor, and return the still-open descriptor. The name
-/// should be freshly minted (unpredictable) so the object is not
-/// observable under a guessable name before the caller publishes it.
-/// The caller drops the descriptor after its publication step.
+/// the held descriptor, and return the still-open descriptor together
+/// with the created object's identity. The name should be freshly
+/// minted; the identity is what authorizes the caller's failure-path
+/// cleanup (`remove_staged`) to unlink that name — and only while it
+/// still names the object this call created.
 pub(crate) fn write_staged_file(
     parent: &OwnedFd,
     name: &str,
     bytes: &[u8],
-) -> SafetyResult<OwnedFd> {
+) -> SafetyResult<(OwnedFd, ObjectId)> {
     // O_CREAT|O_EXCL returns the descriptor of the object THIS call
     // created, atomically: the identity below is ours by construction.
     let file = match open_leaf(parent, name, true, true) {
@@ -438,7 +439,7 @@ pub(crate) fn write_staged_file(
         require_unshared_inode(&stat, name)
     });
     match outcome {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok((file, identity)),
         Err(error) => {
             drop(file);
             // Identity-checked: if the name was swapped for a foreign
@@ -718,10 +719,13 @@ pub(crate) fn rename_publish(
     renameat(parent, staged, parent, leaf)
 }
 
-/// Remove a staged sibling after a failed publication (best effort; the
-/// staged name is freshly minted so this unlink cannot hit foreign data).
-pub(crate) fn remove_staged(parent: &OwnedFd, staged: &str) {
-    let _ = unlinkat(parent, staged, AtFlags::empty());
+/// Remove a staged sibling after a failed publication — only while the
+/// name still resolves to the object this module created (identity
+/// from [`write_staged_file`]). A swapped-in foreign file is never
+/// removed; this module's own inode stays orphaned under its
+/// attacker-chosen name inside the same directory.
+pub(crate) fn remove_staged(parent: &OwnedFd, staged: &str, identity: &ObjectId) {
+    identity_checked_unlink(parent, staged, identity);
 }
 
 /// Admission-time validation and capture of a root path:

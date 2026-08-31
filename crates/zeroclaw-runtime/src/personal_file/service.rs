@@ -345,16 +345,17 @@ impl PersonalFileService {
             // residual for the documented staging window.
             let staged_name = safety::staged_name_for(path.leaf());
             let publish = (|| {
-                let staged = safety::write_staged_file(&parent, &staged_name, content.as_bytes())?;
+                let (staged, staged_id) =
+                    safety::write_staged_file(&parent, &staged_name, content.as_bytes())?;
                 drop(staged);
                 match safety::rename_no_clobber(&parent, &staged_name, &parent, path.leaf()) {
                     Ok(()) => Ok(()),
                     Err(rustix::io::Errno::EXIST) => {
-                        safety::remove_staged(&parent, &staged_name);
+                        safety::remove_staged(&parent, &staged_name, &staged_id);
                         Err(PersonalFileError::AlreadyExists(display.clone()))
                     }
                     Err(error) => {
-                        safety::remove_staged(&parent, &staged_name);
+                        safety::remove_staged(&parent, &staged_name, &staged_id);
                         Err(rustix_errno_to_io(error))
                     }
                 }
@@ -423,7 +424,7 @@ impl PersonalFileService {
             // no file is removed at all.
             let recovery = safety::write_staged_file(&slot.dir, &recovery_name, &prior_bytes);
             let recovery_identity = match &recovery {
-                Ok(file) => fstat(file).ok().map(|stat| ObjectId::of(&stat)),
+                Ok((_, identity)) => Some(*identity),
                 Err(_) => None,
             };
             if let Err(error) = recovery {
@@ -463,9 +464,9 @@ impl PersonalFileService {
             // publish atomically. The staged write already fsynced and
             // proved its inode unshared on the held descriptor.
             let staged_name = safety::staged_name_for(path.leaf());
-            let staged =
+            let (staged, staged_id) =
                 match safety::write_staged_file(&parent, &staged_name, new_content.as_bytes()) {
-                    Ok(staged) => staged,
+                    Ok(pair) => pair,
                     Err(error) => {
                         safety::discard_trash_slot(&trash, &slot, &[recovery_file]);
                         return Err(error);
@@ -485,12 +486,12 @@ impl PersonalFileService {
                     })
                 }
                 Err(rustix::io::Errno::NOENT) => {
-                    safety::remove_staged(&parent, &staged_name);
+                    safety::remove_staged(&parent, &staged_name, &staged_id);
                     safety::discard_trash_slot(&trash, &slot, &[recovery_file]);
                     Err(PersonalFileRefusal::ConcurrentModification { path: display }.into())
                 }
                 Err(error) => {
-                    safety::remove_staged(&parent, &staged_name);
+                    safety::remove_staged(&parent, &staged_name, &staged_id);
                     safety::discard_trash_slot(&trash, &slot, &[recovery_file]);
                     Err(rustix_errno_to_io(error))
                 }

@@ -19,6 +19,18 @@ use super::service::{MoveDestination, MoveSource, PersonalFileService};
 // Fixtures (Unix: the safety core's supported platform)
 // ─────────────────────────────────────────────────────────────────────
 
+/// The test-only race hook is process-global and fires on every
+/// mutation, so fs-backed discriminations run serialized against it.
+#[cfg(unix)]
+static FS_TEST_SERIALIZER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(unix)]
+fn fs_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    FS_TEST_SERIALIZER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(unix)]
 fn service_with_rw_root(dir: &Path) -> (PersonalFileService, PersonalRootRef) {
     let root = PersonalFileService::admit_read_write(dir).expect("admit read-write root");
@@ -89,6 +101,7 @@ fn clear_race_hook() {
 #[cfg(unix)]
 #[tokio::test]
 async fn managed_personal_text_create_read_replace_and_trash_roundtrip() {
+    let _fs_serialized = fs_test_guard();
     let tmp = tempfile::tempdir().expect("tempdir");
     let (service, root) = service_with_rw_root(tmp.path());
 
@@ -163,6 +176,7 @@ async fn managed_personal_text_create_read_replace_and_trash_roundtrip() {
 #[cfg(unix)]
 #[tokio::test]
 async fn absolute_or_unadmitted_root_is_unrepresentable_or_refused() {
+    let _fs_serialized = fs_test_guard();
     // Unrepresentable: the typed path API cannot carry an absolute path.
     assert!(matches!(
         PersonalRelativePath::parse("/etc/passwd"),
@@ -213,6 +227,7 @@ async fn relative_escape_and_dotdot_are_refused() {
 #[cfg(unix)]
 #[tokio::test]
 async fn symlinked_root_ancestor_and_leaf_are_refused() {
+    let _fs_serialized = fs_test_guard();
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // A symlinked root refuses admission instead of silently admitting
@@ -268,6 +283,7 @@ async fn symlinked_root_ancestor_and_leaf_are_refused() {
 #[cfg(unix)]
 #[tokio::test]
 async fn race_swapped_ancestor_or_leaf_cannot_escape_or_mutate() {
+    let _fs_serialized = fs_test_guard();
     let tmp = tempfile::tempdir().expect("tempdir");
     let (service, root) = service_with_rw_root(tmp.path());
 
@@ -362,6 +378,7 @@ async fn race_swapped_ancestor_or_leaf_cannot_escape_or_mutate() {
 #[cfg(unix)]
 #[tokio::test]
 async fn hardlinked_foreign_inode_is_not_modified() {
+    let _fs_serialized = fs_test_guard();
     let tmp = tempfile::tempdir().expect("tempdir");
     let (service, root) = service_with_rw_root(tmp.path());
 
@@ -427,6 +444,7 @@ async fn hardlinked_foreign_inode_is_not_modified() {
 #[cfg(unix)]
 #[tokio::test]
 async fn repo_root_and_nested_git_worktree_are_refused() {
+    let _fs_serialized = fs_test_guard();
     let tmp = tempfile::tempdir().expect("tempdir");
 
     // A root that IS a repository (holds a .git directory) refuses
@@ -504,6 +522,7 @@ async fn repo_root_and_nested_git_worktree_are_refused() {
 #[cfg(unix)]
 #[tokio::test]
 async fn create_is_no_clobber() {
+    let _fs_serialized = fs_test_guard();
     let tmp = tempfile::tempdir().expect("tempdir");
     let (service, root) = service_with_rw_root(tmp.path());
 
@@ -528,6 +547,7 @@ async fn create_is_no_clobber() {
 #[cfg(unix)]
 #[tokio::test]
 async fn replace_requires_matching_expected_identity() {
+    let _fs_serialized = fs_test_guard();
     let tmp = tempfile::tempdir().expect("tempdir");
     let (service, root) = service_with_rw_root(tmp.path());
 
@@ -588,6 +608,7 @@ async fn replace_requires_matching_expected_identity() {
 #[cfg(unix)]
 #[tokio::test]
 async fn same_root_move_is_no_clobber_and_cross_root_is_unsupported() {
+    let _fs_serialized = fs_test_guard();
     let tmp = tempfile::tempdir().expect("tempdir");
     let (service, root) = service_with_rw_root(tmp.path());
 
@@ -703,6 +724,7 @@ async fn same_root_move_is_no_clobber_and_cross_root_is_unsupported() {
 #[cfg(unix)]
 #[tokio::test]
 async fn trash_is_hidden_from_ordinary_listing_and_search() {
+    let _fs_serialized = fs_test_guard();
     let tmp = tempfile::tempdir().expect("tempdir");
     let (service, root) = service_with_rw_root(tmp.path());
 
@@ -816,6 +838,7 @@ fn unsupported_platform_safety_fails_closed() {
 #[cfg(unix)]
 #[tokio::test]
 async fn read_failure_is_not_reported_as_empty() {
+    let _fs_serialized = fs_test_guard();
     let tmp = tempfile::tempdir().expect("tempdir");
     let (service, root) = service_with_rw_root(tmp.path());
 
@@ -869,6 +892,43 @@ async fn read_failure_is_not_reported_as_empty() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn staged_cleanup_leaves_foreign_files_alone() {
+    let _fs_serialized = fs_test_guard();
+    use crate::personal_file::safety;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = PersonalFileService::admit_read_write(tmp.path()).expect("admit");
+    let dir = rustix::io::dup(&root.inner.dir).expect("dup root fd");
+
+    // Our staged object, dropped exactly like the publication flow.
+    let staged_name = format!(".victim.{}", uuid::Uuid::new_v4());
+    let (_file, identity) = safety::write_staged_file(&dir, &staged_name, b"ours").expect("stage");
+
+    // An attacker swaps the name for a foreign file before cleanup.
+    std::fs::remove_file(tmp.path().join(&staged_name)).expect("swap away ours");
+    std::fs::write(tmp.path().join(&staged_name), b"foreign").expect("plant foreign");
+
+    safety::remove_staged(&dir, &staged_name, &identity);
+    assert_eq!(
+        std::fs::read(tmp.path().join(&staged_name)).expect("foreign file survives"),
+        b"foreign",
+        "cleanup must never remove a name that no longer names our object"
+    );
+
+    // The positive direction: cleanup removes our own staged object
+    // while the name still names it.
+    let our_name = format!(".victim.{}", uuid::Uuid::new_v4());
+    let (_file2, our_identity) =
+        safety::write_staged_file(&dir, &our_name, b"ours-2").expect("stage 2");
+    safety::remove_staged(&dir, &our_name, &our_identity);
+    assert!(
+        !tmp.path().join(&our_name).exists(),
+        "cleanup removes our own staged object"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Read-only roots
 // ─────────────────────────────────────────────────────────────────────
@@ -876,6 +936,7 @@ async fn read_failure_is_not_reported_as_empty() {
 #[cfg(unix)]
 #[tokio::test]
 async fn read_only_root_refuses_mutation_but_allows_reads() {
+    let _fs_serialized = fs_test_guard();
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::write(tmp.path().join("source.txt"), "source").expect("file");
     let root = PersonalFileService::admit_read_only(tmp.path()).expect("admit ro");
