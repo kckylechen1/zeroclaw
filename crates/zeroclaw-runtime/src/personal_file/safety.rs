@@ -8,31 +8,58 @@
 //!   `O_NOFOLLOW | O_DIRECTORY`. A component that is (or becomes) a
 //!   symlink fails the open instead of resolving through it. Because
 //!   each step holds a real descriptor, later resolution is pinned to
-//!   inodes: renaming an ancestor mid-walk cannot redirect the walk.
-//!   This closes the check-then-use race class that path-based guards
-//!   (including the tools-crate `fs_guard` helpers, which re-verify
-//!   path identities instead) can only narrow.
-//! - **The admitted root is captured once**: opened no-follow, identity
-//!   (device + inode) recorded at admission and re-verified against the
-//!   held descriptor before every operation. The canonical path string
-//!   is kept for display only and is never opened through again.
-//! - **Hard-link containment**: any file targeted for mutation must have
-//!   `nlink == 1`; a shared inode answers [`PersonalFileRefusal::Hardlinked`].
+//!   inodes: a symlink swap of any ancestor or leaf cannot redirect the
+//!   walk. This closes the check-then-use race class that path-based
+//!   guards (including the tools-crate `fs_guard` helpers, which
+//!   re-verify path identities instead) can only narrow.
+//! - **Ancestry is verified, not assumed.** A directory descriptor pins
+//!   an inode, not its path: renaming an interior directory would let
+//!   writes follow the inode to its new (attacker-chosen) location.
+//!   Every opened child therefore re-proves its `..` entry against the
+//!   parent descriptor's identity while walking, and the root proves
+//!   its own `..` against the parent identity captured at admission on
+//!   every operation. A relocated directory answers a typed refusal
+//!   instead of inheriting the root's authority.
+//! - **The admitted root is captured once**: the canonical path is
+//!   walked component-by-component with no-follow opens at admission,
+//!   identity (device + inode) and parent identity are recorded, and
+//!   both are re-verified against the held descriptor before every
+//!   operation. The canonical path string is kept for display only and
+//!   is never opened through again.
+//! - **Staged names are unobservable.** Every intermediate write (new
+//!   file, replacement content, trash recovery copy) is created under a
+//!   freshly minted unpredictable name, written through a held
+//!   descriptor, fsynced, and checked for `nlink == 1` on that held
+//!   descriptor before publication. An attacker cannot watch-and-link
+//!   a name it cannot predict, and a link planted anyway is detected
+//!   on the held fd before the object is published or reused.
+//! - **Hard-link containment**: any file targeted for mutation must
+//!   have `nlink == 1`; a shared inode answers
+//!   [`PersonalFileRefusal::Hardlinked`].
 //! - **Git exclusion runs before mutation**: the root's canonical
-//!   ancestry is scanned at admission (a write root inside any repository
-//!   or worktree is not admissible), and every ancestor directory of a
-//!   mutation target is probed for a `.git` directory or `.git` worktree
-//!   file at operation time. `.git` as a path component is rejected at
-//!   the type boundary.
+//!   ancestry is scanned at admission (a write root inside any
+//!   repository or worktree is not admissible), and the root plus every
+//!   ancestor directory of a mutation target is probed for a `.git`
+//!   directory or `.git` worktree file after it is held (so the probe
+//!   applies to the exact object used, not to a name). `.git` as a path
+//!   component is rejected at the type boundary.
 //! - **Unsupported platforms fail closed**: this module is compiled only
 //!   on Unix (`cfg(unix)`); admission on any other platform answers
 //!   [`PersonalFileError::UnsupportedSafely`] from the service and never
 //!   degrades to string containment.
 //!
-//! The residual exposure is the kernel-defined atomicity of each single
-//! syscall (`openat`, `mkdirat`, `renameat`, `renameat2`/`renamex_np`);
-//! there is no window in which this code reasons about a path it does
-//! not hold a descriptor for.
+//! ## Documented residual
+//!
+//! The remaining exposure is the POSIX gap between a verification and
+//! the adjacent mutation syscall: a same-host attacker who can rename
+//! or link objects inside the admitted root can win only by landing a
+//! rename inside that single-syscall window (all discovered windows are
+//! one `renameat`/`openat` wide, and every published object is
+//! re-verified immediately before its syscall). Closing even that
+//! window would require renaming to be impossible outside the process,
+//! which no pathname-based primitive can assert. All operation
+//! ordering, and the ancestry checks above, keep every failure typed
+//! and every refused operation free of published mutation.
 //!
 //! ## Test-only race hooks
 //!
@@ -103,11 +130,52 @@ fn file_type_of(stat: &Stat) -> FileType {
     FileType::from_raw_mode(stat.st_mode)
 }
 
+fn identity_of(fd: &OwnedFd) -> SafetyResult<ObjectId> {
+    let stat = fstat(fd).map_err(errno_to_io)?;
+    if file_type_of(&stat) != FileType::Directory {
+        return Err(PersonalFileRefusal::RootIdentityChanged.into());
+    }
+    Ok(ObjectId::of(&stat))
+}
+
+/// Verify `child`'s `..` entry still resolves to the object identified
+/// by `parent_id`: the ancestry of a held descriptor is re-proved so a
+/// renamed interior directory cannot silently relocate a subtree (and
+/// its writes) to an attacker-chosen location.
+fn verify_parent_link(child: &OwnedFd, parent_id: ObjectId) -> SafetyResult<()> {
+    let parent =
+        openat(child, "..", dir_oflags(), Mode::empty()).map_err(map_link_error)?;
+    let stat = fstat(&parent).map_err(errno_to_io)?;
+    if file_type_of(&stat) != FileType::Directory || ObjectId::of(&stat) != parent_id {
+        return Err(PersonalFileRefusal::ConcurrentModification {
+            path: "held directory ancestry".to_string(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn map_link_error(error: rustix::io::Errno) -> PersonalFileError {
+    match error {
+        rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => {
+            PersonalFileRefusal::ConcurrentModification {
+                path: "held directory ancestry".to_string(),
+            }
+            .into()
+        }
+        _ => errno_to_io(error),
+    }
+}
+
 /// Verify the held root descriptor still has the identity captured at
-/// admission (root swap / descriptor recycling guard).
+/// admission AND is still linked under the parent it was admitted
+/// under (root swap, relocation, and descriptor-recycling guard).
 pub(crate) fn verify_root_identity(root: &RootInner) -> SafetyResult<()> {
     let stat = fstat(&root.dir).map_err(errno_to_io)?;
     if file_type_of(&stat) != FileType::Directory || ObjectId::of(&stat) != root.identity {
+        return Err(PersonalFileRefusal::RootIdentityChanged.into());
+    }
+    if verify_parent_link(&root.dir, root.parent_identity).is_err() {
         return Err(PersonalFileRefusal::RootIdentityChanged.into());
     }
     Ok(())
@@ -122,10 +190,13 @@ fn dup_fd(fd: &OwnedFd) -> SafetyResult<OwnedFd> {
 ///
 /// - every open is `O_NOFOLLOW | O_DIRECTORY`: a swapped-in symlink
 ///   component answers [`PersonalFileRefusal::Symlink`], never resolves;
+/// - every held directory re-proves its `..` against the previous
+///   descriptor's identity (see [`verify_parent_link`]);
 /// - `creating` allows missing ancestors to be created with `mkdirat`
 ///   (mode 0700) and then opened no-follow;
-/// - `scan_git` probes every walked directory for a `.git` directory or
-///   `.git` worktree file before it is used for a mutation.
+/// - `scan_git` probes the root and every held ancestor directory for a
+///   `.git` directory or `.git` worktree file — after the directory is
+///   held, so the probe applies to the exact object used.
 pub(crate) fn walk_parents(
     root: &RootInner,
     path: &PersonalRelativePath,
@@ -133,9 +204,13 @@ pub(crate) fn walk_parents(
     scan_git: bool,
 ) -> SafetyResult<OwnedFd> {
     verify_root_identity(root)?;
+    if scan_git {
+        probe_git_at_root(root)?;
+    }
     let components = path.components();
     let parent_count = components.len() - 1;
     let mut current = dup_fd(&root.dir)?;
+    let mut current_id = root.identity;
 
     for component in components.iter().take(parent_count) {
         let dir = match openat(&current, component.as_str(), dir_oflags(), Mode::empty()) {
@@ -147,11 +222,13 @@ pub(crate) fn walk_parents(
             }
             Err(error) => return Err(map_walk_error(error, path)),
         };
-        // The freshly held directory is one of the target's ancestors:
-        // probe it for a `.git` entry before it is used any further.
+        // The freshly held directory must still be a child of the
+        // directory it was opened from, and is then probed (mutations).
+        verify_parent_link(&dir, current_id)?;
         if scan_git {
             probe_git_entry(&dir, &format!("{path} (at ancestor {component})"))?;
         }
+        current_id = identity_of(&dir)?;
         current = dir;
     }
     Ok(current)
@@ -240,15 +317,17 @@ pub(crate) fn require_unshared_inode(stat: &Stat, display: &str) -> SafetyResult
     Ok(())
 }
 
-/// Open a leaf no-follow under `parent`. A symlink final component fails
-/// with `ELOOP` before any content is touched.
+/// Open a leaf no-follow and non-blocking under `parent`. A symlink
+/// final component fails with `ELOOP`; a FIFO cannot block the open
+/// (`O_NONBLOCK`) and is rejected by the type check that follows the
+/// open in every caller.
 pub(crate) fn open_leaf(
     parent: &OwnedFd,
     name: &str,
     write: bool,
     create_exclusive: bool,
 ) -> Result<OwnedFd, rustix::io::Errno> {
-    let mut flags = OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let mut flags = OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
     if write {
         flags |= OFlags::WRONLY;
     } else {
@@ -275,6 +354,7 @@ pub(crate) fn open_leaf_dir(parent: &OwnedFd, name: &str) -> Result<OwnedFd, rus
 /// metadata and from the actual read.
 pub(crate) fn read_bounded(file: OwnedFd, limit: u64) -> SafetyResult<Vec<u8>> {
     let stat = fstat(&file).map_err(errno_to_io)?;
+    #[allow(clippy::unnecessary_cast)]
     let declared = stat.st_size as u64;
     if declared > limit {
         return Err(PersonalFileError::TooLarge {
@@ -297,23 +377,39 @@ pub(crate) fn read_bounded(file: OwnedFd, limit: u64) -> SafetyResult<Vec<u8>> {
     Ok(buffer)
 }
 
-/// Write bytes to a freshly created exclusive (no-clobber, no-follow)
-/// file under `parent`, fsync it, and close it. On any failure the
-/// staged name is removed.
-pub(crate) fn write_exclusive_file(parent: &OwnedFd, name: &str, bytes: &[u8]) -> SafetyResult<()> {
+/// Write bytes to a freshly created exclusive (no-clobber, no-follow,
+/// non-blocking) file under `parent`, fsync it, verify `nlink == 1` on
+/// the held descriptor, and return the still-open descriptor. The name
+/// should be freshly minted (unpredictable) so the object is not
+/// observable under a guessable name before the caller publishes it.
+/// The caller drops the descriptor after its publication step.
+pub(crate) fn write_staged_file(
+    parent: &OwnedFd,
+    name: &str,
+    bytes: &[u8],
+) -> SafetyResult<OwnedFd> {
     let file = match open_leaf(parent, name, true, true) {
         Ok(file) => file,
         Err(error) => return Err(errno_to_io(error)),
     };
-    let outcome = (|| -> SafetyResult<()> {
-        let mut file = std::fs::File::from(file);
-        file.write_all(bytes).map_err(PersonalFileError::Io)?;
-        file.flush().map_err(PersonalFileError::Io)?;
-        file.sync_all().map_err(PersonalFileError::Io)
+    let write = (|| -> SafetyResult<()> {
+        {
+            let mut writer = std::fs::File::from(dup_fd(&file)?);
+            writer.write_all(bytes).map_err(PersonalFileError::Io)?;
+            writer.flush().map_err(PersonalFileError::Io)?;
+            writer.sync_all().map_err(PersonalFileError::Io)?;
+        }
+        Ok(())
     })();
+    let outcome = write.and_then(|()| {
+        // No foreign alias may exist for what we are about to publish.
+        let stat = fstat(&file).map_err(errno_to_io)?;
+        require_unshared_inode(&stat, name)
+    });
     match outcome {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(file),
         Err(error) => {
+            drop(file);
             let _ = unlinkat(parent, name, AtFlags::empty());
             Err(error)
         }
@@ -331,22 +427,35 @@ pub(crate) fn fsync_dir_best_effort(dir: &OwnedFd) {
 }
 
 /// Open (creating with mode 0700 if needed) the reserved root-local
-/// trash directory and verify it is a real directory inside the root.
+/// trash directory and verify it is a real directory linked directly
+/// under the root.
 pub(crate) fn open_trash(root: &RootInner) -> SafetyResult<OwnedFd> {
     match openat(&root.dir, TRASH_NAMESPACE, dir_oflags(), Mode::empty()) {
-        Ok(dir) => Ok(dir),
+        Ok(dir) => {
+            verify_parent_link(&dir, root.identity).map_err(|_| {
+                PersonalFileRefusal::TrashUnavailable {
+                    reason: "the reserved trash dir is not linked under the root".to_string(),
+                }
+            })?;
+            Ok(dir)
+        }
         Err(rustix::io::Errno::NOENT) => {
             mkdirat(&root.dir, TRASH_NAMESPACE, Mode::from(0o700)).map_err(|error| {
                 PersonalFileRefusal::TrashUnavailable {
                     reason: format!("creating the reserved trash dir failed: {error}"),
                 }
             })?;
-            openat(&root.dir, TRASH_NAMESPACE, dir_oflags(), Mode::empty()).map_err(|error| {
-                PersonalFileRefusal::TrashUnavailable {
+            let dir = openat(&root.dir, TRASH_NAMESPACE, dir_oflags(), Mode::empty()).map_err(
+                |error| PersonalFileRefusal::TrashUnavailable {
                     reason: format!("reopening the reserved trash dir failed: {error}"),
+                },
+            )?;
+            verify_parent_link(&dir, root.identity).map_err(|_| {
+                PersonalFileRefusal::TrashUnavailable {
+                    reason: "the reserved trash dir is not linked under the root".to_string(),
                 }
-                .into()
-            })
+            })?;
+            Ok(dir)
         }
         Err(rustix::io::Errno::LOOP) => Err(PersonalFileRefusal::TrashUnavailable {
             reason: "the reserved trash name is occupied by a non-directory".to_string(),
@@ -358,10 +467,13 @@ pub(crate) fn open_trash(root: &RootInner) -> SafetyResult<OwnedFd> {
 
 /// Create a fresh per-operation slot directory inside the trash and
 /// return `(slot name, slot descriptor)`. Slot names are freshly minted
-/// per operation and re-minted on the (astronomically unlikely) `EEXIST`,
-/// so the following rename can never clobber: collision handling is
-/// deterministic by construction.
+/// per operation and re-minted on the (astronomically unlikely) `EEXIST`
+/// (deterministic collision handling by construction), the slot is
+/// verified to still be linked under the trash, and the trash
+/// directory's dirent is fsynced so recovery copies are
+/// crash-reachable.
 pub(crate) fn fresh_trash_slot(trash: &OwnedFd) -> SafetyResult<(String, OwnedFd)> {
+    let trash_id = identity_of(trash)?;
     for _ in 0..8 {
         let slot = uuid::Uuid::new_v4().to_string();
         match mkdirat(trash, slot.as_str(), Mode::from(0o700)) {
@@ -372,6 +484,12 @@ pub(crate) fn fresh_trash_slot(trash: &OwnedFd) -> SafetyResult<(String, OwnedFd
                             reason: format!("opening the fresh trash slot failed: {error}"),
                         }
                     })?;
+                verify_parent_link(&dir, trash_id).map_err(|_| {
+                    PersonalFileRefusal::TrashUnavailable {
+                        reason: "the fresh trash slot moved".to_string(),
+                    }
+                })?;
+                fsync_dir_best_effort(trash);
                 return Ok((slot, dir));
             }
             Err(rustix::io::Errno::EXIST) => continue,
@@ -387,6 +505,22 @@ pub(crate) fn fresh_trash_slot(trash: &OwnedFd) -> SafetyResult<(String, OwnedFd
         reason: "could not mint a fresh trash slot".to_string(),
     }
     .into())
+}
+
+/// Remove a trash slot that a failed operation left behind (best
+/// effort): unlink the given file names inside the slot, then remove
+/// the now-empty slot directory. All names are freshly minted by this
+/// module, so the cleanup cannot hit foreign data.
+pub(crate) fn discard_trash_slot(
+    trash: &OwnedFd,
+    slot: &str,
+    slot_dir: &OwnedFd,
+    file_names: &[String],
+) {
+    for name in file_names {
+        let _ = unlinkat(slot_dir, name.as_str(), AtFlags::empty());
+    }
+    let _ = unlinkat(trash, slot, AtFlags::REMOVEDIR);
 }
 
 /// Rename `leaf` (under `parent`) into the freshly minted empty `slot`.
@@ -421,8 +555,8 @@ pub(crate) fn rename_no_clobber(
     )
 }
 
-/// Plain same-directory publication rename (used by replace, which
-/// verified the expected identity immediately before).
+/// Plain same-directory publication rename (used by replace and staged
+/// create, which verified the leaf state immediately before).
 pub(crate) fn rename_publish(
     parent: &OwnedFd,
     staged: &str,
@@ -441,76 +575,96 @@ pub(crate) fn remove_staged(parent: &OwnedFd, staged: &str) {
 ///
 /// 1. the caller path must be absolute and lexically normal (no `..`,
 ///    no `.` components);
-/// 2. the root itself must not be a symlink: the entry is checked
-///    no-follow, and the subsequent open is `O_NOFOLLOW | O_DIRECTORY`,
-///    so a symlinked final component refuses admission instead of
-///    silently admitting the redirect target. Symlinked OS-level
-///    *ancestors* above the root (e.g. `/var` -> `/private/var` on
-///    macOS) are resolved by canonicalization and recorded in the
-///    canonical display — the admitted object is the resolved directory,
-///    and the held descriptor plus per-operation identity re-verification
-///    keep it pinned even if any name above it is later swapped;
-/// 3. the resolved root must be a real directory.
-///
-/// On any platform without descriptor primitives this answers
-/// [`PersonalFileError::UnsupportedSafely`] (fail closed).
-pub(crate) fn admit_root(dir: &Path) -> Result<(String, OwnedFd, ObjectId), PersonalFileError> {
-    {
-        use std::path::Component;
+/// 2. the canonical form is resolved, then **walked component-by-
+///    component from the process root with `O_NOFOLLOW | O_DIRECTORY`
+///    opens** — a symlink planted anywhere on the path before its
+///    component is opened refuses admission instead of silently
+///    admitting the redirect target. Symlinked OS-level *ancestors*
+///    (e.g. `/var` -> `/private/var` on macOS) are part of the
+///    canonical form and are walked the same way: the admitted object
+///    is the resolved directory, pinned by descriptor;
+/// 3. the resolved root must be a real directory linked under the
+///    parent directory recorded at admission; both identities are
+///    re-verified before every later operation.
+pub(crate) fn admit_root(
+    dir: &Path,
+) -> Result<(String, OwnedFd, ObjectId, ObjectId), PersonalFileError> {
+    use std::path::Component;
 
-        let caller = dir
-            .to_str()
-            .ok_or::<PersonalFileError>(
-                PersonalFileRefusal::RelativeRoot {
-                    path: dir.display().to_string(),
-                }
-                .into(),
-            )?
-            .to_string();
-        if !dir.is_absolute() {
+    let caller = dir
+        .to_str()
+        .ok_or::<PersonalFileError>(
+            PersonalFileRefusal::RelativeRoot {
+                path: dir.display().to_string(),
+            }
+            .into(),
+        )?
+        .to_string();
+    if !dir.is_absolute() {
+        return Err(PersonalFileRefusal::RelativeRoot { path: caller }.into());
+    }
+    for component in dir.components() {
+        if matches!(component, Component::CurDir | Component::ParentDir) {
             return Err(PersonalFileRefusal::RelativeRoot { path: caller }.into());
         }
-        for component in dir.components() {
-            if matches!(component, Component::CurDir | Component::ParentDir) {
-                return Err(PersonalFileRefusal::RelativeRoot { path: caller }.into());
-            }
-        }
-        // The root itself must not be a symlink (no-follow stat; the
-        // no-follow open below re-proves it atomically).
-        let root_meta = std::fs::symlink_metadata(dir).map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => PersonalFileError::NotFound(caller.clone()),
-            _ => PersonalFileError::Io(error),
-        })?;
-        if root_meta.file_type().is_symlink() {
-            return Err(PersonalFileRefusal::SymlinkedRoot { path: caller }.into());
-        }
-        // Resolve OS ancestors for audit display and the Git scan. The
-        // descriptor below is bound to this resolved directory.
-        let canonical = std::fs::canonicalize(dir).map_err(|error| match error.kind() {
-            std::io::ErrorKind::NotFound => PersonalFileError::NotFound(caller.clone()),
-            _ => PersonalFileError::Io(error),
-        })?;
-        let opened =
-            openat(CWD, canonical.as_os_str(), dir_oflags(), Mode::empty()).map_err(|error| {
-                match error {
-                    rustix::io::Errno::LOOP => PersonalFileRefusal::SymlinkedRoot {
-                        path: caller.clone(),
-                    }
-                    .into(),
-                    rustix::io::Errno::NOENT => PersonalFileError::NotFound(caller.clone()),
-                    rustix::io::Errno::NOTDIR => PersonalFileRefusal::NotRegularFile {
-                        path: caller.clone(),
-                    }
-                    .into(),
-                    other => errno_to_io(other),
-                }
-            })?;
-        let stat = fstat(&opened).map_err(errno_to_io)?;
-        if file_type_of(&stat) != FileType::Directory {
-            return Err(PersonalFileRefusal::NotRegularFile { path: caller }.into());
-        }
-        Ok((canonical.display().to_string(), opened, ObjectId::of(&stat)))
     }
+    // The root itself must not be a symlink (no-follow stat; the
+    // no-follow walk below re-proves every component atomically).
+    let root_meta = std::fs::symlink_metadata(dir).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => PersonalFileError::NotFound(caller.clone()),
+        _ => PersonalFileError::Io(error),
+    })?;
+    if root_meta.file_type().is_symlink() {
+        return Err(PersonalFileRefusal::SymlinkedRoot { path: caller }.into());
+    }
+    // Canonical form for audit display, the Git scan, and the walk.
+    let canonical = std::fs::canonicalize(dir).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => PersonalFileError::NotFound(caller.clone()),
+        _ => PersonalFileError::Io(error),
+    })?;
+
+    // Component walk from the filesystem root: every component is
+    // opened no-follow + directory-only and re-proves its `..` linkage
+    // against the previously held descriptor.
+    let mut current = openat(CWD, "/", dir_oflags(), Mode::empty()).map_err(errno_to_io)?;
+    let mut current_id = identity_of(&current)?;
+    // The filesystem root's `..` is itself; for the admitted root this
+    // becomes the identity of the directory it was opened from.
+    let mut root_parent_id = current_id;
+    for component in canonical.components() {
+        let name = match component {
+            Component::RootDir => continue,
+            Component::Normal(name) => name,
+            _ => return Err(PersonalFileRefusal::RelativeRoot { path: caller }.into()),
+        };
+        let next =
+            openat(&current, name, dir_oflags(), Mode::empty()).map_err(|error| match error {
+                rustix::io::Errno::LOOP => PersonalFileRefusal::SymlinkedRoot {
+                    path: caller.clone(),
+                }
+                .into(),
+                rustix::io::Errno::NOENT => PersonalFileError::NotFound(caller.clone()),
+                rustix::io::Errno::NOTDIR => PersonalFileRefusal::NotRegularFile {
+                    path: caller.clone(),
+                }
+                .into(),
+                other => errno_to_io(other),
+            })?;
+        verify_parent_link(&next, current_id)?;
+        root_parent_id = current_id;
+        current_id = identity_of(&next)?;
+        current = next;
+    }
+    let stat = fstat(&current).map_err(errno_to_io)?;
+    if file_type_of(&stat) != FileType::Directory {
+        return Err(PersonalFileRefusal::NotRegularFile { path: caller }.into());
+    }
+    Ok((
+        canonical.display().to_string(),
+        current,
+        current_id,
+        root_parent_id,
+    ))
 }
 
 /// Admission-time Git scan for mutation roots: a root at or under a

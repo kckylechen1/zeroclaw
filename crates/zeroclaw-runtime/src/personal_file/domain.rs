@@ -58,6 +58,12 @@ pub(crate) struct RootInner {
     /// Identity at admission, re-verified before every operation.
     #[cfg(unix)]
     pub identity: ObjectId,
+    /// Identity of the parent directory the root was admitted under;
+    /// re-verified (via the root's `..` entry) before every operation
+    /// so a relocated root refuses instead of carrying its authority
+    /// to a new location.
+    #[cfg(unix)]
+    pub parent_identity: ObjectId,
     /// Canonical path at admission; display/audit only.
     pub canonical_display: String,
 }
