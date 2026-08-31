@@ -43,7 +43,8 @@ process.stdin.on("data", (d) => {{
     if (msg.method === "initialize") {{
       send({{ id: msg.id, result: {{ protocolVersion: 1 }} }});
     }} else if (msg.method === "session/new") {{
-      send({{ id: msg.id, result: {{ sessionId }} }});
+      const id = sessionId === "auto" ? `auto-${{process.pid}}-${{Date.now()}}` : sessionId;
+      send({{ id: msg.id, result: {{ sessionId: id }} }});
     }} else if (msg.method === "session/load") {{
       if (mode === "refuse-load") {{
         send({{ id: msg.id, error: {{ code: -32000, message: "load refused by fake adapter" }} }});
@@ -475,5 +476,52 @@ async fn fake_adapter_failed_load_teardown_kills_only_own_child() {
         !controller.session_alive_for_test(&handle),
         "no child may survive the failed resume teardown"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Repeated productive reattach cycles: recovery → prompt (observed
+/// events) → transport drop → recovery … The flapping budget must reset
+/// on observed progress, so productive cycles never exhaust it.
+#[tokio::test]
+async fn fake_adapter_productive_cycles_keep_the_budget_alive() {
+    let dir = scratch("zc-fake-cycles");
+    let adapter = write_fake_adapter(&dir, "normal", "auto");
+    let controller = Arc::new(
+        AcpxController::new(fake_config(&dir, &adapter, "normal", "fake-cycles-1"))
+            .expect("controller constructs"),
+    );
+    for cycle in 0..6 {
+        let handle = controller
+            .start(&spec_for(
+                &dir,
+                "Reply with CYCLE. Do not use any tools.",
+                "conn-fake-cycles",
+            ))
+            .await
+            .expect("cycle start");
+        assert!(controller.session_alive_for_test(&handle));
+
+        // Transport drop + same-session recovery.
+        let resumed = controller
+            .reattach(
+                &AdapterConnectionRef::from_opaque("conn-fake-cycles"),
+                &handle.remote_session,
+                0,
+            )
+            .await
+            .expect("reattach must recover the SAME session");
+        assert_eq!(
+            resumed.remote_session.as_str(),
+            handle.remote_session.as_str()
+        );
+
+        // The recovered session is productive: events observed.
+        let page = controller
+            .watch(&resumed, 0, 64)
+            .await
+            .expect("events after recovery");
+        assert!(!page.events.is_empty(), "cycle {cycle}: events must flow");
+    }
+    println!("LIVE cycles: 6 productive reattach cycles completed");
     let _ = std::fs::remove_dir_all(&dir);
 }

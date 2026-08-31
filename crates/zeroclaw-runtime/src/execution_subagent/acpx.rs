@@ -1077,6 +1077,12 @@ impl SessionController for AcpxController {
             });
         }
         if state.alive.load(Ordering::SeqCst) == ALIVE_YES || !page.events.is_empty() {
+            // Observed progress resets the flapping budget: productive
+            // cycles (events seen, transport alive) never accumulate
+            // toward the bound.
+            if !page.events.is_empty() {
+                state.resume_streak.store(0, Ordering::SeqCst);
+            }
             return Ok(page);
         }
         // Dead transport: bounded resume attempts so the tool's
