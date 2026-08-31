@@ -298,9 +298,9 @@ fn bounded_text(text: &str, ceiling: usize, scrub: &[String]) -> String {
 // The controller
 // ─────────────────────────────────────────────────────────────────────────
 
-/// The real ACPX [`SessionController`]. Cheap to clone; all state is
-/// shared behind `Arc`s.
-#[derive(Clone)]
+/// The real ACPX [`SessionController`]. Deliberately NOT `Clone`: one
+/// controller owns its sessions' lifecycles, and its `Drop` is the
+/// last-resort kill. Share it through an `Arc` at the wiring layer.
 pub struct AcpxController {
     config: Arc<AcpxControllerConfig>,
     sessions: Arc<Mutex<HashMap<String, Arc<SessionState>>>>,
@@ -733,18 +733,27 @@ impl SessionController for AcpxController {
         // The open is guarded by a cancellation-safe watchdog: if the
         // caller's own ceiling cancels the start future mid-open, the
         // future's cleanup arms never run — the watchdog still does. It
-        // fires only when the open never settled, and kills through the
-        // state slot the child is registered in.
-        let open_budget = self.config.startup_timeout * 3 + self.config.turn_timeout;
+        // kills the child and removes the pending map entry, so a
+        // cancelled start leaks neither a process nor state.
+        let open_budget = self.config.startup_timeout * 2 + self.config.turn_timeout;
         let watchdog_state = Arc::downgrade(&state);
-        let watchdog_budget = open_budget + Duration::from_secs(5);
+        let watchdog_sessions = Arc::clone(&self.sessions);
         zeroclaw_spawn::spawn!(async move {
-            tokio::time::sleep(watchdog_budget).await;
+            tokio::time::sleep(open_budget).await;
             if let Some(state) = watchdog_state.upgrade()
                 && state.settled.load(Ordering::SeqCst) == UNSET
-                && state.alive.load(Ordering::SeqCst) == ALIVE_YES
             {
-                Self::terminate(&state).await;
+                if state.alive.load(Ordering::SeqCst) == ALIVE_YES {
+                    Self::terminate(&state).await;
+                }
+                state.settled.store(SET, Ordering::SeqCst);
+                let session_id = state.session_id();
+                // A cancelled open leaves the state behind only in this
+                // dead entry; remove it so the map never accumulates.
+                watchdog_sessions.lock().remove(&session_id);
+                watchdog_sessions
+                    .lock()
+                    .remove(&format!("pending-{}", &session_id));
             }
         });
         let opened = self.open_session(&state, &spec.prompt).await;
@@ -869,18 +878,15 @@ impl SessionController for AcpxController {
         let confirmation =
             AuthorityConfirmationRef::from_opaque(format!("acpx-stop-{}", Uuid::new_v4().simple()));
         if !graceful {
+            // An immediate host kill is run-scoped bookkeeping: the child
+            // dies, but NO terminal fact is minted into the event stream
+            // (the spine keeps its honest state; a fact that nobody
+            // authored through the lifecycle vocabulary would be noise).
             Self::terminate(&state).await;
-            state.push_event(
-                SessionEventKindV1::Terminal,
-                Some(SessionTerminalOutcomeV1::Cancelled {
-                    confirmation: confirmation.clone(),
-                }),
-                Some("session terminated by host (immediate)".to_string()),
-            );
             return Ok(SessionStopReceipt {
                 confirmed: true,
                 authority_confirmation_ref: Some(confirmation),
-                detail: None,
+                detail: Some("session terminated by host (immediate)".to_string()),
             });
         }
         // Graceful: arm the confirmation, cancel the current turn (if
@@ -998,12 +1004,10 @@ impl SessionController for AcpxController {
 
 impl Drop for AcpxController {
     fn drop(&mut self) {
-        // Synchronous last-resort kill: no harness child may outlive the
-        // LAST controller that owns it. Clones share the session map —
-        // only the final owner runs the kill sweep.
-        if Arc::strong_count(&self.sessions) > 1 {
-            return;
-        }
+        // Synchronous last-resort kill: the controller is not `Clone`, so
+        // this drop IS the final ownership release — no clone can be
+        // holding sessions alive, and the sweep cannot murder another
+        // owner's sessions.
         for state in self.sessions.lock().values() {
             state.alive.store(UNSET, Ordering::SeqCst);
             let process = state.process.lock().take();

@@ -457,10 +457,16 @@ impl ExecutionSubagentTool {
         // paths report their own spine terminal.
         let mut decided_status: Option<ExecutionRunStatusV1> = None;
 
+        let mut deadline_hit = false;
         loop {
             if Instant::now() >= deadline {
-                status = ExecutionRunStatusV1::TimedOut;
-                break;
+                if deadline_hit {
+                    // Already drained once past the deadline with no
+                    // authoritative terminal: end typed.
+                    status = ExecutionRunStatusV1::TimedOut;
+                    break;
+                }
+                deadline_hit = true;
             }
             if meter.exhausted() {
                 status = ExecutionRunStatusV1::Aborted;
@@ -591,6 +597,12 @@ impl ExecutionSubagentTool {
                         };
                         corrections_used += 1;
                         usage.actions += 1;
+                        if deadline_hit {
+                            // No new correction legs past the ceiling: the
+                            // next loop pass ends the run typed.
+                            saw_terminal = true;
+                            break;
+                        }
                         // Deliberately NOT wrapped in the remaining-budget
                         // timeout: cancelling a mid-turn prompt races the
                         // remote completion and can mint a contradictory
@@ -633,6 +645,13 @@ impl ExecutionSubagentTool {
             if let Some(reason) = &refusal {
                 status = ExecutionRunStatusV1::Failed;
                 let _ = reason;
+                break;
+            }
+            if deadline_hit {
+                // One drain pass already ran past the deadline with no
+                // authoritative terminal: lifecycle truth preserved, the
+                // ceiling still ends the run typed.
+                status = ExecutionRunStatusV1::TimedOut;
                 break;
             }
         }
