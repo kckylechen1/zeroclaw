@@ -732,6 +732,11 @@ impl AcpxController {
         if state.alive.load(Ordering::SeqCst) == ALIVE_YES {
             return Ok(());
         }
+        // The flapping budget is consumed by the serialized attempt only:
+        // coalesced waiters (the alive branch above) never spend it.
+        if state.resume_streak.fetch_add(1, Ordering::SeqCst) >= MAX_WATCH_RESUMES {
+            return Err(ControllerError::Unavailable);
+        }
         state.load_in_flight.store(SET, Ordering::SeqCst);
         let mut recovery = RecoveryGuard::new(state, self.config.startup_timeout);
         recovery.spawn_and_initialize(self).await?;
@@ -1081,9 +1086,6 @@ impl SessionController for AcpxController {
         // the watch in an endless success/fail cycle. The budget is
         // consumed inside the serialized recovery (coalesced waiters
         // never spend it).
-        if state.resume_streak.fetch_add(1, Ordering::SeqCst) >= MAX_WATCH_RESUMES {
-            return Err(ControllerError::Unavailable);
-        }
         self.resume_session(&state).await?;
         let page = self.watch(handle, after_seq, limit).await?;
         // The streak decays only on OBSERVED progress: a resume that
