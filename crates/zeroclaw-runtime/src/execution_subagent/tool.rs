@@ -660,7 +660,10 @@ impl ExecutionSubagentTool {
         // Nonterminal exits still kill the carrier — an immediate host
         // stop terminates and reaps the process group but mints NO event
         // into the fact stream (best-effort; the spine keeps its honest
-        // state instead of a fabricated terminal).
+        // state instead of a fabricated terminal). The gated client may
+        // TYPE-REFUSE this stop when the profile did not declare cancel —
+        // that refusal is the frozen capability law, not a fallback path:
+        // such a session is reclaimed when the controller is released.
         if matches!(
             status,
             ExecutionRunStatusV1::TimedOut

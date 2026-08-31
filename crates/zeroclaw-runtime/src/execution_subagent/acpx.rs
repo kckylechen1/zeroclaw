@@ -209,6 +209,9 @@ struct SessionState {
     /// cancelled `start` future never sets this; the open watchdog reads
     /// it to decide whether a stranded child must be killed.
     settled: AtomicU8,
+    /// A terminal fact was observed: the run is over, the state is
+    /// evictable (the spine owns canonical truth from here).
+    terminal_reached: AtomicU8,
     /// Bounded, secret-free fact projection: occurrences of these strings
     /// (workspace path, operator env values) are replaced before any
     /// summary leaves the transport.
@@ -232,6 +235,9 @@ impl SessionState {
         // ordinal space survives a transport drop (same state), so the
         // spine's replay dedup sees identical ids exactly once. History
         // replayed by `session/load` never reaches here (the load gate).
+        if matches!(kind, SessionEventKindV1::Terminal) {
+            self.terminal_reached.store(SET, Ordering::SeqCst);
+        }
         let ordinal = self.update_ordinal.fetch_add(1, Ordering::SeqCst);
         let event_id = event_identity(
             kind.as_str(),
@@ -725,8 +731,15 @@ impl SessionController for AcpxController {
             load_in_flight: AtomicU8::new(UNSET),
             alive: AtomicU8::new(UNSET),
             settled: AtomicU8::new(UNSET),
+            terminal_reached: AtomicU8::new(UNSET),
             scrub: self.scrub.clone(),
         });
+        // Evict terminal-reached sessions: their runs are over, the spine
+        // owns canonical truth, and a shared controller must not retain
+        // every completed run's projection forever.
+        self.sessions
+            .lock()
+            .retain(|_, state| state.terminal_reached.load(Ordering::SeqCst) == UNSET);
         let key = format!("pending-{}", Uuid::new_v4().simple());
         self.sessions.lock().insert(key.clone(), state.clone());
 
@@ -741,6 +754,7 @@ impl SessionController for AcpxController {
         let open_budget = self.config.startup_timeout * 3 + self.config.turn_timeout;
         let watchdog_state = Arc::downgrade(&state);
         let watchdog_sessions = Arc::clone(&self.sessions);
+        let watchdog_key = key.clone();
         zeroclaw_spawn::spawn!(async move {
             tokio::time::sleep(open_budget).await;
             if let Some(state) = watchdog_state.upgrade()
@@ -750,7 +764,14 @@ impl SessionController for AcpxController {
                     .is_ok()
             {
                 Self::terminate(&state).await;
-                watchdog_sessions.lock().remove(&state.session_id());
+                // Remove BOTH possible keys: the pending key this start
+                // inserted and (if the open got far enough to publish)
+                // the minted remote identity.
+                watchdog_sessions.lock().remove(&watchdog_key);
+                let minted = state.session_id();
+                if !minted.is_empty() {
+                    watchdog_sessions.lock().remove(&minted);
+                }
             }
         });
         let opened = self.open_session(&state, &spec.prompt).await;
@@ -991,6 +1012,7 @@ impl SessionController for AcpxController {
                 load_in_flight: AtomicU8::new(UNSET),
                 alive: AtomicU8::new(UNSET),
                 settled: AtomicU8::new(SET),
+                terminal_reached: AtomicU8::new(SET),
                 scrub: self.scrub.clone(),
             }),
         };

@@ -494,6 +494,11 @@ impl SessionFactSink for TachiSessionFactSink {
                 SessionFactError::Refused("attach receipt carries no attachment id".to_string())
             })?;
         *self.attachment.write() = Some(attachment_id.to_string());
+        // Bound the revision map: this sink serves one attachment at a
+        // time; a fresh attach supersedes all earlier revision histories.
+        self.last_revisions
+            .write()
+            .retain(|key, _| key == &attachment_id.to_string());
         Ok(SessionAttachmentRef::from_opaque(attachment_id))
     }
 
