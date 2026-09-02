@@ -18881,7 +18881,7 @@ impl Config {
                     format!(
                         "runtime_profiles.{alias}.context_compression.enabled is set but context \
                          compression is not currently implemented in the runtime (the compressor \
-                         was removed in #8196); this setting has no effect."
+                         was removed in); this setting has no effect."
                     ),
                     format!("runtime_profiles.{alias}.context_compression.enabled"),
                 ));
@@ -18948,7 +18948,7 @@ impl Config {
                     format!(
                         "runtime_profiles.{alias}.context_compression.{field} is set to a \
                          non-default value but context compression is not currently implemented \
-                         in the runtime (the compressor was removed in #8196); this setting has \
+                         in the runtime (the compressor was removed in); this setting has \
                          no effect."
                     ),
                     format!("runtime_profiles.{alias}.context_compression.{field}"),
@@ -20929,7 +20929,7 @@ impl Config {
     /// Full save. Refuses to overwrite an existing config file unless this
     /// value was loaded from that exact file (`loaded_from`), so a default,
     /// programmatically built, or repointed `Config` cannot replace an
-    /// operator's config with a near-empty snapshot (#10495). Creating a
+    /// operator's config with a near-empty snapshot. Creating a
     /// missing file (first run) always succeeds — a value that never read
     /// a file gets exactly one create and must then reload or use
     /// `force_save()`; `force_save()` is the explicit overwrite path.
@@ -29932,7 +29932,7 @@ group_policy = "disabled"
 
     #[test]
     async fn save_refuses_unproven_overwrite_of_existing_config() {
-        // #10495 regression bar: a Config that never read the target file
+        // Regression bar (per the leaf contract): a Config that never read the target file
         // must not be able to overwrite an operator's populated config, and
         // the refusal must leave the existing bytes untouched.
         let tmp = tempfile::TempDir::new().unwrap();
