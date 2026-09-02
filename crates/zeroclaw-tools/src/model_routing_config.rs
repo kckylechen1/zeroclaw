@@ -1470,6 +1470,9 @@ mod tests {
         .unwrap();
         on_disk.config_path = config.config_path.clone();
         on_disk.data_dir = config.data_dir.clone();
+        // Parsed from the on-disk file (the trusted PUT-equivalent path);
+        // keep full-save provenance for the seed save below.
+        on_disk.loaded_from = Some(config.config_path.clone());
         let entry = on_disk
             .providers
             .models
