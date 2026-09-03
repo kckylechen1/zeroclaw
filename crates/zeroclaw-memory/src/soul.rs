@@ -1,4 +1,4 @@
-//! AgentSoul domain seam — identity-bound Soul storage.
+//! AgentSoul domain seam — identity-bound Soul storage (#52 / #187).
 //!
 //! Soul is the reviewed operating disposition of ONE persistent agent
 //! identity, carried unchanged across replaceable model / provider /
@@ -6,7 +6,7 @@
 //! identity-binding storage surface:
 //!
 //! - the identity vocabulary type is [`AgentIdentityId`] from
-//!   `zeroclaw_api::companion` (the Tachi substrate's minted-once
+//!   `zeroclaw_api::companion` (the tachi#1630 substrate's minted-once
 //!   identity slot) — this module never mints or derives identities,
 //!   it only admits and resolves them;
 //! - every namespace read/write resolves to a stable admitted identity
@@ -16,7 +16,7 @@
 //!   attributes (model, provider, harness, session, display name) are
 //!   structurally irrelevant to the key;
 //! - no disposition capture, review/promotion, persona projection, or
-//!   reset/erase lifecycle exists here (later leaves under the AgentSoul tracker);
+//!   reset/erase lifecycle exists here (later leaves under #52);
 //! - durability is delegated to the existing [`Memory`] backend; this
 //!   module introduces no new persistence, revision, or receipt engine.
 //!
@@ -27,7 +27,7 @@
 //! identity-namespaced key alone. Backends with true composite
 //! attribution (SQLite) enforce it structurally.
 //!
-//! Verified identity evidence from Tachi (envelope contract pending in Tachi)
+//! Verified identity evidence from Tachi (envelope contract tachi#1667)
 //! is NOT wired yet: the [`IdentityRegistry`] seam keeps a provenance
 //! note per admission so external evidence can attach later without
 //! widening this API.
@@ -114,7 +114,7 @@ pub enum AdmissionStatus {
 
 /// Why/how an identity was admitted. Free-form for locally admitted
 /// identities today; reserved as the attachment point for verified
-/// Tachi evidence envelopes without widening the API.
+/// Tachi evidence envelopes (tachi#1667) without widening the API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionRecord {
     pub status: AdmissionStatus,
@@ -460,7 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_identity_across_carriers_shares_one_namespace() {
-        // Discrimination #1 (per the leaf contract): swap model/provider/harness/
+        // Discrimination #1 (issue #187): swap model/provider/harness/
         // session while preserving the admitted identity -> same domain
         // key and state.
         let (tmp, backend) = fresh_backend();
@@ -487,7 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn different_identity_cannot_read_or_write_neighbors_namespace() {
-        // Discrimination #2 (per the leaf contract): a different identity has zero access to the
+        // Discrimination #2: a different identity has zero access to the
         // first identity's namespace, in both directions.
         let (tmp, backend) = fresh_backend();
         let (registry, soul) = service(Arc::clone(&backend));
@@ -582,7 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_display_name_with_different_identity_is_denied() {
-        // Discrimination #3 (per the leaf contract): an identical display name with a different
+        // Discrimination #3: an identical display name with a different
         // identity is a different Soul — zero access to A's state.
         let (tmp, backend) = fresh_backend();
         let (registry, soul) = service(Arc::clone(&backend));
