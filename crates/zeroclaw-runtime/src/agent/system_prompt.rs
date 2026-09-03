@@ -14,6 +14,17 @@ pub const NO_TOOLS_TASK_FRAMING: &str = "No tools are available for this turn";
 pub const NATIVE_TOOLS_TASK_FRAMING: &str = "Use tools when the request requires action";
 const TRUNCATION_MARKER: &str = "\n\n[System prompt truncated to fit context budget]\n";
 
+/// Per-file cap applied to every injected workspace bootstrap file while
+/// compact context is on. Shared by the turn paths and `zeroclaw doctor`
+/// so both report the same budget.
+pub(crate) const COMPACT_BOOTSTRAP_MAX_CHARS: usize = 6000;
+
+/// Workspace files injected into the system prompt, in order. `doctor`
+/// scans the same list (plus the conditional `BOOTSTRAP.md` /
+/// `MEMORY.md`) so its report matches what the prompt builder caps.
+pub(crate) const BOOTSTRAP_FILES: &[&str] =
+    &["AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md", "USER.md"];
+
 fn load_openclaw_bootstrap_files(
     prompt: &mut String,
     workspace_dir: &std::path::Path,
@@ -24,9 +35,7 @@ fn load_openclaw_bootstrap_files(
         "The following workspace files define your identity, behavior, and context. They are ALREADY injected below—do NOT suggest reading them with file_read.\n\n",
     );
 
-    let bootstrap_files = ["AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md", "USER.md"];
-
-    for filename in &bootstrap_files {
+    for filename in BOOTSTRAP_FILES {
         inject_workspace_file(prompt, workspace_dir, filename, max_chars_per_file);
     }
 
@@ -582,6 +591,52 @@ pub fn build_skills_prompt_with_effective_tools(
     )
 }
 
+/// Emit the operator-facing truncation WARN once per file per process.
+/// The turn paths inject bootstrap files on every turn; warning once
+/// keeps the signal discoverable in logs (`agent.bootstrap_file_truncated`)
+/// without spamming every turn. `zeroclaw doctor` re-checks offline.
+fn warn_bootstrap_truncation_once(
+    workspace_dir: &std::path::Path,
+    filename: &str,
+    max_chars: usize,
+    total_chars: usize,
+) -> bool {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
+
+    static WARNED: LazyLock<Mutex<HashSet<(PathBuf, String)>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    let mut seen = WARNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !seen.insert((workspace_dir.to_path_buf(), filename.to_string())) {
+        return false;
+    }
+
+    let discarded = total_chars.saturating_sub(max_chars);
+    ::zeroclaw_log::record!(
+        WARN,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+            .with_attrs(::serde_json::json!({
+                "error_key": "agent.bootstrap_file_truncated",
+                "file": filename,
+                "workspace": workspace_dir.display().to_string(),
+                "injected": max_chars,
+                "total": total_chars,
+                "discarded": discarded,
+                "compact_context": true,
+            })),
+        &format!(
+            "{filename}: injected {max_chars} of {total_chars} chars \
+             ({discarded} discarded, compact_context=true)"
+        )
+    );
+    true
+}
+
 /// Inject a single workspace file into the prompt with truncation and missing-file markers.
 fn inject_workspace_file(
     prompt: &mut String,
@@ -609,6 +664,15 @@ fn inject_workspace_file(
                 trimmed
             };
             if truncated.len() < trimmed.len() {
+                // Operator-facing visibility for the cap (#10523): the
+                // marker below tells the model, this WARN tells the person
+                // who wrote the file.
+                let _ = warn_bootstrap_truncation_once(
+                    workspace_dir,
+                    filename,
+                    max_chars,
+                    trimmed.chars().count(),
+                );
                 prompt.push_str(truncated);
                 let _ = writeln!(
                     prompt,
@@ -630,6 +694,20 @@ fn inject_workspace_file(
 mod tests {
     use super::*;
     use zeroclaw_config::schema::SkillsPromptInjectionMode;
+
+    #[test]
+    fn bootstrap_truncation_warns_once_per_workspace_file() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let first = warn_bootstrap_truncation_once(dir.path(), "AGENTS.md", 6000, 13985);
+        assert!(first, "first truncation of a workspace file must warn");
+        let second = warn_bootstrap_truncation_once(dir.path(), "AGENTS.md", 6000, 13985);
+        assert!(
+            !second,
+            "same workspace+file must not warn twice per process"
+        );
+        let other_file = warn_bootstrap_truncation_once(dir.path(), "SOUL.md", 6000, 9000);
+        assert!(other_file, "a different file still warns");
+    }
 
     #[test]
     fn compact_skills_fall_back_to_full_when_loader_is_described_but_unavailable() {
