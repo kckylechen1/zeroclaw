@@ -1,4 +1,4 @@
-//! AgentSoul domain seam — identity-bound Soul storage (#52 / #187).
+//! AgentSoul domain seam — identity-bound Soul storage .
 //!
 //! Soul is the reviewed operating disposition of ONE persistent agent
 //! identity, carried unchanged across replaceable model / provider /
@@ -6,7 +6,7 @@
 //! identity-binding storage surface:
 //!
 //! - the identity vocabulary type is [`AgentIdentityId`] from
-//!   `zeroclaw_api::companion` (the tachi#1630 substrate's minted-once
+//!   `zeroclaw_api::companion` (the the pending Tachi envelope contract substrate's minted-once
 //!   identity slot) — this module never mints or derives identities,
 //!   it only admits and resolves them;
 //! - every namespace read/write resolves to a stable admitted identity
@@ -16,7 +16,7 @@
 //!   attributes (model, provider, harness, session, display name) are
 //!   structurally irrelevant to the key;
 //! - no disposition capture, review/promotion, persona projection, or
-//!   reset/erase lifecycle exists here (later leaves under #52);
+//!   reset/erase lifecycle exists here (later leaves under the AgentSoul tracker);
 //! - durability is delegated to the existing [`Memory`] backend; this
 //!   module introduces no new persistence, revision, or receipt engine.
 //!
@@ -27,7 +27,7 @@
 //! with true composite attribution (SQLite) enforce isolation
 //! structurally.
 //!
-//! Verified identity evidence from Tachi (envelope contract tachi#1667)
+//! Verified identity evidence from Tachi (envelope contract the pending Tachi envelope contract)
 //! is NOT wired yet: the [`IdentityRegistry`] seam keeps a provenance
 //! note per admission so external evidence can attach later without
 //! widening this API.
@@ -54,7 +54,7 @@ pub enum SoulError {
     InvalidIdentityToken(String),
     /// The key starts with the `candidate::` segment reserved for Soul
     /// candidate rows. Candidate rows are owned by the sibling
-    /// `soul_candidate` module (#188) and are written/read only through
+    /// `soul_candidate` module  and are written/read only through
     /// its typed intake surface — raw Soul store/forget must refuse the
     /// segment so a disposition write can never overwrite or delete a
     /// candidate row.
@@ -124,7 +124,7 @@ pub(crate) fn validate_identity_token(id: &AgentIdentityId) -> Result<(), SoulEr
 }
 
 /// Key segment reserved for Soul candidate rows, owned by the sibling
-/// `soul_candidate` module (#188). Raw Soul store/forget refuse keys in
+/// `soul_candidate` module . Raw Soul store/forget refuse keys in
 /// this segment so the two modules' key spaces cannot collide.
 pub(crate) const RESERVED_CANDIDATE_PREFIX: &str = "candidate::";
 
@@ -145,7 +145,7 @@ pub enum AdmissionStatus {
 
 /// Why/how an identity was admitted. Free-form for locally admitted
 /// identities today; reserved as the attachment point for verified
-/// Tachi evidence envelopes (tachi#1667) without widening the API.
+/// Tachi evidence envelopes  without widening the API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionRecord {
     pub status: AdmissionStatus,
@@ -347,7 +347,7 @@ impl SoulService {
                 // Custom("soul") category plus the "soul" namespace let
                 // ambient recall surfaces (memory_inject) exclude Soul
                 // from model context structurally instead of by key
-                // convention. Soul projection is #190's dedicated
+                // convention. Soul projection is the later projection leaf's dedicated
                 // channel.
                 MemoryCategory::Custom("soul".to_string()),
                 None,
@@ -510,7 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_identity_across_carriers_shares_one_namespace() {
-        // Discrimination #1 (issue #187): swap model/provider/harness/
+        // Discrimination #1: swap model/provider/harness/
         // session while preserving the admitted identity -> same domain
         // key and state.
         let (tmp, backend) = fresh_backend();
@@ -762,7 +762,7 @@ mod tests {
 
     #[tokio::test]
     async fn reserved_candidate_key_segment_is_refused_by_raw_seam() {
-        // The `candidate::` segment belongs to soul_candidate (#188):
+        // The `candidate::` segment belongs to soul_candidate :
         // raw disposition store/forget must refuse it so a plain write
         // can never overwrite or delete a candidate row.
         let (tmp, backend) = fresh_backend();

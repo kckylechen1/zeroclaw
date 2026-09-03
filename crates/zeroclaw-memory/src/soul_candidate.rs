@@ -1,6 +1,6 @@
-//! AgentSoul candidate intake — evidence is not authority (#52 / #188).
+//! AgentSoul candidate intake — evidence is not authority (AgentSoul tracker contract).
 //!
-//! This leaf builds on the #187 seam ([`crate::soul`]): it records
+//! This leaf builds on the soul seam ([`crate::soul`]): it records
 //! *candidate* Soul dispositions plus evidence/counterevidence
 //! references for exactly one admitted
 //! [`AgentIdentityId`](zeroclaw_api::companion::AgentIdentityId), while
@@ -15,7 +15,7 @@
 //!   `Retracted`. There is no `Active` variant anywhere in this
 //!   module, so no method — however named — can return or store an
 //!   active disposition. Promotion belongs to the explicit authorized
-//!   review leaf (#189) alone;
+//!   later review leaf alone;
 //! - counts, frequency, recurrence, and confidence are evidence
 //!   QUALITY metadata ([`RecurrenceMetadata`]), recomputed from the
 //!   deduped evidence refs on every write. They never feed any
@@ -24,15 +24,15 @@
 //!   (incident store, benchmark run, Tachi envelope, worker receipt).
 //!   Referenced content is NEVER copied into a second truth store;
 //!   each ref keeps its source revision and derivation ref so a later
-//!   invalidation leaf (#52 future leaf 4) can find dependents;
+//!   invalidation leaf (a future AgentSoul leaf) can find dependents;
 //! - user-preference-shaped evidence is rejected with a typed error
 //!   naming the User Model ([`CandidateError::UserModelDomain`]) —
 //!   never silently stored as Soul. Every intake must carry an
 //!   explicit [`DomainClassification`];
-//! - identity resolution reuses the #187 fail-closed
+//! - identity resolution reuses the same fail-closed
 //!   [`IdentityRegistry`]: unadmitted, ambiguous, revoked, or
 //!   malformed identities fail closed before any storage access;
-//! - storage is one row per candidate under the #187 namespace
+//! - storage is one row per candidate under the soul namespace
 //!   (`soul::<identity>::candidate::<id>`) through the existing
 //!   [`Memory`] trait; carrier attributes never enter the key;
 //! - Tachi verified evidence can support a candidate but never
@@ -42,17 +42,17 @@
 //!   [`EvidenceVerification::Unavailable`] — never fabricated as
 //!   verified;
 //! - no persona projection, no promotion path, no suspend/resume/
-//!   reset/erase lifecycle exists here (later leaves under #52).
+//!   reset/erase lifecycle exists here (later leaves under).
 //!   Retraction ([`SoulCandidateService::retract`]) is the one
 //!   lifecycle-shaped operation: owner-correction-only, and it keeps
 //!   the row as history instead of erasing it.
 //!
-//! Deliberate scope boundary (repair-round adjudication for #188): this
+//! Deliberate scope boundary (repair-round adjudication for this leaf): this
 //! module performs NO owner principal/grant authentication — any caller
 //! claiming the [`CandidateOrigin::OwnerCorrection`] origin is taken at
 //! its word. Authenticating who may speak for an owner belongs to the
-//! explicit review/promotion leaf (#189) and its authorization
-//! substrate (#194), not to intake.
+//! explicit review/promotion leaf  and its authorization
+//! substrate , not to intake.
 
 use crate::soul::{
     CarrierContext, IdentityRegistry, NAMESPACE_DELIMITER, SoulError, SoulService,
@@ -77,7 +77,7 @@ use crate::soul::RESERVED_CANDIDATE_PREFIX;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CandidateError {
     /// Identity resolution failed (unavailable / ambiguous / revoked /
-    /// malformed / cross-identity). Carries the #187 typed cause.
+    /// malformed / cross-identity). Carries the soul seam's typed cause.
     Soul(SoulError),
     /// The evidence is user-preference-shaped and belongs to the User
     /// Model domain, not Soul. Rejected at intake — never stored.
@@ -162,7 +162,7 @@ impl From<SoulError> for CandidateError {
 /// The complete lifecycle vocabulary of a Soul candidate in this leaf.
 /// Deliberately two variants: `Candidate` and `Retracted`. There is NO
 /// `Active` variant — an active Soul disposition is created only by the
-/// explicit authorized review leaf (#189), through its own types, never
+/// explicit authorized review leaf , through its own types, never
 /// through candidate intake. The exhaustive-match test in this module
 /// fails to compile if a variant is added here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,7 +177,7 @@ pub enum CandidateStatus {
     Retracted,
 }
 
-/// The frozen authority list (#188): the ONLY origins that may create
+/// The frozen authority list : the ONLY origins that may create
 /// or update a candidate. Closed by construction — there is no
 /// `Other`/`Custom` variant, so no caller can smuggle an origin past
 /// this enum. None of these origins can activate Soul; they only ever
@@ -194,7 +194,7 @@ pub enum CandidateOrigin {
     /// A receipt from an external worker/harness.
     WorkerReceipt,
     /// A verified Tachi evidence reference (envelope contract
-    /// tachi#1667). Supports candidates; never activates Soul.
+    /// the pending Tachi envelope contract). Supports candidates; never activates Soul.
     TachiVerifiedEvidence,
     /// A model-generated summary of observations.
     ModelSummary,
@@ -203,12 +203,12 @@ pub enum CandidateOrigin {
     OwnerCorrection,
 }
 
-/// Explicit domain classification required at intake (#52 domain
+/// Explicit domain classification required at intake (per the AgentSoul domain
 /// boundary: Soul is not a user-preference store). Evidence classified
 /// as [`DomainClassification::UserPreference`] is typed-rejected with
 /// [`CandidateError::UserModelDomain`] and must be routed to the User
 /// Model store instead — this is the "explicit domain classification
-/// path" the #188 discrimination demands; there is no unclassified
+/// path" the discrimination demands; there is no unclassified
 /// intake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -224,7 +224,7 @@ pub enum DomainClassification {
 /// Whether one evidence reference supports or counters the candidate.
 /// Counterevidence is a first-class citizen: it is recorded alongside
 /// supporting evidence and never deletes or demotes the candidate —
-/// weighing is review's job (#189).
+/// weighing is review's job .
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceStance {
@@ -237,7 +237,7 @@ pub enum EvidenceStance {
 /// Verification state of an evidence reference. Tachi being unavailable
 /// is represented as [`EvidenceVerification::Unavailable`] — external
 /// evidence is marked, never fabricated as verified, so local
-/// observations can still create local candidates (#188 failure model).
+/// observations can still create local candidates (per the leaf's failure model).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceVerification {
@@ -252,7 +252,7 @@ pub enum EvidenceVerification {
 
 /// Privacy/sensitivity classification of the candidate. Required on
 /// every intake so no Soul row exists unclassified; consumed by the
-/// future privacy-erase leaf (#52 future leaf 5).
+/// future privacy-erase leaf (a future privacy-erase leaf).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sensitivity {
@@ -269,7 +269,7 @@ pub enum Sensitivity {
 /// Tachi envelope, worker receipt log. Referenced content is never
 /// copied here: this module holds no second copy of any source truth
 /// (project engineering precedent stays in project/precedent memory,
-/// per the #52 domain boundary).
+/// per the AgentSoul domain boundary).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceRef {
     /// Opaque reference id in the owning source system. Non-empty;
@@ -293,7 +293,7 @@ impl EvidenceRef {
         if self.id.trim().is_empty() {
             return Err(CandidateError::InvalidEvidenceRef("(empty)".to_string()));
         }
-        // Consistency rule (repair-round adjudication for #188): the
+        // Consistency rule (repair-round adjudication for this leaf): the
         // TachiVerifiedEvidence origin MUST carry a Verified ref — an
         // unverified or unavailable reference can never claim it.
         // Verified refs from OTHER origins stay allowed (worker
@@ -326,7 +326,7 @@ impl EvidenceRef {
 }
 
 /// Repetition/frequency/confidence metadata — evidence QUALITY signals
-/// only (#188 frozen rule). Recomputed from the deduped evidence refs
+/// only (per the leaf's frozen rule). Recomputed from the deduped evidence refs
 /// on every write, so these numbers can never drift from the evidence
 /// they describe, and nothing in this module reads them to make any
 /// authority decision (there is no authority decision to make).
@@ -367,11 +367,11 @@ pub struct SoulCandidate {
     /// Candidate id, unique within one identity's namespace.
     pub candidate_id: String,
     /// Disposition facet this candidate speaks to (e.g.
-    /// `"explanation density"`). Free-form: the #52 boundary lists
+    /// `"explanation density"`). Free-form: the AgentSoul boundary lists
     /// example shapes, not a closed registry.
     pub disposition: String,
     /// The proposed behavioral rule as observed/proposed. A proposal —
-    /// never an operating rule until review promotes it (#189).
+    /// never an operating rule until review promotes it .
     pub proposed_rule: String,
     /// Lifecycle status. `Candidate` or `Retracted` — never active.
     pub status: CandidateStatus,
@@ -521,7 +521,7 @@ fn validate_disposition(disposition: &str, proposed_rule: &str) -> Result<(), Ca
 static CANDIDATE_WRITE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
-/// Candidate intake/query service behind the #187 Soul domain seam.
+/// Candidate intake/query service behind the Soul domain seam.
 /// Every method resolves the caller's identity through the same
 /// fail-closed [`IdentityRegistry`] as [`SoulService`], stores one row
 /// per candidate under `soul::<identity>::candidate::<id>` through the
@@ -552,7 +552,7 @@ impl SoulCandidateService {
     }
 
     /// Full namespaced key for one candidate row. Carrier attributes
-    /// are structurally irrelevant (same law as #187); the `candidate`
+    /// are structurally irrelevant (same law as the soul seam); the `candidate`
     /// segment is reserved inside the Soul namespace.
     #[must_use]
     pub fn candidate_key(identity: &AgentIdentityId, candidate_id: &str) -> String {
@@ -804,7 +804,7 @@ mod tests {
     }
 
     /// Admit-through-backend identity (SqliteMemory rejects rows for
-    /// unregistered agent ids), mirroring the #187 test setup.
+    /// unregistered agent ids), mirroring the soul seam test setup.
     async fn identity_for(backend: &Arc<SqliteMemory>, alias: &str) -> AgentIdentityId {
         AgentIdentityId::from_opaque(backend.ensure_agent_uuid(alias).await.unwrap())
     }
@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn candidate_status_vocabulary_has_no_active_variant() {
-        // Structural guard for the #188 frozen rule: this exhaustive
+        // Structural guard for the leaf's frozen rule: this exhaustive
         // match over every constructible CandidateStatus value stops
         // COMPILING the moment anyone adds a variant (Active,
         // Suspended, ...) — an implicit-promotion state would be
@@ -851,19 +851,19 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_high_confidence_evidence_never_activates_soul() {
-        // REQUIRED discrimination (#188): submit the same
+        // REQUIRED discrimination : submit the same
         // high-confidence candidate evidence 25 times for one identity.
         // Expected: candidate/evidence state grows only under the
         // bounded dedupe policy, active Soul disposition count is 0
         // (proven by scanning EVERY backend row), and unrelated Soul
-        // state (the #187 disposition row feeding persona projection)
+        // state (the disposition row feeding persona projection)
         // is byte-identical afterwards.
         let (tmp, backend) = fresh_backend();
         let (registry, soul, candidates) = services(&backend);
         let id = identity_for(&backend, "identity-a").await;
         registry.admit(&id, "local bootstrap").unwrap();
 
-        // Pre-existing Soul state from the #187 seam: must survive the
+        // Pre-existing Soul state from the soul seam: must survive the
         // intake storm untouched (persona projection input unchanged).
         soul.store(
             &id,
@@ -913,7 +913,7 @@ mod tests {
 
         // Active Soul disposition count -> 0: scan the ENTIRE backend.
         // The only Soul rows for this identity may be (a) the one
-        // candidate row and (b) the untouched #187 disposition row; no
+        // candidate row and (b) the untouched disposition row; no
         // row of any other shape may exist, because this module can
         // only ever write candidate rows.
         let rows = backend.list(None, None).await.unwrap();
@@ -1382,7 +1382,7 @@ mod tests {
         assert_eq!(stored.evidence.len(), 1);
 
         // Tachi-unavailable external refs are marked unavailable, never
-        // fabricated as verified (#188 failure model).
+        // fabricated as verified (per the leaf's failure model).
         let mut unreachable = intake("warmth", "tachi-ev-2");
         unreachable.evidence.verification = EvidenceVerification::Unavailable;
         let record = candidates.submit(&id, unreachable).await.unwrap();

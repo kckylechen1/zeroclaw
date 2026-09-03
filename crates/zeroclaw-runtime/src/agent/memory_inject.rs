@@ -222,7 +222,7 @@ pub fn resolve_inject_policy(
 /// in `zeroclaw-memory`) are identity-bound domain state, never ambient
 /// recall material. They are excluded from model context at every
 /// entry-selection site: Soul reaches the model only through the
-/// dedicated bounded persona projection channel (#190), not here.
+/// dedicated bounded persona projection channel (the later projection leaf), not here.
 const SOUL_NAMESPACE: &str = "soul";
 
 fn is_soul_entry(entry: &MemoryEntry) -> bool {
@@ -338,7 +338,7 @@ pub async fn render_memory_context(
             if exclude_conversation && matches!(entry.category, MemoryCategory::Conversation) {
                 return false;
             }
-            // Soul rows never render through ambient recall (#190 owns
+            // Soul rows never render through ambient recall (the later projection leaf owns
             // the projection channel).
             if is_soul_entry(entry) {
                 return false;
@@ -364,7 +364,7 @@ pub async fn render_memory_context(
         if exclude_conversation && matches!(entry.category, MemoryCategory::Conversation) {
             continue;
         }
-        // Soul rows never render through ambient recall (#190 owns the
+        // Soul rows never render through ambient recall (the later projection leaf owns the
         // projection channel).
         if is_soul_entry(entry) {
             continue;
@@ -757,7 +757,7 @@ mod tests {
                 .filter(|e| matches!(e, ObserverEvent::MemoryRecall { .. }))
                 .count(),
             1,
-            "exactly one recall event per turn — the #8619 contract"
+            "exactly one recall event per turn — the existing recall contract"
         );
     }
 
