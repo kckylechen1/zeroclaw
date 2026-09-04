@@ -6,7 +6,6 @@ use crate::approval::ApprovalManager;
 use crate::observability::{self, Observer};
 use crate::platform;
 use crate::security::SecurityPolicy;
-use crate::sop::{SopAuditLogger, SopEngine};
 use crate::tools;
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -43,8 +42,6 @@ impl Agent {
             None,
             None,
             None,
-            None,
-            None,
         )
         .await
     }
@@ -55,8 +52,6 @@ impl Agent {
         session_cwd: Option<&Path>,
         initialize_mcp: bool,
         exclude_memory: bool,
-        sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
-        sop_audit: Option<Arc<SopAuditLogger>>,
         canvas_store: Option<tools::CanvasStore>,
     ) -> Result<Self> {
         Self::from_config_with_session_cwd_and_mcp_approval_mode(
@@ -67,8 +62,6 @@ impl Agent {
             true,
             exclude_memory,
             None,
-            sop_engine,
-            sop_audit,
             canvas_store,
             None,
         )
@@ -83,8 +76,6 @@ impl Agent {
         session_cwd: Option<&Path>,
         initialize_mcp: bool,
         exclude_memory: bool,
-        sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
-        sop_audit: Option<Arc<SopAuditLogger>>,
         canvas_store: Option<tools::CanvasStore>,
     ) -> Result<Self> {
         let config = live_config.read().clone();
@@ -96,8 +87,6 @@ impl Agent {
             true,
             exclude_memory,
             None,
-            sop_engine,
-            sop_audit,
             canvas_store,
             Some(live_config),
         )
@@ -115,8 +104,6 @@ impl Agent {
         initialize_mcp: bool,
         exclude_memory: bool,
         tui_env: Option<std::collections::HashMap<String, String>>,
-        sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
-        sop_audit: Option<Arc<SopAuditLogger>>,
     ) -> Result<Self> {
         Self::from_config_with_session_cwd_and_mcp_approval_mode(
             config,
@@ -126,8 +113,6 @@ impl Agent {
             true,
             exclude_memory,
             tui_env,
-            sop_engine,
-            sop_audit,
             None,
             None,
         )
@@ -143,8 +128,6 @@ impl Agent {
         initialize_mcp: bool,
         exclude_memory: bool,
         tui_env: Option<std::collections::HashMap<String, String>>,
-        sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
-        sop_audit: Option<Arc<SopAuditLogger>>,
     ) -> Result<Self> {
         let config = live_config.read().clone();
         Self::from_config_with_session_cwd_and_mcp_approval_mode(
@@ -155,8 +138,6 @@ impl Agent {
             true,
             exclude_memory,
             tui_env,
-            sop_engine,
-            sop_audit,
             None,
             Some(live_config),
         )
@@ -172,8 +153,6 @@ impl Agent {
         approval_backchannel: bool,
         exclude_memory: bool,
         tui_env: Option<std::collections::HashMap<String, String>>,
-        sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
-        sop_audit: Option<Arc<SopAuditLogger>>,
         canvas_store: Option<tools::CanvasStore>,
         live_config: Option<Arc<parking_lot::RwLock<Config>>>,
     ) -> Result<Self> {
@@ -264,29 +243,6 @@ impl Agent {
             None
         };
 
-        // SOP loading is gated on `[sop] sops_dir`: unset disables all SOP
-        // runtime behavior, matching the documented rollback path.
-        // If caller provided an engine (daemon path), use it; otherwise
-        // build our own (CLI/standalone path) only when the gate is set.
-        let (sop_engine, sop_audit) = match (sop_engine, sop_audit) {
-            (Some(engine), Some(audit)) => (Some(engine), Some(audit)),
-            (None, None) if config.sop.sops_dir.is_some() => {
-                let mem: Arc<dyn zeroclaw_memory::Memory> =
-                    zeroclaw_memory::create_memory_for_agent(config, agent_alias, None).await?;
-                // CLI / standalone path: no channel map is wired here, so the route
-                // adapter is the no-op (log-only). The daemon path builds the SOP
-                // engine with a real channel-delivering adapter instead.
-                let (engine, audit) = crate::sop::build_sop_engine(
-                    config.sop.clone(),
-                    &config.data_dir,
-                    mem,
-                    Default::default(),
-                );
-                (Some(engine), Some(audit))
-            }
-            _ => (None, None),
-        };
-
         let all_tools_result = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
             &security,
@@ -306,8 +262,9 @@ impl Agent {
             canvas_store,
             false,
             tui_env,
-            sop_engine,
-            sop_audit,
+            None,
+            // Daemon direct-turn construction is a top-level origin: no
+            // inherited lineage; the run mints its own root.
             None,
         );
         // Skills are loaded here and handed to `assemble`, which owns skill
@@ -345,7 +302,6 @@ impl Agent {
         let pinned_section = assembled.pinned_section().to_string();
         let crate::tools::scoped::ScopedAssembled {
             registry,
-            delegate_handle: _,
             ask_user_handle,
             reaction_handle,
             poll_handle,

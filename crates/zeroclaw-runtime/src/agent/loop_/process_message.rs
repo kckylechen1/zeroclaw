@@ -19,12 +19,10 @@ use zeroclaw_memory::{self, Memory};
 use zeroclaw_providers::{ChatMessage, ModelProvider};
 
 use super::{
-    agent_turn_with_sop_reassembly, apply_text_tool_prompt_policy, build_hardware_context,
-    build_tool_instructions_for_names, claim_announcements_for_turn, compute_excluded_mcp_tools,
-    live_channel_registry, native_tool_specs_present_for_turn, observe_turn_user_message,
-    resolved_agent_for_turn, seed_channel_handles, settle_announcement_guards,
+    agent_turn, apply_text_tool_prompt_policy, build_hardware_context,
+    build_tool_instructions_for_names, compute_excluded_mcp_tools, live_channel_registry,
+    native_tool_specs_present_for_turn, resolved_agent_for_turn, seed_channel_handles,
 };
-use crate::agent::turn::SopStepReassembly;
 
 /// Process a single message through the full agent (with tools, peripherals, memory).
 /// Used by channels (Telegram, Discord, etc.) to enable hardware and tool use.
@@ -132,24 +130,6 @@ pub async fn process_message(
             (None, None)
         };
 
-        // Build SOP engine when sops_dir is configured so SOP tools are
-        // available on this path (process_message CLI agent). No channel map is
-        // wired here, so the approval route adapter is the no-op (log-only); the
-        // daemon path injects a real channel-delivering adapter.
-        let (sop_engine, sop_audit) = if config.sop.sops_dir.is_some() {
-            let sop_mem: Arc<dyn zeroclaw_memory::Memory> =
-                zeroclaw_memory::create_memory_for_agent(&config, agent_alias, None).await?;
-            let (engine, audit) = crate::sop::build_sop_engine(
-                config.sop.clone(),
-                &config.data_dir,
-                sop_mem,
-                Default::default(),
-            );
-            (Some(engine), Some(audit))
-        } else {
-            (None, None)
-        };
-
         let all_tools_result_pm = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
             &security,
@@ -171,8 +151,9 @@ pub async fn process_message(
             None,
             false,
             None,
-            sop_engine,
-            sop_audit,
+            None,
+            // Gateway/WS and ACP turn seeding is a top-level origin: the
+            // turn's own lineage root, no inherited one.
             None,
         );
         let skills = crate::skills::load_skills_for_agent_from_config(&config, agent_alias);
@@ -204,7 +185,6 @@ pub async fn process_message(
         let mut deferred_section = assembled.combined_mcp_prompt_section();
         let scoped::ScopedAssembled {
             registry,
-            delegate_handle: _,
             ask_user_handle,
             reaction_handle,
             poll_handle,
@@ -217,7 +197,10 @@ pub async fn process_message(
         let tools_registry = registry.into_inner();
 
         // Populate all channel-driven tool handles from the registered factory.
+        // `process_message` is the parent channel-turn entry; `false` keeps
+        // the SA-7c child gate (inside the seed function) inert here.
         let count = seed_channel_handles(
+            false,
             &ask_user_handle,
             &channel_room_handle,
             &reaction_handle,
@@ -295,10 +278,6 @@ pub async fn process_message(
             ("memory_store", "Save to memory."),
             ("memory_recall", "Search memory."),
             ("memory_forget", "Delete a memory entry."),
-            (
-                "model_routing_config",
-                "Configure default model, scenario routing, and delegate agents.",
-            ),
             ("screenshot", "Capture a screenshot."),
             ("image_info", "Read image metadata."),
         ];
@@ -377,7 +356,7 @@ pub async fn process_message(
         tool_descs.retain(|(name, _)| effective_tool_names.contains(name));
 
         let bootstrap_max_chars = if eff_compact_context {
-            Some(6000)
+            Some(crate::agent::system_prompt::COMPACT_BOOTSTRAP_MAX_CHARS)
         } else {
             None
         };
@@ -503,24 +482,13 @@ pub async fn process_message(
             .unwrap_or_default();
         // `process_message` does not scope a session key of its own — its
         // callers (gateway, peer messaging) do, and they are outer entry
-        // points: nothing calls `process_message` from inside another turn
-        // shape, so it is always the claimant for whatever key it inherits and
-        // needs no ownership gate of the kind `run()` carries. With no key in
-        // scope the claim is a no-op and the turn is unchanged.
-        //
-        // The guard is settled against the turn's own outcome below; every
-        // fallible step between here and the provider call would otherwise
-        // consume these announcements without the model reading them.
-        let (announcements, announcement_guard) = claim_announcements_for_turn(true).await;
-        let context = format!("{hw_context}{announcements}");
+        let context = hw_context;
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
         let enriched = if context.is_empty() {
             format!("[{now}] {effective_message}")
         } else {
             format!("{context}[{now}] {effective_message}")
         };
-        observe_turn_user_message(&enriched);
-
         let mut history = vec![
             ChatMessage::system(&system_prompt),
             ChatMessage::user(&enriched),
@@ -547,10 +515,10 @@ pub async fn process_message(
             .as_ref()
             .map(|c| c as &dyn zeroclaw_api::channel::Channel);
 
-        let turn_result = zeroclaw_api::NATIVE_THINKING_OVERRIDE
+        zeroclaw_api::NATIVE_THINKING_OVERRIDE
             .scope(
                 thinking_params.native_thinking,
-                agent_turn_with_sop_reassembly(
+                agent_turn(
                     Some(&config),
                     model_provider.as_ref(),
                     &mut history,
@@ -590,14 +558,9 @@ pub async fn process_message(
                     }),
                     Some(agent_alias),
                     Some(&turn_id),
-                    Some(SopStepReassembly { config: &config }),
                 ),
             )
-            .await;
-        // Success point for this entry point: the turn returns `Ok` only after
-        // the provider call, so the announcements have been read. On `Err` the
-        // guard drops still armed and returns them to the store.
-        settle_announcement_guards(announcement_guard, turn_result)
+            .await
     };
     __zc_body
         .instrument(__zc_scope_span)

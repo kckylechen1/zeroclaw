@@ -8,6 +8,10 @@
 # Or set api_key directly below (not recommended for version control).
 
 # api_key = ""
+# This deployment template keeps the complete tool surface because it is a
+# hardware-oriented install (see [hardware] below); the minimal companion
+# profile excludes hardware tools, so opting in here is explicit.
+composition = "full"
 default_provider = "anthropic-custom:https://api.z.ai/api/anthropic"
 default_model = "claude-3-5-sonnet-20241022"
 default_temperature = 0.4
@@ -97,14 +101,11 @@ non_cli_excluded_tools = [
     "cron_run",
     "memory_store",
     "memory_forget",
-    "proxy_config",
     "web_search_config",
     "web_access_config",
-    "model_routing_config",
     "channel_ack_config",
     "pushover",
     "composio",
-    "delegate",
     "screenshot",
     "image_info",
 ]
@@ -137,16 +138,12 @@ enabled = true
 method = "totp"
 token_ttl_secs = 30
 cache_valid_secs = 300
-gated_actions = [
-    "shell",
-    "file_write",
-    "browser_open",
-    "browser",
-    "memory_forget",
-]
-gated_domains = []
-gated_domain_categories = []
-challenge_max_attempts = 3
+# Deprecated and not enforced: ZeroClaw has no OTP action-gating. The former
+# gated_actions / gated_domains / gated_domain_categories /
+# challenge_max_attempts knobs are parsed for compatibility but provide no
+# authorization boundary, so this template no longer sets them. High-risk
+# action authorization is owned by the Tachi approval/grant plane with
+# Node-local enforcement.
 
 [security.estop]
 enabled = false

@@ -54,12 +54,11 @@ share some axes and diverge on others independently. Two agents might share one
 model provider but run under different risk profiles, answer on different
 channels, and keep entirely separate memory.
 
-Agents reach each other two ways, each gated separately: they can **message**
-on a channel where they share a [peer group](../channels/peer-groups.md), and
-they can **[delegate](./delegation.md)** a task to one another only when the caller's risk profile
-permits delegation and the target is in the caller's reachable set (a same-profile
-peer, or an explicit cross-profile entry in the caller's `delegates` list; see
-[Running agents](./operating.md#coexistence-and-isolation)).
+Agents reach each other by **messaging** on a channel where they share a
+[peer group](../channels/peer-groups.md). (The retired `delegate` tool that
+used to add a second, policy-gated hand-off path is removed; see
+[Running agents](./operating.md#coexistence-and-isolation) and
+[Delegation & SubAgents](./delegation.md).)
 
 ```text
                     agents.researcher          agents.support

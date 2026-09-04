@@ -356,34 +356,15 @@ impl GitChannel {
             RouteAction::Message => {
                 events::event_to_message(&event, filter, CHANNEL_KEY, &self.alias, true)
             }
-            RouteAction::Sop { sop } => {
-                ::zeroclaw_log::record!(
-                    INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_attrs(::serde_json::json!({
-                            "sop": sop,
-                            "event_type": event.event_type(),
-                        })),
-                    "git event routed to SOP ingress"
-                );
-                events::event_to_sop_message(
-                    &event,
-                    filter,
-                    CHANNEL_KEY,
-                    &self.alias,
-                    &self.cfg.provider,
-                    &sop,
-                )
-            }
         };
         let Some(msg) = msg else {
             return true;
         };
         if !self.is_user_allowed(&msg.sender) {
             // First drop for a sender is a WARN: with an empty or misconfigured
-            // allowlist this branch eats every event (including `sop`-routed PR
-            // lifecycle events), and at DEBUG the operator sees "routed to SOP
-            // ingress" followed by nothing. Repeats stay DEBUG so a busy public
+            // allowlist this branch eats every event, and at DEBUG the
+            // operator sees the routing decision followed by nothing.
+            // Repeats stay DEBUG so a busy public
             // repo cannot turn this into log spam.
             if self.warned_unauthorized.lock().insert(msg.sender.clone()) {
                 ::zeroclaw_log::record!(
@@ -472,7 +453,7 @@ impl Channel for GitChannel {
 
         // Fail loudly on the one misconfiguration that silently disables the
         // whole channel: an empty resolved peer allowlist drops EVERY inbound
-        // event — peer checks apply to `sop` routes too — and the only trace
+        // event — and the only trace
         // was a DEBUG line per event. Resolved once here for the diagnostic;
         // per-event checks still resolve live.
         if (self.peer_resolver)().is_empty() {
@@ -1011,71 +992,6 @@ mod tests {
                 .unwrap();
             drop(tx2);
             assert!(rx2.recv().await.is_none());
-        }
-
-        #[tokio::test]
-        async fn sop_route_emits_sop_event_without_mention_gate() {
-            use wiremock::matchers::{method, path};
-            use wiremock::{Mock, MockServer, ResponseTemplate};
-
-            let server = MockServer::start().await;
-            let now = chrono::Utc::now();
-            mount_token_mock(&server).await;
-            // A PR opened WITHOUT mentioning the app.
-            Mock::given(method("GET"))
-                .and(path("/repos/octo/repo/issues"))
-                .respond_with(
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!([{
-                        "id": 556,
-                        "number": 31,
-                        "title": "Add events",
-                        "body": "Implements the event enum.",
-                        "user": {"login": "test_user", "type": "User"},
-                        "created_at": (now - chrono::Duration::seconds(60)).to_rfc3339(),
-                        "html_url": "https://github.com/octo/repo/pull/31",
-                        "pull_request": {"merged_at": null},
-                    }])),
-                )
-                .mount(&server)
-                .await;
-            mount_empty(&server, "/repos/octo/repo/issues/comments").await;
-
-            let mut cfg = base_cfg();
-            cfg.events.insert(
-                "pull_request.opened".to_string(),
-                zeroclaw_config::schema::GitEventRoute {
-                    message: false,
-                    sop: Some("pr-triage".to_string()),
-                },
-            );
-            let plan = TransportPlan::from_routes(&cfg.events);
-            let ch = mock_channel(cfg, server.uri());
-
-            let filter = test_filter();
-            let mut state = PollState::new(now - chrono::Duration::hours(1));
-            let repo = RepoRef::parse("octo/repo").unwrap();
-            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-            ch.poll_repo(&repo, &filter, &plan, &mut state, &tx)
-                .await
-                .unwrap();
-            drop(tx);
-
-            // SOP-routed events bypass the mention gate and enter SOP
-            // ingress with a reserved subject.
-            let msg = rx.recv().await.unwrap();
-            assert_eq!(msg.id, "ghpr_octo/repo#31");
-            assert_eq!(msg.reply_target, "octo/repo#31");
-            assert_eq!(
-                msg.subject.as_deref(),
-                Some("zeroclaw:sop-event:git.main:pull_request.opened")
-            );
-            let payload: serde_json::Value = serde_json::from_str(&msg.content).unwrap();
-            assert_eq!(payload["sop"], "pr-triage");
-            assert_eq!(payload["event_type"], "pull_request.opened");
-            assert_eq!(payload["repo"], "octo/repo");
-            assert_eq!(payload["number"], 31);
-            assert_eq!(payload["body"], "Implements the event enum.");
-            assert!(rx.recv().await.is_none());
         }
 
         #[tokio::test]

@@ -1,26 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Undo2 } from 'lucide-react';
 import { t } from '@/lib/i18n';
-import {
-  runStateTone,
-  flowRoleTone,
-  layoutGeometry,
-  getGraphLegend,
-  indexLegend,
-  indexLegendLabels,
-  CANONICAL_LAYOUT_GEOMETRY,
-  type RunStateTone,
-  type WireTone,
-  type Sop,
-  type SopStep,
-  type NodeRunState,
-  type SopGraph,
-  type GraphNode,
-  type GraphPin,
-  type GraphWire,
-  type GraphLegend,
-  type FlowRole,
-} from '@/lib/sops';
+import {flowRoleTone, layoutGeometry, getGraphLegend, indexLegend, indexLegendLabels, CANONICAL_LAYOUT_GEOMETRY, type WireTone, type Sop, type SopStep, type SopGraph, type GraphNode, type GraphPin, type GraphWire, type GraphLegend, type FlowRole} from '@/lib/sops';
 
 type XY = { x: number; y: number };
 
@@ -46,18 +27,6 @@ const WIRE_STROKE: Record<WireTone, string> = {
 
 function wireStroke(kind: FlowRole): string {
   return WIRE_STROKE[flowRoleTone(kind)];
-}
-
-const NODE_STROKE: Record<RunStateTone, string> = {
-  accent: 'var(--pc-accent)',
-  success: 'var(--color-status-success)',
-  error: 'var(--color-status-error)',
-  warning: 'var(--color-status-warning)',
-  neutral: 'var(--pc-border-strong)',
-};
-
-function nodeStateStroke(state: NodeRunState | undefined): string {
-  return NODE_STROKE[runStateTone(state)];
 }
 
 /// Seed positions from the backend layout. The layout (columns/rows walked from
@@ -217,13 +186,11 @@ function flowInY(nodeY: number, kind: FlowRole): number {
 // gesture is treated as a pan instead of a delete-click.
 const WIRE_CLICK_SLOP = 4;
 
-const EMPTY_RUN_STATE: Map<number, NodeRunState> = new Map();
 
 interface Props {
   draft: Sop;
   graph: SopGraph;
   selectedStep: number | null;
-  runStateByStep?: Map<number, NodeRunState>;
   readOnly?: boolean;
   onSelectStep: (n: number) => void;
   onSelectTrigger: (index: number) => void;
@@ -332,7 +299,6 @@ export default function SopCanvas({
   draft,
   graph,
   selectedStep,
-  runStateByStep = EMPTY_RUN_STATE,
   readOnly = false,
   onSelectStep,
   onSelectTrigger,
@@ -381,7 +347,6 @@ export default function SopCanvas({
   const flowRoleDesc = useMemo(() => indexLegend(legend?.flow_roles), [legend]);
   const flowRoleLabel = useMemo(() => indexLegendLabels(legend?.flow_roles), [legend]);
   const pinClassDesc = useMemo(() => indexLegend(legend?.pin_classes), [legend]);
-  const runStateDesc = useMemo(() => indexLegend(legend?.run_states), [legend]);
   const dataWireTitle = pinClassDesc.get('data') ?? t('sops.wire_kind_data');
 
   // Abandon an in-progress wire draw (flow or data) and clear the ghost line.
@@ -691,7 +656,6 @@ export default function SopCanvas({
             const b = pos.get(w.to_step);
             if (!a || !b) return null;
             const kind = (w.flow_role ?? 'sequence') as FlowRole;
-            const active = runStateByStep.get(w.to_step) === 'active';
             const portIndex = switchPortIndex(w);
             const srcY =
               portIndex !== undefined ? switchPortY(a.y, portIndex) : flowOutY(a.y, kind);
@@ -747,7 +711,7 @@ export default function SopCanvas({
                   d={d}
                   fill="none"
                   stroke={hovered && !readOnly && kind !== 'trigger' ? 'var(--color-status-error)' : wireStroke(kind)}
-                  strokeWidth={active ? 3 : hovered ? 2.5 : 1.75}
+                  strokeWidth={hovered ? 2.5 : 1.75}
                   strokeDasharray={
                     hovered && !readOnly && kind !== 'trigger'
                       ? '6 3'
@@ -758,18 +722,9 @@ export default function SopCanvas({
                           : undefined
                   }
                   markerEnd="url(#sop-arrow)"
-                  opacity={active ? 1 : hovered ? 1 : kind === 'trigger' ? 1 : 0.85}
+                  opacity={hovered ? 1 : kind === 'trigger' ? 1 : 0.85}
                   pointerEvents="none"
                 >
-                  {active ? (
-                    <animate
-                      attributeName="stroke-dashoffset"
-                      from="18"
-                      to="0"
-                      dur="0.6s"
-                      repeatCount="indefinite"
-                    />
-                  ) : null}
                 </path>
                 {hovered && !readOnly && kind !== 'trigger' ? (
                   <g pointerEvents="none">
@@ -977,7 +932,6 @@ export default function SopCanvas({
     const step: SopStep | undefined = stepByNum.get(node.step);
     const p = pos.get(node.step);
     if (!p) return null;
-    const state = runStateByStep.get(node.step);
     const selected = selectedStep === node.step;
     const isCheckpoint = step?.kind === 'checkpoint';
     const switchRules = step?.routing?.switch ?? [];
@@ -1016,7 +970,7 @@ export default function SopCanvas({
           height={nodeHeight(node, ruleCount, expandedRows)}
           rx={10}
           fill="var(--pc-bg-surface)"
-          stroke={selected ? 'var(--pc-accent)' : nodeStateStroke(state)}
+          stroke={selected ? 'var(--pc-accent)' : 'var(--pc-border-strong)'}
           strokeWidth={selected ? 2.5 : 1.5}
         />
         <rect width={NODE_W} height={26} rx={10} fill="var(--pc-bg-elevated)" />
@@ -1035,12 +989,6 @@ export default function SopCanvas({
         ) : switchRules.length > 0 ? (
           <text x={NODE_W - 10} y={17} fontSize="10" textAnchor="end" fill="var(--pc-accent-light)">
             ⋔ {t('sops.switch')}
-          </text>
-        ) : null}
-        {state ? (
-          <text x={12} y={64} fontSize="10" fill={nodeStateStroke(state)}>
-            {t(`sops.run_state.${state}`)}
-            {runStateDesc.get(state) ? <title>{runStateDesc.get(state)}</title> : null}
           </text>
         ) : null}
         {switchRules.length > 0 ? (

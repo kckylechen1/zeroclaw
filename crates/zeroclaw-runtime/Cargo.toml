@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 zeroclaw-api.workspace = true
-zeroclaw-coordinator.workspace = true
 zeroclaw-spawn.workspace = true
 zeroclaw-infra.workspace = true
 zeroclaw-config.workspace = true
@@ -92,13 +91,23 @@ landlock = { version = "0.4", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Descriptor-bound `openat`-family containment primitives for the
+# `personal_file` safe core (LA1): no-follow component opens, renameat
+# no-clobber, descriptor identity checks. Unix-only; every other
+# platform fails closed with `unsupported_safely`.
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Console", "Win32_Globalization"] }
 encoding_rs = "0.8"
 
 [features]
-default = ["observability-prometheus", "schema-export"]
+default = [
+    "observability-prometheus",
+    "schema-export",
+    "integrations-saas",
+    "hardware-tools",
+]
 observability-prometheus = ["dep:prometheus"]
 observability-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
 sandbox-landlock = ["dep:landlock"]
@@ -106,6 +115,12 @@ schema-export = ["dep:schemars", "zeroclaw-config/schema-export", "zeroclaw-sop-
 
 
 browser-native = []
+# Concrete integration families from zeroclaw-tools. Default-on so this
+# crate's standalone build and test surface are unchanged; the root package
+# consumes this crate with default-features = false and forwards these from
+# its own default so the slim companion selection can omit them.
+integrations-saas = ["zeroclaw-tools/integrations-saas"]
+hardware-tools = ["zeroclaw-tools/hardware-tools"]
 plugins-wasm = ["dep:zeroclaw-plugins", "zeroclaw-plugins/plugins-wasmtime"]
 webauthn = []
 sandbox-bubblewrap = []

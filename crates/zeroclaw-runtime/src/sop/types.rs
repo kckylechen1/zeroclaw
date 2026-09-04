@@ -140,7 +140,8 @@ impl std::str::FromStr for FilesystemEventKind {
            Derived from `SopTrigger`; one discriminant per trigger variant."
 )]
 pub enum SopTrigger {
-    /// MQTT message arrival. Live: delivered by the MQTT listener.
+    /// MQTT message arrival. Defined and matched, but the MQTT listener
+    /// feeder is retired; no live route delivers it.
     #[trigger(display = "topic")]
     Mqtt {
         /// Topic filter. `+` matches one level, `#` matches the remaining levels.
@@ -156,7 +157,8 @@ pub enum SopTrigger {
         /// Request path matched exactly against the event path.
         path: String,
     },
-    /// Time-based firing. Live: dispatched by the SOP maintenance tick (daemon / channel-start paths).
+    /// Time-based firing. Defined and matched, but the maintenance-tick
+    /// feeder is unwired; no live route fires it.
     #[trigger(display = "expression")]
     Cron {
         /// Cron expression evaluated over the run window.
@@ -173,7 +175,8 @@ pub enum SopTrigger {
         #[serde(default)]
         condition: Option<String>,
     },
-    /// Filesystem change. Live: delivered by the filesystem watcher.
+    /// Filesystem change. Defined and matched, but the filesystem watcher
+    /// feeder is retired; no live route delivers it.
     #[trigger(display = "path")]
     Filesystem {
         /// Path glob (`*`, `**`, `?`); a bare directory matches anything under it.
@@ -198,8 +201,8 @@ pub enum SopTrigger {
         condition: Option<String>,
     },
     /// Inbound message or forge/platform event on a configured channel
-    /// (telegram, discord, slack, git, ...). Live: delivered by the channel
-    /// orchestrator when the channel's SOP dispatch is enabled. The Git forge
+    /// (telegram, discord, slack, git, ...). Defined and matched, but the
+    /// channel SOP fan-in is retired; no live route delivers it. The Git forge
     /// producer sets an event topic of the form `<channel>.<alias>:<event_type>`
     /// and puts `event_type` in the payload, so an authored `condition` filters
     /// forge events by type without a second trigger shape.
@@ -214,9 +217,11 @@ pub enum SopTrigger {
         #[serde(default)]
         condition: Option<String>,
     },
-    /// Agent-initiated run via the `sop_execute` tool. Not an external fan-in.
+    /// Agent- or operator-initiated run request. Not an external fan-in; the
+    /// model-facing run tool that started one is retired.
     Manual,
-    /// AMQP delivery. Live: delivered by the AMQP consumer in a SOP dispatch mode.
+    /// AMQP delivery. Defined and matched, but the SOP dispatch mode of the
+    /// AMQP consumer is retired; no live route delivers it.
     #[trigger(display = "routing_key")]
     Amqp {
         /// Routing-key filter (topic-exchange semantics): `.`-delimited words,

@@ -158,15 +158,7 @@ hermes = "none"
 openclaw = "none"
 hermes = "none"
 
-[channels.mqtt]
-openclaw = "none"
-hermes = "none"
-
 [channels.amqp]
-openclaw = "none"
-hermes = "none"
-
-[channels.filesystem]
 openclaw = "none"
 hermes = "none"
 

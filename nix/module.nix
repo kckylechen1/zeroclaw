@@ -139,6 +139,14 @@ let
             # ZeroClaw config key flow through with TOML's value-model
             # validation. No string-of-doom escape hatch needed for the
             # common case.
+            #
+            # `composition` flows through this freeform surface like any
+            # other key. The module deliberately ships no default for it:
+            # config.toml is re-rendered from these settings on every
+            # service start, so a default here would retarget existing
+            # deployments on the next rebuild, not only fresh installs.
+            # Operators pin `composition = "minimal"` (or "full")
+            # explicitly.
             freeformType = tomlFormat.type;
           };
           default = { };

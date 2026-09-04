@@ -13,6 +13,8 @@ use zeroclaw_api::agent::TurnEvent;
 
 // Items that still live in `loop_` — import via the parent module.
 use super::loop_::{ParsedToolCall, ToolLoopCancelled, is_tool_loop_cancelled, scrub_credentials};
+use super::turn::redact::scrub_credentials_json;
+use super::turn::redact::scrub_credentials_value;
 use super::turn::{ModelSwitchCallback, TurnMeta, scope_model_switch_state};
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -116,7 +118,13 @@ pub(crate) async fn execute_one_tool(
     receipt_generator: Option<&super::tool_receipts::ReceiptGenerator>,
     event_tx: Option<&Sender<TurnEvent>>,
 ) -> Result<ToolExecutionOutcome> {
-    let full_args = call_arguments.to_string();
+    // Rendering-boundary copy of the arguments for observer events. Results
+    // are already scrubbed at this boundary; arguments carry the same
+    // credential exposure (e.g. a rejected raw `api_key`) and get the same
+    // treatment — via the structured walk so composite shapes the text regex
+    // cannot see are redacted too. The data path below (`tool.execute`,
+    // receipts) stays raw.
+    let full_args = scrub_credentials_json(&call_arguments);
     let tool_call_id_owned = tool_call_id.map(str::to_string);
     observer.record_event(&ObserverEvent::ToolCallStart {
         tool: call_name.to_string(),
@@ -225,7 +233,7 @@ pub(crate) async fn execute_one_tool(
             .with_attrs(::serde_json::json!({
                 "tool": call_name,
                 "tool_call_id": tool_call_id,
-                "input": call_arguments,
+                "input": scrub_credentials_value(call_arguments.clone()),
             })),
         format!("tool call: {call_name}")
     );
@@ -244,7 +252,9 @@ pub(crate) async fn execute_one_tool(
             .send(TurnEvent::ToolCall {
                 id: event_call_id.clone(),
                 name: call_name.to_string(),
-                args: call_arguments.clone(),
+                // UI-facing turn event: same rendering-boundary scrub as the
+                // observer events above. The raw args still reach the tool.
+                args: scrub_credentials_value(call_arguments.clone()),
             })
             .await;
     }
@@ -286,7 +296,7 @@ pub(crate) async fn execute_one_tool(
                         .with_attrs(::serde_json::json!({
                             "tool": call_name,
                             "tool_call_id": tool_call_id,
-                            "input": call_arguments,
+                            "input": scrub_credentials_value(call_arguments.clone()),
                             "output": r.output,
                         })),
                         format!("tool result: {call_name}")
@@ -301,7 +311,7 @@ pub(crate) async fn execute_one_tool(
                             .with_attrs(::serde_json::json!({
                                 "tool": call_name,
                                 "tool_call_id": tool_call_id,
-                                "input": call_arguments,
+                                "input": scrub_credentials_value(call_arguments.clone()),
                                 "error": r.error.clone().unwrap_or_default(),
                                 "output": r.output,
                             })),
@@ -372,7 +382,7 @@ pub(crate) async fn execute_one_tool(
                         .with_attrs(::serde_json::json!({
                             "tool": call_name,
                             "tool_call_id": tool_call_id,
-                            "input": call_arguments,
+                            "input": scrub_credentials_value(call_arguments.clone()),
                             "error": format!("{e:?}"),
                         })),
                     format!("tool error: {call_name}")
@@ -715,6 +725,185 @@ mod tests {
             "Tool not available in this turn: extract_text"
         );
         assert_eq!(invocations.load(Ordering::SeqCst), 0);
+    }
+
+    /// Tool that captures the exact arguments it received into a shared cell,
+    /// so tests can distinguish the raw data path from the scrubbed rendering
+    /// surface.
+    struct ArgsCapturingTool {
+        received: Arc<Mutex<Option<serde_json::Value>>>,
+    }
+
+    impl zeroclaw_api::attribution::Attributable for ArgsCapturingTool {
+        fn role(&self) -> zeroclaw_api::attribution::Role {
+            zeroclaw_api::attribution::Role::System
+        }
+        fn alias(&self) -> &str {
+            "test-args-capturing-tool"
+        }
+    }
+
+    #[async_trait]
+    impl Tool for ArgsCapturingTool {
+        fn name(&self) -> &str {
+            "args_capture"
+        }
+
+        fn description(&self) -> &str {
+            "Captures received arguments for rendering-boundary tests"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}, "required": []})
+        }
+
+        async fn execute(
+            &self,
+            args: serde_json::Value,
+        ) -> anyhow::Result<crate::tools::ToolResult> {
+            *self.received.lock().unwrap() = Some(args);
+            Ok(crate::tools::ToolResult {
+                success: true,
+                output: "captured".into(),
+                error: None,
+            })
+        }
+    }
+
+    /// Observer that records the arguments string of every tool lifecycle
+    /// event, standing in for the log/UI surfaces that render them.
+    struct RecordingObserver {
+        tool_event_args: Mutex<Vec<String>>,
+    }
+
+    impl RecordingObserver {
+        fn args_snapshots(&self) -> Vec<String> {
+            self.tool_event_args.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::observability::Observer for RecordingObserver {
+        fn record_event(&self, event: &crate::observability::ObserverEvent) {
+            use crate::observability::ObserverEvent;
+            let arguments = match event {
+                ObserverEvent::ToolCallStart { arguments, .. } => arguments.clone(),
+                ObserverEvent::ToolCall { arguments, .. } => arguments.clone(),
+                _ => return,
+            };
+            if let Some(args) = arguments {
+                self.tool_event_args.lock().unwrap().push(args);
+            }
+        }
+
+        fn record_metric(&self, _metric: &zeroclaw_api::observability_traits::ObserverMetric) {}
+
+        fn name(&self) -> &str {
+            "test-recording-observer"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_one_tool_scrubs_credential_args_on_rendering_surfaces() {
+        let received = Arc::new(Mutex::new(None));
+        let tool = ArgsCapturingTool {
+            received: Arc::clone(&received),
+        };
+        let observer = RecordingObserver {
+            tool_event_args: Mutex::new(Vec::new()),
+        };
+        let meta = crate::agent::turn::TurnMeta {
+            parent_agent_alias: None,
+            agent_alias: None,
+            turn_id: "test-turn-id",
+            channel_name: "test",
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<zeroclaw_api::agent::TurnEvent>(8);
+
+        let secret_args = serde_json::json!({
+            "action": "upsert_agent",
+            "api_key": "sk-test-raw-secret-material",
+            // Composite credential shape: the text regex cannot see a
+            // non-scalar under a secret-named key; the structured walk must.
+            "metadata": {"api_key": {"nested": "sk-composite-secret-value"}},
+            "model": "gpt-5.3-codex"
+        });
+        let registry: Vec<Box<dyn Tool>> = vec![Box::new(tool)];
+        let outcome = execute_one_tool(
+            "args_capture",
+            secret_args.clone(),
+            Some("call-1"),
+            ToolDispatchContext {
+                tools_registry: &registry,
+                activated_tools: None,
+                excluded_tools: &[],
+                model_switch_callback: None,
+            },
+            &meta,
+            &observer,
+            None,
+            None,
+            Some(&tx),
+        )
+        .await
+        .expect("tool should execute");
+
+        assert!(outcome.success);
+
+        // Data path: the tool itself received the raw, unmodified arguments.
+        let received = received.lock().unwrap().clone();
+        assert_eq!(
+            received.as_ref(),
+            Some(&secret_args),
+            "scrubbing must stay a rendering concern; the tool gets raw args"
+        );
+
+        // Rendering path: observer lifecycle events carry a scrubbed copy.
+        let snapshots = observer.args_snapshots();
+        assert!(
+            snapshots.len() >= 2,
+            "expected ToolCallStart and ToolCall events, got: {snapshots:?}"
+        );
+        for rendered in &snapshots {
+            assert!(
+                !rendered.contains("sk-test-raw-secret-material"),
+                "observer event must not echo the secret: {rendered}"
+            );
+            assert!(
+                !rendered.contains("sk-composite-secret-value"),
+                "observer event must not echo the composite-wrapped secret: {rendered}"
+            );
+            assert!(
+                rendered.contains("[REDACTED]"),
+                "observer event should show the redaction marker: {rendered}"
+            );
+        }
+
+        // Rendering path: the UI-facing turn event carries a scrubbed copy.
+        let mut turn_call_args: Option<serde_json::Value> = None;
+        while let Ok(event) = rx.try_recv() {
+            if let zeroclaw_api::agent::TurnEvent::ToolCall { args, .. } = event {
+                turn_call_args = Some(args);
+            }
+        }
+        let args = turn_call_args.expect("TurnEvent::ToolCall must be emitted");
+        let rendered = args.to_string();
+        assert!(
+            !rendered.contains("sk-test-raw-secret-material"),
+            "turn event must not echo the secret: {rendered}"
+        );
+        assert!(
+            !rendered.contains("sk-composite-secret-value"),
+            "turn event must not echo the composite-wrapped secret: {rendered}"
+        );
+        assert!(
+            rendered.contains("[REDACTED]"),
+            "turn event should show the redaction marker: {rendered}"
+        );
+        assert_eq!(args["model"], serde_json::json!("gpt-5.3-codex"));
     }
 
     use super::should_execute_tools_in_parallel;

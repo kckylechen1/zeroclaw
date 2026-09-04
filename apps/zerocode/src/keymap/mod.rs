@@ -196,7 +196,6 @@ mod tests {
         check(ConfigTabAction::TAG, ConfigTabAction::bindings());
         check(DoctorTabAction::TAG, DoctorTabAction::bindings());
         check(QuickstartTabAction::TAG, QuickstartTabAction::bindings());
-        check(SopTabAction::TAG, SopTabAction::bindings());
         check(InputBarAction::TAG, InputBarAction::bindings());
         check(ModalAction::TAG, ModalAction::bindings());
         check(CaptureAction::TAG, CaptureAction::bindings());
@@ -252,13 +251,6 @@ mod tests {
                     .map(|(c, _)| c)
                     .collect(),
             ),
-            (
-                "sop",
-                SopTabAction::bindings()
-                    .into_iter()
-                    .map(|(c, _)| c)
-                    .collect(),
-            ),
         ];
         for (gc, ga) in &global {
             for (label, chords) in panes {
@@ -295,7 +287,6 @@ mod tests {
         check::<DashboardTabAction>();
         check::<ConfigTabAction>();
         check::<QuickstartTabAction>();
-        check::<SopTabAction>();
         check::<InputBarAction>();
         check::<FileExplorerAction>();
     }

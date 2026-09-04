@@ -686,9 +686,6 @@ const AGENT_MULTI_ALIAS_FIELDS: Record<string, keyof AgentOptionsResponse> = {
   "skill_bundles": "skill_bundles",
   "knowledge_bundles": "knowledge_bundles",
   "mcp_bundles": "mcp_bundles",
-  // Delegates is a subset of the configured agents — give it the same themed
-  // multi-select (with agent suggestions) as the bundle fields, not free text.
-  delegates: "agents",
 };
 
 // Peer-groups carry the same alias-ref shape as agents do: a single
@@ -980,7 +977,7 @@ const FieldForm = forwardRef<FieldFormHandle, FieldFormProps>(
     // is the agent whose `channels` list contains `<type>.<alias>` (a reverse
     // lookup the gateway already does and returns as `owning_agent`), so it
     // is NOT the alias in the path. `undefined` for non-channel sections
-    // (risk profiles are shared across agents; pipeline/claude_code are
+    // (risk profiles are shared across agents; pipeline is
     // global) leaves the picker on the default-agent catalog.
     const [toolAgent, setToolAgent] = useState<string | undefined>(undefined);
     useEffect(() => {

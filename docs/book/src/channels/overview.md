@@ -92,7 +92,7 @@ See [Webhooks](./webhook.md) and [ACP](./acp.md).
 
 ### Event sources
 
-Input-only transports that feed events into the agent loop or the SOP engine. They have no outbound reply; each one is also a [SOP fan-in](../sop/fan-in/overview.md).
+Input-only transports that feed events into the agent loop. (They formerly also fed the SOP engine; that fan-in was removed with the run side.) They have no outbound reply; each one was also a [SOP fan-in](../sop/fan-in/overview.md).
 
 | Channel | Feature flag | Shape |
 |---|---|---|

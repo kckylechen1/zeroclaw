@@ -26,14 +26,13 @@ function sets(value: ToolPermissionGridValue) {
   };
 }
 
-test('permission catalog excludes discovered CLI executables', () => {
+test('permission catalog keeps only agent-registry entries', () => {
   const entries = [
     { name: 'shell', group: 'agent' as const },
-    { name: 'git', group: 'cli' as const },
-    { name: 'docker', group: 'cli' as const },
+    { name: 'some_plugin', group: 'agent' as const },
   ];
 
-  assert.deepEqual(filterPermissionCatalogEntries(entries), [entries[0]]);
+  assert.deepEqual(filterPermissionCatalogEntries(entries), entries);
 });
 
 test('strict allowlists still auto-admit MCP names unless denied', () => {

@@ -158,8 +158,6 @@ pub struct SecurityPolicy {
     /// delegation: a Delegate may only target an agent sharing the caller's
     /// risk profile. Empty when constructed outside the profile path.
     pub risk_profile_name: String,
-    /// Whether and to which agents this profile may delegate.
-    pub delegation_policy: crate::autonomy::DelegationPolicy,
     pub workspace_dir: PathBuf,
     pub config_path: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
@@ -486,7 +484,6 @@ impl Default for SecurityPolicy {
         Self {
             autonomy: AutonomyLevel::Supervised,
             risk_profile_name: String::new(),
-            delegation_policy: crate::autonomy::DelegationPolicy::default(),
             workspace_dir: PathBuf::from("."),
             config_path: None,
             data_dir: None,
@@ -2352,7 +2349,6 @@ impl SecurityPolicy {
         Self {
             autonomy: risk_profile.level,
             risk_profile_name: String::new(),
-            delegation_policy: risk_profile.delegation_policy.clone(),
             workspace_dir: workspace_dir.to_path_buf(),
             // Set by `for_agent` once the install root is known; the
             // profile-only constructor has no config path.
@@ -2445,8 +2441,9 @@ impl SecurityPolicy {
             // allow-list, `always_ask` — "the profile owns the rest," per
             // `AgentCard::risk_profile`'s doc). What it does NOT do is touch
             // tools: that accessor is also read directly elsewhere for a
-            // profile's OWN `allowed_tools`/`excluded_tools` fields (e.g.
-            // `spawn_subagent.rs`'s self-permission check), so folding the
+            // profile's OWN `allowed_tools`/`excluded_tools` fields (the
+            // retired `spawn_subagent` tool's self-permission check was one
+            // such reader), so folding the
             // card's grants into it there would let a card-granted tool be
             // silently gated by an unrelated profile's tool list, or vice
             // versa. Tool grants are resolved only here, once, as a
@@ -2803,7 +2800,6 @@ mod tests {
             auto_approve: vec!["memory_recall".into()],
             always_ask: vec!["shell".into()],
             allowed_roots: vec!["/tmp/extra".into()],
-            delegation_policy: crate::autonomy::DelegationPolicy::default(),
             approval_route: None,
             allowed_tools: Some(vec!["shell".into(), "memory_recall".into()]),
             excluded_tools: vec!["spawn_subagent".into()],

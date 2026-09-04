@@ -336,6 +336,15 @@ sections! {
         help:  "Model Context Protocol settings. Toggle `enabled` and pick deferred \
                 or eager loading. Individual MCP servers live under `mcp.servers[]`.",
     },
+    Composition => {
+        key:   "composition",
+        shape: DirectForm,
+        group: Tools,
+        help:  "Install-wide tool surface. `minimal` assembles only the curated \
+                companion primitives (about a dozen universal tools); `full` \
+                (alias `legacy`) keeps the complete tool registry and is a \
+                transitional compatibility profile. Unset behaves as `full`.",
+    },
     McpServers => {
         key:   "mcp.servers",
         shape: OneTierAliasMap,
@@ -520,6 +529,7 @@ pub fn section_has_signal(cfg: &crate::schema::Config, section: Section) -> bool
         | Section::Mcp
         | Section::McpBundles
         | Section::KnowledgeBundles
+        | Section::Composition
         | Section::QuickstartState => false,
     }
 }
@@ -782,7 +792,6 @@ mod tests {
             section_group_for_key("observability"),
             SectionGroup::Operations
         );
-        assert_eq!(section_group_for_key("delegate"), SectionGroup::MultiAgent);
         assert_eq!(section_group_for_key("web_search"), SectionGroup::Tools);
         assert_eq!(section_group_for_key("secrets"), SectionGroup::Storage);
         // Kebab spelling of a SCHEMA-grouped (non-curated) root resolves
@@ -852,16 +861,11 @@ mod tests {
     #[test]
     fn migrated_hand_list_roots_keep_their_groups() {
         let expected = [
-            ("claude_code", SectionGroup::Integrations),
-            ("codex_cli", SectionGroup::Integrations),
-            ("gemini_cli", SectionGroup::Integrations),
-            ("opencode_cli", SectionGroup::Integrations),
             ("sop", SectionGroup::Agent),
             ("verifiable_intent", SectionGroup::Agent),
             ("shell_tool", SectionGroup::Tools),
             ("observability", SectionGroup::Operations),
             ("gateway", SectionGroup::Network),
-            ("delegate", SectionGroup::MultiAgent),
             ("secrets", SectionGroup::Storage),
         ];
         for (key, group) in expected {

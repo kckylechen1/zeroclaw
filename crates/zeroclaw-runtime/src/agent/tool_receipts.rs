@@ -151,16 +151,6 @@ impl ReceiptScope {
     }
 }
 
-/// Scope `TOOL_LOOP_RECEIPT_CONTEXT` around `fut` for the lifetime of one turn
-/// so delegate sub-loops forward receipts into the same per-turn collector.
-/// One seam shared by every entrypoint; a `None` scope is inert.
-pub async fn scope_receipts<F>(scope: Option<ReceiptScope>, fut: F) -> F::Output
-where
-    F: std::future::Future,
-{
-    TOOL_LOOP_RECEIPT_CONTEXT.scope(scope, fut).await
-}
-
 /// Canonical system-prompt addendum that instructs the model to carry the
 /// `[receipt: ...]` field verbatim. Shared by every turn entrypoint so the
 /// instruction text never drifts between the channel orchestrator and the
@@ -185,13 +175,6 @@ pub fn render_receipts_block(receipts: &[String]) -> Option<String> {
         let _ = write!(block, "\n  {r}");
     }
     Some(block)
-}
-
-tokio::task_local! {
-    /// Set by the orchestrator when `[agent.tool_receipts] enabled = true`.
-    /// `DelegateTool` reads this to forward receipts into sub-agent tool loops
-    /// so subagent tool calls land in the same per-turn collector.
-    pub static TOOL_LOOP_RECEIPT_CONTEXT: Option<ReceiptScope>;
 }
 
 /// Parse a receipt string into (timestamp, hash).

@@ -90,10 +90,6 @@ pub struct AcpServer {
     /// that `/ws/canvas/:id` WebSocket subscribers read from.  `None` in
     /// standalone `zeroclaw acp` mode where no gateway is running.
     canvas_store: Option<CanvasStore>,
-    /// Shared SOP engine from the daemon. `None` in standalone mode — agents
-    /// build their own engine from config.
-    sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-    sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
     /// Connection-scoped default agent alias (`?agent=` on the gateway ACP
     /// endpoint). Slots into the `session/new` alias precedence chain between
     /// an explicit `agentAlias` and `[acp].default_agent`. Not a config
@@ -213,8 +209,6 @@ impl AcpServer {
             loading_sessions: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             store,
             canvas_store: None,
-            sop_engine: None,
-            sop_audit: None,
             connection_default_agent: None,
             client_elicitation_caps: std::sync::RwLock::new(ElicitationCapabilities::default()),
         }
@@ -241,8 +235,6 @@ impl AcpServer {
                 Some(workspace_dir),
                 enable_mcp,
                 true,
-                self.sop_engine.clone(),
-                self.sop_audit.clone(),
                 self.canvas_store.clone(),
             )
             .await
@@ -253,8 +245,6 @@ impl AcpServer {
                 Some(workspace_dir),
                 enable_mcp,
                 true,
-                self.sop_engine.clone(),
-                self.sop_audit.clone(),
                 self.canvas_store.clone(),
             )
             .await
@@ -279,18 +269,6 @@ impl AcpServer {
     /// `/ws/canvas/:id` WebSocket endpoint serves.
     pub fn with_canvas_store(mut self, canvas_store: CanvasStore) -> Self {
         self.canvas_store = Some(canvas_store);
-        self
-    }
-
-    /// Attach the shared SOP engine from the daemon so that agents created by
-    /// this server share a single SOP engine with the rest of the daemon.
-    pub fn with_sop_engine(
-        mut self,
-        sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-        sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
-    ) -> Self {
-        self.sop_engine = sop_engine;
-        self.sop_audit = sop_audit;
         self
     }
 
@@ -2088,10 +2066,9 @@ fn to_acp_content(name: &str, args: &Value) -> Value {
 
 fn map_tool_kind(name: &str) -> &'static str {
     match name {
-        "ask_user" | "calculator" | "claude_code" | "claude_code_runner" | "codex_cli"
-        | "composio" | "delegate" | "escalate_to_human" | "execute_pipeline" | "gemini_cli"
-        | "jira" | "llm_task" | "opencode_cli" | "schedule" | "security_ops" | "shell"
-        | "sop_advance" | "sop_approve" | "sop_execute" | "vi_verify" => "execute",
+        "ask_user" | "calculator" | "composio" | "delegate" | "escalate_to_human"
+        | "execute_pipeline" | "jira" | "llm_task" | "schedule" | "security_ops" | "shell"
+        | "vi_verify" => "execute",
         "backup" | "browser_open" | "canvas" | "cloud_ops" | "file_edit" | "file_write"
         | "memory_export" | "memory_store" | "report_template" => "edit",
         "cron_add" | "poll" | "reaction" => "edit",
@@ -2103,7 +2080,6 @@ fn map_tool_kind(name: &str) -> &'static str {
         "content_search" | "discord_search" | "glob_search" | "knowledge" | "search"
         | "tool_search" | "web_search_tool" => "other",
         "browser"
-        | "browser_delegate"
         | "cloud_patterns"
         | "data_management"
         | "file_read"
@@ -2122,8 +2098,6 @@ fn map_tool_kind(name: &str) -> &'static str {
         | "read_skill"
         | "sessions_history"
         | "sessions_list"
-        | "sop_list"
-        | "sop_status"
         | "text_browser"
         | "weather"
         | "workspace" => "other",

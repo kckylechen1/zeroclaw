@@ -7,6 +7,9 @@ if [ "${1:-}" = "--strict" ]; then
     MODE="strict"
 fi
 
+echo "==> rust quality: toolchain pin guard"
+"$(dirname "${BASH_SOURCE[0]}")/toolchain_gate.sh"
+
 echo "==> rust quality: cargo fmt --all -- --check"
 cargo fmt --all -- --check
 
@@ -26,3 +29,4 @@ else
 fi
 
 "$(dirname "${BASH_SOURCE[0]}")/provider_dispatch_gate.sh"
+"$(dirname "${BASH_SOURCE[0]}")/wire_budget_exception_gate.sh"

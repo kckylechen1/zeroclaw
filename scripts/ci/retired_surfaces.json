@@ -1,0 +1,515 @@
+{
+  "_header": [
+    "Retired-surface registry: the single source consumed by scripts/ci/retired_docs_gate.sh.",
+    "",
+    "RULE: any PR that removes, renames, demotes, sunsets, or deprecates a",
+    "model-visible route, tool, profile, config key, env override, or code path",
+    "MUST add an entry here in the same PR. The gate scans active documentation",
+    "for teaching references to these terms and fails CI on them; historical",
+    "mentions that explicitly describe the term as removed/deprecated/legacy",
+    "pass (see the gate script header for the discriminator and its limits).",
+    "",
+    "Entry fields:",
+    "  term          exact identifier as active docs would teach it (tool name,",
+    "                action string, config key, env prefix, or source path)",
+    "  kind          tool | op | config-key | env-prefix | code-path",
+    "  retired_in    the PR that retired it",
+    "  notes         why it was retired and where the replacement lives",
+    "  match_regex   optional refinement used instead of the default match when",
+    "                the bare term collides with ordinary words or file",
+    "                basenames; defaults: word-bounded exact match for",
+    "                tool/op/config-key/code-path, prefix match for env-prefix.",
+    "                In Fluent files the tool-<hyphenated-term> key form is",
+    "                always matched on top of this",
+    "  allowed_globs optional repo-relative globs that are never flagged for",
+    "                this term (explicit bounded historical exemptions);",
+    "                directory components must be literal, wildcards may",
+    "                appear only in the basename (never spanning '/'), and",
+    "                every component needs a non-wildcard character, so",
+    "                blanket exemptions cannot be declared",
+    "  replacement   optional replacement surface string (>= 4 characters,",
+    "                no whitespace); when present, some active doc must teach",
+    "                it (contain the string) or the gate fails - a rename may",
+    "                not merely erase the old name"
+  ],
+  "retired": [
+    {
+      "term": "model_routing_config",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; routing and provider config belong to the gateway operator config API.",
+      "replacement": "/api/config"
+    },
+    {
+      "term": "model_switch",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; runtime model switching is the channel /model command.",
+      "replacement": "/model"
+    },
+    {
+      "term": "proxy_config",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; proxy configuration belongs to the operator config API with startup/reload application.",
+      "replacement": "/api/config/proxy"
+    },
+    {
+      "term": "security_ops",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; default-off diagnostics with no operator surface. The term is also a source-file basename, so only the bare code-span form is matched; path references to the compiled module are not tool references.",
+      "match_regex": "`security_ops`"
+    },
+    {
+      "term": "backup",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; backups are operator-only via the gateway operator API. The bare word is ordinary English (server-side backup, backup model), so only the code-span or 'backup tool' forms are matched.",
+      "match_regex": "`backup`|\\bbackup tool\\b",
+      "replacement": "/api/agents/<alias>/backup"
+    },
+    {
+      "term": "data_management",
+      "kind": "tool",
+      "retired_in": "PR #228",
+      "notes": "Removed from the ordinary model-visible registry; data retention is operator-only via the gateway operator API.",
+      "replacement": "data-retention"
+    },
+    {
+      "term": "apply_env",
+      "kind": "op",
+      "retired_in": "PR #228",
+      "notes": "proxy_config action string deleted outright; restart application replaces live process-env mutation."
+    },
+    {
+      "term": "clear_env",
+      "kind": "op",
+      "retired_in": "PR #228",
+      "notes": "proxy_config action string deleted outright; restart application replaces live process-env manipulation."
+    },
+    {
+      "term": "pairing_dashboard",
+      "kind": "config-key",
+      "retired_in": "PR #229",
+      "notes": "The gateway.pairing_dashboard schema is removed; file-section and env tombstones warn and ignore. Docs must not teach the section."
+    },
+    {
+      "term": "ZEROCLAW_gateway__pairing_dashboard__",
+      "kind": "env-prefix",
+      "retired_in": "PR #229",
+      "notes": "Env override prefix tombstoned (warn + ignore); docs must not teach setting these variables."
+    },
+    {
+      "term": "gated_actions",
+      "kind": "config-key",
+      "retired_in": "PR #226",
+      "notes": "Deprecated-but-parsed security.otp knob with no runtime consumer; docs may only present it as a deprecated no-op, never as a working boundary."
+    },
+    {
+      "term": "gated_domains",
+      "kind": "config-key",
+      "retired_in": "PR #226",
+      "notes": "Deprecated-but-parsed security.otp knob with no runtime consumer; docs may only present it as a deprecated no-op, never as a working boundary."
+    },
+    {
+      "term": "gated_domain_categories",
+      "kind": "config-key",
+      "retired_in": "PR #226",
+      "notes": "Deprecated-but-parsed security.otp knob with no runtime consumer; docs may only present it as a deprecated no-op, never as a working boundary."
+    },
+    {
+      "term": "challenge_max_attempts",
+      "kind": "config-key",
+      "retired_in": "PR #226",
+      "notes": "Deprecated-but-parsed security.otp knob with no runtime consumer; docs may only present it as a deprecated no-op, never as a working boundary."
+    },
+    {
+      "term": "glm.rs",
+      "kind": "code-path",
+      "retired_in": "PR #222",
+      "notes": "Uncompiled provider module deleted; live GLM access runs through the compatible-provider surface. Docs must not teach the module path."
+    },
+    {
+      "term": "platform/wasm.rs",
+      "kind": "code-path",
+      "retired_in": "PR #222",
+      "notes": "Triple-dead runtime platform module deleted; WASM support lives in the zeroclaw-plugins host bridge. Docs must not teach the module path."
+    },
+    {
+      "term": "sop_execute",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy agent-facing SOP run tool; the run side was demolished. Run truth is Tachi-side ProcedureRuns through the procedure_v1 seam.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "sop_advance",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy agent-facing SOP run tool; the run side was demolished. Run truth is Tachi-side ProcedureRuns through the procedure_v1 seam.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "sop_approve",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy agent-facing SOP run tool; the run side was demolished. Approvals are Tachi-side through the procedure_v1 seam.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "sop_status",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy agent-facing SOP run tool; the run side was demolished. Run truth is Tachi-side ProcedureRuns through the procedure_v1 seam.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "sop_list",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy agent-facing SOP run tool; the run side was demolished. Definitions stay authorable; runs are Tachi-side.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "sop_workshop",
+      "kind": "tool",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy proposal-review run tool; the run-derived proposal pipeline was demolished with the engine, store, and procedural-memory capture.",
+      "replacement": "procedure_v1"
+    },
+    {
+      "term": "persist_runs",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP run-persistence key; the runs.db store and engine were demolished and the key still parses but is inert: nothing consumes it any more."
+    },
+    {
+      "term": "run_store_backend",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP run-store backend key; the runs.db store was demolished and the key still parses but is inert: nothing consumes it any more."
+    },
+    {
+      "term": "run_state_dir",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP run-state directory key; the runs.db store was demolished and the key still parses but is inert: nothing consumes it any more."
+    },
+    {
+      "term": "step_mandatory_tools",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP step tool-scope key; the sop_* lifecycle tools it referenced were demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "procedural_memory_enabled",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired key for the sop_workshop proposal pipeline; capture, store, and review tool were demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "sop/runs.db",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Legacy SQLite run store (runs, events, claims, proposals). Existing files on real installs are left in place with a boot-time WARN naming the migration path; nothing reads or migrates them."
+    },
+    {
+      "term": "maintenance_interval_secs",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP maintenance-tick interval; the tick (approval timeouts, claim reaping, pruning) was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "max_concurrent_total",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP engine admission key; the engine that admitted runs was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "max_finished_runs",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP engine cache-eviction key; the engine cache was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "approval_timeout_action",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP approval-broker timeout action; the broker was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "approval_timeout_secs",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "match_regex": "sop[^a-z_]+approval_timeout_secs|approval_timeout_secs[^a-z_]+sop|sop\\.approval",
+      "notes": "Retired SOP approval-broker timeout key; the broker was demolished with the run side and the key still parses but is inert. The regex scope keeps the identically named, still-live channel approval key (channels/*/overview, security/autonomy) out of the tripwire."
+    },
+    {
+      "term": "step_scope_enforce",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP per-step tool-scope enforcement key; the agent-turn scope consumption was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "step_schema_enforce",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP step schema enforcement key; engine step execution was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "max_step_visits",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP engine step-routing bound; engine step routing was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "max_step_retries",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Retired SOP step failure-policy bound; engine step execution was demolished with the run side. The key still parses but is inert."
+    },
+    {
+      "term": "sop.approval",
+      "kind": "config-key",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "match_regex": "\\[sop\\.approval|sop\\.approval\\.",
+      "notes": "Retired approval-broker policy section ([sop.approval] groups/policies); the broker that consumed it was demolished with the run side. The section still parses but is inert; gate/resume authority lives Tachi-side via the procedure_v1 seam."
+    },
+    {
+      "term": "SopEngine",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "The headless SOP run engine (FSM, admission, checkpoints, deterministic capability steps) was deleted; run truth lives Tachi-side as ProcedureRuns through the procedure_v1 seam. The regex also trips prose teaching of 'the SOP engine' as live.",
+      "match_regex": "(?i)SopEngine\\b|\\bSOP engines?\\b"
+    },
+    {
+      "term": "SopRunStore",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "The durable SOP run store (runs.db) was deleted; existing files are left in place with a boot-time WARN.",
+      "match_regex": "(?i)SopRunStore\\b|\\bSOP run stores?\\b"
+    },
+    {
+      "term": "build_sop_engine",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "The headless engine constructor was deleted with the run engine."
+    },
+    {
+      "term": "sop/procedural_memory.rs",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "notes": "Procedural-memory proposal store was deleted against its census survivor row: its only consumers (engine, workshop tool, proposal store) were demolished and the V4 seam leaves no ZeroClaw-side reader."
+    },
+    {
+      "term": "sop-run",
+      "kind": "code-path",
+      "retired_in": "wall-5 slice 1/2 (surface retirement + engine deletion PRs)",
+      "match_regex": "(?i)\\bSOP runs?\\b",
+      "notes": "Prose tripwire for teaching local SOP runs as live behavior: the run side was deleted and runs live Tachi-side as ProcedureRuns through the procedure_v1 seam. Historical/removal context nearby excuses, per the gate discriminator."
+    },
+    {
+      "term": "delegate",
+      "kind": "tool",
+      "retired_in": "PR #248",
+      "notes": "Deleted with #197 wall 1: the legacy delegation tool was constructed from full parent inheritance (per-alias api_key clones, fallback credential, Arc<Config> snapshot, live parent-registry snapshot, channel-wired handles), all forbidden for child paths by the frozen #202 contract SA-7. Replacement: the V1 bounded SubAgent entrypoint reasoning_subagent (minimal composition) and the Tachi bridge for durable/heavy work.",
+      "match_regex": "`delegate`|\\bdelegate tool\\b|\\bDelegateTool\\b|\\[delegate\\]|ZEROCLAW_delegate__|\n\"delegate\"|'delegate'|\"delegate\",|,\\s*\"delegate\"",
+      "replacement": "reasoning_subagent"
+    },
+    {
+      "term": "spawn_subagent",
+      "kind": "tool",
+      "retired_in": "PR #255",
+      "notes": "Deleted with the #197 spawn wall: the legacy same-identity spawn entry ran children under the parent alias with the parent's full Arc<Config> clone, a full registry rebuild under the parent's Arc-shared policy, a fresh memory backend over the parent's same-UUID rows with live memory tools, and (CLI process) a live channel map; its detached arm was the only production CoordinatorCommand::Spawn producer. Replacement: the V1 bounded reasoning_subagent entrypoint on every composition; durable/heavy work via the Tachi bridge.",
+      "replacement": "reasoning_subagent"
+    },
+    {
+      "term": "max_delegation_depth",
+      "kind": "config-key",
+      "retired_in": "PR #256",
+      "notes": "Runtime-profile spawn-depth cap removed with the #197 spawn wall: its only readers were the retired spawn_subagent tool and the retired model_routing_config operator tool. Local recursion is the fixed D1 depth-0 law on the v1 reasoning entrypoint. Amended by the control-plane migration wall: the former replacement (the coordinator's max_spawn_depth cap) was itself deleted with the zeroclaw-coordinator child host, so there is no numeric successor — local recursion is denied outright by the frozen D1 law and durable work goes through the Tachi bridge."
+    },
+    {
+      "term": "await_sessions",
+      "kind": "op",
+      "retired_in": "PR #248",
+      "notes": "delegate tool action string deleted outright with the tool (#197 wall 1). Background SubAgent work is Tachi-side via the bridge."
+    },
+    {
+      "term": "check_result",
+      "kind": "op",
+      "retired_in": "PR #248",
+      "notes": "delegate tool action string deleted with the tool (#197 wall 1); the coordinator Query path it drove keeps only its fail-closed legacy-row read. The bare phrase collides with ordinary prose, so only code-span/quoted forms match.",
+      "match_regex": "`check_result`|'check_result'|\\\"check_result\\\""
+    },
+    {
+      "term": "list_results",
+      "kind": "op",
+      "retired_in": "PR #248",
+      "notes": "delegate tool action string deleted with the tool (#197 wall 1).",
+      "match_regex": "`list_results`|'list_results'|\\\"list_results\\\""
+    },
+    {
+      "term": "cancel_task",
+      "kind": "op",
+      "retired_in": "PR #248",
+      "notes": "delegate tool action string deleted with the tool (#197 wall 1).",
+      "match_regex": "`cancel_task`|'cancel_task'|\\\"cancel_task\\\""
+    },
+    {
+      "term": "delegates",
+      "kind": "config-key",
+      "retired_in": "wall 1 (SubAgent demolition)",
+      "notes": "`[agents.<alias>].delegates` roster removed with the delegate tool. The bare word also appears as ordinary prose (verb) and in unrelated plugin tables, so only the explicit key forms are matched.",
+      "match_regex": "`delegates`|`agents\\.[^`]*\\.delegates`|\\bdelegates\\s*=|\\bdelegates\\s*:"
+    },
+    {
+      "term": "delegate_same_risk_profile",
+      "kind": "config-key",
+      "retired_in": "wall 1 (SubAgent demolition)",
+      "notes": "Reach flag removed with the delegate tool; its same-profile gate no longer has a consumer.",
+      "match_regex": "`delegate_same_risk_profile`|\\bdelegate_same_risk_profile\\b"
+    },
+    {
+      "term": "delegation_policy",
+      "kind": "config-key",
+      "retired_in": "wall 1 (SubAgent demolition)",
+      "notes": "`[risk_profiles.<alias>].delegation_policy` gate removed with the delegate tool; the old spawn-depth cap (`max_delegation_depth`) retired with the spawn wall — local recursion is the fixed D1 law, and the coordinator's admission cap is `max_spawn_depth`.",
+      "match_regex": "`delegation_policy`|\\[risk_profiles\\.[^\\]]*\\.delegation_policy\\]|delegation_policy\\b"
+    },
+    {
+      "term": "delegation_timeout_secs",
+      "kind": "config-key",
+      "retired_in": "wall 1 (SubAgent demolition)",
+      "notes": "Runtime-profile delegate call timeout removed with the delegate tool.",
+      "match_regex": "`delegation_timeout_secs`|\\bdelegation_timeout_secs\\b"
+    },
+    {
+      "term": "agentic_timeout_secs",
+      "kind": "config-key",
+      "retired_in": "wall 1 (SubAgent demolition)",
+      "notes": "Runtime-profile agentic delegate run timeout removed with the delegate tool.",
+      "match_regex": "`agentic_timeout_secs`|\\bagentic_timeout_secs\\b"
+    },
+    {
+      "term": "claude_code",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Raw Claude Code CLI launch tool removed from the Parent registry. Harness execution goes through the typed subagent/Tachi paths (#197 wall 2).",
+      "replacement": "reasoning_subagent",
+      "allowed_globs": [
+        "docs/maintainers/utf8-truncation-audit-7828.md"
+      ]
+    },
+    {
+      "term": "claude_code_runner",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Claude Code task-runner tool (tmux/SSH handoff + Slack progress) removed from the Parent registry; its unauthenticated /hooks/claude-code webhook is deleted.",
+      "replacement": "reasoning_subagent"
+    },
+    {
+      "term": "codex_cli",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Raw Codex CLI launch tool removed from the Parent registry. Harness execution goes through the typed subagent/Tachi paths (#197 wall 2).",
+      "replacement": "reasoning_subagent",
+      "allowed_globs": [
+        "docs/maintainers/utf8-truncation-audit-7828.md"
+      ]
+    },
+    {
+      "term": "gemini_cli",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Raw Gemini CLI launch tool removed from the Parent registry. Distinct from the providers.models.gemini_cli model provider, which stays.",
+      "replacement": "reasoning_subagent",
+      "match_regex": "^(?!.*providers)(?!.*gemini_cli\\.rs).*\\bgemini_cli\\b",
+      "allowed_globs": [
+        "docs/maintainers/utf8-truncation-audit-7828.md"
+      ]
+    },
+    {
+      "term": "opencode_cli",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Raw OpenCode CLI launch tool removed from the Parent registry. Harness execution goes through the typed subagent/Tachi paths (#197 wall 2).",
+      "replacement": "reasoning_subagent",
+      "allowed_globs": [
+        "docs/maintainers/utf8-truncation-audit-7828.md"
+      ]
+    },
+    {
+      "term": "browser_delegate",
+      "kind": "tool",
+      "retired_in": "PR #250",
+      "notes": "Spawned a configurable coding CLI (default `claude --print`) for browser tasks; removed from the Parent registry as a raw harness launcher (#197 wall 2).",
+      "replacement": "reasoning_subagent"
+    },
+    {
+      "term": "hooks/claude-code",
+      "kind": "op",
+      "retired_in": "PR #250",
+      "notes": "Unauthenticated vendor webhook that existed only for the claude_code_runner; deleted with the runner's registration.",
+      "replacement": "reasoning_subagent"
+    },
+    {
+      "term": "api/cli-tools",
+      "kind": "op",
+      "retired_in": "PR #250",
+      "notes": "CLI PATH-scan discovery endpoint and its dashboard consumers deleted; the discovery plumbing is a retired Parent surface (#197 wall 2).",
+      "replacement": "/api/tools"
+    },
+    {
+      "term": "coding_cli_executor",
+      "kind": "code-path",
+      "retired_in": "PR #250",
+      "notes": "RuntimeCodingCliExecutor raw subprocess seam deleted; no Parent path builds coding-CLI commands anymore.",
+      "replacement": "reasoning_subagent"
+    },
+    {
+      "term": "control_plane.db",
+      "kind": "code-path",
+      "retired_in": "PR #258",
+      "notes": "The durable control-plane task ledger (tasks/goal_tasks/task_continuation_contexts) was deleted with the control-plane migration wall: its last writer died with the spawn wall and durable task/attempt truth is Tachi's through the task-intent bridge. Legacy files are left in place and reported by a once-per-boot warning."
+    },
+    {
+      "term": "SubagentPersistence",
+      "kind": "code-path",
+      "retired_in": "PR #258",
+      "notes": "The coordinator child-row writer, deleted with the durable control plane (bridge-contract annex row 6). Durable work goes through the Tachi bridge."
+    },
+    {
+      "term": "SqliteTaskStore",
+      "kind": "code-path",
+      "retired_in": "PR #258",
+      "notes": "The sqlite task-ledger store, deleted with the durable control plane (bridge-contract annex row 1). No local task ledger may regrow; see tests/no_durable_task_store.rs and the persistence-surface gate."
+    },
+    {
+      "term": "zeroclaw-coordinator",
+      "kind": "code-path",
+      "retired_in": "PR #258",
+      "notes": "The single-writer background child-hosting crate, deleted after its last production spawn producer retired with the spawn wall."
+    },
+    {
+      "term": "max_concurrent_children",
+      "kind": "config-key",
+      "retired_in": "PR #260",
+      "notes": "The [subagents] coordinator concurrency limit retired with the coordinator actor it configured; legacy files load with a structured tombstone warning."
+    },
+    {
+      "term": "[subagents]",
+      "kind": "config-key",
+      "retired_in": "PR #260",
+      "notes": "The daemon-wide coordinator-limit config section retired with the coordinator actor.",
+      "match_regex": "\\[subagents(\\.\\w+)?\\s*\\]"
+    },
+    {
+      "term": "max_spawn_depth",
+      "kind": "config-key",
+      "retired_in": "PR #258",
+      "notes": "The coordinator actor's spawn-depth admission cap was deleted together with the zeroclaw-coordinator child host. Local recursion stays denied by the fixed D1 law on the v1 spawn path; durable work goes through the Tachi bridge."
+    }
+  ]
+}

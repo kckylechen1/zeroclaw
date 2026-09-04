@@ -21,6 +21,11 @@
 
 default_provider = "openrouter"
 
+# This demo drives hardware tools on a simulated ESP32; the minimal
+# companion profile excludes hardware tools, so the complete surface is
+# opted into explicitly here.
+composition = "full"
+
 [model_providers.openrouter]
 name = "openrouter"
 base_url = "https://openrouter.ai/api/v1"

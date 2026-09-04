@@ -100,9 +100,7 @@ pub const V3_CHANNEL_TYPES: &[&str] = &[
     "voice_call",
     "voice_wake",
     "voice_duplex",
-    "mqtt",
     "amqp",
-    "filesystem",
 ];
 
 impl V2Config {
@@ -996,6 +994,23 @@ fn alias_wrap_channels(channels_value: toml::Value, peer_groups: &mut toml::Tabl
 
     let stashed_feishu_v2 = strip_feishu_block(&mut channels_table);
 
+    // Retired SOP run-side channels: MQTT/filesystem were
+    // SOP-trigger-only fan-in with no remaining runtime. Drop their tables
+    // during migration (loudly) instead of porting them into a config that
+    // would then fail to parse.
+    for retired in ["mqtt", "filesystem"] {
+        if channels_table.remove(retired).is_some() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Skip),
+                &format!(
+                    "[channels.{retired}] dropped during migration: SOP-trigger-only channel \
+                     retired (#197 wall 5); SOP runs are Tachi-side ProcedureRuns (#243)"
+                )
+            );
+        }
+    }
+
     // Per-channel-type: singular→plural fold, peer-auth lift into
     // [peer_groups.<type>_default], then alias-wrap as <type>.default.
     for ct in V3_CHANNEL_TYPES {
@@ -1362,6 +1377,21 @@ fn synthesize_agent_brains(
             }
         }
 
+        // The retired delegation timeout keys have no V3 destination: the
+        // delegate tool was removed with the wall-1 demolition. Drop them
+        // loudly rather than forwarding inert keys onto the migrated file.
+        for retired in ["agentic_timeout_secs", "delegation_timeout_secs"] {
+            if agent_table.remove(retired).is_some() {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"alias": alias, "key": retired})),
+                    "agents.<alias> retired delegate timeout key dropped: the delegate                      tool was removed; remove the key from the config file"
+                );
+            }
+        }
+
         // max_iterations lifts into the synthesized per-agent runtime
         // profile as max_tool_iterations.
         let max_iterations = agent_table
@@ -1370,8 +1400,20 @@ fn synthesize_agent_brains(
 
         let allowed_tools = agent_table.remove("allowed_tools");
         let agentic_flag = agent_table.remove("agentic");
-        let max_depth = agent_table.remove("max_depth");
-        let agentic_timeout_secs = extract_agentic_timeout_secs(&mut agent_table);
+        // The retired spawn-depth key has no V3 destination: the legacy
+        // in-kernel spawn tools it capped are removed (delegate, wall 1;
+        // spawn_subagent, the spawn wall) and the v1 reasoning entrypoint's
+        // recursion law is a fixed D1 depth-0 rule, not a configured cap.
+        // Drop it loudly rather than forwarding an inert key.
+        if agent_table.remove("max_depth").is_some() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"alias": alias, "key": "max_depth"})),
+                "agents.<alias> retired max_depth key dropped: the local spawn depth cap is                  no longer configurable (D1 fixed law); remove the key from the config file"
+            );
+        }
 
         let profile_alias = format!("agent_{}", alias);
 
@@ -1392,20 +1434,10 @@ fn synthesize_agent_brains(
             );
         }
 
-        if agentic_flag.is_some()
-            || max_depth.is_some()
-            || agentic_timeout_secs.is_some()
-            || max_iterations.is_some()
-        {
+        if agentic_flag.is_some() || max_iterations.is_some() {
             let mut overrides = toml::Table::new();
             if let Some(v) = agentic_flag {
                 overrides.insert("agentic".to_string(), v);
-            }
-            if let Some(d) = max_depth {
-                overrides.insert("max_delegation_depth".to_string(), d);
-            }
-            if let Some(t) = agentic_timeout_secs {
-                overrides.insert("agentic_timeout_secs".to_string(), t);
             }
             if let Some(mi) = max_iterations {
                 overrides.insert("max_tool_iterations".to_string(), mi);
@@ -1420,7 +1452,7 @@ fn synthesize_agent_brains(
                     .with_attrs(
                         ::serde_json::json!({"alias": alias, "profile_alias": profile_alias})
                     ),
-                "agents.: agentic/max_depth/agentic_timeout_secs/max_iterations → runtime_profiles."
+                "agents.: agentic/max_iterations → runtime_profiles."
             );
         }
 
@@ -1500,13 +1532,6 @@ fn synthesize_agent_brains(
         new_agents.insert(alias, toml::Value::Table(agent_table));
     }
     new_agents
-}
-
-/// Pull V2 `[agents.<alias>].agentic_timeout_secs` off the agent table
-/// and hand it to the caller for routing onto the synthesized
-/// `runtime_profiles.agent_<alias>.agentic_timeout_secs`.
-fn extract_agentic_timeout_secs(agent: &mut toml::Table) -> Option<toml::Value> {
-    agent.remove("agentic_timeout_secs")
 }
 
 /// Pull V2 `[agents.<alias>].timeout_secs` off the agent table; the
@@ -2285,13 +2310,30 @@ fn split_autonomy_into_profile_buckets(
         "max_actions_per_hour",
         "max_cost_per_day_cents",
         "shell_timeout_secs",
-        "max_delegation_depth",
+    ];
+    // Retired keys have no V3 destination (the delegate tool was removed in
+    // wall 1; the spawn tools the depth key capped followed in the spawn
+    // wall); drop them loudly instead of filing them into a profile bucket
+    // where they would sit inert.
+    const RETIRED: &[&str] = &[
         "delegation_timeout_secs",
         "agentic_timeout_secs",
+        "max_depth",
     ];
     let mut risk = toml::Table::new();
     let mut runtime = toml::Table::new();
     for (k, v) in table {
+        if RETIRED.contains(&k.as_str()) {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"key": k})),
+                "[autonomy] retired delegate timeout key dropped: the delegate tool \
+                 was removed; remove the key from the config file"
+            );
+            continue;
+        }
         if RUNTIME_FIELDS.contains(&k.as_str()) {
             runtime.insert(k, v);
         } else {

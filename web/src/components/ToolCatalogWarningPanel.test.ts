@@ -4,13 +4,12 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 type CatalogLoadWarning = {
-  source: 'agent' | 'cli';
+  source: 'agent';
   message: string;
 };
 
 const warnings: CatalogLoadWarning[] = [
   { source: 'agent', message: 'agent catalog unavailable' },
-  { source: 'cli', message: 'CLI catalog unavailable' },
 ];
 
 async function renderPanel({
@@ -41,7 +40,6 @@ test('partial catalog warning renders source failures and retry action', async (
 
   assert.match(html, /Some tools could not be loaded\./);
   assert.match(html, /Agent tools: agent catalog unavailable/);
-  assert.match(html, /CLI tools: CLI catalog unavailable/);
   assert.match(html, /aria-label="Retry loading tools"/);
   // Inserted asynchronously after the catalog settles, so it must announce to
   // assistive tech as a polite live region.

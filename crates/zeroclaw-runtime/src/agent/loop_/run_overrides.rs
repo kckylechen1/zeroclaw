@@ -26,10 +26,18 @@ pub struct AgentRunOverrides {
     /// lifetime rather than being orphaned and re-spawned per
     /// `agent::run` call. When `Some`, the loop MUST use this
     /// `Arc<McpRegistry>` and MUST NOT call `McpRegistry::connect_all`
-    /// itself. `None` preserves the legacy per-call connect path
+    /// itself; `None` preserves the legacy per-call connect path
     /// (CLI / one-shot), which is correct for callers that have no
     /// cross-turn reuse contract.
     pub mcp_registry: Option<Arc<crate::tools::McpRegistry>>,
+    /// Unified spawn lineage (SA-9): the ONE depth authority carried by
+    /// the spawning context. Spawn sites MUST pass `parent_lineage.child()`
+    /// here; a registry rebuild inside the child then cannot reset depth
+    /// (SA-11) and every spawn surface increments the same ledger (SA-10;
+    /// the retired `delegate`/`spawn_subagent` hopped the same ledger). `None` means this run is a genuine root (interactive
+    /// top-level turn, cron job) — the run mints a root lineage from its
+    /// session key.
+    pub lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 }
 
 pub(crate) fn agent_provider_composite(

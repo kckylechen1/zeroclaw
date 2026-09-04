@@ -3,8 +3,6 @@
 #[cfg(feature = "channel-acp-server")]
 pub mod acp_server;
 pub mod media_pipeline;
-#[cfg(feature = "channel-mqtt")]
-pub mod mqtt;
 
 mod channel_system_prompt;
 pub(crate) use channel_system_prompt::{
@@ -13,22 +11,22 @@ pub(crate) use channel_system_prompt::{
 };
 
 mod reply_intent;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use reply_intent::NoReplyKind;
 pub(crate) use reply_intent::{AssistantChannelOutcome, parse_reply_intent};
 // Test suites under `orchestrator::tests` pull these through `use super::*`.
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use channel_system_prompt::{
     build_channel_system_prompt, build_channel_system_prompt_for_message,
     channel_delivery_instructions,
 };
 
 mod outbound_sanitize;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use outbound_sanitize::strip_think_tags_inline;
 #[cfg(feature = "channel-telegram")]
 pub(crate) use outbound_sanitize::strip_tool_call_tags;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use outbound_sanitize::{
     EMPTY_CHANNEL_REPLY_FALLBACK, OutboundContentFormat, channel_outbound_protected_spans,
     sanitize_channel_response, sanitize_channel_response_with_leak_detection,
@@ -49,7 +47,7 @@ pub(crate) use runtime_commands::{
 };
 
 mod channel_factories;
-#[cfg(any(feature = "channel-nostr", feature = "channel-filesystem"))]
+#[cfg(feature = "channel-nostr")]
 pub(crate) use channel_factories::ActiveChannelAliases;
 #[cfg(feature = "channel-matrix")]
 pub(crate) use channel_factories::matrix_state_dir;
@@ -63,14 +61,11 @@ use process_message::process_channel_message;
 
 mod channel_build;
 use channel_build::build_channel_by_id;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 use channel_build::one_shot_channel_workspace_dir;
 
 mod start_channels;
 pub use start_channels::start_channels;
-
-mod sop_gate;
-pub(crate) use sop_gate::dispatch_channel_sop_gate;
 
 mod deliver_announcement;
 pub use deliver_announcement::deliver_announcement;
@@ -94,8 +89,6 @@ pub use crate::dingtalk::DingTalkChannel;
 pub use crate::discord::DiscordChannel;
 #[cfg(feature = "channel-email")]
 pub use crate::email_channel::EmailChannel;
-#[cfg(feature = "channel-filesystem")]
-pub use crate::filesystem::FilesystemChannel;
 #[cfg(feature = "channel-git")]
 pub use crate::git::GitChannel;
 #[cfg(feature = "channel-email")]
@@ -176,7 +169,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 use std::time::Instant;
 use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
@@ -185,16 +178,13 @@ use zeroclaw_api::memory_traits::MemoryStrategy;
 use zeroclaw_api::session_keys::sanitize_session_key;
 use zeroclaw_config::scattered_types::{ThinkingConfig, ThinkingLevel};
 use zeroclaw_config::schema::Config;
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 use zeroclaw_memory::MEMORY_CONTEXT_OPEN;
 use zeroclaw_memory::{self, Memory};
 use zeroclaw_providers::{self, ChatMessage, ModelProvider, ProviderDispatch};
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 use zeroclaw_runtime::agent::loop_::build_tool_instructions_for_names;
-use zeroclaw_runtime::agent::loop_::{
-    TurnOutcome, append_pinned_mcp_section, apply_text_tool_prompt_policy,
-    settle_announcement_guards,
-};
+use zeroclaw_runtime::agent::loop_::{append_pinned_mcp_section, apply_text_tool_prompt_policy};
 use zeroclaw_runtime::approval::ApprovalManager;
 use zeroclaw_runtime::observability::Observer;
 use zeroclaw_runtime::observability::traits::{ObserverEvent, ObserverMetric};
@@ -320,7 +310,7 @@ fn effective_channel_message_timeout_secs(configured: u64) -> u64 {
     configured.max(MIN_CHANNEL_MESSAGE_TIMEOUT_SECS)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 fn channel_message_timeout_budget_secs(
     message_timeout_secs: u64,
     max_tool_iterations: usize,
@@ -540,8 +530,6 @@ struct ChannelRuntimeContext {
     /// (append / remove_last / delete_session) for the same sender without
     /// serializing the full message-processing loop.
     persist_locks: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
-    sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-    sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
 }
 
 impl ChannelRuntimeContext {
@@ -717,149 +705,16 @@ fn is_stop_command(content: &str) -> bool {
 /// with no separator of our own — the block carries its own trailing newline
 /// from `claim_child_announcements_context`.
 ///
-/// **Only the last message, and only when it is the user turn.** That is this
-/// module's existing convention for "the message this turn is about": the
-/// turn-context preamble is composed onto `history.last_mut()` under the same
-/// `role == "user"` test, and the runtime's claim sites all splice into a user
-/// message they build as the final one. Reaching further back would put the
-/// block above text the model reads earlier, out of order with the news it
-/// describes.
-///
-/// Returns whether the block landed. `false` means the model will never read
-/// it, and the caller must let its `UnclaimOnDrop` guard drop armed so the
-/// announcements go back to the store for a later turn. Takes a slice rather
-/// than a `Vec` on purpose: there is no shape in which pushing a new message
-/// here is right, so the signature refuses it.
-fn prepend_context_to_last_user_turn(history: &mut [ChatMessage], block: &str) -> bool {
-    if block.is_empty() {
-        return false;
-    }
-    match history.last_mut() {
-        Some(last) if last.role == "user" => {
-            last.content = format!("{block}{}", last.content);
-            true
-        }
-        _ => false,
-    }
-}
-
-/// How a channel turn ended. Three levels because this turn shape separates
-/// cancellation from timeout from tool-loop failure, and the three answer the
-/// announcement question differently.
+/// How a channel turn ended: completed (with the tool loop's nested result)
+/// or cancelled.
 ///
 /// Module scope rather than a local inside `process_channel_message_body`
-/// (where it used to live) because
-/// [`run_channel_turn_with_background_announcements`] returns it and the tests
-/// that pin the bracket's settle behaviour have to construct it — a
-/// function-local type is reachable from neither.
+/// (where it used to live) because the result-handling match arms and tests
+/// both need to construct it — a function-local type is reachable from
+/// neither.
 enum LlmExecutionResult {
     Completed(Result<Result<String, anyhow::Error>, tokio::time::error::Elapsed>),
     Cancelled,
-}
-
-/// This turn shape's answer to the one question that decides whether its
-/// claimed announcements stay delivered (`TurnOutcome`, `agent/loop_.rs`).
-///
-/// Only the fully nested `Completed(Ok(Ok(_)))` counts, and each layer it
-/// rejects is a case where the model may never have seen the block:
-/// `Cancelled` (the select fired before or during the call),
-/// `Completed(Err(_))` (the whole tool loop timed out), and
-/// `Completed(Ok(Err(_)))` (it failed — including failing before the
-/// provider call). Flattening this to "is it ok" would keep announcements
-/// nobody read flagged delivered-to-nobody.
-impl TurnOutcome for LlmExecutionResult {
-    fn turn_succeeded(&self) -> bool {
-        matches!(self, LlmExecutionResult::Completed(Ok(Ok(_))))
-    }
-}
-
-/// What [`run_channel_turn_with_background_announcements`] needs of a claim
-/// guard: settle it exactly once, against this turn's outcome, and let it drop
-/// still armed on every path that does not.
-///
-/// The bracket is generic over this rather than over `UnclaimOnDrop` for one
-/// reason: `UnclaimOnDrop` can only be minted by a real claim, and a real claim
-/// in this crate's tests yields nothing. `claim_announcements_for_scoped_turn`
-/// resolves its store through `control_plane()`
-/// (`zeroclaw-runtime/src/control_plane/global.rs`), a `OnceLock` only the
-/// daemon boots, and the bypass hook for it (`CHILD_ANNOUNCEMENT_STORE_TEST_HOOK`,
-/// `agent/loop_.rs`) is `#[cfg(test)]`-private to `zeroclaw-runtime`, so it does
-/// not exist when that crate is compiled as this one's dependency. A test here
-/// can therefore only ever observe an empty claim and no guard. Abstracting the
-/// guard is what lets a stub claim hand the bracket something whose settling is
-/// observable.
-trait ChannelAnnouncementGuard {
-    /// Settle against how the turn ended. The judgement is
-    /// [`TurnOutcome::turn_succeeded`]'s, never this call's.
-    fn settle_against(self, outcome: &LlmExecutionResult);
-}
-
-/// The production guard settles through the runtime's own function, so the
-/// criterion stays the one spelled in `agent/loop_.rs` and is not restated here.
-impl ChannelAnnouncementGuard for zeroclaw_runtime::agent::UnclaimOnDrop {
-    fn settle_against(self, outcome: &LlmExecutionResult) {
-        settle_announcement_guards(Some(self), outcome);
-    }
-}
-
-/// The channel turn's background-announcement bracket: claim under the
-/// conversation's history key, splice the block above the user message, run the
-/// turn, settle the claim against how it ended.
-///
-/// This exists as a seam, not as decomposition.
-/// `process_channel_message_body` needs a whole live orchestrator context
-/// (providers, registries, channel handles, approval manager) that no test
-/// constructs, so with the wiring inline the only thing that could pin it was a
-/// test that read this file's own source text for literals — which cannot catch
-/// a wrong key, a wrong history shape, or a splice that permanently returns
-/// `false`. Taking the turn's execution body as a parameter moves all three
-/// under behavioural test: production passes its model-switch retry loop
-/// unchanged, a test passes a stub that returns a constructed
-/// [`LlmExecutionResult`] and inspects, from inside the stub, exactly the
-/// `history` the model would have been given.
-///
-/// **`history` is `&mut` and reaches the body only after the splice.** That
-/// ordering is the contract — the body is handed the same vector the splice
-/// wrote into, so there is no shape in which the model reads a history the
-/// splice did not touch.
-///
-/// **A failed splice disarms before the body runs.** Nothing was put in front
-/// of the model, so the rows go back to the store and a later turn announces
-/// them again. This is reachable, not theoretical: a cache whose tail is a
-/// `tool` message — an interrupted tool-calling turn, persisted before its
-/// assistant reply — makes `normalize_cached_channel_turns` merge this turn's
-/// user content *into* that tool message, so the last role is `tool` and both
-/// this splice and the turn-context preamble no-op. It costs one turn, not the
-/// announcement.
-///
-/// **Settling happens once, outside the body.** A model-switch retry loops with
-/// the same history, which the model has still not read, so a body that retries
-/// internally settles nothing per attempt; it yields one outcome and that is
-/// what the claim is judged by.
-async fn run_channel_turn_with_background_announcements<Guard, Claim, Body>(
-    history_key: &str,
-    history: &mut Vec<ChatMessage>,
-    claim: Claim,
-    turn_body: Body,
-) -> LlmExecutionResult
-where
-    Guard: ChannelAnnouncementGuard,
-    Claim: AsyncFnOnce(&str) -> (String, Option<Guard>),
-    Body: AsyncFnOnce(&mut Vec<ChatMessage>) -> LlmExecutionResult,
-{
-    let (announcements, mut guard) = claim(history_key).await;
-    if !prepend_context_to_last_user_turn(history, &announcements) {
-        // Nothing was spliced, so the model will never read these. Drop the
-        // guard armed right here, before the turn even starts.
-        guard = None;
-    }
-
-    let outcome = turn_body(history).await;
-
-    if let Some(guard) = guard {
-        guard.settle_against(&outcome);
-    }
-    outcome
 }
 
 fn timestamp_channel_user_content(content: &str) -> String {
@@ -1168,6 +1023,16 @@ async fn load_runtime_config_and_defaults(
     let applied = zeroclaw_config::env_overrides::apply_env_overrides(&mut parsed)?;
     parsed.env_overridden_paths = applied.paths;
     parsed.pre_override_snapshots = applied.snapshots;
+    // Same retired-surface tombstones as `Config::load_or_init`: env-prefix
+    // hits plus any retired section still present in the file being
+    // (re)loaded, so the live per-message reload path surfaces the same
+    // structured warnings the startup path does.
+    parsed.retired_surface_warnings =
+        zeroclaw_config::validation_warnings::retired_section_tombstones(&contents)
+            .into_iter()
+            .chain(zeroclaw_config::validation_warnings::retired_field_tombstones(&contents))
+            .chain(applied.tombstone_warnings)
+            .collect();
 
     let model_provider = resolved_runtime_model_provider_ref(&parsed, agent_alias)?;
     let defaults = runtime_defaults_from_config(&parsed, &model_provider)?;
@@ -2216,7 +2081,7 @@ fn sender_memory_session_ids(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "heavy-tests"))]
 fn extract_tool_context_summary(history: &[ChatMessage], start_index: usize) -> String {
     fn push_unique_tool_name(tool_names: &mut Vec<String>, name: &str) {
         let candidate = name.trim();
@@ -3027,34 +2892,26 @@ pub(crate) struct AgentRouter {
     by_agent: Arc<HashMap<String, Arc<ChannelRuntimeContext>>>,
     owner_by_channel_key: Arc<HashMap<String, String>>,
     single_ctx: Option<Arc<ChannelRuntimeContext>>,
-    sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-    sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
 }
 
 impl AgentRouter {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "heavy-tests"))]
     fn single(ctx: Arc<ChannelRuntimeContext>) -> Self {
         Self {
             by_agent: Arc::new(HashMap::new()),
             owner_by_channel_key: Arc::new(HashMap::new()),
             single_ctx: Some(ctx),
-            sop_engine: None,
-            sop_audit: None,
         }
     }
 
     fn multi(
         by_agent: HashMap<String, Arc<ChannelRuntimeContext>>,
         owner_by_channel_key: HashMap<String, String>,
-        sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-        sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
     ) -> Self {
         Self {
             by_agent: Arc::new(by_agent),
             owner_by_channel_key: Arc::new(owner_by_channel_key),
             single_ctx: None,
-            sop_engine,
-            sop_audit,
         }
     }
 
@@ -3084,152 +2941,11 @@ impl AgentRouter {
     }
 }
 
-/// Split an inbound gate reference into its run part and revision. A reference
-/// may be revision-qualified (`<run_id>#<rev>`); a bare reference means
-/// revision 0 (the ORIGINAL presentation) — NOT "whatever is current" — so a
-/// click on a superseded prompt can never resolve a newer draft it wasn't
-/// looking at. A malformed suffix leaves the whole string as the run part.
-fn parse_gate_reference(reference: &str) -> (String, u32) {
-    match reference.rsplit_once('#') {
-        Some((run_part, rev_part)) if !run_part.is_empty() => match rev_part.parse::<u32>() {
-            Ok(rev) => (run_part.to_string(), rev),
-            Err(_) => (reference.to_string(), 0),
-        },
-        _ => (reference.to_string(), 0),
-    }
-}
-
 fn channel_key_for_message(msg: &zeroclaw_api::channel::ChannelMessage) -> String {
     match msg.channel_alias.as_deref() {
         Some(alias) => format!("{}.{alias}", msg.channel),
         None => msg.channel.clone(),
     }
-}
-
-fn unique_channel_handles(
-    channels_by_name: &HashMap<String, Arc<dyn Channel>>,
-) -> Vec<Arc<dyn Channel>> {
-    let mut unique = Vec::new();
-    for channel in channels_by_name.values() {
-        if !unique.iter().any(|existing| Arc::ptr_eq(existing, channel)) {
-            unique.push(Arc::clone(channel));
-        }
-    }
-    unique
-}
-
-async fn finalize_gate_prompts(channels: &[Arc<dyn Channel>], reference: &str, outcome: &str) {
-    for channel in channels {
-        if let Err(e) = channel.finalize_gate_prompt(reference, outcome).await {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({
-                        "reference": reference,
-                        "channel": channel.name(),
-                        "error": e.to_string(),
-                    })),
-                "gate-prompt finalize failed (decision unaffected)"
-            );
-        }
-    }
-}
-
-fn text_gate_reply_matches_approval_route(
-    engine: &zeroclaw_runtime::sop::SopEngine,
-    run_id: &str,
-    channel_route_keys: &[String],
-    reply_target: &str,
-) -> bool {
-    let Some(policy_name) = engine.current_step_policy_name(run_id) else {
-        return false;
-    };
-    let broker = engine.approval_broker();
-    broker
-        .reply_routes(engine.approval_config(), &policy_name)
-        .iter()
-        .any(|route| {
-            let Some((route_channel_key, route_recipient)) =
-                zeroclaw_runtime::sop::approval::channel_route::parse_approval_route(route)
-            else {
-                return false;
-            };
-            channel_route_keys
-                .iter()
-                .any(|channel_key| channel_key == route_channel_key)
-                && route_recipient == reply_target
-        })
-}
-
-async fn dispatch_channel_sop_event(
-    router: &AgentRouter,
-    msg: &zeroclaw_api::channel::ChannelMessage,
-) -> bool {
-    let Some(topic) = msg
-        .internal_sop_event
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-    else {
-        return false;
-    };
-
-    let Some(engine) = router.sop_engine.as_ref() else {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
-                ::serde_json::json!({
-                    "channel": msg.channel.as_str(),
-                    "channel_alias": msg.channel_alias.as_deref(),
-                    "topic": topic,
-                })
-            ),
-            "dropping channel SOP event: SOP engine is not available"
-        );
-        return true;
-    };
-    let Some(audit) = router.sop_audit.as_ref() else {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(
-                ::serde_json::json!({
-                    "channel": msg.channel.as_str(),
-                    "channel_alias": msg.channel_alias.as_deref(),
-                    "topic": topic,
-                })
-            ),
-            "dropping channel SOP event: SOP audit logger is not available"
-        );
-        return true;
-    };
-
-    let event = zeroclaw_runtime::sop::types::SopEvent {
-        source: zeroclaw_runtime::sop::types::SopTriggerSource::Channel,
-        topic: Some(topic.to_string()),
-        payload: Some(msg.content.clone()),
-        timestamp: zeroclaw_runtime::sop::engine::now_iso8601(),
-    };
-    let target_sop = channel_sop_target(msg);
-    let results = if let Some(sop_name) = target_sop.as_deref() {
-        zeroclaw_runtime::sop::dispatch::dispatch_sop_event_to(engine, audit, event, sop_name).await
-    } else {
-        zeroclaw_runtime::sop::dispatch::dispatch_sop_event(engine, audit, event).await
-    };
-    zeroclaw_runtime::sop::dispatch::process_headless_results(&results);
-    true
-}
-
-fn channel_sop_target(msg: &zeroclaw_api::channel::ChannelMessage) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(&msg.content)
-        .ok()
-        .and_then(|payload| {
-            payload
-                .get("sop")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ToString::to_string)
-        })
 }
 
 /// Resolve effective debounce window: a per-channel override with a positive
@@ -3340,62 +3056,11 @@ async fn run_message_dispatch_loop(
                 }
             }
         }
-        // Gate answers (button-click markers / `approve <ref>` text replies)
-        // resolve a PARKED run and must never start one, so they are consumed
-        // BEFORE agent ownership lookup. A configured approval route may be
-        // intentionally unowned by an agent; it can present gate prompts but
-        // must never receive ordinary agent traffic. All live contexts share
-        // this global channel registry and prompt config.
-        let gate_ctx = router
-            .single_ctx
-            .as_ref()
-            .cloned()
-            .or_else(|| router.by_agent.values().next().cloned());
-        if let Some(gate_ctx) = gate_ctx {
-            let gate_channel = find_channel_for_message(&gate_ctx.channels_by_name, &msg).cloned();
-            let gate_channel_route_keys = gate_channel
-                .as_ref()
-                .map(|target| {
-                    let mut keys: Vec<String> = gate_ctx
-                        .channels_by_name
-                        .iter()
-                        .filter(|&(_key, channel)| Arc::ptr_eq(channel, target))
-                        .map(|(key, _channel)| key.clone())
-                        .collect();
-                    let inbound_key = channel_key_for_message(&msg);
-                    if !keys.iter().any(|key| key == &inbound_key) {
-                        keys.push(inbound_key);
-                    }
-                    keys.sort();
-                    keys.dedup();
-                    keys
-                })
-                .unwrap_or_else(|| vec![channel_key_for_message(&msg)]);
-            let gate_prompt_channels = unique_channel_handles(&gate_ctx.channels_by_name);
-            if dispatch_channel_sop_gate(
-                &router,
-                &msg,
-                gate_ctx.prompt_config.as_ref(),
-                &gate_prompt_channels,
-                &gate_channel_route_keys,
-            )
-            .await
-            {
-                continue;
-            }
-        }
-
         let Some(ctx) = router.resolve(&msg) else {
             ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"channel_alias": msg.channel_alias, "sender": msg.sender})), "dropping inbound message: no agent owns this channel");
             continue;
         };
 
-        // Gate answers were already considered against the global approval
-        // channel registry above. The remaining path only dispatches events and
-        // ordinary messages to an agent-owned runtime.
-        if dispatch_channel_sop_event(&router, &msg).await {
-            continue;
-        }
         // Fast path: /stop cancels the in-flight task for this sender scope without
         // spawning a worker or registering a new task. Handled here — before semaphore
         // acquisition — so the target task is still in the store and is never replaced.
@@ -3895,7 +3560,7 @@ fn no_real_time_channels_message() -> &'static str {
 pub async fn doctor_channels(config: Config) -> Result<()> {
     let config_arc = Arc::new(RwLock::new(config));
     #[allow(unused_mut)]
-    let mut channels = collect_configured_channels(&config_arc, "health check", &[], None, None);
+    let mut channels = collect_configured_channels(&config_arc, "health check", &[]);
 
     #[cfg(feature = "channel-nostr")]
     {
@@ -4167,11 +3832,6 @@ async fn assemble_channel_agent_tools(
     let pinned_section = assembled.pinned_section().to_string();
     let zeroclaw_runtime::tools::scoped::ScopedAssembled {
         registry,
-        // `assemble` threads the target's own `delegate_handle` into eager MCP
-        // registration internally (mirroring `run`/`process_message`, which also
-        // discard it here) - the channel path never separately needed it after
-        // that internal registration completes.
-        delegate_handle: _,
         ask_user_handle,
         reaction_handle,
         poll_handle,
@@ -4345,8 +4005,6 @@ fn concurrent_persist_lock_serialization() {
         last_applied_config_stamp: Arc::new(Mutex::new(None)),
         runtime_defaults_override: Arc::new(Mutex::new(None)),
         persist_locks: Arc::new(Mutex::new(HashMap::new())),
-        sop_engine: None,
-        sop_audit: None,
         user_model: None,
         task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
     });

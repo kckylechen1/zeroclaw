@@ -30,7 +30,6 @@ export type StepFailure = Schemas['StepFailure'];
 export type StepSchema = Schemas['StepSchema'];
 export type StepToolScope = Schemas['StepToolScope'];
 export type PlannedToolCall = Schemas['PlannedToolCall'];
-export type StepToolCall = Schemas['StepToolCall'];
 
 export type SopGraph = Schemas['SopGraph'];
 export type GraphNode = Schemas['GraphNode'];
@@ -45,8 +44,6 @@ export type PinClass = GraphPin['class'];
 export type FlowRole = NonNullable<GraphWire['flow_role']>;
 export type GraphSeverity = GraphDiagnostic['severity'];
 
-export type RunOverlay = Schemas['RunOverlay'];
-export type SopApprovalDecision = Schemas['ApprovalDecision'];
 export type TriggerSourceRegistry = Schemas['TriggerSourceRegistry'];
 export type BoundTriggerSource = Schemas['BoundTriggerSource'];
 export type TriggerField = Schemas['TriggerField'];
@@ -56,9 +53,6 @@ export type PayloadContract = Schemas['PayloadContract'];
 export type ConditionField = Schemas['ConditionField'];
 export type ConditionOpSpec = Schemas['ConditionOpSpec'];
 export type ConditionValueType = Schemas['ConditionValueType'];
-export type NodeRunOverlay = Schemas['NodeRunOverlay'];
-export type NodeRunState = Schemas['NodeRunState'];
-export type SopRunStatus = Schemas['SopRunStatus'];
 export type GraphLegend = Schemas['GraphLegend'];
 export type LegendEntry = Schemas['LegendEntry'];
 
@@ -66,23 +60,6 @@ export interface SopSummary {
   name: string;
   description: string;
   version: string;
-}
-
-/// One row on the Runs page: a run the engine currently holds (a live run
-/// from its active set or a retained terminal run). Mirrors the Rust
-/// `SopRunSummary` serde shape. Not sourced from the generated OpenAPI
-/// schema because the runs listing is served as a plain JSON envelope, not a
-/// schemars-exported type.
-export interface SopRunSummary {
-  run_id: string;
-  sop_name: string;
-  status: SopRunStatus;
-  current_step: number;
-  total_steps: number;
-  started_at: string;
-  completed_at: string | null;
-  trigger_source: string;
-  active: boolean;
 }
 
 // Canonical canvas geometry fallback, mirroring `LayoutGeometry::CANONICAL` in
@@ -104,12 +81,6 @@ export function layoutGeometry(graph: SopGraph): LayoutGeometry {
 export async function listSops(): Promise<SopSummary[]> {
   const body = await apiFetch<{ sops: SopSummary[] }>('/api/sops');
   return body.sops ?? [];
-}
-
-export async function listRuns(sop?: string): Promise<SopRunSummary[]> {
-  const qs = sop ? `?sop=${encodeURIComponent(sop)}` : '';
-  const body = await apiFetch<{ runs: SopRunSummary[] }>(`/api/sops/runs${qs}`);
-  return body.runs ?? [];
 }
 
 export function getSopGraph(name: string): Promise<SopGraph> {
@@ -261,137 +232,7 @@ export function buildCondition(part: {
   return path.length > 0 ? `$.${path} ${rhs}`.trim() : rhs;
 }
 
-export function getRunOverlay(name: string, runId: string): Promise<RunOverlay> {
-  return apiFetch<RunOverlay>(
-    `/api/sops/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/overlay`,
-  );
-}
-
-/// Fire a Manual trigger for the named SOP and return the started run id, which
-/// feeds straight into `getRunOverlay` to animate the run. `payload` is an
-/// optional JSON string passed as the step-1 input; the backend rejects
-/// malformed JSON with a clear error. Requires the SOP to declare a manual
-/// trigger.
-export function runSop(name: string, payload?: string): Promise<{ run_id: string }> {
-  return apiFetch<{ run_id: string }>(`/api/sops/${encodeURIComponent(name)}/run`, {
-    method: 'POST',
-    body: JSON.stringify({ payload: payload ?? null }),
-  });
-}
-
-/// Resolve a paused checkpoint on a live run. `decision` is the canonical
-/// `ApprovalDecision` wire shape (generated from the runtime enum): `'approve'`
-/// or `{ deny: { reason? } }`. Returns the refreshed overlay so the caller
-/// re-renders the post-decision run state.
-export function decideSop(
-  name: string,
-  runId: string,
-  decision: SopApprovalDecision,
-): Promise<RunOverlay> {
-  return apiFetch<RunOverlay>(
-    `/api/sops/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/decide`,
-    {
-      method: 'POST',
-      body: JSON.stringify(decision),
-    },
-  );
-}
-
-/// Index a run overlay's node states by step number. Shared by every view
-/// that projects run state onto graph nodes.
-export function overlayStateByStep(
-  overlay: RunOverlay | null | undefined,
-): Map<number, NodeRunState> {
-  const map = new Map<number, NodeRunState>();
-  for (const n of overlay?.nodes ?? []) map.set(n.step, n.state);
-  return map;
-}
-
-/// Index a run overlay's captured tool calls by step number. Feeds the
-/// call inspector and lets planned calls pin a sample output from a run.
-export function overlayCallsByStep(
-  overlay: RunOverlay | null | undefined,
-): Map<number, StepToolCall[]> {
-  const map = new Map<number, StepToolCall[]>();
-  for (const n of overlay?.nodes ?? []) {
-    if (n.tool_calls && n.tool_calls.length > 0) map.set(n.step, n.tool_calls);
-  }
-  return map;
-}
-
-/// Semantic tone for a node run state. Single mapping shared by every SOP
-/// surface; each renderer maps the tone onto its own representation
-/// (Tailwind class, SVG stroke, badge variant) without re-deciding which
-/// state means what.
-export type RunStateTone = 'accent' | 'success' | 'error' | 'warning' | 'neutral';
-
-/// The one tone-to-badge binding. Every surface that renders a run state or
-/// run status as a badge goes through this map; nothing re-declares it.
-export const RUN_TONE_BADGE = {
-  accent: 'neutral',
-  success: 'ok',
-  error: 'error',
-  warning: 'warn',
-  neutral: 'neutral',
-} as const satisfies Record<RunStateTone, string>;
-
-export type RunToneBadge = (typeof RUN_TONE_BADGE)[RunStateTone];
-
-export function runStateBadge(state: NodeRunState | undefined): RunToneBadge {
-  return RUN_TONE_BADGE[runStateTone(state)];
-}
-
-export function runStatusBadge(status: SopRunStatus | undefined): RunToneBadge {
-  return RUN_TONE_BADGE[runStatusTone(status)];
-}
-
-export function runStateTone(state: NodeRunState | undefined): RunStateTone {
-  switch (state) {
-    case 'active':
-      return 'accent';
-    case 'completed':
-      return 'success';
-    case 'failed':
-      return 'error';
-    case 'skipped':
-      return 'warning';
-    default:
-      return 'neutral';
-  }
-}
-
-/// Semantic tone for a whole-run status (the Runs page's status badge).
-/// Distinct from `runStateTone`, which tones an individual node's state.
-export function runStatusTone(status: SopRunStatus | undefined): RunStateTone {
-  switch (status) {
-    case 'running':
-    case 'pending':
-      return 'accent';
-    case 'completed':
-      return 'success';
-    case 'failed':
-      return 'error';
-    case 'waiting_approval':
-    case 'paused_checkpoint':
-      return 'warning';
-    default:
-      return 'neutral';
-  }
-}
-
-export function isTerminalRunStatus(status: SopRunStatus | undefined): boolean {
-  switch (status) {
-    case 'completed':
-    case 'failed':
-    case 'cancelled':
-      return true;
-    default:
-      return false;
-  }
-}
-
-/// Semantic tone for a graph wire. Same single-mapping rationale as
-/// `runStateTone`.
+/// Semantic tone for a graph wire.
 export type WireTone = 'data' | 'error' | 'warning' | 'switch' | 'accent' | 'success';
 
 export function flowRoleTone(role: FlowRole | null | undefined): WireTone {

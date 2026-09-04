@@ -15,7 +15,7 @@ SMOKE_CACHE_DIR="${SMOKE_CACHE_DIR:-.cache/buildx-smoke}"
 
 run_in_ci() {
   local cmd="$1"
-  "${compose_cmd[@]}" run --rm local-ci bash -c "$cmd"
+  "${compose_cmd[@]}" run --rm local-ci bash -c "./scripts/ci/toolchain_gate.sh && $cmd"
 }
 
 run_firmware_protocol_gate() {

@@ -83,9 +83,9 @@ pub fn diagnose(config: &Config) -> Vec<DiagResult> {
     check_degraded_sections(config, &mut items);
     check_config_semantics(config, &mut items);
     check_workspace(config, &mut items);
+    check_bootstrap_truncation(config, &mut items);
     check_daemon_state(config, &mut items);
     check_environment(&mut items);
-    check_cli_tools(&mut items);
 
     items.into_iter().map(DiagItem::into_result).collect()
 }
@@ -1279,6 +1279,45 @@ fn embedding_provider_validation_error(name: &str) -> Option<String> {
 
 // ── Workspace integrity ──────────────────────────────────────────
 
+/// Compact-context bootstrap cap visibility: while compact context is on,
+/// every injected workspace bootstrap file is capped at
+/// [`crate::agent::system_prompt::COMPACT_BOOTSTRAP_MAX_CHARS`] chars. A
+/// persona file that is fine on disk can reach the model truncated with no
+/// operator-visible signal, so report every over-cap file per agent with
+/// the same injected/total/discarded shape the runtime WARN uses.
+fn check_bootstrap_truncation(config: &Config, items: &mut Vec<DiagItem>) {
+    let cat = "agent.prompt";
+    let cap = crate::agent::system_prompt::COMPACT_BOOTSTRAP_MAX_CHARS;
+
+    let mut aliases: Vec<&str> = config.agents.keys().map(String::as_str).collect();
+    aliases.sort_unstable();
+    for alias in aliases {
+        if !config.effective_compact_context(alias) {
+            continue;
+        }
+        let workspace = config.agent_workspace_dir(alias);
+        let mut files: Vec<&str> = crate::agent::system_prompt::BOOTSTRAP_FILES.to_vec();
+        files.push("BOOTSTRAP.md");
+        files.push("MEMORY.md");
+        for filename in files {
+            let Ok(content) = std::fs::read_to_string(workspace.join(filename)) else {
+                continue;
+            };
+            let total = content.chars().count();
+            if total > cap {
+                items.push(DiagItem::warn(
+                    cat,
+                    format!(
+                        "{alias}/{filename}: injected {cap} of {total} chars \
+                         ({} discarded, compact_context=true)",
+                        total - cap
+                    ),
+                ));
+            }
+        }
+    }
+}
+
 fn check_workspace(config: &Config, items: &mut Vec<DiagItem>) {
     let cat = "workspace";
     let ws = &config.data_dir;
@@ -1592,32 +1631,6 @@ fn systemd_linger_diag_item(status: crate::service::SystemdUserLinger) -> DiagIt
             cat,
             crate::i18n::get_required_cli_string("cli-doctor-systemd-linger-unknown"),
         ),
-    }
-}
-
-fn check_cli_tools(items: &mut Vec<DiagItem>) {
-    let cat = "cli-tools";
-
-    let discovered = crate::tools::discover_cli_tools(&[], &[]);
-
-    if discovered.is_empty() {
-        items.push(DiagItem::warn(cat, "No CLI tools found in PATH"));
-    } else {
-        for cli in &discovered {
-            let version_info = cli
-                .version
-                .as_deref()
-                .map(|v| truncate_for_display(v, COMMAND_VERSION_PREVIEW_CHARS))
-                .unwrap_or_else(|| "unknown version".to_string());
-            items.push(DiagItem::ok(
-                cat,
-                format!("{} ({}) — {}", cli.name, cli.category, version_info),
-            ));
-        }
-        items.push(DiagItem::ok(
-            cat,
-            format!("{} CLI tools discovered", discovered.len()),
-        ));
     }
 }
 
@@ -2049,6 +2062,37 @@ mod tests {
             "doctor should flag unknown agent model_provider"
         );
         assert_eq!(prov_item.unwrap().severity, Severity::Warn);
+    }
+
+    #[test]
+    fn check_bootstrap_truncation_reports_over_cap_files_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = Config {
+            config_path: tmp.path().join("config.toml"),
+            data_dir: tmp.path().to_path_buf(),
+            ..Config::default()
+        };
+        config.agents.insert(
+            "alpha".to_string(),
+            zeroclaw_config::schema::AliasedAgentConfig {
+                ..Default::default()
+            },
+        );
+        let ws = config.agent_workspace_dir("alpha");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("AGENTS.md"), "a".repeat(7000)).unwrap();
+        std::fs::write(ws.join("SOUL.md"), "s".repeat(100)).unwrap();
+
+        let mut items = Vec::new();
+        check_bootstrap_truncation(&config, &mut items);
+
+        assert_eq!(items.len(), 1, "only the over-cap file is reported");
+        assert_eq!(items[0].severity, Severity::Warn);
+        assert_eq!(items[0].category, "agent.prompt");
+        assert_eq!(
+            items[0].message,
+            "alpha/AGENTS.md: injected 6000 of 7000 chars (1000 discarded, compact_context=true)"
+        );
     }
 
     #[test]

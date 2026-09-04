@@ -1,0 +1,392 @@
+//! Definition capture: read an SOP package ONCE and project it into a
+//! `ProcedureDefinitionV1` from exactly those bytes (KP-11 publication
+//! rules 2–3: complete-definition atomicity, race-free mint).
+//!
+//! The capture reads each file and read-back byte-compares (the
+//! atomicity guard below); the manifest, the parsed steps, and the
+//! digest all derive from the CAPTURED bytes, never from a later read —
+//! there is no window where parsed steps and digested bytes can
+//! disagree (no TOCTOU on the content hash).
+//!
+//! Publication state (KP-11 rule 1): the authored `[sop] review_state`
+//! key (`"draft"` | `"published"`); ABSENT means draft — fail closed.
+//! The legacy `SopManifest` carries no `deny_unknown_fields`, so the
+//! key is backward-compatible: the legacy loader ignores it. Review
+//! state is definition-side authored state (KP-10 — authoring, revision
+//! creation, applicability, and review state stay ZeroClaw-owned);
+//! flipping it to draft later does not retro-invalidate an already
+//! minted snapshot, because the snapshot binds the published revision's
+//! digest, immutably.
+
+use std::path::Path;
+
+use anyhow::{Context, Result, bail};
+use zeroclaw_api::procedure_v1::{
+    ArtifactExpectationV1, DefinitionProvenance, DefinitionReviewState, EvaluationContractRef,
+    ProcedureDefinitionV1, ProcedureGateV1, ProcedureStepV1,
+};
+use zeroclaw_api::taskintent::{ArtifactClass, PrivacyClass, canonical_json_digest_hex};
+use zeroclaw_log::{Action, Event, EventOutcome};
+
+use crate::sop::parse_steps;
+use crate::sop::types::{SopManifest, SopStep, SopStepKind};
+
+/// One complete captured package revision — the single-read snapshot of
+/// the authored bytes plus everything derived from them.
+#[derive(Debug, Clone)]
+pub struct CapturedDefinition {
+    /// The exact captured `SOP.toml` bytes.
+    pub toml_bytes: String,
+    /// The exact captured `SOP.md` bytes (empty when the package has no
+    /// markdown file).
+    pub md_bytes: String,
+    /// The parsed manifest (from the captured TOML bytes only).
+    pub manifest: SopManifest,
+    /// The authored review state read from the raw manifest table.
+    pub review_state: DefinitionReviewState,
+    /// The parsed steps (from the captured bytes only).
+    pub steps: Vec<SopStep>,
+    /// Canonical digest over the captured bytes.
+    pub digest: String,
+    /// Where the capture happened (definitions root, for provenance).
+    pub sops_dir: std::path::PathBuf,
+    /// The package name (directory key == procedure identity).
+    pub name: String,
+}
+
+fn stat_signature(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
+/// Read an optional file, distinguishing ABSENT (stable None) from any
+/// other failure. Presence is judged by the read result itself, never
+/// by a separate `exists()` probe — an `exists()`-then-read pair has
+/// its own disappearance window.
+fn read_optional(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(anyhow::Error::new(err).context(format!("reading {}", path.display()))),
+    }
+}
+
+/// Read the review state from the RAW manifest table — the typed
+/// `SopMeta` does not carry it (legacy-compatible extra key). Absent or
+/// unrecognized values are DRAFT: publication must be an explicit
+/// authored act (fail closed, KP-11 rule 1).
+/// Publication truth read from the RAW manifest bytes (public within
+/// the crate: the mint re-derives it instead of trusting the capture
+/// struct's mutable field).
+pub(crate) fn review_state_of(toml_bytes: &str) -> Result<DefinitionReviewState> {
+    review_state_from_raw(toml_bytes)
+}
+
+fn review_state_from_raw(toml_bytes: &str) -> Result<DefinitionReviewState> {
+    let value: toml::Value = toml::from_str(toml_bytes).context("SOP.toml is not valid TOML")?;
+    let Some(sop_table) = value.get("sop") else {
+        bail!("SOP.toml has no [sop] table");
+    };
+    match sop_table.get("review_state").and_then(|v| v.as_str()) {
+        Some("published") => Ok(DefinitionReviewState::Published),
+        Some("draft") | None => Ok(DefinitionReviewState::Draft),
+        Some(other) => {
+            // Unknown labels refuse the capture entirely: an author who
+            // typos the publication key gets a loud failure, not a
+            // silent draft.
+            bail!("unknown review_state value `{other}` (expected draft|published)")
+        }
+    }
+}
+
+/// Renumber manifest-carried steps into the dense 1..=N invariant the
+/// authoring side enforces on save (the loader-side normalizer is
+/// private to the legacy module; the invariant itself is a documented
+/// derived property of the format).
+fn renumber(steps: Vec<SopStep>) -> Vec<SopStep> {
+    let mut steps = steps;
+    for (index, step) in steps.iter_mut().enumerate() {
+        step.number = (index as u32) + 1;
+    }
+    steps
+}
+
+/// Capture one SOP package by name under `sops_dir`. Reads
+/// `SOP.toml` (required) and `SOP.md` (optional) exactly once each and
+/// derives everything from the captured bytes. Rejects path-escape
+/// names the same way the legacy loader does (single normal path
+/// component).
+pub fn capture_definition(sops_dir: &Path, name: &str) -> Result<CapturedDefinition> {
+    let mut components = Path::new(name).components();
+    let valid = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) && !name.is_empty()
+        && !name.starts_with('.');
+    if !valid {
+        bail!("invalid SOP name `{name}`");
+    }
+    let sop_dir = sops_dir.join(name);
+    let toml_path = sop_dir.join("SOP.toml");
+    let md_path = sop_dir.join("SOP.md");
+
+    // Package-atomicity guard (KP-11 rules 2–3), in two layers:
+    //
+    // 1. Read-back byte comparison: read both files, then RE-READ both
+    //    and require byte-identical content. A same-length swap under
+    //    coarse timestamps can fool a (size, mtime) signature — the
+    //    bytes cannot lie. Any interleaved edit that would freeze a
+    //    mixed old-TOML/new-MD revision changes at least one of the
+    //    four reads.
+    // 2. Stat stability: the (size, mtime) signatures before and after
+    //    must also match, catching swaps that land between the two
+    //    read passes and settle back.
+    //
+    // Instability triggers ONE bounded re-capture; a second instability
+    // fails the capture loudly. An edit RACING the capture therefore
+    // cannot freeze a mixed revision. A STABLE mixed tree (an author's
+    // sequenced install paused between the TOML and MD halves) is
+    // undetectable by re-reading alone — that window is closed by the
+    // pair-publication marker: a mismatched marker is refused right
+    // below, and an absent marker is refused at MINT
+    // (`SnapshotMintError::UnpairedPublication`), so no run can be
+    // created from a mixed or unpaired tree either way.
+    //
+    // 3. Presence coherence, BOTH files: each file's READ result must
+    //    agree with its stat signatures on both sides. A rename-aside
+    //    during the reads (the file restored with size/mtime intact
+    //    before the closing stat) reads as ABSENT while the stats say
+    //    PRESENT — that contradiction is instability, never "the
+    //    package is TOML-only": without this check, an md-bearing tree
+    //    could freeze an empty-MD capture that skips the pairing law.
+    //    Symmetrically, a TRANSIENT SOP.toml (absent at both stats,
+    //    readable during the reads) would freeze a revision the tree
+    //    never stably held — the toml presence contradiction is
+    //    instability too, and a stably-absent TOML is the loud
+    //    missing-required-file failure below.
+    let mut attempts = 0;
+    let (toml_bytes, md_bytes) = loop {
+        let before = (stat_signature(&toml_path), stat_signature(&md_path));
+        let toml = read_optional(&toml_path)?;
+        let md = read_optional(&md_path)?;
+        let toml_again = read_optional(&toml_path)?;
+        let md_again = read_optional(&md_path)?;
+        let after = (stat_signature(&toml_path), stat_signature(&md_path));
+        if before == after
+            && toml == toml_again
+            && md == md_again
+            && toml.is_some() == before.0.is_some()
+            && md.is_some() == before.1.is_some()
+        {
+            let Some(toml) = toml else {
+                bail!("SOP.toml for `{name}` not found (required)");
+            };
+            // Present-but-EMPTY is an incomplete publication, not an
+            // md-less one: the byte string alone cannot carry presence
+            // (an empty `definition_md` is ambiguous downstream), so a
+            // truncate-before-write install pause is refused HERE,
+            // loudly, rather than frozen as a TOML-only revision.
+            if md.as_ref().is_some_and(|md| md.is_empty()) {
+                bail!("SOP.md for `{name}` is present but empty (incomplete publication refused)");
+            }
+            break (toml, md.unwrap_or_default());
+        }
+        attempts += 1;
+        if attempts >= 2 {
+            bail!("definitions tree changed during capture (mixed revision refused)");
+        }
+    };
+
+    recapture_from_bytes(name, toml_bytes, md_bytes).map(|mut captured| {
+        captured.sops_dir = sops_dir.to_path_buf();
+        captured
+    })
+}
+
+/// The declared pair-publication marker (`[sop] md_sha256`), if the
+/// manifest publishes one. Crate-public: the mint refuses an
+/// md-bearing capture with NO marker (`UnpairedPublication`).
+pub(crate) fn declared_md_marker(toml_bytes: &str) -> Option<String> {
+    let raw: toml::Value = toml::from_str(toml_bytes).ok()?;
+    raw.get("sop")?
+        .get("md_sha256")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Pure byte projection: everything `capture_definition` derives from
+/// the bytes, with NO filesystem access. Public within the crate: the
+/// submit-side invariant verifier re-runs this over a snapshot's
+/// embedded bytes to prove the snapshot is exactly the mint of them
+/// (the totality seal — no field can be forged while the bytes stay
+/// fixed).
+pub(crate) fn recapture_from_bytes(
+    name: &str,
+    toml_bytes: String,
+    md_bytes: String,
+) -> Result<CapturedDefinition> {
+    let manifest: SopManifest =
+        toml::from_str(&toml_bytes).context("SOP.toml manifest decode failed")?;
+    // Pair-publication marker: an author who publishes an md-bearing
+    // revision publishes `[sop] md_sha256 = "<hex>"` binding the
+    // manifest to exactly one markdown body. A capture during a
+    // sequenced install (TOML-B paused before MD-B) sees a
+    // stable-but-mixed tree that the byte/stat guards cannot detect;
+    // the MISMATCHED marker refuses it here, and an ABSENT marker is
+    // refused at mint (`UnpairedPublication`) — the mixed window
+    // cannot mint either way.
+    {
+        if let Some(declared) = declared_md_marker(&toml_bytes) {
+            let actual = zeroclaw_api::taskintent::canonical_json_digest_hex(
+                &serde_json::json!({ "md": md_bytes }),
+            );
+            if !declared.eq_ignore_ascii_case(&actual) {
+                bail!(
+                    "SOP.toml md_sha256 marker does not match SOP.md bytes (mixed revision refused)"
+                );
+            }
+        }
+    }
+    let review_state = review_state_from_raw(&toml_bytes)?;
+    let steps = if !md_bytes.is_empty() {
+        parse_steps(&md_bytes)
+    } else {
+        renumber(manifest.steps.clone())
+    };
+    if steps.is_empty() {
+        bail!("SOP `{name}` has no steps (missing or empty SOP.md)");
+    }
+
+    let digest = canonical_json_digest_hex(&serde_json::json!({
+        "sop_toml": toml_bytes,
+        "sop_md": md_bytes,
+    }));
+
+    Ok(CapturedDefinition {
+        toml_bytes,
+        md_bytes,
+        manifest,
+        review_state,
+        steps,
+        digest,
+        sops_dir: std::path::PathBuf::new(),
+        name: name.to_string(),
+    })
+}
+
+/// Project a captured revision into the wire `ProcedureDefinitionV1`
+/// (KP-10 field freeze). Pure function over the capture — no I/O.
+pub fn project_definition(captured: &CapturedDefinition) -> ProcedureDefinitionV1 {
+    let manifest = &captured.manifest;
+    let applicability = manifest
+        .triggers
+        .iter()
+        .map(|trigger| {
+            // The serde token of the trigger variant (e.g. `manual`,
+            // `mqtt`) — a stable machine summary, not free prose.
+            let value = serde_json::to_value(trigger).unwrap_or(serde_json::Value::Null);
+            match value {
+                serde_json::Value::Object(map) => map
+                    .keys()
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                _ => "unknown".to_string(),
+            }
+        })
+        .collect();
+
+    let steps = captured
+        .steps
+        .iter()
+        .map(|step| ProcedureStepV1 {
+            number: step.number,
+            title: step.title.clone(),
+            body: zeroclaw_api::taskintent::BoundedText::new(step.body.clone())
+                .unwrap_or_else(|_| {
+                    // BoundedText's own limit is the wire bound; a body
+                    // past it is clamped OUT of the projection by
+                    // refusing the step — but a hard failure here would
+                    // panic in a projection fn, so clamp to empty and
+                    // let the mint's own bound checks refuse oversize
+                    // snapshots with the typed error.
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        Event::new(module_path!(), Action::Reject)
+                            .with_outcome(EventOutcome::Failure)
+                            .with_attrs(serde_json::json!({
+                                "sop": captured.name, "step": step.number,
+                            })),
+                        "procedure_v1: step body exceeds the bounded-text wire limit; projected empty (mint bound checks will refuse)"
+                    );
+                    zeroclaw_api::taskintent::BoundedText::new(String::new())
+                        .expect("empty bounded text")
+                }),
+            suggested_tools: step.suggested_tools.clone(),
+            requires_confirmation: step.requires_confirmation,
+            kind: match step.kind {
+                SopStepKind::Execute => "execute".to_string(),
+                SopStepKind::Checkpoint => "checkpoint".to_string(),
+                SopStepKind::Capability => "capability".to_string(),
+            },
+        })
+        .collect();
+
+    let approval_gates = captured
+        .steps
+        .iter()
+        .filter(|step| step.requires_confirmation || step.kind == SopStepKind::Checkpoint)
+        .map(|step| ProcedureGateV1 {
+            step: step.number,
+            policy: step.policy.clone(),
+        })
+        .collect();
+
+    // Deterministic, documented artifact expectations: a procedure run
+    // always owes a final outcome report, and per-step output contracts
+    // (when any step declares one) owe a verification trail.
+    let mut expected_artifacts = vec![ArtifactExpectationV1 {
+        artifact_class: ArtifactClass::Report,
+        description: zeroclaw_api::taskintent::BoundedText::new(
+            "Final procedure-run outcome report recorded through the bridge",
+        )
+        .expect("static bounded text"),
+        required: true,
+    }];
+    if captured.steps.iter().any(|step| step.schema.is_some()) {
+        expected_artifacts.push(ArtifactExpectationV1 {
+            artifact_class: ArtifactClass::VerificationLog,
+            description: zeroclaw_api::taskintent::BoundedText::new(
+                "Per-step output-contract verification trail",
+            )
+            .expect("static bounded text"),
+            required: true,
+        });
+    }
+
+    ProcedureDefinitionV1 {
+        procedure_id: captured.name.clone(),
+        revision: manifest.sop.version.clone(),
+        digest: captured.digest.clone(),
+        name: manifest.sop.name.clone(),
+        purpose: zeroclaw_api::taskintent::BoundedText::new(manifest.sop.description.clone())
+            .unwrap_or_else(|_| {
+                zeroclaw_api::taskintent::BoundedText::new(String::new())
+                    .expect("empty bounded text")
+            }),
+        applicability,
+        steps,
+        approval_gates,
+        constraints: Vec::new(),
+        expected_artifacts,
+        evaluation_contract: EvaluationContractRef {
+            revision: "procedure-eval.v1".to_string(),
+            digest: captured.digest.clone(),
+        },
+        privacy_class: PrivacyClass::Public,
+        provenance: DefinitionProvenance {
+            authored_via: "zeroclaw-sops-dir".to_string(),
+        },
+        review_state: captured.review_state,
+    }
+}
