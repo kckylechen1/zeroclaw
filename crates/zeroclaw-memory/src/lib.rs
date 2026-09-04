@@ -40,6 +40,7 @@ pub mod response_cache;
 pub mod retrieval;
 pub mod scanned;
 pub mod snapshot;
+pub mod soul;
 pub mod sqlite;
 #[cfg(feature = "tachi")]
 pub mod tachi;
