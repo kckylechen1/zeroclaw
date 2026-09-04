@@ -1,4 +1,4 @@
-//! AgentSoul domain seam — identity-bound Soul storage.
+//! AgentSoul domain seam — identity-bound Soul storage .
 //!
 //! Soul is the reviewed operating disposition of ONE persistent agent
 //! identity, carried unchanged across replaceable model / provider /
@@ -6,7 +6,7 @@
 //! identity-binding storage surface:
 //!
 //! - the identity vocabulary type is [`AgentIdentityId`] from
-//!   `zeroclaw_api::companion` (the Tachi substrate's minted-once
+//!   `zeroclaw_api::companion` (the the pending Tachi envelope contract substrate's minted-once
 //!   identity slot) — this module never mints or derives identities,
 //!   it only admits and resolves them;
 //! - every namespace read/write resolves to a stable admitted identity
@@ -20,14 +20,14 @@
 //! - durability is delegated to the existing [`Memory`] backend; this
 //!   module introduces no new persistence, revision, or receipt engine.
 //!
-//! Known limitation (recorded, not fixed in this leaf): row-attribution
-//! verification is only as honest as the backend. `AgentScopedMarkdown
-//! Memory` stamps reads with its own bound alias instead of the stored
-//! attribution, so Soul isolation over that backend rests on the
-//! identity-namespaced key alone. Backends with true composite
-//! attribution (SQLite) enforce it structurally.
+//! Backend boundary: row-attribution verification is only as honest as
+//! the backend. The markdown backend both stamps reads with its own
+//! alias AND drops the `soul` namespace on round-trip, so both Soul
+//! services refuse it at construction (`UnsupportedBackend`). Backends
+//! with true composite attribution (SQLite) enforce isolation
+//! structurally.
 //!
-//! Verified identity evidence from Tachi (envelope contract pending in Tachi)
+//! Verified identity evidence from Tachi (envelope contract the pending Tachi envelope contract)
 //! is NOT wired yet: the [`IdentityRegistry`] seam keeps a provenance
 //! note per admission so external evidence can attach later without
 //! widening this API.
@@ -52,11 +52,23 @@ pub enum SoulError {
     /// The identity token is malformed for Soul namespacing (empty, or
     /// containing the `::` namespace delimiter).
     InvalidIdentityToken(String),
+    /// The key starts with the `candidate::` segment reserved for Soul
+    /// candidate rows. Candidate rows are owned by the sibling
+    /// `soul_candidate` module  and are written/read only through
+    /// its typed intake surface — raw Soul store/forget must refuse the
+    /// segment so a disposition write can never overwrite or delete a
+    /// candidate row.
+    ReservedKey(String),
     /// The operation targets a row bound to a different identity.
     IdentityMismatch,
     /// The memory backend rejected the operation. The identity resolved
     /// fine; durability is the failure.
     Backend(String),
+    /// The backend cannot honor Soul storage semantics (e.g. the
+    /// markdown backend synthesizes keys and drops the namespace on
+    /// round-trip, which would leak Soul rows back into ambient
+    /// recall). Refused at construction.
+    UnsupportedBackend(String),
 }
 
 impl SoulError {
@@ -70,8 +82,10 @@ impl SoulError {
             }
             Self::IdentityRevoked(_) => "agent identity revoked: no active Soul access",
             Self::InvalidIdentityToken(_) => "invalid agent identity token for Soul namespacing",
+            Self::ReservedKey(_) => "key uses the candidate:: segment reserved by soul_candidate",
             Self::IdentityMismatch => "identity mismatch: operation targets another agent identity",
             Self::Backend(_) => "soul storage backend rejected the operation",
+            Self::UnsupportedBackend(_) => "backend cannot honor Soul storage semantics",
         }
     }
 }
@@ -81,7 +95,10 @@ impl fmt::Display for SoulError {
         match self {
             Self::IdentityRevoked(id) => write!(f, "{}: {id}", self.message()),
             Self::InvalidIdentityToken(id) => write!(f, "{}: {id}", self.message()),
-            Self::Backend(detail) => write!(f, "{}: {detail}", self.message()),
+            Self::ReservedKey(key) => write!(f, "{}: {key}", self.message()),
+            Self::Backend(detail) | Self::UnsupportedBackend(detail) => {
+                write!(f, "{}: {detail}", self.message())
+            }
             _ => f.write_str(self.message()),
         }
     }
@@ -91,15 +108,29 @@ impl std::error::Error for SoulError {}
 
 /// The namespace delimiter must never appear inside an identity token,
 /// so `soul::<identity>::<key>` has exactly one parse and no `(id, key)`
-/// pair can collide with a different pair.
-const NAMESPACE_DELIMITER: &str = "::";
+/// pair can collide with a different pair. Shared with the sibling
+/// `soul_candidate` module (same namespace scheme, same rule).
+pub(crate) const NAMESPACE_DELIMITER: &str = "::";
 
-fn validate_identity_token(id: &AgentIdentityId) -> Result<(), SoulError> {
+pub(crate) fn validate_identity_token(id: &AgentIdentityId) -> Result<(), SoulError> {
     let token = id.as_str();
     if token.is_empty() {
         Err(SoulError::InvalidIdentityToken("(empty)".to_string()))
     } else if token.contains(NAMESPACE_DELIMITER) {
         Err(SoulError::InvalidIdentityToken(token.to_string()))
+    } else {
+        Ok(())
+    }
+}
+
+/// Key segment reserved for Soul candidate rows, owned by the sibling
+/// `soul_candidate` module . Raw Soul store/forget refuse keys in
+/// this segment so the two modules' key spaces cannot collide.
+pub(crate) const RESERVED_CANDIDATE_PREFIX: &str = "candidate::";
+
+pub(crate) fn reject_reserved_key(key: &str) -> Result<(), SoulError> {
+    if key.starts_with(RESERVED_CANDIDATE_PREFIX) {
+        Err(SoulError::ReservedKey(key.to_string()))
     } else {
         Ok(())
     }
@@ -114,7 +145,7 @@ pub enum AdmissionStatus {
 
 /// Why/how an identity was admitted. Free-form for locally admitted
 /// identities today; reserved as the attachment point for verified
-/// Tachi evidence envelopes without widening the API.
+/// Tachi evidence envelopes  without widening the API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionRecord {
     pub status: AdmissionStatus,
@@ -264,9 +295,19 @@ pub struct SoulService {
 }
 
 impl SoulService {
-    #[must_use]
-    pub fn new(registry: Arc<IdentityRegistry>, backend: Arc<dyn Memory>) -> Self {
-        Self { registry, backend }
+    /// Refuses backends that cannot honor Soul semantics: the markdown
+    /// backend drops the `soul` namespace on round-trip (reads come back
+    /// as `default`), which would leak disposition rows back into
+    /// ambient memory recall — the exact projection boundary this seam
+    /// exists to enforce. Sqlite-family and tachi backends are supported.
+    pub fn new(
+        registry: Arc<IdentityRegistry>,
+        backend: Arc<dyn Memory>,
+    ) -> Result<Self, SoulError> {
+        if backend.name().contains("markdown") {
+            return Err(SoulError::UnsupportedBackend(backend.name().to_string()));
+        }
+        Ok(Self { registry, backend })
     }
 
     /// Derived namespace key: identity ONLY. `CarrierContext` is accepted
@@ -295,13 +336,20 @@ impl SoulService {
     ) -> Result<(), SoulError> {
         let resolved = self.registry.resolve(Some(identity))?;
         validate_identity_token(&resolved)?;
+        reject_reserved_key(key)?;
         let namespaced = Self::namespace_key(&resolved, key, carrier);
         if let Err(e) = self
             .backend
             .store_with_agent(
                 &namespaced,
                 content,
-                MemoryCategory::Core,
+                // Plain Core must not be used for Soul rows: the
+                // Custom("soul") category plus the "soul" namespace let
+                // ambient recall surfaces (memory_inject) exclude Soul
+                // from model context structurally instead of by key
+                // convention. Soul projection is the later projection leaf's dedicated
+                // channel.
+                MemoryCategory::Custom("soul".to_string()),
                 None,
                 Some("soul"),
                 None,
@@ -369,6 +417,7 @@ impl SoulService {
     ) -> Result<bool, SoulError> {
         let resolved = self.registry.resolve(Some(identity))?;
         validate_identity_token(&resolved)?;
+        reject_reserved_key(key)?;
         let namespaced = Self::namespace_key(&resolved, key, carrier);
         match self
             .backend
@@ -397,7 +446,7 @@ impl SoulService {
 /// A backend refusal caused by identity (a wrapper bound to another
 /// agent refusing our attribution) is an identity verdict, not a
 /// durability failure.
-fn classify_backend_error(e: &anyhow::Error) -> SoulError {
+pub(crate) fn classify_backend_error(e: &anyhow::Error) -> SoulError {
     if e.to_string().contains(FOREIGN_AGENT_REFUSAL_MARKER) {
         SoulError::IdentityMismatch
     } else {
@@ -421,7 +470,8 @@ mod tests {
         let soul = SoulService::new(
             Arc::clone(&registry) as Arc<IdentityRegistry>,
             backend as Arc<dyn Memory>,
-        );
+        )
+        .expect("sqlite backend must be accepted");
         (registry, soul)
     }
 
@@ -460,7 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_identity_across_carriers_shares_one_namespace() {
-        // Discrimination #1 (per the leaf contract): swap model/provider/harness/
+        // Discrimination #1: swap model/provider/harness/
         // session while preserving the admitted identity -> same domain
         // key and state.
         let (tmp, backend) = fresh_backend();
@@ -487,7 +537,7 @@ mod tests {
 
     #[tokio::test]
     async fn different_identity_cannot_read_or_write_neighbors_namespace() {
-        // Discrimination #2 (per the leaf contract): a different identity has zero access to the
+        // Discrimination #2: a different identity has zero access to the
         // first identity's namespace, in both directions.
         let (tmp, backend) = fresh_backend();
         let (registry, soul) = service(Arc::clone(&backend));
@@ -582,7 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_display_name_with_different_identity_is_denied() {
-        // Discrimination #3 (per the leaf contract): an identical display name with a different
+        // Discrimination #3: an identical display name with a different
         // identity is a different Soul — zero access to A's state.
         let (tmp, backend) = fresh_backend();
         let (registry, soul) = service(Arc::clone(&backend));
@@ -706,6 +756,42 @@ mod tests {
         assert_eq!(
             registry.admit(&empty, "local").unwrap_err(),
             SoulError::InvalidIdentityToken("(empty)".to_string())
+        );
+        drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn reserved_candidate_key_segment_is_refused_by_raw_seam() {
+        // The `candidate::` segment belongs to soul_candidate :
+        // raw disposition store/forget must refuse it so a plain write
+        // can never overwrite or delete a candidate row.
+        let (tmp, backend) = fresh_backend();
+        let (registry, soul) = service(Arc::clone(&backend));
+        let id = identity_for(&backend, "identity-a").await;
+        registry.admit(&id, "local bootstrap").unwrap();
+
+        assert_eq!(
+            soul.store(&id, "candidate::density", "{}", &CarrierContext::default())
+                .await,
+            Err(SoulError::ReservedKey("candidate::density".to_string())),
+            "raw store must refuse the reserved candidate:: segment"
+        );
+        assert_eq!(
+            soul.forget(&id, "candidate::density", &CarrierContext::default())
+                .await,
+            Err(SoulError::ReservedKey("candidate::density".to_string())),
+            "raw forget must refuse the reserved candidate:: segment"
+        );
+        // Refusal happened before any backend write: no row exists.
+        let namespaced =
+            SoulService::namespace_key(&id, "candidate::density", &CarrierContext::default());
+        assert!(
+            backend
+                .get_for_agent(&namespaced, id.as_str())
+                .await
+                .unwrap()
+                .is_none(),
+            "the refused store must not have created a row"
         );
         drop(tmp);
     }
