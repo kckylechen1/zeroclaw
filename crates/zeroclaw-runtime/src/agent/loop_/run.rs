@@ -535,7 +535,7 @@ pub async fn run(
         }
         retain_registered_tool_descriptions(&mut tool_descs, &tools_registry);
         let bootstrap_max_chars = if eff_compact_context {
-            Some(6000)
+            Some(crate::agent::system_prompt::COMPACT_BOOTSTRAP_MAX_CHARS)
         } else {
             None
         };
