@@ -80,7 +80,7 @@ export interface ToolPermissionGridProps {
 interface Row {
   name: string;
   description: string;
-  group: 'agent' | 'cli' | 'unknown';
+  group: 'agent' | 'unknown';
 }
 
 export default function ToolPermissionGrid({
@@ -203,7 +203,6 @@ export default function ToolPermissionGrid({
 
   const unknownFiltered = filtered.filter((r) => r.group === 'unknown');
   const agentFiltered = filtered.filter((r) => r.group === 'agent');
-  const cliFiltered = filtered.filter((r) => r.group === 'cli');
 
   function authState(name: string): AuthState {
     return effectiveAuthState({ name, strict, realAllowSet, excludedSet });
@@ -491,25 +490,6 @@ export default function ToolPermissionGrid({
           {agentFiltered.length > 0 && (
             <RowGroup label={t('tool_picker.group_agent')} count={agentFiltered.length}>
               {agentFiltered.map((r) => (
-                <PermissionRow
-                  key={r.name}
-                  row={r}
-                  strict={strict}
-                  disabled={disabled}
-                  authState={authState(r.name)}
-                  apprState={apprState(r.name)}
-                  mcpAutoAdmitted={mcpAutoAdmitted(r.name)}
-                  alwaysAskWildcardLocked={alwaysAskWildcardLocked(r.name)}
-                  autoApproveWildcardApplies={autoApproveWildcardApplies(r.name)}
-                  onAuth={(s) => setAuth(r.name, s)}
-                  onAppr={(s) => setApproval(r.name, s)}
-                />
-              ))}
-            </RowGroup>
-          )}
-          {cliFiltered.length > 0 && (
-            <RowGroup label={t('tool_picker.group_cli')} count={cliFiltered.length}>
-              {cliFiltered.map((r) => (
                 <PermissionRow
                   key={r.name}
                   row={r}

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/zeroclaw-api", "crates/zeroclaw-coordinator", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "apps/zerocode", "crates/zeroclaw-plugins", "crates/zeroclaw-plugins/tests/fixtures/channel-fixture", "crates/zeroclaw-gateway", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/robot-kit", "crates/aardvark-sys", "crates/zeroclaw-macros", "apps/tauri", "tools/fill-translations", "xtask"]
+members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "apps/zerocode", "crates/zeroclaw-plugins", "crates/zeroclaw-plugins/tests/fixtures/channel-fixture", "crates/zeroclaw-gateway", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/robot-kit", "crates/aardvark-sys", "crates/zeroclaw-macros", "apps/tauri", "tools/fill-translations", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -11,7 +11,6 @@ rust-version = "1.96.1"
 
 [workspace.dependencies]
 zeroclaw-api = { path = "crates/zeroclaw-api", version = "0.8.3" }
-zeroclaw-coordinator = { path = "crates/zeroclaw-coordinator", version = "0.8.3" }
 zeroclaw-infra = { path = "crates/zeroclaw-infra", version = "0.8.3" }
 zeroclaw-config = { path = "crates/zeroclaw-config", version = "0.8.3", default-features = false }
 zeroclaw-log = { path = "crates/zeroclaw-log", version = "0.8.3" }
@@ -20,7 +19,7 @@ zeroclaw-commands = { path = "crates/zeroclaw-commands", version = "0.8.3" }
 zeroclaw-providers = { path = "crates/zeroclaw-providers", version = "0.8.3" }
 zeroclaw-memory = { path = "crates/zeroclaw-memory", version = "0.8.3" }
 zeroclaw-channels = { path = "crates/zeroclaw-channels", version = "0.8.3", default-features = false }
-zeroclaw-tools = { path = "crates/zeroclaw-tools", version = "0.8.3" }
+zeroclaw-tools = { path = "crates/zeroclaw-tools", version = "0.8.3", default-features = false }
 zeroclaw-sop-graph = { path = "crates/zeroclaw-sop-graph", version = "0.8.3", default-features = false }
 zeroclaw-runtime = { path = "crates/zeroclaw-runtime", version = "0.8.3", default-features = false }
 zeroclaw-eval = { path = "crates/zeroclaw-eval", version = "0.8.3" }
@@ -283,6 +282,23 @@ default = [
     "gateway",
     "observability-prometheus",
     "schema-export",
+    "integrations-saas",
+    "hardware-tools",
+]
+
+# Concrete integration families forwarded from zeroclaw-tools. Default-on so
+# the standard build keeps the pre-feature compiled surface and registry; a
+# slim companion build selects `--no-default-features --features agent-runtime,...`
+# and omits these to keep the families out of the dependency graph. The
+# implementations stay in-tree either way — turning a family off is a compile
+# selection, not a deletion.
+integrations-saas = [
+    "zeroclaw-tools/integrations-saas",
+    "zeroclaw-runtime/integrations-saas",
+]
+hardware-tools = [
+    "zeroclaw-tools/hardware-tools",
+    "zeroclaw-runtime/hardware-tools",
 ]
 
 # The core agent runtime — agent loop, tools, persistence subsystems.
@@ -302,7 +318,6 @@ agent-runtime = [
 default-channels = [
     "channel-acp-server", "channel-webhook",
     "channel-email", "channel-telegram", "channel-discord",
-    "channel-filesystem",
 ]
 
 # Historical broad channel bundle. Preserves the older default channel surface.
@@ -312,7 +327,7 @@ channels-full = [
     "channel-slack", "channel-signal",
     "channel-mattermost", "channel-irc", "channel-imessage",
     "channel-dingtalk", "channel-qq", "channel-bluesky", "channel-git",
-    "channel-twitch", "channel-twitter", "channel-reddit", "channel-notion", "channel-mqtt", "channel-amqp",
+    "channel-twitch", "channel-twitter", "channel-reddit", "channel-notion", "channel-amqp",
     "channel-linq", "channel-wati", "channel-nextcloud",
     "channel-mochat", "channel-wecom", "channel-wecom-ws", "channel-clawdtalk",
     "channel-whatsapp-cloud", "channel-voice-call",
@@ -349,8 +364,6 @@ provider-gitea = ["zeroclaw-channels/provider-gitea"]
 channel-twitter = ["zeroclaw-channels/channel-twitter"]
 channel-reddit = ["zeroclaw-channels/channel-reddit"]
 channel-notion = ["zeroclaw-channels/channel-notion"]
-channel-mqtt = ["zeroclaw-channels/channel-mqtt"]
-channel-filesystem = ["zeroclaw-channels/channel-filesystem"]
 channel-amqp = ["zeroclaw-channels/channel-amqp"]
 channel-linq = ["zeroclaw-channels/channel-linq", "zeroclaw-gateway?/channel-linq"]
 channel-wati = ["zeroclaw-channels/channel-wati", "zeroclaw-gateway?/channel-wati"]

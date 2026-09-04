@@ -1,6 +1,6 @@
 // Reusable multi-select tool picker. Loads the built-in agent tools
-// (GET /api/tools) and the discovered CLI tools (GET /api/cli-tools),
-// groups them, and lets the operator toggle individual tools on/off.
+// (GET /api/tools), groups them, and lets the operator toggle individual
+// tools on/off.
 //
 // Tool identity is the tool `name` — exactly the strings that land in an
 // `allowed_tools` list (e.g. "shell", "file_read", "web_search_tool",
@@ -16,7 +16,7 @@
 // namespace (plus shared `common.` keys); see @/lib/i18n.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Search, X, Wrench, Terminal } from 'lucide-react';
+import { Search, X, Wrench } from 'lucide-react';
 import {
   loadToolCatalogResult,
   peekToolCatalog,
@@ -39,7 +39,7 @@ export interface ToolPickerProps {
   id?: string;
   /** Scope the agent-tools catalog to this agent (its built-ins plus its
    * `mcp_bundles` MCP tools) via `/api/tools?agent=`. Omit for the gateway's
-   * default-agent listing. CLI tools are always included (not agent-scoped). */
+   * default-agent listing. */
   agent?: string;
 }
 
@@ -165,16 +165,8 @@ export default function ToolPicker({
     () => filtered.filter((e) => e.group === 'agent'),
     [filtered],
   );
-  const cliEntries = useMemo(
-    () => filtered.filter((e) => e.group === 'cli'),
-    [filtered],
-  );
-
   const agentAllSelected =
     agentEntries.length > 0 && agentEntries.every((e) => selectedSet.has(e.name));
-  const cliAllSelected =
-    cliEntries.length > 0 && cliEntries.every((e) => selectedSet.has(e.name));
-
   // Selected names that aren't in the catalog (unknown / removed tools).
   // Surface them as chips so nothing is silently dropped on save.
   const unknownSelected = useMemo(
@@ -302,7 +294,7 @@ export default function ToolPicker({
           currently-displayed (filtered) entries and flips Select all/Deselect
           all to match. Hidden when the picker is disabled or the group is empty. */}
       {!loading && error === null && !disabled &&
-        (agentEntries.length > 0 || cliEntries.length > 0) && (
+        agentEntries.length > 0 && (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-0.5">
             {agentEntries.length > 0 && (
               <button
@@ -319,23 +311,6 @@ export default function ToolPicker({
                   ? t('tool_picker.deselect_all')
                   : t('tool_picker.select_all')}{' '}
                 {t('tool_picker.group_agent')}
-              </button>
-            )}
-            {cliEntries.length > 0 && (
-              <button
-                type="button"
-                onClick={() => toggleAll(cliEntries)}
-                aria-label={`${
-                  cliAllSelected
-                    ? t('tool_picker.deselect_all_aria_prefix')
-                    : t('tool_picker.select_all_aria_prefix')
-                }${t('tool_picker.group_cli')}`}
-                className="text-[10px] font-medium text-pc-accent hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--pc-focus)]/40 rounded cursor-pointer"
-              >
-                {cliAllSelected
-                  ? t('tool_picker.deselect_all')
-                  : t('tool_picker.select_all')}{' '}
-                {t('tool_picker.group_cli')}
               </button>
             )}
           </div>
@@ -413,28 +388,7 @@ export default function ToolPicker({
             </ToolGroup>
           )}
 
-          {cliEntries.length > 0 && (
-            <ToolGroup
-              icon={<Terminal className="h-3.5 w-3.5 text-pc-text-muted" />}
-              label={t('tool_picker.group_cli')}
-              count={cliEntries.length}
-            >
-              {cliEntries.map((e) => (
-                <ToolRow
-                  key={e.name}
-                  name={e.name}
-                  description={e.description}
-                  selected={selectedSet.has(e.name)}
-                  disabled={disabled}
-                  onToggle={() => toggle(e.name)}
-                />
-              ))}
-            </ToolGroup>
-          )}
-
-          {agentEntries.length === 0 &&
-            cliEntries.length === 0 &&
-            unknownSelected.length === 0 && (
+          {agentEntries.length === 0 && unknownSelected.length === 0 && (
               <p className="px-3 py-4 text-xs text-center text-pc-text-muted">
                 {search.trim()
                   ? `${t('tool_picker.no_match_prefix')}"${search.trim()}"${t('tool_picker.no_match_suffix')}`

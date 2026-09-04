@@ -4,10 +4,7 @@ import type { CatalogLoadWarning } from '../lib/toolCatalog';
 import { t } from '../lib/i18n';
 
 export function catalogWarningLabel(warning: CatalogLoadWarning): string {
-  const prefix =
-    warning.source === 'agent'
-      ? t('tool_picker.partial_load_agent_prefix')
-      : t('tool_picker.partial_load_cli_prefix');
+  const prefix = t('tool_picker.partial_load_agent_prefix');
   return `${prefix}${warning.message}`;
 }
 

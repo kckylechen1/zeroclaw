@@ -42,6 +42,10 @@ jobs:
         with:
           toolchain: 1.96.1
           components: rustfmt
+      - name: Toolchain pin guard (self-test + active check)
+        run: |
+          bash scripts/ci/toolchain_gate.test.sh
+          bash scripts/ci/toolchain_gate.sh
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -85,6 +89,23 @@ jobs:
           fi
       - name: Test translation release submodule handling
         run: scripts/release/refresh-translations.test.sh
+      - name: Tracked runtime-state hygiene gate (self-test + index scan)
+        run: |
+          bash scripts/ci/tracked_state_gate.test.sh
+          bash scripts/ci/tracked_state_gate.sh
+      - name: Retired-documentation gate (self-test + active-docs scan)
+        run: |
+          bash scripts/ci/retired_docs_gate.test.sh
+          bash scripts/ci/retired_docs_gate.sh
+      - name: Persistence-surface manifest gate (TB-22 no new durable stores)
+        run: |
+          # The gate scans with ripgrep; hosted runners do not ship it.
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+          fi
+          rg --version
+          bash scripts/ci/persistence_surface_gate.test.sh
+          bash scripts/ci/persistence_surface_gate.sh
 
   # ── Post-format required quality gate ─────────────────────────────────────
 
@@ -92,10 +113,12 @@ jobs:
     name: Lint
     needs: [fmt]
     runs-on: ubuntu-latest
-    # 20 (not 15): a cold rust-cache after any Cargo.lock change puts a full
+    # 25 (not 20): a cold rust-cache after any Cargo.lock change puts a full
     # workspace clippy at 14-15m on hosted runners, which made the old 15m
-    # ceiling a coin flip for every PR.
-    timeout-minutes: 20
+    # ceiling a coin flip for every PR; observed runs with a lock change
+    # plus the persistence-gate ripgrep install have exceeded 20m and been
+    # cancelled mid-clippy, so the ceiling moves again by the same logic.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -162,6 +185,11 @@ jobs:
           bash scripts/ci/comment_hygiene_gate.sh
       - name: Provider dispatch gate (no direct ModelProvider method calls outside ProviderDispatch)
         run: bash scripts/ci/provider_dispatch_gate.sh
+      - name: Wire budget exception gate (explicit token ceiling manifest)
+        run: |
+          bash scripts/ci/wire_budget_exception_gate.test.sh
+          bash scripts/ci/wire_budget_exception_gate.sh
+
 
   windows-clippy-tools-changes:
     name: Detect Windows Clippy changes
@@ -357,6 +385,11 @@ jobs:
             sys_deps: libudev-dev
           - name: no default features
             args: --no-default-features
+            sys_deps: ""
+          # Root default minus the compile-time integration families
+          # (integrations-saas, hardware-tools): the slim companion graph.
+          - name: minimal companion
+            args: --no-default-features --features agent-runtime,default-channels,acp-bridge,gateway,observability-prometheus,schema-export
             sys_deps: ""
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

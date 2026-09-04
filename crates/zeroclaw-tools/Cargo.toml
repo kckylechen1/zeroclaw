@@ -53,9 +53,17 @@ tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring
 webpki-roots = "1.0.6"
 
 [features]
-default = []
+# Concrete SaaS/vendor business tool family: Jira, Notion, Google Workspace,
+# Microsoft 365, LinkedIn, Composio, Pushover. Default-on so the standard
+# build is unchanged; slim companion builds drop this feature to keep the
+# family out of the compiled surface.
+integrations-saas = []
+# Concrete hardware board/memory tool family. Default-on; the hardware install
+# templates enable the `hardware` root feature, which forwards this.
+hardware-tools = []
+default = ["integrations-saas", "hardware-tools"]
 browser-native = ["dep:fantoccini"]
-probe = ["dep:probe-rs"]
+probe = ["dep:probe-rs", "hardware-tools"]
 # Exposes cross-crate test-only constructors (e.g.
 # `McpRegistry::for_test_with_server_count`) so downstream test
 # suites can build registry fixtures without spawning real stdio

@@ -323,7 +323,7 @@ site and pushes decisions to the layer that has the most context.
 The goal is not zero `.unwrap()` calls. Some are correct. The goal is that every one
 represents a conscious decision, with the reasoning visible to anyone who reads the code.
 The difference between `.unwrap()` and `.expect("this vec is guaranteed non-empty by the
-caller — see §4.2 of the SOP engine invariants")` is not just style. It is the
+caller; see the runtime invariants notes")` is not just style. It is the
 difference between deferred judgment and documented judgment.
 
 ### 4.2 Public API Surface as a Promise

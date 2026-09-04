@@ -19,7 +19,7 @@ use crate::agent::loop_::{
 };
 use crate::skills::Skill;
 use crate::tools::{
-    self, ActivatedToolSet, AllToolsResult, DelegateParentToolsHandle, PerToolChannelHandle, Tool,
+    self, ActivatedToolSet, AllToolsResult, PerToolChannelHandle, Tool,
     register_skill_tools_with_context_and_runtime,
 };
 
@@ -96,7 +96,6 @@ pub struct ScopedAssembly<'a> {
 /// side-channel handles + the deferred-MCP prompt section the callers thread on.
 pub struct ScopedAssembled {
     pub registry: ScopedToolRegistry,
-    pub delegate_handle: Option<DelegateParentToolsHandle>,
     pub ask_user_handle: Option<PerToolChannelHandle>,
     pub reaction_handle: PerToolChannelHandle,
     pub poll_handle: Option<PerToolChannelHandle>,
@@ -184,7 +183,6 @@ impl ScopedToolRegistry {
 
         let AllToolsResult {
             tools: mut tools_registry,
-            delegate_handle,
             ask_user_handle,
             reaction_handle,
             poll_handle,
@@ -193,11 +191,22 @@ impl ScopedToolRegistry {
             unfiltered_tool_arcs,
         } = built;
 
+        // Install-wide composition. `minimal` is a terminal gate for built-in
+        // surface: the registry arrives pre-cut from `all_tools`, and every
+        // built-in appended during this assembly (peripherals, pipeline) is
+        // gated too. Extension surfaces — MCP tools admitted by the effective
+        // policy and skill-defined tools — are NOT built-ins and stay governed
+        // by their own admission policies.
+        let composition_minimal =
+            zeroclaw_config::composition::Composition::effective(config.composition)
+                == zeroclaw_config::composition::Composition::Minimal;
+
         // 1. Peripherals. Loading CONNECTS hardware (serial opens are exclusive for
         //    real devices), so this is gated: execution surfaces pass
-        //    `connect_peripherals: true`; listing-only surfaces pass `false` and
-        //    enumerate without holding devices.
-        if connect_peripherals {
+        //    `connect_peripherals = true`; listing-only surfaces pass `false` and
+        //    enumerate without holding devices. Hardware is demoted from the
+        //    minimal composition, so it never connects there either.
+        if connect_peripherals && !composition_minimal {
             let peripheral_tools = load_peripheral_tools(config.peripherals.clone()).await;
             if emit_assembly_logs && !peripheral_tools.is_empty() {
                 ::zeroclaw_log::record!(
@@ -219,7 +228,7 @@ impl ScopedToolRegistry {
             .filter(|tool| tool_allowed_in_context(tool.name(), exclude_memory))
             .cloned()
             .collect();
-        let pipeline_tool = config.pipeline.enabled.then(|| {
+        let pipeline_tool = (!composition_minimal && config.pipeline.enabled).then(|| {
             Arc::new(tools::PipelineTool::with_access_policy(
                 config.pipeline.clone(),
                 context_filtered_tool_arcs.clone(),
@@ -338,7 +347,6 @@ impl ScopedToolRegistry {
                     if register_eager_mcp_tool_if_allowed(
                         tool,
                         &mut tools_registry,
-                        delegate_handle.as_ref(),
                         mcp_policy.as_ref(),
                     ) {
                         // Capability tools are MCP-origin (built from the
@@ -382,7 +390,6 @@ impl ScopedToolRegistry {
                             register_eager_mcp_tool_if_allowed(
                                 wrapper,
                                 &mut tools_registry,
-                                delegate_handle.as_ref(),
                                 mcp_policy.as_ref(),
                             );
                         }
@@ -431,7 +438,6 @@ impl ScopedToolRegistry {
                             &activated,
                             filter_groups,
                             mcp_policy.as_ref(),
-                            delegate_handle.as_ref(),
                         );
                         if emit_assembly_logs && !preactivated_names.is_empty() {
                             ::zeroclaw_log::record!(
@@ -464,19 +470,6 @@ impl ScopedToolRegistry {
                         if let Some(policy) = mcp_policy {
                             tool_search = tool_search.with_access_policy(policy);
                         }
-                        // Newly-activated deferred tools are also exposed to the
-                        // delegate parent set, matching the run/process_message paths.
-                        if let Some(ref handle) = delegate_handle {
-                            let delegate_tools = Arc::clone(handle);
-                            tool_search = tool_search.with_activation_hook(Arc::new(move |tool| {
-                                let mut tools = delegate_tools.write();
-                                let already =
-                                    tools.iter().any(|existing| existing.name() == tool.name());
-                                if !already {
-                                    tools.push(tool);
-                                }
-                            }));
-                        }
                         tools_registry.push(Box::new(tool_search));
                     }
                 } else {
@@ -497,7 +490,6 @@ impl ScopedToolRegistry {
                             if register_eager_mcp_tool_if_allowed(
                                 wrapper,
                                 &mut tools_registry,
-                                delegate_handle.as_ref(),
                                 mcp_policy.as_ref(),
                             ) {
                                 registered += 1;
@@ -555,7 +547,6 @@ impl ScopedToolRegistry {
 
         ScopedAssembled {
             registry: ScopedToolRegistry(tools_registry),
-            delegate_handle,
             ask_user_handle,
             reaction_handle,
             poll_handle,
@@ -659,7 +650,6 @@ mod tests {
             .collect();
         AllToolsResult {
             tools,
-            delegate_handle: None,
             ask_user_handle: None,
             reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             poll_handle: None,
@@ -699,6 +689,43 @@ mod tests {
             mcp_registry: None,
         })
         .await
+    }
+
+    #[tokio::test]
+    async fn minimal_composition_drops_pipeline_from_assembly() {
+        // The existing pipeline tests prove `pipeline.enabled = true`
+        // registers under absent composition; this locks the inverse: an
+        // enabled flag cannot widen the minimal surface, at the assemble
+        // boundary where the pipeline tool is appended after the built-in
+        // cut. Peripherals share the same `composition_minimal` gate.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let security = Arc::new(SecurityPolicy::default());
+        let mut config = Config::default();
+        config.pipeline.enabled = true;
+        config.pipeline.max_steps = 20;
+        config.pipeline.allowed_tools = vec!["shell".to_string(), "file_write".to_string()];
+        config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+        let assembled = ScopedToolRegistry::assemble(ScopedAssembly {
+            config: &config,
+            agent_alias: "default",
+            security: &security,
+            built: built_with_pipeline(calls),
+            skills: &[],
+            runtime: Arc::new(crate::platform::NativeRuntime::new()),
+            caller_allowed: None,
+            connect_mcp: false,
+            connect_peripherals: false,
+            exclude_memory: false,
+            list_deferred_mcp_specs: false,
+            emit_assembly_logs: false,
+            mcp_registry: None,
+        })
+        .await;
+        let names: Vec<&str> = assembled.registry.iter().map(|t| t.name()).collect();
+        assert!(
+            !names.contains(&tools::PipelineTool::NAME),
+            "pipeline must not join the minimal assembly: {names:?}"
+        );
     }
 
     #[tokio::test]
@@ -941,7 +968,6 @@ mod tests {
     fn built_with(tools: Vec<Box<dyn Tool>>) -> AllToolsResult {
         AllToolsResult {
             tools,
-            delegate_handle: None,
             ask_user_handle: None,
             reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             poll_handle: None,
@@ -982,14 +1008,14 @@ mod tests {
         // excluded tools. Through the one seam the filter ALWAYS runs - the leak is fixed
         // by construction, not by remembering to call it.
         let security = Arc::new(SecurityPolicy {
-            excluded_tools: Some(vec!["spawn_subagent".into()]),
+            excluded_tools: Some(vec!["reasoning_subagent".into()]),
             ..SecurityPolicy::default()
         });
         let names = assemble_names(
             security,
             vec![
                 Box::new(MockTool("shell")),
-                Box::new(MockTool("spawn_subagent")),
+                Box::new(MockTool("reasoning_subagent")),
             ],
             None,
         )
@@ -999,7 +1025,7 @@ mod tests {
             "unlisted tool kept: {names:?}"
         );
         assert!(
-            !names.iter().any(|n| n == "spawn_subagent"),
+            !names.iter().any(|n| n == "reasoning_subagent"),
             "excluded tool dropped: {names:?}"
         );
     }
@@ -1277,7 +1303,6 @@ mod tests {
     fn assembled_with_sections(deferred: &str, pinned: &str) -> ScopedAssembled {
         ScopedAssembled {
             registry: ScopedToolRegistry(Vec::new()),
-            delegate_handle: None,
             ask_user_handle: None,
             reaction_handle: Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             poll_handle: None,

@@ -1,6 +1,6 @@
 # MQTT
 
-The `mqtt` channel subscribes to topics on an MQTT broker and feeds each message into the agent loop or the SOP engine. It is gated by the `channel-mqtt` build feature.
+The `mqtt` channel subscribes to topics on an MQTT broker and feeds each message into the agent loop. (It formerly also dispatched messages to the SOP engine; that dispatch was removed with the run side.) It is gated by the `channel-mqtt` build feature.
 
 > **This is a SOP event source.** For trigger syntax and topic matching, see [SOP Fan-In: MQTT](../sop/fan-in/mqtt.md). This page covers the broker connection.
 

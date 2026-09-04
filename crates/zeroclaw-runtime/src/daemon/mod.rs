@@ -379,55 +379,28 @@ pub async fn run(
         ));
     }
 
-    if crate::control_plane::control_plane().is_none() {
-        match crate::control_plane::ControlPlaneHandle::start(&config.data_dir).await {
-            Ok(mut handle) => {
-                // The coordinator actor is started only now, against the
-                // handle `start` already returned — i.e. strictly after that
-                // call's recovery pass reclaimed every prior-boot orphan row
-                // for this boot_id. Starting it any earlier (or folding it
-                // into `start` itself) would risk a freshly-accepted spawn
-                // racing the reaper's prior-boot sweep over the same table
-                // recovery is still reconciling; running the actor after
-                // `start` returns is what keeps those two passes from ever
-                // overlapping. See `coordinator_host`'s module doc.
-                let coordinator_host = crate::control_plane::coordinator_host::start(
-                    std::sync::Arc::new(config.clone()),
-                    std::sync::Arc::clone(&handle.sqlite_store),
-                    handle.boot_id.clone(),
-                );
-                handle.commands = Some(coordinator_host.commands);
-                // Folded into the daemon's ordinary component shutdown below
-                // (grace window, then force-abort): the coordinator's own
-                // exit condition (command channel closed AND every in-flight
-                // child settled) never fires on its own here, because the
-                // sender lives inside the process-global `ControlPlaneHandle`
-                // for the rest of the process — so this task is always
-                // force-aborted at shutdown, which is what makes
-                // `Coordinator`'s Drop sweep (ledgering any still-live child
-                // `Lost`) actually run instead of being skipped.
-                handles.push(coordinator_host.actor);
-                crate::control_plane::init_control_plane(handle);
-            }
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({ "error": format!("{e:#}") })),
-                    "control-plane failed to start; supervision disabled for this run"
-                );
-            }
-        }
-    }
-    // Respawn the reaper for THIS run iteration against the INSTALLED handle, so its
-    // boot_id matches what producers stamp via `control_plane()`.
-    if let Some(handle) = crate::control_plane::control_plane() {
-        handle.spawn_reaper(
-            crate::control_plane::reaper::DEFAULT_MAX_RUNTIME_SECS,
-            channels_cancel.clone(),
+    // Wall 4 (issue 197): the durable control-plane is no longer booted. Its
+    // only production writer (the coordinator child host) lost its last spawn
+    // producer with the spawn wall, and durable execution truth is owned by
+    // Tachi through the bridge (frozen contract annex rows 1 and 6). A legacy
+    // `<data_dir>/control_plane.db` is never read, migrated, rewritten, or
+    // deleted — but an existing install is told so, once per process (reload
+    // iterations re-run this function; the latch keeps the notice at true
+    // boot frequency).
+    static LEGACY_PLANE_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let legacy_control_plane = config.data_dir.join("control_plane.db");
+    if LEGACY_PLANE_WARNED.set(()).is_ok() && legacy_control_plane.exists() {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({
+                    "path": legacy_control_plane.display().to_string(),
+                })),
+            "legacy control-plane database is retired and no longer read; it is \
+             left in place untouched — durable task/attempt truth now lives in \
+             Tachi through the task-intent bridge"
         );
-        crate::health::mark_component_ok("control-plane");
     }
 
     if let Some(channels_start) = registry.take_channels_start() {
@@ -468,9 +441,6 @@ pub async fn run(
     // Build the shared RpcContext if either transport is configured.
     let socket_client_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let need_rpc_ctx = registry.has_socket_start() || registry.has_wss_start();
-
-    // Extract shared SOP engine from registry for RpcContext.
-    let (sop_engine, sop_audit) = registry.take_sop_engine();
 
     let rpc_ctx = if need_rpc_ctx {
         use crate::rpc::context::RpcContext;
@@ -588,8 +558,6 @@ pub async fn run(
             ),
             tui_registry,
             acp_session_store,
-            sop_engine,
-            sop_audit,
             hooks,
         }))
     } else {
@@ -640,42 +608,6 @@ pub async fn run(
                 async move { start(ctx, cancel, count).await }
             },
         ));
-    }
-
-    // Wire up MQTT SOP listener if configured and referenced by an enabled agent
-    if let Some(mqtt_start) = registry.take_mqtt_start() {
-        let active_mqtt: std::collections::HashSet<String> = config
-            .agents
-            .values()
-            .filter(|a| a.enabled)
-            .flat_map(|a| a.channels.iter().map(|c| c.as_str().to_string()))
-            .collect();
-        let mut mqtt_started = false;
-        for (alias, mqtt_config) in &config.channels.mqtt {
-            if !active_mqtt.contains(&format!("mqtt.{alias}")) {
-                continue;
-            }
-            let mqtt_cfg = mqtt_config.clone();
-            let mqtt_start = std::sync::Arc::new(mqtt_start);
-            handles.push(spawn_component_supervisor(
-                "mqtt",
-                initial_backoff,
-                max_backoff,
-                channels_cancel.clone(),
-                move || {
-                    let cfg = mqtt_cfg.clone();
-                    let start = mqtt_start.clone();
-                    async move { start(cfg).await }
-                },
-            ));
-            mqtt_started = true;
-            break;
-        }
-        if !mqtt_started {
-            crate::health::mark_component_ok("mqtt");
-        }
-    } else {
-        crate::health::mark_component_ok("mqtt");
     }
 
     if config.heartbeat.enabled {
@@ -2129,9 +2061,6 @@ fn has_supervised_channels(config: &Config) -> bool {
     config.channels.has_any_enabled()
 }
 
-// run_mqtt_sop_listener has been moved to zeroclaw-channels::orchestrator::mqtt.
-// The daemon now receives it as a starter via DaemonRegistry::register_mqtt.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2159,10 +2088,13 @@ mod tests {
         config.agents.insert(agent_alias.to_string(), agent);
     }
 
-    async fn recv_log_event(
+    /// Wait up to 2s for a log event whose `message` matches, or `None`.
+    /// Retries at 50ms steps because a broadcast receiver only observes new
+    /// sends when polled.
+    async fn try_recv_log_event(
         rx: &mut tokio::sync::broadcast::Receiver<serde_json::Value>,
         message: &str,
-    ) -> serde_json::Value {
+    ) -> Option<serde_json::Value> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -2174,14 +2106,14 @@ mod tests {
                         .and_then(|v| v.as_str())
                         .is_some_and(|candidate| candidate == message) =>
                 {
-                    return value;
+                    return Some(value);
                 }
                 Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
                 Err(_elapsed) => {}
             }
         }
-        panic!("did not find log event: {message}");
+        None
     }
 
     #[test]
@@ -2258,16 +2190,33 @@ mod tests {
         let _writer_guard = zeroclaw_log::__private_test_writer_lock();
         let _hook_guard = zeroclaw_log::__private_test_hook_lock();
         zeroclaw_log::try_install_capture_subscriber();
-        let mut rx = zeroclaw_log::subscribe_or_install();
-        while rx.try_recv().is_ok() {}
 
         let tmp = TempDir::new().unwrap();
         let mut config = test_config(&tmp);
         config.gateway.require_pairing = true;
 
-        record_daemon_started(&config, "127.0.0.1", 0);
+        // The process-global broadcast channel this test subscribes to also
+        // carries every log line the other parallel tests emit, and the hook
+        // it rides on is process-global mutable state that other tests'
+        // fixtures legitimately replace and clear. Either hazard can make the
+        // one event this test cares about never arrive on a given receiver —
+        // a timing/interference flake, not a regression signal. So
+        // subscribe-emit-wait is retried: each attempt takes a FRESH
+        // subscription, drains, re-emits (the event is a synthetic
+        // diagnostics record, and this test is its only matcher), and waits
+        // on a fresh 2s window.
+        let mut value = None;
+        for _ in 0..6 {
+            let mut rx = zeroclaw_log::subscribe_or_install();
+            while rx.try_recv().is_ok() {}
+            record_daemon_started(&config, "127.0.0.1", 0);
+            if let Some(found) = try_recv_log_event(&mut rx, "ZeroClaw daemon started").await {
+                value = Some(found);
+                break;
+            }
+        }
+        let value = value.expect("daemon-started diagnostics event must be captured");
 
-        let value = recv_log_event(&mut rx, "ZeroClaw daemon started").await;
         assert_eq!(value["event"]["category"], "system");
         assert_eq!(value["event"]["action"], "start");
         assert_eq!(value["event"]["outcome"], "success");
@@ -2665,27 +2614,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_delivery_rejects_configured_but_undeliverable_channel() {
-        // review: a configured input-only channel (mqtt is a fan-in
-        // listener whose Channel::send is a no-op) must not pass heartbeat
-        // validation just because its table exists. Otherwise the validator
-        // claims a target the delivery surface silently drops.
-        let mut config = Config::default();
-        config.heartbeat.target = Some("mqtt".into());
-        config.heartbeat.to = Some("ops/heartbeat".into());
-        config
-            .channels
-            .mqtt
-            .insert("default".to_string(), Default::default());
-
-        let err = resolve_heartbeat_delivery(&config).unwrap_err();
-        assert!(
-            err.to_string().contains("input-only channel"),
-            "expected input-only rejection, got: {err}"
-        );
-    }
-
-    #[test]
     fn resolve_delivery_rejects_voice_duplex_target() {
         // review: voice_duplex has a configured table and a WebSocket
         // event protocol but no Channel::send outbound path, so a heartbeat
@@ -2963,6 +2891,47 @@ mod tests {
         assert!(
             component["last_error"].is_null(),
             "scheduler must have no last_error after cooperative shutdown; got: {component}"
+        );
+    }
+
+    /// A daemon boot must not create `<data_dir>/control_plane.db` (Wall 4,
+    /// issue 197): the durable control-plane is deleted, so no boot path can open
+    /// or create the store. Discrimination against the pre-slice trees is
+    /// recorded on the wall-4 PR: the equivalent assertion (including a
+    /// `control_plane().is_none()` probe, possible while the module existed)
+    /// ran RED against the slice-1 base's boot block and GREEN here.
+    #[tokio::test]
+    async fn daemon_boot_creates_no_control_plane_db() {
+        use tokio::time::{Duration, timeout};
+
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let mut registry = DaemonRegistry::new();
+        registry.register_gateway(Box::new(
+            |_host, _port, _config, _event_tx, reload_controls, _tui_reg| {
+                Box::pin(async move {
+                    let reload_tx = reload_controls
+                        .map(|controls| controls.reload_tx)
+                        .expect("daemon should pass reload controls to gateway starter");
+                    reload_tx.send(true).expect("send reload signal");
+                    std::future::pending::<Result<()>>().await
+                })
+            },
+        ));
+
+        let exit = timeout(
+            Duration::from_secs(2),
+            run(config, "127.0.0.1".to_string(), 4243, registry, false),
+        )
+        .await
+        .expect("daemon should return after gateway-triggered reload")
+        .expect("daemon run should succeed");
+        assert_eq!(exit, DaemonExit::Reload);
+
+        assert!(
+            !tmp.path().join("data").join("control_plane.db").exists(),
+            "a daemon boot must not create the control-plane DB; \
+             durable task truth is Tachi's through the bridge (#205 annex rows 1/6)"
         );
     }
 

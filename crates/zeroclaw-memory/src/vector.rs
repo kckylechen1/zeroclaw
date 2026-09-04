@@ -46,11 +46,10 @@ pub fn vec_to_bytes(v: &[f32]) -> Vec<u8> {
 /// Deserialize bytes to f32 vector (little-endian)
 pub fn bytes_to_vec(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|chunk| {
-            let arr: [u8; 4] = chunk.try_into().unwrap_or([0; 4]);
-            f32::from_le_bytes(arr)
-        })
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&chunk| f32::from_le_bytes(chunk))
         .collect()
 }
 
@@ -337,6 +336,28 @@ mod tests {
         let bytes = vec![1u8, 2, 3];
         let result = bytes_to_vec(&bytes);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn bytes_to_vec_discriminators() {
+        // 1. Length 0
+        assert_eq!(bytes_to_vec(&[]), Vec::<f32>::new());
+
+        // 2. Length exact multiple of 4
+        let floats = vec![1.0f32, 2.5f32, -3.75f32];
+        let bytes = vec_to_bytes(&floats);
+        assert_eq!(bytes_to_vec(&bytes), floats);
+
+        // 3. Length not a multiple of 4 (1, 2, 3 bytes)
+        assert_eq!(bytes_to_vec(&[1]), Vec::<f32>::new());
+        assert_eq!(bytes_to_vec(&[1, 2]), Vec::<f32>::new());
+        assert_eq!(bytes_to_vec(&[1, 2, 3]), Vec::<f32>::new());
+
+        // 4. Trailing bytes ignored, no artificial padding, no panic, byte equivalence
+        let mut bytes_with_trailing = vec_to_bytes(&[1.0f32, 2.0f32]);
+        bytes_with_trailing.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        let result = bytes_to_vec(&bytes_with_trailing);
+        assert_eq!(result, vec![1.0f32, 2.0f32]);
     }
 
     #[test]

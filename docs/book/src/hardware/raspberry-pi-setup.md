@@ -225,7 +225,7 @@ podman run --rm -d \
 
 </div>
 
-> **Bind gotcha:** ZeroClaw defaults to `127.0.0.1` for the gateway. Inside a container that means the gateway is unreachable from the host. Always pass `--host 0.0.0.0` (or set `ZEROCLAW_BIND=0.0.0.0`) when running in a container.
+> **Bind gotcha:** ZeroClaw defaults to `127.0.0.1` for the gateway. Inside a container that means the gateway is unreachable from the host. Always pass `--host 0.0.0.0` (or set `ZEROCLAW_gateway__host=0.0.0.0`) when running in a container.
 
 ### Running as a systemd unit via Quadlet
 
@@ -242,7 +242,7 @@ Wants=network-online.target
 Image=ghcr.io/zeroclaw-labs/zeroclaw:latest
 ContainerName=zeroclaw
 PublishPort=42617:42617
-Environment=ZEROCLAW_BIND=0.0.0.0
+Environment=ZEROCLAW_gateway__host=0.0.0.0
 Exec=daemon --host 0.0.0.0 --port 42617
 Volume=zeroclaw-data:/root/.zeroclaw
 
@@ -355,7 +355,7 @@ If you want skills to drive GPIO pins (LEDs, buttons, sensors, etc.):
 - **Pre-built binary "Exec format error":** architecture mismatch. `uname -m` and grab the matching binary (`aarch64` = 64-bit, `armv7l` = 32-bit).
 - **GPIO permission denied:** you are not in the `gpio` group; `sudo usermod -aG gpio $USER`, then re-login.
 - **Service won't start after reboot:** `loginctl enable-linger $USER` so the user service survives logout.
-- **Container can't reach gateway from host:** the gateway binds `127.0.0.1`; pass `--host 0.0.0.0` (or `ZEROCLAW_BIND=0.0.0.0`).
+- **Container can't reach gateway from host:** the gateway binds `127.0.0.1`; pass `--host 0.0.0.0` (or `ZEROCLAW_gateway__host=0.0.0.0`).
 
 ## Performance tips
 

@@ -49,23 +49,23 @@ Credential setup differs per provider and each has its own encrypted secret; bot
 
 ## Events & routing
 
-Beyond conversation, the channel normalizes repository activity into typed events and routes each event type per config. Routing an event to a `sop` dispatches it to a [Standard Operating Procedure](../sop/index.md), a deterministic, auditable procedure with trigger matching and approval gates. The [Git SOP fan-in](../sop/fan-in/git.md) page details exactly how a forge event becomes a SOP run.
+Beyond conversation, the channel normalizes repository activity into typed events and routes each event type per config. A former `sop` route target dispatched events into the SOP run side (trigger matching, approval gates, audited runs); that target was retired with the run side and is a parse-time tombstone in config. The [Git SOP fan-in](../sop/fan-in/git.md) page is kept as the historical description of how a forge event became a SOP run.
 
 | Event type | Example route | Result |
 | --- | --- | --- |
-| `pull_request.opened` | `sop` = `pr-triage` | Dispatches the PR payload to the `pr-triage` SOP. |
-| `issues.opened` | `sop` = `issue-triage` | Dispatches the issue payload to the `issue-triage` SOP. |
+| `pull_request.opened` | `message` = `true` | Delivers the PR payload to the normal conversational agent loop. (A former `sop` route target dispatched it into the removed SOP run side.) |
+| `issues.opened` | `message` = `true` | Delivers the issue payload to the normal conversational agent loop. |
 | `issue_comment.created` | `message` = `true` | Delivers the comment to the normal conversational agent loop. |
-| `workflow_run.failed` | `sop` = `ci-failure` | Dispatches the CI failure payload to SOP ingress. |
+| `workflow_run.failed` | `message` = `true` | Delivers the CI failure payload to the normal agent loop. (The former `sop` route into SOP ingress was removed with the run side.) |
 | `release.published` | `message` = `true` | Delivers the release event to the normal agent loop. |
 
 Known event types: `issue_comment.created`, `issues.opened`, `pull_request.opened`, `pull_request.closed`, `pull_request.merged`, `pull_request_review_comment.created`, `workflow_run.completed`, `workflow_run.failed`, `release.published`.
 
-- **Defaults.** With no `events` table, the channel behaves conversationally: `issue_comment.created`, `issues.opened`, and `pull_request.opened` are delivered as messages (mention-gated as described above); everything else is ignored. Event types absent from a non-empty table get the same per-type defaults: listing `workflow_run.failed` doesn't turn conversation off. An entry with neither `message = true` nor a `sop` explicitly disables that event type.
+- **Defaults.** With no `events` table, the channel behaves conversationally: `issue_comment.created`, `issues.opened`, and `pull_request.opened` are delivered as messages (mention-gated as described above); everything else is ignored. Event types absent from a non-empty table get the same per-type defaults: listing `workflow_run.failed` doesn't turn conversation off. An entry without `message = true` disables that event type. (The former `sop` route key was removed with the run side and now fails config parse with a migration message.)
 - **Routing an event type is subscribing to it.** The channel derives which API endpoints to poll from the table: review comments, releases, and Actions runs are only fetched when their event types are routed, so an unconfigured channel costs exactly what it did before. GitHub currently covers every listed event type; the Gitea/Forgejo provider covers issue comments, issue/PR openings, PR close/merge transitions, releases, replies, edits, deletes, and reactions.
-- **`sop` routing.** A `sop` route emits a channel-sourced SOP event with topic `git.<alias>:<event_type>` and a structured JSON payload. The routed event is consumed by SOP ingress rather than delivered as chat. Match it from `SOP.toml` with a `channel` trigger whose topic is the Git event topic, for example `git.main:pull_request.opened`; use an optional condition such as `$.repo == "octo/repo"` to narrow the SOP to one repository.
-- **Mention gating per route.** The `mention_only` gate applies to conversational events on the message path. `sop`-routed events skip it: a PR routed to `pr-triage` is captured whether or not the author mentioned the app. Lifecycle/CI/release events have no mention surface and are never gated. The app's own activity is always dropped; other bots' activity follows `listen_to_bots`; every delivery passes the peer-group allowlist on the author's login.
-- **Reply surfaces.** Comment, issue, and PR events reply onto their issue/PR thread. Workflow-run events reply onto the run's associated PR when the forge reports one; otherwise, and for releases, the target is the bare repository and the agent cannot reply on-platform (route those to a SOP or act through other tools).
+- **`sop` routing (removed).** A former `sop` route emitted a channel-sourced SOP event with topic `git.<alias>:<event_type>` and a structured JSON payload, consumed by SOP ingress rather than delivered as chat. Removed with the run side: the key now fails config parse with a migration message. The [Git SOP fan-in](../sop/fan-in/git.md) page keeps the historical topic, payload, and condition details.
+- **Mention gating per route.** The `mention_only` gate applies to conversational events on the message path. Lifecycle/CI/release events have no mention surface and are never gated. The app's own activity is always dropped; other bots' activity follows `listen_to_bots`; every delivery passes the peer-group allowlist on the author's login.
+- **Reply surfaces.** Comment, issue, and PR events reply onto their issue/PR thread. Workflow-run events reply onto the run's associated PR when the forge reports one; otherwise, and for releases, the target is the bare repository and the agent cannot reply on-platform (act through other tools).
 - **Events API backbone (optional, GitHub).** `events_backbone = true` additionally polls `/repos/{owner}/{repo}/events` with ETag-conditional requests (one request per repo per tick; an idle repo answers 304 and costs almost nothing). Caveats: the feed lags by up to ~5 minutes, payloads are trimmed, and **Actions events never appear in it**: workflow runs always use their dedicated endpoint. Anything surfaced by both the feed and a targeted endpoint is de-duplicated, so it's safe to combine. Gitea/Forgejo ignore this option today.
 
 ## Operating notes
@@ -82,5 +82,5 @@ Issues and PR comments on public repositories are adversarial input. Keep `menti
 - **Set up credentials:** [Creating a GitHub App](./git-github-app.md) · [Creating a Gitea / Forgejo token (Codeberg)](./git-gitea-forgejo.md)
 - **Who can reach the agent:** [Peer Groups](./peer-groups.md)
 - **What the agent may do:** [Security & Autonomy](../security/overview.md) · [Autonomy levels](../security/autonomy.md)
-- **Event-driven automation:** [Standard Operating Procedures](../sop/index.md) · [Git SOP fan-in](../sop/fan-in/git.md)
+- **Event-driven automation (historical):** the `sop` route target was removed with the run side; [Git SOP fan-in](../sop/fan-in/git.md) keeps the retired wiring, and [Standard Operating Procedures](../sop/index.md) documents the definition format that remains.
 - **The bigger picture:** [Agents](../agents/overview.md) · [Channels overview](./overview.md)

@@ -1,7 +1,6 @@
 //! Tool subsystem for agent-callable capabilities.
 
 pub mod attribution;
-pub(crate) mod coding_cli_executor;
 pub mod cron_add;
 pub(crate) mod cron_common;
 pub mod cron_list;
@@ -9,7 +8,6 @@ pub mod cron_remove;
 pub mod cron_run;
 pub mod cron_runs;
 pub mod cron_update;
-pub mod delegate;
 pub mod file_read;
 pub mod model_switch;
 pub mod param_options;
@@ -25,13 +23,6 @@ pub mod shell;
 pub mod skill_http;
 pub mod skill_manage;
 pub mod skill_tool;
-pub mod sop_advance;
-pub mod sop_approve;
-pub mod sop_execute;
-pub mod sop_list;
-pub mod sop_status;
-pub mod sop_workshop;
-pub mod spawn_subagent;
 pub mod todo_write;
 pub mod verifiable_intent;
 
@@ -40,18 +31,14 @@ pub use zeroclaw_tools::ask_user::AskUserTool;
 pub use zeroclaw_tools::ask_user::ChannelMapHandle;
 pub use zeroclaw_tools::backup_tool::BackupTool;
 pub use zeroclaw_tools::browser::{BrowserTool, ComputerUseConfig};
-pub use zeroclaw_tools::browser_delegate::BrowserDelegateTool;
 pub use zeroclaw_tools::browser_open::BrowserOpenTool;
 pub use zeroclaw_tools::calculator::CalculatorTool;
 pub use zeroclaw_tools::canvas::{ALLOWED_CONTENT_TYPES, MAX_CONTENT_SIZE};
 pub use zeroclaw_tools::canvas::{CanvasStore, CanvasTool};
 pub use zeroclaw_tools::channel_room::ChannelRoomTool;
-pub use zeroclaw_tools::claude_code::ClaudeCodeTool;
-pub use zeroclaw_tools::claude_code_runner::ClaudeCodeRunnerTool;
-pub use zeroclaw_tools::cli_discovery::{DiscoveredCli, discover_cli_tools};
 pub use zeroclaw_tools::cloud_ops::CloudOpsTool;
 pub use zeroclaw_tools::cloud_patterns::CloudPatternsTool;
-pub use zeroclaw_tools::codex_cli::CodexCliTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::composio::ComposioTool;
 pub use zeroclaw_tools::content_search::ContentSearchTool;
 pub use zeroclaw_tools::data_management::DataManagementTool;
@@ -64,19 +51,24 @@ pub use zeroclaw_tools::file_edit::FileEditTool;
 pub use zeroclaw_tools::file_upload::FileUploadTool;
 pub use zeroclaw_tools::file_upload_bundle::FileUploadBundleTool;
 pub use zeroclaw_tools::file_write::FileWriteTool;
-pub use zeroclaw_tools::gemini_cli::GeminiCliTool;
 pub use zeroclaw_tools::git_forge::GitForgeTool;
 pub use zeroclaw_tools::git_operations::GitOperationsTool;
 pub use zeroclaw_tools::glob_search::GlobSearchTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::google_workspace::GoogleWorkspaceTool;
+#[cfg(feature = "hardware-tools")]
 pub use zeroclaw_tools::hardware_board_info::HardwareBoardInfoTool;
+#[cfg(feature = "hardware-tools")]
 pub use zeroclaw_tools::hardware_memory_map::HardwareMemoryMapTool;
+#[cfg(feature = "hardware-tools")]
 pub use zeroclaw_tools::hardware_memory_read::HardwareMemoryReadTool;
 pub use zeroclaw_tools::http_request::HttpRequestTool;
 pub use zeroclaw_tools::image_gen::ImageGenTool;
 pub use zeroclaw_tools::image_info::ImageInfoTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::jira_tool::JiraTool;
 pub use zeroclaw_tools::knowledge_tool::KnowledgeTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::linkedin::LinkedInTool;
 pub use zeroclaw_tools::llm_task::LlmTaskTool;
 pub use zeroclaw_tools::mcp_client::{McpRegistry, McpServer};
@@ -93,14 +85,16 @@ pub use zeroclaw_tools::memory_forget::MemoryForgetTool;
 pub use zeroclaw_tools::memory_purge::MemoryPurgeTool;
 pub use zeroclaw_tools::memory_recall::MemoryRecallTool;
 pub use zeroclaw_tools::memory_store::MemoryStoreTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::microsoft365::Microsoft365Tool;
 pub use zeroclaw_tools::model_routing_config::ModelRoutingConfigTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::notion_tool::NotionTool;
-pub use zeroclaw_tools::opencode_cli::OpenCodeCliTool;
 pub use zeroclaw_tools::pipeline::PipelineTool;
 pub use zeroclaw_tools::poll::PollTool;
 pub use zeroclaw_tools::project_intel::ProjectIntelTool;
 pub use zeroclaw_tools::proxy_config::ProxyConfigTool;
+#[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::pushover::PushoverTool;
 pub use zeroclaw_tools::reaction::ReactionTool;
 pub use zeroclaw_tools::report_template_tool::ReportTemplateTool;
@@ -130,7 +124,6 @@ pub use cron_remove::CronRemoveTool;
 pub use cron_run::CronRunTool;
 pub use cron_runs::CronRunsTool;
 pub use cron_update::CronUpdateTool;
-pub use delegate::DelegateTool;
 pub use file_read::FileReadTool;
 pub use model_switch::ModelSwitchTool;
 pub use read_skill::ReadSkillTool;
@@ -140,13 +133,6 @@ pub use send_message_to_peer::SendMessageToPeerTool;
 pub use shell::ShellTool;
 pub use skill_http::SkillHttpTool;
 pub use skill_tool::{SkillBuiltinTool, SkillShellTool};
-pub use sop_advance::SopAdvanceTool;
-pub use sop_approve::SopApproveTool;
-pub use sop_execute::SopExecuteTool;
-pub use sop_list::SopListTool;
-pub use sop_status::SopStatusTool;
-pub use sop_workshop::SopWorkshopTool;
-pub use spawn_subagent::SpawnSubagentTool;
 pub use todo_write::TodoWriteTool;
 pub use verifiable_intent::VerifiableIntentTool;
 
@@ -154,25 +140,23 @@ pub use verifiable_intent::VerifiableIntentTool;
 /// per-turn duplicate-call guard: launching several with the same prompt
 /// (redundancy, sampling, fan-out) is intentional, not an accidental
 /// repeat. Unioned with config-provided exemptions in the tool-call loop.
-pub const REENTRANT_AGENT_TOOLS: &[&str] = &[SpawnSubagentTool::NAME, DelegateTool::NAME];
+pub const REENTRANT_AGENT_TOOLS: &[&str] = &[
+    // `spawn_subagent` retired from this list with the spawn_subagent wall;
+    // the V1 entrypoint is the surviving re-entrant spawn surface.
+    crate::subagent_v1::ReasoningSubagentTool::NAME,
+];
 
 use crate::platform::{NativeRuntime, RuntimeAdapter};
 use crate::security::{SecurityPolicy, create_sandbox};
-use crate::sop::audit::SopAuditLogger;
-use crate::sop::engine::SopEngine;
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use zeroclaw_config::schema::{AliasedAgentConfig, Config};
 use zeroclaw_memory::Memory;
 
 pub type PerToolChannelHandle =
     Arc<RwLock<HashMap<String, Arc<dyn zeroclaw_api::channel::Channel>>>>;
-
-/// Shared handle to the delegate tool's parent-tools list.
-/// Callers can push additional tools (e.g. MCP wrappers) after construction.
-pub type DelegateParentToolsHandle = Arc<RwLock<Vec<Arc<dyn Tool>>>>;
 
 /// Thin wrapper that makes an `Arc<dyn Tool>` usable as `Box<dyn Tool>`.
 pub struct ArcToolRef(pub Arc<dyn Tool>);
@@ -210,13 +194,6 @@ impl Tool for ArcToolRef {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         self.0.execute(args).await
     }
-}
-
-fn any_coding_cli_tool_enabled(root_config: &Config) -> bool {
-    root_config.claude_code.enabled
-        || root_config.codex_cli.enabled
-        || root_config.gemini_cli.enabled
-        || root_config.opencode_cli.enabled
 }
 
 #[derive(Clone)]
@@ -457,9 +434,61 @@ pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
     ("File System", "Read/write files"),
     ("Weather", "Forecasts & conditions (wttr.in)"),
     (
-        "Spawn SubAgent",
-        "Spawn an ephemeral SubAgent that inherits this agent's identity",
+        "Reasoning SubAgent",
+        "Run one bounded, contract-admitted reasoning child (V1 entry point)",
     ),
+];
+
+/// The registry's reasoning-spawn construction site. Single point where the
+/// run's spawn lineage (SA-9) is threaded into the surviving spawn-capable
+/// tool, so `registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth`
+/// can discriminate a dropped thread-through.
+fn reasoning_spawn_tool_for_registry(
+    root_config: &zeroclaw_config::schema::Config,
+    agent_alias: &str,
+    security: &Arc<SecurityPolicy>,
+    spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
+) -> crate::subagent_v1::ReasoningSubagentTool {
+    crate::subagent_v1::ReasoningSubagentTool::new(
+        Arc::new(root_config.clone()),
+        agent_alias,
+        security.clone(),
+    )
+    .with_lineage(spawn_lineage)
+}
+
+/// Tool names retired from the ordinary model-visible registry. No assembly
+/// path may register them and no plugin may claim the names. Most entries
+/// keep their implementations compiled (operator surfaces and tests
+/// construct them directly); the SOP run tools below were deleted outright
+/// with the legacy run side. Kept as one list so the registry totality test
+/// and the plugin collision guard assert the same set.
+#[cfg(any(test, feature = "plugins-wasm"))]
+pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
+    "model_routing_config",
+    "model_switch",
+    "proxy_config",
+    "security_ops",
+    "backup",
+    "data_management",
+    "sop_execute",
+    "sop_advance",
+    "sop_approve",
+    "sop_status",
+    "sop_list",
+    "sop_workshop",
+    "delegate",
+    // spawn_subagent wall: the legacy full-Parent-inheritance spawn entry
+    // (same-alias child, full `Arc<Config>` clone, parent memory UUID) —
+    // retired; `reasoning_subagent` is the single spawn surface.
+    "spawn_subagent",
+    // Wall 2 prune epic: Parent-visible raw harness/vendor launch surfaces.
+    "claude_code",
+    "claude_code_runner",
+    "codex_cli",
+    "gemini_cli",
+    "opencode_cli",
+    "browser_delegate",
 ];
 
 /// Bundled return values from tool registry construction.
@@ -468,7 +497,6 @@ pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
 #[allow(clippy::type_complexity)]
 pub struct AllToolsResult {
     pub tools: Vec<Box<dyn Tool>>,
-    pub delegate_handle: Option<DelegateParentToolsHandle>,
     pub ask_user_handle: Option<PerToolChannelHandle>,
     pub channel_room_handle: Option<PerToolChannelHandle>,
     pub reaction_handle: PerToolChannelHandle,
@@ -497,8 +525,12 @@ pub fn all_tools(
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
-    agents: &HashMap<String, AliasedAgentConfig>,
-    fallback_api_key: Option<&str>,
+    // Formerly the delegate tool's agent roster / parent fallback key.
+    // `delegate` is retired (wall 1); the parameters stay in the
+    // signature (underscored, intentionally unused) so call sites do not
+    // churn and the registry contract is unchanged for callers.
+    _agents: &HashMap<String, AliasedAgentConfig>,
+    _fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
     canvas_store: Option<CanvasStore>,
     is_subagent_caller: bool,
@@ -517,13 +549,14 @@ pub fn all_tools(
         http_config,
         web_fetch_config,
         workspace_dir,
-        agents,
-        fallback_api_key,
+        _agents,
+        _fallback_api_key,
         root_config,
         canvas_store,
         is_subagent_caller,
         tui_env,
-        None,
+        // No runtime adapter / live-config here; and no lineage —
+        // callers of the non-runtime variant are top-level origins.
         None,
         None,
     )
@@ -562,34 +595,44 @@ pub fn all_tools_with_runtime(
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
-    agents: &HashMap<String, AliasedAgentConfig>,
-    fallback_api_key: Option<&str>,
+    // Formerly the delegate tool's agent roster / parent fallback key.
+    // `delegate` is retired (wall 1); the parameters stay in the
+    // signature (underscored, intentionally unused) so call sites do not
+    // churn and the registry contract is unchanged for callers.
+    _agents: &HashMap<String, AliasedAgentConfig>,
+    _fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
     canvas_store: Option<CanvasStore>,
-    is_subagent_caller: bool,
+    // Formerly the legacy `spawn_subagent` tool's depth-1 self-cap flag.
+    // `spawn_subagent` is retired (spawn_subagent wall); the parameter
+    // stays in the signature (underscored, intentionally unused) so call
+    // sites do not churn and the registry contract is unchanged for
+    // callers.
+    _is_subagent_caller: bool,
     tui_env: Option<HashMap<String, String>>,
-    sop_engine: Option<Arc<Mutex<SopEngine>>>,
-    sop_audit: Option<Arc<SopAuditLogger>>,
     // Live config handle for `send_via` peer-group authority. `Some` from the
     // channel daemon (so reloads take effect); `None` for one-shot / non-channel
     // callers, which fall back to a snapshot of `root_config`.
     live_config: Option<Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>>,
+    // Unified spawn lineage (SA-9): the lineage of the run this registry
+    // is being built for. Spawn-capable tools constructed here carry it,
+    // so depth survives registry rebuilds (SA-11) and hops stay on one
+    // ledger (SA-10). `None` for top-level origins (the run mints a
+    // root) and legacy test callers.
+    spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 ) -> AllToolsResult {
-    let has_shell_access = runtime.has_shell_access();
     let persistent_writes = runtime.has_filesystem_access();
-    let register_coding_cli_tools = has_shell_access && persistent_writes;
+    // Composio credentials are only consumed when the SaaS family is compiled
+    // in; the parameters stay part of the stable signature for both builds.
+    #[cfg(not(feature = "integrations-saas"))]
+    let _ = (composio_key, composio_entity_id);
+    // `has_shell_access` gates only the SaaS-family gws integration now; the
+    // raw launcher registrations that consumed it unconditionally are retired.
+    #[cfg(feature = "integrations-saas")]
+    let has_shell_access = runtime.has_shell_access();
     let runtime_kind = root_config.runtime.kind.as_wire();
     let sandbox_cfg = risk_profile.sandbox_config();
     let sandbox = create_sandbox(&sandbox_cfg, runtime_kind, Some(&security.workspace_dir));
-    let coding_cli_executor = coding_cli_executor::RuntimeCodingCliExecutor::shared(
-        runtime.clone(),
-        sandbox.clone(),
-        root_config.runtime.kind == zeroclaw_config::schema::RuntimeKind::Native,
-    );
-    // Keep a shared runtime adapter available after constructing ShellTool.
-    // Independent agentic delegates use it later to build the target-owned tool
-    // registry; bounded delegates continue to use the parent `tool_arcs`
-    // snapshot below.
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
         Arc::new(RateLimitedTool::new(
             PathGuardedTool::new(
@@ -662,40 +705,45 @@ pub fn all_tools_with_runtime(
             root_config.clone(),
             agent_alias,
         )),
-        Arc::new(
-            SpawnSubagentTool::new(Arc::new(root_config.clone()), agent_alias, security.clone())
-                .with_subagent_caller(is_subagent_caller),
-        ),
+        Arc::new(reasoning_spawn_tool_for_registry(
+            root_config,
+            agent_alias,
+            security,
+            spawn_lineage.clone(),
+        )),
         Arc::new(SendMessageToPeerTool::new(
             Arc::new(root_config.clone()),
             agent_alias,
         )),
-        Arc::new(ModelRoutingConfigTool::new(
-            config.clone(),
-            security.clone(),
-        )),
-        Arc::new(ModelSwitchTool::new(security.clone(), config.clone())),
-        Arc::new(ProxyConfigTool::new(config.clone(), security.clone())),
+        // Operator/admin tools are deliberately absent from this registry:
+        // model_routing_config, model_switch, and proxy_config mutate
+        // routing/proxy state whose authority is operator-level. The
+        // trusted surfaces are the gateway config API
+        // (PUT/DELETE /api/config...) for routing and proxy config, the
+        // channel `/model` command for runtime model switching, and
+        // startup application of persisted proxy config. The tool
+        // implementations stay compiled and are re-exported below; they
+        // are simply never handed to the model.
         Arc::new(GitOperationsTool::new(
             security.clone(),
             workspace_dir.to_path_buf(),
         )),
-        Arc::new(PushoverTool::new(
-            security.clone(),
-            workspace_dir.to_path_buf(),
-        )),
-        Arc::new(CalculatorTool::new()),
-        Arc::new(WeatherTool::new()),
-        Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())),
-        Arc::new(TodoWriteTool::new()),
     ];
 
-    // A SubAgent runs as an ephemeral clone of its parent and inherits the
-    // parent's model verbatim; it must not be able to switch the active
-    // model out from under the parent (the switch signal is process-wide).
-    if is_subagent_caller {
-        tool_arcs.retain(|tool| tool.name() != ModelSwitchTool::NAME);
-    }
+    // Pushover notifications are part of the SaaS integration family: only
+    // registered when the family is compiled in. Pushed here — between the
+    // git tool and the calculator group — so the full build keeps the exact
+    // registry position it had before the feature gate.
+    #[cfg(feature = "integrations-saas")]
+    tool_arcs.push(Arc::new(PushoverTool::new(
+        security.clone(),
+        workspace_dir.to_path_buf(),
+    )));
+
+    tool_arcs.push(Arc::new(CalculatorTool::new()));
+    tool_arcs.push(Arc::new(WeatherTool::new()));
+    tool_arcs.push(Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())));
+    tool_arcs.push(Arc::new(TodoWriteTool::new()));
 
     // Register discord_search if any configured Discord alias has
     // archive enabled. Multiple Discord aliases are supported (one per
@@ -840,22 +888,6 @@ pub fn all_tools_with_runtime(
     }
 
     // Browser delegation tool (conditionally registered; requires shell access)
-    if root_config.browser_delegate.enabled {
-        if has_shell_access {
-            tool_arcs.push(Arc::new(BrowserDelegateTool::new(
-                security.clone(),
-                root_config.browser_delegate.clone(),
-            )));
-        } else {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "browser_delegate: skipped registration because the current runtime does not allow shell access"
-            );
-        }
-    }
-
     if http_config.enabled {
         match HttpRequestTool::new_with_config(
             security.clone(),
@@ -946,6 +978,7 @@ pub fn all_tools_with_runtime(
     }
 
     // Notion API tool (conditionally registered)
+    #[cfg(feature = "integrations-saas")]
     if root_config.notion.enabled {
         let notion_api_key = if root_config.notion.api_key.trim().is_empty() {
             std::env::var("NOTION_API_KEY").unwrap_or_default()
@@ -965,6 +998,7 @@ pub fn all_tools_with_runtime(
     }
 
     // Jira integration (config-gated)
+    #[cfg(feature = "integrations-saas")]
     if root_config.jira.enabled {
         let api_token = if root_config.jira.api_token.trim().is_empty() {
             std::env::var("JIRA_API_TOKEN").unwrap_or_default()
@@ -1027,29 +1061,17 @@ pub fn all_tools_with_runtime(
         tool_arcs.push(Arc::new(ReportTemplateTool::new()));
     }
 
-    // MCSS Security Operations
-    if root_config.security_ops.enabled {
-        tool_arcs.push(Arc::new(SecurityOpsTool::new(
-            root_config.security_ops.clone(),
-        )));
-    }
-
-    // Backup tool (enabled by default)
-    if root_config.backup.enabled {
-        tool_arcs.push(Arc::new(BackupTool::new(
-            workspace_dir.to_path_buf(),
-            root_config.backup.include_dirs.clone(),
-            root_config.backup.max_keep,
-        )));
-    }
-
-    // Data management tool (disabled by default)
-    if root_config.data_retention.enabled {
-        tool_arcs.push(Arc::new(DataManagementTool::new(
-            workspace_dir.to_path_buf(),
-            root_config.data_retention.retention_days,
-        )));
-    }
+    // MCSS Security Operations: no longer registered as a model tool. The
+    // diagnostics module stays compiled; `security_ops.enabled` no longer
+    // admits it to any registry (the daemon notes the withheld section at
+    // boot and reload instead).
+    //
+    // Backup and data management: operator-only surfaces. The gateway
+    // operator API (`/api/agents/{alias}/backup*`,
+    // `/api/agents/{alias}/data-retention*`) dispatches to the same
+    // BackupTool / DataManagementTool command methods; the `[backup]` and
+    // `[data_retention]` sections keep configuring that surface, not a
+    // model tool.
 
     // Cloud operations advisory tools (read-only analysis)
     if root_config.cloud_ops.enabled {
@@ -1058,6 +1080,7 @@ pub fn all_tools_with_runtime(
     }
 
     // Google Workspace CLI (gws) integration — requires shell access
+    #[cfg(feature = "integrations-saas")]
     if root_config.google_workspace.enabled && has_shell_access {
         tool_arcs.push(Arc::new(GoogleWorkspaceTool::new(
             security.clone(),
@@ -1076,79 +1099,6 @@ pub fn all_tools_with_runtime(
                 .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
             "google_workspace: skipped registration because shell access is unavailable"
         );
-    }
-
-    if any_coding_cli_tool_enabled(root_config) && !register_coding_cli_tools {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "coding_cli: skipped registration because runtime shell or filesystem access is unavailable"
-        );
-    }
-
-    // Claude Code delegation tool
-    if register_coding_cli_tools && root_config.claude_code.enabled {
-        tool_arcs.push(Arc::new(RateLimitedTool::new(
-            ClaudeCodeTool::new_with_executor(
-                security.clone(),
-                root_config.claude_code.clone(),
-                coding_cli_executor.clone(),
-            ),
-            security.clone(),
-        )));
-    }
-
-    // Claude Code task runner with Slack progress and SSH handoff
-    if root_config.claude_code_runner.enabled {
-        let gateway_url = format!(
-            "http://{}:{}",
-            root_config.gateway.host, root_config.gateway.port
-        );
-        tool_arcs.push(Arc::new(RateLimitedTool::new(
-            ClaudeCodeRunnerTool::new(
-                security.clone(),
-                root_config.claude_code_runner.clone(),
-                gateway_url,
-            ),
-            security.clone(),
-        )));
-    }
-
-    // Codex CLI delegation tool
-    if register_coding_cli_tools && root_config.codex_cli.enabled {
-        tool_arcs.push(Arc::new(RateLimitedTool::new(
-            CodexCliTool::new_with_executor(
-                security.clone(),
-                root_config.codex_cli.clone(),
-                coding_cli_executor.clone(),
-            ),
-            security.clone(),
-        )));
-    }
-
-    // Gemini CLI delegation tool
-    if register_coding_cli_tools && root_config.gemini_cli.enabled {
-        tool_arcs.push(Arc::new(RateLimitedTool::new(
-            GeminiCliTool::new_with_executor(
-                security.clone(),
-                root_config.gemini_cli.clone(),
-                coding_cli_executor.clone(),
-            ),
-            security.clone(),
-        )));
-    }
-
-    // OpenCode CLI delegation tool
-    if register_coding_cli_tools && root_config.opencode_cli.enabled {
-        tool_arcs.push(Arc::new(RateLimitedTool::new(
-            OpenCodeCliTool::new_with_executor(
-                security.clone(),
-                root_config.opencode_cli.clone(),
-                coding_cli_executor.clone(),
-            ),
-            security.clone(),
-        )));
     }
 
     // Vision tools are always available
@@ -1171,6 +1121,7 @@ pub fn all_tools_with_runtime(
     }
 
     // LinkedIn integration (config-gated)
+    #[cfg(feature = "integrations-saas")]
     if root_config.linkedin.enabled {
         tool_arcs.push(Arc::new(LinkedInTool::new(
             security.clone(),
@@ -1239,40 +1190,7 @@ pub fn all_tools_with_runtime(
         Arc::clone(&poll_handle),
     )));
 
-    // SOP tools (registered when engine handle is provided)
-    if let Some(ref sop_engine) = sop_engine {
-        tool_arcs.push(Arc::new(SopListTool::new(Arc::clone(sop_engine))));
-        if let Some(ref sop_audit) = sop_audit {
-            tool_arcs.push(Arc::new(
-                SopExecuteTool::new(Arc::clone(sop_engine)).with_audit(Arc::clone(sop_audit)),
-            ));
-            tool_arcs.push(Arc::new(
-                SopAdvanceTool::new(Arc::clone(sop_engine)).with_audit(Arc::clone(sop_audit)),
-            ));
-            tool_arcs.push(Arc::new(
-                SopApproveTool::new(Arc::clone(sop_engine))
-                    .with_agent_alias(agent_alias)
-                    .with_audit(Arc::clone(sop_audit)),
-            ));
-        } else {
-            tool_arcs.push(Arc::new(SopExecuteTool::new(Arc::clone(sop_engine))));
-            tool_arcs.push(Arc::new(SopAdvanceTool::new(Arc::clone(sop_engine))));
-            tool_arcs.push(Arc::new(
-                SopApproveTool::new(Arc::clone(sop_engine)).with_agent_alias(agent_alias),
-            ));
-        }
-        tool_arcs.push(Arc::new(
-            SopStatusTool::new(Arc::clone(sop_engine))
-                .with_collector(crate::sop::SopMetricsCollector::shared()),
-        ));
-        if root_config.sop.procedural_memory_enabled {
-            tool_arcs.push(Arc::new(SopWorkshopTool::new(
-                Arc::clone(sop_engine),
-                workspace_dir.to_path_buf(),
-            )));
-        }
-    }
-
+    #[cfg(feature = "integrations-saas")]
     if let Some(key) = composio_key
         && !key.is_empty()
     {
@@ -1334,6 +1252,7 @@ pub fn all_tools_with_runtime(
     tool_arcs.push(Arc::new(escalate_tool));
 
     // Microsoft 365 Graph API integration
+    #[cfg(feature = "integrations-saas")]
     if root_config.microsoft365.enabled {
         let ms_cfg = &root_config.microsoft365;
         let tenant_id = ms_cfg
@@ -1362,10 +1281,10 @@ pub fn all_tools_with_runtime(
                         .with_outcome(::zeroclaw_log::EventOutcome::Failure),
                     "microsoft365: client_credentials auth_flow requires a non-empty client_secret"
                 );
+                apply_install_composition(&mut tool_arcs, root_config);
                 return AllToolsResult {
                     unfiltered_tool_arcs: tool_arcs.clone(),
                     tools: boxed_registry_from_arcs(tool_arcs),
-                    delegate_handle: None,
                     ask_user_handle,
                     channel_room_handle,
                     reaction_handle,
@@ -1437,54 +1356,11 @@ pub fn all_tools_with_runtime(
         }
     }
 
-    // Add delegation tool when agents are configured
-    let delegate_global_credential = fallback_api_key.and_then(|value| {
-        let trimmed_value = value.trim();
-        (!trimmed_value.is_empty()).then(|| trimmed_value.to_owned())
-    });
-    let provider_runtime_options =
-        zeroclaw_providers::provider_runtime_options_for_agent(root_config, agent_alias);
-
-    let delegate_handle: Option<DelegateParentToolsHandle> = if agents.is_empty() {
-        None
-    } else {
-        let delegate_agents: HashMap<String, AliasedAgentConfig> = agents
-            .iter()
-            .map(|(name, cfg)| (name.clone(), cfg.clone()))
-            .collect();
-        let parent_tools = Arc::new(RwLock::new(tool_arcs.clone()));
-        let delegate_tool = DelegateTool::new_with_options(
-            delegate_agents,
-            delegate_global_credential.clone(),
-            security.clone(),
-            provider_runtime_options.clone(),
-        )
-        .with_parent_tools(Arc::clone(&parent_tools))
-        .with_runtime(runtime.clone())
-        .with_multimodal_config(root_config.multimodal.clone())
-        .with_delegate_config(root_config.delegate.clone())
-        .with_workspace_dir(workspace_dir.to_path_buf())
-        .with_memory(memory.clone())
-        .with_providers_models({
-            let mut m: std::collections::HashMap<
-                String,
-                std::collections::HashMap<String, zeroclaw_config::schema::ModelProviderConfig>,
-            > = std::collections::HashMap::new();
-            for (t, a, base) in root_config.providers.models.iter_entries() {
-                m.entry(t.to_string())
-                    .or_default()
-                    .insert(a.to_string(), base.clone());
-            }
-            m
-        })
-        .with_risk_profiles(root_config.risk_profiles.clone())
-        .with_runtime_profiles(root_config.runtime_profiles.clone())
-        .with_skill_bundles(root_config.skill_bundles.clone())
-        .with_root_config(config.clone())
-        .with_caller_alias(agent_alias);
-        tool_arcs.push(Arc::new(delegate_tool));
-        Some(parent_tools)
-    };
+    // `delegate` is retired (wall 1): the legacy full-parent-inheritance
+    // delegation tool is no longer constructed on any composition. Its
+    // replacement-first surfaces are the V1 `reasoning_subagent` (minimal and
+    // full alike) and the Tachi bridge for durable/heavy work. The name stays
+    // reserved in RETIRED_OPERATOR_TOOL_NAMES so a plugin cannot ride it back.
 
     // `vi_verify` is deliberately absent while no chain verifier exists: it checked
     // caller-supplied constraints against a caller-supplied fulfillment with nothing
@@ -1520,6 +1396,12 @@ pub fn all_tools_with_runtime(
                     if root_config.pipeline.enabled {
                         registered_names.insert(PipelineTool::NAME.to_string());
                     }
+                    // Operator/admin tools retired from the model surface keep
+                    // their names reserved: a plugin must not be able to claim
+                    // `backup` or `proxy_config` and ride the retired name back
+                    // onto the provider wire.
+                    registered_names
+                        .extend(RETIRED_OPERATOR_TOOL_NAMES.iter().map(|s| s.to_string()));
                     let plugin_limits = zeroclaw_plugins::component::PluginLimits {
                         call_fuel: config.plugins.limits.call_fuel,
                         max_memory_bytes: config
@@ -1636,15 +1518,81 @@ pub fn all_tools_with_runtime(
     // Pipeline construction waits for ScopedToolRegistry::assemble(), where the
     // effective per-agent policy and optional caller allowlist are both known.
 
+    // The concrete SaaS integration family is not compiled into this build
+    // (the `integrations-saas` feature is off). Config sections still parse,
+    // so an install that enables one of these families must hear about the
+    // mismatch instead of silently losing the tool.
+    #[cfg(not(feature = "integrations-saas"))]
+    {
+        let enabled_but_absent = [
+            ("jira", root_config.jira.enabled),
+            ("notion", root_config.notion.enabled),
+            ("google_workspace", root_config.google_workspace.enabled),
+            ("microsoft365", root_config.microsoft365.enabled),
+            ("linkedin", root_config.linkedin.enabled),
+            ("composio", root_config.composio.enabled),
+        ];
+        for (family, enabled) in enabled_but_absent {
+            if enabled {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"integration": family})),
+                    "config enables an integration whose tool family is not compiled into this build (integrations-saas feature is off); skipping registration"
+                );
+            }
+        }
+    }
+
+    apply_install_composition(&mut tool_arcs, root_config);
+
     AllToolsResult {
         unfiltered_tool_arcs: tool_arcs.clone(),
         tools: boxed_registry_from_arcs(tool_arcs),
-        delegate_handle,
         ask_user_handle,
         channel_room_handle,
         reaction_handle,
         poll_handle: Some(poll_handle),
         escalate_handle,
+    }
+}
+
+/// Apply the install-wide composition cut to the assembled registry.
+///
+/// Under `composition = "minimal"` the registry is reduced to the explicit
+/// membership table (`zeroclaw_config::composition::MINIMAL_TOOL_MEMBERSHIP`)
+/// before anything derives from it — the boxed registry and the
+/// skill-elevation arcs both clone the filtered set — so no later stage can
+/// resurrect a built-in non-member (scoped assembly gates its own built-in
+/// appends the same way). Extension surfaces — MCP tools admitted by the
+/// effective policy and skill-defined tools — are not built-ins and stay
+/// governed by their own admission policies. An absent field keeps today's assembly: existing
+/// installs must not lose tools on upgrade. Individual `enabled = true`
+/// flags do not widen the minimal profile back; the exclusion is logged.
+fn apply_install_composition(
+    tool_arcs: &mut Vec<Arc<dyn Tool>>,
+    root_config: &zeroclaw_config::schema::Config,
+) {
+    use zeroclaw_config::composition::Composition;
+
+    if Composition::effective(root_config.composition) != Composition::Minimal {
+        return;
+    }
+    let before = tool_arcs.len();
+    tool_arcs.retain(|tool| Composition::is_minimal_member(tool.name()));
+    let dropped = before - tool_arcs.len();
+    if dropped > 0 {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({
+                    "dropped": dropped,
+                    "composition": "minimal"
+                })),
+            "Minimal composition excluded non-member tools from assembly"
+        );
     }
 }
 
@@ -1660,10 +1608,7 @@ fn claim_plugin_tool_name(
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use zeroclaw_config::schema::{
-        ApprovalGroupConfig, ApprovalPolicyConfig, BrowserConfig, Config, MemoryConfig,
-        SopApprovalConfig,
-    };
+    use zeroclaw_config::schema::{BrowserConfig, Config, MemoryConfig};
 
     #[tokio::test]
     async fn mcp_capability_tools_respect_policy() {
@@ -1727,6 +1672,21 @@ mod tests {
 
     #[cfg(feature = "plugins-wasm")]
     #[test]
+    fn retired_tool_names_stay_reserved_from_plugin_claims() {
+        let mut registered_names = RETIRED_OPERATOR_TOOL_NAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        for name in RETIRED_OPERATOR_TOOL_NAMES {
+            assert!(
+                !claim_plugin_tool_name(&mut registered_names, name),
+                "a plugin reclaimed retired tool name {name}"
+            );
+        }
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
     fn component_with_failed_metadata_probe_is_not_registered() {
         let tmp = TempDir::new().unwrap();
         let package_dir = tmp.path().join("plugins").join("metadata-probe");
@@ -1785,8 +1745,12 @@ mod tests {
         );
     }
 
+    /// Discrimination guard for the retired SOP run side: the
+    /// legacy agent-facing run tools must never re-enter the registry. Run
+    /// truth is Tachi-side (procedure_v1 seam); definitions have no tool
+    /// surface here.
     #[test]
-    fn sop_tools_absent_when_engine_not_provided() {
+    fn sop_run_tools_stay_retired_from_the_registry() {
         let tmp = TempDir::new().unwrap();
         let security = Arc::new(SecurityPolicy::default());
         let mem_cfg = MemoryConfig {
@@ -1827,241 +1791,28 @@ mod tests {
         .tools;
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
 
-        let sop_tool_names = [
+        let retired_sop_tools = [
             "sop_list",
             "sop_execute",
             "sop_advance",
             "sop_approve",
             "sop_status",
+            "sop_workshop",
         ];
-        for name in &sop_tool_names {
+        for name in &retired_sop_tools {
             assert!(
                 !names.contains(name),
-                "SOP tool '{name}' must not be registered when engine is absent"
-            );
-        }
-    }
-
-    #[test]
-    fn sop_tools_present_when_engine_provided() {
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-
-        let browser = BrowserConfig {
-            enabled: false,
-            allowed_domains: vec![],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
-        let http = zeroclaw_config::schema::HttpRequestConfig::default();
-        let cfg = test_config(&tmp);
-
-        // Build a minimal SOP engine — no sops_dir needed for this test.
-        let engine = Arc::new(Mutex::new(SopEngine::new(
-            zeroclaw_config::schema::SopConfig::default(),
-        )));
-
-        let tools = all_tools_with_runtime(
-            Arc::new(Config::default()),
-            &security,
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-            "test-agent",
-            Arc::new(NativeRuntime::new()),
-            mem,
-            None,
-            None,
-            &browser,
-            &http,
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-            Some(engine),
-            None,
-            None,
-        )
-        .tools;
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-
-        let sop_tool_names = [
-            "sop_list",
-            "sop_execute",
-            "sop_advance",
-            "sop_approve",
-            "sop_status",
-        ];
-        for name in &sop_tool_names {
-            assert!(
-                names.contains(name),
-                "SOP tool '{name}' must be registered when engine is provided"
-            );
-        }
-        assert!(
-            !names.contains(&"sop_workshop"),
-            "sop_workshop must stay opt-in while procedural memory is disabled"
-        );
-    }
-
-    struct CapturingRuntime {
-        seen_command: Arc<Mutex<Option<String>>>,
-        filesystem_access: bool,
-    }
-
-    impl RuntimeAdapter for CapturingRuntime {
-        fn name(&self) -> &str {
-            "capturing-test"
-        }
-        fn has_shell_access(&self) -> bool {
-            true
-        }
-        fn has_filesystem_access(&self) -> bool {
-            self.filesystem_access
-        }
-        fn storage_path(&self) -> std::path::PathBuf {
-            std::env::temp_dir()
-        }
-        fn supports_long_running(&self) -> bool {
-            false
-        }
-        fn build_shell_command(
-            &self,
-            command: &str,
-            workspace_dir: &std::path::Path,
-        ) -> anyhow::Result<tokio::process::Command> {
-            *self.seen_command.lock().unwrap() = Some(command.to_string());
-            let mut process = tokio::process::Command::new("/bin/sh");
-            process
-                .args(["-c", "printf '%s' \"$0\"", "zc-runtime"])
-                .current_dir(workspace_dir);
-            Ok(process)
-        }
-    }
-
-    #[tokio::test]
-    async fn registered_coding_cli_tools_use_configured_runtime_executor() {
-        type EnableCodingCli = fn(&mut Config);
-
-        let cases: [(&str, &str, EnableCodingCli); 4] = [
-            ("claude_code", "claude -p", |cfg: &mut Config| {
-                cfg.claude_code.enabled = true;
-                cfg.claude_code.timeout_secs = 5;
-            }),
-            ("codex_cli", "codex exec", |cfg: &mut Config| {
-                cfg.codex_cli.enabled = true;
-                cfg.codex_cli.timeout_secs = 5;
-            }),
-            ("gemini_cli", "gemini -p", |cfg: &mut Config| {
-                cfg.gemini_cli.enabled = true;
-                cfg.gemini_cli.timeout_secs = 5;
-            }),
-            ("opencode_cli", "opencode run", |cfg: &mut Config| {
-                cfg.opencode_cli.enabled = true;
-                cfg.opencode_cli.timeout_secs = 5;
-            }),
-        ];
-
-        for (tool_name, expected_fragment, enable) in cases {
-            let tmp = TempDir::new().unwrap();
-            let security = Arc::new(SecurityPolicy {
-                autonomy: crate::security::AutonomyLevel::Full,
-                workspace_dir: tmp.path().to_path_buf(),
-                ..SecurityPolicy::default()
-            });
-            let mem_cfg = MemoryConfig {
-                backend: "markdown".into(),
-                ..MemoryConfig::default()
-            };
-            let mem: Arc<dyn Memory> =
-                Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-            let browser = BrowserConfig {
-                enabled: false,
-                ..BrowserConfig::default()
-            };
-            let mut cfg = test_config(&tmp);
-            cfg.runtime.kind = zeroclaw_config::schema::RuntimeKind::Docker;
-            cfg.claude_code.enabled = false;
-            cfg.codex_cli.enabled = false;
-            cfg.gemini_cli.enabled = false;
-            cfg.opencode_cli.enabled = false;
-            enable(&mut cfg);
-            let risk = zeroclaw_config::schema::RiskProfileConfig {
-                sandbox_enabled: Some(false),
-                sandbox_backend: Some("none".to_string()),
-                ..zeroclaw_config::schema::RiskProfileConfig::default()
-            };
-            let seen_command = Arc::new(Mutex::new(None));
-
-            let tools = all_tools_with_runtime(
-                Arc::new(cfg.clone()),
-                &security,
-                &risk,
-                "test-agent",
-                Arc::new(CapturingRuntime {
-                    seen_command: Arc::clone(&seen_command),
-                    filesystem_access: true,
-                }),
-                mem,
-                None,
-                None,
-                &browser,
-                &zeroclaw_config::schema::HttpRequestConfig::default(),
-                &zeroclaw_config::schema::WebFetchConfig::default(),
-                tmp.path(),
-                &HashMap::new(),
-                None,
-                &cfg,
-                None,
-                false,
-                None,
-                None,
-                None,
-                None,
-            )
-            .tools;
-            let tool = tools
-                .iter()
-                .find(|tool| tool.name() == tool_name)
-                .unwrap_or_else(|| panic!("{tool_name} should register"));
-
-            let result = tool
-                .execute(serde_json::json!({"prompt": "route through runtime"}))
-                .await
-                .unwrap_or_else(|error| panic!("{tool_name} should return a tool result: {error}"));
-
-            assert!(
-                result.success,
-                "{tool_name} unexpected error: {:?}",
-                result.error
-            );
-            assert_eq!(result.output.trim(), "zc-runtime");
-            let command = seen_command
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or_else(|| panic!("registry-wired {tool_name} should call runtime"));
-            assert!(
-                command.contains(expected_fragment),
-                "{tool_name} command was {command:?}"
-            );
-            assert!(
-                command.contains("route through runtime"),
-                "{tool_name} command was {command:?}"
+                "legacy SOP run tool '{name}' is retired; the registry must not re-admit it"
             );
         }
     }
 
     #[tokio::test]
-    async fn docker_without_workspace_mount_does_not_register_coding_cli_tools() {
+    async fn retired_raw_launcher_tools_never_register_even_when_enabled() {
+        // Wall 2 raw-launcher retirement: the Parent-visible raw harness/vendor
+        // launch tools are retired together with their config sections. No
+        // registry path may re-admit them; harness execution goes through the
+        // typed subagent/Tachi paths.
         let tmp = TempDir::new().unwrap();
         let security = Arc::new(SecurityPolicy {
             autonomy: crate::security::AutonomyLevel::Full,
@@ -2078,13 +1829,7 @@ mod tests {
             enabled: false,
             ..BrowserConfig::default()
         };
-        let mut cfg = test_config(&tmp);
-        cfg.runtime.kind = zeroclaw_config::schema::RuntimeKind::Docker;
-        cfg.runtime.docker.mount_workspace = false;
-        cfg.claude_code.enabled = true;
-        cfg.codex_cli.enabled = true;
-        cfg.gemini_cli.enabled = true;
-        cfg.opencode_cli.enabled = true;
+        let cfg = test_config(&tmp);
         let risk = zeroclaw_config::schema::RiskProfileConfig {
             sandbox_enabled: Some(false),
             sandbox_backend: Some("none".to_string()),
@@ -2096,9 +1841,7 @@ mod tests {
             &security,
             &risk,
             "test-agent",
-            Arc::new(zeroclaw_config::platform::DockerRuntime::new(
-                cfg.runtime.docker.clone(),
-            )),
+            Arc::new(zeroclaw_config::platform::NativeRuntime::new()),
             mem,
             None,
             None,
@@ -2114,309 +1857,27 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .tools;
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
 
-        for tool_name in ["claude_code", "codex_cli", "gemini_cli", "opencode_cli"] {
+        for tool_name in [
+            "claude_code",
+            "claude_code_runner",
+            "codex_cli",
+            "gemini_cli",
+            "opencode_cli",
+            "browser_delegate",
+        ] {
             assert!(
                 !names.contains(&tool_name),
-                "{tool_name} must not register without runtime filesystem access"
+                "retired raw launcher '{tool_name}' must not register under any composition"
             );
         }
         assert!(
             names.contains(&"shell"),
             "positive control: ordinary tools should still register"
         );
-    }
-
-    #[test]
-    fn sop_workshop_registered_only_when_procedural_memory_enabled() {
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-
-        let browser = BrowserConfig {
-            enabled: false,
-            allowed_domains: vec![],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
-        let http = zeroclaw_config::schema::HttpRequestConfig::default();
-        let mut cfg = test_config(&tmp);
-        cfg.sop.procedural_memory_enabled = true;
-
-        let engine = Arc::new(Mutex::new(SopEngine::new(
-            zeroclaw_config::schema::SopConfig::default(),
-        )));
-
-        let tools = all_tools_with_runtime(
-            Arc::new(Config::default()),
-            &security,
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-            "test-agent",
-            Arc::new(NativeRuntime::new()),
-            mem,
-            None,
-            None,
-            &browser,
-            &http,
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-            Some(engine),
-            None,
-            None,
-        )
-        .tools;
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-
-        assert!(
-            names.contains(&"sop_workshop"),
-            "sop_workshop must be registered when procedural memory is enabled"
-        );
-    }
-
-    #[test]
-    fn shared_sop_engine_arc_is_observed_by_multiple_registrations() {
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-
-        let cfg = test_config(&tmp);
-        let browser = BrowserConfig::default();
-        let http = zeroclaw_config::schema::HttpRequestConfig::default();
-        let web = zeroclaw_config::schema::WebFetchConfig::default();
-        let risk = zeroclaw_config::schema::RiskProfileConfig::default();
-
-        let shared_engine = Arc::new(Mutex::new(SopEngine::new(
-            zeroclaw_config::schema::SopConfig::default(),
-        )));
-        let shared_audit = Arc::new(crate::sop::SopAuditLogger::new(mem.clone()));
-
-        // Two independent registrations using clones of the same Arc — the
-        // pattern the daemon uses when wiring gateway, channels, MQTT, and
-        // RPC sessions from one engine pair.
-        let session_a = all_tools_with_runtime(
-            Arc::new(Config::default()),
-            &security,
-            &risk,
-            "session-a",
-            Arc::new(NativeRuntime::new()),
-            mem.clone(),
-            None,
-            None,
-            &browser,
-            &http,
-            &web,
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-            Some(shared_engine.clone()),
-            Some(shared_audit.clone()),
-            None,
-        );
-        let session_b = all_tools_with_runtime(
-            Arc::new(Config::default()),
-            &security,
-            &risk,
-            "session-b",
-            Arc::new(NativeRuntime::new()),
-            mem.clone(),
-            None,
-            None,
-            &browser,
-            &http,
-            &web,
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-            Some(shared_engine.clone()),
-            Some(shared_audit.clone()),
-            None,
-        );
-
-        for tools in [&session_a.tools, &session_b.tools] {
-            assert!(tools.iter().any(|t| t.name() == "sop_status"));
-        }
-
-        // Outer Arc + both registrations = 3+ strong refs. Confirms the
-        // registries kept references to the same instance instead of
-        // copying state.
-        assert!(Arc::strong_count(&shared_engine) >= 3);
-        assert!(Arc::strong_count(&shared_audit) >= 3);
-    }
-
-    #[tokio::test]
-    async fn sop_approve_registry_binds_the_calling_agent_alias() {
-        use crate::sop::types::{
-            Sop, SopAdmissionPolicy, SopEvent, SopExecutionMode, SopPriority, SopRunAction,
-            SopRunStatus, SopStep, SopStepKind, SopTrigger, SopTriggerSource,
-        };
-
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let mut groups = HashMap::new();
-        groups.insert(
-            "release".to_string(),
-            ApprovalGroupConfig {
-                members: vec!["agent:ZeroClawOperator".to_string()],
-            },
-        );
-        let mut policies = HashMap::new();
-        policies.insert(
-            "prod".to_string(),
-            ApprovalPolicyConfig {
-                required_group: Some("release".to_string()),
-                quorum: 1,
-                request_route: None,
-                escalation_route: None,
-            },
-        );
-        let mut engine = SopEngine::new(zeroclaw_config::schema::SopConfig {
-            approval: SopApprovalConfig { groups, policies },
-            ..Default::default()
-        })
-        .with_approval_broker(Arc::new(crate::sop::approval::ApprovalBroker::disabled()));
-        engine.set_sops_for_test(vec![Sop {
-            name: "deploy".into(),
-            description: "test".into(),
-            version: "1.0.0".into(),
-            priority: SopPriority::Normal,
-            execution_mode: SopExecutionMode::Supervised,
-            triggers: vec![SopTrigger::Manual],
-            steps: vec![
-                SopStep {
-                    number: 1,
-                    title: "gate".into(),
-                    kind: SopStepKind::Execute,
-                    requires_confirmation: true,
-                    policy: Some("prod".into()),
-                    ..SopStep::default()
-                },
-                SopStep {
-                    number: 2,
-                    title: "execute".into(),
-                    kind: SopStepKind::Execute,
-                    ..SopStep::default()
-                },
-            ],
-            cooldown_secs: 0,
-            max_concurrent: 1,
-            location: None,
-            deterministic: false,
-            admission_policy: SopAdmissionPolicy::Parallel,
-            max_pending_approvals: 0,
-            agent: None,
-        }]);
-        let action = engine
-            .start_run(
-                "deploy",
-                SopEvent {
-                    source: SopTriggerSource::Manual,
-                    topic: None,
-                    payload: None,
-                    timestamp: crate::sop::engine::now_iso8601(),
-                },
-            )
-            .unwrap();
-        let run_id = match action {
-            SopRunAction::WaitApproval { run_id, .. } => run_id,
-            other => panic!("expected WaitApproval, got {other:?}"),
-        };
-        let shared_engine = Arc::new(Mutex::new(engine));
-        let cfg = test_config(&tmp);
-        let browser = BrowserConfig::default();
-        let http = zeroclaw_config::schema::HttpRequestConfig::default();
-        let web = zeroclaw_config::schema::WebFetchConfig::default();
-        let risk = zeroclaw_config::schema::RiskProfileConfig::default();
-
-        let build = |agent_alias: &str, memory: Arc<dyn Memory>| {
-            all_tools_with_runtime(
-                Arc::new(Config::default()),
-                &security,
-                &risk,
-                agent_alias,
-                Arc::new(NativeRuntime::new()),
-                memory,
-                None,
-                None,
-                &browser,
-                &http,
-                &web,
-                tmp.path(),
-                &HashMap::new(),
-                None,
-                &cfg,
-                None,
-                false,
-                None,
-                Some(shared_engine.clone()),
-                None,
-                None,
-            )
-            .tools
-        };
-        let unauthorized_tools = build("ZeroClawAgent", mem.clone());
-        let authorized_tools = build("ZeroClawOperator", mem);
-
-        let unauthorized = unauthorized_tools
-            .iter()
-            .find(|tool| tool.name() == "sop_approve")
-            .expect("unauthorized registry has sop_approve");
-        let result = unauthorized
-            .execute(serde_json::json!({ "run_id": run_id.clone() }))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert_eq!(
-            shared_engine
-                .lock()
-                .unwrap()
-                .get_run(&run_id)
-                .map(|run| run.status),
-            Some(SopRunStatus::WaitingApproval)
-        );
-
-        let authorized = authorized_tools
-            .iter()
-            .find(|tool| tool.name() == "sop_approve")
-            .expect("authorized registry has sop_approve");
-        let result = authorized
-            .execute(serde_json::json!({ "run_id": run_id }))
-            .await
-            .unwrap();
-        assert!(result.success, "authorized alias must resolve: {result:?}");
     }
 
     #[test]
@@ -2479,7 +1940,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .tools;
 
@@ -2503,46 +1963,6 @@ mod tests {
         assert!(
             !workspace_dir.join("sessions").exists(),
             "session tools must not open/create a store under the per-agent workspace_dir"
-        );
-    }
-
-    #[tokio::test]
-    async fn sop_audit_memory_uses_agent_alias_not_default() {
-        let tmp = TempDir::new().unwrap();
-        let sops_dir = tmp.path().join("sops");
-        std::fs::create_dir_all(&sops_dir).unwrap();
-
-        let mut agents = HashMap::new();
-        agents.insert(
-            "ops".to_string(),
-            AliasedAgentConfig {
-                ..Default::default()
-            },
-        );
-
-        let config = Config {
-            data_dir: tmp.path().join("data"),
-            config_path: tmp.path().join("config.toml"),
-            sop: zeroclaw_config::schema::SopConfig {
-                sops_dir: Some(sops_dir.to_string_lossy().into_owned()),
-                ..zeroclaw_config::schema::SopConfig::default()
-            },
-            agents: agents.clone(),
-            ..Config::default()
-        };
-
-        // Using the session alias ("ops") must succeed even with no "default" agent.
-        let mem = zeroclaw_memory::create_memory_for_agent(&config, "ops", None).await;
-        assert!(
-            mem.is_ok(),
-            "create_memory_for_agent with session alias should succeed"
-        );
-
-        // The old hardcoded "default" must fail — proving the fix is load-bearing.
-        let mem_default = zeroclaw_memory::create_memory_for_agent(&config, "default", None).await;
-        assert!(
-            mem_default.is_err(),
-            "create_memory_for_agent(\"default\") must fail when agents.default is absent"
         );
     }
 
@@ -2691,9 +2111,161 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"browser_open"));
         assert!(names.contains(&"schedule"));
-        assert!(names.contains(&"model_routing_config"));
+        // Operator/admin tools are never part of the model surface.
+        assert!(!names.contains(&"model_routing_config"));
+        assert!(!names.contains(&"proxy_config"));
+        // The pushover tool only exists when the SaaS family is compiled in.
+        #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
-        assert!(names.contains(&"proxy_config"));
+    }
+
+    #[test]
+    fn minimal_composition_cuts_registry_to_membership() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig {
+            enabled: false,
+            allowed_domains: vec!["example.com".into()],
+            session_name: None,
+            ..BrowserConfig::default()
+        };
+        let http = zeroclaw_config::schema::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        cfg.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+        // Explicitly enabled non-members must not widen the minimal profile.
+        cfg.browser.enabled = true;
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            &zeroclaw_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            None,
+            false,
+            None,
+        )
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+
+        // `read_skill` and `tool_search` are conditional members (compact
+        // skills mode / deferred MCP respectively); in this default-config
+        // fixture they are not registered at all, which the totality check
+        // below covers from the other side.
+        for member in [
+            "shell",
+            "file_read",
+            "file_write",
+            "file_edit",
+            "glob_search",
+            "content_search",
+            "schedule",
+            "reasoning_subagent",
+        ] {
+            assert!(
+                names.contains(&member),
+                "minimal profile must keep {member}, got: {names:?}"
+            );
+        }
+        // The minimal composition fronts the V1 entrypoint; the legacy
+        // `spawn_subagent` is retired on every composition.
+        assert!(
+            !names.contains(&"spawn_subagent"),
+            "minimal profile must drop the retired spawn_subagent; got: {names:?}"
+        );
+        // Fail-closed totality: nothing outside the membership table may be
+        // assembled under minimal, whatever flags enabled it.
+        for name in &names {
+            assert!(
+                zeroclaw_config::composition::is_minimal_member(name),
+                "non-member leaked into minimal assembly: {name}"
+            );
+        }
+        assert!(!names.contains(&"model_routing_config"));
+        assert!(!names.contains(&"proxy_config"));
+        assert!(!names.contains(&"pushover"));
+        assert!(!names.contains(&"claude_code"));
+    }
+
+    #[test]
+    fn absent_composition_keeps_full_assembly() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let browser = BrowserConfig {
+            enabled: false,
+            allowed_domains: vec!["example.com".into()],
+            session_name: None,
+            ..BrowserConfig::default()
+        };
+        let http = zeroclaw_config::schema::HttpRequestConfig::default();
+        let cfg = test_config(&tmp);
+        assert!(
+            cfg.composition.is_none(),
+            "test_config must not set a composition"
+        );
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            None,
+            None,
+            &browser,
+            &http,
+            &zeroclaw_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            None,
+            false,
+            None,
+        )
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        // Absent field resolves as full: today's default assembly minus the
+        // retired operator/admin tools, which no composition may re-admit.
+        assert!(!names.contains(&"model_routing_config"));
+        assert!(!names.contains(&"proxy_config"));
+        // The legacy full-Parent-inheritance spawn entrypoint is retired
+        // (spawn_subagent wall): no composition registers it, and the
+        // retired-name guard keeps plugins from claiming it.
+        assert!(
+            !names.contains(&"spawn_subagent"),
+            "full composition must not register the retired spawn_subagent; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"reasoning_subagent"),
+            "full composition must carry the V1 reasoning_subagent; got: {names:?}"
+        );
+        // The pushover tool only exists when the SaaS family is compiled in.
+        #[cfg(feature = "integrations-saas")]
+        assert!(names.contains(&"pushover"));
     }
 
     #[test]
@@ -2739,86 +2311,12 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"browser_open"));
         assert!(names.contains(&"content_search"));
-        assert!(names.contains(&"model_routing_config"));
+        // Operator/admin tools are never part of the model surface.
+        assert!(!names.contains(&"model_routing_config"));
+        assert!(!names.contains(&"proxy_config"));
+        // The pushover tool only exists when the SaaS family is compiled in.
+        #[cfg(feature = "integrations-saas")]
         assert!(names.contains(&"pushover"));
-        assert!(names.contains(&"proxy_config"));
-    }
-
-    #[tokio::test]
-    async fn registered_sop_tools_persist_audit_trail() {
-        let tmp = TempDir::new().unwrap();
-        let sops_dir = tmp.path().join("sops");
-        let sop_subdir = sops_dir.join("canary");
-        std::fs::create_dir_all(&sop_subdir).unwrap();
-        std::fs::write(
-            sop_subdir.join("SOP.toml"),
-            "[sop]\nname = \"canary\"\ndescription = \"audit wiring guard\"\nversion = \"1.0.0\"\n\n[[triggers]]\ntype = \"manual\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            sop_subdir.join("SOP.md"),
-            "## Steps\n\n1. **Resolve** Do the first step\n   - tools: shell\n",
-        )
-        .unwrap();
-
-        let mem_cfg = MemoryConfig {
-            backend: "sqlite".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-
-        let security = Arc::new(SecurityPolicy::default());
-        let mut cfg = test_config(&tmp);
-        cfg.sop.sops_dir = Some(sops_dir.to_string_lossy().into_owned());
-
-        let tools = {
-            let mut engine = crate::sop::SopEngine::new(cfg.sop.clone());
-            engine.reload(tmp.path());
-            let sop_engine = Arc::new(std::sync::Mutex::new(engine));
-            let sop_audit = Arc::new(crate::sop::SopAuditLogger::new(mem.clone()));
-            all_tools_with_runtime(
-                Arc::new(Config::default()),
-                &security,
-                &zeroclaw_config::schema::RiskProfileConfig::default(),
-                "test-agent",
-                Arc::new(NativeRuntime::new()),
-                mem.clone(),
-                None,
-                None,
-                &BrowserConfig::default(),
-                &zeroclaw_config::schema::HttpRequestConfig::default(),
-                &zeroclaw_config::schema::WebFetchConfig::default(),
-                tmp.path(),
-                &HashMap::new(),
-                None,
-                &cfg,
-                None,
-                false,
-                None,
-                Some(sop_engine),
-                Some(sop_audit),
-                None,
-            )
-            .tools
-        };
-
-        let execute = tools
-            .iter()
-            .find(|t| t.name() == "sop_execute")
-            .expect("sop_execute must be registered when sops_dir is set");
-        let result = execute
-            .execute(serde_json::json!({"name": "canary"}))
-            .await
-            .unwrap();
-        assert!(result.success, "sop_execute failed: {result:?}");
-
-        let audit = crate::sop::SopAuditLogger::new(mem.clone());
-        let run_keys = audit.list_runs().await.unwrap();
-        assert!(
-            !run_keys.is_empty(),
-            "registered sop_execute must persist a sop_run_* audit entry; got none (audit not wired)"
-        );
     }
 
     #[test]
@@ -2915,7 +2413,13 @@ mod tests {
     }
 
     #[test]
-    fn all_tools_includes_delegate_when_agents_configured() {
+    fn delegate_stays_absent_from_every_registry() {
+        // Wall 1: the legacy full-parent-inheritance delegation tool is
+        // retired. Neither an agents-configured full-composition registry nor
+        // an agents-less one may surface it, and the retired-name guard keeps
+        // plugins from claiming the name. The V1 SubAgent entrypoint
+        // (`reasoning_subagent`) is the only spawn-capable model-visible
+        // tool; the legacy `spawn_subagent` retired with its wall.
         let tmp = TempDir::new().unwrap();
         let security = Arc::new(SecurityPolicy::default());
         let mem_cfg = MemoryConfig {
@@ -2938,67 +2442,186 @@ mod tests {
             },
         );
 
-        let tools = all_tools(
-            Arc::new(Config::default()),
+        for (label, agents) in [
+            ("agents configured", agents.clone()),
+            ("no agents", HashMap::new()),
+        ] {
+            let tools = all_tools(
+                Arc::new(Config::default()),
+                &security,
+                &zeroclaw_config::schema::RiskProfileConfig::default(),
+                "test-agent",
+                mem.clone(),
+                None,
+                None,
+                &browser,
+                &http,
+                &zeroclaw_config::schema::WebFetchConfig::default(),
+                tmp.path(),
+                &agents,
+                Some("delegate-test-credential"),
+                &cfg,
+                None,
+                false,
+                None,
+            )
+            .tools;
+            let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+            assert!(
+                !names.contains(&"delegate"),
+                "delegate must not be registered ({label}); got {names:?}"
+            );
+        }
+    }
+
+    // ── Unified lineage (SA-9/SA-10/SA-11): the GREEN side of the
+    // census zig-zag red→green pair. The RED evidence (master, where the
+    // rebuilt registry minted depth 0 and sailed past the depth gate) is
+    // captured verbatim in the PR body; these tests pin the closed
+    // behavior.
+
+    fn lineage_agents() -> HashMap<String, AliasedAgentConfig> {
+        let mut agents = HashMap::new();
+        for alias in ["parent-agent", "child-target"] {
+            agents.insert(
+                alias.to_string(),
+                AliasedAgentConfig {
+                    risk_profile: "default".into(),
+                    ..AliasedAgentConfig::default()
+                },
+            );
+        }
+        agents
+    }
+
+    fn lineage_registry_config() -> Config {
+        let mut config = Config::default();
+        let risk = zeroclaw_config::schema::RiskProfileConfig::default();
+        config.risk_profiles.insert("default".to_string(), risk);
+        config.agents = lineage_agents();
+        config
+    }
+
+    #[tokio::test]
+    async fn registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth() {
+        // The census zig-zag GREEN half: a registry built for a child
+        // context whose lineage is at the depth cap (exactly what
+        // `agent::run` builds for a spawned child of a depth-3 parent)
+        // carries the ONE ledger through the rebuild. The behavioral
+        // refusal at that depth is pinned on the surviving spawn
+        // surface in `subagent_v1::tests`; here the rebuilt registry's
+        // SHAPE is the discrimination: both retired spawn tools are
+        // absent, the V1 entrypoint is present and inherits the depth.
+        let tmp = TempDir::new().unwrap();
+        let cfg = lineage_registry_config();
+        let mut build_cfg = cfg.clone();
+        build_cfg.data_dir = tmp.path().join("data");
+        build_cfg.config_path = tmp.path().join("config.toml");
+        let security = Arc::new(SecurityPolicy::for_agent(&build_cfg, "parent-agent").unwrap());
+        let mem: Arc<dyn Memory> = Arc::from(
+            zeroclaw_memory::create_memory(&MemoryConfig::default(), tmp.path(), None).unwrap(),
+        );
+
+        let at_cap = zeroclaw_api::subagent_v1::LineageRef::new_root(
+            zeroclaw_api::subagent_v1::ParentRunRef::from_opaque("zigzag-root"),
+        )
+        .child()
+        .child()
+        .child(); // depth 3 = default cap
+
+        // The lineage thread-through is discriminated at the construction
+        // site: the helper the registry vec calls must carry the run's
+        // lineage, so dropping the `.with_lineage` thread flips this red
+        // (a lineage-None reasoning tool inside a child registry would
+        // admit D1-forbidden spawns from depth > 0 contexts).
+        let probe = reasoning_spawn_tool_for_registry(
+            &build_cfg,
+            "parent-agent",
             &security,
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-            "test-agent",
+            Some(at_cap.clone()),
+        );
+        assert_eq!(
+            probe
+                .carried_lineage()
+                .map(zeroclaw_api::subagent_v1::LineageRef::depth),
+            Some(3),
+            "the registry construction site must thread the run's spawn lineage \
+             into the surviving spawn tool"
+        );
+
+        let built = all_tools_with_runtime(
+            Arc::new(build_cfg),
+            &security,
+            &cfg.risk_profiles.get("default").cloned().unwrap(),
+            "parent-agent",
+            Arc::new(NativeRuntime::new()),
             mem,
             None,
             None,
-            &browser,
-            &http,
+            &BrowserConfig::default(),
+            &zeroclaw_config::schema::HttpRequestConfig::default(),
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
-            &agents,
-            Some("delegate-test-credential"),
-            &cfg,
+            &cfg.agents,
             None,
-            false,
+            &lineage_registry_config(),
             None,
-        )
-        .tools;
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"delegate"));
+            true, // is_subagent_caller: registry belongs to a child run
+            None,
+            None,
+            Some(at_cap.clone()),
+        );
+
+        // The retired legacy spawn tools must not reappear in a rebuilt
+        // registry: the zig-zag chain loses its legacy hops entirely.
+        let names: Vec<String> = built.tools.iter().map(|t| t.name().to_string()).collect();
+        assert!(
+            !names.contains(&"delegate".to_string()),
+            "delegate is retired and must be absent from a rebuilt registry"
+        );
+        assert!(
+            !names.contains(&"spawn_subagent".to_string()),
+            "spawn_subagent is retired and must be absent from a rebuilt registry"
+        );
+        // The V1 entrypoint is the surviving spawn surface in the same
+        // rebuilt registry (and refuses at depth > 0 per D1 — asserted
+        // behaviorally by `subagent_v1::tests`).
+        assert!(
+            names.contains(&"reasoning_subagent".to_string()),
+            "reasoning_subagent must be the surviving spawn surface in a rebuilt registry"
+        );
     }
 
     #[test]
-    fn all_tools_excludes_delegate_when_no_agents() {
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+    fn zigzag_is_counted_by_one_ledger_across_spawn_hops() {
+        // SA-9/SA-10: any spawn chain (the census chain was
+        // `delegate → spawn_subagent → delegate`; both legacy hops are
+        // retired) is counted by ONE counter. The depth a rebuilt
+        // registry sees is exactly the spawning context's lineage
+        // advanced by one, however many hops the chain took.
+        use zeroclaw_api::subagent_v1::{LineageRef, ParentRunRef};
 
-        let browser = BrowserConfig::default();
-        let http = zeroclaw_config::schema::HttpRequestConfig::default();
-        let cfg = test_config(&tmp);
+        let root = LineageRef::new_root(ParentRunRef::from_opaque("chain-root"));
+        assert_eq!(root.depth(), 0);
 
-        let tools = all_tools(
-            Arc::new(Config::default()),
-            &security,
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-            "test-agent",
-            mem,
-            None,
-            None,
-            &browser,
-            &http,
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-        )
-        .tools;
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        assert!(!names.contains(&"delegate"));
+        let after_first_hop = root.child();
+        assert_eq!(after_first_hop.depth(), 1);
+
+        let after_second_hop = after_first_hop.child();
+        assert_eq!(after_second_hop.depth(), 2);
+
+        // A rebuilt registry in the grandchild context carries the same
+        // lineage — depth 2 against the cap (3), refusing at the NEXT
+        // hop, never resetting (the ledger law is what the test pins):
+        let after_third_hop = after_second_hop.child();
+        assert_eq!(after_third_hop.depth(), 3);
+        // ...and 3 >= cap is the refusal asserted behaviorally on the
+        // surviving spawn surface in `subagent_v1::tests`.
+        assert!(after_third_hop.depth() >= 3);
+
+        // The ledger identity is the root run, shared across the whole
+        // chain (SA-11: rebuilds inherit, roots are typed transitions).
+        assert_eq!(root.root_ref(), after_third_hop.root_ref());
     }
 
     #[test]
@@ -3082,54 +2705,107 @@ mod tests {
         assert!(!names.contains(&"read_skill"));
     }
 
-    fn registry_names(tmp: &TempDir, is_subagent_caller: bool) -> Vec<String> {
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let cfg = test_config(tmp);
-
-        all_tools(
-            Arc::new(cfg.clone()),
-            &security,
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-            "test-agent",
-            mem,
-            None,
-            None,
-            &BrowserConfig::default(),
-            &zeroclaw_config::schema::HttpRequestConfig::default(),
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            is_subagent_caller,
-            None,
-        )
-        .tools
-        .iter()
-        .map(|t| t.name().to_string())
-        .collect()
-    }
-
     #[test]
-    fn model_switch_present_for_top_level_absent_for_subagent() {
-        let tmp = TempDir::new().unwrap();
-        let top = registry_names(&tmp, false);
-        assert!(
-            top.iter().any(|n| n == ModelSwitchTool::NAME),
-            "top-level agent must keep model_switch"
-        );
-        let subagent = registry_names(&tmp, true);
-        assert!(
-            !subagent.iter().any(|n| n == ModelSwitchTool::NAME),
-            "subagent must not be able to switch the inherited model"
-        );
+    fn retired_operator_tools_absent_from_every_assembly_path() {
+        // Totality check for the operator/admin retirement: the retired
+        // names must not appear in the assembled registry (`tools`) NOR in
+        // the pre-policy `unfiltered_tool_arcs` (the vector skill builtin
+        // elevation resolves targets against), whatever re-admits them:
+        //
+        // - absent `composition` (resolves as full),
+        // - explicit `composition = "full"`,
+        // - a SubAgent caller (the registry factory the spawned-child path
+        //   shares with the top level; inheritance is downstream of the
+        //   cut, so there is nothing to inherit),
+        // - config sections explicitly enabling the retired tools.
+        fn assembled(
+            tmp: &TempDir,
+            composition: Option<zeroclaw_config::composition::Composition>,
+            is_subagent_caller: bool,
+            enable_retired_sections: bool,
+        ) -> (Vec<String>, Vec<String>) {
+            let security = Arc::new(SecurityPolicy::default());
+            let mem: Arc<dyn Memory> = Arc::from(
+                zeroclaw_memory::create_memory(
+                    &MemoryConfig {
+                        backend: "markdown".into(),
+                        ..MemoryConfig::default()
+                    },
+                    tmp.path(),
+                    None,
+                )
+                .unwrap(),
+            );
+            let mut cfg = test_config(tmp);
+            cfg.composition = composition;
+            if enable_retired_sections {
+                cfg.security_ops.enabled = true;
+                cfg.backup.enabled = true;
+                cfg.data_retention.enabled = true;
+            }
+            let result = all_tools(
+                Arc::new(cfg.clone()),
+                &security,
+                &zeroclaw_config::schema::RiskProfileConfig::default(),
+                "test-agent",
+                mem,
+                None,
+                None,
+                &BrowserConfig::default(),
+                &zeroclaw_config::schema::HttpRequestConfig::default(),
+                &zeroclaw_config::schema::WebFetchConfig::default(),
+                tmp.path(),
+                &HashMap::new(),
+                None,
+                &cfg,
+                None,
+                is_subagent_caller,
+                None,
+            );
+            (
+                result.tools.iter().map(|t| t.name().to_string()).collect(),
+                result
+                    .unfiltered_tool_arcs
+                    .iter()
+                    .map(|t| t.name().to_string())
+                    .collect(),
+            )
+        }
+
+        for (label, composition, is_subagent, enable) in [
+            ("absent composition", None, false, false),
+            (
+                "explicit full composition",
+                Some(zeroclaw_config::composition::Composition::Full),
+                false,
+                false,
+            ),
+            (
+                "subagent caller, full composition",
+                Some(zeroclaw_config::composition::Composition::Full),
+                true,
+                false,
+            ),
+            (
+                "enabled retired sections, absent composition",
+                None,
+                false,
+                true,
+            ),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let (tools, arcs) = assembled(&tmp, composition, is_subagent, enable);
+            for retired in RETIRED_OPERATOR_TOOL_NAMES {
+                assert!(
+                    !tools.iter().any(|n| n == retired),
+                    "retired tool {retired} leaked into the registry under {label}: {tools:?}"
+                );
+                assert!(
+                    !arcs.iter().any(|n| n == retired),
+                    "retired tool {retired} leaked into the unfiltered arcs under {label}: {arcs:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -20,9 +20,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use zeroclaw_api::channel::ChannelApprovalResponse;
-use zeroclaw_runtime::sop::approval::{
-    ApprovalDecision as SopApprovalDecision, ApprovalPrincipal as SopApprovalPrincipal,
-};
 
 /// Default wall-clock budget for the operator to answer an
 /// `approval_request` frame before the channel auto-denies. Mirrors the
@@ -253,95 +250,6 @@ async fn resolve_ws_memory_handle(
         .map(Some)
 }
 
-async fn handle_ws_sop_frame<S>(
-    parsed: &serde_json::Value,
-    state: &AppState,
-    session_id: &str,
-    auth_subject: Option<&str>,
-    sender: &mut S,
-) -> bool
-where
-    S: SinkExt<Message> + Unpin,
-{
-    if parsed["kind"].as_str() != Some("sop") {
-        return false;
-    }
-    let run_id = parsed["run_id"].as_str().unwrap_or("").to_string();
-    let decision = match parsed["decision"].as_str().unwrap_or("") {
-        "approve" => Some(SopApprovalDecision::Approve),
-        // Thread the optional reason through, like the HTTP/CLI deny surfaces, so
-        // the ledger records it.
-        "deny" => Some(SopApprovalDecision::Deny {
-            reason: parsed["reason"].as_str().map(str::to_string),
-        }),
-        _ => None,
-    };
-    // run_id + a valid decision are both required; the let-else avoids an expect
-    // on the downstream resolve (codebase rule: no expect/unwrap in production).
-    let Some(decision) = decision.filter(|_| !run_id.is_empty()) else {
-        let err = serde_json::json!({
-            "type": "error",
-            "message": zeroclaw_runtime::i18n::get_required_cli_string(
-                "cli-sop-ws-invalid-approval"
-            ),
-            "code": "INVALID_APPROVAL_RESPONSE"
-        });
-        let _ = sender.send(Message::Text(err.to_string().into())).await;
-        return true;
-    };
-    let frame = if let Some(engine) = state.sop_engine.as_ref() {
-        let principal =
-            SopApprovalPrincipal::ws(session_id.to_string(), auth_subject.map(str::to_string));
-        // EPIC G: route through the broker (membership + quorum); with no
-        // `[sop.approval]` policy this is exactly `resolve_gate`.
-        let resolved = match engine.lock() {
-            Ok(mut g) => Some(g.resolve_via_broker(&run_id, decision, principal)),
-            Err(_) => None,
-        };
-        match resolved {
-            Some(Ok(outcome)) => {
-                let config = state.config.read();
-                zeroclaw_runtime::sop::drive_resumed_broker_action(
-                    &config,
-                    std::sync::Arc::clone(engine),
-                    state.sop_audit.clone(),
-                    &outcome,
-                );
-                serde_json::json!({
-                    "type": "sop_approval_result",
-                    "run_id": run_id,
-                    "outcome": outcome.label(),
-                })
-            }
-            Some(Err(e)) => serde_json::json!({
-                "type": "error",
-                "message": zeroclaw_runtime::i18n::get_required_cli_string_with_args(
-                    "cli-sop-ws-resolve-failed",
-                    &[("error", &e.to_string())],
-                ),
-                "code": "SOP_RESOLVE_FAILED"
-            }),
-            None => serde_json::json!({
-                "type": "error",
-                "message": zeroclaw_runtime::i18n::get_required_cli_string(
-                    "cli-sop-ws-engine-lock-poisoned"
-                ),
-                "code": "SOP_LOCK_POISONED"
-            }),
-        }
-    } else {
-        serde_json::json!({
-            "type": "error",
-            "message": zeroclaw_runtime::i18n::get_required_cli_string(
-                "cli-sop-ws-subsystem-disabled"
-            ),
-            "code": "SOP_DISABLED"
-        })
-    };
-    let _ = sender.send(Message::Text(frame.to_string().into())).await;
-    true
-}
-
 async fn handle_socket(
     socket: WebSocket,
     state: AppState,
@@ -493,8 +401,6 @@ async fn handle_socket(
             Some(&session_cwd),
             true,
             false,
-            state.sop_engine.clone(),
-            state.sop_audit.clone(),
             Some(state.canvas_store.clone()),
         )
         .await
@@ -682,21 +588,6 @@ async fn handle_socket(
 
                 // ── approval_response (operator answered a tool prompt) ──
                 if msg_type == "approval_response" {
-                    // EPIC C: a SOP-kind frame resolves a SOP gate via the shared
-                    // engine + resolve_gate (keyed by run_id), NOT the tool-prompt
-                    // pending_approvals map (keyed by request_id). The principal is
-                    // transport-derived (ws + session id), never from the frame.
-                    if handle_ws_sop_frame(
-                        &parsed,
-                        &state,
-                        &session_id,
-                        auth_subject.as_deref(),
-                        &mut sender,
-                    )
-                    .await
-                    {
-                        continue;
-                    }
                     let request_id = parsed["request_id"].as_str().unwrap_or("");
                     let decision_str = parsed["decision"].as_str().unwrap_or("");
                     let decision = match decision_str {
@@ -1112,21 +1003,6 @@ async fn process_chat_message(
                     };
                     match parsed["type"].as_str() {
                         Some("approval_response") => {
-                            // A SOP-kind frame is a gate resolution (keyed by run_id),
-                            // not a tool-prompt response (keyed by request_id). Resolve
-                            // it here too so it is answered mid-turn instead of being
-                            // silently dropped on the request_id path below.
-                            if handle_ws_sop_frame(
-                                &parsed,
-                                state,
-                                session_id,
-                                auth_subject,
-                                &mut *sender,
-                            )
-                            .await
-                            {
-                                continue;
-                            }
                             let request_id = parsed["request_id"].as_str().unwrap_or("");
                             let decision = match parsed["decision"].as_str().unwrap_or("") {
                                 "approve" => Some(ChannelApprovalResponse::Approve),
@@ -1676,32 +1552,6 @@ mod tests {
     }
 
     #[test]
-    fn sop_ws_error_frames_resolve_via_fluent() {
-        // The SOP WebSocket error frames are UI-surfaced and route through the
-        // embedded en/cli.ftl. A renamed/typo'd key would silently ship the
-        // missing-key fallback `{cli-sop-ws-...}` to the browser; guard against it.
-        for key in [
-            "cli-sop-ws-invalid-approval",
-            "cli-sop-ws-engine-lock-poisoned",
-            "cli-sop-ws-subsystem-disabled",
-        ] {
-            let s = zeroclaw_runtime::i18n::get_required_cli_string(key);
-            assert!(
-                !s.starts_with('{') || !s.ends_with('}'),
-                "fluent missing-key fallback leaked for {key}: {s:?}"
-            );
-        }
-        let resolved = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
-            "cli-sop-ws-resolve-failed",
-            &[("error", "boom")],
-        );
-        assert!(
-            resolved.contains("boom"),
-            "the resolve-failed frame must interpolate the error: {resolved:?}"
-        );
-    }
-
-    #[test]
     fn extract_ws_token_from_authorization_header() {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer zc_test123".parse().unwrap());
@@ -2203,92 +2053,6 @@ mod tests {
             backend.append_calls.lock().unwrap().is_empty(),
             "persist_conversation_messages must not resurrect a session whose \
              session_exists() returned false (see #7126)"
-        );
-    }
-
-    /// A `Sink<Message>` that just collects the text frames sent to it, so a handler
-    /// smoke can inspect the response without a real WebSocket.
-    struct CollectSink(Vec<String>);
-    impl futures_util::Sink<Message> for CollectSink {
-        type Error = std::convert::Infallible;
-        fn poll_ready(
-            self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Result<(), Self::Error>> {
-            std::task::Poll::Ready(Ok(()))
-        }
-        fn start_send(self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
-            if let Message::Text(t) = item {
-                self.get_mut().0.push(t.to_string());
-            }
-            Ok(())
-        }
-        fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Result<(), Self::Error>> {
-            std::task::Poll::Ready(Ok(()))
-        }
-        fn poll_close(
-            self: std::pin::Pin<&mut Self>,
-            _: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Result<(), Self::Error>> {
-            std::task::Poll::Ready(Ok(()))
-        }
-    }
-
-    #[tokio::test]
-    async fn ws_sop_frame_enforces_policy_membership_via_auth_subject() {
-        use zeroclaw_runtime::security::pairing::PairingGuard;
-        // Reuse the HTTP policied-gate harness: a run parked at a `prod` policy whose
-        // group is granted to the paired-token subject (bare, any source).
-        let (state, run_id) = crate::api_sop::tests::state_with_policied_gate("ws-tok");
-        let member = PairingGuard::token_hash("ws-tok");
-        let outsider = PairingGuard::token_hash("someone-else");
-        let frame = serde_json::json!({
-            "kind": "sop",
-            "run_id": run_id,
-            "decision": "approve",
-        });
-        let run_status = |st: &AppState| {
-            st.sop_engine
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .get_run(&run_id)
-                .map(|r| format!("{:?}", r.status))
-        };
-
-        // A non-member WS subject is rejected; the gate stays waiting.
-        let mut sink = CollectSink(Vec::new());
-        assert!(
-            handle_ws_sop_frame(&frame, &state, "sess-1", Some(&outsider), &mut sink).await,
-            "a sop-kind frame is handled"
-        );
-        assert!(
-            sink.0.iter().any(|m| m.contains("not_authorized")),
-            "a non-member WS caller is not authorized: {:?}",
-            sink.0
-        );
-        assert_eq!(
-            run_status(&state).as_deref(),
-            Some("WaitingApproval"),
-            "the gate stays waiting after a non-member WS attempt"
-        );
-
-        // The member WS subject clears the policied gate.
-        let mut sink = CollectSink(Vec::new());
-        handle_ws_sop_frame(&frame, &state, "sess-1", Some(&member), &mut sink).await;
-        assert!(
-            sink.0.iter().any(|m| m.contains("resumed")),
-            "an authenticated member clears the gate over WS: {:?}",
-            sink.0
-        );
-        assert_ne!(
-            run_status(&state).as_deref(),
-            Some("WaitingApproval"),
-            "the gate is cleared once an authorized WS member approves"
         );
     }
 }

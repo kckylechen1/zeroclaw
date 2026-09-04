@@ -7,7 +7,6 @@ import type {
   DiagResult,
   MemoryEntry,
   CostSummary,
-  CliTool,
   HealthSnapshot,
   Session,
   ChannelDetail,
@@ -1832,7 +1831,7 @@ export interface AdminResponse {
 
 /**
  * Reload the daemon in place. Same PID — the daemon's main loop tears down
- * every subsystem (gateway/channels/heartbeat/scheduler/mqtt), re-reads
+ * every subsystem (gateway/channels/heartbeat/scheduler), re-reads
  * config from disk, and re-instantiates everything. Brief HTTP downtime
  * while the gateway listener rebinds; clients should poll `/health` to
  * detect when the new instance is ready.
@@ -2249,15 +2248,3 @@ export function getLogs(params: LogsQueryParams = {}): Promise<LogsResponse> {
   return apiFetch<LogsResponse>(`/api/logs${qs ? `?${qs}` : ""}`);
 }
 
-// ---------------------------------------------------------------------------
-// CLI Tools
-// ---------------------------------------------------------------------------
-
-export function getCliTools(): Promise<CliTool[]> {
-  return apiFetch<CliTool[] | { cli_tools: CliTool[] }>("/api/cli-tools").then(
-    (data) => {
-      const result = unwrapField(data, "cli_tools");
-      return Array.isArray(result) ? result : [];
-    },
-  );
-}

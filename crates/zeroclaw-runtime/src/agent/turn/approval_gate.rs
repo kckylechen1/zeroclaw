@@ -4,6 +4,7 @@
 use super::context::TurnCtx;
 use super::events::StreamDelta;
 use super::redact::scrub_credentials;
+use super::redact::scrub_credentials_json;
 use crate::agent::tool_execution::ToolExecutionOutcome;
 use crate::approval::store::AuditDecision;
 use crate::approval::{ApprovalRequest, ApprovalRequirement, ApprovalResponse};
@@ -67,7 +68,12 @@ pub(crate) async fn gate_tool_approval(
                 let ch_request = zeroclaw_api::channel::ChannelApprovalRequest {
                     tool_name: request.tool_name.clone(),
                     arguments_summary: crate::approval::summarize_args(&request.arguments),
-                    raw_arguments: Some(request.arguments.clone()),
+                    // Raw structure for approver context, secrets redacted at
+                    // the rendering boundary — credential material must not
+                    // transit to chat/plugin approval surfaces verbatim.
+                    raw_arguments: Some(crate::agent::turn::redact::scrub_credentials_value(
+                        request.arguments.clone(),
+                    )),
                 };
                 let recipient = ctx.channel_reply_target.unwrap_or_default();
                 match ch.request_approval_attributed(recipient, &ch_request).await {
@@ -176,7 +182,7 @@ pub(crate) async fn gate_tool_approval(
                         "model": ctx.model,
                         "iteration": iteration + 1,
                         "tool": tool_name,
-                        "arguments": scrub_credentials(&tool_args.to_string()),
+                        "arguments": scrub_credentials_json(tool_args),
                         "result": denied,
                         "trace_id": ctx.turn_id,
                         // Operator-facing only. The remedy lives here rather than
@@ -232,7 +238,7 @@ pub(crate) async fn gate_tool_approval(
                         "model": ctx.model,
                         "iteration": iteration + 1,
                         "tool": tool_name,
-                        "arguments": scrub_credentials(&tool_args.to_string()),
+                        "arguments": scrub_credentials_json(tool_args),
                         "replaced": true,
                         "output": scrub_credentials(replacement),
                         "trace_id": ctx.turn_id,

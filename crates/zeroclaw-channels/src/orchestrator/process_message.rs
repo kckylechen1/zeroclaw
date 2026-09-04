@@ -12,7 +12,6 @@ use zeroclaw_api::channel::{Channel, SendMessage};
 use zeroclaw_providers::ChatMessage;
 use zeroclaw_providers::ModelProvider;
 use zeroclaw_providers::reliable::{scope_provider_fallback, take_last_provider_fallback};
-use zeroclaw_runtime::agent::claim_announcements_for_scoped_turn;
 use zeroclaw_runtime::agent::loop_::{
     LoopKnobs, ResolvedAgentExecution, ResolvedIo, ResolvedModelAccess, ResolvedRuntimeKnobs,
     ToolLoop, is_model_switch_requested, run_tool_call_loop, scope_session_key, scope_thread_id,
@@ -43,13 +42,12 @@ use super::{
     outbound_content_format_for_channel, peer_prompt_channel_ref, provider_cache_key,
     reconcile_early_ack, record_passive_context, refreshed_new_session_system_prompt,
     resolve_channel_ack_reactions, resolve_channel_thinking, resolve_classifier_route,
-    resolve_provider_ref_for_runtime_switch, rollback_orphan_user_turn,
-    run_channel_turn_with_background_announcements, run_draft_updater, runtime_defaults_snapshot,
-    sanitize_channel_response_for_format_with_leak_detection, send_message_to_peer_tool_available,
-    sender_memory_session_ids, set_route_selection, should_bypass_reply_intent_precheck,
-    should_rollback_failed_user_turn, stamp_session_routing_context,
-    strip_inline_data_image_markers, strip_tool_result_content, strip_tool_summary_prefix,
-    take_pending_new_session, timestamped_channel_user_history_content,
+    resolve_provider_ref_for_runtime_switch, rollback_orphan_user_turn, run_draft_updater,
+    runtime_defaults_snapshot, sanitize_channel_response_for_format_with_leak_detection,
+    send_message_to_peer_tool_available, sender_memory_session_ids, set_route_selection,
+    should_bypass_reply_intent_precheck, should_rollback_failed_user_turn,
+    stamp_session_routing_context, strip_inline_data_image_markers, strip_tool_result_content,
+    strip_tool_summary_prefix, take_pending_new_session, timestamped_channel_user_history_content,
 };
 
 /// Merge the durable owner-profile section and the session task-scoped
@@ -157,28 +155,6 @@ async fn process_channel_message_body(
                 "dropping self-authored inbound message (self-loop guard, agent-loop fallback)"
             );
             return;
-        }
-    }
-
-    if let (Some(engine), Some(audit)) = (ctx.sop_engine.as_ref(), ctx.sop_audit.as_ref()) {
-        let wants = engine
-            .lock()
-            .map(|eng| eng.wants_source(zeroclaw_runtime::sop::types::SopTriggerSource::Channel))
-            .unwrap_or(false);
-        if wants {
-            let topic = match &msg.channel_alias {
-                Some(alias) if !alias.is_empty() => format!("{}/{}", msg.channel, alias),
-                _ => msg.channel.clone(),
-            };
-            zeroclaw_runtime::sop::dispatch::dispatch_untrusted_fan_in(
-                engine,
-                audit,
-                zeroclaw_runtime::sop::types::SopTriggerSource::Channel,
-                Some(&topic),
-                Some(&msg.content),
-                None,
-            )
-            .await;
         }
     }
 
@@ -945,12 +921,6 @@ async fn process_channel_message_body(
 
     let tool_receipts_collector: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let receipt_scope = ctx.receipt_generator.as_ref().map(|generator| {
-        zeroclaw_runtime::agent::tool_receipts::ReceiptScope {
-            generator: generator.clone(),
-            collector: std::sync::Arc::clone(&tool_receipts_collector),
-        }
-    });
     let loop_knobs = LoopKnobs::default();
     let turn_id = uuid::Uuid::new_v4().to_string();
     // Bracket the channel turn so lifecycle events
@@ -970,69 +940,8 @@ async fn process_channel_message_body(
         Some(turn_id.clone()),
     );
 
-    // Finished background children, claimed once for this turn and spliced
-    // above the user message, so a Detached completion actually reaches the
-    // person on Telegram/Discord/etc. instead of sitting delivered-to-nobody.
-    //
-    // **Claimed through the scoping entry point, not the ambient one.** This
-    // turn owns `history_key`, but it only scopes it around the tool-loop
-    // future below (`scope_session_key(Some(history_key.clone()), tool_loop)`),
-    // which is built after `history` — so an ambient claim here would read no
-    // key at all and be a silent no-op. The runtime scopes the key for us.
-    //
-    // **Once per turn, not once per model-switch retry.** A retry re-enters the
-    // loop with this same `history`, so the block is still in front of the
-    // model on the second attempt; claiming inside the loop would consume the
-    // next batch of announcements for a turn that already has one.
-    //
-    // **Divergence from the CLI/Agent claim sites, deliberate:** the block goes
-    // into this turn's local `history` only, never into the per-sender
-    // conversation cache — `append_sender_turn` above already persisted the
-    // plain user text, and rewriting that entry would re-show the same
-    // completion at the top of every later turn. The consequence is that later
-    // turns' history does not carry the block; that is accepted, because
-    // delivered-exactly-once is the contract and the assistant's persisted
-    // reply is the durable record of what it was told.
-    //
-    // **Above the turn-context preamble, not between it and the user's text —
-    // and that is a divergence, not a mirror.** The CLI site composes
-    // `{hw_context}{announcements}[{now}] {msg}` (`agent/loop_.rs`), putting the
-    // news closest to the message it is news about. Here the preamble is already
-    // composed onto the user turn by the time this claim runs, because the claim
-    // is deliberately late: it sits below the reply-intent precheck, so a turn
-    // that decides to stay silent never consumes a batch, and the window in
-    // which the guard has to hand rows back is as narrow as this function
-    // allows. The ordering is what that narrower window costs.
-    //
-    // Nothing fallible sits between here and the provider call that the guard
-    // does not already cover: the splice is infallible, and every path from the
-    // retry loop that fails before the provider leaves the guard armed.
-    //
-    // **Two limits of "one claimant per conversation" on this surface, named
-    // rather than assumed away.** First, `history_key` is not the dispatch key:
-    // Matrix folds thread roots into one history key while the interruption
-    // scope keeps them apart, so two workers for the same conversation can
-    // reach this line concurrently. SQLite's single claiming statement keeps
-    // that safe — no row is read twice — but one batch can arrive split across
-    // two turns. Second, settling below on a succeeded turn means the model
-    // read the block, not that the user received anything: an outbound send can
-    // still fail afterwards. That is deliberate. The assistant's reply is
-    // persisted to this conversation's history either way, so the agent keeps
-    // what it was told; handing the rows back on a send failure would
-    // re-announce a completion it has already acted on.
-    //
-    // The claim, the splice and the settle live in
-    // `run_channel_turn_with_background_announcements`; this turn's execution
-    // body — the model-switch retry loop below, unchanged — is what gets handed
-    // to it. That is the only seam through which those three can be asserted
-    // without a live orchestrator context, and the disarm-on-failed-splice case
-    // that used to be spelled here now lives there with its reasoning.
     let mut fallback_info = None;
-    let llm_result = run_channel_turn_with_background_announcements(
-        &history_key,
-        &mut history,
-        async |key| claim_announcements_for_scoped_turn(key).await,
-        async |history| scope_provider_fallback(async {
+    let llm_result = scope_provider_fallback(async {
             let llm_result = loop {
                 let thread_scope_id = msg
                     .interruption_scope_id
@@ -1081,9 +990,9 @@ async fn process_channel_message_body(
                             knobs: &loop_knobs,
                         },
                     ),
-                    // Reborrow, not move: `history` is the bracket's `&mut` and the
-                    // model-switch loop may take another lap with the same vector.
-                    history: &mut *history,
+                    // Reborrow, not move: the model-switch loop may take
+                    // another lap with the same vector.
+                    history: &mut history,
                     channel_name: msg.channel.as_str(),
                     channel_reply_target: Some(msg.reply_target.as_str()),
                     cancellation_token: Some(cancellation_token.clone()),
@@ -1122,13 +1031,6 @@ async fn process_channel_message_body(
                     agent_alias: Some(ctx.agent_alias.as_str()),
                     parent_agent_alias: None,
                     turn_id: &turn_id,
-                    // Live channel-daemon SOP path: re-assemble a nested step's
-                    // agent when it delegates to a different agent, so the step runs
-                    // with that agent's own gated tools/policy/MCP scope rather than
-                    // this turn's.
-                    sop_reassembly: Some(zeroclaw_runtime::agent::loop_::SopStepReassembly {
-                        config: ctx.prompt_config.as_ref(),
-                    }),
                 });
                 // Scope this turn's routing handle so concurrent same-agent turns,
                 // which share one SendViaTool, never read each other's routes.
@@ -1136,8 +1038,6 @@ async fn process_channel_message_body(
                     tools::TURN_ROUTING.scope(Some(std::sync::Arc::clone(&turn_routing)), tool_loop);
                 let tool_loop = zeroclaw_api::NATIVE_THINKING_OVERRIDE
                     .scope(thinking.params.native_thinking, tool_loop);
-                let tool_loop = zeroclaw_runtime::agent::tool_receipts::TOOL_LOOP_RECEIPT_CONTEXT
-                    .scope(receipt_scope.clone(), tool_loop);
                 let tool_loop = zeroclaw_runtime::agent::loop_::TOOL_LOOP_COST_TRACKING_CONTEXT
                     .scope(cost_tracking_context.clone(), tool_loop);
                 let tool_loop = scope_session_key(Some(history_key.clone()), tool_loop);
@@ -1246,11 +1146,9 @@ async fn process_channel_message_body(
             // handed out through the binding above rather than as part of the
             // body's outcome: the bracket settles against the turn's outcome, and a
             // fallback record is not part of that question.
-            fallback_info = take_last_provider_fallback();
-            llm_result
-        })
-        .await,
-    )
+        fallback_info = take_last_provider_fallback();
+        llm_result
+    })
     .await;
 
     // Attribute the closing event to the final route and attach aggregate

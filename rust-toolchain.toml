@@ -1,0 +1,7 @@
+# Canonical Rust toolchain pin for development lanes. The setup-time guard
+# (scripts/ci/toolchain_gate.sh) derives the expected version from this file,
+# and CI's Format job cross-checks its installed toolchain against it, so a
+# ci.yml toolchain bump that misses this pin fails fast. Container images pin
+# their toolchains by base-image digest instead and do not consume this file.
+[toolchain]
+channel = "1.96.1"

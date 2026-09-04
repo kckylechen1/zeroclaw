@@ -845,7 +845,13 @@ fn t14b2_per_agent_timeout_secs_folds_onto_model_provider_entry() {
 }
 
 #[test]
-fn t14c_max_depth_synthesizes_per_agent_runtime_profile() {
+fn t14c_max_depth_key_is_stripped_not_forwarded() {
+    // The fixture's complex_agent carries V2 `max_depth = 4` alongside
+    // `max_iterations = 25`. The retired spawn-depth key has no V3 field
+    // (spawn wall): migration must NOT forward it, and the agent still
+    // points at the profile synthesized from the surviving keys (that
+    // synthesis is caused by max_iterations/agentic, per t14a/t14b —
+    // this test pins the STRIP half).
     let cfg = v3_config();
     let agent = cfg
         .agents
@@ -853,18 +859,13 @@ fn t14c_max_depth_synthesizes_per_agent_runtime_profile() {
         .expect("agents.complex_agent present");
     assert_eq!(
         agent.runtime_profile, "agent_complex_agent",
-        "V2 max_depth must point agent at synthesized per-agent runtime profile"
+        "surviving V2 runtime keys must still point the agent at its synthesized profile"
     );
     let profile = cfg
         .runtime_profiles
         .get("agent_complex_agent")
         .expect("synthesized runtime_profiles.agent_complex_agent");
-    assert_eq!(profile.max_delegation_depth, 4);
-    assert_eq!(
-        profile.agentic_timeout_secs,
-        Some(600),
-        "V2 agent agentic_timeout_secs must land on the agent's runtime_profile"
-    );
+    assert_eq!(profile.max_tool_iterations, 25);
 }
 
 #[test]
@@ -1836,33 +1837,6 @@ enabled = false
 }
 
 #[test]
-fn v2_channels_mqtt_block_alias_wraps() {
-    // V3 preserves disabled channel blocks rather than dropping them, so
-    // the test config has to satisfy MqttConfig's required `broker_url` /
-    // `client_id` fields — a parked channel still has to deserialize.
-    let raw = r#"
-default_provider = "openai"
-default_model = "gpt-4o-mini"
-
-[channels_config.mqtt]
-enabled = false
-broker_url = "mqtt://localhost:1883"
-client_id = "parked-test-client"
-"#;
-    let cfg = migrate_to_current(raw).expect("mqtt flat V2 block must alias-wrap");
-    assert_eq!(cfg.schema_version, CURRENT_SCHEMA_VERSION);
-    let mqtt = cfg
-        .channels
-        .mqtt
-        .get("default")
-        .expect("parked mqtt block survives V2→V3 migration");
-    assert!(
-        !mqtt.enabled,
-        "operator's enabled = false ports through verbatim"
-    );
-}
-
-#[test]
 fn v2_tunnel_provider_renamed_to_tunnel_provider() {
     // V2 grammar wrote `[tunnel] provider = "cloudflare"`. V3 qualifies the
     // field name as `tunnel_provider` (it's not a model provider). Without
@@ -2078,6 +2052,25 @@ fn generate_every_version_migrates_and_validates() {
         });
         cfg.validate()
             .unwrap_or_else(|e| panic!("generate({target}) output fails Config::validate: {e:#}"));
+    }
+}
+
+#[test]
+fn generate_never_emits_retired_config_surfaces() {
+    // The seed fixture predates retirements and the migration lenses pass
+    // unknown nested tables through, so the generator must strip retired
+    // sections itself — a freshly generated config must not trigger the
+    // running binary's own removal warning on first load. Asserted through
+    // the real detector so every retired surface in the shared table is
+    // covered without re-implementing the walk.
+    for target in 1..=CURRENT_SCHEMA_VERSION {
+        let raw = generate(target, &GenerateOptions::default())
+            .unwrap_or_else(|e| panic!("generate({target}) failed: {e:#}"));
+        let warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+        assert!(
+            warnings.is_empty(),
+            "generate({target}) must not emit retired config surfaces: {warnings:?}"
+        );
     }
 }
 
