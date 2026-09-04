@@ -158,6 +158,10 @@ name = "nom"
 version = "=7.1.3"
 
 [[bans.skip]]
+name = "base64"
+version = "=0.23.1"
+
+[[bans.skip]]
 name = "rand"
 version = "=0.9.4"
 
@@ -186,6 +190,10 @@ name = "strum"
 version = "=0.27.2"
 
 [[bans.skip]]
+name = "syn"
+version = "=3.0.4"
+
+[[bans.skip]]
 name = "strum_macros"
 version = "=0.27.2"
 
@@ -200,6 +208,18 @@ version = "=1.0.69"
 [[bans.skip]]
 name = "webpki-roots"
 version = "=0.26.11"
+
+[[bans.skip]]
+name = "windows-core"
+version = "=0.62.2"
+
+[[bans.skip]]
+name = "windows-result"
+version = "=0.4.1"
+
+[[bans.skip]]
+name = "windows-strings"
+version = "=0.5.1"
 
 [[bans.skip]]
 name = "windows-sys"
