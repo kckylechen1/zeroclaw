@@ -356,7 +356,7 @@ pub async fn process_message(
         tool_descs.retain(|(name, _)| effective_tool_names.contains(name));
 
         let bootstrap_max_chars = if eff_compact_context {
-            Some(6000)
+            Some(crate::agent::system_prompt::COMPACT_BOOTSTRAP_MAX_CHARS)
         } else {
             None
         };
