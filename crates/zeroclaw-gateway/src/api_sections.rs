@@ -342,6 +342,7 @@ pub async fn handle_sections(State(state): State<AppState>, headers: HeaderMap) 
                     zeroclaw_config::sections::Section::Hardware
                         | zeroclaw_config::sections::Section::Mcp
                         | zeroclaw_config::sections::Section::Skills
+                        | zeroclaw_config::sections::Section::Composition
                 ),
                 None => section_has_picker_for_key(&key),
             };
@@ -505,9 +506,11 @@ fn picker_items_for(
         | Section::EmbeddingRoutes => {
             PickerDispatch::Items(one_tier_alias_map_picker(cfg, section.as_str()))
         }
-        Section::Hardware | Section::Mcp | Section::Skills | Section::QuickstartState => {
-            PickerDispatch::DirectForm
-        }
+        Section::Hardware
+        | Section::Mcp
+        | Section::Skills
+        | Section::Composition
+        | Section::QuickstartState => PickerDispatch::DirectForm,
     }
 }
 
@@ -1050,7 +1053,11 @@ pub async fn handle_section_select(
             };
             (prefix, true)
         }
-        Section::Hardware | Section::Mcp | Section::Skills | Section::QuickstartState => {
+        Section::Hardware
+        | Section::Mcp
+        | Section::Skills
+        | Section::Composition
+        | Section::QuickstartState => {
             return error_response(
                 ConfigApiError::new(
                     ConfigApiCode::PathNotFound,
@@ -1336,8 +1343,6 @@ mod tests {
             )),
             pending_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
-            sop_engine: None,
-            sop_audit: None,
         }
     }
 

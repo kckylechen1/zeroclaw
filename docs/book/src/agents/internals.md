@@ -20,7 +20,7 @@ Each agent's effective `SecurityPolicy` is built by `SecurityPolicy::for_agent(c
 
 The read-only allowlist is honored by `file_read` (and other read-side tools); the read-write allowlist gates `file_write`, `file_edit`, `git_operations`, and the shell tool's path-touching invocations. POSIX device files (`/dev/null`, `/dev/zero`, `/dev/random`, `/dev/urandom`) are always readable so shell idioms keep working without per-agent config.
 
-SubAgent spawns enforce the rule that a child cannot escalate beyond its parent. The validator's full axis list and the budget-sharing behavior are documented at [Delegation → Permission inheritance](./delegation.md#permission-inheritance).
+SubAgent spawns enforce the rule that a child cannot escalate beyond its parent. The validator's full axis list and the budget-sharing behavior live in `crates/zeroclaw-runtime/src/subagent/mod.rs` (`SecurityPolicy::ensure_no_escalation_beyond` in `crates/zeroclaw-config/src/policy.rs`); see [Delegation & SubAgents](./delegation.md) for the retirement record of the tools that exercised it.
 
 ## Memory model
 

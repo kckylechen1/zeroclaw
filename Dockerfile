@@ -53,7 +53,7 @@ FROM --platform=$BUILDPLATFORM ${ZEROCLAW_BASE_RUST_SLIM} AS builder
 WORKDIR /app
 ARG TARGETARCH
 # >>> generated:docker-features-arg by `cargo generate installers` - do not edit <<<
-ARG ZEROCLAW_CARGO_FLAGS="--no-default-features --features acp-bridge,agent-runtime,channel-acp-server,channel-discord,channel-email,channel-filesystem,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,observability-prometheus,schema-export,whatsapp-web"
+ARG ZEROCLAW_CARGO_FLAGS="--no-default-features --features acp-bridge,agent-runtime,channel-acp-server,channel-discord,channel-email,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,hardware-tools,integrations-saas,observability-prometheus,schema-export,whatsapp-web"
 # >>> end generated:docker-features-arg <<<
 
 # Install build dependencies. g++ is required by inkjet (zerocode's syntax
@@ -211,6 +211,7 @@ RUN mkdir -p /zeroclaw-data/.zeroclaw /zeroclaw-data/data && \
         'default_provider = "openrouter"' \
         'default_model = "anthropic/claude-sonnet-4-20250514"' \
         'default_temperature = 0.7' \
+        'composition = "minimal"' \
         '' \
         '[gateway]' \
         'port = 42617' \
@@ -286,7 +287,6 @@ ENV HOME=/zeroclaw-data
 # Default provider and model are set in config.toml, not here,
 # so config file edits are not silently overridden
 #ENV PROVIDER=
-ENV ZEROCLAW_GATEWAY_PORT=42617
 
 # API_KEY must be provided at runtime!
 

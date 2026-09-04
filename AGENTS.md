@@ -54,6 +54,8 @@ cargo test
 
 Use `./dev/ci.sh all` for full pre-PR validation when the scope warrants it. Docs-only changes use `scripts/ci/docs_quality_gate.sh` and `scripts/ci/docs_links_gate.sh`. Bootstrap script changes add `bash -n install.sh`.
 
+Host-side cargo work runs under the `rust-toolchain.toml` pin: `scripts/ci/toolchain_gate.sh` (wired into `scripts/ci/rust_quality_gate.sh` and `just ci`) fails fast when the active cargo/rustc do not match it — consume that guard instead of rediscovering toolchain drift per harness. Shell gate changes add `bash -n` on the touched scripts plus the gate's fixture self-test (e.g. `bash scripts/ci/toolchain_gate.test.sh`).
+
 ## Task References
 
 The architecture map routes task-specific documentation. Consult `docs/book/src/contributing/agent-guidelines.md` only for detailed agent examples, risk and stability policy, skill discovery, and protected operational documents. Do not skip a required contract because it is no longer embedded in this bootstrap file.

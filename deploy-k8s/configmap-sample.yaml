@@ -11,6 +11,9 @@ data:
   # env, not inside config.toml — see deployment.yaml.
   config.toml: |
     schema_version = 3
+    # Fresh installs start on the minimal companion tool surface; set
+    # "full" (alias "legacy") explicitly to keep the complete registry.
+    composition = "minimal"
 
     [providers.models.anthropic.cloud]   # type = anthropic; alias = cloud
     model = "claude-sonnet-4-20250514"

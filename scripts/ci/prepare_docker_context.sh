@@ -67,6 +67,7 @@ printf '%s\n' \
   'default_provider = "openrouter"' \
   'default_model = "anthropic/claude-sonnet-4-20250514"' \
   'default_temperature = 0.7' \
+  'composition = "minimal"' \
   '' \
   '[gateway]' \
   'port = 42617' \

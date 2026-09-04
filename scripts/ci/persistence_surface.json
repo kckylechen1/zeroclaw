@@ -1,0 +1,422 @@
+{
+  "version": 1,
+  "law": "TB-22 (frozen contract rev 3, owner-ratified): from ratification no new durable task/attempt/workspace/eval/approval/delivery store is added to ZeroClaw, and no annex table gains new writers. Freeze-no-growth also means no new WRITER PATH to any annex table. Enforcement: this checked-in manifest enumerates the codebase's detected persistence surface (case-insensitive sqlite DDL incl. .sql/.txt/.md files, rusqlite connection sites, store-crate name mentions (alias-proof), OpenOptions write paths, embedded-store crate deps); CI diffs the manifest against the detected surface; ANY drift (new file, removed file, new store crate) fails this gate and requires a PR-visible manifest change citing a TB-22 exemption. Detection is signature-based, not semantic: constructed DDL strings or a hand-rolled file store can still evade it - the gate's contract is drift VISIBILITY plus a PR-visible manifest change, with human review as the authority, not impossibility. The only standing exemptions per the contract: TB-19 watch cursors and the TB-7 outstanding-tuple journal (neither exists yet; neither is granted here).",
+  "exemptions": [],
+  "files": [
+    {
+      "path": "apps/tauri/src/daemon.rs",
+      "store": "desktop-daemon.log",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): daemon log append; not a task/attempt/delivery ledger",
+      "signals": 1
+    },
+    {
+      "path": "crates/robot-kit/src/drive.rs",
+      "store": "serial-port",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): serial device write, no durable store",
+      "signals": 1
+    },
+    {
+      "path": "crates/zeroclaw-channels/src/imessage.rs",
+      "store": "macOS chat.db (external)",
+      "role": "store",
+      "basis": "channel-internal client state reading Apple's chat.db",
+      "signals": 24
+    },
+    {
+      "path": "crates/zeroclaw-channels/src/matrix.rs",
+      "store": "matrix-state.json",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): owner-only channel state persist",
+      "signals": 2
+    },
+    {
+      "path": "crates/zeroclaw-channels/src/orchestrator/acp_server.rs",
+      "store": "channel_seen_ids.db",
+      "role": "test",
+      "basis": "test-only direct connections",
+      "signals": 4
+    },
+    {
+      "path": "crates/zeroclaw-channels/src/orchestrator/inbox.rs",
+      "store": "channel_seen_ids.db",
+      "role": "store",
+      "basis": "#205 annex row 11: channel-edge inbound dedupe only; never outbound result-delivery truth",
+      "signals": 18
+    },
+    {
+      "path": "crates/zeroclaw-channels/src/slack.rs",
+      "store": "slack-state.json",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): atomic temp-file state persist",
+      "signals": 1
+    },
+    {
+      "path": "crates/zeroclaw-channels/src/whatsapp_storage.rs",
+      "store": "whatsapp channel store",
+      "role": "store",
+      "basis": "channel-internal client state",
+      "signals": 55
+    },
+    {
+      "path": "crates/zeroclaw-config/src/cost/tracker.rs",
+      "store": "cost-usage.jsonl",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): cost/usage accounting file",
+      "signals": 4
+    },
+    {
+      "path": "crates/zeroclaw-config/src/migration.rs",
+      "store": "config.toml",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): config migration temp+fsync rewrite",
+      "signals": 1
+    },
+    {
+      "path": "crates/zeroclaw-config/src/policy.rs",
+      "store": "(none)",
+      "role": "mention",
+      "basis": "CREATE TABLE appears inside security-policy test string literals; no store",
+      "signals": 2
+    },
+    {
+      "path": "crates/zeroclaw-config/src/schema.rs",
+      "store": "config.toml",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): config write/backup paths",
+      "signals": 4
+    },
+    {
+      "path": "crates/zeroclaw-config/src/schema/v2.rs",
+      "store": "(workspace layout list)",
+      "role": "mention",
+      "basis": "lists known db filenames for workspace migration; no store",
+      "signals": 24
+    },
+    {
+      "path": "crates/zeroclaw-gateway/src/api_config.rs",
+      "store": "api-config.json",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): api config migration temp+fsync",
+      "signals": 1
+    },
+    {
+      "path": "crates/zeroclaw-gateway/src/api_pairing.rs",
+      "store": "devices.db",
+      "role": "store",
+      "basis": "gateway device-fabric plane (#55); kept",
+      "signals": 20
+    },
+    {
+      "path": "crates/zeroclaw-gateway/src/device_identity.rs",
+      "store": "device_identities",
+      "role": "store",
+      "basis": "#205 keeper: gateway admission/role/capability state",
+      "signals": 23
+    },
+    {
+      "path": "crates/zeroclaw-infra/src/acp_session_store.rs",
+      "store": "sessions/acp-sessions.db",
+      "role": "store",
+      "basis": "#205 annex row 2: derived host transport/presentation cache only",
+      "signals": 13
+    },
+    {
+      "path": "crates/zeroclaw-infra/src/session_sqlite.rs",
+      "store": "sessions/sessions.db",
+      "role": "store",
+      "basis": "#205 annex row 10: ZeroClaw-owned conversation/turn state; never mirrors Tachi lifecycle",
+      "signals": 14
+    },
+    {
+      "path": "crates/zeroclaw-infra/src/session_store.rs",
+      "store": "sessions.jsonl",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): per-session JSONL append store",
+      "signals": 1
+    },
+    {
+      "path": "crates/zeroclaw-infra/src/sqlite_perms.rs",
+      "store": "(helper: sqlite permission hardening)",
+      "role": "mention",
+      "basis": "helper + tests; owns no store",
+      "signals": 3
+    },
+    {
+      "path": "crates/zeroclaw-infra/tests/proof_session_routing_columns.rs",
+      "store": "sessions.db (fixture)",
+      "role": "test",
+      "basis": "integration test fixtures",
+      "signals": 7
+    },
+    {
+      "path": "crates/zeroclaw-log/src/migrate.rs",
+      "store": "zeroclaw.log",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): log migration temp rewrite",
+      "signals": 3
+    },
+    {
+      "path": "crates/zeroclaw-log/src/writer.rs",
+      "store": "zeroclaw.log",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): append-only log writer",
+      "signals": 7
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/audit.rs",
+      "store": "memory/audit.db",
+      "role": "store",
+      "basis": "personal-memory audit trail",
+      "signals": 10
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/budget.rs",
+      "store": "memory budget store",
+      "role": "store",
+      "basis": "personal-memory domain",
+      "signals": 11
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/companion/mod.rs",
+      "store": "companion.db",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (store-crate mention): companion memcore rusqlite store docs/handles",
+      "signals": 1
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/companion/outbox.rs",
+      "store": "companion.db",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (store-crate mention): memory outbox rusqlite writes",
+      "signals": 3
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/companion/store.rs",
+      "store": "companion memcore PortableKernel store",
+      "role": "store",
+      "basis": "#49 companion-memcore exception: in-process, feature-gated, no network/daemon",
+      "signals": 7
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/companion/user_model.rs",
+      "store": "user_model.db",
+      "role": "store",
+      "basis": "#205 keeper: append-only user-model review receipts",
+      "signals": 34
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/conflict.rs",
+      "store": "memories.db",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (store-crate mention): memories supersede updates via rusqlite",
+      "signals": 2
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/consolidation.rs",
+      "store": "memory/brain.db",
+      "role": "store",
+      "basis": "personal-memory consolidation (test blocks open brain.db directly)",
+      "signals": 7
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/hygiene.rs",
+      "store": "memory hygiene store",
+      "role": "store",
+      "basis": "personal-memory domain",
+      "signals": 11
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/knowledge_graph.rs",
+      "store": "knowledge graph (sqlite)",
+      "role": "store",
+      "basis": "personal-memory domain",
+      "signals": 5
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/knowledge_graph_pg.rs",
+      "store": "knowledge graph (postgres)",
+      "role": "store",
+      "basis": "personal-memory domain (external postgres backend)",
+      "signals": 3
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/lib.rs",
+      "store": "memory/audit.db",
+      "role": "test",
+      "basis": "test-only direct connections",
+      "signals": 8
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/postgres.rs",
+      "store": "postgres memory backend",
+      "role": "store",
+      "basis": "personal-memory domain (external postgres backend)",
+      "signals": 4
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/response_cache.rs",
+      "store": "memory response cache",
+      "role": "store",
+      "basis": "personal-memory domain",
+      "signals": 3
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/snapshot.rs",
+      "store": "memory snapshot store",
+      "role": "store",
+      "basis": "personal-memory domain",
+      "signals": 10
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/sqlite.rs",
+      "store": "memory/brain.db",
+      "role": "store",
+      "basis": "personal-memory main store (tachi#1630/#49 ZeroClaw-canonical side)",
+      "signals": 42
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/tachi_governance.rs",
+      "store": "memories.db",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (store-crate mention): governance test writes via rusqlite",
+      "signals": 1
+    },
+    {
+      "path": "crates/zeroclaw-memory/tests/agent_migration.rs",
+      "store": "memory fixtures",
+      "role": "test",
+      "basis": "integration test fixtures",
+      "signals": 4
+    },
+    {
+      "path": "crates/zeroclaw-providers/src/auth/mod.rs",
+      "store": "pending-oauth.json",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): pending OAuth login file reset",
+      "signals": 1
+    },
+    {
+      "path": "crates/zeroclaw-providers/src/auth/profiles.rs",
+      "store": "auth-profiles.json",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): profile file write",
+      "signals": 2
+    },
+    {
+      "path": "crates/zeroclaw-providers/src/copilot.rs",
+      "store": "copilot-token.json",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): owner-only credential file write",
+      "signals": 2
+    },
+    {
+      "path": "crates/zeroclaw-runtime/src/approval/mod.rs",
+      "store": "approvals.db",
+      "role": "test",
+      "basis": "test-only direct connections inspecting approvals.db",
+      "signals": 7
+    },
+    {
+      "path": "crates/zeroclaw-runtime/src/approval/store.rs",
+      "store": "approvals.db",
+      "role": "store",
+      "basis": "#205 annex row 4: kernel-local tool approval only; never authorizes Tachi-managed execution",
+      "signals": 6
+    },
+    {
+      "path": "crates/zeroclaw-runtime/src/cron/scheduler.rs",
+      "store": "cron/jobs.db",
+      "role": "test",
+      "basis": "test-only direct connections inspecting cron/jobs.db",
+      "signals": 7
+    },
+    {
+      "path": "crates/zeroclaw-runtime/src/cron/store.rs",
+      "store": "cron/jobs.db",
+      "role": "store",
+      "basis": "#205 annex row 5: schedule definitions stay; cron_runs keeps delivery facts only, never worker truth",
+      "signals": 19
+    },
+    {
+      "path": "crates/zeroclaw-runtime/src/doctor/mod.rs",
+      "store": "workspace-probe",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): doctor probe file create",
+      "signals": 1
+    },
+    {
+      "path": "crates/zeroclaw-runtime/src/heartbeat/store.rs",
+      "store": "heartbeat/history.db",
+      "role": "store",
+      "basis": "#205 annex row 9: attention/observation history only",
+      "signals": 5
+    },
+    {
+      "path": "crates/zeroclaw-runtime/src/migration.rs",
+      "store": "memory/brain.db (legacy source)",
+      "role": "read_only",
+      "basis": "legacy workspace migration reads old memory/brain.db; no new store",
+      "signals": 13
+    },
+    {
+      "path": "crates/zeroclaw-runtime/src/security/audit.rs",
+      "store": "audit-chain.jsonl",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): tamper-evident chained audit append",
+      "signals": 2
+    },
+    {
+      "path": "crates/zeroclaw-runtime/src/service/mod.rs",
+      "store": "service-state",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by hardened detector (OpenOptions): service file create/append path",
+      "signals": 1
+    },
+    {
+      "path": "src/bin/zeroclaw-acp-bridge.rs",
+      "store": "acp-bridge-state",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by widened scan (root package src/): OpenOptions write path",
+      "signals": 1
+    },
+    {
+      "path": "src/commands/self_test.rs",
+      "store": "self-test.db",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by widened scan (root package src/): rusqlite connection open in self-test",
+      "signals": 2
+    },
+    {
+      "path": "src/memory/battle_tests.rs",
+      "store": "memories.db",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by widened scan (root package src/): rusqlite test writes",
+      "signals": 1
+    },
+    {
+      "path": "src/migration.rs",
+      "store": "zeroclaw.db",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by widened scan (root package src/): rusqlite migration module",
+      "signals": 1
+    },
+    {
+      "path": "tools/fill-translations/src/main.rs",
+      "store": "translations.json",
+      "role": "role",
+      "basis": "pre-existing surface enumerated by widened scan (tools/): OpenOptions write path",
+      "signals": 1
+    }
+  ],
+  "store_crates": [
+    "Cargo.toml",
+    "crates/zeroclaw-channels",
+    "crates/zeroclaw-config",
+    "crates/zeroclaw-gateway",
+    "crates/zeroclaw-infra",
+    "crates/zeroclaw-memory",
+    "crates/zeroclaw-runtime"
+  ]
+}

@@ -6,10 +6,9 @@ use std::fs;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::policy::SecurityPolicy;
-use zeroclaw_config::schema::{ClassificationRule, Config, DelegateTargetConfig, ModelRouteConfig};
+use zeroclaw_config::schema::{ClassificationRule, Config, ModelRouteConfig};
 use zeroclaw_providers::ProviderDispatch;
 
-const DEFAULT_AGENT_MAX_DEPTH: u32 = 3;
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 10;
 
 pub struct ModelRoutingConfigTool {
@@ -39,6 +38,28 @@ impl ModelRoutingConfigTool {
                 self.config.config_path.display()
             ))
         })?;
+
+        // This reparse path bypasses the normal load pipeline's tombstone
+        // reporting, so surface retired-surface warnings here too: a legacy
+        // key (e.g. runtime_profiles.*.max_delegation_depth) is dropped by
+        // the parse below and must not vanish silently before save() rewrites
+        // the file.
+        for warning in zeroclaw_config::validation_warnings::retired_field_tombstones(&contents)
+            .into_iter()
+            .chain(zeroclaw_config::validation_warnings::retired_section_tombstones(&contents))
+        {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "code": warning.code,
+                        "path": warning.path,
+                        "message": warning.message,
+                    })),
+                "model_routing_config: retired config surface present in config file"
+            );
+        }
 
         let mut parsed =
             zeroclaw_config::migration::migrate_to_current(&contents).map_err(|error| {
@@ -82,6 +103,58 @@ impl ModelRoutingConfigTool {
         None
     }
 
+    /// Reject any call that still carries an `api_key` argument. Credential
+    /// mutation is not part of the model-visible surface: raw secrets must go
+    /// through the trusted operator config API (PUT /api/config/{path}, with
+    /// secret-masked reads) or the settings UI. Reject the whole call — never
+    /// silently drop the parameter (the caller must not believe a key was
+    /// stored) and never echo the submitted value or any prefix of it.
+    ///
+    /// The check is recursive over object keys and array elements so a
+    /// credential cannot hide inside an unrelated nested argument either.
+    fn reject_raw_credential_args(args: &Value) -> Option<ToolResult> {
+        // Presence of the key (any JSON value, including null) is the rejection
+        // condition; the submitted value is never inspected or logged.
+        if !Self::contains_api_key_arg(args) {
+            return None;
+        }
+
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "action": args.get("action").and_then(Value::as_str).unwrap_or("get"),
+                    "reason": "raw credential argument",
+                })),
+            "model_routing_config: rejected call carrying api_key"
+        );
+
+        Some(ToolResult {
+            success: false,
+            output: ToolOutput::default(),
+            error: Some(
+                "'api_key' is not accepted by model_routing_config. Raw credentials must be \
+                 configured through the trusted operator config surface (PUT /api/config/{path} \
+                 or the settings UI), never through model tool arguments. The whole call was \
+                 rejected and nothing was written."
+                    .into(),
+            ),
+        })
+    }
+
+    /// True when any object key named `api_key` exists anywhere in the
+    /// arguments (objects and arrays are walked; string values are not keys).
+    fn contains_api_key_arg(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => map
+                .iter()
+                .any(|(key, val)| key == "api_key" || Self::contains_api_key_arg(val)),
+            Value::Array(items) => items.iter().any(Self::contains_api_key_arg),
+            _ => false,
+        }
+    }
+
     fn parse_string_list(raw: &Value, field: &str) -> anyhow::Result<Vec<String>> {
         if let Some(raw_string) = raw.as_str() {
             return Ok(raw_string
@@ -114,56 +187,6 @@ impl ModelRoutingConfigTool {
         }
 
         anyhow::bail!("'{field}' must be a string or string[]")
-    }
-
-    fn parse_delegate_targets(
-        raw: &Value,
-        field: &str,
-    ) -> anyhow::Result<Vec<DelegateTargetConfig>> {
-        // Keep the config-editing tool as permissive as the schema loader:
-        // operators may pass a comma-separated legacy string, a string array,
-        // or object entries with explicit mode. The stored config still uses
-        // `DelegateTargetConfig`, so mode semantics are not reimplemented here.
-        if let Some(raw_string) = raw.as_str() {
-            return Ok(raw_string
-                .split(',')
-                .map(str::trim)
-                .filter(|entry| !entry.is_empty())
-                .map(DelegateTargetConfig::bounded)
-                .collect());
-        }
-
-        if let Some(array) = raw.as_array() {
-            let mut out = Vec::new();
-            for item in array {
-                let mut target: DelegateTargetConfig =
-                    serde_json::from_value(item.clone()).map_err(|error| {
-                        ::zeroclaw_log::record!(
-                            WARN,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Reject
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({
-                                "field": field,
-                                "error": format!("{}", error),
-                            })),
-                            "model_routing_config: delegate target element has invalid shape"
-                        );
-                        anyhow::Error::msg(format!(
-                            "'{field}' array must contain strings or objects with agent/mode: {error}"
-                        ))
-                    })?;
-                target.agent = target.agent.trim().to_string();
-                if !target.agent.is_empty() {
-                    out.push(target);
-                }
-            }
-            return Ok(out);
-        }
-
-        anyhow::bail!("'{field}' must be a string, string[], or delegate target object[]")
     }
 
     fn parse_non_empty_string(args: &Value, field: &str) -> anyhow::Result<String> {
@@ -271,38 +294,6 @@ impl ModelRoutingConfigTool {
                 "model_routing_config: usize value too large"
             );
             anyhow::Error::msg(format!("'{field}' is too large for this platform"))
-        })?;
-        Ok(MaybeSet::Set(value))
-    }
-
-    fn parse_optional_u32_update(args: &Value, field: &str) -> anyhow::Result<MaybeSet<u32>> {
-        let Some(raw) = args.get(field) else {
-            return Ok(MaybeSet::Unset);
-        };
-
-        if raw.is_null() {
-            return Ok(MaybeSet::Null);
-        }
-
-        let raw_value = raw.as_u64().ok_or_else(|| {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({"field": field})),
-                "model_routing_config: u32 field must be non-negative integer or null"
-            );
-            anyhow::Error::msg(format!("'{field}' must be a non-negative integer or null"))
-        })?;
-        let value = u32::try_from(raw_value).map_err(|_| {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({"field": field, "raw_value": raw_value})),
-                "model_routing_config: u32 value too large"
-            );
-            anyhow::Error::msg(format!("'{field}' must fit in u32"))
         })?;
         Ok(MaybeSet::Set(value))
     }
@@ -422,12 +413,9 @@ impl ModelRoutingConfigTool {
                     "model_provider": agent.model_provider,
                     "risk_profile": agent.risk_profile,
                     "runtime_profile": agent.runtime_profile,
-                    "max_delegation_depth": runtime.map(|r| r.max_delegation_depth),
                     "agentic": runtime.map(|r| r.agentic),
                     "allowed_tools": risk.map(|r| &r.allowed_tools),
                     "max_tool_iterations": runtime.map(|r| r.max_tool_iterations),
-                    "delegate_same_risk_profile": agent.delegate_same_risk_profile,
-                    "delegates": agent.delegates,
                 }),
             );
         }
@@ -694,7 +682,6 @@ impl ModelRoutingConfigTool {
         let hint = Self::parse_non_empty_string(args, "hint")?;
         let model_provider = Self::parse_non_empty_string(args, "model_provider")?;
         let model = Self::parse_non_empty_string(args, "model")?;
-        let api_key_update = Self::parse_optional_string_update(args, "api_key")?;
 
         let keywords_update = if let Some(raw) = args.get("keywords") {
             Some(Self::parse_string_list(raw, "keywords")?)
@@ -736,12 +723,6 @@ impl ModelRoutingConfigTool {
         next_route.hint = hint.clone();
         next_route.model_provider = model_provider;
         next_route.model = model;
-
-        match api_key_update {
-            MaybeSet::Set(api_key) => next_route.api_key = Some(api_key),
-            MaybeSet::Null => next_route.api_key = None,
-            MaybeSet::Unset => {}
-        }
 
         cfg.model_routes.retain(|route| route.hint != hint);
         cfg.model_routes.push(next_route);
@@ -875,22 +856,12 @@ impl ModelRoutingConfigTool {
         let model_provider = Self::parse_non_empty_string(args, "model_provider")?;
         let model = Self::parse_non_empty_string(args, "model")?;
 
-        let api_key_update = Self::parse_optional_string_update(args, "api_key")?;
         let temperature_update = Self::parse_optional_f64_update(args, "temperature")?;
-        let max_depth_update = Self::parse_optional_u32_update(args, "max_depth")?;
         let max_iterations_update = Self::parse_optional_usize_update(args, "max_iterations")?;
         let agentic_update = Self::parse_optional_bool(args, "agentic")?;
 
         let allowed_tools_update = if let Some(raw) = args.get("allowed_tools") {
             Some(Self::parse_string_list(raw, "allowed_tools")?)
-        } else {
-            None
-        };
-
-        let delegate_same_risk_profile_update =
-            Self::parse_optional_bool(args, "delegate_same_risk_profile")?;
-        let delegates_update = if let Some(raw) = args.get("delegates") {
-            Some(Self::parse_delegate_targets(raw, "delegates")?)
         } else {
             None
         };
@@ -922,11 +893,6 @@ impl ModelRoutingConfigTool {
                         ))
                     })?;
             provider_entry.model = Some(model.clone());
-            match api_key_update {
-                MaybeSet::Set(ref v) => provider_entry.api_key = Some(v.clone()),
-                MaybeSet::Null => provider_entry.api_key = None,
-                MaybeSet::Unset => {}
-            }
             match temperature_update {
                 MaybeSet::Set(value) => {
                     if !(0.0..=2.0).contains(&value) {
@@ -947,7 +913,7 @@ impl ModelRoutingConfigTool {
             }
         }
 
-        // synthesize runtime_profiles[name] from agentic/max_iterations/max_depth.
+        // synthesize runtime_profiles[name] from agentic/max_iterations.
         {
             let runtime = cfg.runtime_profiles.entry(name.clone()).or_default();
             if let Some(agentic) = agentic_update {
@@ -961,14 +927,6 @@ impl ModelRoutingConfigTool {
             } else if runtime.max_tool_iterations == 0 {
                 runtime.max_tool_iterations = DEFAULT_AGENT_MAX_ITERATIONS;
             }
-            if let MaybeSet::Set(depth) = max_depth_update {
-                if depth == 0 {
-                    anyhow::bail!("'max_depth' must be greater than 0");
-                }
-                runtime.max_delegation_depth = depth;
-            } else if runtime.max_delegation_depth == 0 {
-                runtime.max_delegation_depth = DEFAULT_AGENT_MAX_DEPTH;
-            }
         }
 
         // Get or create the agent and wire up alias references.
@@ -976,13 +934,6 @@ impl ModelRoutingConfigTool {
         next_agent.model_provider = agent_model_provider_ref.into();
         next_agent.risk_profile = name.clone().into();
         next_agent.runtime_profile = name.clone().into();
-        if let Some(same_profile) = delegate_same_risk_profile_update {
-            next_agent.delegate_same_risk_profile = same_profile;
-        }
-        if let Some(delegates) = delegates_update {
-            next_agent.delegates = delegates;
-        }
-
         cfg.save().await?;
 
         Ok(ToolResult {
@@ -1031,33 +982,6 @@ impl Tool for ModelRoutingConfigTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        let delegates_schema = json!({
-            "description": "Explicit delegate roster. Accepts a comma-separated string, string array, or objects with {agent, mode}; mode is bounded or independent.",
-            "oneOf": [
-                {"type": "string"},
-                {
-                    "type": "array",
-                    "items": {
-                        "oneOf": [
-                            {"type": "string"},
-                            {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "required": ["agent"],
-                                "properties": {
-                                    "agent": {"type": "string", "minLength": 1},
-                                    "mode": {
-                                        "type": "string",
-                                        "enum": ["bounded", "independent"],
-                                        "default": "bounded"
-                                    }
-                                }
-                            }
-                        ]
-                    }
-                }
-            ]
-        });
         json!({
             "type": "object",
             "properties": {
@@ -1089,10 +1013,6 @@ impl Tool for ModelRoutingConfigTool {
                 "temperature": {
                     "type": ["number", "null"],
                     "description": "Optional temperature override (0.0-2.0)"
-                },
-                "api_key": {
-                    "type": ["string", "null"],
-                    "description": "Optional API key override for scenario route or aliased agent"
                 },
                 "keywords": {
                     "description": "Classification keywords for upsert_scenario (string or string array)",
@@ -1134,17 +1054,12 @@ impl Tool for ModelRoutingConfigTool {
                     "type": "string",
                     "description": "Aliased agent name for upsert_agent/remove_agent"
                 },
-                "max_depth": {
-                    "type": ["integer", "null"],
-                    "minimum": 1,
-                    "description": "Delegate max recursion depth"
-                },
                 "agentic": {
                     "type": "boolean",
                     "description": "Enable tool-call loop mode for aliased agent"
                 },
                 "allowed_tools": {
-                    "description": "Allowed tools for agentic delegate mode (string or string array)",
+                    "description": "Allowed tools for the agentic tool loop (string or string array)",
                     "oneOf": [
                         {"type": "string"},
                         {"type": "array", "items": {"type": "string"}}
@@ -1153,13 +1068,8 @@ impl Tool for ModelRoutingConfigTool {
                 "max_iterations": {
                     "type": ["integer", "null"],
                     "minimum": 1,
-                    "description": "Maximum tool-call iterations for agentic delegate mode"
+                    "description": "Maximum tool-call iterations for the agentic tool loop"
                 },
-                "delegate_same_risk_profile": {
-                    "type": "boolean",
-                    "description": "Auto-allow delegation to same-risk-profile peers (default true). Set false to restrict reach to the explicit delegates list."
-                },
-                "delegates": delegates_schema
             },
             "additionalProperties": false
         })
@@ -1171,6 +1081,10 @@ impl Tool for ModelRoutingConfigTool {
             .and_then(Value::as_str)
             .unwrap_or("get")
             .to_ascii_lowercase();
+
+        if let Some(rejected) = Self::reject_raw_credential_args(&args) {
+            return Ok(rejected);
+        }
 
         let result = match action.as_str() {
             "get" => self.handle_get(),
@@ -1340,7 +1254,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upsert_and_remove_delegate_agent() {
+    async fn upsert_and_remove_agent() {
         let tmp = TempDir::new().unwrap();
         let tool = ModelRoutingConfigTool::new(Box::pin(test_config(&tmp)).await, test_security());
 
@@ -1384,45 +1298,211 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upsert_agent_writes_delegate_roster_fields() {
+    async fn upsert_scenario_rejects_api_key_without_writing() {
         let tmp = TempDir::new().unwrap();
-        let tool = ModelRoutingConfigTool::new(Box::pin(test_config(&tmp)).await, test_security());
+        let cfg_path = tmp.path().join("config.toml");
+        let tool = ModelRoutingConfigTool::new(test_config(&tmp).await, test_security());
+        let config_before = std::fs::read(&cfg_path).unwrap();
 
-        // Create the explicit delegate target first so the roster names a
-        // real agent (snapshot/readback does not validate, but keep it real).
-        let _ = tool
+        let result = tool
             .execute(json!({
-                "action": "upsert_agent",
-                "name": "aaalore",
+                "action": "upsert_scenario",
+                "hint": "coding",
                 "model_provider": "openai",
-                "model": "gpt-5.3"
+                "model": "gpt-5.3-codex",
+                "api_key": "sk-test-raw-secret-material"
             }))
             .await
             .unwrap();
 
-        let upsert = tool
+        assert!(
+            !result.success,
+            "upsert_scenario must reject calls that carry api_key"
+        );
+        let error = result.error.unwrap_or_default();
+        assert!(error.contains("api_key"));
+        assert!(
+            error.contains("/api/config"),
+            "error must name the trusted config surface: {error}"
+        );
+        assert!(
+            !error.contains("sk-test-raw-secret-material"),
+            "error must not echo the submitted secret"
+        );
+
+        // The rejected call must write nothing: the config file is
+        // byte-for-byte identical to its pre-call state.
+        let config_after = std::fs::read(&cfg_path).unwrap();
+        assert_eq!(
+            config_before, config_after,
+            "rejected upsert_scenario must not touch the config file"
+        );
+
+        // Explicit null is still a credential mutation attempt: reject too.
+        let null_result = tool
             .execute(json!({
-                "action": "upsert_agent",
-                "name": "aaa",
+                "action": "upsert_scenario",
+                "hint": "coding",
                 "model_provider": "openai",
-                "model": "gpt-5.3",
-                "delegate_same_risk_profile": false,
-                "delegates": [{"agent": "aaalore", "mode": "independent"}]
+                "model": "gpt-5.3-codex",
+                "api_key": null
             }))
             .await
             .unwrap();
-        assert!(upsert.success, "{:?}", upsert.error);
+        assert!(
+            !null_result.success,
+            "api_key: null must also be rejected, not silently clear a credential"
+        );
 
+        // A credential nested inside an unrelated argument object must not
+        // smuggle through either: the whole call is rejected, not just ignored.
+        let nested_result = tool
+            .execute(json!({
+                "action": "set_default",
+                "model_provider": "openai",
+                "model": "gpt-5.3-codex",
+                "metadata": {"api_key": "sk-test-raw-secret-material"}
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !nested_result.success,
+            "nested api_key must also be rejected, not silently ignored"
+        );
+
+        // After every rejected variant: no route materialized, no secret on
+        // disk, config still byte-for-byte the pre-call state.
+        let config_after_all = std::fs::read(&cfg_path).unwrap();
+        assert_eq!(
+            config_before, config_after_all,
+            "no rejected variant may touch the config file"
+        );
+        let contents = String::from_utf8_lossy(&config_after_all).to_string();
+        assert!(
+            !contents.contains("sk-test-raw-secret-material"),
+            "rejected calls must not persist the submitted secret"
+        );
         let get_result = tool.execute(json!({"action": "get"})).await.unwrap();
         let output: Value = serde_json::from_str(&get_result.output).unwrap();
-        assert_eq!(
-            output["agents"]["aaa"]["delegate_same_risk_profile"],
-            json!(false)
+        let scenarios_empty = output["scenarios"]
+            .as_array()
+            .is_some_and(|items| items.is_empty());
+        assert!(
+            scenarios_empty,
+            "rejected upsert_scenario must not create the route: {output}"
         );
-        assert_eq!(
-            output["agents"]["aaa"]["delegates"],
-            json!([{"agent": "aaalore", "mode": "independent"}])
+    }
+
+    #[tokio::test]
+    async fn upsert_agent_rejects_api_key_without_writing() {
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let tool = ModelRoutingConfigTool::new(test_config(&tmp).await, test_security());
+        let config_before = std::fs::read(&cfg_path).unwrap();
+
+        let result = tool
+            .execute(json!({
+                "action": "upsert_agent",
+                "name": "coder",
+                "model_provider": "openai",
+                "model": "gpt-5.3-codex",
+                "api_key": "sk-test-raw-secret-material"
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            !result.success,
+            "upsert_agent must reject calls that carry api_key"
         );
+        let error = result.error.unwrap_or_default();
+        assert!(error.contains("api_key"));
+        assert!(
+            error.contains("/api/config"),
+            "error must name the trusted config surface: {error}"
+        );
+        assert!(
+            !error.contains("sk-test-raw-secret-material"),
+            "error must not echo the submitted secret"
+        );
+
+        // The rejected call must write nothing: the config file is
+        // byte-for-byte identical to its pre-call state; no secret on disk,
+        // no synthesized provider slot, no aliased agent.
+        let config_after = std::fs::read(&cfg_path).unwrap();
+        assert_eq!(
+            config_before, config_after,
+            "rejected upsert_agent must not touch the config file"
+        );
+        let contents = String::from_utf8_lossy(&config_after).to_string();
+        assert!(
+            !contents.contains("sk-test-raw-secret-material"),
+            "rejected call must not persist the submitted secret"
+        );
+        assert!(
+            read_saved_provider_entry(&cfg_path, "openai", "coder").is_none(),
+            "rejected upsert_agent must not materialize the provider slot"
+        );
+        let get_result = tool.execute(json!({"action": "get"})).await.unwrap();
+        let output: Value = serde_json::from_str(&get_result.output).unwrap();
+        assert!(
+            output["agents"]["coder"].is_null(),
+            "rejected upsert_agent must not create the agent entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_agent_without_api_key_preserves_existing_credential() {
+        let tmp = TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let config = test_config(&tmp).await;
+
+        // Seed a credential through the trusted path (direct config write,
+        // the equivalent of PUT /api/config/providers.models.openai.coder.api_key).
+        // Secrets are encrypted at rest, so pin the stored form through the
+        // same read path before and after the upsert.
+        let mut on_disk = zeroclaw_config::migration::migrate_to_current(
+            &std::fs::read_to_string(&cfg_path).unwrap(),
+        )
+        .unwrap();
+        on_disk.config_path = config.config_path.clone();
+        on_disk.data_dir = config.data_dir.clone();
+        let entry = on_disk
+            .providers
+            .models
+            .ensure("openai", "coder")
+            .expect("openai family must have a typed slot");
+        entry.api_key = Some("sk-preexisting-trusted-credential".to_string());
+        on_disk.save().await.unwrap();
+        let seeded_api_key = read_saved_provider_entry(&cfg_path, "openai", "coder")
+            .expect("seeded provider slot must be readable")
+            .api_key
+            .expect("seeded credential must round-trip through the read path");
+
+        // Non-secret upsert on the same alias must succeed as before and must
+        // neither overwrite nor clear the existing credential.
+        let tool = ModelRoutingConfigTool::new(config, test_security());
+        let result = tool
+            .execute(json!({
+                "action": "upsert_agent",
+                "name": "coder",
+                "model_provider": "openai",
+                "model": "gpt-5.3-codex",
+                "temperature": 0.3
+            }))
+            .await
+            .unwrap();
+        assert!(result.success, "{:?}", result.error);
+
+        let entry = read_saved_provider_entry(&cfg_path, "openai", "coder")
+            .expect("upsert_agent must keep the provider slot");
+        assert_eq!(
+            entry.api_key,
+            Some(seeded_api_key),
+            "non-secret upsert must preserve the credential set via the trusted surface"
+        );
+        assert_eq!(entry.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(entry.temperature, Some(0.3));
     }
 
     #[tokio::test]

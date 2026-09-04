@@ -41,10 +41,10 @@ product integrations.
 |---|---|
 | `memory_store`, `memory_recall`, `memory_forget`, `memory_export`, `memory_purge` | Long-term memory is a first-party runtime contract and uses shared memory ownership rules. |
 | `cron_add`, `cron_list`, `cron_remove`, `cron_update`, `cron_run`, `cron_runs`, `schedule` | Scheduling affects autonomous execution, ownership, and run history; keep it policy-visible in core. |
-| `spawn_subagent`, `delegate`, `send_message_to_peer` | Delegation is part of the agent execution model and must share risk profiles, tools, memory, and parent/child constraints. |
+| `send_message_to_peer`, `reasoning_subagent` | Agent-child execution and peer messaging are part of the agent execution model and must share risk profiles, tools, memory, and parent/child constraints. (The legacy `spawn_subagent` and `delegate` tools are retired; see the delegation retirement record.) |
 | `ask_user`, `escalate_to_human`, `reaction`, `poll`, `channel_room` | These are channel-bridging operator interaction primitives with late-bound channel handles and receipts. |
 | `sessions_current`, `sessions_list`, `sessions_history`, `sessions_send` | Session visibility and message sending must share the daemon/gateway session backend and agent ownership boundaries. |
-| `model_routing_config`, `model_switch`, `proxy_config` | These expose the current model/proxy routing control plane and should not drift from config-source behavior. |
+| `model_routing_config`, `model_switch`, `proxy_config` | Retired from the model surface. Routing and proxy configuration belong to the operator config API (`PUT/DELETE /api/config...`), runtime model switching to the channel `/model` command, and proxy application to startup + daemon reload. The tool implementations stay compiled but no assembly path registers them. See "Retired Operator Tools" below. |
 | `TodoWrite` | Maintains the agent's structured task list inside the runtime tool surface; keep its stable tool name and lifecycle behavior in core. |
 | `read_skill` and skill-defined tools with `kind = "shell"`, `kind = "http"`, or `kind = "builtin"` | Skills are an intended extension surface, but the runtime bridge that turns installed skills into tools is core. |
 
@@ -55,19 +55,42 @@ boundaries because they add platform, dependency, network, or UI surface area.
 
 | Tool(s) | Boundary | Classification |
 |---|---|---|
-| `browser`, `browser_open`, `browser_delegate`, `text_browser` | Config-gated and runtime-dependent. | Keep first-party, but continue tightening feature/config gates because browser automation is a large trusted surface. |
+| `browser`, `browser_open`, `text_browser` | Config-gated and runtime-dependent. | Keep first-party, but continue tightening feature/config gates because browser automation is a large trusted surface. |
 | `http_request`, `web_fetch`, `web_search_tool` | Config-gated network access. | Keep first-party while SSRF, allowlist, provider routing, and receipt behavior remain ZeroClaw-owned. Revisit only after MCP/plugin replacements can express the same network policy. |
-| SOP tools (`sop_list`, `sop_execute`, `sop_advance`, `sop_approve`, `sop_status`, and conditional `sop_workshop`) | Runtime-handle gated; `sop_workshop` also requires procedural memory. | Keep first-party; SOP lifecycle, approvals, procedural memory, and audit records are runtime state, not a generic external integration. |
+| SOP tools (`sop_list`, `sop_execute`, `sop_advance`, `sop_approve`, `sop_status`, `sop_workshop`) | Removed with the SOP run side. | Retired: no agent-facing SOP run tools remain; runs are Tachi-side ProcedureRuns through the procedure_v1 seam. |
 | WASM plugin tools | Compile-feature and config-gated host bridge. | Keep the host bridge first-party; individual plugin capabilities should live outside core. |
 | `execute_pipeline` | Config-gated tool chaining. | Keep gated until tool chaining policy, per-step receipts, and caller allowlists are stable enough to judge whether it is core. |
 | `knowledge` | Config-gated knowledge surface. | Keep gated while relationship memory and graph workflows are still being promoted into user-facing docs and skills. |
 | `file_upload`, `file_upload_bundle`, `file_download` | Config-gated data movement. | Keep gated; these are policy-sensitive data movement tools and need an explicit replacement before externalization. |
-| `backup`, `data_management` | Local-state mutation surface. | Consider a clearer feature/config boundary because both mutate local state outside ordinary file edit flows. |
+| `backup`, `data_management` | Retired from the model surface. | Operator-only via the gateway operator API (`/api/agents/<alias>/backup*`, `/api/agents/<alias>/data-retention*`), which the `[backup]` / `[data_retention]` sections configure. See "Retired Operator Tools" below. |
 | `screenshot`, `image_info`, `canvas` | Visual/UI tool surface. | Keep for now; classify with the visual/UI tool surface once plugin and dashboard boundaries settle. |
 | `llm_task` | Provider-dependent subtask execution. | Keep until provider-scoped subtask execution has a separate contract from delegation. |
-| `security_ops` | Config-gated security operations. | Keep gated; security operations need first-party policy visibility until a plugin can advertise equivalent permissions, receipts, and rollback. |
+| `security_ops` | Retired from the model surface. | Default-off diagnostics with no operator surface; the module stays compiled but unreachable, and enabling the section only emits a startup/reload notice. See "Retired Operator Tools" below. |
 | `verifiable_intent` | Config-gated trust policy. **The `vi_verify` tool is temporarily withheld from the model-visible registry.** | Keep gated and first-party; intent issuance and verification affect trust policy and should stay first-party until the credential boundary is stable. No chain verifier exists yet, so `vi_verify` is not registered even when `verifiable_intent.enabled = true`; enabling the section now only emits a warning naming that gap, at process startup and again on each daemon reload. The issuance and verification library paths are unchanged. Restore registration only behind a verify-and-evaluate path that consumes a verified chain result. |
 | Hardware probes (`hardware_board_info`, `hardware_memory_map`, `hardware_memory_read`) | Peripheral-gated hardware access. | Keep first-party while hardware tools are added through the peripheral registry path and touch physical devices under ZeroClaw permission rules. |
+
+## Retired Operator Tools
+
+These first-party tools are no longer part of the model-visible registry on any
+assembly path (ordinary, SubAgent, skill elevation, minimal or full
+composition). Their implementations stay compiled; the capability moved to a
+trusted surface or was deleted.
+
+| Tool(s) | Trusted surface today |
+|---|---|
+| `model_routing_config` | `GET/PUT/DELETE /api/config...` (gateway config API, settings UI). Mutation actions additionally reject raw `api_key` values. |
+| `model_switch` | Channel `/model` and `/models` commands (per-sender runtime switch; the parent agent cannot switch its own model through a tool). |
+| `proxy_config` | `PUT /api/config/proxy.*` persists the canonical `[proxy]` config; the daemon applies it at process startup (runtime global plus, for `scope = "environment"`, process env) and refreshes the runtime global on daemon reload. The `apply_env` / `clear_env` actions were deleted outright: live process-env manipulation had no consumer and restart application replaces it. |
+| `security_ops` | None (default-off diagnostics, unreachable by design). `security_ops.enabled` stays parseable; enabling it emits a startup/reload notice. |
+| `backup` | `POST/GET /api/agents/<alias>/backup`, `.../backup/{name}/verify`, `.../backup/{name}/restore` (operator bearer gated; restore keeps its `confirm` guard). |
+| `data_management` | `GET /api/agents/<alias>/data-retention/status`, `.../stats`, `POST .../purge` (operator bearer gated; purge keeps its `dry_run` default). |
+
+Config sections that used to enable these as model tools still parse. Sections
+that keep configuring an operator surface (`[backup]`, `[data_retention]`)
+log a startup/reload notice naming that surface when enabled; nothing widens
+the model-visible registry. The retired names are reserved against WASM plugin
+registration so a plugin cannot claim one and ride it back onto the provider
+wire.
 
 ## Externalize Later
 
@@ -77,7 +100,7 @@ replacement surface exists. Until then, keep them compatible and policy-visible.
 | Tool(s) | Likely long-term home | Why |
 |---|---|---|
 | `notion`, `jira`, `microsoft365`, `google_workspace`, `linkedin`, `composio` | Plugin, MCP server, or CLI-backed integration. | These mostly wrap third-party products and authentication models that can evolve independently from the core runtime. |
-| `claude_code`, `claude_code_runner`, `codex_cli`, `gemini_cli`, `opencode_cli` | CLI-backed integration or skill package. | The external CLI already owns authentication, command behavior, and release cadence; ZeroClaw should preserve receipts and policy if it invokes them. |
+| `claude_code`, `claude_code_runner`, `codex_cli`, `gemini_cli`, `opencode_cli` | Removed; retired raw launchers. | These Parent-visible raw CLI launchers were removed from the registry (#197 wall 2); harness execution goes through the typed subagent / Tachi paths instead. |
 | `email_search`, `email_read` | Channel companion plugin or MCP server. | Email search/read is useful but tied to external account auth and channel setup rather than the baseline agent contract. |
 | `discord_search` | Channel companion plugin or archive-query skill. | It depends on a Discord archive database produced by the channel; keep it close to that channel until the archive API is explicit. |
 | `image_gen`, `cloud_ops`, `cloud_patterns`, `project_intel`, `report_template` | Skill package, plugin, or MCP server. | These are optional workflows or vendor/data-service wrappers rather than core execution primitives. |

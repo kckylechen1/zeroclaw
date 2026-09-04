@@ -299,11 +299,18 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         setMessages((prev) => {
           const argsKey = JSON.stringify(toolArgs ?? {});
           if (pendingContentRef.current) {
+            // Dedup re-delivered frames by gateway tool_call_id. The redacted
+            // args must not serve as identity: full credential redaction maps
+            // every secret to the same mask, so two parallel calls that differ
+            // only in their credential would otherwise collapse into one card.
+            // Only id-less legacy frames fall back to the name+args key.
             const isDuplicate = prev.some(
               (m) => m.toolCall
                 && m.toolCall.output === undefined
                 && m.toolCall.name === toolName
-                && JSON.stringify(m.toolCall.args ?? {}) === argsKey,
+                && (msg.id !== undefined
+                  ? m.toolCall.id === msg.id
+                  : JSON.stringify(m.toolCall.args ?? {}) === argsKey),
             );
             if (isDuplicate) return prev;
           }

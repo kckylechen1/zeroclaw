@@ -20,7 +20,6 @@
       "zeroclaw-api",
       "zeroclaw-channel-plugin-fixture",
       "zeroclaw-commands",
-      "zeroclaw-coordinator",
       "zeroclaw-eval",
       "zeroclaw-hardware",
       "zeroclaw-infra",

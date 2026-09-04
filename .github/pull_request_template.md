@@ -65,6 +65,16 @@ Yes/No for each. Answer any `Yes` with a 1-2 sentence risk-and-mitigation note. 
 - Rust/MSRV/toolchain floor changed? (`Yes/No`)
 - If backward compatibility is `No` or either surface/floor question is `Yes`: exact upgrade steps for existing users:
 
+## Core-Residency Rationale (required for new default tools or kernel primitives)
+
+If this PR introduces or widens default tools, kernel primitives, or built-in integrations, answer the questions below (see `docs/book/src/contributing/core-residency-rationale.md`). For changes not touching default/kernel tool surfaces, write `N/A` with a brief note.
+
+- **Why can this not live as a Skill?**
+- **Why can this not live as an MCP / optional integration?**
+- **Why can this not live as a Node capability?**
+- **Why can this not live as a Surface/Channel integration or Provider adapter?**
+- **Why can this not live as a Tachi worker/harness adapter?**
+
 ## Rollback (required for medium/high-risk PRs)
 
 Low-risk PRs: `git revert <sha>` is the plan unless otherwise noted.

@@ -7,8 +7,6 @@ use crate::approval::ApprovalManager;
 use crate::observability::Observer;
 use crate::tools::Tool;
 use anyhow::Result;
-#[cfg(test)]
-use std::sync::{Arc, LazyLock, Mutex};
 use zeroclaw_api::channel::Channel;
 use zeroclaw_api::ingress::{IngressContext, TurnOrigin};
 use zeroclaw_providers::{ChatMessage, ModelProvider};
@@ -16,16 +14,8 @@ use zeroclaw_providers::{ChatMessage, ModelProvider};
 use crate::agent::cost::TOOL_LOOP_COST_TRACKING_CONTEXT;
 use crate::agent::turn::{
     LoopKnobs, ModelSwitchCallback, ResolvedAgentExecution, ResolvedIo, ResolvedModelAccess,
-    ResolvedRuntimeKnobs, SopStepReassembly, ToolLoop, run_tool_call_loop,
+    ResolvedRuntimeKnobs, ToolLoop, run_tool_call_loop,
 };
-
-#[cfg(test)]
-type AgentTurnSopReassemblyTestHook = Arc<dyn Fn(bool) + Send + Sync>;
-
-#[cfg(test)]
-pub(crate) static AGENT_TURN_SOP_REASSEMBLY_TEST_HOOK: LazyLock<
-    Mutex<Option<AgentTurnSopReassemblyTestHook>>,
-> = LazyLock::new(|| Mutex::new(None));
 
 /// Execute a single turn of the agent loop: send messages, parse tool calls,
 /// execute tools, and loop until the LLM produces a final text response.
@@ -70,80 +60,7 @@ pub async fn agent_turn(
     agent_alias: Option<&str>,
     turn_id: Option<&str>,
 ) -> Result<String> {
-    agent_turn_with_sop_reassembly(
-        config,
-        model_provider,
-        history,
-        tools_registry,
-        observer,
-        provider_name,
-        model,
-        temperature,
-        silent,
-        channel_name,
-        channel_reply_target,
-        multimodal_config,
-        max_tool_iterations,
-        approval,
-        excluded_tools,
-        dedup_exempt_tools,
-        activated_tools,
-        model_switch_callback,
-        strict_tool_parsing,
-        parallel_tools,
-        max_tool_result_chars,
-        context_token_budget,
-        channel,
-        origin,
-        memory,
-        agent_alias,
-        turn_id,
-        None,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn agent_turn_with_sop_reassembly(
-    config: Option<&zeroclaw_config::schema::Config>,
-    model_provider: &dyn ModelProvider,
-    history: &mut Vec<ChatMessage>,
-    tools_registry: &[Box<dyn Tool>],
-    observer: &dyn Observer,
-    provider_name: &str,
-    model: &str,
-    temperature: Option<f64>,
-    silent: bool,
-    channel_name: &str,
-    channel_reply_target: Option<&str>,
-    multimodal_config: &zeroclaw_config::schema::MultimodalConfig,
-    max_tool_iterations: usize,
-    approval: Option<&ApprovalManager>,
-    excluded_tools: &[String],
-    dedup_exempt_tools: &[String],
-    activated_tools: Option<&std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
-    model_switch_callback: Option<ModelSwitchCallback>,
-    strict_tool_parsing: bool,
-    parallel_tools: bool,
-    max_tool_result_chars: usize,
-    context_token_budget: usize,
-    channel: Option<&dyn Channel>,
-    origin: TurnOrigin,
-    memory: Option<crate::agent::memory_inject::TurnMemory<'_>>,
-    agent_alias: Option<&str>,
-    turn_id: Option<&str>,
-    sop_reassembly: Option<SopStepReassembly<'_>>,
-) -> Result<String> {
     let turn_id = turn_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
-    #[cfg(test)]
-    if let Some(hook) = AGENT_TURN_SOP_REASSEMBLY_TEST_HOOK
-        .lock()
-        .expect("agent-turn reassembly test hook lock should not be poisoned")
-        .as_ref()
-        .cloned()
-    {
-        hook(sop_reassembly.is_some());
-    }
     // Bracket the turn with AgentStart/AgentEnd so entry points that dispatch
     // through `agent_turn` (gateway webhook chat via `process_message`, peer
     // messages) surface turn lifecycle events to observers — mirroring the
@@ -159,7 +76,6 @@ pub(crate) async fn agent_turn_with_sop_reassembly(
         Some(turn_id.clone()),
     );
     let result = run_tool_call_loop(ToolLoop {
-        sop_reassembly,
         exec: ResolvedAgentExecution::resolve(
             ResolvedModelAccess {
                 model_provider,

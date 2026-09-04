@@ -769,542 +769,6 @@ fn sops_trigger_sources_rpc_carries_full_trigger_source_walk() {
     );
 }
 
-#[tokio::test]
-async fn sops_run_rejects_malformed_payload_before_engine() {
-    // Payload validation runs before the engine lookup, so a malformed JSON
-    // string is rejected with INVALID_PARAMS even on a dispatcher with no
-    // SOP engine wired. This pins the "surface a clear error on malformed
-    // JSON rather than failing the run opaquely" contract.
-    let tmp = tempfile::TempDir::new().unwrap();
-    let d = make_cost_test_dispatcher(tmp.path());
-    let err = d
-        .handle_sops_run(&serde_json::json!({ "name": "any", "payload": "{not json" }))
-        .await
-        .expect_err("malformed payload must be rejected");
-    assert_eq!(err.code, INVALID_PARAMS);
-}
-
-#[tokio::test]
-async fn sops_run_requires_engine() {
-    // A well-formed request against a dispatcher with no SOP engine reports
-    // the subsystem as unavailable rather than panicking or silently
-    // succeeding.
-    let tmp = tempfile::TempDir::new().unwrap();
-    let d = make_cost_test_dispatcher(tmp.path());
-    let err = d
-        .handle_sops_run(&serde_json::json!({ "name": "any", "payload": "{\"k\":1}" }))
-        .await
-        .expect_err("missing engine must error");
-    assert_eq!(err.code, INTERNAL_ERROR);
-}
-
-#[test]
-fn sops_runs_requires_engine() {
-    // Listing runs against a dispatcher with no SOP engine reports the
-    // subsystem as unavailable rather than returning a bogus empty list.
-    let tmp = tempfile::TempDir::new().unwrap();
-    let d = make_cost_test_dispatcher(tmp.path());
-    let err = d
-        .handle_sops_runs(&serde_json::json!({}))
-        .expect_err("missing engine must error");
-    assert_eq!(err.code, INTERNAL_ERROR);
-}
-
-#[test]
-fn sops_runs_accepts_optional_sop_filter() {
-    // The request parses with or without the `sop` field; both fail only on
-    // the engine guard, not on param parsing.
-    let tmp = tempfile::TempDir::new().unwrap();
-    let d = make_cost_test_dispatcher(tmp.path());
-    let err = d
-        .handle_sops_runs(&serde_json::json!({ "sop": "some-sop" }))
-        .expect_err("missing engine must error");
-    assert_eq!(err.code, INTERNAL_ERROR);
-}
-
-fn make_checkpoint_rpc_dispatcher(
-    quorum: u32,
-    members: &[&str],
-    tui_id: &str,
-) -> (
-    RpcDispatcher,
-    Arc<std::sync::Mutex<crate::sop::SopEngine>>,
-    String,
-    tempfile::TempDir,
-) {
-    use crate::sop::types::{
-        Sop, SopAdmissionPolicy, SopEvent, SopExecutionMode, SopPriority, SopRunAction, SopStep,
-        SopStepKind, SopTrigger, SopTriggerSource,
-    };
-    use std::collections::HashMap;
-    use zeroclaw_config::schema::{
-        ApprovalGroupConfig, ApprovalPolicyConfig, Config, SopApprovalConfig,
-    };
-    use zeroclaw_infra::session_queue::SessionActorQueue;
-
-    let temp = tempfile::TempDir::new().unwrap();
-    let sops_dir = temp.path().join("sops");
-    let sop = Sop {
-        name: "rpc-checkpoint".into(),
-        description: "checkpoint RPC authorization test".into(),
-        version: "1.0.0".into(),
-        priority: SopPriority::Normal,
-        execution_mode: SopExecutionMode::Deterministic,
-        triggers: vec![SopTrigger::Manual],
-        steps: vec![
-            SopStep {
-                number: 1,
-                title: "authorize".into(),
-                kind: SopStepKind::Checkpoint,
-                policy: Some("prod".into()),
-                ..SopStep::default()
-            },
-            SopStep {
-                number: 2,
-                title: "continue".into(),
-                kind: SopStepKind::Execute,
-                ..SopStep::default()
-            },
-        ],
-        cooldown_secs: 0,
-        max_concurrent: 1,
-        location: None,
-        deterministic: false,
-        admission_policy: SopAdmissionPolicy::Parallel,
-        max_pending_approvals: 0,
-        agent: None,
-    };
-    crate::sop::save_sop(&sops_dir, &sop).unwrap();
-    let mut groups = HashMap::new();
-    groups.insert(
-        "release".to_string(),
-        ApprovalGroupConfig {
-            members: members.iter().map(|member| (*member).to_string()).collect(),
-        },
-    );
-    let mut policies = HashMap::new();
-    policies.insert(
-        "prod".to_string(),
-        ApprovalPolicyConfig {
-            required_group: Some("release".into()),
-            quorum,
-            request_route: None,
-            escalation_route: None,
-        },
-    );
-    let mut config = Config::default();
-    config.sop.sops_dir = Some(sops_dir.to_string_lossy().into_owned());
-    config.sop.approval = SopApprovalConfig { groups, policies };
-
-    let mut engine = crate::sop::SopEngine::new(config.sop.clone())
-        .with_approval_broker(Arc::new(crate::sop::approval::ApprovalBroker::disabled()));
-    engine.set_sops_for_test(vec![sop]);
-    let action = engine
-        .start_run(
-            "rpc-checkpoint",
-            SopEvent {
-                source: SopTriggerSource::Manual,
-                topic: None,
-                payload: None,
-                timestamp: crate::sop::engine::now_iso8601(),
-            },
-        )
-        .unwrap();
-    let run_id = match action {
-        SopRunAction::CheckpointWait { run_id, .. } => run_id,
-        other => panic!("expected checkpoint wait, got {other:?}"),
-    };
-    let engine = Arc::new(std::sync::Mutex::new(engine));
-    let sessions = Arc::new(crate::rpc::session::SessionStore::new(
-        16,
-        Arc::new(SessionActorQueue::new(4, 10, 60)),
-    ));
-    let ctx = RpcContext::minimal_with_sop_engine(config, sessions, Arc::clone(&engine));
-    let (tx, _rx) = tokio::sync::mpsc::channel(64);
-    let mut dispatcher = RpcDispatcher::new(ctx, tx, "local:test".into());
-    dispatcher.set_tui_id_for_test(Some(tui_id.to_string()));
-    (dispatcher, engine, run_id, temp)
-}
-
-#[tokio::test]
-async fn sops_decide_rpc_enforces_checkpoint_membership_and_quorum() {
-    use crate::sop::types::SopRunStatus;
-
-    let (unauthorized, engine, run_id, _temp) =
-        make_checkpoint_rpc_dispatcher(1, &["cli:ZeroClawOperator"], "ZeroClawAgent");
-    let error = unauthorized
-        .handle_sops_decide(&json!({
-            "name": "rpc-checkpoint",
-            "run_id": run_id.clone(),
-            "decision": "approve",
-        }))
-        .await
-        .expect_err("unauthorized RPC principal must be rejected");
-    assert_eq!(error.code, AUTH_REQUIRED);
-    assert_eq!(
-        engine
-            .lock()
-            .unwrap()
-            .get_run(&run_id)
-            .map(|run| run.status),
-        Some(SopRunStatus::PausedCheckpoint)
-    );
-
-    let (pending, engine, run_id, _temp) = make_checkpoint_rpc_dispatcher(
-        2,
-        &["cli:ZeroClawOperator", "cli:ZeroClawMaintainer"],
-        "ZeroClawOperator",
-    );
-    pending
-        .handle_sops_decide(&json!({
-            "name": "rpc-checkpoint",
-            "run_id": run_id.clone(),
-            "decision": "approve",
-        }))
-        .await
-        .expect("an authorized first vote returns the still-parked overlay");
-    assert_eq!(
-        engine
-            .lock()
-            .unwrap()
-            .get_run(&run_id)
-            .map(|run| run.status),
-        Some(SopRunStatus::PausedCheckpoint)
-    );
-}
-
-#[tokio::test]
-async fn sops_decide_drives_resumed_execute_step() {
-    use crate::sop::{
-        Sop, SopEvent, SopExecutionMode, SopPriority, SopRunAction, SopRunStatus, SopStep,
-        SopStepKind, SopTrigger, SopTriggerSource,
-    };
-    use std::sync::{Arc, Mutex};
-    use zeroclaw_config::schema::{Config, SopConfig};
-    use zeroclaw_infra::session_queue::SessionActorQueue;
-
-    let tmp = tempfile::TempDir::new().expect("temporary SOP directory");
-    let sops_dir = tmp.path().join("sops");
-    let sop_config = SopConfig {
-        sops_dir: Some(sops_dir.to_string_lossy().into_owned()),
-        ..SopConfig::default()
-    };
-    let config = Config {
-        data_dir: tmp.path().join("data"),
-        config_path: tmp.path().join("config.toml"),
-        sop: sop_config.clone(),
-        ..Config::default()
-    };
-    let sop = Sop {
-        name: "rpc-resumed-execute".to_string(),
-        description: "RPC resume driver regression".to_string(),
-        version: "1.0.0".to_string(),
-        priority: SopPriority::Normal,
-        execution_mode: SopExecutionMode::Supervised,
-        triggers: vec![SopTrigger::Manual],
-        steps: vec![SopStep {
-            number: 1,
-            title: "Execute after approval".to_string(),
-            kind: SopStepKind::Execute,
-            ..SopStep::default()
-        }],
-        cooldown_secs: 0,
-        max_concurrent: 1,
-        location: None,
-        deterministic: false,
-        agent: None,
-        admission_policy: crate::sop::types::SopAdmissionPolicy::Parallel,
-        max_pending_approvals: 0,
-    };
-    crate::sop::save_sop(&sops_dir, &sop).expect("save temporary SOP");
-
-    let mut engine = crate::sop::SopEngine::new(sop_config);
-    engine.reload(tmp.path());
-    let engine = Arc::new(Mutex::new(engine));
-    let run_id = {
-        let mut guard = engine.lock().expect("engine lock");
-        let action = guard
-            .start_run(
-                "rpc-resumed-execute",
-                SopEvent {
-                    source: SopTriggerSource::Manual,
-                    topic: None,
-                    payload: None,
-                    timestamp: crate::sop::engine::now_iso8601(),
-                },
-            )
-            .expect("start approval-gated SOP");
-        let SopRunAction::WaitApproval { run_id, .. } = action else {
-            panic!("supervised Execute step must park for approval: {action:?}");
-        };
-        run_id
-    };
-
-    let queue = Arc::new(SessionActorQueue::new(4, 10, 60));
-    let sessions = Arc::new(crate::rpc::session::SessionStore::new(16, queue));
-    let ctx = RpcContext::minimal_with_sop_engine(config, sessions, Arc::clone(&engine));
-    let (tx, _rx) = tokio::sync::mpsc::channel(64);
-    let dispatcher = RpcDispatcher::new(ctx, tx, "test-peer-rpc:pid=1".to_string());
-
-    dispatcher
-        .handle_sops_decide(&serde_json::json!({
-            "name": "rpc-resumed-execute",
-            "run_id": run_id,
-            "decision": "approve",
-        }))
-        .await
-        .expect("RPC approval must accept the parked run");
-
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            let status = engine
-                .lock()
-                .expect("engine lock")
-                .get_run(&run_id)
-                .map(|run| run.status);
-            if status == Some(SopRunStatus::Failed) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("RPC approval must schedule the resumed ExecuteStep");
-}
-
-#[tokio::test]
-async fn sops_decide_rejects_approval_mode_rejection() {
-    use crate::sop::{
-        Sop, SopEvent, SopExecutionMode, SopPriority, SopRunAction, SopRunStatus, SopStep,
-        SopStepKind, SopTrigger, SopTriggerSource,
-    };
-    use std::sync::{Arc, Mutex};
-    use zeroclaw_config::schema::{ApprovalMode, Config, SopConfig};
-    use zeroclaw_infra::session_queue::SessionActorQueue;
-
-    fn dispatcher_with_sop_engine(
-        config: Config,
-        engine: Arc<Mutex<crate::sop::SopEngine>>,
-    ) -> RpcDispatcher {
-        let queue = Arc::new(SessionActorQueue::new(4, 10, 60));
-        let sessions = Arc::new(crate::rpc::session::SessionStore::new(16, queue));
-        let ctx = RpcContext::minimal_with_sop_engine(config, sessions, engine);
-        let (tx, _rx) = tokio::sync::mpsc::channel(64);
-        let mut dispatcher = RpcDispatcher::new(ctx, tx, "test-peer-rpc:pid=1".to_string());
-        dispatcher.set_tui_id_for_test(Some("alice".to_string()));
-        dispatcher
-    }
-
-    let tmp = tempfile::TempDir::new().unwrap();
-    let sops_dir = tmp.path().join("sops");
-    let sop_config = SopConfig {
-        sops_dir: Some(sops_dir.to_string_lossy().into_owned()),
-        default_execution_mode: "deterministic".to_string(),
-        approval_mode: ApprovalMode::AgentTool,
-        ..SopConfig::default()
-    };
-    let config = Config {
-        data_dir: tmp.path().join("data"),
-        config_path: tmp.path().join("config.toml"),
-        sop: sop_config.clone(),
-        ..Config::default()
-    };
-
-    let sop = Sop {
-        name: "rpc-agent-tool-only".to_string(),
-        description: "rpc approval-mode checkpoint".to_string(),
-        version: "1.0.0".to_string(),
-        priority: SopPriority::Normal,
-        execution_mode: SopExecutionMode::Deterministic,
-        triggers: vec![SopTrigger::Manual],
-        steps: vec![SopStep {
-            number: 1,
-            title: "Policy gate".to_string(),
-            kind: SopStepKind::Checkpoint,
-            ..SopStep::default()
-        }],
-        cooldown_secs: 0,
-        max_concurrent: 1,
-        location: None,
-        deterministic: true,
-        agent: None,
-        admission_policy: crate::sop::types::SopAdmissionPolicy::Parallel,
-        max_pending_approvals: 0,
-    };
-    crate::sop::save_sop(&sops_dir, &sop).expect("save temp SOP");
-
-    let mut engine = crate::sop::SopEngine::new(sop_config);
-    engine.reload(tmp.path());
-    let engine = Arc::new(Mutex::new(engine));
-    let run_id = {
-        let mut guard = engine.lock().expect("engine lock");
-        let action = guard
-            .start_run(
-                "rpc-agent-tool-only",
-                SopEvent {
-                    source: SopTriggerSource::Manual,
-                    topic: None,
-                    payload: None,
-                    timestamp: crate::sop::engine::now_iso8601(),
-                },
-            )
-            .expect("start approval-mode SOP");
-        let SopRunAction::CheckpointWait { run_id, .. } = action else {
-            panic!("approval-mode SOP must park at checkpoint, got {action:?}");
-        };
-        run_id
-    };
-
-    let dispatcher = dispatcher_with_sop_engine(config, Arc::clone(&engine));
-    let err = dispatcher
-        .handle_sops_decide(&serde_json::json!({
-            "name": "rpc-agent-tool-only",
-            "run_id": run_id,
-            "decision": "approve",
-        }))
-        .await
-        .expect_err("RPC principal must be rejected by approval_mode=agent_tool");
-    assert_eq!(err.code, AUTH_REQUIRED);
-    assert!(
-        err.message.contains(&crate::i18n::get_required_cli_string(
-            "sop-rpc-decision-unauthorized",
-        )),
-        "approval_mode rejection must surface, got: {}",
-        err.message
-    );
-    let guard = engine.lock().expect("engine lock");
-    assert_eq!(
-        guard.get_run(&run_id).expect("run still active").status,
-        SopRunStatus::PausedCheckpoint
-    );
-    assert!(
-        !guard
-            .run_events(&run_id)
-            .unwrap_or_default()
-            .iter()
-            .any(|event| event.kind == "gate_resolved"),
-        "rejected RPC decision must not append a gate_resolved row"
-    );
-}
-
-#[tokio::test]
-async fn sops_decide_rejects_run_id_from_different_sop_before_broker_resolution() {
-    use crate::sop::{
-        Sop, SopEvent, SopExecutionMode, SopPriority, SopRunAction, SopRunStatus, SopStep,
-        SopStepKind, SopTrigger, SopTriggerSource,
-    };
-    use std::sync::{Arc, Mutex};
-    use zeroclaw_config::schema::{Config, SopConfig};
-    use zeroclaw_infra::session_queue::SessionActorQueue;
-
-    fn dispatcher_with_sop_engine(
-        config: Config,
-        engine: Arc<Mutex<crate::sop::SopEngine>>,
-    ) -> RpcDispatcher {
-        let queue = Arc::new(SessionActorQueue::new(4, 10, 60));
-        let sessions = Arc::new(crate::rpc::session::SessionStore::new(16, queue));
-        let ctx = RpcContext::minimal_with_sop_engine(config, sessions, engine);
-        let (tx, _rx) = tokio::sync::mpsc::channel(64);
-        let mut dispatcher = RpcDispatcher::new(ctx, tx, "test-peer-rpc:pid=1".to_string());
-        dispatcher.set_tui_id_for_test(Some("alice".to_string()));
-        dispatcher
-    }
-
-    fn checkpoint_sop(name: &str) -> Sop {
-        Sop {
-            name: name.to_string(),
-            description: format!("{name} checkpoint"),
-            version: "1.0.0".to_string(),
-            priority: SopPriority::Normal,
-            execution_mode: SopExecutionMode::Deterministic,
-            triggers: vec![SopTrigger::Manual],
-            steps: vec![SopStep {
-                number: 1,
-                title: "Gate".to_string(),
-                kind: SopStepKind::Checkpoint,
-                ..SopStep::default()
-            }],
-            cooldown_secs: 0,
-            max_concurrent: 1,
-            location: None,
-            deterministic: true,
-            agent: None,
-            admission_policy: crate::sop::types::SopAdmissionPolicy::Parallel,
-            max_pending_approvals: 0,
-        }
-    }
-
-    let tmp = tempfile::TempDir::new().unwrap();
-    let sops_dir = tmp.path().join("sops");
-    let sop_config = SopConfig {
-        sops_dir: Some(sops_dir.to_string_lossy().into_owned()),
-        default_execution_mode: "deterministic".to_string(),
-        ..SopConfig::default()
-    };
-    let config = Config {
-        data_dir: tmp.path().join("data"),
-        config_path: tmp.path().join("config.toml"),
-        sop: sop_config.clone(),
-        ..Config::default()
-    };
-
-    crate::sop::save_sop(&sops_dir, &checkpoint_sop("rpc-a")).expect("save rpc-a");
-    crate::sop::save_sop(&sops_dir, &checkpoint_sop("rpc-b")).expect("save rpc-b");
-
-    let mut engine = crate::sop::SopEngine::new(sop_config);
-    engine.reload(tmp.path());
-    assert_eq!(engine.sops().len(), 2, "both temp SOPs should load");
-    let engine = Arc::new(Mutex::new(engine));
-
-    let run_id = {
-        let mut guard = engine.lock().expect("engine lock");
-        let action = guard
-            .start_run(
-                "rpc-b",
-                SopEvent {
-                    source: SopTriggerSource::Manual,
-                    topic: None,
-                    payload: None,
-                    timestamp: crate::sop::engine::now_iso8601(),
-                },
-            )
-            .expect("start rpc-b SOP");
-        let SopRunAction::CheckpointWait { run_id, .. } = action else {
-            panic!("rpc-b must park at checkpoint, got {action:?}");
-        };
-        run_id
-    };
-
-    let dispatcher = dispatcher_with_sop_engine(config, Arc::clone(&engine));
-    let err = dispatcher
-        .handle_sops_decide(&serde_json::json!({
-            "name": "rpc-a",
-            "run_id": run_id,
-            "decision": "approve",
-        }))
-        .await
-        .expect_err("mismatched name/run_id must be rejected before broker resolution");
-    assert_eq!(err.code, INVALID_PARAMS);
-    assert!(
-        err.message.contains("belongs to SOP 'rpc-b', not 'rpc-a'"),
-        "mismatch rejection must name both SOPs, got: {}",
-        err.message
-    );
-
-    let guard = engine.lock().expect("engine lock");
-    let run = guard.get_run(&run_id).expect("rpc-b run still active");
-    assert_eq!(run.sop_name, "rpc-b");
-    assert_eq!(run.status, SopRunStatus::PausedCheckpoint);
-    assert!(
-        !guard
-            .run_events(&run_id)
-            .unwrap_or_default()
-            .iter()
-            .any(|event| event.kind == "gate_resolved"),
-        "mismatched RPC decision must not append a gate_resolved row"
-    );
-}
-
 #[test]
 fn cost_org_unreadable_non_notfound_errors() {
     // A directory at the snapshot path produces a non-NotFound read error; it must
@@ -2559,7 +2023,7 @@ async fn acp_persistence_skips_empty_and_failed_turns() {
 
 fn make_agent_rename_test_config(tmp: &tempfile::TempDir) -> zeroclaw_config::schema::Config {
     use zeroclaw_config::multi_agent::{AccessMode, AgentAlias, PeerGroupConfig};
-    use zeroclaw_config::schema::{AliasedAgentConfig, DelegateTargetConfig};
+    use zeroclaw_config::schema::AliasedAgentConfig;
 
     let mut config = zeroclaw_config::schema::Config {
         config_path: tmp.path().join("config.toml"),
@@ -2571,7 +2035,6 @@ fn make_agent_rename_test_config(tmp: &tempfile::TempDir) -> zeroclaw_config::sc
     config.acp.default_agent = Some("alpha".to_string());
 
     let mut alpha = AliasedAgentConfig {
-        delegates: vec![DelegateTargetConfig::bounded("alpha")],
         ..Default::default()
     };
     alpha
@@ -2581,7 +2044,6 @@ fn make_agent_rename_test_config(tmp: &tempfile::TempDir) -> zeroclaw_config::sc
     config.agents.insert("alpha".to_string(), alpha);
 
     let mut reviewer = AliasedAgentConfig {
-        delegates: vec![DelegateTargetConfig::bounded("alpha")],
         ..Default::default()
     };
     reviewer
@@ -2628,23 +2090,11 @@ async fn config_map_key_rename_uses_agent_cascade() {
     assert!(config.agents.contains_key("beta"));
     assert_eq!(config.heartbeat.agent, "beta");
     assert_eq!(config.acp.default_agent.as_deref(), Some("beta"));
-    assert_eq!(
-        config.agents["beta"].delegates,
-        vec![zeroclaw_config::schema::DelegateTargetConfig::bounded(
-            "beta"
-        )]
-    );
     assert!(
         config.agents["beta"]
             .workspace
             .access
             .contains_key(&zeroclaw_config::multi_agent::AgentAlias::new("beta"))
-    );
-    assert_eq!(
-        config.agents["reviewer"].delegates,
-        vec![zeroclaw_config::schema::DelegateTargetConfig::bounded(
-            "beta"
-        )]
     );
     assert_eq!(
         config.agents["reviewer"].workspace.read_memory_from,
@@ -4689,8 +4139,6 @@ async fn session_close_missing_session_does_not_fire_session_end() {
         approval_pending: Arc::new(crate::rpc::context::ApprovalPendingMap::default()),
         tui_registry: Arc::new(crate::rpc::tui_identity::TuiRegistry::new_unsigned()),
         acp_session_store: None,
-        sop_engine: None,
-        sop_audit: None,
         hooks: Some(Arc::new(runner)),
     });
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
@@ -4732,8 +4180,6 @@ async fn session_delete_missing_session_does_not_fire_session_end() {
         approval_pending: Arc::new(crate::rpc::context::ApprovalPendingMap::default()),
         tui_registry: Arc::new(crate::rpc::tui_identity::TuiRegistry::new_unsigned()),
         acp_session_store: None,
-        sop_engine: None,
-        sop_audit: None,
         hooks: Some(Arc::new(runner)),
     });
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
@@ -4830,8 +4276,6 @@ async fn session_close_real_session_fires_session_end_hook() {
         approval_pending: Arc::new(crate::rpc::context::ApprovalPendingMap::default()),
         tui_registry: Arc::new(crate::rpc::tui_identity::TuiRegistry::new_unsigned()),
         acp_session_store: None,
-        sop_engine: None,
-        sop_audit: None,
         hooks: Some(Arc::new(runner)),
     });
     let (tx, _rx) = tokio::sync::mpsc::channel(64);

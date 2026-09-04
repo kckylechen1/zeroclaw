@@ -87,20 +87,16 @@ pub fn append_pinned_mcp_section(deferred_section: &mut String, pinned_section: 
     deferred_section.push_str(pinned_section);
 }
 
-/// Register an eager MCP tool wrapper into `tools` (and the delegate handle,
-/// when present) only if `policy` admits it. Returns `true` when the tool was
-/// registered, `false` when the policy dropped it.
+/// Register an eager MCP tool wrapper into `tools` only if `policy` admits
+/// it. Returns `true` when the tool was registered, `false` when the policy
+/// dropped it.
 pub fn register_eager_mcp_tool_if_allowed(
     wrapper: std::sync::Arc<dyn Tool>,
     tools: &mut Vec<Box<dyn Tool>>,
-    delegate_handle: Option<&tools::DelegateParentToolsHandle>,
     policy: Option<&zeroclaw_tools::tool_search::ToolAccessPolicy>,
 ) -> bool {
     if !eager_mcp_tool_allowed(wrapper.name(), policy) {
         return false;
-    }
-    if let Some(handle) = delegate_handle {
-        handle.write().push(std::sync::Arc::clone(&wrapper));
     }
     tools.push(Box::new(tools::ArcToolRef(wrapper)));
     true
@@ -111,7 +107,6 @@ pub(crate) fn preactivate_always_filter_groups(
     activated: &Arc<Mutex<crate::tools::ActivatedToolSet>>,
     groups: &[zeroclaw_config::schema::ToolFilterGroup],
     policy: Option<&zeroclaw_tools::tool_search::ToolAccessPolicy>,
-    delegate_handle: Option<&tools::DelegateParentToolsHandle>,
 ) -> HashSet<String> {
     use zeroclaw_config::schema::ToolFilterGroupMode;
 
@@ -145,18 +140,6 @@ pub(crate) fn preactivate_always_filter_groups(
         }
         if let Some(tool) = deferred.activate(&stub.prefixed_name) {
             let tool: Arc<dyn Tool> = Arc::from(tool);
-            // Pre-activated tools must reach delegated subagents exactly as
-            // tool_search-activated ones do (same dedup as the activation
-            // hook `assemble` installs on `ToolSearchTool`).
-            if let Some(handle) = delegate_handle {
-                let mut delegate_tools = handle.write();
-                let already = delegate_tools
-                    .iter()
-                    .any(|existing| existing.name() == tool.name());
-                if !already {
-                    delegate_tools.push(Arc::clone(&tool));
-                }
-            }
             guard.activate(stub.prefixed_name.clone(), tool);
             activated_names.insert(stub.prefixed_name.clone());
         }

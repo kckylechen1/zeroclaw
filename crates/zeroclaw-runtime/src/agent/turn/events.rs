@@ -3,6 +3,7 @@
 
 use super::outcome::ToolLoopCancelled;
 use super::redact::scrub_credentials;
+use super::redact::scrub_credentials_value;
 use crate::agent::tool_execution::ToolExecutionOutcome;
 use anyhow::Result;
 use tokio::sync::mpsc::Sender;
@@ -70,7 +71,9 @@ pub(crate) async fn emit_tool_call_pending(
         .send(TurnEvent::ToolCall {
             id: id.to_string(),
             name: call.name.clone(),
-            args: call.arguments.clone(),
+            // UI-facing turn event: rendering-boundary scrub, same contract as
+            // execute_one_tool. The tool itself still receives raw arguments.
+            args: scrub_credentials_value(call.arguments.clone()),
         })
         .await;
 }

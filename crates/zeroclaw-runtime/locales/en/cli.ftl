@@ -28,7 +28,6 @@ cli-providers-about = List supported AI providers
 cli-channel-about = Manage communication channels
 cli-integrations-about = Browse 50+ integrations
 cli-skills-about = Manage skills (user-defined capabilities)
-cli-sop-about = Manage standard operating procedures (SOPs)
 cli-migrate-about = Migrate data from other agent runtimes
 cli-auth-about = Manage provider subscription authentication profiles
 cli-hardware-about = Discover and introspect USB hardware
@@ -185,9 +184,6 @@ cli-peripheral-list-about = List configured peripherals
 cli-peripheral-add-about = Add a peripheral by board type and transport path
 cli-peripheral-flash-about = Flash ZeroClaw firmware to an Arduino board
 
-cli-sop-list-about = List loaded SOPs
-cli-sop-validate-about = Validate SOP definitions
-cli-sop-show-about = Show details of an SOP
 
 cli-migrate-openclaw-about = Import memory from an OpenClaw workspace into this ZeroClaw workspace
 
@@ -508,14 +504,6 @@ cli-skills-skipped-scripts-hint = {"    "}Set `skills.allow_scripts = true` in y
 
 # ── sop (zeroclaw sop) ──
 cli-sop-none = No SOPs found.
-cli-sop-pending-none = No SOP runs waiting for approval.
-cli-sop-pending-header = SOP runs waiting for approval:
-cli-sop-pending-row = {"  "}{$run_id} [{$sop_name}] step {$step}/{$total}
-# gateway WebSocket SOP approval error frames (UI-surfaced)
-cli-sop-ws-invalid-approval = sop approval_response requires run_id and a decision of approve or deny
-cli-sop-ws-resolve-failed = sop resolve failed: {$error}
-cli-sop-ws-engine-lock-poisoned = SOP engine lock poisoned
-cli-sop-ws-subsystem-disabled = SOP subsystem not enabled
 cli-sop-create-hint = {"  "}Create one: mkdir -p <workspace>/sops/my-sop
 cli-sop-create-hint-2 = {"              "}then add SOP.toml and SOP.md
 cli-sop-loaded-header = Loaded SOPs ({$count}):

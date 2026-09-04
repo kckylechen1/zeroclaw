@@ -38,7 +38,7 @@ spec:
               value: "/zeroclaw-data"
             - name: ZEROCLAW_WORKSPACE
               value: "/zeroclaw-data/workspace"
-            - name: ZEROCLAW_GATEWAY_PORT
+            - name: ZEROCLAW_gateway__port
               value: "42617"
           volumeMounts:
             - name: state

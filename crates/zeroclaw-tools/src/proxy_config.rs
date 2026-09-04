@@ -37,6 +37,27 @@ impl ProxyConfigTool {
             ))
         })?;
 
+        // This reparse path bypasses the normal load pipeline's tombstone
+        // reporting, and the full save() below rewrites the file — so surface
+        // retired-surface warnings here too: a legacy section or key is dropped
+        // by the parse and must not vanish silently before that rewrite.
+        for warning in zeroclaw_config::validation_warnings::retired_field_tombstones(&contents)
+            .into_iter()
+            .chain(zeroclaw_config::validation_warnings::retired_section_tombstones(&contents))
+        {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "code": warning.code,
+                        "path": warning.path,
+                        "message": warning.message,
+                    })),
+                "proxy_config: retired config surface present in config file"
+            );
+        }
+
         let mut parsed: Config = toml::from_str(&contents).map_err(|error| {
             ::zeroclaw_log::record!(
                 ERROR,
@@ -354,50 +375,6 @@ impl ProxyConfigTool {
             error: None,
         })
     }
-
-    fn handle_apply_env(&self) -> anyhow::Result<ToolResult> {
-        let cfg = self.load_config_without_env()?;
-        let proxy = cfg.proxy;
-        proxy.validate()?;
-
-        if !proxy.enabled {
-            anyhow::bail!("Proxy is disabled. Use action 'set' with enabled=true first");
-        }
-
-        if proxy.scope != ProxyScope::Environment {
-            anyhow::bail!(
-                "apply_env only works when proxy.scope is 'environment' (current: {:?})",
-                proxy.scope
-            );
-        }
-
-        proxy.apply_to_process_env();
-        set_runtime_proxy_config(proxy.clone());
-
-        Ok(ToolResult {
-            success: true,
-            output: serde_json::to_string_pretty(&json!({
-                "message": "Proxy environment variables applied",
-                "proxy": Self::proxy_json(&proxy),
-                "environment": Self::env_snapshot(),
-            }))?
-            .into(),
-            error: None,
-        })
-    }
-
-    fn handle_clear_env(&self) -> anyhow::Result<ToolResult> {
-        ProxyConfig::clear_process_env();
-        Ok(ToolResult {
-            success: true,
-            output: serde_json::to_string_pretty(&json!({
-                "message": "Proxy environment variables cleared",
-                "environment": Self::env_snapshot(),
-            }))?
-            .into(),
-            error: None,
-        })
-    }
 }
 
 #[async_trait]
@@ -416,7 +393,7 @@ impl Tool for ProxyConfigTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["get", "set", "disable", "list_services", "apply_env", "clear_env"],
+                    "enum": ["get", "set", "disable", "list_services"],
                     "default": "get"
                 },
                 "enabled": {
@@ -471,7 +448,7 @@ impl Tool for ProxyConfigTool {
         let result = match action.as_str() {
             "get" => self.handle_get(),
             "list_services" => self.handle_list_services(),
-            "set" | "disable" | "apply_env" | "clear_env" => {
+            "set" | "disable" => {
                 if let Some(blocked) = self.require_write_access() {
                     return Ok(blocked);
                 }
@@ -479,14 +456,16 @@ impl Tool for ProxyConfigTool {
                 match action.as_str() {
                     "set" => Box::pin(self.handle_set(&args)).await,
                     "disable" => Box::pin(self.handle_disable(&args)).await,
-                    "apply_env" => self.handle_apply_env(),
-                    "clear_env" => self.handle_clear_env(),
                     _ => unreachable!("handled above"),
                 }
             }
-            _ => anyhow::bail!(
-                "Unknown action '{action}'. Valid: get, set, disable, list_services, apply_env, clear_env"
-            ),
+            // `apply_env` / `clear_env` were deleted: persisted proxy
+            // config is applied at process startup instead, so the live
+            // env-manipulation actions have no trusted equivalent and no
+            // remaining consumer.
+            _ => {
+                anyhow::bail!("Unknown action '{action}'. Valid: get, set, disable, list_services")
+            }
         };
 
         match result {

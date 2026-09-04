@@ -1,6 +1,6 @@
 # Filesystem
 
-The `filesystem` channel watches one or more paths and feeds each change into the agent loop or the SOP engine. It is gated by the `channel-filesystem` build feature (default on).
+The `filesystem` channel watches one or more paths and feeds each change into the agent loop. (It formerly also dispatched changes to the SOP engine; that dispatch was removed with the run side.) It is gated by the `channel-filesystem` build feature (default on).
 
 > **This is a SOP event source.** For trigger syntax and path matching, see [SOP Fan-In: Filesystem](../sop/fan-in/filesystem.md). This page covers what is watched and the safety scoping.
 

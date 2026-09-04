@@ -87,8 +87,8 @@ function remediationTarget(result: DiagResult): RemediationTarget | null {
 
 /**
  * Coarse fallback link for a finding with NO parseable entity. Config/workspace
- * findings point at the navigator; everything else (daemon, environment,
- * cli-tools) has no sensible in-app target. Returns `[href, label]` or `null`.
+ * findings point at the navigator; everything else (daemon, environment)
+ * has no sensible in-app target. Returns `[href, label]` or `null`.
  */
 function fallbackLink(result: DiagResult): [string, string] | null {
   if (result.severity === 'ok') return null;

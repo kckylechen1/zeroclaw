@@ -34,14 +34,14 @@ A minimal build ships with:
 | `ask_user` | Send a question to the active channel and wait for a reply. Supports optional `choices` for structured responses (inline keyboard on Telegram, numbered list on CLI). On ACP, `choices` are required: free-form ask awaits the ACP elicitation RFD. Parameters: `question` (required), `choices` (optional list), `timeout_secs` (default 600). |
 | `escalate_to_human` | Send a structured escalation message with urgency routing. `high` / `critical` urgency additionally notifies any channels listed in `[escalation] alert_channels`. Parameters: `summary` (required), `context` (optional), `urgency` (`low`/`medium`/`high`/`critical`, default `medium`), `wait_for_response` (bool, default false), `timeout_secs` (default 600). On ACP, `wait_for_response: true` fails immediately if the channel cannot receive free-form replies (awaits ACP elicitation RFD). |
 
-Always registered alongside the built-ins:
+Registered alongside the built-ins under `full`/`legacy` composition (the minimal composition assembles its own curated set; see [Install-wide composition](#install-wide-composition)):
 
 | Tool | Notes |
 |---|---|
 | `cron_*` | Manage scheduled jobs: `cron_add`, `cron_list`, `cron_remove`, `cron_update`, `cron_run`, `cron_runs` |
 | `schedule` | Shell-only one-shot/recurring scheduling |
 | `memory_forget`, `memory_export`, `memory_purge` | Long-term memory management |
-| `spawn_subagent`, `delegate` | Run a subtask in a child agent |
+| `reasoning_subagent` | V1 SubAgent entry point: one bounded, contract-admitted ReasoningSubAgent run returning a structured report. Also the SubAgent entry point of the minimal composition. |
 
 Conditionally registered:
 
@@ -51,6 +51,18 @@ Conditionally registered:
 | Hardware probes | `--features hardware`: GPIO, I2C, SPI reads/writes |
 | `sop_*` tools | Registered when `sop.sops_dir` is configured: run and inspect SOPs |
 | `discord_search` | Registered when a Discord alias has `archive` enabled |
+
+## Install-wide composition
+
+The root `composition` key selects which tool surface an install assembles:
+
+- `composition = "minimal"` assembles only the curated companion primitives: workspace basics (`shell`, `file_read`, `file_write`, `file_edit`, `glob_search`, `content_search`), personal memory (`memory_recall`, `memory_store`), skill discovery (`read_skill`), extension discovery (`tool_search`), universal web primitives (`web_search_tool`, `web_fetch`), bounded interaction (`ask_user`), the V1 SubAgent entry point (`reasoning_subagent`), and scheduling (`schedule`). Individual tool `enabled` flags do not widen it back. The legacy `spawn_subagent` entry point is retired on every composition (see [Delegation & SubAgents](../agents/delegation.md)).
+- `composition = "full"` (alias `"legacy"`) keeps the complete built-in registry. This is a **transitional opt-in compatibility profile**, not a target: new specialist capabilities should stay out of the ordinary provider-wire surface until they are measured in.
+- An absent key behaves as `full`: configs written before the field existed keep today's tool surface across upgrades, and existing installs are not migrated.
+
+Fresh installs start on `minimal`: the install bootstrap (`Config::load_or_init` on a first run, and the shipped config template used by the dev container) pins `composition = "minimal"` into the brand-new config file. Set `composition = "full"` explicitly to opt an install back into the complete registry.
+
+The membership table is an allowlist, so a newly registered tool stays out of the minimal surface until it is deliberately added. CI guards the minimal profile from both directions: a wire-budget ceiling on the provider-wire `tools[]` array, and a banned-category tripwire (direct coding-harness launchers, repo/git mutation, operator/admin mutation, concrete SaaS adapters, hardware tools) on the membership table.
 
 ## Extension protocols
 

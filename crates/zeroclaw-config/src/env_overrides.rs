@@ -8,6 +8,78 @@ use std::sync::LazyLock;
 const PREFIX: &str = "ZEROCLAW_";
 const SEP: &str = "__";
 
+/// Retired config surfaces recognized by exact env-form prefix BEFORE the
+/// unknown-path rejection. Each hit is IGNORED (never applied) and reported
+/// as a structured deprecation warning so existing deployments setting
+/// these env vars keep booting instead of failing config load after the
+/// backing schema was deleted. This is deliberately a narrow prefix
+/// carve-out, not a relaxation of the walker: every other walker-eligible
+/// (conforming lowercase-tail) unknown env path still hard-errors; tails
+/// that fail the lowercase prefilter were never overrides to begin with.
+///
+/// The prefix set is derived from the single retired-surface table
+/// (`RETIRED_CONFIG_SURFACES`): dotted path → env form with a trailing
+/// `__`, so the env shim and the file-section shim cannot drift apart.
+/// Sunset: these tombstones are compatibility shims; they will be removed
+/// in a later announced window, after which the paths hard-error like any
+/// other unknown path.
+static RETIRED_ENV_TOMBSTONE_PREFIXES: LazyLock<Vec<(String, &'static str)>> =
+    LazyLock::new(|| {
+        crate::validation_warnings::RETIRED_CONFIG_SURFACES
+            .iter()
+            .map(|(path, code)| (format!("{}{SEP}", path.replace('.', SEP)), *code))
+            .collect()
+    });
+
+/// One retired env path pattern. `segments` come from the dotted retired
+/// path split on the env separator; a `*` segment (from the file lane's
+/// map-key wildcard) matches exactly one env segment. Every pattern is
+/// prefix-matching: children under a retired section AND children under a
+/// retired field (e.g. `delegation_policy__mode`) are ignored with the
+/// same warning instead of erroring as unknown paths.
+struct RetiredEnvPattern {
+    segments: Vec<&'static str>,
+    code: &'static str,
+    prefix: bool,
+}
+
+/// Field-lane patterns derived from `RETIRED_CONFIG_FIELDS`, so an env
+/// override naming a removed field is ignored with the same structured
+/// warning as the file section/field shims instead of hard-erroring as an
+/// unknown path. Same SSOT rationale as the section prefixes above.
+static RETIRED_ENV_FIELD_PATTERNS: LazyLock<Vec<RetiredEnvPattern>> = LazyLock::new(|| {
+    crate::validation_warnings::RETIRED_CONFIG_FIELDS
+        .iter()
+        .map(|(path, code)| RetiredEnvPattern {
+            segments: path.split('.').collect(),
+            code,
+            prefix: true,
+        })
+        .collect()
+});
+
+/// Match one retired env pattern against the `__`-split env tail.
+fn retired_env_pattern_matches(pattern: &RetiredEnvPattern, tail_segments: &[&str]) -> bool {
+    let length_ok = if pattern.prefix {
+        tail_segments.len() >= pattern.segments.len()
+    } else {
+        tail_segments.len() == pattern.segments.len()
+    };
+    length_ok
+        && pattern
+            .segments
+            .iter()
+            .zip(tail_segments)
+            .all(|(expected, actual)| *expected == "*" || expected.eq_ignore_ascii_case(actual))
+}
+
+/// Test-visible view of the derived env-prefix set, so the SSOT guard can
+/// assert the walker carries a prefix for every retired surface.
+#[cfg(test)]
+pub(crate) fn retired_env_tombstone_prefixes() -> &'static [(String, &'static str)] {
+    &RETIRED_ENV_TOMBSTONE_PREFIXES
+}
+
 static NON_OVERRIDABLE_PATHS: LazyLock<HashSet<&'static str>> =
     LazyLock::new(|| HashSet::from(["schema_version"]));
 
@@ -15,6 +87,11 @@ static NON_OVERRIDABLE_PATHS: LazyLock<HashSet<&'static str>> =
 pub struct AppliedOverrides {
     pub paths: HashSet<String>,
     pub snapshots: HashMap<String, String>,
+    /// Structured deprecation warnings for retired-surface env hits that
+    /// were ignored instead of applied. Callers attach these to
+    /// `Config::retired_surface_warnings` so `collect_warnings()` replays
+    /// them through the stable-code warning machinery.
+    pub tombstone_warnings: Vec<crate::validation_warnings::ValidationWarning>,
 }
 
 /// Apply every `ZEROCLAW_<lowercase>` env var to `config`. Returns the set of
@@ -36,7 +113,64 @@ pub fn apply_env_overrides(config: &mut Config) -> Result<AppliedOverrides> {
 
     let mut paths: HashSet<String> = HashSet::with_capacity(entries.len());
     let mut snapshots: HashMap<String, String> = HashMap::with_capacity(entries.len());
+    let mut tombstone_warnings: Vec<crate::validation_warnings::ValidationWarning> = Vec::new();
     for (env_name, value, tail) in entries {
+        // Retired-surface tombstone: exact-prefix carve-out consulted
+        // BEFORE the unknown-path rejection (so no map-key section can
+        // intercept first). The hit is ignored and warned; it must never
+        // be applied (the schema no longer has a destination) and must
+        // never mask an otherwise-unknown path. The apply-time log is
+        // deliberate dual emission with the collect_warnings replay: it
+        // covers loaders that never call validate()/collect_warnings
+        // (the channels standalone reload) and fires even when a later
+        // entry hard-errors and the structured vec is discarded with the
+        // Err — deprecation visibility should not depend on the rest of
+        // the environment being clean.
+        let tail_segments: Vec<&str> = tail.split(SEP).collect();
+        let retired_hit = RETIRED_ENV_TOMBSTONE_PREFIXES
+            .iter()
+            .find(|(prefix, _)| tail.starts_with(prefix.as_str()))
+            .map(|(prefix, code)| {
+                let dotted = prefix.trim_end_matches(SEP).replace(SEP, ".");
+                (dotted, *code)
+            })
+            .or_else(|| {
+                RETIRED_ENV_FIELD_PATTERNS
+                    .iter()
+                    .find(|pattern| retired_env_pattern_matches(pattern, &tail_segments))
+                    .map(|pattern| {
+                        let dotted: Vec<&str> = tail_segments
+                            .iter()
+                            .zip(&pattern.segments)
+                            .map(
+                                |(actual, expected)| {
+                                    if *expected == "*" { *actual } else { expected }
+                                },
+                            )
+                            .collect();
+                        (dotted.join("."), pattern.code)
+                    })
+            });
+        if let Some((dotted, code)) = retired_hit {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"env_var": env_name, "path": dotted})),
+                "env override for retired config surface ignored"
+            );
+            tombstone_warnings.push(crate::validation_warnings::ValidationWarning::new(
+                code,
+                format!(
+                    "{env_name} targets the retired `[{dotted}]` config key and is \
+                     ignored. The key was removed from the schema and has no runtime \
+                     consumer; this compatibility shim will be removed in a later \
+                     announced window. Remove the env var."
+                ),
+                dotted.clone(),
+            ));
+            continue;
+        }
         let path = resolve_path(&tail, config)
             .with_context(|| format!("{env_name} did not resolve to a schema path"))?;
         if NON_OVERRIDABLE_PATHS.contains(path.as_str()) {
@@ -85,7 +219,11 @@ pub fn apply_env_overrides(config: &mut Config) -> Result<AppliedOverrides> {
             "Applied env-var config overrides"
         );
     }
-    Ok(AppliedOverrides { paths, snapshots })
+    Ok(AppliedOverrides {
+        paths,
+        snapshots,
+        tombstone_warnings,
+    })
 }
 
 /// Walk an env-var tail against the schema. Map-keyed positions consume one
@@ -314,6 +452,182 @@ mod tests {
         assert!(
             msg.contains("ZEROCLAW_no__such__field") && msg.contains("did not resolve"),
             "error must name the env var and the failure: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    async fn walker_ignores_retired_pairing_dashboard_prefix_with_warning() {
+        // The discrimination that prevents global loosening: the retired
+        // section's env prefix is ignored + warned, while every OTHER
+        // unknown gateway path still hard-errors (next test). Before the
+        // tombstone, this var hard-errored (path unknown after schema
+        // removal); deployments setting it must keep booting with a
+        // structured deprecation warning instead.
+        let _guard = super::env_test_lock().await;
+        let _v = EnvVarGuard::set("ZEROCLAW_gateway__pairing_dashboard__anything", "1");
+
+        let mut config = Config::default();
+        let applied =
+            apply_env_overrides(&mut config).expect("retired prefix must be ignored, not fatal");
+        assert!(
+            applied.paths.is_empty(),
+            "tombstoned var must not be applied: {:?}",
+            applied.paths
+        );
+        assert_eq!(
+            applied.tombstone_warnings.len(),
+            1,
+            "exactly one deprecation warning per hit: {:?}",
+            applied.tombstone_warnings
+        );
+        let warning = &applied.tombstone_warnings[0];
+        assert_eq!(warning.code, "gateway_pairing_dashboard_removed");
+        assert_eq!(warning.path, "gateway.pairing_dashboard");
+        assert!(
+            warning
+                .message
+                .contains("ZEROCLAW_gateway__pairing_dashboard__anything"),
+            "warning must name the env var: {}",
+            warning.message
+        );
+        assert!(
+            warning.message.contains("later announced window"),
+            "warning must name the sunset intent: {}",
+            warning.message
+        );
+
+        // The structured warning flows through the validation_warnings
+        // machinery once attached, mirroring the otp_action_gating
+        // precedent.
+        config.retired_surface_warnings = applied.tombstone_warnings;
+        assert!(
+            config
+                .collect_warnings()
+                .iter()
+                .any(|w| w.code == "gateway_pairing_dashboard_removed"
+                    && w.path == "gateway.pairing_dashboard"),
+            "collect_warnings must replay the tombstone warning"
+        );
+    }
+
+    #[tokio::test]
+    async fn walker_still_hard_errors_on_unknown_gateway_paths() {
+        // Guard against the tombstone becoming a relaxation: only the
+        // exact retired prefix is carved out; adjacent unknown paths under
+        // `gateway` keep hard-erroring.
+        let _guard = super::env_test_lock().await;
+        let _v = EnvVarGuard::set("ZEROCLAW_gateway__anything_else__foo", "1");
+
+        let mut config = Config::default();
+        let err = apply_env_overrides(&mut config).expect_err("must hard-error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("ZEROCLAW_gateway__anything_else__foo") && msg.contains("did not resolve"),
+            "error must name the env var and the failure: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    async fn walker_tombstone_prefix_is_exact_not_a_name_prefix() {
+        // `gateway__pairing_dashboard_something` differs from the retired
+        // prefix by a single separator: it is a DIFFERENT (unknown) path
+        // and must still hard-error. The tombstone requires the full
+        // `__`-terminated prefix, so it cannot swallow longer section
+        // names that merely start with the same words.
+        let _guard = super::env_test_lock().await;
+        let _v = EnvVarGuard::set("ZEROCLAW_gateway__pairing_dashboard_something__x", "1");
+
+        let mut config = Config::default();
+        let err = apply_env_overrides(&mut config).expect_err("must hard-error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("did not resolve"),
+            "prefix look-alike must hard-error: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    async fn walker_tombstone_covers_bare_prefix_and_former_real_keys() {
+        // The prefix match includes the exact bare form (empty remainder)
+        // and every former real sub-key of the retired section; each hit
+        // warns once and none is applied.
+        let _guard = super::env_test_lock().await;
+        let _v1 = EnvVarGuard::set("ZEROCLAW_gateway__pairing_dashboard__", "1");
+        let _v2 = EnvVarGuard::set("ZEROCLAW_gateway__pairing_dashboard__code_length", "9");
+        let _v3 = EnvVarGuard::set("ZEROCLAW_gateway__pairing_dashboard__nested__deep", "7");
+
+        let mut config = Config::default();
+        let applied = apply_env_overrides(&mut config).expect("all hits ignored, not fatal");
+        assert!(
+            applied.paths.is_empty(),
+            "no tombstoned var may be applied: {:?}",
+            applied.paths
+        );
+        assert_eq!(
+            applied.tombstone_warnings.len(),
+            3,
+            "one warning per hit: {:?}",
+            applied.tombstone_warnings
+        );
+        assert!(
+            applied
+                .tombstone_warnings
+                .iter()
+                .all(|w| w.code == "gateway_pairing_dashboard_removed"),
+            "all hits carry the stable code"
+        );
+    }
+
+    #[tokio::test]
+    async fn walker_field_tombstone_ignores_retired_delegate_keys() {
+        // Field-lane tombstones (RETIRED_CONFIG_FIELDS): an env override
+        // naming a removed delegate config field is ignored with the
+        // stable structured warning — symmetric with the file lane — and
+        // must not hard-error as an unknown path. The wildcard matches the
+        // actual alias segment; the warning path records it verbatim.
+        let _guard = super::env_test_lock().await;
+        let _v1 = EnvVarGuard::set("ZEROCLAW_agents__lead__delegates", "peer");
+        let _v2 = EnvVarGuard::set("ZEROCLAW_agents__lead__delegate_same_risk_profile", "true");
+        // A child key under the retired field is ignored by the same
+        // prefix semantics as the section lane, not a hard error.
+        let _v3 = EnvVarGuard::set(
+            "ZEROCLAW_risk_profiles__ops__delegation_policy__mode",
+            "allow",
+        );
+
+        let mut config = Config::default();
+        let applied = apply_env_overrides(&mut config).expect("field hits ignored, not fatal");
+        assert!(
+            applied.paths.is_empty(),
+            "no tombstoned var may be applied: {:?}",
+            applied.paths
+        );
+        assert_eq!(
+            applied.tombstone_warnings.len(),
+            3,
+            "one warning per hit: {:?}",
+            applied.tombstone_warnings
+        );
+        let mut paths: Vec<_> = applied
+            .tombstone_warnings
+            .iter()
+            .map(|w| w.path.as_str())
+            .collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec![
+                "agents.lead.delegate_same_risk_profile",
+                "agents.lead.delegates",
+                "risk_profiles.ops.delegation_policy"
+            ]
+        );
+        assert!(
+            applied
+                .tombstone_warnings
+                .iter()
+                .all(|w| w.code == "delegate_config_removed"),
+            "all hits carry the stable code"
         );
     }
 

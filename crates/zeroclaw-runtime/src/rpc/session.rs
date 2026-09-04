@@ -171,7 +171,7 @@ impl SessionStore {
         Some(lock.lock_owned().await)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "heavy-tests"))]
     pub(crate) fn model_provider_update_waiting(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.model_provider_update_waiting)
     }

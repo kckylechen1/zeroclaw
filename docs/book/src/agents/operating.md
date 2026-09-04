@@ -28,19 +28,11 @@ memory, and identity (see [Filesystem components](./filesystem.md)), so by
 default nothing one agent does leaks into another. They share only what their
 config references share, a provider, a channel, a bundle.
 
-There are two ways one agent reaches another, each separately gated:
-
-- **Messaging** on a shared channel: two agents can address each other only
-  where they share a [peer group](../channels/peer-groups.md).
-- **[Delegation](./delegation.md)**: an agent can hand a task to another agent only when **both**
-  conditions hold, its own risk profile's `delegation_policy.mode` is `allow`
-  (the default is `forbidden`), **and** the target agent shares the **same risk
-  profile**. Delegation never crosses trust tiers, an agent on a hardened
-  profile cannot delegate to one on a permissive profile. The shared risk
-  profile is itself the allow-list: the delegate roster offered to the model is
-  exactly the other agents on the caller's profile, and only when delegation is
-  permitted. See [Delegation & SubAgents](./delegation.md) for the full gate
-  behavior and the exact refusal messages.
+One agent reaches another through **messaging** on a shared channel: two
+agents can address each other only where they share a
+[peer group](../channels/peer-groups.md). (The retired `delegate` tool that
+used to provide a second, policy-gated hand-off path is removed; see
+[Delegation & SubAgents](./delegation.md) for the retirement record.)
 
 When an agent needs a one-off helper instead of an existing peer, it spawns an
 ephemeral [SubAgent](./delegation.md) that inherits its identity and

@@ -9,6 +9,7 @@
 
 pub mod store;
 
+use crate::agent::turn::redact::{scrub_credentials, scrub_credentials_value};
 use crate::security::AutonomyLevel;
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -451,32 +452,23 @@ impl ApprovalManager {
 
 /// Resolve the local_tool boot id, freezing the first answer for the process.
 ///
-/// The choice is whatever is visible on first use: a live ControlPlane boot
-/// id if the plane is already installed, otherwise a process-local UUID.
-/// Later managers reuse that frozen value even if ControlPlane appears
-/// afterwards.
+/// The boot id is a process-local UUID. It was homologous with the durable
+/// control-plane's boot id until Wall 4 (issue 197) retired that plane: durable
+/// execution truth moved to Tachi (frozen contract annex rows 1 and 6), and the grant
+/// namespace never needed the homology — what it needs is one stable id per
+/// process so independently opened managers redeem each other's rows.
 ///
-/// That is deliberately not "always the ControlPlane id". Gateway and
-/// channel construction can attach an approval store before
-/// `init_control_plane` runs; flipping boot_id afterwards would split one
-/// process across two grant namespaces, so independently opened managers
-/// could not redeem each other's rows. Process-local consistency is the
-/// contract; homology with ControlPlane is not required.
-fn resolve_boot_id(slot: &OnceLock<String>, control_plane_boot: Option<&str>) -> String {
-    slot.get_or_init(|| {
-        control_plane_boot
-            .map(str::to_string)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-    })
-    .clone()
+/// The `OnceLock` freeze stays: gateway and channel construction can attach
+/// an approval store at different moments of the same process, and flipping
+/// boot_id mid-process would split one process across two grant namespaces.
+fn resolve_boot_id(slot: &OnceLock<String>) -> String {
+    slot.get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .clone()
 }
 
 fn process_boot_id() -> String {
     static BOOT_ID: OnceLock<String> = OnceLock::new();
-    resolve_boot_id(
-        &BOOT_ID,
-        crate::control_plane::control_plane().map(|handle| handle.boot_id.as_str()),
-    )
+    resolve_boot_id(&BOOT_ID)
 }
 
 /// Open `data_dir/approvals.db`. Failure returns `None` so callers keep the
@@ -937,33 +929,26 @@ mod approval_precedence_tests {
         );
     }
 
-    /// First manager is built with no ControlPlane. A ControlPlane then
-    /// starts (later boot id). The frozen choice stays the first one, so a
-    /// second manager on the same DB can redeem the first manager's grant.
+    /// First manager freezes a boot id. A second manager on the same DB —
+    /// opened independently, as the gateway and channel construction do —
+    /// resolves the same frozen id and can redeem the first manager's grant.
     #[tokio::test]
-    async fn frozen_boot_id_ignores_a_later_control_plane_and_cross_redeems() {
+    async fn frozen_boot_id_cross_redeems_across_independently_opened_managers() {
         let slot = std::sync::OnceLock::new();
         let dir = tempfile::tempdir().unwrap();
         let args = json!({"command": "ls"});
 
-        let first_boot = super::resolve_boot_id(&slot, None);
+        let first_boot = super::resolve_boot_id(&slot);
         let first =
             manager(AutonomyLevel::Supervised, &["shell"], &[]).with_store(std::sync::Arc::new(
                 super::store::ApprovalStore::open(dir.path(), first_boot.as_str())
                     .expect("store opens"),
             ));
 
-        let plane = crate::control_plane::ControlPlaneHandle::start(dir.path())
-            .await
-            .unwrap();
-        let after = super::resolve_boot_id(&slot, Some(plane.boot_id.as_str()));
+        let after = super::resolve_boot_id(&slot);
         assert_eq!(
             first_boot, after,
-            "the first boot choice must stay frozen after ControlPlane appears"
-        );
-        assert_ne!(
-            after, plane.boot_id,
-            "a later ControlPlane id must not replace the frozen boot"
+            "the first boot choice must stay frozen for the whole process"
         );
 
         let second =
@@ -990,7 +975,7 @@ mod approval_precedence_tests {
         );
         assert!(
             first.redeem_one_shot("run-2", "shell", &args).is_ok(),
-            "the first manager must also redeem a grant minted by itself after the plane starts"
+            "the first manager must also redeem a grant minted by itself afterwards"
         );
     }
 
@@ -1169,9 +1154,16 @@ pub fn summarize_args(args: &serde_json::Value) -> String {
                     "[redacted]".to_string()
                 } else {
                     match v {
-                        serde_json::Value::String(s) => truncate_for_summary(s, 80),
+                        // Same scrub-before-truncate treatment as the general
+                        // loop below: a signed or tokenized path
+                        // (`https://host/file?token=...`) is still a render
+                        // surface, and truncating first could cut the value
+                        // below the scrubber's match length.
+                        serde_json::Value::String(s) => {
+                            truncate_for_summary(&scrub_credentials(s), 80)
+                        }
                         other => {
-                            let s = other.to_string();
+                            let s = scrub_credentials_value(other.clone()).to_string();
                             truncate_for_summary(&s, 80)
                         }
                     }
@@ -1187,9 +1179,21 @@ pub fn summarize_args(args: &serde_json::Value) -> String {
                     "[redacted]".to_string()
                 } else {
                     match v {
-                        serde_json::Value::String(s) => truncate_for_summary(s, 80),
+                        // Plain strings can still carry inline credential
+                        // shapes (note: "token=..."); scrub before truncation
+                        // so truncation cannot cut the value below the
+                        // scrubber's match length and smuggle a prefix
+                        // through, matching the nested-value treatment.
+                        serde_json::Value::String(s) => {
+                            truncate_for_summary(&scrub_credentials(s), 80)
+                        }
+                        // Nested objects/arrays are rendered to the operator
+                        // (and persisted in the approval audit trail); run
+                        // them through the rendering-boundary scrub so a
+                        // credential hidden inside a nested argument (e.g.
+                        // metadata.api_key) is not echoed verbatim.
                         other => {
-                            let s = other.to_string();
+                            let s = scrub_credentials_value(other.clone()).to_string();
                             truncate_for_summary(&s, 80)
                         }
                     }
@@ -1199,35 +1203,23 @@ pub fn summarize_args(args: &serde_json::Value) -> String {
             parts.join(", ")
         }
         other => {
-            let s = other.to_string();
+            // Non-object top-level args (e.g. an array of calls) get the same
+            // rendering-boundary scrub before they reach the operator.
+            let s = scrub_credentials_value(other.clone()).to_string();
             truncate_for_summary(&s, 120)
         }
     }
 }
 
 /// Heuristic for argument keys that should have their value redacted in
-/// human-readable summaries. Matches anywhere in the (lowercased) key:
+/// human-readable summaries. Matches anywhere in the (case-insensitive) key:
 /// covers `api_key`, `api-key`, `apiKey`, `oauth_token`, `secret`,
-/// `password`, `auth_token`, `bearer`, `client_secret`, `private_key`, etc.
+/// `password`, `passwd`, `auth`, `auth_token`, `bearer`, `client_secret`,
+/// `private_key`, `credential`, cookie headers, etc. The predicate lives in
+/// `agent::turn::redact` and is shared with the structured credential walk
+/// so the two surfaces cannot drift apart.
 fn looks_like_secret_key(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    [
-        "secret",
-        "password",
-        "passwd",
-        "token",
-        "api_key",
-        "api-key",
-        "apikey",
-        "auth",
-        "bearer",
-        "private_key",
-        "private-key",
-        "privatekey",
-        "credential",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    crate::agent::turn::redact::is_sensitive_key(key)
 }
 
 fn truncate_for_summary(input: &str, max_chars: usize) -> String {
@@ -1518,6 +1510,73 @@ mod tests {
         let summary = summarize_args(&args);
         assert!(summary.contains('…'));
         assert!(summary.len() < 200);
+    }
+
+    #[test]
+    pub fn summarize_args_redacts_credential_nested_in_object_value() {
+        // A credential smuggled inside a nested argument object must not be
+        // echoed verbatim into the approval prompt or the audit trail.
+        let args = serde_json::json!({
+            "action": "upsert_agent",
+            "metadata": {"api_key": "sk-test-raw-secret-material"},
+            "model": "gpt-5.3-codex"
+        });
+        let summary = summarize_args(&args);
+        assert!(
+            !summary.contains("sk-test-raw-secret-material"),
+            "nested credential must not be echoed: {summary}"
+        );
+        assert!(
+            summary.contains("[REDACTED]"),
+            "nested credential should show the redaction marker: {summary}"
+        );
+        assert!(summary.contains("model: gpt-5.3-codex"));
+    }
+
+    #[test]
+    pub fn summarize_args_redacts_credential_nested_in_path_value() {
+        let args = serde_json::json!({
+            "path": {"api_key": "sk-test-raw-secret-material", "hint": "coding"}
+        });
+        let summary = summarize_args(&args);
+        assert!(
+            !summary.contains("sk-test-raw-secret-material"),
+            "nested credential under 'path' must not be echoed: {summary}"
+        );
+    }
+
+    #[test]
+    pub fn summarize_args_redacts_inline_credential_in_plain_string_value() {
+        let args = serde_json::json!({
+            "note": "auth via token=aaaaaaaaaaaa99 then retry"
+        });
+        let summary = summarize_args(&args);
+        assert!(
+            !summary.contains("aaaaaaaaaaaa99"),
+            "inline credential inside a plain string must not be echoed: {summary}"
+        );
+        assert!(
+            summary.contains("token=[REDACTED]"),
+            "inline credential should show the full mask: {summary}"
+        );
+        assert!(summary.contains("then retry"));
+    }
+
+    #[test]
+    pub fn summarize_args_redacts_inline_credential_in_string_path_value() {
+        let args = serde_json::json!({
+            "path": "https://internal.host/fetch?token=aaaaaaaaaaaa99&mode=raw"
+        });
+        let summary = summarize_args(&args);
+        assert!(
+            !summary.contains("aaaaaaaaaaaa99"),
+            "inline credential inside a string path must not be echoed: {summary}"
+        );
+        assert!(
+            summary.contains("token=[REDACTED]"),
+            "inline credential in a path should show the full mask: {summary}"
+        );
+        assert!(summary.contains("internal.host/fetch"));
     }
 
     #[test]

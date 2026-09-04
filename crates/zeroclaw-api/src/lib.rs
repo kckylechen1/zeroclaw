@@ -1,7 +1,6 @@
 //! ZeroClaw API layer — trait definitions and shared types.
 
 pub mod agent;
-pub mod announce;
 pub mod attribution;
 pub mod channel;
 pub mod companion;
@@ -19,10 +18,14 @@ pub mod peripherals_traits;
 pub mod plan;
 pub mod platform;
 pub mod principal;
+pub mod procedure_v1;
 pub mod runtime_status;
 pub mod runtime_traits;
 pub mod schema;
+pub mod session_exec;
 pub mod session_keys;
+pub mod subagent_v1;
+pub mod taskintent;
 pub mod tool;
 pub mod vad;
 

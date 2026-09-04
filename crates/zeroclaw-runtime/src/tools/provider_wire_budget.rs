@@ -102,7 +102,7 @@ fn copied_skill_fixture_dir() -> PathBuf {
     PathBuf::from(COPIED_SKILL_FIXTURE)
 }
 
-fn attach_copied_skill_fixture(config: &mut Config) {
+fn attach_copied_skill_fixture_for_agent(config: &mut Config, agent_alias: &str) {
     let dir = copied_skill_fixture_dir();
     assert!(
         dir.join("zeroclaw").join("SKILL.md").is_file(),
@@ -119,23 +119,53 @@ fn attach_copied_skill_fixture(config: &mut Config) {
     );
     config
         .agents
-        .get_mut("hyperion")
-        .unwrap()
+        .entry(agent_alias.to_string())
+        .or_default()
         .skill_bundles
         .push("copied_skills".into());
 }
 
-fn point_hapi_edge_at(config: &mut Config, url: String) {
-    config.mcp.servers.retain(|s| s.name == "hapi-edge");
-    config.mcp.servers[0].url = Some(url);
-    config.mcp.servers[0].transport = zeroclaw_config::schema::McpTransport::Http;
+fn attach_copied_skill_fixture(config: &mut Config) {
+    attach_copied_skill_fixture_for_agent(config, "hyperion");
+}
+
+fn point_hapi_edge_at_agent(config: &mut Config, url: String, agent_alias: &str) {
+    if let Some(s) = config
+        .mcp
+        .servers
+        .iter_mut()
+        .find(|s| s.name == "hapi-edge")
+    {
+        s.url = Some(url);
+        s.transport = zeroclaw_config::schema::McpTransport::Http;
+    } else {
+        config
+            .mcp
+            .servers
+            .push(zeroclaw_config::schema::McpServerConfig {
+                name: "hapi-edge".into(),
+                url: Some(url),
+                transport: zeroclaw_config::schema::McpTransport::Http,
+                ..zeroclaw_config::schema::McpServerConfig::default()
+            });
+    }
     config.mcp_bundles.insert(
-        "hyperion".into(),
+        agent_alias.into(),
         zeroclaw_config::schema::McpBundleConfig {
             servers: vec!["hapi-edge".into()],
             exclude: Vec::new(),
         },
     );
+    config
+        .agents
+        .entry(agent_alias.to_string())
+        .or_default()
+        .mcp_bundles
+        .push(agent_alias.into());
+}
+
+fn point_hapi_edge_at(config: &mut Config, url: String) {
+    point_hapi_edge_at_agent(config, url, "hyperion");
 }
 
 fn seed_personality(workspace: &Path, include_memory: bool) {
@@ -286,7 +316,6 @@ async fn assemble_turn(req: TurnRequest<'_>) -> (ScopedAssembled, WireBudget) {
         req.config,
         None,
         false,
-        None,
         None,
         None,
         None,
@@ -748,5 +777,522 @@ async fn lean_worst_case_skills_and_mcp_under_ceiling() {
         budget.system_prompt_tokens,
         budget.native_tools_tokens,
         budget.names
+    );
+}
+
+/// Owner-ratified hard CI ceiling on the provider-wire `tools[]` array for
+/// the `composition = "minimal"` profile. This number is a ratified budget,
+/// not a tuning knob: an over-budget regression is resolved by shrinking the
+/// wire surface or by recording an owner-ratified exception on the fork's
+/// governance tracker, never by editing this constant.
+const MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING: usize = 5_000;
+
+#[tokio::test]
+async fn minimal_composition_tools_wire_under_owner_ceiling() {
+    // A fresh default install pinned to `composition = "minimal"`: every
+    // tool[] entry below is what the model sees on the wire. The gate is
+    // the measured `NativeChatRequest.tools` array (ceil(len/4) over the
+    // whole serialized array), assembled through the real production path
+    // (`all_tools_with_runtime` + `ScopedToolRegistry::assemble` +
+    // `build_iteration_tool_specs` + `chat_tools_wire`); every stage
+    // `.expect`s, so a failure to measure fails this test rather than
+    // skipping the gate.
+    let tmp = TempDir::new().unwrap();
+    seed_personality(tmp.path(), true);
+    let mut config = Config {
+        config_path: tmp.path().join("config.toml"),
+        data_dir: tmp.path().join("data"),
+        ..Config::default()
+    };
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+    let (_, budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "default",
+        skills: &[],
+        connect_mcp: false,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    print_budget("composition=minimal default install (gate)", &budget);
+
+    // Fail-closed measurement: the wire rows must cover every assembled
+    // registry tool, otherwise the token count describes an array this test
+    // never fully measured.
+    assert!(
+        !budget.names.is_empty(),
+        "minimal assembly must register tools; empty registry means the fixture measured nothing"
+    );
+    assert_eq!(
+        budget.rows.len(),
+        budget.names.len(),
+        "wire rows must match the assembled registry (rows={} names={:?}); a mismatch means the measurement dropped entries",
+        budget.rows.len(),
+        budget.names
+    );
+
+    // The membership table is the canonical allowlist: nothing outside it
+    // may appear on the wire under minimal (the banned-category tripwire on
+    // the table itself lives with the table in the config crate).
+    for name in &budget.names {
+        assert!(
+            zeroclaw_config::composition::is_minimal_member(name),
+            "non-member reached the minimal wire surface: {name}"
+        );
+    }
+
+    // Measured report: tool count, system-prompt tokens, largest individual
+    // schema, and total pre-history tokens (system prompt + tools[]).
+    let largest = budget
+        .rows
+        .first()
+        .expect("rows are non-empty; largest schema must be reportable");
+    eprintln!(
+        "minimal profile report: tools={} tools_array_tok={} system_prompt_tok={} largest_schema={} ({} tok) pre_history_tok={}",
+        budget.names.len(),
+        budget.native_tools_tokens,
+        budget.system_prompt_tokens,
+        largest.name,
+        largest.native_tokens,
+        budget.whole_turn_tokens
+    );
+
+    assert!(
+        budget.native_tools_tokens <= MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING,
+        "minimal composition tools[] {} exceeded owner ceiling {} (tools={:?} largest={} at {} tok)",
+        budget.native_tools_tokens,
+        MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING,
+        budget.names,
+        largest.name,
+        largest.native_tokens
+    );
+}
+
+#[test]
+fn manifest_ceiling_matches_rust_constant() {
+    let manifest_str = include_str!("../../../../scripts/ci/wire_budget_exceptions.json");
+    let v: serde_json::Value =
+        serde_json::from_str(manifest_str).expect("wire_budget_exceptions.json must be valid JSON");
+    let manifest_ceiling = v
+        .get("wire_budget_tokens_ceiling")
+        .and_then(|c| c.as_u64())
+        .expect("manifest must have numeric wire_budget_tokens_ceiling");
+    assert_eq!(
+        manifest_ceiling as usize, MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING,
+        "Rust MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING ({}) must match manifest wire_budget_tokens_ceiling ({})",
+        MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING, manifest_ceiling
+    );
+}
+
+#[tokio::test]
+async fn minimal_composition_no_bypass_subsystem_flags() {
+    let tmp = TempDir::new().unwrap();
+    seed_personality(tmp.path(), true);
+    let mut config = Config {
+        config_path: tmp.path().join("config.toml"),
+        data_dir: tmp.path().join("data"),
+        ..Config::default()
+    };
+    // Explicitly configure and enable non-minimal subsystems with valid credentials
+    config.pipeline.enabled = true;
+    config.pipeline.allowed_tools = vec!["shell".to_string(), "file_read".to_string()];
+    config.browser.enabled = true;
+    config.http_request.enabled = true;
+    config.web_search.enabled = true;
+    config.jira.enabled = true;
+    config.jira.base_url = "https://example.atlassian.net".into();
+    config.jira.api_token = "dummy_jira_token".into();
+    config.notion.enabled = true;
+    config.notion.api_key = "secret_notion_key".into();
+    config.notion.database_id = "00000000-0000-0000-0000-000000000000".into();
+
+    // Positive control: under full composition, EVERY enabled non-minimal subsystem tool is registered
+    config.composition = Some(zeroclaw_config::composition::Composition::Full);
+    let (_, full_budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "default",
+        skills: &[],
+        connect_mcp: false,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    assert!(
+        full_budget.names.contains(&"execute_pipeline".to_string()),
+        "execute_pipeline must be registered under full composition: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget.names.contains(&"browser".to_string()),
+        "browser must be registered under full composition: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget.names.contains(&"browser_open".to_string()),
+        "browser_open must be registered under full composition: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget.names.contains(&"http_request".to_string()),
+        "http_request must be registered under full composition: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget.names.contains(&"jira".to_string()),
+        "jira must be registered under full composition: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget.names.contains(&"notion".to_string()),
+        "notion must be registered under full composition: {:?}",
+        full_budget.names
+    );
+
+    // Negative assertion: under minimal composition, all non-minimal subsystems are excluded
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+    let (_, budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "default",
+        skills: &[],
+        connect_mcp: false,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    print_budget(
+        "composition=minimal subsystem overrides (no-bypass test)",
+        &budget,
+    );
+
+    // 1. Every assembled tool MUST be an explicit minimal member
+    for name in &budget.names {
+        assert!(
+            zeroclaw_config::composition::is_minimal_member(name),
+            "non-member tool penetrated minimal composition: {name}"
+        );
+    }
+
+    // 2. None of the banned/demoted categories can enter the minimal wire surface
+    for banned in [
+        "claude_code",
+        "codex_cli",
+        "git_operations",
+        "git_forge",
+        "model_routing_config",
+        "backup",
+        "jira",
+        "notion",
+        "google_workspace",
+        "microsoft365",
+        "linkedin",
+        "composio",
+        "pushover",
+        "cron_add",
+        "cron_update",
+        "browser",
+        "browser_open",
+        "http_request",
+        "pipeline",
+        "execute_pipeline",
+    ] {
+        assert!(
+            !budget.names.iter().any(|n| n == banned),
+            "banned/excluded tool `{banned}` bypassed minimal composition into registry: {:?}",
+            budget.names
+        );
+    }
+}
+
+#[tokio::test]
+async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
+    let tmp = TempDir::new().unwrap();
+    seed_personality(tmp.path(), true);
+    let mut config = Config {
+        config_path: tmp.path().join("config.toml"),
+        data_dir: tmp.path().join("data"),
+        ..Config::default()
+    };
+    config.jira.enabled = true;
+    config.jira.base_url = "https://example.atlassian.net".into();
+    config.jira.api_token = "dummy_jira_token".into();
+
+    // Create a skill attempting to elevate non-minimal built-in tools (cron_add / jira)
+    let bypass_skill = Skill {
+        name: "malicious_skill".into(),
+        description: "attempting bypass".into(),
+        description_localizations: Default::default(),
+        version: "1.0.0".into(),
+        author: None,
+        tags: vec![],
+        tools: vec![
+            crate::skills::SkillTool {
+                name: "elevate_cron".into(),
+                description: "cron bypass".into(),
+                kind: "builtin".into(),
+                command: String::new(),
+                args: Default::default(),
+                target: Some("cron_add".into()),
+                locked_args: Default::default(),
+                timeout_secs: None,
+            },
+            crate::skills::SkillTool {
+                name: "elevate_jira".into(),
+                description: "jira bypass".into(),
+                kind: "builtin".into(),
+                command: String::new(),
+                args: Default::default(),
+                target: Some("jira".into()),
+                locked_args: Default::default(),
+                timeout_secs: None,
+            },
+        ],
+        prompts: vec![],
+        slash_options: vec![],
+        location: None,
+    };
+
+    // Positive control: under full composition, skill elevation of available built-in tools succeeds for both cron_add and jira
+    config.composition = Some(zeroclaw_config::composition::Composition::Full);
+    let (_, full_budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "default",
+        skills: std::slice::from_ref(&bypass_skill),
+        connect_mcp: false,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    assert!(
+        full_budget
+            .names
+            .contains(&"malicious_skill__elevate_cron".to_string()),
+        "full composition must permit skill elevation of available cron_add tool: {:?}",
+        full_budget.names
+    );
+    assert!(
+        full_budget
+            .names
+            .contains(&"malicious_skill__elevate_jira".to_string()),
+        "full composition must permit skill elevation of available jira tool: {:?}",
+        full_budget.names
+    );
+
+    // Negative assertion: under minimal composition, non-minimal built-ins are never in resolution registry
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+    let (_, budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "default",
+        skills: &[bypass_skill],
+        connect_mcp: false,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+
+    assert!(
+        !budget
+            .names
+            .contains(&"malicious_skill__elevate_cron".to_string()),
+        "skill elevation must not resurrect excluded non-minimal tool: {:?}",
+        budget.names
+    );
+    assert!(
+        !budget
+            .names
+            .contains(&"malicious_skill__elevate_jira".to_string()),
+        "skill elevation must not resurrect excluded non-minimal tool: {:?}",
+        budget.names
+    );
+}
+
+#[tokio::test]
+async fn mcp_explicit_only_eager_drops_unlisted_tools_in_minimal_composition() {
+    let server = mock_mcp_http_server(&[
+        ("snapshot", "allowed trading tool"),
+        ("git_operations", "unlisted repo tool attempt"),
+        ("jira_write", "unlisted SaaS tool attempt"),
+    ])
+    .await;
+
+    let tmp = TempDir::new().unwrap();
+    seed_personality(tmp.path(), true);
+    let mut config = Config {
+        config_path: tmp.path().join("config.toml"),
+        data_dir: tmp.path().join("data"),
+        ..Config::default()
+    };
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+    config.mcp.enabled = true;
+    config.mcp.deferred_loading = false;
+    let risk_profile = zeroclaw_config::schema::RiskProfileConfig {
+        mcp_discovered_tool_policy:
+            zeroclaw_config::autonomy::McpDiscoveredToolPolicy::ExplicitOnly,
+        allowed_tools: Some(vec![
+            "shell".into(),
+            "file_read".into(),
+            "file_write".into(),
+            "hapi-edge__snapshot".into(),
+        ]),
+        ..Default::default()
+    };
+    config.risk_profiles.insert("lean".into(), risk_profile);
+    let agent_cfg = zeroclaw_config::schema::AliasedAgentConfig {
+        risk_profile: "lean".into(),
+        ..Default::default()
+    };
+    config.agents.insert("lean".into(), agent_cfg);
+    point_hapi_edge_at_agent(&mut config, server.uri(), "lean");
+
+    let (_, budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "lean",
+        skills: &[],
+        connect_mcp: true,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    print_budget("composition=minimal + eager explicit_only mcp", &budget);
+
+    // Snapshot is explicitly listed, so it is admitted on the wire
+    assert!(budget.names.contains(&"hapi-edge__snapshot".to_string()));
+
+    // Unlisted MCP tools MUST be dropped from eager registration
+    assert!(!budget.names.iter().any(|n| n.contains("git_operations")));
+    assert!(!budget.names.iter().any(|n| n.contains("jira_write")));
+}
+
+#[tokio::test]
+async fn mcp_explicit_only_deferred_drops_unlisted_tools_in_minimal_composition() {
+    let server = mock_mcp_http_server(&[
+        ("snapshot", "allowed trading tool"),
+        ("git_operations", "unlisted repo tool attempt"),
+        ("jira_write", "unlisted SaaS tool attempt"),
+    ])
+    .await;
+
+    let tmp = TempDir::new().unwrap();
+    seed_personality(tmp.path(), true);
+    let mut config = Config {
+        config_path: tmp.path().join("config.toml"),
+        data_dir: tmp.path().join("data"),
+        ..Config::default()
+    };
+    config.composition = Some(zeroclaw_config::composition::Composition::Minimal);
+    config.mcp.enabled = true;
+    config.mcp.deferred_loading = true;
+    let risk_profile = zeroclaw_config::schema::RiskProfileConfig {
+        mcp_discovered_tool_policy:
+            zeroclaw_config::autonomy::McpDiscoveredToolPolicy::ExplicitOnly,
+        allowed_tools: Some(vec![
+            "shell".into(),
+            "file_read".into(),
+            "file_write".into(),
+            "hapi-edge__snapshot".into(),
+        ]),
+        ..Default::default()
+    };
+    config.risk_profiles.insert("lean".into(), risk_profile);
+    let agent_cfg = zeroclaw_config::schema::AliasedAgentConfig {
+        risk_profile: "lean".into(),
+        ..Default::default()
+    };
+    config.agents.insert("lean".into(), agent_cfg);
+    point_hapi_edge_at_agent(&mut config, server.uri(), "lean");
+
+    let (assembled, budget) = assemble_turn(TurnRequest {
+        config: &config,
+        agent_alias: "lean",
+        skills: &[],
+        connect_mcp: true,
+        inject_memory: true,
+        workspace: tmp.path(),
+    })
+    .await;
+    print_budget("composition=minimal + deferred explicit_only mcp", &budget);
+
+    // 1. Under deferred loading, tool_search is registered instead of eager snapshot
+    assert!(budget.names.contains(&"tool_search".to_string()));
+    assert!(!budget.names.contains(&"hapi-edge__snapshot".to_string()));
+
+    // 2. Deferred prompt section advertises allowed tool and strictly omits unlisted tools
+    let deferred = assembled.combined_mcp_prompt_section();
+    assert!(deferred.contains("hapi-edge__snapshot"));
+    assert!(!deferred.contains("git_operations"));
+    assert!(!deferred.contains("jira_write"));
+
+    // 3. Search and activation boundaries: allowed tool resolves, unlisted tools return not found
+    let tool_search = assembled
+        .registry
+        .iter()
+        .find(|t| t.name() == "tool_search")
+        .expect("tool_search must be assembled under deferred loading with admitted tools");
+
+    let allowed_res = tool_search
+        .execute(serde_json::json!({"query": "select:hapi-edge__snapshot"}))
+        .await
+        .expect("tool_search must execute");
+    assert!(
+        allowed_res
+            .output
+            .contains("\"name\": \"hapi-edge__snapshot\""),
+        "allowed tool must resolve in tool_search: {}",
+        allowed_res.output
+    );
+
+    let unlisted_git_res = tool_search
+        .execute(serde_json::json!({"query": "select:hapi-edge__git_operations"}))
+        .await
+        .expect("tool_search must execute");
+    assert!(
+        !unlisted_git_res
+            .output
+            .contains("\"name\": \"hapi-edge__git_operations\""),
+        "unlisted tool must not resolve in tool_search: {}",
+        unlisted_git_res.output
+    );
+    assert!(
+        unlisted_git_res
+            .output
+            .contains("Not found: hapi-edge__git_operations"),
+        "unlisted tool must report not found: {}",
+        unlisted_git_res.output
+    );
+
+    let unlisted_jira_res = tool_search
+        .execute(serde_json::json!({"query": "select:hapi-edge__jira_write"}))
+        .await
+        .expect("tool_search must execute");
+    assert!(
+        !unlisted_jira_res
+            .output
+            .contains("\"name\": \"hapi-edge__jira_write\""),
+        "unlisted tool must not resolve in tool_search: {}",
+        unlisted_jira_res.output
+    );
+    assert!(
+        unlisted_jira_res
+            .output
+            .contains("Not found: hapi-edge__jira_write"),
+        "unlisted tool must report not found: {}",
+        unlisted_jira_res.output
+    );
+
+    // 4. Activation set verification
+    let activated_handle = assembled
+        .activated_handle
+        .expect("tool_search registers the activation handle");
+    let guard = activated_handle.lock().unwrap();
+    assert!(
+        guard.is_activated("hapi-edge__snapshot"),
+        "allowed tool must be activated"
+    );
+    assert!(
+        !guard.is_activated("hapi-edge__git_operations"),
+        "unlisted git tool must not be activated"
+    );
+    assert!(
+        !guard.is_activated("hapi-edge__jira_write"),
+        "unlisted jira tool must not be activated"
     );
 }

@@ -3,6 +3,10 @@
 .gitignore
 .githooks
 
+# Development-lane toolchain pin; container builds pin their toolchain by
+# frozen base-image digest instead and must not resolve through rustup.
+rust-toolchain.toml
+
 # Rust build artifacts (can be multiple GB)
 target
 
