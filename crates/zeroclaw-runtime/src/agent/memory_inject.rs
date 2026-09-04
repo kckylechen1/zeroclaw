@@ -218,6 +218,17 @@ pub fn resolve_inject_policy(
     }
 }
 
+/// Soul rows (namespace exactly `"soul"`, written by the AgentSoul seam
+/// in `zeroclaw-memory`) are identity-bound domain state, never ambient
+/// recall material. They are excluded from model context at every
+/// entry-selection site: Soul reaches the model only through the
+/// dedicated bounded persona projection channel (the later projection leaf), not here.
+const SOUL_NAMESPACE: &str = "soul";
+
+fn is_soul_entry(entry: &MemoryEntry) -> bool {
+    entry.namespace == SOUL_NAMESPACE
+}
+
 /// The uniform skip set: entries no path wants in a preamble. Union of the
 /// legacy renderers' filters (the channel renderer's set was the widest).
 fn should_skip_entry(key: &str, content: &str) -> bool {
@@ -327,6 +338,11 @@ pub async fn render_memory_context(
             if exclude_conversation && matches!(entry.category, MemoryCategory::Conversation) {
                 return false;
             }
+            // Soul rows never render through ambient recall (the later projection leaf owns
+            // the projection channel).
+            if is_soul_entry(entry) {
+                return false;
+            }
             !should_skip_entry(&entry.key, &entry.content)
         });
     } else {
@@ -346,6 +362,11 @@ pub async fn render_memory_context(
             break;
         }
         if exclude_conversation && matches!(entry.category, MemoryCategory::Conversation) {
+            continue;
+        }
+        // Soul rows never render through ambient recall (the later projection leaf owns the
+        // projection channel).
+        if is_soul_entry(entry) {
             continue;
         }
         if should_skip_entry(&entry.key, &entry.content) {
@@ -736,7 +757,7 @@ mod tests {
                 .filter(|e| matches!(e, ObserverEvent::MemoryRecall { .. }))
                 .count(),
             1,
-            "exactly one recall event per turn — the #8619 contract"
+            "exactly one recall event per turn — the existing recall contract"
         );
     }
 
@@ -820,6 +841,65 @@ mod tests {
         .await;
 
         assert!(!context.contains("said hi earlier"));
+        assert!(context.contains("- fact: server is prod-3"));
+    }
+
+    #[tokio::test]
+    async fn soul_namespace_entries_never_render_into_model_context() {
+        // Soul rows (namespace "soul", written by the AgentSoul seam) are
+        // identity-bound domain state: ambient recall must never leak them
+        // into model context. Proven at BOTH selection sites — the plain
+        // render loop and the rerank eligibility predicate — while a
+        // normal entry from the same recall still renders.
+        let soul_entry = MemoryEntry {
+            namespace: "soul".into(),
+            ..entry(
+                "soul::identity-a::candidate::density",
+                "candidate disposition json",
+                MemoryCategory::Custom("soul".into()),
+                None,
+            )
+        };
+        let mem = FixtureMemory::with(vec![
+            soul_entry,
+            entry("fact", "server is prod-3", MemoryCategory::Core, None),
+        ]);
+        let observer = RecordingObserver::default();
+        let turn = TurnMeta {
+            parent_agent_alias: None,
+            agent_alias: None,
+            turn_id: "t",
+            channel_name: "test",
+        };
+
+        // Plain path (render-loop filter site).
+        let context = render_memory_context(
+            &mem,
+            &observer,
+            "query",
+            &[],
+            &MemoryInjectConfig::default(),
+            false,
+            turn,
+        )
+        .await;
+        assert!(
+            !context.contains("candidate disposition json"),
+            "soul-namespace entry must not render into model context"
+        );
+        assert!(context.contains("- fact: server is prod-3"));
+
+        // Rerank path (eligibility-predicate filter site).
+        let rerank_cfg = MemoryInjectConfig {
+            rerank_enabled: true,
+            ..MemoryInjectConfig::default()
+        };
+        let context =
+            render_memory_context(&mem, &observer, "query", &[], &rerank_cfg, false, turn).await;
+        assert!(
+            !context.contains("candidate disposition json"),
+            "soul-namespace entry must stay excluded under rerank too"
+        );
         assert!(context.contains("- fact: server is prod-3"));
     }
 
