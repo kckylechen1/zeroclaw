@@ -48,7 +48,7 @@
     {
       "path": "crates/zeroclaw-channels/src/orchestrator/mod.rs",
       "store": "channel_seen_ids.db",
-      "role": "role",
+      "role": "mention",
       "basis": "#181: type-level rusqlite::Error mention in the admission_decision signature only - no connection site, no DDL, no write path; the store access stays in inbox.rs",
       "signals": 1
     },

@@ -3070,6 +3070,9 @@ pub(crate) fn warn_inbox_failure_once(key: &str) -> bool {
     let mut seen = WARNED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seen.contains(key) {
+        return false;
+    }
     seen.insert(key.to_string())
 }
 
@@ -3100,7 +3103,6 @@ async fn run_message_dispatch_loop(
             let store = Arc::clone(seen_ids);
             let recorded =
                 tokio::task::spawn_blocking(move || store.admit(&account, &message_id)).await;
-            let warn_key = format!("inbox_admit_store_failed:{}", msg.channel);
             match admission_decision(recorded) {
                 AdmissionDecision::Fresh(receipt) => Some(receipt),
                 AdmissionDecision::DropDuplicate(boundary) => {
@@ -3127,7 +3129,8 @@ async fn run_message_dispatch_loop(
                 AdmissionDecision::StoreFailed => {
                     // Fail-open: no dedup evidence, so the message MUST be
                     // processed — at-least-once, never a silent drop.
-                    if warn_inbox_failure_once(&warn_key) {
+                    if warn_inbox_failure_once(&format!("inbox_admit_store_failed:{}", msg.channel))
+                    {
                         ::zeroclaw_log::record!(
                             WARN,
                             ::zeroclaw_log::Event::new(
