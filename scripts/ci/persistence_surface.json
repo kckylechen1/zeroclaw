@@ -42,8 +42,8 @@
       "path": "crates/zeroclaw-channels/src/orchestrator/inbox.rs",
       "store": "channel_seen_ids.db",
       "role": "store",
-      "basis": "#205 annex row 11: channel-edge inbound dedupe only; never outbound result-delivery truth",
-      "signals": 18
+      "basis": "#205 annex row 11: channel-edge inbound dedupe only; never outbound result-delivery truth. TB-22 exemption (PR #280, owner-directed per the 2026-09-03 cross-vendor #181 review): signals 18->22 are four new rusqlite param-path mentions from the atomic batch-completion loop and the bounded stale-'received' aging scan - same store, same two tables, no new table/store/writer surface",
+      "signals": 22
     },
     {
       "path": "crates/zeroclaw-channels/src/slack.rs",
