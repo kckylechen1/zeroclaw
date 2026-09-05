@@ -2864,35 +2864,44 @@ async fn dispatch_worker(
         }
     }
 
-    process_channel_message(ctx, msg, cancellation_token).await;
+    let processed = process_channel_message(ctx, msg, cancellation_token).await;
 
-    // The turn is finished: only now is a future redelivery safely
-    // suppressible. Failure here means at-least-once re-processing, never
-    // a silent drop.
+    // The turn is finished: only a turn that actually ran may suppress a
+    // future redelivery. A worker whose token was already cancelled when
+    // it reached processing bailed before doing anything — it owns
+    // nothing durably, so its claims are released and the rows stay
+    // `received`: a redelivery is admitted fresh (at-least-once, never a
+    // silent drop). Failure of the completion write itself means
+    // at-least-once re-processing, never a silent drop.
     if let Some(inbox) = inbox
         && !inbox_receipts.is_empty()
     {
-        match tokio::task::spawn_blocking(move || inbox.mark_completed_batch(&inbox_receipts)).await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"err": err.to_string()})),
-                    "inbox completion failed; redelivery remains eligible"
-                );
+        if processed {
+            match tokio::task::spawn_blocking(move || inbox.mark_completed_batch(&inbox_receipts))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({"err": err.to_string()})),
+                        "inbox completion failed; redelivery remains eligible"
+                    );
+                }
+                Err(err) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({"err": err.to_string()})),
+                        "inbox completion task failed; redelivery remains eligible"
+                    );
+                }
             }
-            Err(err) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"err": err.to_string()})),
-                    "inbox completion task failed; redelivery remains eligible"
-                );
-            }
+        } else {
+            inbox.release_claims(&inbox_receipts);
         }
     }
 

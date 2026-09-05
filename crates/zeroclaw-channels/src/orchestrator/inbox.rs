@@ -209,6 +209,18 @@ impl MessageInbox {
         }
         result
     }
+
+    /// Release live claims without completing their rows: the turn was
+    /// abandoned before it processed anything, so its ids stay `received`
+    /// and a redelivery is admitted fresh. Durable state is untouched.
+    pub(crate) fn release_claims(&self, receipts: &[InboxReceipt]) {
+        let mut state = self.state.lock();
+        for receipt in receipts {
+            state
+                .in_flight
+                .remove(&(receipt.account.clone(), receipt.message_id.clone()));
+        }
+    }
 }
 
 fn create_owner_only_file(path: &Path) -> Result<(), rusqlite::Error> {
@@ -479,6 +491,37 @@ mod tests {
             inbox.admit("wechat.main", "live-0").unwrap(),
             Admission::DuplicateInFlight,
             "a live owner's redelivery is still an in-flight duplicate"
+        );
+    }
+
+    #[test]
+    fn release_claims_keeps_rows_received() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = MessageInbox::open(dir.path()).unwrap();
+        let first = expect_fresh(inbox.admit("wechat.main", "m-abandoned").unwrap());
+        let second = expect_fresh(inbox.admit("wechat.main", "m-kept").unwrap());
+        inbox.release_claims(&[first, second]);
+
+        // Live claims are gone: a same-process redelivery is not an
+        // in-flight duplicate anymore.
+        assert!(
+            matches!(
+                inbox.admit("wechat.main", "m-abandoned").unwrap(),
+                Admission::Fresh(_)
+            ),
+            "a released claim must admit fresh, not in-flight-duplicate"
+        );
+        drop(inbox);
+
+        // Durable state was untouched: after a restart the rows are still
+        // `received`, never `completed`.
+        let reopened = MessageInbox::open(dir.path()).unwrap();
+        assert!(
+            matches!(
+                reopened.admit("wechat.main", "m-kept").unwrap(),
+                Admission::Fresh(_)
+            ),
+            "a released claim's row must survive as received, not completed"
         );
     }
 }

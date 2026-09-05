@@ -62,13 +62,18 @@ pub(super) fn merge_projection_sections(durable: &str, task: &str) -> String {
     format!("{}\n{}", durable.trim_end(), task)
 }
 
+/// Process one channel message turn. Returns whether the turn actually
+/// ran: a worker whose cancellation token was already cancelled on entry
+/// bails before any processing and returns `false` — its ids must not be
+/// durably completed, or a redelivery of a never-processed message would
+/// be silently dropped.
 pub(super) async fn process_channel_message(
     ctx: Arc<ChannelRuntimeContext>,
     msg: zeroclaw_api::channel::ChannelMessage,
     cancellation_token: CancellationToken,
-) {
+) -> bool {
     if cancellation_token.is_cancelled() {
-        return;
+        return false;
     }
 
     let channel_composite = match &msg.channel_alias {
@@ -90,6 +95,7 @@ pub(super) async fn process_channel_message(
         }
     )
     .await;
+    true
 }
 
 async fn process_channel_message_body(
