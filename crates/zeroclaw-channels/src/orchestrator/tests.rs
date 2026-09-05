@@ -7348,8 +7348,8 @@ async fn message_dispatch_processes_messages_in_parallel() {
 
 #[tokio::test]
 async fn message_dispatch_drops_redelivered_message_ids() {
-    let without_dedup =
-        deliver_messages_through_loop(None, "test-channel", "redelivered-1", 2).await;
+    let deliveries = [("redelivered-1", "hello"), ("redelivered-1", "hello")];
+    let without_dedup = deliver_messages_through_loop(None, "test-channel", &deliveries, 0).await;
     assert_eq!(
         without_dedup, 2,
         "control: without the seen-id store both deliveries start a turn"
@@ -7358,8 +7358,7 @@ async fn message_dispatch_drops_redelivered_message_ids() {
     let seen_dir = tempfile::tempdir().unwrap();
     let store = MessageInbox::open(seen_dir.path()).unwrap();
     let with_dedup =
-        deliver_messages_through_loop(Some(Arc::new(store)), "test-channel", "redelivered-1", 2)
-            .await;
+        deliver_messages_through_loop(Some(Arc::new(store)), "test-channel", &deliveries, 0).await;
     assert_eq!(
         with_dedup, 1,
         "a redelivered message id must be dropped before dispatch"
@@ -7375,25 +7374,69 @@ async fn message_dispatch_does_not_dedup_session_counter_channels() {
     let seen_dir = tempfile::tempdir().unwrap();
     {
         let previous_session = MessageInbox::open(seen_dir.path()).unwrap();
-        assert_eq!(
-            previous_session.admit("webhook", "webhook_0").unwrap(),
-            Admission::Fresh,
-            "the previous session recorded the id but never completed it"
+        assert!(
+            matches!(
+                previous_session.admit("webhook", "webhook_0").unwrap(),
+                Admission::Fresh(_)
+            ),
+            "the previous session should admit the id without completing it"
         );
     }
     let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
-    let replies = deliver_messages_through_loop(Some(store), "webhook", "webhook_0", 1).await;
+    let replies =
+        deliver_messages_through_loop(Some(store), "webhook", &[("webhook_0", "hello")], 0).await;
     assert_eq!(
         replies, 1,
         "a restarted session-counter channel's fresh webhook_0 must not be dropped as a duplicate"
     );
 }
 
+#[tokio::test]
+async fn message_dispatch_completes_every_id_in_a_debounced_turn() {
+    let seen_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
+    let replies = deliver_messages_through_loop(
+        Some(Arc::clone(&store)),
+        "test-channel",
+        &[("rapid-1", "first"), ("rapid-2", "second")],
+        10,
+    )
+    .await;
+
+    assert_eq!(
+        replies, 1,
+        "rapid messages should produce one combined turn"
+    );
+    assert_eq!(
+        store.admit("test-channel", "rapid-1").unwrap(),
+        Admission::DuplicateCompleted,
+        "the superseded receiver's id belongs to the completed combined turn"
+    );
+    assert_eq!(
+        store.admit("test-channel", "rapid-2").unwrap(),
+        Admission::DuplicateCompleted,
+        "the final receiver's id belongs to the completed combined turn"
+    );
+    drop(store);
+
+    let reopened = MessageInbox::open(seen_dir.path()).unwrap();
+    assert_eq!(
+        reopened.admit("test-channel", "rapid-1").unwrap(),
+        Admission::DuplicateCompleted,
+        "the whole batch completion must survive restart"
+    );
+    assert_eq!(
+        reopened.admit("test-channel", "rapid-2").unwrap(),
+        Admission::DuplicateCompleted,
+        "the whole batch completion must survive restart"
+    );
+}
+
 async fn deliver_messages_through_loop(
     seen_ids: Option<Arc<MessageInbox>>,
     channel_name: &'static str,
-    message_id: &str,
-    deliveries: usize,
+    messages: &[(&str, &str)],
+    debounce_ms: u64,
 ) -> usize {
     let sent_messages = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
     let channel: Arc<dyn Channel> = Arc::new(StaticNameRecordingChannel {
@@ -7403,6 +7446,8 @@ async fn deliver_messages_through_loop(
 
     let mut channels_by_name = HashMap::new();
     channels_by_name.insert(channel.name().to_string(), channel);
+    let mut prompt_config = zeroclaw_config::schema::Config::default();
+    prompt_config.channels.debounce_ms = debounce_ms;
 
     let runtime_ctx = Arc::new(ChannelRuntimeContext {
         channels_by_name: Arc::new(channels_by_name),
@@ -7442,7 +7487,7 @@ async fn deliver_messages_through_loop(
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
         workspace_dir: Arc::new(std::env::temp_dir()),
-        prompt_config: Arc::new(zeroclaw_config::schema::Config::default()),
+        prompt_config: Arc::new(prompt_config),
         message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
         interrupt_on_new_message: InterruptOnNewMessageConfig {
             telegram: false,
@@ -7474,7 +7519,7 @@ async fn deliver_messages_through_loop(
         max_tool_result_chars: 0,
         context_token_budget: 0,
         debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
-            Duration::ZERO,
+            Duration::from_millis(debounce_ms),
         )),
         receipt_generator: None,
         show_receipts_in_response: false,
@@ -7486,12 +7531,12 @@ async fn deliver_messages_through_loop(
     });
 
     let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(4);
-    for _ in 0..deliveries {
+    for (message_id, content) in messages {
         tx.send(zeroclaw_api::channel::ChannelMessage {
-            id: message_id.to_string(),
+            id: (*message_id).to_string(),
             sender: "alice".to_string(),
             reply_target: "alice".to_string(),
-            content: "hello".to_string(),
+            content: (*content).to_string(),
             channel: channel_name.into(),
             channel_alias: None,
             timestamp: 1,
@@ -16748,5 +16793,241 @@ fn resolved_agent_config_carries_strict_tool_parsing_and_parallel_tools() {
     assert!(
         !raw_agent.resolved.parallel_tools,
         "raw agent resolved.parallel_tools should be false (serde-skipped default)"
+    );
+}
+
+/// Cross-vendor review blocker regression (codex review of the re-port):
+/// a worker whose cancellation token is already cancelled when it reaches
+/// processing bails before doing anything — its receipts must NOT be
+/// durably completed, or a never-processed message's redelivery is
+/// silently dropped. Reviewer choreography (A running, B interrupts A and
+/// waits, C interrupts B), made deterministic by driving the workers
+/// directly and holding A's completion until C has cancelled B.
+#[tokio::test]
+async fn message_dispatch_abandoned_before_processing_stays_replayable() {
+    let channel_impl = Arc::new(TelegramRecordingChannel::default());
+    let channel: Arc<dyn Channel> = channel_impl.clone();
+
+    let mut channels_by_name = HashMap::new();
+    channels_by_name.insert(channel.name().to_string(), channel);
+
+    let provider_impl = Arc::new(DelayedHistoryCaptureModelProvider {
+        delay: Duration::from_millis(10),
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let runtime_ctx = Arc::new(ChannelRuntimeContext {
+        channels_by_name: Arc::new(channels_by_name),
+        model_provider: provider_impl.clone(),
+        model_provider_ref: Arc::new("test-provider".to_string()),
+        agent_alias: Arc::new("test-agent".to_string()),
+        agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
+        memory: Arc::new(NoopMemory),
+        memory_strategy: Arc::new(
+            zeroclaw_runtime::agent::memory_strategy::DefaultMemoryStrategy::with_config(
+                Arc::new(NoopMemory),
+                zeroclaw_config::schema::MemoryConfig::default(),
+                std::path::PathBuf::new(),
+            ),
+        ),
+        companion_store: None,
+        tools_registry: Arc::new(vec![]),
+        observer: Arc::new(NoopObserver),
+        system_prompt: Arc::new("test-system-prompt".to_string()),
+        model: Arc::new("test-model".to_string()),
+        temperature: Some(0.0),
+        auto_save_memory: false,
+        max_tool_iterations: 10,
+        min_relevance_score: 0.0,
+        conversation_histories: Arc::new(Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(MAX_CONVERSATION_SENDERS).unwrap(),
+        ))),
+        pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
+        provider_cache: Arc::new(Mutex::new(HashMap::new())),
+        route_overrides: Arc::new(Mutex::new(HashMap::new())),
+        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
+        scope_overrides: Arc::new(Mutex::new(HashMap::new())),
+        reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
+        provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
+        workspace_dir: Arc::new(std::env::temp_dir()),
+        prompt_config: Arc::new(zeroclaw_config::schema::Config::default()),
+        message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+        interrupt_on_new_message: InterruptOnNewMessageConfig {
+            telegram: true,
+            slack: false,
+            discord: false,
+            mattermost: false,
+            matrix: false,
+            whatsapp: false,
+        },
+        multimodal: zeroclaw_config::schema::MultimodalConfig::default(),
+        media_pipeline: zeroclaw_config::schema::MediaPipelineConfig::default(),
+        transcription_config: zeroclaw_config::schema::TranscriptionConfig::default(),
+        agent_transcription_provider: String::new(),
+        hooks: None,
+        non_cli_excluded_tools: Arc::new(Vec::new()),
+        autonomy_level: AutonomyLevel::default(),
+        tool_call_dedup_exempt: Arc::new(Vec::new()),
+        model_routes: Arc::new(Vec::new()),
+        query_classification: zeroclaw_config::schema::QueryClassificationConfig::default(),
+        ack_reactions: true,
+        show_tool_calls: true,
+        session_store: None,
+        approval_manager: Arc::new(ApprovalManager::for_non_interactive(
+            &zeroclaw_config::schema::RiskProfileConfig::default(),
+        )),
+        activated_tools: None,
+        cost_tracking: None,
+        pacing: zeroclaw_config::schema::PacingConfig::default(),
+        max_tool_result_chars: 0,
+        context_token_budget: 0,
+        debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
+            Duration::ZERO,
+        )),
+        receipt_generator: None,
+        show_receipts_in_response: false,
+        last_applied_config_stamp: Arc::new(Mutex::new(None)),
+        runtime_defaults_override: Arc::new(Mutex::new(None)),
+        persist_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        user_model: None,
+        task_prefs: std::sync::Arc::new(TaskPreferenceOverlay::new()),
+    });
+
+    let seen_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
+
+    let message = |id: &str, ts: u64| zeroclaw_api::channel::ChannelMessage {
+        id: id.to_string(),
+        sender: "alice".to_string(),
+        reply_target: "chat-1".to_string(),
+        content: format!("content-{id}"),
+        channel: "telegram".into(),
+        channel_alias: None,
+        timestamp: ts,
+        thread_ts: None,
+        interruption_scope_id: None,
+        attachments: vec![],
+        subject: None,
+        ..Default::default()
+    };
+    let b_msg = message("m-b", 2);
+    let c_msg = message("m-c", 3);
+    let scope_key = interruption_scope_key(&b_msg);
+
+    // Resident turn A for the same scope, its completion held by the test:
+    // B will cancel it and then wait on it.
+    let a_completion = Arc::new(InFlightTaskCompletion::new());
+    let in_flight: Arc<tokio::sync::Mutex<HashMap<String, InFlightSenderTaskState>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    in_flight.lock().await.insert(
+        scope_key.clone(),
+        InFlightSenderTaskState {
+            task_id: 900,
+            cancellation: tokio_util::sync::CancellationToken::new(),
+            completion: Arc::clone(&a_completion),
+        },
+    );
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    let task_sequence = Arc::new(portable_atomic::AtomicU64::new(1));
+    let admit = |store: &Arc<MessageInbox>, id: &str| match store.admit("telegram", id).unwrap() {
+        Admission::Fresh(receipt) => receipt,
+        other => panic!("expected fresh admission for {id}, got {other:?}"),
+    };
+
+    // B: registers, interrupts held A, waits on A's completion.
+    let b_receipt = admit(&store, "m-b");
+    let b_permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+    let b_ctx = Arc::clone(&runtime_ctx);
+    let b_in_flight = Arc::clone(&in_flight);
+    let b_task_sequence = Arc::clone(&task_sequence);
+    let b_store = Arc::clone(&store);
+    let b_handle = zeroclaw_spawn::spawn!(async move {
+        dispatch_worker(
+            b_ctx,
+            b_msg,
+            b_in_flight,
+            b_task_sequence,
+            b_permit,
+            Some(b_store),
+            vec![b_receipt],
+        )
+        .await;
+    });
+
+    // Wait until B is resident (it replaced the seeded A in the registry).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while in_flight
+        .lock()
+        .await
+        .get(&scope_key)
+        .is_none_or(|state| state.task_id == 900)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "B never registered over the seeded resident turn"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // C: registers over B, cancels B's token, waits on B.
+    let c_receipt = admit(&store, "m-c");
+    let c_permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+    let c_ctx = Arc::clone(&runtime_ctx);
+    let c_in_flight = Arc::clone(&in_flight);
+    let c_task_sequence = Arc::clone(&task_sequence);
+    let c_store = Arc::clone(&store);
+    let c_handle = zeroclaw_spawn::spawn!(async move {
+        dispatch_worker(
+            c_ctx,
+            c_msg,
+            c_in_flight,
+            c_task_sequence,
+            c_permit,
+            Some(c_store),
+            vec![c_receipt],
+        )
+        .await;
+    });
+    // Let C reach its cancel-B step: once C is resident the cancel follows
+    // synchronously before C's first await on B's completion.
+    while in_flight
+        .lock()
+        .await
+        .get(&scope_key)
+        .is_none_or(|state| state.task_id == 900 || state.task_id == 1)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "C never registered over B"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Release A: B resumes with an already-cancelled token and must bail
+    // before processing, releasing its claim without completing its row.
+    a_completion.mark_done();
+    b_handle.await.unwrap();
+    c_handle.await.unwrap();
+
+    assert!(
+        matches!(store.admit("telegram", "m-b").unwrap(), Admission::Fresh(_)),
+        "B was cancelled before processing: its id must be replayable, not completed"
+    );
+    assert_eq!(
+        store.admit("telegram", "m-c").unwrap(),
+        Admission::DuplicateCompleted,
+        "C ran its turn to completion"
+    );
+    drop(store);
+
+    let reopened = MessageInbox::open(seen_dir.path()).unwrap();
+    assert!(
+        matches!(
+            reopened.admit("telegram", "m-b").unwrap(),
+            Admission::Fresh(_)
+        ),
+        "B's row must still be received after a restart — never a silent drop"
     );
 }
