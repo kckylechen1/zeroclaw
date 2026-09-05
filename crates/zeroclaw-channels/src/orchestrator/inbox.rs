@@ -20,15 +20,24 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 use zeroclaw_infra::sqlite_perms::harden_sqlite_owner_only;
 
-/// Recent ids retained per channel account. Covers restart redelivery
-/// windows; oldest entries are evicted FIFO past this bound.
+/// Completed and stale-received ids retained per channel account. Covers
+/// restart redelivery windows; oldest entries past this bound are evicted
+/// FIFO within their state class. A live turn's `received` row is never
+/// evicted from under its in-flight owner.
 const PER_ACCOUNT_CAP: usize = 1024;
 
+/// Ownership of an admitted message until its turn completes.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct InboxReceipt {
+    account: String,
+    message_id: String,
+}
+
 /// The outcome of offering a message to the inbox.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Admission {
     /// Not seen before, or seen but never completed — process it.
-    Fresh,
+    Fresh(InboxReceipt),
     /// A previous turn completed for this id — drop the redelivery.
     DuplicateCompleted,
     /// A live turn in this process is working on this id — drop the
@@ -37,9 +46,13 @@ pub enum Admission {
     DuplicateInFlight,
 }
 
+struct InboxState {
+    conn: Connection,
+    in_flight: HashSet<(String, String)>,
+}
+
 pub(crate) struct MessageInbox {
-    conn: Mutex<Connection>,
-    in_flight: Mutex<HashSet<(String, String)>>,
+    state: Mutex<InboxState>,
 }
 
 impl MessageInbox {
@@ -77,76 +90,124 @@ impl MessageInbox {
         }
         harden_sqlite_owner_only(&db_path);
         Ok(Self {
-            conn: Mutex::new(conn),
-            in_flight: Mutex::new(HashSet::new()),
+            state: Mutex::new(InboxState {
+                conn,
+                in_flight: HashSet::new(),
+            }),
         })
     }
 
     /// Offer a message for dispatch. `Fresh` must be followed (eventually)
-    /// by [`MessageInbox::mark_completed`] or the id stays `received` and a
-    /// post-restart redelivery will re-process it.
+    /// by [`MessageInbox::mark_completed_batch`] or the id stays `received`
+    /// and a post-restart redelivery will re-process it.
     pub(crate) fn admit(
         &self,
         account: &str,
         message_id: &str,
     ) -> Result<Admission, rusqlite::Error> {
         let key = (account.to_string(), message_id.to_string());
-        let conn = self.conn.lock();
-        let tx = conn.unchecked_transaction()?;
-        let inserted = tx.execute(
-            "INSERT OR IGNORE INTO seen_message_ids (account, message_id) VALUES (?1, ?2)",
-            rusqlite::params![account, message_id],
-        )?;
-        if inserted == 0 {
-            let state: String = tx.query_row(
-                "SELECT state FROM seen_message_ids WHERE account = ?1 AND message_id = ?2",
+        let mut state = self.state.lock();
+        let InboxState { conn, in_flight } = &mut *state;
+        let completed = {
+            let tx = conn.unchecked_transaction()?;
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO seen_message_ids (account, message_id) VALUES (?1, ?2)",
                 rusqlite::params![account, message_id],
-                |row| row.get(0),
             )?;
-            tx.commit()?;
-            if state == "completed" {
-                return Ok(Admission::DuplicateCompleted);
-            }
-            // recorded but unfinished: only a LIVE in-flight turn justifies
-            // dropping the duplicate; after a restart this is Fresh.
-            let duplicate_in_flight = self.in_flight.lock().contains(&key);
-            return Ok(if duplicate_in_flight {
-                Admission::DuplicateInFlight
+            let completed = if inserted == 0 {
+                let persisted_state: String = tx.query_row(
+                    "SELECT state FROM seen_message_ids WHERE account = ?1 AND message_id = ?2",
+                    rusqlite::params![account, message_id],
+                    |row| row.get(0),
+                )?;
+                persisted_state == "completed"
             } else {
-                Admission::Fresh
-            });
+                tx.execute(
+                    "DELETE FROM seen_message_ids
+                     WHERE account = ?1 AND state = 'completed' AND seq NOT IN (
+                         SELECT seq FROM seen_message_ids WHERE account = ?1
+                         ORDER BY seq DESC LIMIT ?2
+                     )",
+                    rusqlite::params![account, PER_ACCOUNT_CAP],
+                )?;
+                // Age crash-orphaned `received` rows the same way: past the
+                // newest PER_ACCOUNT_CAP received entries, a row that no live
+                // turn in this process owns can never complete (its process
+                // died), so keeping it forever would grow the table without
+                // bound. Evicting it is safe — a later delivery of the same
+                // id is admitted Fresh and re-processed, the at-least-once
+                // direction. In-flight owners are excluded so their
+                // completion UPDATE always finds its row.
+                let stale: Vec<(i64, String)> = {
+                    let mut stmt = tx.prepare(
+                        "SELECT seq, message_id FROM seen_message_ids
+                         WHERE account = ?1 AND state = 'received'
+                         ORDER BY seq DESC LIMIT -1 OFFSET ?2",
+                    )?;
+                    stmt.query_map(rusqlite::params![account, PER_ACCOUNT_CAP], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+                };
+                for (seq, stale_message_id) in stale {
+                    let owned_by_live_turn =
+                        in_flight.contains(&(account.to_string(), stale_message_id.clone()));
+                    if !owned_by_live_turn {
+                        tx.execute(
+                            "DELETE FROM seen_message_ids WHERE account = ?1 AND seq = ?2",
+                            rusqlite::params![account, seq],
+                        )?;
+                    }
+                }
+                false
+            };
+            tx.commit()?;
+            completed
+        };
+
+        if completed {
+            return Ok(Admission::DuplicateCompleted);
         }
-        tx.execute(
-            "DELETE FROM seen_message_ids WHERE account = ?1 AND seq NOT IN (
-                 SELECT seq FROM seen_message_ids WHERE account = ?1
-                 ORDER BY seq DESC LIMIT ?2
-             )",
-            rusqlite::params![account, PER_ACCOUNT_CAP],
-        )?;
-        tx.commit()?;
-        drop(conn);
-        let _ = self.in_flight.lock().insert(key);
-        Ok(Admission::Fresh)
+        if !in_flight.insert(key.clone()) {
+            return Ok(Admission::DuplicateInFlight);
+        }
+        Ok(Admission::Fresh(InboxReceipt {
+            account: key.0,
+            message_id: key.1,
+        }))
     }
 
-    /// Mark the turn finished: durable `completed` and removed from the
-    /// in-flight set. Best-effort — a failure means a future redelivery
-    /// re-processes (at-least-once), never a silent drop.
-    pub(crate) fn mark_completed(
+    /// Complete every message represented by one combined turn atomically.
+    /// On failure, all live claims are released so redelivery can retry.
+    pub(crate) fn mark_completed_batch(
         &self,
-        account: &str,
-        message_id: &str,
+        receipts: &[InboxReceipt],
     ) -> Result<(), rusqlite::Error> {
-        self.in_flight
-            .lock()
-            .remove(&(account.to_string(), message_id.to_string()));
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE seen_message_ids SET state = 'completed'
-             WHERE account = ?1 AND message_id = ?2",
-            rusqlite::params![account, message_id],
-        )?;
-        Ok(())
+        if receipts.is_empty() {
+            return Ok(());
+        }
+
+        let mut state = self.state.lock();
+        let result = (|| {
+            let tx = state.conn.unchecked_transaction()?;
+            for receipt in receipts {
+                let updated = tx.execute(
+                    "UPDATE seen_message_ids SET state = 'completed'
+                     WHERE account = ?1 AND message_id = ?2",
+                    rusqlite::params![receipt.account, receipt.message_id],
+                )?;
+                if updated != 1 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+            }
+            tx.commit()
+        })();
+        for receipt in receipts {
+            state
+                .in_flight
+                .remove(&(receipt.account.clone(), receipt.message_id.clone()));
+        }
+        result
     }
 }
 
@@ -168,12 +229,19 @@ fn create_owner_only_file(path: &Path) -> Result<(), rusqlite::Error> {
 mod tests {
     use super::*;
 
+    fn expect_fresh(admission: Admission) -> InboxReceipt {
+        match admission {
+            Admission::Fresh(receipt) => receipt,
+            other => panic!("expected fresh admission, got {other:?}"),
+        }
+    }
+
     #[test]
     fn completed_redelivery_is_dropped_live_and_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let inbox = MessageInbox::open(dir.path()).unwrap();
-        assert_eq!(inbox.admit("wechat.main", "m-1").unwrap(), Admission::Fresh);
-        inbox.mark_completed("wechat.main", "m-1").unwrap();
+        let receipt = expect_fresh(inbox.admit("wechat.main", "m-1").unwrap());
+        inbox.mark_completed_batch(&[receipt]).unwrap();
         assert_eq!(
             inbox.admit("wechat.main", "m-1").unwrap(),
             Admission::DuplicateCompleted
@@ -194,18 +262,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let inbox = MessageInbox::open(dir.path()).unwrap();
-            assert_eq!(
-                inbox.admit("telegram.bot", "m-2").unwrap(),
-                Admission::Fresh
-            );
+            expect_fresh(inbox.admit("telegram.bot", "m-2").unwrap());
             // no mark_completed: the turn died with the process
         }
         let reopened = MessageInbox::open(dir.path()).unwrap();
-        assert_eq!(
-            reopened.admit("telegram.bot", "m-2").unwrap(),
-            Admission::Fresh,
-            "a received-but-unfinished message must survive the crash window"
-        );
+        expect_fresh(reopened.admit("telegram.bot", "m-2").unwrap());
     }
 
     /// Within one live process, a concurrent duplicate of an in-flight
@@ -214,12 +275,12 @@ mod tests {
     fn concurrent_duplicate_of_in_flight_is_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let inbox = MessageInbox::open(dir.path()).unwrap();
-        assert_eq!(inbox.admit("slack.team", "m-3").unwrap(), Admission::Fresh);
+        let receipt = expect_fresh(inbox.admit("slack.team", "m-3").unwrap());
         assert_eq!(
             inbox.admit("slack.team", "m-3").unwrap(),
             Admission::DuplicateInFlight
         );
-        inbox.mark_completed("slack.team", "m-3").unwrap();
+        inbox.mark_completed_batch(&[receipt]).unwrap();
         // after completion the in-flight set is cleared; durable state rules
         assert_eq!(
             inbox.admit("slack.team", "m-3").unwrap(),
@@ -231,12 +292,8 @@ mod tests {
     fn same_id_across_accounts_is_independent() {
         let dir = tempfile::tempdir().unwrap();
         let inbox = MessageInbox::open(dir.path()).unwrap();
-        assert!(inbox.admit("wechat.main", "m-1").unwrap() == Admission::Fresh);
-        assert_eq!(
-            inbox.admit("telegram.bot", "m-1").unwrap(),
-            Admission::Fresh,
-            "an id is scoped to its account, not global"
-        );
+        expect_fresh(inbox.admit("wechat.main", "m-1").unwrap());
+        expect_fresh(inbox.admit("telegram.bot", "m-1").unwrap());
     }
 
     #[test]
@@ -244,12 +301,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let inbox = MessageInbox::open(dir.path()).unwrap();
         for i in 0..(PER_ACCOUNT_CAP + 2) {
-            assert!(inbox.admit("wechat.main", &format!("m-{i}")).unwrap() == Admission::Fresh);
+            let message_id = format!("m-{i}");
+            let receipt = expect_fresh(inbox.admit("wechat.main", &message_id).unwrap());
+            inbox.mark_completed_batch(&[receipt]).unwrap();
         }
-        assert!(
-            inbox.admit("wechat.main", "m-0").unwrap() == Admission::Fresh,
-            "the oldest entry must have been evicted past the cap"
-        );
+        expect_fresh(inbox.admit("wechat.main", "m-0").unwrap());
     }
 
     /// Pre-rework databases (no state column) migrate in place; their old
@@ -272,10 +328,157 @@ mod tests {
             .unwrap();
         }
         let inbox = MessageInbox::open(dir.path()).unwrap();
+        expect_fresh(inbox.admit("old.bot", "legacy-1").unwrap());
+    }
+
+    #[test]
+    fn received_redelivery_has_one_live_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let inbox = MessageInbox::open(dir.path()).unwrap();
+            expect_fresh(inbox.admit("wechat.main", "m-race").unwrap());
+        }
+        let inbox = std::sync::Arc::new(MessageInbox::open(dir.path()).unwrap());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let inbox = std::sync::Arc::clone(&inbox);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    inbox.admit("wechat.main", "m-race").unwrap()
+                })
+            })
+            .collect();
+        let admissions: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
         assert_eq!(
-            inbox.admit("old.bot", "legacy-1").unwrap(),
-            Admission::Fresh,
-            "a legacy seen row must not suppress a redelivery forever"
+            admissions
+                .iter()
+                .filter(|admission| matches!(admission, Admission::Fresh(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            admissions
+                .iter()
+                .filter(|admission| matches!(admission, Admission::DuplicateInFlight))
+                .count(),
+            7
+        );
+    }
+
+    #[test]
+    fn batch_completion_is_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = MessageInbox::open(dir.path()).unwrap();
+        let first = expect_fresh(inbox.admit("wechat.main", "m-1").unwrap());
+        let second = expect_fresh(inbox.admit("wechat.main", "m-2").unwrap());
+        inbox
+            .state
+            .lock()
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER fail_second_completion
+                 BEFORE UPDATE OF state ON seen_message_ids
+                 WHEN NEW.message_id = 'm-2'
+                 BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;",
+            )
+            .unwrap();
+
+        assert!(
+            inbox.mark_completed_batch(&[first, second]).is_err(),
+            "the injected second update must fail the whole batch"
+        );
+        drop(inbox);
+
+        let reopened = MessageInbox::open(dir.path()).unwrap();
+        expect_fresh(reopened.admit("wechat.main", "m-1").unwrap());
+        expect_fresh(reopened.admit("wechat.main", "m-2").unwrap());
+    }
+
+    fn received_row_count(inbox: &MessageInbox, account: &str) -> i64 {
+        inbox
+            .state
+            .lock()
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM seen_message_ids
+                 WHERE account = ?1 AND state = 'received'",
+                rusqlite::params![account],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn crash_orphaned_received_rows_are_aged_past_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            // A crashed process: it admitted rows without completing any,
+            // so they persist as 'received' with no live owner anywhere.
+            let inbox = MessageInbox::open(dir.path()).unwrap();
+            for i in 0..(PER_ACCOUNT_CAP + 8) {
+                expect_fresh(inbox.admit("wechat.main", &format!("orphan-{i}")).unwrap());
+            }
+        }
+
+        let inbox = MessageInbox::open(dir.path()).unwrap();
+        // The next fresh admission in a new process ages the stale rows.
+        expect_fresh(inbox.admit("wechat.main", "later-1").unwrap());
+        assert_eq!(
+            received_row_count(&inbox, "wechat.main"),
+            PER_ACCOUNT_CAP as i64,
+            "crash-orphaned received rows must be bounded at the cap"
+        );
+        let oldest_gone: i64 = inbox
+            .state
+            .lock()
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM seen_message_ids
+                 WHERE account = 'wechat.main' AND message_id = 'orphan-0'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(oldest_gone, 0, "the oldest orphan must have been evicted");
+        let newest_kept: i64 = inbox
+            .state
+            .lock()
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM seen_message_ids
+                 WHERE account = 'wechat.main' AND message_id = 'later-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(newest_kept, 1, "the newest received row must be retained");
+    }
+
+    #[test]
+    fn live_in_flight_received_rows_survive_aging() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = MessageInbox::open(dir.path()).unwrap();
+        // Same process: every admitted id is a live in-flight owner, so
+        // aging must not evict them even past the cap — their completion
+        // UPDATE is still owed.
+        for i in 0..(PER_ACCOUNT_CAP + 2) {
+            expect_fresh(inbox.admit("wechat.main", &format!("live-{i}")).unwrap());
+        }
+        assert_eq!(
+            received_row_count(&inbox, "wechat.main"),
+            (PER_ACCOUNT_CAP + 2) as i64,
+            "live in-flight owners must never be aged out"
+        );
+        assert_eq!(
+            inbox.admit("wechat.main", "live-0").unwrap(),
+            Admission::DuplicateInFlight,
+            "a live owner's redelivery is still an in-flight duplicate"
         );
     }
 }

@@ -7348,8 +7348,8 @@ async fn message_dispatch_processes_messages_in_parallel() {
 
 #[tokio::test]
 async fn message_dispatch_drops_redelivered_message_ids() {
-    let without_dedup =
-        deliver_messages_through_loop(None, "test-channel", "redelivered-1", 2).await;
+    let deliveries = [("redelivered-1", "hello"), ("redelivered-1", "hello")];
+    let without_dedup = deliver_messages_through_loop(None, "test-channel", &deliveries, 0).await;
     assert_eq!(
         without_dedup, 2,
         "control: without the seen-id store both deliveries start a turn"
@@ -7358,8 +7358,7 @@ async fn message_dispatch_drops_redelivered_message_ids() {
     let seen_dir = tempfile::tempdir().unwrap();
     let store = MessageInbox::open(seen_dir.path()).unwrap();
     let with_dedup =
-        deliver_messages_through_loop(Some(Arc::new(store)), "test-channel", "redelivered-1", 2)
-            .await;
+        deliver_messages_through_loop(Some(Arc::new(store)), "test-channel", &deliveries, 0).await;
     assert_eq!(
         with_dedup, 1,
         "a redelivered message id must be dropped before dispatch"
@@ -7375,25 +7374,69 @@ async fn message_dispatch_does_not_dedup_session_counter_channels() {
     let seen_dir = tempfile::tempdir().unwrap();
     {
         let previous_session = MessageInbox::open(seen_dir.path()).unwrap();
-        assert_eq!(
-            previous_session.admit("webhook", "webhook_0").unwrap(),
-            Admission::Fresh,
-            "the previous session recorded the id but never completed it"
+        assert!(
+            matches!(
+                previous_session.admit("webhook", "webhook_0").unwrap(),
+                Admission::Fresh(_)
+            ),
+            "the previous session should admit the id without completing it"
         );
     }
     let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
-    let replies = deliver_messages_through_loop(Some(store), "webhook", "webhook_0", 1).await;
+    let replies =
+        deliver_messages_through_loop(Some(store), "webhook", &[("webhook_0", "hello")], 0).await;
     assert_eq!(
         replies, 1,
         "a restarted session-counter channel's fresh webhook_0 must not be dropped as a duplicate"
     );
 }
 
+#[tokio::test]
+async fn message_dispatch_completes_every_id_in_a_debounced_turn() {
+    let seen_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
+    let replies = deliver_messages_through_loop(
+        Some(Arc::clone(&store)),
+        "test-channel",
+        &[("rapid-1", "first"), ("rapid-2", "second")],
+        10,
+    )
+    .await;
+
+    assert_eq!(
+        replies, 1,
+        "rapid messages should produce one combined turn"
+    );
+    assert_eq!(
+        store.admit("test-channel", "rapid-1").unwrap(),
+        Admission::DuplicateCompleted,
+        "the superseded receiver's id belongs to the completed combined turn"
+    );
+    assert_eq!(
+        store.admit("test-channel", "rapid-2").unwrap(),
+        Admission::DuplicateCompleted,
+        "the final receiver's id belongs to the completed combined turn"
+    );
+    drop(store);
+
+    let reopened = MessageInbox::open(seen_dir.path()).unwrap();
+    assert_eq!(
+        reopened.admit("test-channel", "rapid-1").unwrap(),
+        Admission::DuplicateCompleted,
+        "the whole batch completion must survive restart"
+    );
+    assert_eq!(
+        reopened.admit("test-channel", "rapid-2").unwrap(),
+        Admission::DuplicateCompleted,
+        "the whole batch completion must survive restart"
+    );
+}
+
 async fn deliver_messages_through_loop(
     seen_ids: Option<Arc<MessageInbox>>,
     channel_name: &'static str,
-    message_id: &str,
-    deliveries: usize,
+    messages: &[(&str, &str)],
+    debounce_ms: u64,
 ) -> usize {
     let sent_messages = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
     let channel: Arc<dyn Channel> = Arc::new(StaticNameRecordingChannel {
@@ -7403,6 +7446,8 @@ async fn deliver_messages_through_loop(
 
     let mut channels_by_name = HashMap::new();
     channels_by_name.insert(channel.name().to_string(), channel);
+    let mut prompt_config = zeroclaw_config::schema::Config::default();
+    prompt_config.channels.debounce_ms = debounce_ms;
 
     let runtime_ctx = Arc::new(ChannelRuntimeContext {
         channels_by_name: Arc::new(channels_by_name),
@@ -7442,7 +7487,7 @@ async fn deliver_messages_through_loop(
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
         workspace_dir: Arc::new(std::env::temp_dir()),
-        prompt_config: Arc::new(zeroclaw_config::schema::Config::default()),
+        prompt_config: Arc::new(prompt_config),
         message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
         interrupt_on_new_message: InterruptOnNewMessageConfig {
             telegram: false,
@@ -7474,7 +7519,7 @@ async fn deliver_messages_through_loop(
         max_tool_result_chars: 0,
         context_token_budget: 0,
         debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
-            Duration::ZERO,
+            Duration::from_millis(debounce_ms),
         )),
         receipt_generator: None,
         show_receipts_in_response: false,
@@ -7486,12 +7531,12 @@ async fn deliver_messages_through_loop(
     });
 
     let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(4);
-    for _ in 0..deliveries {
+    for (message_id, content) in messages {
         tx.send(zeroclaw_api::channel::ChannelMessage {
-            id: message_id.to_string(),
+            id: (*message_id).to_string(),
             sender: "alice".to_string(),
             reply_target: "alice".to_string(),
-            content: "hello".to_string(),
+            content: (*content).to_string(),
             channel: channel_name.into(),
             channel_alias: None,
             timestamp: 1,
