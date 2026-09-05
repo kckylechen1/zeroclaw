@@ -2881,23 +2881,39 @@ async fn dispatch_worker(
                 .await
             {
                 Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                Ok(Err(_err)) => {
+                    // Bounded WARN — completion failure means at-least-once
+                    // re-processing on the next delivery, never a silent drop.
+                    if warn_inbox_failure_once("inbox_completion_failed") {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({"err": err.to_string()})),
-                        "inbox completion failed; redelivery remains eligible"
-                    );
+                            .with_attrs(::serde_json::json!({
+                                "error_key": "channels.inbox_completion_failed",
+                            })),
+                            "inbox completion failed; redelivery remains eligible"
+                        );
+                    }
                 }
-                Err(err) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                Err(_err) => {
+                    if warn_inbox_failure_once("inbox_completion_task_failed") {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({"err": err.to_string()})),
-                        "inbox completion task failed; redelivery remains eligible"
-                    );
+                            .with_attrs(::serde_json::json!({
+                                "error_key": "channels.inbox_completion_task_failed",
+                            })),
+                            "inbox completion task failed; redelivery remains eligible"
+                        );
+                    }
                 }
             }
         } else {
@@ -3007,6 +3023,56 @@ fn resolve_effective_debounce_window(
 /// window dedup exists to close.
 const NON_DEDUP_CHANNELS: &[&str] = &["cli", "webhook", "voice_wake"];
 
+/// Dispatch decision for one durable-admission result: dedup is
+/// fail-open, so a store failure must never suppress a redelivery.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AdmissionDecision {
+    /// Fresh: process and keep the receipt for later completion.
+    Fresh(InboxReceipt),
+    /// Duplicate with a turn at the stated boundary: drop the redelivery.
+    DropDuplicate(DuplicateBoundary),
+    /// Store unusable (write error or blocking-task failure): process
+    /// WITHOUT dedup — at-least-once delivery is preserved, never a
+    /// silent drop.
+    StoreFailed,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum DuplicateBoundary {
+    Completed,
+    InFlight,
+}
+
+pub(crate) fn admission_decision(
+    recorded: Result<Result<Admission, rusqlite::Error>, tokio::task::JoinError>,
+) -> AdmissionDecision {
+    match recorded {
+        Ok(Ok(Admission::Fresh(receipt))) => AdmissionDecision::Fresh(receipt),
+        Ok(Ok(Admission::DuplicateCompleted)) => {
+            AdmissionDecision::DropDuplicate(DuplicateBoundary::Completed)
+        }
+        Ok(Ok(Admission::DuplicateInFlight)) => {
+            AdmissionDecision::DropDuplicate(DuplicateBoundary::InFlight)
+        }
+        Ok(Err(_)) | Err(_) => AdmissionDecision::StoreFailed,
+    }
+}
+
+/// Bounded-WARN gate: inbox failure WARNs fire once per key per
+/// process, so a persistently broken store cannot flood the log on every
+/// turn while still leaving one greppable line after every restart.
+pub(crate) fn warn_inbox_failure_once(key: &str) -> bool {
+    use std::collections::HashSet as WarnSet;
+    use std::sync::{LazyLock, Mutex};
+
+    static WARNED: LazyLock<Mutex<WarnSet<String>>> = LazyLock::new(|| Mutex::new(WarnSet::new()));
+
+    let mut seen = WARNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    seen.insert(key.to_string())
+}
+
 async fn run_message_dispatch_loop(
     mut rx: tokio::sync::mpsc::Receiver<zeroclaw_api::channel::ChannelMessage>,
     router: AgentRouter,
@@ -3034,9 +3100,18 @@ async fn run_message_dispatch_loop(
             let store = Arc::clone(seen_ids);
             let recorded =
                 tokio::task::spawn_blocking(move || store.admit(&account, &message_id)).await;
-            match recorded {
-                Ok(Ok(Admission::Fresh(receipt))) => Some(receipt),
-                Ok(Ok(Admission::DuplicateCompleted)) => {
+            let warn_key = format!("inbox_admit_store_failed:{}", msg.channel);
+            match admission_decision(recorded) {
+                AdmissionDecision::Fresh(receipt) => Some(receipt),
+                AdmissionDecision::DropDuplicate(boundary) => {
+                    let reason = match boundary {
+                        DuplicateBoundary::Completed => {
+                            "dropping redelivered inbound message (turn already completed)"
+                        }
+                        DuplicateBoundary::InFlight => {
+                            "dropping concurrent duplicate of an in-flight message"
+                        }
+                    };
                     ::zeroclaw_log::record!(
                         INFO,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -3045,49 +3120,28 @@ async fn run_message_dispatch_loop(
                                 "message_id": msg.id,
                                 "sender": msg.sender,
                             })),
-                        "dropping redelivered inbound message (turn already completed)"
+                        reason
                     );
                     continue;
                 }
-                Ok(Ok(Admission::DuplicateInFlight)) => {
-                    ::zeroclaw_log::record!(
-                        INFO,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_attrs(::serde_json::json!({
-                                "channel": msg.channel,
-                                "message_id": msg.id,
-                                "sender": msg.sender,
-                            })),
-                        "dropping concurrent duplicate of an in-flight message"
-                    );
-                    continue;
-                }
-                Ok(Err(err)) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                AdmissionDecision::StoreFailed => {
+                    // Fail-open: no dedup evidence, so the message MUST be
+                    // processed — at-least-once, never a silent drop.
+                    if warn_inbox_failure_once(&warn_key) {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                             .with_attrs(::serde_json::json!({
+                                "error_key": "channels.inbox_admit_store_failed",
                                 "channel": msg.channel,
-                                "message_id": msg.id,
-                                "err": err.to_string(),
                             })),
-                        "inbox store failed; processing without dedup"
-                    );
-                    None
-                }
-                Err(_) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({
-                                "channel": msg.channel,
-                                "message_id": msg.id,
-                                "err": "spawn_blocking join error",
-                            })),
-                        "seen-id store failed; processing without dedup"
-                    );
+                            "inbox store failed; processing without dedup"
+                        );
+                    }
                     None
                 }
             }
