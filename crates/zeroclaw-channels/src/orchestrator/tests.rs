@@ -17031,3 +17031,134 @@ async fn message_dispatch_abandoned_before_processing_stays_replayable() {
         "B's row must still be received after a restart — never a silent drop"
     );
 }
+
+#[tokio::test]
+async fn admission_decision_is_fail_open_on_store_failure() {
+    use super::inbox::{Admission, MessageInbox};
+    use super::{AdmissionDecision, DuplicateBoundary, admission_decision};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = MessageInbox::open(tmp.path()).unwrap();
+    let admission = inbox
+        .admit("acct", "m-181")
+        .expect("fresh admit must succeed");
+    let receipt = match admission {
+        Admission::Fresh(receipt) => receipt,
+        other => panic!("fresh admit must return a receipt, got {other:?}"),
+    };
+
+    // Fresh passes through with its receipt.
+    assert!(matches!(
+        admission_decision(Ok(Ok(Admission::Fresh(receipt)))),
+        AdmissionDecision::Fresh(_)
+    ));
+    // Duplicates drop, by boundary.
+    assert_eq!(
+        admission_decision(Ok(Ok(Admission::DuplicateCompleted))),
+        AdmissionDecision::DropDuplicate(DuplicateBoundary::Completed)
+    );
+    assert_eq!(
+        admission_decision(Ok(Ok(Admission::DuplicateInFlight))),
+        AdmissionDecision::DropDuplicate(DuplicateBoundary::InFlight)
+    );
+    // The discriminator: an unavailable store — whether the write itself
+    // failed or the blocking task failed — must NOT suppress a redelivery.
+    // StoreFailed processes the message without dedup; only DropDuplicate
+    // drops. This is the at-least-once guarantee against silent loss.
+    assert_eq!(
+        admission_decision(Ok(Err(rusqlite::Error::QueryReturnedNoRows))),
+        AdmissionDecision::StoreFailed
+    );
+    let join_err = tokio::task::spawn_blocking(|| panic!("blocking task fails"))
+        .await
+        .expect_err("panicking blocking task must join with an error");
+    assert_eq!(
+        admission_decision(Err(join_err)),
+        AdmissionDecision::StoreFailed
+    );
+}
+
+#[test]
+fn inbox_failure_warns_are_bounded_per_process() {
+    use super::warn_inbox_failure_once;
+
+    // Unique key owned by this test; the gate must report the first
+    // failure and stay silent on repeats so a broken store cannot flood
+    // the log on every turn.
+    let key = "bounded-warn-test-181";
+    assert!(warn_inbox_failure_once(key), "first failure must warn");
+    assert!(
+        !warn_inbox_failure_once(key),
+        "repeat failure must not re-warn (bounded)"
+    );
+}
+
+/// Loop-level discriminator: prove
+/// the PRODUCTION dispatch loop is fail-open when the real admission store
+/// is unusable — not just the pure decision helper. The store is faulted
+/// through the database itself (a second connection installs a trigger
+/// that aborts every admission INSERT), the same stable id is delivered
+/// twice, and both deliveries must reach agent-turn processing.
+#[tokio::test]
+async fn message_dispatch_is_fail_open_when_inbox_store_is_unusable() {
+    let seen_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
+    let injector = rusqlite::Connection::open(seen_dir.path().join("channel_seen_ids.db")).unwrap();
+    injector
+        .execute_batch(
+            "CREATE TRIGGER fail_admission BEFORE INSERT ON seen_message_ids
+             BEGIN SELECT RAISE(ABORT, 'injected admission failure'); END;",
+        )
+        .unwrap();
+    drop(injector);
+    assert!(
+        store.admit("test-channel", "m-fail-open").is_err(),
+        "control: the injected trigger must break admission writes"
+    );
+
+    let deliveries = [("m-fail-open", "hello"), ("m-fail-open", "hello")];
+    let replies = deliver_messages_through_loop(Some(store), "test-channel", &deliveries, 0).await;
+    assert_eq!(
+        replies, 2,
+        "an unusable admission store must never suppress a redelivery: both deliveries reach a turn"
+    );
+}
+
+/// Loop-level discriminator: fault
+/// the batch completion itself; the later redelivery of the same id must
+/// remain eligible and be processed again — at-least-once, never a silent
+/// drop. The reply counts are the authority; logging is not.
+#[tokio::test]
+async fn message_dispatch_redelivery_stays_eligible_after_completion_failure() {
+    let seen_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
+    let injector = rusqlite::Connection::open(seen_dir.path().join("channel_seen_ids.db")).unwrap();
+    injector
+        .execute_batch(
+            "CREATE TRIGGER fail_completion BEFORE UPDATE OF state ON seen_message_ids
+             BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;",
+        )
+        .unwrap();
+    drop(injector);
+
+    let first = deliver_messages_through_loop(
+        Some(Arc::clone(&store)),
+        "test-channel",
+        &[("m-complete-fail", "hello")],
+        0,
+    )
+    .await;
+    assert_eq!(first, 1, "the first delivery must start a turn");
+
+    let second = deliver_messages_through_loop(
+        Some(Arc::clone(&store)),
+        "test-channel",
+        &[("m-complete-fail", "hello")],
+        0,
+    )
+    .await;
+    assert_eq!(
+        second, 1,
+        "a failed completion must leave the redelivery eligible (at-least-once)"
+    );
+}
