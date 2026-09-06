@@ -88,7 +88,7 @@
       "signals": 1
     },
     {
-      "path": "crates/zeroclaw-config/src/policy.rs",
+      "path": "crates/zeroclaw-config/src/policy/tests.rs",
       "store": "(none)",
       "role": "mention",
       "basis": "CREATE TABLE appears inside security-policy test string literals; no store",
