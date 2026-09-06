@@ -367,12 +367,9 @@ pub struct Agent {
     /// Pre-rendered security policy summary injected into the system prompt
     /// so the LLM knows the concrete constraints before making tool calls.
     security_summary: Option<String>,
-    /// Autonomy level from config; controls safety prompt instructions.
-    autonomy_level: crate::security::AutonomyLevel,
-    /// Tools that still require approval even under Full autonomy.
-    /// Snapshotted from the risk profile at construction, matching
-    /// `autonomy_level`.
-    always_ask: Vec<String>,
+    /// Autonomy and `always_ask` are no longer stored here: at render time
+    /// they are read from the same `ApprovalManager` the execution gate
+    /// consults, so the prompt cannot contradict enforcement.
     /// The shell this agent's runtime adapter will spawn, so the system
     /// prompt reports the dialect the agent actually executes under.
     /// `None` for a shell-less runtime.
@@ -543,8 +540,6 @@ pub struct AgentBuilder {
     allowed_tools: Option<Vec<String>>,
     response_cache: Option<Arc<zeroclaw_memory::response_cache::ResponseCache>>,
     security_summary: Option<String>,
-    autonomy_level: Option<crate::security::AutonomyLevel>,
-    always_ask: Option<Vec<String>>,
     shell_profile: Option<zeroclaw_api::runtime_traits::ShellProfile>,
     approval_route: Option<zeroclaw_config::autonomy::ApprovalRoute>,
     activated_tools: Option<Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
@@ -598,8 +593,6 @@ impl AgentBuilder {
             allowed_tools: None,
             response_cache: None,
             security_summary: None,
-            autonomy_level: None,
-            always_ask: None,
             shell_profile: None,
             approval_route: None,
             activated_tools: None,
@@ -787,16 +780,6 @@ impl AgentBuilder {
 
     pub fn security_summary(mut self, summary: Option<String>) -> Self {
         self.security_summary = summary;
-        self
-    }
-
-    pub fn autonomy_level(mut self, level: crate::security::AutonomyLevel) -> Self {
-        self.autonomy_level = Some(level);
-        self
-    }
-
-    pub fn always_ask(mut self, tools: Vec<String>) -> Self {
-        self.always_ask = Some(tools);
         self
     }
 
@@ -1004,10 +987,6 @@ impl AgentBuilder {
             response_cache: self.response_cache,
             security_summary: self.security_summary,
             approval_route: self.approval_route,
-            autonomy_level: self
-                .autonomy_level
-                .unwrap_or(crate::security::AutonomyLevel::Supervised),
-            always_ask: self.always_ask.unwrap_or_default(),
             shell_profile: self.shell_profile,
             activated_tools: self.activated_tools,
             mcp_pinned_section: self.mcp_pinned_section.unwrap_or_default(),
@@ -1876,8 +1855,6 @@ impl Agent {
             .auto_save(config.memory.auto_save)
             .exclude_memory(exclude_memory)
             .security_summary(Some(security.prompt_summary()))
-            .autonomy_level(risk_profile.level)
-            .always_ask(risk_profile.always_ask.clone())
             .approval_route(risk_profile.approval_route.clone())
             .activated_tools(activated_handle)
             .mcp_deferred_section(Some(deferred_section))
@@ -2094,6 +2071,14 @@ impl Agent {
             &no_tools
         };
         let instructions = dispatcher.prompt_instructions(prompt_tools);
+        // Prompt policy facts come from the same ApprovalManager the
+        // execution gate consults (borrowed, render-time). A builder without
+        // a manager renders generic safety guidance: it cannot see a real
+        // policy, so it must not claim Full autonomy or name exceptions.
+        let (prompt_autonomy_level, prompt_always_ask) = match self.approval_manager.as_deref() {
+            Some(mgr) => (mgr.autonomy_level(), mgr.always_ask_tools()),
+            None => (crate::security::AutonomyLevel::Supervised, Vec::new()),
+        };
         let ctx = PromptContext {
             workspace_dir: &self.workspace_dir,
             agent_workspace_dir: &self.agent_workspace_dir,
@@ -2107,8 +2092,8 @@ impl Agent {
             sends_native_tool_specs: dispatcher.should_send_tool_specs()
                 && !prompt_tools.is_empty(),
             security_summary: self.security_summary.clone(),
-            autonomy_level: self.autonomy_level,
-            always_ask: &self.always_ask,
+            autonomy_level: prompt_autonomy_level,
+            always_ask: &prompt_always_ask,
             shell_profile: self.shell_profile.clone(),
         };
         let mut prompt = self.prompt_builder.build(&ctx)?;
@@ -12312,10 +12297,6 @@ mod approval_route_tests {
         assert_eq!(
             out, None,
             "no originator to inherit; gate applies the non-interactive auto-deny"
-        );
-    }
-}
-
         );
     }
 }

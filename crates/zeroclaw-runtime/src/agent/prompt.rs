@@ -117,10 +117,12 @@ pub struct PromptContext<'a> {
     /// (allowed commands, forbidden paths, autonomy level) so it can plan
     /// tool calls without trial-and-error.  See
     pub security_summary: Option<String>,
-    /// Autonomy level from config. Controls whether the safety section
-    /// includes "ask before acting" instructions. Full autonomy omits them
-    /// for uncovered tools so the model executes those directly without
-    /// simulating approval. `always_ask` still prompts even under Full.
+    /// Autonomy level the prompt describes. On the Agent path this is
+    /// resolved at render time from the canonical `ApprovalManager` the
+    /// execution gate consults; the standalone builder passes the configured
+    /// risk profile directly. Full autonomy omits "ask before acting"
+    /// instructions for uncovered tools so the model executes those directly
+    /// without simulating approval. `always_ask` still prompts even under Full.
     pub autonomy_level: AutonomyLevel,
     /// Tools that still require operator approval (or fail closed with no
     /// approver) even when `autonomy_level` is Full. Empty means no
@@ -781,6 +783,7 @@ mod tests {
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            always_ask: &[],
             shell_profile: None,
         };
 
@@ -818,6 +821,7 @@ mod tests {
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            always_ask: &[],
             shell_profile: None,
         };
 
@@ -1319,11 +1323,13 @@ mod tests {
             skills: &[],
             skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
             identity_config: None,
+            interaction: None,
             dispatcher_instructions: "",
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Full,
             always_ask: &always_ask,
+            shell_profile: None,
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -1353,11 +1359,13 @@ mod tests {
             skills: &[],
             skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
             identity_config: None,
+            interaction: None,
             dispatcher_instructions: "",
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Full,
             always_ask: &always_ask,
+            shell_profile: None,
         };
 
         let output = SafetySection.build(&ctx).unwrap();
@@ -1422,6 +1430,7 @@ mod tests {
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
+            always_ask: &[],
             shell_profile,
         }
     }

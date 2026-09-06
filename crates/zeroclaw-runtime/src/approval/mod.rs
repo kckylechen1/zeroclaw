@@ -166,6 +166,22 @@ impl ApprovalManager {
         self.non_interactive
     }
 
+    /// The autonomy level this manager enforces. Prompt rendering reads the
+    /// same policy the execution gate consults so the two cannot diverge.
+    pub fn autonomy_level(&self) -> AutonomyLevel {
+        self.autonomy_level
+    }
+
+    /// Tools that still require approval even under Full autonomy, in
+    /// deterministic (sorted) order so rendered prompt text is stable.
+    /// The manager stores these as a set because enforcement is order-blind;
+    /// prompts need a stable ordering instead.
+    pub fn always_ask_tools(&self) -> Vec<String> {
+        let mut tools: Vec<String> = self.always_ask.iter().cloned().collect();
+        tools.sort();
+        tools
+    }
+
     /// Check whether a tool call requires interactive approval.
     /// Returns `true` if the call needs a prompt, `false` if it can proceed.
     pub fn needs_approval(&self, tool_name: &str) -> bool {

@@ -284,6 +284,7 @@ mod tests {
             strict_tool_parsing: false,
             channel,
             agent_alias: None,
+            draft_reasoning: zeroclaw_config::schema::StreamReasoningMode::Status,
             turn_id: "trace-approval-gate",
         }
     }
