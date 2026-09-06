@@ -28626,7 +28626,7 @@ allowed_tools = []
     }
 
     #[test]
-    fn risk_profile_effective_allowed_tools_normalizes_legacy_deny_all_sentinel() {
+    async fn risk_profile_effective_allowed_tools_normalizes_legacy_deny_all_sentinel() {
         let mut profile = RiskProfileConfig::default();
         assert_eq!(profile.effective_allowed_tools(), None);
 
