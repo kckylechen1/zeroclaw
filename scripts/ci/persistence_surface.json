@@ -288,7 +288,14 @@
       "store": "memory/brain.db",
       "role": "store",
       "basis": "personal-memory main store (tachi#1630/#49 ZeroClaw-canonical side)",
-      "signals": 42
+      "signals": 34
+    },
+    {
+      "path": "crates/zeroclaw-memory/src/sqlite/tests.rs",
+      "store": "memory/brain.db",
+      "role": "test",
+      "basis": "sqlite unit tests extracted from sqlite.rs; test-only direct connections and fixtures",
+      "signals": 8
     },
     {
       "path": "crates/zeroclaw-memory/src/tachi_governance.rs",
