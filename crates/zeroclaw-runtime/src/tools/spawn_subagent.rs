@@ -104,12 +104,9 @@ impl Tool for SpawnSubagentTool {
         let risk_profile = self.config.risk_profile_for_agent(&self.parent_alias);
         if let Some(rp) = risk_profile {
             let excluded = rp.excluded_tools.iter().any(|t| t == "spawn_subagent");
-            // `deny_all_tools` denies spawn_subagent; an absent/empty
-            // `allowed_tools` is legacy-unrestricted; a non-empty list must
-            // name spawn_subagent.
-            let allowed_when_listed = !rp.deny_all_tools
-                && (rp.allowed_tools.is_empty()
-                    || rp.allowed_tools.iter().any(|t| t == "spawn_subagent"));
+            let allowed_when_listed = rp
+                .effective_allowed_tools()
+                .is_none_or(|tools| tools.iter().any(|t| t == "spawn_subagent"));
             if excluded || !allowed_when_listed {
                 return Ok(ToolResult {
                     success: false,
@@ -522,6 +519,29 @@ mod tests {
         assert!(
             err.contains("risk_profile") && err.contains("spawn_subagent"),
             "deny_all_tools must deny spawn_subagent, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_when_risk_profile_uses_legacy_none_sentinel() {
+        let config = config_with_allowed_tools(
+            "alpha",
+            vec![RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into()],
+        );
+        let tool = SpawnSubagentTool::new(
+            Arc::new(config),
+            "alpha",
+            Arc::new(SecurityPolicy::default()),
+        );
+        let result = tool
+            .execute(json!({ "prompt": "hello" }))
+            .await
+            .expect("execute returns Ok with structured failure");
+        assert!(!result.success);
+        let err = result.error.as_deref().unwrap_or_default();
+        assert!(
+            err.contains("risk_profile") && err.contains("spawn_subagent"),
+            "legacy __none__ must deny spawn_subagent, got: {err:?}"
         );
     }
 

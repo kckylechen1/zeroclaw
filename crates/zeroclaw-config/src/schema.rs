@@ -12770,6 +12770,35 @@ fn default_always_ask() -> Vec<String> {
 }
 
 impl RiskProfileConfig {
+    /// Legacy serialized marker used by older operators to represent an
+    /// explicit deny-all profile before `deny_all_tools` existed.
+    pub const LEGACY_DENY_ALL_TOOLS_SENTINEL: &'static str = "__none__";
+
+    /// Resolve the profile's effective tool allowlist without changing the
+    /// persisted representation. `None` is unrestricted, while `Some([])` is
+    /// explicit deny-all. Mixed legacy sentinel lists retain only real tool
+    /// names.
+    #[must_use]
+    pub fn effective_allowed_tools(&self) -> Option<Vec<String>> {
+        if self.deny_all_tools {
+            return Some(Vec::new());
+        }
+
+        if self.allowed_tools.len() == 1
+            && self.allowed_tools[0] == Self::LEGACY_DENY_ALL_TOOLS_SENTINEL
+        {
+            return Some(Vec::new());
+        }
+
+        let real = self
+            .allowed_tools
+            .iter()
+            .filter(|name| name.as_str() != Self::LEGACY_DENY_ALL_TOOLS_SENTINEL)
+            .cloned()
+            .collect::<Vec<_>>();
+        (!real.is_empty()).then_some(real)
+    }
+
     /// Merge the built-in default `auto_approve` entries into the current
     /// list, preserving any user-supplied additions.
     pub fn ensure_default_auto_approve(&mut self) {
@@ -28597,6 +28626,24 @@ allowed_tools = []
         );
         assert!(!profile.deny_all_tools);
         parsed.validate().expect("allowed_tools = [] must validate");
+    }
+
+    #[test]
+    fn risk_profile_effective_allowed_tools_normalizes_legacy_sentinel() {
+        let mut profile = RiskProfileConfig::default();
+        assert_eq!(profile.effective_allowed_tools(), None);
+
+        profile.allowed_tools = vec![RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into()];
+        assert_eq!(profile.effective_allowed_tools(), Some(vec![]));
+
+        profile.allowed_tools = vec![
+            RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into(),
+            "shell".into(),
+        ];
+        assert_eq!(
+            profile.effective_allowed_tools(),
+            Some(vec!["shell".into()])
+        );
     }
 
     /// `deny_all_tools = true` is the explicit deny-all representation and is

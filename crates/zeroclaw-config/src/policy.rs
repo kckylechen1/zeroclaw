@@ -3613,19 +3613,7 @@ impl SecurityPolicy {
             block_high_risk_commands: risk_profile.block_high_risk_commands,
             shell_env_passthrough: risk_profile.shell_env_passthrough.clone(),
             shell_timeout_secs: runtime.shell_timeout_secs,
-            // Tri-state mapping: `deny_all_tools` is the explicit deny-all
-            // gate (`Some(vec![])`); an absent or empty `allowed_tools` is the
-            // legacy unrestricted state (`None`); a non-empty list is the
-            // closed set. `Config::validate` rejects the contradictory
-            // combination up front, so deny-all wins here only for
-            // hand-constructed profiles that bypassed validation.
-            allowed_tools: if risk_profile.deny_all_tools {
-                Some(Vec::new())
-            } else if risk_profile.allowed_tools.is_empty() {
-                None
-            } else {
-                Some(risk_profile.allowed_tools.clone())
-            },
+            allowed_tools: risk_profile.effective_allowed_tools(),
             excluded_tools: if risk_profile.excluded_tools.is_empty() {
                 None
             } else {
@@ -4122,6 +4110,22 @@ mod tests {
             !policy.is_tool_allowed("filesystem__write_file"),
             "deny_all_tools also denies MCP-discovered tools — no auto-admit under deny-all"
         );
+    }
+
+    #[test]
+    fn from_profiles_legacy_none_sentinel_means_deny_all() {
+        use crate::schema::RiskProfileConfig;
+        use std::path::Path;
+
+        let risk = RiskProfileConfig {
+            allowed_tools: vec![RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into()],
+            ..RiskProfileConfig::default()
+        };
+
+        let policy = SecurityPolicy::from_profiles(&risk, None, Path::new("/ws"));
+
+        assert!(!policy.is_tool_allowed("shell"));
+        assert!(!policy.is_tool_allowed("filesystem__write_file"));
     }
 
     #[test]

@@ -24,6 +24,11 @@ import {
 import { loadAgentPickerSummaries, type AgentPickerSummary } from '@/lib/agents';
 import { t } from '@/lib/i18n';
 import { Badge, Card, PageHeader } from '@/components/ui';
+import {
+  applyAuthState,
+  isStrictAllowlist,
+  type ToolPermissionGridValue,
+} from '@/components/ToolPermissionGrid.logic';
 
 // ── Risk-profile tool access ────────────────────────────────────────────
 // Per-profile allow/exclude state for the tool-access matrix in each expanded
@@ -36,8 +41,7 @@ import { Badge, Card, PageHeader } from '@/components/ui';
 //   • excluded_tools               → denylist, wins over allow
 // So we never silently convert an unrestricted profile into an allowlist:
 // BLOCK adds to excluded_tools (no side effects on other tools); ALLOW clears
-// the exclusion and, only when the profile is already an allowlist, adds the
-// tool to it.
+// the exclusion and adds the tool only when an explicit gate is active.
 interface ProfileAccess {
   allowed: string[] | null;
   denyAll: boolean;
@@ -193,16 +197,22 @@ export default function Tools() {
     async (profile: string, tool: string, makeAllowed: boolean) => {
       const current = access?.[profile];
       if (!current) return;
-      const allowed = current.allowed === null ? null : [...current.allowed];
-      // ALLOW under deny-all exits deny-all into a one-tool allowlist.
-      const denyAll = makeAllowed ? false : current.denyAll;
-      let excluded = [...current.excluded];
-      if (makeAllowed) {
-        excluded = excluded.filter((x) => x !== tool);
-        if (allowed !== null && !allowed.includes(tool)) allowed.push(tool);
-      } else if (!excluded.includes(tool)) {
-        excluded.push(tool);
-      }
+      const currentValue: ToolPermissionGridValue = {
+        allowedTools: current.allowed,
+        denyAllTools: current.denyAll,
+        excludedTools: current.excluded,
+        autoApprove: [],
+        alwaysAsk: [],
+      };
+      const nextValue = applyAuthState(
+        currentValue,
+        tool,
+        makeAllowed ? 'allow' : 'deny',
+        isStrictAllowlist(currentValue),
+      );
+      const allowed = nextValue.allowedTools;
+      const denyAll = nextValue.denyAllTools;
+      const excluded = nextValue.excludedTools;
       const ops: Parameters<typeof patchConfig>[0] = [];
       if (JSON.stringify(allowed) !== JSON.stringify(current.allowed)) {
         ops.push({ op: 'replace', path: `risk_profiles.${profile}.allowed_tools`, value: allowed });

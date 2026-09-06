@@ -1021,16 +1021,7 @@ impl DelegateTool {
 
         let profile = self.risk_profiles.get(risk_profile)?;
         Some(SecurityPolicy {
-            // Same tri-state mapping as `SecurityPolicy::from_profiles`:
-            // `deny_all_tools` → deny-all (`Some(vec![])`), absent/empty
-            // `allowed_tools` → unrestricted (`None`), non-empty → closed set.
-            allowed_tools: if profile.deny_all_tools {
-                Some(Vec::new())
-            } else if profile.allowed_tools.is_empty() {
-                None
-            } else {
-                Some(profile.allowed_tools.clone())
-            },
+            allowed_tools: profile.effective_allowed_tools(),
             excluded_tools: if profile.excluded_tools.is_empty() {
                 None
             } else {
@@ -5319,6 +5310,12 @@ mod tests {
         profiles
     }
 
+    fn agentic_risk_profiles_legacy_deny_all() -> HashMap<String, RiskProfileConfig> {
+        agentic_risk_profiles(vec![
+            RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into(),
+        ])
+    }
+
     fn agentic_risk_profiles_with_excluded(
         allowed_tools: Vec<String>,
         excluded_tools: Vec<String>,
@@ -6459,6 +6456,26 @@ mod tests {
             .unwrap();
         assert!(result.success, "got: {:?}", result.error);
         assert!(result.output.contains("delegate saw tool"));
+    }
+
+    #[tokio::test]
+    async fn agentic_mode_legacy_none_sentinel_is_deny_all() {
+        let config = agentic_agent_config();
+        let tool = DelegateTool::new(HashMap::new(), None, test_security())
+            .with_runtime_profiles(agentic_runtime_profiles(10))
+            .with_risk_profiles(agentic_risk_profiles_legacy_deny_all());
+        let policy = tool
+            .resolve_tool_policy("agentic_test")
+            .expect("policy resolves");
+
+        assert!(!DelegateTool::delegate_admits_with_mcp(
+            &policy,
+            "echo_tool"
+        ));
+        assert!(!DelegateTool::delegate_admits_with_mcp(
+            &policy,
+            "server__tool"
+        ));
     }
 
     #[tokio::test]
