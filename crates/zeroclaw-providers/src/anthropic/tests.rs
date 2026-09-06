@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::*;
 use crate::auth::anthropic_token::{AnthropicAuthKind, detect_auth_kind};
 

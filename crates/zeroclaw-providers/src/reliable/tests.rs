@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::*;
 use futures_util::StreamExt;
 use std::sync::Arc;

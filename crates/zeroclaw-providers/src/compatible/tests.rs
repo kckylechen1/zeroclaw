@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::*;
 
 /// Empty / whitespace arguments must collapse to `"{}"` so OpenAI-style
