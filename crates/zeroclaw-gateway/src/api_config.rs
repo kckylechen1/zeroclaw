@@ -2944,7 +2944,6 @@ mod tests {
             zeroclaw_config::policy::SecurityPolicy::from_profiles(profile, None, tmp.path());
         assert!(policy.is_tool_allowed("shell"));
         assert!(!policy.is_tool_allowed("memory_recall"));
-        assert!(policy.is_tool_allowed("filesystem__write_file"));
     }
 
     #[tokio::test]

@@ -6461,7 +6461,6 @@ mod tests {
 
     #[tokio::test]
     async fn agentic_mode_legacy_none_sentinel_is_deny_all() {
-        let config = agentic_agent_config();
         let tool = DelegateTool::new(HashMap::new(), None, test_security())
             .with_runtime_profiles(agentic_runtime_profiles(10))
             .with_risk_profiles(agentic_risk_profiles_legacy_deny_all());
