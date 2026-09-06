@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refuses_when_risk_profile_uses_legacy_none_sentinel() {
+    async fn refuses_when_risk_profile_uses_legacy_deny_all_sentinel() {
         let config = config_with_allowed_tools(
             "alpha",
             vec![
