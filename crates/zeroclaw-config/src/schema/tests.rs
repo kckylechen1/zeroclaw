@@ -1,3 +1,4 @@
+#[cfg(test)]
 #[::core::prelude::v1::test]
 fn todotracker_config_defaults() {
     let cfg = super::TodoTrackerConfig::default();
