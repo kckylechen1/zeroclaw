@@ -5313,6 +5313,7 @@ mod tests {
     fn agentic_risk_profiles_legacy_deny_all() -> HashMap<String, RiskProfileConfig> {
         agentic_risk_profiles(vec![
             RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into(),
+            RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into(),
         ])
     }
 

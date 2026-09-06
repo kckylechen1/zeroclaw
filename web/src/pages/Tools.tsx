@@ -25,10 +25,10 @@ import { loadAgentPickerSummaries, type AgentPickerSummary } from '@/lib/agents'
 import { t } from '@/lib/i18n';
 import { Badge, Card, PageHeader } from '@/components/ui';
 import {
-  applyAuthState,
-  isStrictAllowlist,
-  type ToolPermissionGridValue,
-} from '@/components/ToolPermissionGrid.logic';
+  applyToolAccessPatch,
+  buildToolAccessPatch,
+  type ToolAccess,
+} from './Tools.logic';
 
 // ── Risk-profile tool access ────────────────────────────────────────────
 // Per-profile allow/exclude state for the tool-access matrix in each expanded
@@ -197,45 +197,18 @@ export default function Tools() {
     async (profile: string, tool: string, makeAllowed: boolean) => {
       const current = access?.[profile];
       if (!current) return;
-      const currentValue: ToolPermissionGridValue = {
-        allowedTools: current.allowed,
-        denyAllTools: current.denyAll,
-        excludedTools: current.excluded,
-        autoApprove: [],
-        alwaysAsk: [],
-      };
-      const nextValue = applyAuthState(
-        currentValue,
-        tool,
-        makeAllowed ? 'allow' : 'deny',
-        isStrictAllowlist(currentValue),
-      );
-      const allowed = nextValue.allowedTools;
-      const denyAll = nextValue.denyAllTools;
-      const excluded = nextValue.excludedTools;
-      const ops: Parameters<typeof patchConfig>[0] = [];
-      if (JSON.stringify(allowed) !== JSON.stringify(current.allowed)) {
-        ops.push({ op: 'replace', path: `risk_profiles.${profile}.allowed_tools`, value: allowed });
-      }
-      if (denyAll !== current.denyAll) {
-        ops.push({ op: 'replace', path: `risk_profiles.${profile}.deny_all_tools`, value: denyAll });
-      }
-      if (JSON.stringify(excluded) !== JSON.stringify(current.excluded)) {
-        ops.push({
-          op: 'replace',
-          path: `risk_profiles.${profile}.excluded_tools`,
-          value: excluded.length > 0 ? excluded : null,
-        });
-      }
-      if (ops.length === 0) return;
-      const next = { allowed, denyAll, excluded };
-      setAccess((prev) => (prev ? { ...prev, [profile]: next } : prev));
+      const change = buildToolAccessPatch(profile, tool, current, makeAllowed);
+      if (!change) return;
       setAccessError(null);
       try {
-        await patchConfig(ops);
+        await applyToolAccessPatch(
+          change,
+          patchConfig,
+          (state: ToolAccess) => {
+            setAccess((prev) => (prev ? { ...prev, [profile]: state } : prev));
+          },
+        );
       } catch (e) {
-        // Revert on failure.
-        setAccess((prev) => (prev ? { ...prev, [profile]: current } : prev));
         setAccessError(
           e instanceof ApiError
             ? `[${e.envelope.code}] ${e.envelope.message}`

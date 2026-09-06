@@ -526,7 +526,10 @@ mod tests {
     async fn refuses_when_risk_profile_uses_legacy_none_sentinel() {
         let config = config_with_allowed_tools(
             "alpha",
-            vec![RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into()],
+            vec![
+                RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into(),
+                RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into(),
+            ],
         );
         let tool = SpawnSubagentTool::new(
             Arc::new(config),

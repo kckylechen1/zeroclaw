@@ -4118,7 +4118,10 @@ mod tests {
         use std::path::Path;
 
         let risk = RiskProfileConfig {
-            allowed_tools: vec![RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into()],
+            allowed_tools: vec![
+                RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into(),
+                RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into(),
+            ],
             ..RiskProfileConfig::default()
         };
 

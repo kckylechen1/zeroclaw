@@ -12784,18 +12784,15 @@ impl RiskProfileConfig {
             return Some(Vec::new());
         }
 
-        if self.allowed_tools.len() == 1
-            && self.allowed_tools[0] == Self::LEGACY_DENY_ALL_TOOLS_SENTINEL
-        {
-            return Some(Vec::new());
-        }
-
         let real = self
             .allowed_tools
             .iter()
             .filter(|name| name.as_str() != Self::LEGACY_DENY_ALL_TOOLS_SENTINEL)
             .cloned()
             .collect::<Vec<_>>();
+        if !self.allowed_tools.is_empty() && real.is_empty() {
+            return Some(Vec::new());
+        }
         (!real.is_empty()).then_some(real)
     }
 
@@ -28634,6 +28631,12 @@ allowed_tools = []
         assert_eq!(profile.effective_allowed_tools(), None);
 
         profile.allowed_tools = vec![RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into()];
+        assert_eq!(profile.effective_allowed_tools(), Some(vec![]));
+
+        profile.allowed_tools = vec![
+            RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into(),
+            RiskProfileConfig::LEGACY_DENY_ALL_TOOLS_SENTINEL.into(),
+        ];
         assert_eq!(profile.effective_allowed_tools(), Some(vec![]));
 
         profile.allowed_tools = vec![
