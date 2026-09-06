@@ -71,7 +71,7 @@ mod deliver_announcement;
 pub use deliver_announcement::deliver_announcement;
 
 mod inbox;
-pub(crate) use inbox::{Admission, MessageInbox};
+pub(crate) use inbox::{Admission, InboxReceipt, MessageInbox};
 
 mod task_prefs;
 pub(crate) use task_prefs::TaskPreferenceOverlay;
@@ -515,7 +515,7 @@ struct ChannelRuntimeContext {
     pacing: zeroclaw_config::schema::PacingConfig,
     max_tool_result_chars: usize,
     context_token_budget: usize,
-    debouncer: Arc<zeroclaw_infra::debounce::MessageDebouncer>,
+    debouncer: Arc<zeroclaw_infra::debounce::MessageDebouncer<InboxReceipt>>,
     /// HMAC receipt generator. `Some` when `[agent.resolved.tool_receipts] enabled = true`.
     /// Threaded into `run_tool_call_loop` so `tool_execution::execute_one_tool`
     /// can sign each result.
@@ -2826,10 +2826,9 @@ async fn dispatch_worker(
     task_sequence: Arc<AtomicU64>,
     permit: tokio::sync::OwnedSemaphorePermit,
     inbox: Option<Arc<MessageInbox>>,
+    inbox_receipts: Vec<InboxReceipt>,
 ) {
     let _permit = permit;
-    let inbox_account = channel_key_for_message(&msg);
-    let inbox_message_id = msg.id.clone();
     let interrupt_enabled = ctx
         .interrupt_on_new_message
         .enabled_for_channel(msg.channel.as_str());
@@ -2865,16 +2864,61 @@ async fn dispatch_worker(
         }
     }
 
-    process_channel_message(ctx, msg, cancellation_token).await;
+    let processed = process_channel_message(ctx, msg, cancellation_token).await;
 
-    // The turn is finished: only now is a future redelivery safely
-    // suppressible. Failure here means at-least-once re-processing, never
-    // a silent drop.
-    if let Some(inbox) = inbox {
-        let _ = tokio::task::spawn_blocking(move || {
-            inbox.mark_completed(&inbox_account, &inbox_message_id)
-        })
-        .await;
+    // The turn is finished: only a turn that actually ran may suppress a
+    // future redelivery. A worker whose token was already cancelled when
+    // it reached processing bailed before doing anything — it owns
+    // nothing durably, so its claims are released and the rows stay
+    // `received`: a redelivery is admitted fresh (at-least-once, never a
+    // silent drop). Failure of the completion write itself means
+    // at-least-once re-processing, never a silent drop.
+    if let Some(inbox) = inbox
+        && !inbox_receipts.is_empty()
+    {
+        if processed {
+            match tokio::task::spawn_blocking(move || inbox.mark_completed_batch(&inbox_receipts))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(_err)) => {
+                    // Bounded WARN — completion failure means at-least-once
+                    // re-processing on the next delivery, never a silent drop.
+                    if warn_inbox_failure_once("inbox_completion_failed") {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "error_key": "channels.inbox_completion_failed",
+                            })),
+                            "inbox completion failed; redelivery remains eligible"
+                        );
+                    }
+                }
+                Err(_err) => {
+                    if warn_inbox_failure_once("inbox_completion_task_failed") {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "error_key": "channels.inbox_completion_task_failed",
+                            })),
+                            "inbox completion task failed; redelivery remains eligible"
+                        );
+                    }
+                }
+            }
+        } else {
+            inbox.release_claims(&inbox_receipts);
+        }
     }
 
     if register_in_flight {
@@ -2979,6 +3023,59 @@ fn resolve_effective_debounce_window(
 /// window dedup exists to close.
 const NON_DEDUP_CHANNELS: &[&str] = &["cli", "webhook", "voice_wake"];
 
+/// Dispatch decision for one durable-admission result: dedup is
+/// fail-open, so a store failure must never suppress a redelivery.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AdmissionDecision {
+    /// Fresh: process and keep the receipt for later completion.
+    Fresh(InboxReceipt),
+    /// Duplicate with a turn at the stated boundary: drop the redelivery.
+    DropDuplicate(DuplicateBoundary),
+    /// Store unusable (write error or blocking-task failure): process
+    /// WITHOUT dedup — at-least-once delivery is preserved, never a
+    /// silent drop.
+    StoreFailed,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum DuplicateBoundary {
+    Completed,
+    InFlight,
+}
+
+pub(crate) fn admission_decision(
+    recorded: Result<Result<Admission, rusqlite::Error>, tokio::task::JoinError>,
+) -> AdmissionDecision {
+    match recorded {
+        Ok(Ok(Admission::Fresh(receipt))) => AdmissionDecision::Fresh(receipt),
+        Ok(Ok(Admission::DuplicateCompleted)) => {
+            AdmissionDecision::DropDuplicate(DuplicateBoundary::Completed)
+        }
+        Ok(Ok(Admission::DuplicateInFlight)) => {
+            AdmissionDecision::DropDuplicate(DuplicateBoundary::InFlight)
+        }
+        Ok(Err(_)) | Err(_) => AdmissionDecision::StoreFailed,
+    }
+}
+
+/// Bounded-WARN gate: inbox failure WARNs fire once per key per
+/// process, so a persistently broken store cannot flood the log on every
+/// turn while still leaving one greppable line after every restart.
+pub(crate) fn warn_inbox_failure_once(key: &str) -> bool {
+    use std::collections::HashSet as WarnSet;
+    use std::sync::{LazyLock, Mutex};
+
+    static WARNED: LazyLock<Mutex<WarnSet<String>>> = LazyLock::new(|| Mutex::new(WarnSet::new()));
+
+    let mut seen = WARNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seen.contains(key) {
+        return false;
+    }
+    seen.insert(key.to_string())
+}
+
 async fn run_message_dispatch_loop(
     mut rx: tokio::sync::mpsc::Receiver<zeroclaw_api::channel::ChannelMessage>,
     router: AgentRouter,
@@ -2994,7 +3091,10 @@ async fn run_message_dispatch_loop(
     let task_sequence = Arc::new(AtomicU64::new(1));
 
     while let Some(msg) = rx.recv().await {
-        if let Some(seen_ids) = &inbox
+        // Inbox admission stays first: every message class handled
+        // below — agent turns, /stop controls, debounce — passes one
+        // durable admission decision before any of them can act.
+        let inbox_receipt = if let Some(seen_ids) = &inbox
             && !NON_DEDUP_CHANNELS.contains(&msg.channel.as_str())
             && !msg.id.is_empty()
         {
@@ -3003,9 +3103,17 @@ async fn run_message_dispatch_loop(
             let store = Arc::clone(seen_ids);
             let recorded =
                 tokio::task::spawn_blocking(move || store.admit(&account, &message_id)).await;
-            match recorded {
-                Ok(Ok(Admission::Fresh)) => {}
-                Ok(Ok(Admission::DuplicateCompleted)) => {
+            match admission_decision(recorded) {
+                AdmissionDecision::Fresh(receipt) => Some(receipt),
+                AdmissionDecision::DropDuplicate(boundary) => {
+                    let reason = match boundary {
+                        DuplicateBoundary::Completed => {
+                            "dropping redelivered inbound message (turn already completed)"
+                        }
+                        DuplicateBoundary::InFlight => {
+                            "dropping concurrent duplicate of an in-flight message"
+                        }
+                    };
                     ::zeroclaw_log::record!(
                         INFO,
                         ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -3014,51 +3122,35 @@ async fn run_message_dispatch_loop(
                                 "message_id": msg.id,
                                 "sender": msg.sender,
                             })),
-                        "dropping redelivered inbound message (turn already completed)"
+                        reason
                     );
                     continue;
                 }
-                Ok(Ok(Admission::DuplicateInFlight)) => {
-                    ::zeroclaw_log::record!(
-                        INFO,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_attrs(::serde_json::json!({
-                                "channel": msg.channel,
-                                "message_id": msg.id,
-                                "sender": msg.sender,
-                            })),
-                        "dropping concurrent duplicate of an in-flight message"
-                    );
-                    continue;
-                }
-                Ok(Err(err)) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                AdmissionDecision::StoreFailed => {
+                    // Fail-open: no dedup evidence, so the message MUST be
+                    // processed — at-least-once, never a silent drop.
+                    if warn_inbox_failure_once(&format!("inbox_admit_store_failed:{}", msg.channel))
+                    {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                             .with_attrs(::serde_json::json!({
+                                "error_key": "channels.inbox_admit_store_failed",
                                 "channel": msg.channel,
-                                "message_id": msg.id,
-                                "err": err.to_string(),
                             })),
-                        "inbox store failed; processing without dedup"
-                    );
-                }
-                Err(_) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({
-                                "channel": msg.channel,
-                                "message_id": msg.id,
-                                "err": "spawn_blocking join error",
-                            })),
-                        "seen-id store failed; processing without dedup"
-                    );
+                            "inbox store failed; processing without dedup"
+                        );
+                    }
+                    None
                 }
             }
-        }
+        } else {
+            None
+        };
         let Some(ctx) = router.resolve(&msg) else {
             ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"channel_alias": msg.channel_alias, "sender": msg.sender})), "dropping inbound message: no agent owns this channel");
             continue;
@@ -3101,7 +3193,7 @@ async fn run_message_dispatch_loop(
 
         // ── Debounce: accumulate rapid messages per sender ──────────
         // CLI messages bypass debouncing so the interactive loop stays responsive.
-        let msg = if msg.channel != "cli" {
+        let (msg, inbox_receipts) = if msg.channel != "cli" {
             let debounce_key = conversation_history_key(&msg);
 
             // Resolve effective debounce window: per-channel override wins,
@@ -3116,7 +3208,7 @@ async fn run_message_dispatch_loop(
 
             match ctx
                 .debouncer
-                .debounce_with_window(&debounce_key, &msg.content, debounce_window)
+                .debounce_with_window(&debounce_key, &msg.content, inbox_receipt, debounce_window)
                 .await
             {
                 zeroclaw_infra::debounce::DebounceResult::Pending(rx) => {
@@ -3130,14 +3222,14 @@ async fn run_message_dispatch_loop(
                     let debounce_inbox = inbox.clone();
                     let mut debounce_msg = msg;
                     workers.spawn(async move {
-                        let combined = match rx.await {
-                            Ok(combined) => combined,
+                        let batch = match rx.await {
+                            Ok(batch) => batch,
                             Err(_) => {
                                 // Receiver dropped — a newer message superseded this one.
                                 return;
                             }
                         };
-                        debounce_msg.content = combined;
+                        debounce_msg.content = batch.content;
                         ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"channel": debounce_msg.channel, "sender": debounce_msg.sender})), "Debounced message ready — dispatching combined message");
 
                         let permit = match debounce_semaphore.acquire_owned().await {
@@ -3152,19 +3244,20 @@ async fn run_message_dispatch_loop(
                             debounce_task_seq,
                             permit,
                             debounce_inbox,
+                            batch.items,
                         )
                         .await;
                     });
                     continue;
                 }
-                zeroclaw_infra::debounce::DebounceResult::Passthrough(content) => {
+                zeroclaw_infra::debounce::DebounceResult::Passthrough(batch) => {
                     let mut m = msg;
-                    m.content = content;
-                    m
+                    m.content = batch.content;
+                    (m, batch.items)
                 }
             }
         } else {
-            msg
+            (msg, Vec::new())
         };
 
         let permit = match Arc::clone(&semaphore).acquire_owned().await {
@@ -3184,6 +3277,7 @@ async fn run_message_dispatch_loop(
                 task_sequence,
                 permit,
                 worker_inbox,
+                inbox_receipts,
             )
             .await;
         });
