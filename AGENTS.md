@@ -75,6 +75,11 @@ The release binary is fine — 21 MB, because LTO discards what is never
 instantiated. The cost lands on build time and disk, and it compounds: turning
 off 30 of 36 channels changes the dependency graph by 3.5%.
 
+2026-09 update: the inline `#[cfg(test)]` unit-test block moved to
+`zeroclaw-config/src/schema/tests.rs`, leaving `schema.rs` at ~22.5k
+production lines. The rules below still govern the struct body; port
+upstream schema tests into the extracted tests module, not back inline.
+
 So the rule for anything new:
 
 1. **Shared wire/domain types go in `zeroclaw-api`.** It is already the types
