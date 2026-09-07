@@ -1919,6 +1919,7 @@ impl DelegateTool {
             &self.workspace_dir,
             false,
             None,
+            None,
         );
         let system_prompt_ref = enriched_system_prompt.as_deref();
 
@@ -3090,6 +3091,7 @@ impl DelegateTool {
         workspace_dir: &Path,
         sends_native_tool_specs: bool,
         skills_override: Option<&[crate::skills::Skill]>,
+        approval_policy: Option<&ApprovalManager>,
     ) -> Option<String> {
         let mut resolved_agent_config = agent_config.clone();
         resolved_agent_config.resolved = self.resolve_loop_runtime(agent_alias, agent_config);
@@ -3136,6 +3138,15 @@ impl DelegateTool {
         } else {
             XmlToolDispatcher.prompt_instructions(prompt_tools)
         };
+        // Independent delegates run under the target's own ApprovalManager, so
+        // the prompt must state that exact policy — Full contracts and named
+        // `always_ask` exceptions come from the same manager the nested loop's
+        // gate consults. Callers without a manager (bounded delegation,
+        // non-agentic one-shot) keep the generic default guidance.
+        let (autonomy_level, always_ask_values) = match approval_policy {
+            Some(mgr) => (mgr.autonomy_level(), mgr.always_ask_tools()),
+            None => (crate::security::AutonomyLevel::default(), Vec::new()),
+        };
         let ctx = PromptContext {
             workspace_dir,
             agent_workspace_dir: workspace_dir,
@@ -3148,8 +3159,8 @@ impl DelegateTool {
             dispatcher_instructions: &dispatcher_instructions,
             sends_native_tool_specs: sends_native_tool_specs && !prompt_tools.is_empty(),
             security_summary: None,
-            autonomy_level: crate::security::AutonomyLevel::default(),
-            always_ask: &[],
+            autonomy_level,
+            always_ask: &always_ask_values,
             shell_profile,
         };
 
@@ -3424,6 +3435,9 @@ impl DelegateTool {
             prompt_workspace,
             native_tools,
             sub_skills.as_deref(),
+            // Independent targets run under their own manager: state that
+            // exact policy in the prompt. Bounded delegates have none here.
+            approval_manager.as_ref(),
         );
         // Independent delegates surface the target's deferred MCP tools the way a fresh
         // target turn does. See `compose_independent_system_prompt`: it applies the turn
@@ -6900,6 +6914,7 @@ mod tests {
                 Path::new("/tmp"),
                 false,
                 None,
+                None,
             )
             .expect("prompt should render");
         assert!(
@@ -8185,6 +8200,7 @@ mod tests {
                 &workspace,
                 false,
                 None,
+                None,
             )
             .unwrap();
 
@@ -8252,6 +8268,7 @@ mod tests {
                 &workspace,
                 false,
                 Some(&skills),
+                None,
             )
             .unwrap();
 
@@ -8342,6 +8359,7 @@ mod tests {
                 &workspace,
                 false,
                 None,
+                None,
             )
             .unwrap();
 
@@ -8403,6 +8421,7 @@ mod tests {
                 &tools,
                 &workspace,
                 false,
+                None,
                 None,
             )
             .unwrap();
@@ -8498,6 +8517,7 @@ mod tests {
                 &workspace,
                 false,
                 None,
+                None,
             )
             .unwrap();
 
@@ -8590,6 +8610,7 @@ mod tests {
                 &workspace,
                 false,
                 None,
+                None,
             )
             .unwrap();
 
@@ -8630,6 +8651,7 @@ mod tests {
                 &tools,
                 &workspace,
                 false,
+                None,
                 None,
             )
             .unwrap();
@@ -10638,6 +10660,237 @@ command = "echo hi"
         assert_eq!(
             independent.workspace_dir, target_ws,
             "target workspace must resolve to the configured target-workspace path"
+        );
+    }
+
+    /// Captures the system prompt the nested independent loop receives and the
+    /// tool results fed back, then finishes after one tool round.
+    #[derive(Default)]
+    struct FullTargetProbeProvider {
+        system_prompts: std::sync::Mutex<Vec<String>>,
+        tool_messages: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FullTargetProbeProvider {
+        fn system_prompt(&self) -> String {
+            self.system_prompts
+                .lock()
+                .unwrap()
+                .first()
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        fn tool_messages(&self) -> Vec<String> {
+            self.tool_messages.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for FullTargetProbeProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            Ok("unused".to_string())
+        }
+
+        async fn chat(
+            &self,
+            request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<ChatResponse> {
+            if let Some(system) = request
+                .messages
+                .iter()
+                .find(|message| message.role == "system")
+            {
+                self.system_prompts
+                    .lock()
+                    .unwrap()
+                    .push(system.content.clone());
+            }
+            let tool_messages: Vec<String> = request
+                .messages
+                .iter()
+                .filter(|message| message.role == "tool")
+                .map(|message| message.content.clone())
+                .collect();
+            if tool_messages.is_empty() {
+                return Ok(ChatResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "call_echo".to_string(),
+                        name: "shell".to_string(),
+                        arguments: r#"{"command":"echo delegate-full-ran"}"#.to_string(),
+                        extra_content: None,
+                    }],
+                    usage: None,
+                    reasoning_content: None,
+                });
+            }
+            self.tool_messages.lock().unwrap().extend(tool_messages);
+            Ok(ChatResponse {
+                text: Some("done".to_string()),
+                tool_calls: Vec::new(),
+                usage: None,
+                reasoning_content: None,
+            })
+        }
+    }
+
+    impl ::zeroclaw_api::attribution::Attributable for FullTargetProbeProvider {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Provider(
+                ::zeroclaw_api::attribution::ProviderKind::Model(
+                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+                ),
+            )
+        }
+
+        fn alias(&self) -> &str {
+            "FullTargetProbeProvider"
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn independent_full_target_receives_full_prompt_and_executes_uncovered_tool() {
+        // Contract: an independent delegate with an ApprovalManager renders its
+        // prompt from that exact manager. A Full target with no `always_ask`
+        // must see Full prompt wording (not generic Supervised guidance) and
+        // directly execute an uncovered tool.
+        use zeroclaw_config::autonomy::{DelegationMode, DelegationPolicy};
+        use zeroclaw_config::schema::{
+            AliasedAgentConfig, Config, RiskProfileConfig, RuntimeProfileConfig,
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let target_ws = tmp.path().join("target-workspace");
+        std::fs::create_dir_all(&target_ws).unwrap();
+
+        let mut config = Config {
+            data_dir: tmp.path().join("data"),
+            config_path: tmp.path().join("config.toml"),
+            ..Config::default()
+        };
+        config.risk_profiles.insert(
+            "caller".to_string(),
+            RiskProfileConfig {
+                delegation_policy: DelegationPolicy {
+                    mode: DelegationMode::Allow,
+                },
+                ..RiskProfileConfig::default()
+            },
+        );
+        config.risk_profiles.insert(
+            "target".to_string(),
+            RiskProfileConfig {
+                level: zeroclaw_config::autonomy::AutonomyLevel::Full,
+                allowed_tools: vec!["shell".to_string()],
+                ..RiskProfileConfig::default()
+            },
+        );
+        config.runtime_profiles.insert(
+            "agentic".to_string(),
+            RuntimeProfileConfig {
+                agentic: true,
+                max_tool_iterations: 2,
+                ..RuntimeProfileConfig::default()
+            },
+        );
+        config.agents.insert(
+            "caller".to_string(),
+            AliasedAgentConfig {
+                risk_profile: "caller".into(),
+                model_provider: "ollama.caller".into(),
+                delegates: vec![DelegateTargetConfig {
+                    agent: "target".to_string(),
+                    mode: DelegateExecutionMode::Independent,
+                }],
+                ..AliasedAgentConfig::default()
+            },
+        );
+        config.agents.insert(
+            "target".to_string(),
+            AliasedAgentConfig {
+                risk_profile: "target".into(),
+                runtime_profile: "agentic".into(),
+                model_provider: "ollama.target".into(),
+                workspace: zeroclaw_config::multi_agent::AgentWorkspaceConfig {
+                    path: Some(target_ws.clone()),
+                    ..Default::default()
+                },
+                ..AliasedAgentConfig::default()
+            },
+        );
+
+        let config = Arc::new(config);
+        let caller_policy =
+            Arc::new(SecurityPolicy::for_agent(&config, "caller").expect("caller policy resolves"));
+        let delegate = DelegateTool::new(config.agents.clone(), None, caller_policy)
+            .with_root_config(Arc::clone(&config))
+            .with_caller_alias("caller")
+            .with_runtime(Arc::new(NativeRuntime::new()))
+            .with_risk_profiles(config.risk_profiles.clone())
+            .with_runtime_profiles(config.runtime_profiles.clone())
+            .with_parent_tools(Arc::new(RwLock::new(Vec::new())));
+        let target = config.agents.get("target").unwrap();
+        let provider = FullTargetProbeProvider::default();
+
+        let result = delegate
+            .execute_agentic(
+                "target",
+                target,
+                "test",
+                "test-model",
+                &provider,
+                "echo the marker phrase",
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            result.success,
+            "independent Full target must complete: {result:?}"
+        );
+
+        // Prompt side: the enriched prompt states the target manager's exact
+        // Full + empty-always_ask contract, not generic Supervised guidance.
+        let prompt = provider.system_prompt();
+        assert!(
+            prompt
+                .contains("Full autonomy auto-approves tools that are not listed in `always_ask`"),
+            "Full target prompt must state the Full contract, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("No tools are listed in `always_ask`"),
+            "Full target with no always_ask must see the empty-list contract, got: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Ask for approval when the runtime policy requires it"),
+            "Full target must not receive generic Supervised guidance, got: {prompt}"
+        );
+
+        // Enforcement side: the uncovered tool executed directly — the tool
+        // result carries the real command output, not an approval denial.
+        let tool_messages = provider.tool_messages();
+        assert!(
+            tool_messages
+                .iter()
+                .any(|message| message.contains("delegate-full-ran")),
+            "uncovered Full tool must execute and report real output: {tool_messages:?}"
+        );
+        assert!(
+            !tool_messages
+                .iter()
+                .any(|message| message.contains("requires approval")),
+            "uncovered Full tool must not be gated: {tool_messages:?}"
         );
     }
 
