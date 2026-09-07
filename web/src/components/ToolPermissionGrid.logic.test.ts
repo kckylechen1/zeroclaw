@@ -8,6 +8,7 @@ import {
   applyCustomPermission,
   applyStrictMode,
   approvalLevelCaveat,
+  authorizationCopyState,
   effectiveApprovalState,
   effectiveAuthState,
   filterPermissionCatalogEntries,
@@ -120,6 +121,19 @@ test('deny-all flag does not auto-admit MCP names', () => {
     'inherit',
   );
   assert.equal(
+    authorizationCopyState({
+      denyAllTools: value.denyAllTools,
+      strict: true,
+      mcpAutoAdmitted: isMcpAutoAdmitted({
+        name: 'server__tool',
+        strict: true,
+        realAllowSet: current.realAllowSet,
+        excludedSet: current.excludedSet,
+      }),
+    }),
+    'deny-all',
+  );
+  assert.equal(
     effectiveAuthState({
       name: 'shell',
       strict: true,
@@ -128,6 +142,19 @@ test('deny-all flag does not auto-admit MCP names', () => {
     }),
     'inherit',
   );
+});
+
+test('authorization copy state reflects deny-all, MCP admission, and profile mode', () => {
+  const cases = [
+    { denyAllTools: true, strict: true, mcpAutoAdmitted: true, expected: 'deny-all' },
+    { denyAllTools: false, strict: true, mcpAutoAdmitted: true, expected: 'mcp-auto' },
+    { denyAllTools: false, strict: true, mcpAutoAdmitted: false, expected: 'strict' },
+    { denyAllTools: false, strict: false, mcpAutoAdmitted: false, expected: 'open' },
+  ] as const;
+
+  for (const { expected, ...input } of cases) {
+    assert.equal(authorizationCopyState(input), expected);
+  }
 });
 
 test('legacy __none__ sentinel normalizes to the deny-all flag', () => {

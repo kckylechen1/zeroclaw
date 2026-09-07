@@ -39,6 +39,7 @@ import {
   applyCustomPermission,
   applyStrictMode,
   approvalLevelCaveat,
+  authorizationCopyState,
   effectiveApprovalState,
   effectiveAuthState,
   filterPermissionCatalogEntries,
@@ -425,9 +426,11 @@ export default function ToolPermissionGrid({
           <span className="text-[10px] font-semibold uppercase tracking-wider text-pc-text-faint">
             {t('tool_permission_grid.col_authorization')}
             <small className="block font-normal normal-case tracking-normal text-pc-text-faint">
-              {strict
-                ? t('tool_permission_grid.col_authorization_hint_blocked')
-                : t('tool_permission_grid.col_authorization_hint_open')}
+              {value.denyAllTools
+                ? t('tool_permission_grid.col_authorization_hint_deny_all')
+                : strict
+                  ? t('tool_permission_grid.col_authorization_hint_blocked')
+                  : t('tool_permission_grid.col_authorization_hint_open')}
             </small>
           </span>
           <span className="text-[10px] font-semibold uppercase tracking-wider text-pc-text-faint">
@@ -474,6 +477,7 @@ export default function ToolPermissionGrid({
                   key={r.name}
                   row={r}
                   strict={strict}
+                  denyAllTools={value.denyAllTools}
                   disabled={disabled}
                   authState={authState(r.name)}
                   apprState={apprState(r.name)}
@@ -493,6 +497,7 @@ export default function ToolPermissionGrid({
                   key={r.name}
                   row={r}
                   strict={strict}
+                  denyAllTools={value.denyAllTools}
                   disabled={disabled}
                   authState={authState(r.name)}
                   apprState={apprState(r.name)}
@@ -512,6 +517,7 @@ export default function ToolPermissionGrid({
                   key={r.name}
                   row={r}
                   strict={strict}
+                  denyAllTools={value.denyAllTools}
                   disabled={disabled}
                   authState={authState(r.name)}
                   apprState={apprState(r.name)}
@@ -637,6 +643,7 @@ function PermissionRow({
   authState,
   apprState,
   strict,
+  denyAllTools,
   disabled,
   mcpAutoAdmitted,
   alwaysAskWildcardLocked,
@@ -648,6 +655,7 @@ function PermissionRow({
   authState: AuthState;
   apprState: ApprState;
   strict: boolean;
+  denyAllTools: boolean;
   disabled: boolean;
   mcpAutoAdmitted: boolean;
   alwaysAskWildcardLocked: boolean;
@@ -656,6 +664,7 @@ function PermissionRow({
   onAppr: (next: ApprState) => void;
 }) {
   const approvalOnlyWildcard = isApprovalOnlyWildcard(row.name);
+  const authCopyState = authorizationCopyState({ denyAllTools, strict, mcpAutoAdmitted });
   const denied = !approvalOnlyWildcard && authState === 'deny';
   const allowDisabled = disabled || !strict;
   const approvalDisabled = disabled || denied || alwaysAskWildcardLocked;
@@ -685,9 +694,20 @@ function PermissionRow({
       </div>
 
       <div className="flex items-center justify-between gap-2 sm:block">
-        <span className="sm:hidden text-[10px] font-semibold uppercase tracking-wider text-pc-text-faint">
-          {t('tool_permission_grid.col_authorization')}
-        </span>
+        <div className="sm:hidden min-w-0">
+          <span className="block text-[10px] font-semibold uppercase tracking-wider text-pc-text-faint">
+            {t('tool_permission_grid.col_authorization')}
+          </span>
+          <small className="block text-[10px] leading-tight text-pc-text-faint">
+            {authCopyState === 'deny-all'
+              ? t('tool_permission_grid.col_authorization_hint_deny_all')
+              : authCopyState === 'mcp-auto'
+                ? t('tool_permission_grid.auth_inherit_mcp_title')
+                : authCopyState === 'strict'
+                  ? t('tool_permission_grid.col_authorization_hint_blocked')
+                  : t('tool_permission_grid.col_authorization_hint_open')}
+          </small>
+        </div>
         {approvalOnlyWildcard ? (
           <span
             className="inline-flex h-7 items-center text-xs text-pc-text-faint"
@@ -708,11 +728,14 @@ function PermissionRow({
                 icon: Minus,
                 tone: 'neutral',
                 optionDisabled: mcpAutoAdmitted,
-                title: mcpAutoAdmitted
-                  ? t('tool_permission_grid.auth_inherit_mcp_title')
-                  : strict
-                    ? t('tool_permission_grid.auth_inherit_blocked_title')
-                    : t('tool_permission_grid.auth_inherit_open_title'),
+                title:
+                  authCopyState === 'deny-all'
+                    ? t('tool_permission_grid.auth_inherit_deny_all_title')
+                    : authCopyState === 'mcp-auto'
+                      ? t('tool_permission_grid.auth_inherit_mcp_title')
+                      : authCopyState === 'strict'
+                        ? t('tool_permission_grid.auth_inherit_blocked_title')
+                        : t('tool_permission_grid.auth_inherit_open_title'),
               },
               {
                 value: 'allow',

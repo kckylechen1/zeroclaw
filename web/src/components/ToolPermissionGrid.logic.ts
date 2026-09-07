@@ -3,6 +3,7 @@ export const APPROVAL_WILDCARD = '*';
 
 export type AuthState = 'deny' | 'inherit' | 'allow';
 export type ApprState = 'ask' | 'inherit' | 'auto';
+export type AuthorizationCopyState = 'deny-all' | 'mcp-auto' | 'strict' | 'open';
 export type CustomPermissionTarget = AuthState | ApprState;
 
 /** Profile autonomy level. Mirrors the runtime `AutonomyLevel` enum, whose
@@ -103,6 +104,20 @@ export function isMcpToolName(name: string): boolean {
 
 export function isApprovalOnlyWildcard(name: string): boolean {
   return name === APPROVAL_WILDCARD;
+}
+
+export function authorizationCopyState({
+  denyAllTools,
+  strict,
+  mcpAutoAdmitted,
+}: {
+  denyAllTools: boolean;
+  strict: boolean;
+  mcpAutoAdmitted: boolean;
+}): AuthorizationCopyState {
+  if (denyAllTools) return 'deny-all';
+  if (mcpAutoAdmitted) return 'mcp-auto';
+  return strict ? 'strict' : 'open';
 }
 
 export function effectiveAuthState({
