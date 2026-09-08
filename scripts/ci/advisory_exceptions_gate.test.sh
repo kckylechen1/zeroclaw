@@ -72,6 +72,10 @@
 # 68. Non-delimited placeholder expiry tokens fail strictly while normal expiry prose passes.
 # 69. Tool-specific exceptions derive scopes dynamically and reject one-sided additions lacking scope.
 # 70. Fallback baseline fails closed when neither event base nor master exists.
+# 71. Tracking reference without accountable owner fails strictly.
+# 72. Punctuation-only bare handles fail strictly.
+# 73. Contracted negations in lifecycle conditions fail strictly.
+# 74. Non-exclusive multi-tool declarations in one-sided exceptions fail strictly.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -268,7 +272,7 @@ echo "=== Test 14: Free-form review condition passes ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_freeform_review.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review: quarterly" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; review: quarterly" },
 ]
 DENYEOF
 if ! DENY_TOML="$tmp_dir/deny_freeform_review.toml" bash "$gate" >/dev/null 2>&1; then
@@ -280,8 +284,8 @@ echo "=== Test 15: Qualified review due and date conditions pass ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_qualified_review.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review due: 2027-01-01" },
-    { id = "RUSTSEC-2099-0002", reason = "tracking #123; review date: 2027-01-01" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; review due: 2027-01-01" },
+    { id = "RUSTSEC-2099-0002", reason = "owner: @security-team; tracking #123; review date: 2027-01-01" },
 ]
 DENYEOF
 if ! DENY_TOML="$tmp_dir/deny_qualified_review.toml" bash "$gate" >/dev/null 2>&1; then
@@ -342,7 +346,7 @@ cat << 'DENYEOF' > "$tmp_dir/deny_punct_review.toml"
 [advisories]
 ignore = [
     { id = "RUSTSEC-2099-0001", reason = "owner: security-team; review: >= 47.0.5" },
-    { id = "RUSTSEC-2099-0002", reason = "tracking #123; review on #123" },
+    { id = "RUSTSEC-2099-0002", reason = "owner: @security-team; tracking #123; review on #123" },
 ]
 DENYEOF
 if ! DENY_TOML="$tmp_dir/deny_punct_review.toml" bash "$gate" >/dev/null 2>&1; then
@@ -547,7 +551,7 @@ fi
 cat << 'DENYEOF' > "$tmp_dir/deny_past_expiry_fallback.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; expires: 2000-01-01; awaiting upgrade" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; expires: 2000-01-01; awaiting upgrade" },
 ]
 DENYEOF
 set +e
@@ -615,7 +619,7 @@ for resolved_prose in "patched in 1.2.3" "fixed in 1.2.3" "predates 1.0 and is n
     cat << DENYEOF > "$tmp_dir/deny_resolved_prose.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; ${resolved_prose}" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; ${resolved_prose}" },
 ]
 DENYEOF
     set +e
@@ -656,12 +660,12 @@ done
 
 echo "=== Test 33: Explicit malformed or stale expiry declarations override fallbacks ==="
 for bad_expiry in \
-    "tracking #123; expires: TBD; awaiting upgrade" \
-    "tracking #123; expires: none; awaiting upgrade" \
-    "tracking #123; expires: 2026-02-30; awaiting upgrade" \
-    "tracking #123; expires: 2099-01-01; expires: 2000-01-01" \
-    "tracking #123; expires: 2000-01-01; expires: 2099-01-01" \
-    "tracking #123; review due: 2099-01-01; review due: 2000-01-01"; do
+    "owner: @security-team; tracking #123; expires: TBD; awaiting upgrade" \
+    "owner: @security-team; tracking #123; expires: none; awaiting upgrade" \
+    "owner: @security-team; tracking #123; expires: 2026-02-30; awaiting upgrade" \
+    "owner: @security-team; tracking #123; expires: 2099-01-01; expires: 2000-01-01" \
+    "owner: @security-team; tracking #123; expires: 2000-01-01; expires: 2099-01-01" \
+    "owner: @security-team; tracking #123; review due: 2099-01-01; review due: 2000-01-01"; do
     cat << DENYEOF > "$tmp_dir/deny_bad_expiry_override.toml"
 [advisories]
 ignore = [
@@ -680,9 +684,9 @@ done
 
 echo "=== Test 34: Future expiry date does not bypass expired or invalid review date ==="
 for bad_combo in \
-    "tracking #123; expires: 2099-01-01; review: 2000-01-01" \
-    "tracking #123; expires: 2099-01-01; review: 2026-02-30" \
-    "tracking #123; expires: 2099-01-01; review: pending"; do
+    "owner: @security-team; tracking #123; expires: 2099-01-01; review: 2000-01-01" \
+    "owner: @security-team; tracking #123; expires: 2099-01-01; review: 2026-02-30" \
+    "owner: @security-team; tracking #123; expires: 2099-01-01; review: pending"; do
     cat << DENYEOF > "$tmp_dir/deny_expiry_review_combo.toml"
 [advisories]
 ignore = [
@@ -712,7 +716,7 @@ for bad_review in \
     cat << DENYEOF > "$tmp_dir/deny_placeholder_review.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; ${bad_review}" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; ${bad_review}" },
 ]
 DENYEOF
     set +e
@@ -734,7 +738,7 @@ for bad_awaiting in \
     cat << DENYEOF > "$tmp_dir/deny_awaiting_negated.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; ${bad_awaiting}" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; ${bad_awaiting}" },
 ]
 DENYEOF
     set +e
@@ -807,7 +811,7 @@ for bad_norm in \
     cat << DENYEOF > "$tmp_dir/deny_bad_norm_review.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; ${bad_norm}" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; ${bad_norm}" },
 ]
 DENYEOF
     set +e
@@ -824,7 +828,7 @@ done
 cat << 'DENYEOF' > "$tmp_dir/deny_version_review.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review: >= 47.0.5" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; review: >= 47.0.5" },
 ]
 DENYEOF
 DENY_TOML="$tmp_dir/deny_version_review.toml" bash "$gate" >/dev/null
@@ -902,9 +906,9 @@ fi
 
 echo "=== Test 43: Negated or placeholder expiry values fail ==="
 for bad_exp in \
-    "tracking #123; expires: not 2099-01-01" \
-    "tracking #123; expires: TBD 2099-01-01" \
-    "tracking #123; expires: none 2099-01-01"; do
+    "owner: @security-team; tracking #123; expires: not 2099-01-01" \
+    "owner: @security-team; tracking #123; expires: TBD 2099-01-01" \
+    "owner: @security-team; tracking #123; expires: none 2099-01-01"; do
     cat << DENYEOF > "$tmp_dir/deny_bad_exp_val.toml"
 [advisories]
 ignore = [
@@ -931,7 +935,7 @@ for terminal_review in \
     cat << DENYEOF > "$tmp_dir/deny_terminal_review.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; ${terminal_review}" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; ${terminal_review}" },
 ]
 DENYEOF
     set +e
@@ -949,7 +953,7 @@ cat << 'AUDITEOF' > "$tmp_dir/audit_multiline.toml"
 [advisories]
 ignore = [
     "RUSTSEC-2099-0001", # owner: @security-lead; review: quarterly
-    "RUSTSEC-2099-0002", # tracking #123; expires: 2099-01-01
+    "RUSTSEC-2099-0002", # owner: @security-team; tracking #123; expires: 2099-01-01
 ]
 AUDITEOF
 
@@ -961,7 +965,7 @@ owner: @security-lead;
 review: quarterly
 """ },
     { id = "RUSTSEC-2099-0002", reason = '''
-tracking #123;
+owner: @security-team; tracking #123;
 expires: 2099-01-01
 ''' },
 ]
@@ -996,12 +1000,12 @@ done
 
 echo "=== Test 47: Incomplete version review conditions and bare milestone words fail ==="
 for bad_rev in \
-    "tracking #123; review: >= TBD" \
-    "tracking #123; review: vTBD" \
-    "tracking #123; review: when" \
-    "tracking #123; review: when fixed" \
-    "tracking #123; review: when done" \
-    "tracking #123; review: on tbd"; do
+    "owner: @security-team; tracking #123; review: >= TBD" \
+    "owner: @security-team; tracking #123; review: vTBD" \
+    "owner: @security-team; tracking #123; review: when" \
+    "owner: @security-team; tracking #123; review: when fixed" \
+    "owner: @security-team; tracking #123; review: when done" \
+    "owner: @security-team; tracking #123; review: on tbd"; do
     cat << DENYEOF > "$tmp_dir/deny_bad_rev_expr.toml"
 [advisories]
 ignore = [
@@ -1022,20 +1026,20 @@ echo "=== Test 48: Actionable semver requirements and milestone conditions pass 
 cat << 'AUDITEOF' > "$tmp_dir/audit_valid_reviews.toml"
 [advisories]
 ignore = [
-    "RUSTSEC-2099-0001", # tracking #123; review: >= 47.0.5
-    "RUSTSEC-2099-0002", # tracking #123; review: v0.103.13
-    "RUSTSEC-2099-0003", # tracking #123; review: on next release
-    "RUSTSEC-2099-0004", # tracking #123; review: upon upstream migration
+    "RUSTSEC-2099-0001", # owner: @security-team; tracking #123; review: >= 47.0.5
+    "RUSTSEC-2099-0002", # owner: @security-team; tracking #123; review: v0.103.13
+    "RUSTSEC-2099-0003", # owner: @security-team; tracking #123; review: on next release
+    "RUSTSEC-2099-0004", # owner: @security-team; tracking #123; review: upon upstream migration
 ]
 AUDITEOF
 
 cat << 'DENYEOF' > "$tmp_dir/deny_valid_reviews.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review: >= 47.0.5" },
-    { id = "RUSTSEC-2099-0002", reason = "tracking #123; review: v0.103.13" },
-    { id = "RUSTSEC-2099-0003", reason = "tracking #123; review: on next release" },
-    { id = "RUSTSEC-2099-0004", reason = "tracking #123; review: upon upstream migration" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; review: >= 47.0.5" },
+    { id = "RUSTSEC-2099-0002", reason = "owner: @security-team; tracking #123; review: v0.103.13" },
+    { id = "RUSTSEC-2099-0003", reason = "owner: @security-team; tracking #123; review: on next release" },
+    { id = "RUSTSEC-2099-0004", reason = "owner: @security-team; tracking #123; review: upon upstream migration" },
 ]
 DENYEOF
 DENY_TOML="$tmp_dir/deny_valid_reviews.toml" AUDIT_TOML="$tmp_dir/audit_valid_reviews.toml" bash "$gate" >/dev/null
@@ -1044,7 +1048,7 @@ echo "=== Test 49: Undeclared one-sided advisory exceptions fail ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_onesided.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review: quarterly" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; review: quarterly" },
 ]
 DENYEOF
 cat << 'AUDITEOF' > "$tmp_dir/audit_empty.toml"
@@ -1063,7 +1067,7 @@ fi
 cat << 'AUDITEOF' > "$tmp_dir/audit_onesided.toml"
 [advisories]
 ignore = [
-    "RUSTSEC-2099-0001", # tracking #123; review: quarterly
+    "RUSTSEC-2099-0001", # owner: @security-team; tracking #123; review: quarterly
 ]
 AUDITEOF
 cat << 'DENYEOF' > "$tmp_dir/deny_empty.toml"
@@ -1081,9 +1085,9 @@ fi
 
 echo "=== Test 50: Zero-valued issue numbers in tracker or review fail ==="
 for bad_zero in \
-    "tracking #0; review: quarterly" \
-    "tracking #123; review: #0" \
-    "tracking #123; review: on upstream #0"; do
+    "owner: @security-team; tracking #0; review: quarterly" \
+    "owner: @security-team; tracking #123; review: #0" \
+    "owner: @security-team; tracking #123; review: on upstream #0"; do
     cat << DENYEOF > "$tmp_dir/deny_zero_issue.toml"
 [advisories]
 ignore = [
@@ -1104,15 +1108,15 @@ echo "=== Test 51: Multiline strings ending in 4 and 5 quotes pass ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_multiline_quotes.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = """"tracking #123; review: quarterly"""" },
-    { id = "RUSTSEC-2099-0002", reason = ''''tracking #123; expires: 2099-01-01'''' },
+    { id = "RUSTSEC-2099-0001", reason = """"owner: @security-team; tracking #123; review: quarterly"""" },
+    { id = "RUSTSEC-2099-0002", reason = ''''owner: @security-team; tracking #123; expires: 2099-01-01'''' },
 ]
 DENYEOF
 cat << 'AUDITEOF' > "$tmp_dir/audit_multiline_quotes.toml"
 [advisories]
 ignore = [
-    "RUSTSEC-2099-0001", # "tracking #123; review: quarterly"
-    "RUSTSEC-2099-0002", # 'tracking #123; expires: 2099-01-01'
+    "RUSTSEC-2099-0001", # "owner: @security-team; tracking #123; review: quarterly"
+    "RUSTSEC-2099-0002", # 'owner: @security-team; tracking #123; expires: 2099-01-01'
 ]
 AUDITEOF
 DENY_TOML="$tmp_dir/deny_multiline_quotes.toml" AUDIT_TOML="$tmp_dir/audit_multiline_quotes.toml" bash "$gate" >/dev/null
@@ -1192,9 +1196,9 @@ fi
 
 echo "=== Test 55: Negated and ambiguous tool scope markers in one-sided exceptions fail ==="
 for bad_scope in \
-    "not cargo-deny only; tracking #123; review: quarterly" \
-    "cargo-deny is affected; tracking #123; review: quarterly" \
-    "affects cargo-deny; tracking #123; review: quarterly"; do
+    "not cargo-deny only; owner: @security-team; tracking #123; review: quarterly" \
+    "cargo-deny is affected; owner: @security-team; tracking #123; review: quarterly" \
+    "affects cargo-deny; owner: @security-team; tracking #123; review: quarterly"; do
     cat << DENYEOF > "$tmp_dir/deny_bad_scope.toml"
 [advisories]
 ignore = [
@@ -1215,17 +1219,17 @@ done
 cat << 'DENYEOF' > "$tmp_dir/deny_valid_scope.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "cargo-deny only; tracking #123; review: quarterly" },
+    { id = "RUSTSEC-2099-0001", reason = "cargo-deny only; owner: @security-team; tracking #123; review: quarterly" },
 ]
 DENYEOF
 DENY_TOML="$tmp_dir/deny_valid_scope.toml" AUDIT_TOML="$tmp_dir/audit_empty.toml" bash "$gate" >/dev/null
 
 echo "=== Test 56: Malformed tracking-reference suffixes fail strictly ==="
 for bad_track in \
-    "tracking #123oops; review: quarterly" \
-    "tracking #123_bad; review: quarterly" \
-    "tracking #123; review: #456oops" \
-    "tracking #123; review: on upstream #456oops"; do
+    "owner: @security-team; tracking #123oops; review: quarterly" \
+    "owner: @security-team; tracking #123_bad; review: quarterly" \
+    "owner: @security-team; tracking #123; review: #456oops" \
+    "owner: @security-team; tracking #123; review: on upstream #456oops"; do
     cat << DENYEOF > "$tmp_dir/deny_bad_track_suffix.toml"
 [advisories]
 ignore = [
@@ -1246,21 +1250,21 @@ echo "=== Test 57: Expiration prose without deadline delimiter passes ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_expiry_prose.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "certificate expires unexpectedly; tracking #123; awaiting fix" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; certificate expires unexpectedly; tracking #123; awaiting fix" },
 ]
 DENYEOF
 cat << 'AUDITEOF' > "$tmp_dir/audit_expiry_prose.toml"
 [advisories]
 ignore = [
-    "RUSTSEC-2099-0001", # certificate expires unexpectedly; tracking #123; awaiting fix
+    "RUSTSEC-2099-0001", # owner: @security-team; certificate expires unexpectedly; tracking #123; awaiting fix
 ]
 AUDITEOF
 DENY_TOML="$tmp_dir/deny_expiry_prose.toml" AUDIT_TOML="$tmp_dir/audit_expiry_prose.toml" bash "$gate" >/dev/null
 
 echo "=== Test 58: Multi-date review conditions with expired date fail ==="
 for bad_multidate in \
-    "tracking #123; review: 2099-01-01 or 2000-01-01" \
-    "tracking #123; review: by 2099-01-01, expired 2000-01-01"; do
+    "owner: @security-team; tracking #123; review: 2099-01-01 or 2000-01-01" \
+    "owner: @security-team; tracking #123; review: by 2099-01-01, expired 2000-01-01"; do
     cat << DENYEOF > "$tmp_dir/deny_multidate.toml"
 [advisories]
 ignore = [
@@ -1314,13 +1318,13 @@ echo "=== Test 60: Valid TOML table headers and quoted keys pass ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_toml_headers.toml"
 [ advisories ]
 "ignore" = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review: quarterly" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; review: quarterly" },
 ]
 DENYEOF
 cat << 'AUDITEOF' > "$tmp_dir/audit_toml_headers.toml"
 ["advisories"]
 'ignore' = [
-    "RUSTSEC-2099-0001", # tracking #123; review: quarterly
+    "RUSTSEC-2099-0001", # owner: @security-team; tracking #123; review: quarterly
 ]
 AUDITEOF
 DENY_TOML="$tmp_dir/deny_toml_headers.toml" AUDIT_TOML="$tmp_dir/audit_toml_headers.toml" bash "$gate" >/dev/null
@@ -1349,9 +1353,9 @@ fi
 
 echo "=== Test 63: Non-delimited expiry prose passes without false failure ==="
 for valid_prose in \
-    "certificate expired at runtime; tracking #123; awaiting fix" \
-    "certificate expires on reconnect; tracking #123; awaiting fix" \
-    "cache expiry date handling panics; tracking #123; awaiting fix"; do
+    "owner: @security-team; certificate expired at runtime; tracking #123; awaiting fix" \
+    "owner: @security-team; certificate expires on reconnect; tracking #123; awaiting fix" \
+    "owner: @security-team; cache expiry date handling panics; tracking #123; awaiting fix"; do
     cat << DENYEOF > "$tmp_dir/deny_expiry_prose_cases.toml"
 [advisories]
 ignore = [
@@ -1524,10 +1528,10 @@ done
 
 echo "=== Test 68: Non-delimited placeholder expiry tokens fail strictly ==="
 for bad_expiry in \
-    "tracking #123; expires TBD; awaiting fix" \
-    "tracking #123; expires never; awaiting fix" \
-    "tracking #123; expires none; awaiting fix" \
-    "tracking #123; expiry todo; awaiting fix"; do
+    "owner: @security-team; tracking #123; expires TBD; awaiting fix" \
+    "owner: @security-team; tracking #123; expires never; awaiting fix" \
+    "owner: @security-team; tracking #123; expires none; awaiting fix" \
+    "owner: @security-team; tracking #123; expiry todo; awaiting fix"; do
     cat << DENYEOF > "$tmp_dir/deny_bad_expiry_token.toml"
 [advisories]
 ignore = [
@@ -1548,7 +1552,7 @@ done
 cat << 'DENYEOF' > "$tmp_dir/deny_expiry_prose_pass.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "tracking #123; expired at runtime; awaiting fix" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; tracking #123; expired at runtime; awaiting fix" },
 ]
 DENYEOF
 DENY_TOML="$tmp_dir/deny_expiry_prose_pass.toml" bash "$gate" >/dev/null
@@ -1557,7 +1561,7 @@ echo "=== Test 69: Tool-specific exceptions derive scopes dynamically and reject
 cat << 'DENYEOF' > "$tmp_dir/deny_0253_no_scope.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2026-0253", reason = "upstream fix pending; tracking #8519" },
+    { id = "RUSTSEC-2026-0253", reason = "upstream fix pending; owner: @security-team; tracking zeroclaw-labs/zeroclaw#8519" },
 ]
 DENYEOF
 cat << 'AUDITEOF' > "$tmp_dir/audit_empty_69.toml"
@@ -1576,7 +1580,7 @@ fi
 cat << 'DENYEOF' > "$tmp_dir/deny_0253_with_scope.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2026-0253", reason = "upstream fix pending; tracking #8519; cargo-deny only" },
+    { id = "RUSTSEC-2026-0253", reason = "upstream fix pending; owner: @security-team; tracking zeroclaw-labs/zeroclaw#8519; cargo-deny only" },
 ]
 DENYEOF
 DENY_TOML="$tmp_dir/deny_0253_with_scope.toml" AUDIT_TOML="$tmp_dir/audit_empty_69.toml" bash "$gate" >/dev/null
@@ -1616,5 +1620,82 @@ if [ "$status" -ne 1 ]; then
     echo "FAIL: Expected failure on unreviewed entry in non-master repo without baseline fallback, got status $status" >&2
     exit 1
 fi
+
+echo "=== Test 71: Tracking reference without accountable owner fails strictly ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_tracker_only.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review: quarterly" },
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_tracker_only.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure when tracking reference lacks accountable owner, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 72: Punctuation-only bare handles fail strictly ==="
+for bad_punct in "@_" "@-" "@__" "@--"; do
+    cat << DENYEOF > "$tmp_dir/deny_punct_handle.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "assigned to ${bad_punct}; review: quarterly" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_punct_handle.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on punctuation-only handle '${bad_punct}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 73: Contracted negations in lifecycle conditions fail strictly ==="
+for bad_contraction in \
+    "owner: @security-team; isn't awaiting fix" \
+    "owner: @security-team; doesn't have upstream fix pending" \
+    "owner: @security-team; won't fix" \
+    "owner: @security-team; cannot be fixed"; do
+    cat << DENYEOF > "$tmp_dir/deny_contracted_negation.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_contraction}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_contracted_negation.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on contracted negation '${bad_contraction}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 74: Non-exclusive multi-tool declarations in one-sided exceptions fail strictly ==="
+for bad_multi_scope in \
+    "scope: cargo-deny and cargo-audit; owner: @security-team; review: quarterly" \
+    "cargo-deny and cargo-audit only; owner: @security-team; review: quarterly" \
+    "scope: cargo-audit and cargo-deny; owner: @security-team; review: quarterly"; do
+    cat << DENYEOF > "$tmp_dir/deny_multi_scope.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_multi_scope}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_multi_scope.toml" AUDIT_TOML="$tmp_dir/audit_empty.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on non-exclusive scope '${bad_multi_scope}', got status $status" >&2
+        exit 1
+    fi
+done
 
 echo "All advisory_exceptions_gate self-tests passed cleanly."

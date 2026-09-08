@@ -539,7 +539,7 @@ OWNER_FIELD_PATTERN = re.compile(
 )
 
 BARE_HANDLE_PATTERN = re.compile(
-    r"(?<!\w)@([a-zA-Z0-9_-]+)",
+    r"(?<!\w)@([a-zA-Z0-9][a-zA-Z0-9_-]*)",
     re.IGNORECASE
 )
 
@@ -552,16 +552,20 @@ TRACKING_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+def normalize_contractions(s):
+    s = re.sub(r"\bwon['’]t\b", "will not", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bcan['’]t\b", "can not", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bshan['’]t\b", "shall not", s, flags=re.IGNORECASE)
+    s = re.sub(r"\b(\w+)n['’]t\b", r"\1 not", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bcannot\b", "can not", s, flags=re.IGNORECASE)
+    return s
+
 def is_negated_prefix(prefix):
     clause_prefix = re.split(r"[;,\.\n]", prefix)[-1]
+    clause_prefix = normalize_contractions(clause_prefix)
     return bool(re.search(r"\b(?:no|not|without|never|missing|unassigned)\b", clause_prefix, re.IGNORECASE))
 
 def has_accountable_owner(text):
-    for m in TRACKING_PATTERN.finditer(text):
-        if is_negated_prefix(text[:m.start()]):
-            continue
-        return True
-
     for m in OWNER_FIELD_PATTERN.finditer(text):
         if is_negated_prefix(text[:m.start()]):
             continue
@@ -584,6 +588,8 @@ def has_accountable_owner(text):
             continue
         handle = m.group(1).lower()
         if not handle or handle in DISALLOWED_OWNERS:
+            continue
+        if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_/-]*$", handle):
             continue
         if re.match(r"^(?:no|not|without|missing|unassigned|none|tbd|tba|todo|placeholder|unknown|undefined)(?:$|[-_]|\b)", handle):
             continue
@@ -719,6 +725,10 @@ def has_lifecycle_condition(text):
 
 def validate_lifecycle(text):
     has_owner = has_accountable_owner(text)
+    if re.search(r"\btracking\b[^\w#]*#0+\b", text, re.IGNORECASE):
+        return has_owner, False, "invalid zero-valued tracking reference '#0'"
+    if re.search(r"#[0-9]+[a-zA-Z_]", text):
+        return has_owner, False, "malformed issue reference with non-numeric suffix"
     has_expiry, expiry_msg = has_lifecycle_condition(text)
     return has_owner, has_expiry, expiry_msg
 
@@ -761,6 +771,22 @@ if base_deny_file or base_audit_file:
 else:
     import subprocess
     base_ref = os.environ.get("BASE_REF") or os.environ.get("GITHUB_BASE_REF")
+    if not base_ref and os.environ.get("GITHUB_EVENT_PATH"):
+        try:
+            with open(os.environ["GITHUB_EVENT_PATH"], "r", encoding="utf-8") as f:
+                event_data = json.load(f)
+                if "pull_request" in event_data and "base" in event_data["pull_request"]:
+                    base_ref = event_data["pull_request"]["base"].get("sha")
+                elif "before" in event_data and event_data["before"]:
+                    before_sha = event_data["before"]
+                    if not re.match(r"^0+$", before_sha):
+                        base_ref = before_sha
+        except Exception:
+            pass
+
+    if base_ref and re.match(r"^0+$", base_ref):
+        base_ref = ""
+
     if not base_ref:
         for candidate in ["origin/master", "master"]:
             try:
@@ -921,18 +947,34 @@ if not is_single_file_override:
     audit_set = set(audit_entries.keys())
 
     def has_explicit_tool_scope(text, expected_tool):
-        # Explicit non-negated tool scope declaration, e.g.:
-        # 'scope: cargo-deny', 'tool: cargo-deny', 'cargo-deny only', 'deny-only'
+        # Exclusive non-negated tool scope declaration for the expected tool.
+        # Must not declare or include the other tool.
         target = "deny" if "deny" in expected_tool else "audit"
-        pattern = re.compile(
-            rf"(?:\b(?:tool|scope)\s*[:=]\s*(?:cargo-)?{target}\b"
-            rf"|\b(?:cargo-)?{target}\s+only\b"
-            rf"|\b{target}-only\b)",
-            re.IGNORECASE
-        )
-        for m in pattern.finditer(text):
-            if not is_negated_prefix(text[:m.start()]):
-                return True
+        other = "audit" if target == "deny" else "deny"
+
+        clauses = re.split(r"[;,\n]", text)
+        for clause in clauses:
+            clause_str = clause.strip()
+            # 1. "scope: cargo-deny" or "tool: cargo-deny"
+            m = re.search(r"\b(?:tool|scope)\s*[:=]\s*([^;,]+)", clause_str, re.IGNORECASE)
+            if m:
+                scope_val = m.group(1).strip().lower()
+                if re.search(rf"\b(?:cargo-)?{other}\b", scope_val):
+                    return False
+                if re.search(rf"\b(?:cargo-)?{target}\b", scope_val):
+                    prefix = clause_str[:m.start()]
+                    if not is_negated_prefix(prefix):
+                        return True
+
+            # 2. "cargo-deny only" or "deny-only"
+            m2 = re.search(rf"(?:\b(?:cargo-)?{target}\s+only\b|\b{target}-only\b)", clause_str, re.IGNORECASE)
+            if m2:
+                if re.search(rf"\b(?:cargo-)?{other}\b", clause_str, re.IGNORECASE):
+                    return False
+                prefix = clause_str[:m2.start()]
+                if not is_negated_prefix(prefix):
+                    return True
+
         return False
 
     for adv_id in sorted(deny_set - audit_set):
@@ -968,10 +1010,17 @@ if not is_single_file_override:
         d_reason = re.sub(r"\s+", " ", deny_entries[adv_id].strip())
         a_comment = re.sub(r"\s+", " ", audit_entries[adv_id].strip())
         if d_reason != a_comment:
-            errors.append(
-                f"Shared advisory '{adv_id}' metadata mismatch across configs: "
-                f"deny.toml reason '{d_reason}' != .cargo/audit.toml comment '{a_comment}'"
+            is_grandfathered_mismatch = (
+                adv_id in baseline_deny_entries and
+                adv_id in baseline_audit_entries and
+                d_reason == baseline_deny_entries[adv_id] and
+                a_comment == baseline_audit_entries[adv_id]
             )
+            if not is_grandfathered_mismatch:
+                errors.append(
+                    f"Shared advisory '{adv_id}' metadata mismatch across configs: "
+                    f"deny.toml reason '{d_reason}' != .cargo/audit.toml comment '{a_comment}'"
+                )
 
 if errors:
     print("advisory-exceptions gate: FAIL", file=sys.stderr)

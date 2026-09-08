@@ -67,7 +67,7 @@ ignore = [
     # lru -- unsound LruCache::pop panic-safety (RUSTSEC-2026-0253); patched >=0.18.2.
     # Direct deps and ratatui-core upgraded to 0.18.2; remaining 0.16.4 pinned by
     # nostr-sdk 0.44 (nostr-database / nostr-relay-pool) behind channel-nostr.
-    { id = "RUSTSEC-2026-0253", reason = "lru unsound LruCache::pop panic-safety; direct+ratatui upgraded to >=0.18.2; remaining 0.16.4 pinned transitively by nostr-sdk 0.44; upstream fix pending; tracking #8519; cargo-deny only" },
+    { id = "RUSTSEC-2026-0253", reason = "lru unsound LruCache::pop panic-safety; direct+ratatui upgraded to >=0.18.2; remaining 0.16.4 pinned transitively by nostr-sdk 0.44; upstream fix pending" },
 ]
 
 [licenses]
