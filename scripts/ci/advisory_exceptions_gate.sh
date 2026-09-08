@@ -548,7 +548,7 @@ DISALLOWED_REVIEWS = {
 }
 
 OWNER_FIELD_PATTERN = re.compile(
-    r"\b(?:owner|maintainer)\b(?:\s*[:=]\s*|\s+@)([^;,]+)",
+    r"\b(?:owner|maintainer)\b(?:\s*[:=]\s*|\s+@)([^;,\r\n]+)",
     re.IGNORECASE
 )
 
@@ -575,7 +575,7 @@ def normalize_contractions(s):
     return s
 
 def is_negated_prefix(prefix):
-    clause_prefix = re.split(r"[;,\.\n]", prefix)[-1]
+    clause_prefix = re.split(r"[;,\.\r\n]", prefix)[-1]
     clause_prefix = normalize_contractions(clause_prefix)
     return bool(re.search(r"\b(?:no|not|without|never|missing|unassigned|former|previous|past|prior|ex|old)\b", clause_prefix, re.IGNORECASE))
 
@@ -583,9 +583,9 @@ def get_owner_clause_spans(text):
     spans = []
     for m in re.finditer(r"\b(?:owner|maintainer)\b", text, re.IGNORECASE):
         start = 0
-        for delim in re.finditer(r"[;,\n]", text[:m.start()]):
+        for delim in re.finditer(r"[;,\r\n]", text[:m.start()]):
             start = delim.end()
-        next_delim = re.search(r"[;,\n]", text[m.end():])
+        next_delim = re.search(r"[;,\r\n]", text[m.end():])
         if next_delim:
             end = m.end() + next_delim.start()
         else:
@@ -595,13 +595,17 @@ def get_owner_clause_spans(text):
 
 def has_accountable_owner(text):
     # Reject contradictory negated owner declarations across the complete reason
-    for clause_raw in re.split(r"[;\n]", text):
+    for clause_raw in re.split(r"[;\r\n]+", text):
         c_norm = normalize_contractions(clause_raw.strip()).lower()
         if not c_norm:
             continue
-        if re.search(r"\b(?:owner|maintainer)\b(?:\s*[:=]|\s+is)?\s*(?:none|unassigned|placeholder|tbd|tba|todo|unknown|undefined|not\s+assigned|not\s+responsible|no\b|not\b|nobody|false)\b", c_norm):
+        if re.search(r"\b(?:owner|maintainer)\b(?:\s*[:=]|\s+(?:is|was))\s*(?:none|unassigned|placeholder|tbd|tba|todo|unknown|undefined|not\s+assigned|not\s+responsible|no\b|not\b|nobody|false)\b", c_norm):
             return False
-        if re.search(r"\b(?:no\s+(?:accountable\s+)?(?:owner|maintainer)|not\s+owned|unowned|unassigned\s+owner|no\s+owner\s+(?:is\s+)?assigned|not\s+responsible|not\s+an\s+owner)\b", c_norm):
+        if re.search(r"\b(?:no\s+(?:accountable\s+|assigned\s+|responsible\s+)?(?:owner|maintainer)|unassigned\s+owner|no\s+owner\s+(?:is\s+)?assigned|not\s+an?\s+owner|(?:advisory|exception)\s+(?:is\s+)?(?:unowned|not\s+owned))\b", c_norm):
+            return False
+        if re.search(r"\b(?:nobody\s+is\s+responsible|no\s+one\s+is\s+responsible|(?:owner|maintainer)\s+is\s+not\s+responsible|not\s+responsible\s+(?:owner|maintainer))\b", c_norm):
+            return False
+        if re.match(r"^\s*not\s+responsible\s*$", c_norm) or re.search(r"\b(?:disclaim(?:s|ed)?|no)\s+(?:ownership|responsibility)\b", c_norm):
             return False
 
     has_owner = False
@@ -645,18 +649,18 @@ def has_accountable_owner(text):
 
 
 EXPIRY_FIELD_PATTERN = re.compile(
-    r"\b(?:expires?|expiry|expired)(?:(?:\s+(?:on|at|by|date))\b)?(?:(?:\s*[:=]\s*([^;,]*))|(?:\s+(?=(?:\d{4}-\d{2}-\d{2}|tbd|tba|todo|none|never|unknown|undefined|placeholder|no|not|without)\b)([^;,]*)))",
+    r"\b(?:expires?|expiry|expired)(?:(?:\s+(?:on|at|by|date))\b)?(?:(?:\s*[:=]\s*([^;,\r\n]*))|(?:\s+(?=(?:\d{4}-\d{2}-\d{2}|tbd|tba|todo|none|never|unknown|undefined|placeholder|no|not|without)\b)([^;,\r\n]*)))",
     re.IGNORECASE
 )
 
 REVIEW_CONDITION_PATTERN = re.compile(
-    r"(?:\breview\b(?:\s+(?:by|due|before|at|on|date)\b\s*[:=]?|\s*[:=])|\brevisit\b\s+(?:when|after|on|at)\b\s+)([^;\n]+?)(?=(?:,\s*(?:owner|maintainer|tracking|scope|tool|expires?|expiry)\b|[;\n]|$))",
+    r"(?:\breview\b(?:\s+(?:by|due|before|at|on|date)\b\s*[:=]?|\s*[:=])|\brevisit\b\s+(?:when|after|on|at)\b\s+)([^;\r\n]+?)(?=(?:,\s*(?:owner|maintainer|tracking|scope|tool|expires?|expiry)\b|[;\r\n]|$))",
     re.IGNORECASE
 )
 
 LIFECYCLE_OTHER_PATTERN = re.compile(
     r"(?:"
-    r"\bawaiting\b\s+(?:(?!(?:no|not|without|never)\b)[\w-]+\s+)*(?:migration|upgrade|fix|cleanup|upstream)\b"
+    r"\bawaiting\b\s+(?:(?!(?:no|not|without|never|none|tbd|tba|todo|placeholder|unknown|undefined|unassigned)\b)[\w-]+\s+)*(?:migration|upgrade|fix|cleanup|upstream)\b"
     r"|\b(?:upstream\s+)?fix\s+pending\b"
     r"|\bno\s+compatible\s+fix\b(?:\s+in\s+[\w.-]+)?"
     r")",
@@ -669,13 +673,21 @@ def has_lifecycle_condition(text):
     has_valid_milestone = False
 
     # Check for contradictory negated review clauses anywhere in text (e.g. "review: quarterly; no review required")
-    for clause_raw in re.split(r"[;\n]", text):
+    for clause_raw in re.split(r"[;\r\n]+", text):
         c_norm = normalize_contractions(clause_raw.strip()).lower()
         if not c_norm:
             continue
-        if re.search(r"\b(?:no\s+(?:further\s+)?review|not\s+(?:currently\s+)?reviewing|review\s+(?:is\s+)?not\s+required|review\s+(?:is\s+)?not\s+needed|no\s+review\s+(?:required|needed|planned)|review\s+(?:is\s+)?unnecessary|not\s+required|not\s+needed|unnecessary|not\s+applicable|no\s+longer\s+(?:needed|required))\b", c_norm):
-            if LIFECYCLE_OTHER_PATTERN.search(clause_raw):
-                continue
+        if re.search(
+            r"(?:"
+            r"\bno\s+(?:further\s+|more\s+|active\s+)?(?:review|revisit|audit|recheck|expiry|expiration)\b"
+            r"|\b(?:review|revisit|audit|recheck|expiry|expiration)\b(?:\s+(?:is|was|will\s+be))?\s*[:=]?\s*(?:not\s+(?:required|needed|planned|applicable|expected)|unnecessary|none|never|false|n/a|waived)\b"
+            r"|\bnot\s+(?:currently\s+|actively\s+)?(?:reviewing|revisiting|auditing)\b"
+            r"|\b(?:will\s+)?never\s+(?:be\s+)?(?:reviewed|revisited|audited)\b"
+            r"|\bwithout\s+(?:a\s+|any\s+|further\s+)?(?:review|audit|expiry)\b"
+            r"|\bwaive\s+(?:the\s+)?(?:review|audit)\b"
+            r")",
+            c_norm
+        ) or re.match(r"^\s*(?:(?:it|this|that)\s+(?:is\s+)?)?(?:not\s+(?:required|needed|planned|applicable)|unnecessary)\s*$", c_norm):
             return False, f"contradictory negated review clause '{clause_raw.strip()}'"
 
     # 1. Validate every explicit expiry declaration.
@@ -727,15 +739,18 @@ def has_lifecycle_condition(text):
             return False, f"invalid zero-valued issue reference in review condition '{raw_cond}'"
         if re.search(r"#[0-9]+[a-zA-Z_]", norm_cond):
             return False, f"malformed issue reference in review condition '{raw_cond}'"
-        dates = re.findall(r"\b(\d{4}-\d{2}-\d{2})\b", clean_cond)
-        if dates:
-            for date_str in dates:
+
+        date_like_tokens = re.findall(r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b", clean_cond)
+        if date_like_tokens:
+            for token in date_like_tokens:
+                if not re.match(r"^\d{4}-\d{2}-\d{2}$", token):
+                    return False, f"malformed date '{token}' in review condition (expected YYYY-MM-DD)"
                 try:
-                    rev_date = datetime.date.fromisoformat(date_str)
+                    rev_date = datetime.date.fromisoformat(token)
                 except ValueError:
-                    return False, f"invalid calendar date '{date_str}' in review condition"
+                    return False, f"invalid calendar date '{token}' in review condition"
                 if rev_date < today:
-                    return False, f"review date expired on {date_str} (current date is {today.isoformat()})"
+                    return False, f"review date expired on {token} (current date is {today.isoformat()})"
             has_valid_review = True
             continue
 
@@ -764,7 +779,7 @@ def has_lifecycle_condition(text):
             remainder = milestone_m.group(1).strip()
             if not re.match(r"^(?:no|not|never|without|none|tbd|tba|todo|placeholder|unknown|undefined|unassigned|fixed|patched|resolved|wontfix|completed|done|finished|passed|approved|closed|obsolete|retired)\b", remainder):
                 if not re.search(r"#[0-9]+[a-zA-Z_]", remainder):
-                    if re.search(r"(?:#[1-9]\d*(?!\w)|\b\d+(?:\.\d+)*\b|\b(?:release|releases|upgrade|upgrades|migration|migrations|update|updates|cleanup|cleanups|sprint|sprints|quarter|quarters|audit|audits|patch|patches|pr|prs|fix|fixes|replacement|replacements|landing|lands|landed|publish|published|merge|merged)\b)", remainder):
+                    if re.search(r"(?:#[1-9]\d*(?!\w)|\bv?\d+\.\d+(?:\.[0-9a-zA-Z*_-]+)*\b|\b(?:release|releases|upgrade|upgrades|migration|migrations|update|updates|cleanup|cleanups|sprint|sprints|quarter|quarters|audit|audits|patch|patches|pr|prs|fix|fixes|replacement|replacements|landing|lands|landed|publish|published|merge|merged)\b)", remainder):
                         is_milestone = True
         elif re.search(r"^\b(?:next\s+(?:release|sprint|quarter|audit|update))\b$", norm_cond):
             is_milestone = True
@@ -777,11 +792,14 @@ def has_lifecycle_condition(text):
     # 3. Check recognized milestone / ongoing conditions
     for m in LIFECYCLE_OTHER_PATTERN.finditer(text):
         c_start = 0
-        for delim in re.finditer(r"[;\n]", text[:m.start()]):
+        for delim in re.finditer(r"[;\r\n]", text[:m.start()]):
             c_start = delim.end()
-        next_delim = re.search(r"[;\n]", text[m.end():])
+        next_delim = re.search(r"[;\r\n]", text[m.end():])
         c_end = m.end() + next_delim.start() if next_delim else len(text)
         containing_clause = text[c_start:c_end]
+
+        if re.search(r"\b(?:none|tbd|tba|todo|placeholder|unknown|undefined|unassigned)\b", containing_clause, re.IGNORECASE):
+            continue
 
         prefix = containing_clause[:m.start() - c_start]
         suffix = containing_clause[m.end() - c_start:]
@@ -794,7 +812,7 @@ def has_lifecycle_condition(text):
             continue
 
         matched_text = m.group(0).lower()
-        if matched_text.startswith("awaiting") and re.search(r"\b(?:no|not|without|never)\b", matched_text):
+        if matched_text.startswith("awaiting") and re.search(r"\b(?:no|not|without|never|none|tbd|tba|todo|placeholder|unknown|undefined|unassigned)\b", matched_text):
             continue
         has_valid_milestone = True
 

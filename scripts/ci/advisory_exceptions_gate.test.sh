@@ -2000,6 +2000,99 @@ if [ "$status" -ne 1 ]; then
     exit 1
 fi
 
+echo "=== Test 87: Placeholder words in awaiting milestones fail strictly ==="
+for bad_awaiting_placeholder in \
+    "owner: @alice; awaiting tbd upstream" \
+    "owner: @alice; awaiting unknown fix" \
+    "owner: @alice; awaiting placeholder upgrade" \
+    "owner: @alice; awaiting none migration" \
+    "owner: @alice; awaiting unassigned cleanup"; do
+    cat << DENYEOF > "$tmp_dir/deny_awaiting_placeholder.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_awaiting_placeholder}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_awaiting_placeholder.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on awaiting placeholder '${bad_awaiting_placeholder}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 88: Review negation subject specificity ==="
+# 1. Rationale with negation about vulnerability does not reject valid review
+cat << DENYEOF > "$tmp_dir/deny_vuln_rationale.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "authentication is not required for exploitation; owner: @alice; review: quarterly" },
+]
+DENYEOF
+DENY_TOML="$tmp_dir/deny_vuln_rationale.toml" bash "$gate" >/dev/null
+
+# 2. Explicit review opt-out fails strictly even alongside valid review cadence
+cat << DENYEOF > "$tmp_dir/deny_review_optout.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @alice; review: quarterly; no review required while awaiting fix" },
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_review_optout.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on explicit review opt-out clause, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 89: Malformed and invalid dates in review conditions fail strictly ==="
+for bad_review_date in \
+    "owner: @alice; review: on 2026-13-1" \
+    "owner: @alice; review: on 2026-2-30" \
+    "owner: @alice; review: on 2026-02-30" \
+    "owner: @alice; review: on 2026/05/12"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_review_date.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_review_date}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_review_date.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on malformed review date '${bad_review_date}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 90: Multiline TOML string with owner and review on separate lines passes ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_multiline_fields.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = """
+owner: @security-team
+review: quarterly
+""" },
+]
+DENYEOF
+DENY_TOML="$tmp_dir/deny_multiline_fields.toml" bash "$gate" >/dev/null
+
+echo "=== Test 91: Non-owner domain rationale with 'not owned' or 'not responsible' passes ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_domain_negation.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "buffer is not owned by the guest; owner: @alice; review: quarterly" },
+    { id = "RUSTSEC-2099-0002", reason = "local code is not responsible for the panic; owner: @alice; review: quarterly" },
+]
+DENYEOF
+DENY_TOML="$tmp_dir/deny_domain_negation.toml" bash "$gate" >/dev/null
+
 echo "All advisory_exceptions_gate self-tests passed cleanly."
 
 
