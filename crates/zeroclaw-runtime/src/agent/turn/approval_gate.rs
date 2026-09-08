@@ -255,7 +255,7 @@ mod tests {
     fn full_always_ask_profile() -> RiskProfileConfig {
         RiskProfileConfig {
             level: AutonomyLevel::Full,
-            always_ask: vec!["shell".into()],
+            always_ask: vec![" shell ".into()],
             ..RiskProfileConfig::default()
         }
     }

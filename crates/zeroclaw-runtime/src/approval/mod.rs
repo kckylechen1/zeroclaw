@@ -100,12 +100,21 @@ pub struct ApprovalManager {
     audit_log: Mutex<Vec<ApprovalLogEntry>>,
 }
 
+fn normalized_always_ask(entries: &[String]) -> HashSet<String> {
+    entries
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 impl ApprovalManager {
     /// Create an interactive (CLI) approval manager from a risk profile.
     pub fn from_risk_profile(risk_profile: &RiskProfileConfig) -> Self {
         Self {
             auto_approve: risk_profile.auto_approve.iter().cloned().collect(),
-            always_ask: risk_profile.always_ask.iter().cloned().collect(),
+            always_ask: normalized_always_ask(&risk_profile.always_ask),
             autonomy_level: risk_profile.level,
             non_interactive: false,
             non_interactive_shell_requires_approval: false,
@@ -117,7 +126,7 @@ impl ApprovalManager {
     pub fn for_non_interactive(risk_profile: &RiskProfileConfig) -> Self {
         Self {
             auto_approve: risk_profile.auto_approve.iter().cloned().collect(),
-            always_ask: risk_profile.always_ask.iter().cloned().collect(),
+            always_ask: normalized_always_ask(&risk_profile.always_ask),
             autonomy_level: risk_profile.level,
             non_interactive: true,
             non_interactive_shell_requires_approval: false,
@@ -129,7 +138,7 @@ impl ApprovalManager {
     pub fn for_non_interactive_backchannel(risk_profile: &RiskProfileConfig) -> Self {
         Self {
             auto_approve: risk_profile.auto_approve.iter().cloned().collect(),
-            always_ask: risk_profile.always_ask.iter().cloned().collect(),
+            always_ask: normalized_always_ask(&risk_profile.always_ask),
             autonomy_level: risk_profile.level,
             non_interactive: true,
             non_interactive_shell_requires_approval: true,
@@ -151,7 +160,7 @@ impl ApprovalManager {
     pub fn derive_for_risk_profile(&self, risk_profile: &RiskProfileConfig) -> Self {
         Self {
             auto_approve: risk_profile.auto_approve.iter().cloned().collect(),
-            always_ask: risk_profile.always_ask.iter().cloned().collect(),
+            always_ask: normalized_always_ask(&risk_profile.always_ask),
             autonomy_level: risk_profile.level,
             non_interactive: self.non_interactive,
             non_interactive_shell_requires_approval: self.non_interactive_shell_requires_approval,
@@ -585,7 +594,7 @@ mod tests {
         // lists a tool wants a prompt regardless of autonomy level.
         let mgr = ApprovalManager::from_risk_profile(&RiskProfileConfig {
             level: AutonomyLevel::Full,
-            always_ask: vec!["shell".into()],
+            always_ask: vec![" shell ".into(), "shell".into(), "   ".into()],
             ..RiskProfileConfig::default()
         });
         assert!(
@@ -597,13 +606,18 @@ mod tests {
             !mgr.needs_approval("file_write"),
             "uncovered tool should be auto-approved under Full autonomy"
         );
+        assert_eq!(
+            mgr.always_ask_tools(),
+            vec!["shell"],
+            "prompt rendering must receive the same canonical entry as enforcement"
+        );
     }
 
     #[test]
     fn full_autonomy_wildcard_always_ask_prompts_for_everything() {
         let mgr = ApprovalManager::from_risk_profile(&RiskProfileConfig {
             level: AutonomyLevel::Full,
-            always_ask: vec!["*".into()],
+            always_ask: vec![" * ".into()],
             ..RiskProfileConfig::default()
         });
         assert!(mgr.needs_approval("shell"));
@@ -863,7 +877,7 @@ mod tests {
 
     #[test]
     fn non_interactive_full_autonomy_honors_exact_always_ask() {
-        let profile = full_always_ask_config(&["shell"], &[]);
+        let profile = full_always_ask_config(&[" shell "], &[]);
         for mgr in [
             ApprovalManager::for_non_interactive(&profile),
             ApprovalManager::for_non_interactive_backchannel(&profile),
@@ -881,7 +895,7 @@ mod tests {
 
     #[test]
     fn non_interactive_full_autonomy_honors_wildcard_always_ask() {
-        let profile = full_always_ask_config(&["*"], &[]);
+        let profile = full_always_ask_config(&[" * "], &[]);
         for mgr in [
             ApprovalManager::for_non_interactive(&profile),
             ApprovalManager::for_non_interactive_backchannel(&profile),
@@ -915,6 +929,19 @@ mod tests {
         let mgr = ApprovalManager::for_non_interactive(&config);
         // ReadOnly blocks execution elsewhere; approval manager does not prompt.
         assert!(!mgr.needs_approval("shell"));
+    }
+
+    #[test]
+    fn derived_manager_normalizes_always_ask() {
+        let parent = ApprovalManager::for_non_interactive(&RiskProfileConfig::default());
+        let profile = full_always_ask_config(&[" shell "], &[]);
+        let derived = parent.derive_for_risk_profile(&profile);
+
+        assert_eq!(
+            derived.approval_requirement("shell"),
+            ApprovalRequirement::Prompt
+        );
+        assert_eq!(derived.always_ask_tools(), vec!["shell"]);
     }
 
     #[test]

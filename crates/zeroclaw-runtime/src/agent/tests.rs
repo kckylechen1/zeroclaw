@@ -1175,7 +1175,7 @@ async fn construction_boundary_full_always_ask_prompt_matches_enforcement() {
     // the runtime behavior cannot diverge.
     let profile = RiskProfileConfig {
         level: AutonomyLevel::Full,
-        always_ask: vec!["shell".into()],
+        always_ask: vec![" shell ".into()],
         ..RiskProfileConfig::default()
     };
     let (shell_tool, shell_executions) = RecordingShellTool::new();
