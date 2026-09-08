@@ -28,8 +28,12 @@
 # 24. Invalid calendar dates in expiry conditions are rejected.
 # 25. Placeholder or negated review conditions are rejected.
 # 26. Multi-word placeholder owners are rejected.
-# 27. Comment in audit.toml missing fails.
-# 28. Missing config file fails strictly with exit status 2.
+# 27. Generic upstream phrases without a concrete crate or tracking issue fail.
+# 28. Expired lifecycle dates in the past fail.
+# 29. Negated review conditions and milestones fail.
+# 30. Invalid calendar dates in review conditions fail.
+# 31. Comment in audit.toml missing fails.
+# 32. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -466,7 +470,90 @@ DENYEOF
     fi
 done
 
-echo "=== Test 27: Missing comment in audit.toml fails ==="
+echo "=== Test 27: Generic upstream phrases without concrete crate or tracking issue fail ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_generic_upstream.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "transitive dep; awaiting fix" },
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_generic_upstream.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected validation failure status 1 on generic 'transitive dep' without crate or issue, got $status" >&2
+    exit 1
+fi
+
+echo "=== Test 28: Expired lifecycle dates in the past fail ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_past_expiry.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @team; expires: 2000-01-01" },
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_past_expiry.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on expired date 2000-01-01, got status $status" >&2
+    exit 1
+fi
+
+cat << 'DENYEOF' > "$tmp_dir/deny_past_review.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @team; review due: 2000-01-01" },
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_past_review.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on past review date 2000-01-01, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 29: Negated review conditions and milestones fail ==="
+for bad_lifecycle in "no review: quarterly" "not awaiting fix" "no upstream fix pending"; do
+    cat << DENYEOF > "$tmp_dir/deny_negated_lifecycle.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @team; ${bad_lifecycle}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_negated_lifecycle.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on negated lifecycle '${bad_lifecycle}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 30: Invalid calendar dates in review conditions fail ==="
+for bad_date in "review due: 2026-02-30" "review: 2026-99-99" "revisit after 2026-13-01"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_review_date.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @team; ${bad_date}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_review_date.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on invalid review date '${bad_date}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 31: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -478,7 +565,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 28: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 32: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?

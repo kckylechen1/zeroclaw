@@ -34,6 +34,9 @@ python3 - "$audit_toml" "$deny_toml" <<'PYEOF'
 import sys
 import re
 import datetime
+import os
+
+today = datetime.date.fromisoformat(os.environ["GATE_CURRENT_DATE"]) if "GATE_CURRENT_DATE" in os.environ else datetime.date.today()
 
 audit_path = sys.argv[1]
 deny_path = sys.argv[2]
@@ -337,8 +340,6 @@ TRACKING_PATTERN = re.compile(
 UPSTREAM_PATTERN = re.compile(
     r"(?:"
     r"\b(?:transitive\s+via|pinned\s+(?:transitively\s+)?by|direct\s+dep)\s+[\w-]+"
-    r"|\btransitive\s+(?:macro|derive)\s+helper\b"
-    r"|\btransitive\s+dep\b"
     r"|\bawaiting\s+[\w-]+\s+upstream\b"
     r")",
     re.IGNORECASE
@@ -403,14 +404,22 @@ LIFECYCLE_OTHER_PATTERN = re.compile(
 
 def has_lifecycle_condition(text):
     for m in EXPIRY_DATE_PATTERN.finditer(text):
+        prefix = text[:m.start()]
+        if re.search(r"\b(?:no|not|without|never)\s+$", prefix, re.IGNORECASE):
+            continue
         date_str = m.group(1)
         try:
-            datetime.date.fromisoformat(date_str)
-            return True
+            exp_date = datetime.date.fromisoformat(date_str)
         except ValueError:
-            pass
+            continue
+        if exp_date < today:
+            continue
+        return True
 
     for m in REVIEW_CONDITION_PATTERN.finditer(text):
+        prefix = text[:m.start()]
+        if re.search(r"\b(?:no|not|without|never)\s+$", prefix, re.IGNORECASE):
+            continue
         raw_cond = m.group(1).strip()
         clean_cond = re.sub(r"\s+", " ", raw_cond).lower()
         if not re.search(r"[a-zA-Z0-9]", clean_cond):
@@ -419,9 +428,20 @@ def has_lifecycle_condition(text):
             continue
         if re.match(r"^(?:no|not|never|without)\b", clean_cond):
             continue
+        date_m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", clean_cond)
+        if date_m:
+            try:
+                rev_date = datetime.date.fromisoformat(date_m.group(1))
+            except ValueError:
+                continue
+            if rev_date < today:
+                continue
         return True
 
-    if LIFECYCLE_OTHER_PATTERN.search(text):
+    for m in LIFECYCLE_OTHER_PATTERN.finditer(text):
+        prefix = text[:m.start()]
+        if re.search(r"\b(?:no|not|without|never)\s+$", prefix, re.IGNORECASE):
+            continue
         return True
 
     return False
