@@ -20,13 +20,32 @@ repo_root="${REPO_ROOT:-$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/
 audit_toml="${AUDIT_TOML:-$repo_root/.cargo/audit.toml}"
 deny_toml="${DENY_TOML:-$repo_root/deny.toml}"
 
-BASE_REF="${BASE_REF:-origin/master}"
-if [ -z "${BASE_REF:-}" ] || ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
-    if git rev-parse --verify master >/dev/null 2>&1; then
-        BASE_REF="master"
-    else
-        BASE_REF=""
+if [ -z "${BASE_REF:-}" ]; then
+    if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then
+        event_base_sha=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.get('pull_request', {}).get('base', {}).get('sha', ''))" "$GITHUB_EVENT_PATH" 2>/dev/null || true)
+        if [ -n "$event_base_sha" ] && git rev-parse --verify "$event_base_sha" >/dev/null 2>&1; then
+            BASE_REF="$event_base_sha"
+        fi
     fi
+    if [ -z "${BASE_REF:-}" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+        if git rev-parse --verify "origin/$GITHUB_BASE_REF" >/dev/null 2>&1; then
+            BASE_REF="origin/$GITHUB_BASE_REF"
+        elif git rev-parse --verify "$GITHUB_BASE_REF" >/dev/null 2>&1; then
+            BASE_REF="$GITHUB_BASE_REF"
+        fi
+    fi
+    if [ -z "${BASE_REF:-}" ]; then
+        if git rev-parse --verify origin/master >/dev/null 2>&1; then
+            BASE_REF="origin/master"
+        elif git rev-parse --verify master >/dev/null 2>&1; then
+            BASE_REF="master"
+        else
+            BASE_REF=""
+        fi
+    fi
+fi
+if [ -n "${BASE_REF:-}" ] && ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
+    BASE_REF=""
 fi
 export BASE_REF
 
@@ -570,7 +589,7 @@ def has_accountable_owner(text):
     return False
 
 EXPIRY_FIELD_PATTERN = re.compile(
-    r"\b(?:expires?|expiry|expired)(?:(?:\s+(?:on|at|by|date))\b\s*[:=]?|\s*[:=]\s*|\s+(?=\d{4}-\d{2}-\d{2}\b))([^;,]*)",
+    r"\b(?:expires?|expiry|expired)(?:(?:\s+(?:on|at|by|date))\b)?(?:(?:\s*[:=]\s*([^;,]*))|(?:\s+(?=\d{4}-\d{2}-\d{2}\b)([^;,]*)))",
     re.IGNORECASE
 )
 
@@ -598,7 +617,7 @@ def has_lifecycle_condition(text):
     for m in EXPIRY_FIELD_PATTERN.finditer(text):
         if is_negated_prefix(text[:m.start()]):
             continue
-        raw_val = m.group(1).strip()
+        raw_val = (m.group(1) or m.group(2) or "").strip()
         if not raw_val:
             return False, "invalid or empty expiry deadline"
         clean_val = re.sub(r"^[\s\"']+|[\s\"']+$", "", raw_val).strip()
@@ -866,7 +885,7 @@ else:
             norm_comment = re.sub(r"\s+", " ", comment or "")
             is_grandfathered = (
                 adv_id in baseline_audit_entries and
-                (norm_comment == baseline_audit_entries[adv_id] or not baseline_audit_entries[adv_id])
+                norm_comment == baseline_audit_entries[adv_id]
             )
             if not is_grandfathered:
                 if not comment:

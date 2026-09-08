@@ -64,6 +64,9 @@
 # 60. Valid TOML table headers and quoted keys pass.
 # 61. Comment in audit.toml missing fails.
 # 62. Missing config file fails strictly with exit status 2.
+# 63. Non-delimited expiry prose passes without false failure.
+# 64. Modifying audit entry with empty baseline comment without compliant review metadata fails.
+# 65. GITHUB_BASE_REF and GITHUB_EVENT_PATH resolve base commit for stacked PRs.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -1336,6 +1339,125 @@ status=$?
 set -e
 if [ "$status" -ne 2 ]; then
     echo "FAIL: Expected status 2 for missing config file, got $status" >&2
+    exit 1
+fi
+
+echo "=== Test 63: Non-delimited expiry prose passes without false failure ==="
+for valid_prose in \
+    "certificate expired at runtime; tracking #123; awaiting fix" \
+    "certificate expires on reconnect; tracking #123; awaiting fix" \
+    "cache expiry date handling panics; tracking #123; awaiting fix"; do
+    cat << DENYEOF > "$tmp_dir/deny_expiry_prose_cases.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${valid_prose}" },
+]
+DENYEOF
+    cat << AUDITEOF > "$tmp_dir/audit_expiry_prose_cases.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # ${valid_prose}
+]
+AUDITEOF
+    DENY_TOML="$tmp_dir/deny_expiry_prose_cases.toml" AUDIT_TOML="$tmp_dir/audit_expiry_prose_cases.toml" bash "$gate" >/dev/null
+done
+
+echo "=== Test 64: Modifying audit entry with empty baseline comment without compliant review metadata fails ==="
+cat << 'BASEEOF' > "$tmp_dir/base_audit_uncommented.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001",
+]
+BASEEOF
+cat << 'DENYEOF' > "$tmp_dir/deny_empty.toml"
+[advisories]
+ignore = []
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_arbitrary_comment.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # cargo-audit only; arbitrary changed rationale without owner or review
+]
+AUDITEOF
+set +e
+BASE_AUDIT_TOML="$tmp_dir/base_audit_uncommented.toml" BASE_DENY_TOML="$tmp_dir/deny_empty.toml" \
+AUDIT_TOML="$tmp_dir/audit_arbitrary_comment.toml" DENY_TOML="$tmp_dir/deny_empty.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure when modifying uncommented baseline audit entry without compliant review metadata, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 65: GITHUB_BASE_REF and GITHUB_EVENT_PATH resolve base commit for stacked PRs ==="
+stacked_git_dir="$tmp_dir/stacked_repo"
+mkdir -p "$stacked_git_dir/.cargo"
+git -C "$stacked_git_dir" init -q -b master
+git -C "$stacked_git_dir" config user.email "ci@example.com"
+git -C "$stacked_git_dir" config user.name "CI"
+
+cat << 'AUDITEOF' > "$stacked_git_dir/.cargo/audit.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # cargo-audit only; legacy unmaintained; tracking #8519
+]
+AUDITEOF
+cat << 'DENYEOF' > "$stacked_git_dir/deny.toml"
+[advisories]
+ignore = []
+DENYEOF
+git -C "$stacked_git_dir" add .
+git -C "$stacked_git_dir" commit -qm "master baseline with grandfathered exception"
+
+# Parent branch removes the exception
+git -C "$stacked_git_dir" checkout -qb parent
+cat << 'AUDITEOF' > "$stacked_git_dir/.cargo/audit.toml"
+[advisories]
+ignore = []
+AUDITEOF
+git -C "$stacked_git_dir" commit -qam "remove exception in parent PR"
+parent_sha=$(git -C "$stacked_git_dir" rev-parse HEAD)
+
+# Child branch re-adds the exception without review metadata
+git -C "$stacked_git_dir" checkout -qb child
+cat << 'AUDITEOF' > "$stacked_git_dir/.cargo/audit.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # cargo-audit only; legacy unmaintained; tracking #8519
+]
+AUDITEOF
+git -C "$stacked_git_dir" commit -qam "re-add unreviewed exception in child PR"
+
+# 0. When evaluated against master baseline, it passes because it matches master
+(cd "$stacked_git_dir" && REPO_ROOT="$stacked_git_dir" BASE_REF="master" bash "$gate" >/dev/null)
+
+# 1. When evaluated against GITHUB_BASE_REF=parent, it must fail because the exception is new relative to parent
+set +e
+(cd "$stacked_git_dir" && REPO_ROOT="$stacked_git_dir" BASE_REF="" GITHUB_BASE_REF="parent" bash "$gate" >/dev/null 2>&1)
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure when stacked child re-adds exception against GITHUB_BASE_REF=parent, got status $status" >&2
+    exit 1
+fi
+
+# 2. When evaluated using GITHUB_EVENT_PATH with base SHA of parent, it must also fail
+event_json="$tmp_dir/event.json"
+cat << EVENTEOF > "$event_json"
+{
+  "pull_request": {
+    "base": {
+      "sha": "$parent_sha"
+    }
+  }
+}
+EVENTEOF
+set +e
+(cd "$stacked_git_dir" && REPO_ROOT="$stacked_git_dir" BASE_REF="" GITHUB_EVENT_PATH="$event_json" GITHUB_BASE_REF="" bash "$gate" >/dev/null 2>&1)
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure when stacked child re-adds exception against GITHUB_EVENT_PATH base sha, got status $status" >&2
     exit 1
 fi
 

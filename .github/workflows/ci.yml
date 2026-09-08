@@ -190,6 +190,8 @@ jobs:
           bash scripts/ci/wire_budget_exception_gate.test.sh
           bash scripts/ci/wire_budget_exception_gate.sh
       - name: Advisory exceptions gate (explicit lifecycle for audit/deny exceptions)
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.base_ref || '' }}
         run: |
           bash scripts/ci/advisory_exceptions_gate.test.sh
           bash scripts/ci/advisory_exceptions_gate.sh
