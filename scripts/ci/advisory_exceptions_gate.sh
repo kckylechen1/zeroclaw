@@ -563,7 +563,21 @@ def normalize_contractions(s):
 def is_negated_prefix(prefix):
     clause_prefix = re.split(r"[;,\.\n]", prefix)[-1]
     clause_prefix = normalize_contractions(clause_prefix)
-    return bool(re.search(r"\b(?:no|not|without|never|missing|unassigned)\b", clause_prefix, re.IGNORECASE))
+    return bool(re.search(r"\b(?:no|not|without|never|missing|unassigned|former|previous|past|prior|ex|old)\b", clause_prefix, re.IGNORECASE))
+
+def get_owner_clause_spans(text):
+    spans = []
+    for m in re.finditer(r"\b(?:owner|maintainer)\b", text, re.IGNORECASE):
+        start = 0
+        for delim in re.finditer(r"[;,\n]", text[:m.start()]):
+            start = delim.end()
+        next_delim = re.search(r"[;,\n]", text[m.end():])
+        if next_delim:
+            end = m.end() + next_delim.start()
+        else:
+            end = len(text)
+        spans.append((start, end))
+    return spans
 
 def has_accountable_owner(text):
     for m in OWNER_FIELD_PATTERN.finditer(text):
@@ -583,7 +597,10 @@ def has_accountable_owner(text):
             continue
         return True
 
+    owner_clause_spans = get_owner_clause_spans(text)
     for m in BARE_HANDLE_PATTERN.finditer(text):
+        if any(start <= m.start() < end for start, end in owner_clause_spans):
+            continue
         if is_negated_prefix(text[:m.start()]):
             continue
         handle = m.group(1).lower()
@@ -597,13 +614,14 @@ def has_accountable_owner(text):
 
     return False
 
+
 EXPIRY_FIELD_PATTERN = re.compile(
     r"\b(?:expires?|expiry|expired)(?:(?:\s+(?:on|at|by|date))\b)?(?:(?:\s*[:=]\s*([^;,]*))|(?:\s+(?=(?:\d{4}-\d{2}-\d{2}|tbd|tba|todo|none|never|unknown|undefined|placeholder|no|not|without)\b)([^;,]*)))",
     re.IGNORECASE
 )
 
 REVIEW_CONDITION_PATTERN = re.compile(
-    r"(?:\breview\b(?:\s+(?:by|due|before|at|on|date)\b\s*[:=]?|\s*[:=])|\brevisit\b\s+(?:when|after|on|at)\b\s+)([^;,]+)",
+    r"(?:\breview\b(?:\s+(?:by|due|before|at|on|date)\b\s*[:=]?|\s*[:=])|\brevisit\b\s+(?:when|after|on|at)\b\s+)([^;\n]+?)(?=(?:,\s*(?:owner|maintainer|tracking|scope|tool|expires?|expiry)\b|[;\n]|$))",
     re.IGNORECASE
 )
 
@@ -659,7 +677,12 @@ def has_lifecycle_condition(text):
 
         if norm_cond in DISALLOWED_REVIEWS or clean_cond in DISALLOWED_REVIEWS:
             return False, f"placeholder or invalid review condition '{raw_cond}'"
-        if re.match(r"^(?:no|not|never|without|none|tbd|tba|todo|pending|placeholder|unknown|undefined|unassigned|fixed|patched|resolved|wontfix|open|in\s+progress|later|soon|future|closed|completed|done|finished|passed|approved|obsolete|retired)\b", norm_cond):
+
+        norm_cond_norm = normalize_contractions(norm_cond)
+        if re.search(r"\b(?:no|not|never|without|none|tbd|tba|todo|placeholder|unknown|undefined|unassigned|wontfix|obsolete|retired)\b", norm_cond_norm, re.IGNORECASE):
+            return False, f"placeholder or negated review condition '{raw_cond}'"
+
+        if re.match(r"^(?:pending|open|in\s+progress|later|soon|future|closed|completed|done|finished|passed|approved)\b", norm_cond):
             return False, f"placeholder or invalid review condition '{raw_cond}'"
         if re.search(r"#0+\b", norm_cond):
             return False, f"invalid zero-valued issue reference in review condition '{raw_cond}'"
@@ -686,7 +709,10 @@ def has_lifecycle_condition(text):
             if not re.search(r"\b(?:tbd|tba|todo|placeholder|unknown|none|undefined)\b", norm_cond, re.IGNORECASE):
                 is_version = True
 
-        is_cadence = bool(re.search(r"\b(?:quarterly|monthly|weekly|bi-weekly|semi-annually|annually|daily)\b", norm_cond))
+        is_cadence = bool(re.match(
+            r"^(?:(?:every|each|on\s+a)\s+)?(?:quarterly|monthly|weekly|bi-weekly|semi-annually|annually|daily|quarter|month|week|year)(?:\s+(?:review|cadence|basis|cycle))?$",
+            norm_cond
+        ))
         is_tracker = bool(re.match(
             r"^(?:(?:on|upon|via|in|at)\s+)?(?:(?:upstream|local|repo|issue|pr|ticket)\s+)?(?:#[1-9]\d*(?!\w)|https?://[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_./#?=&%-]*)?)$",
             norm_cond
@@ -701,7 +727,7 @@ def has_lifecycle_condition(text):
                 if not re.search(r"#[0-9]+[a-zA-Z_]", remainder):
                     if re.search(r"(?:#[1-9]\d*(?!\w)|\b\d+(?:\.\d+)*\b|\b(?:release|releases|upgrade|upgrades|migration|migrations|update|updates|cleanup|cleanups|sprint|sprints|quarter|quarters|audit|audits|patch|patches|pr|prs)\b)", remainder):
                         is_milestone = True
-        elif re.search(r"\b(?:next\s+(?:release|sprint|quarter|audit|update))\b", norm_cond):
+        elif re.search(r"^\b(?:next\s+(?:release|sprint|quarter|audit|update))\b$", norm_cond):
             is_milestone = True
 
         if not (is_version or is_cadence or is_milestone or is_tracker):
@@ -952,30 +978,42 @@ if not is_single_file_override:
         target = "deny" if "deny" in expected_tool else "audit"
         other = "audit" if target == "deny" else "deny"
 
-        clauses = re.split(r"[;,\n]", text)
-        for clause in clauses:
-            clause_str = clause.strip()
-            # 1. "scope: cargo-deny" or "tool: cargo-deny"
-            m = re.search(r"\b(?:tool|scope)\s*[:=]\s*([^;,]+)", clause_str, re.IGNORECASE)
-            if m:
-                scope_val = m.group(1).strip().lower()
-                if re.search(rf"\b(?:cargo-)?{other}\b", scope_val):
-                    return False
-                if re.search(rf"\b(?:cargo-)?{target}\b", scope_val):
-                    prefix = clause_str[:m.start()]
-                    if not is_negated_prefix(prefix):
-                        return True
+        target_pattern = re.compile(rf"\b(?:cargo-)?{target}\b", re.IGNORECASE)
+        other_pattern = re.compile(rf"\b(?:cargo-)?{other}\b", re.IGNORECASE)
+        shorthand_pattern = re.compile(r"\b(?:cargo-)?(?:deny|audit)(?:-only|\s+only)\b", re.IGNORECASE)
 
-            # 2. "cargo-deny only" or "deny-only"
-            m2 = re.search(rf"(?:\b(?:cargo-)?{target}\s+only\b|\b{target}-only\b)", clause_str, re.IGNORECASE)
-            if m2:
-                if re.search(rf"\b(?:cargo-)?{other}\b", clause_str, re.IGNORECASE):
-                    return False
-                prefix = clause_str[:m2.start()]
-                if not is_negated_prefix(prefix):
-                    return True
+        found_target_scope = False
 
-        return False
+        # 1. Inspect all explicit scope / tool field declarations
+        for m in re.finditer(r"\b(?:tool|scope)\b\s*[:=]\s*([^;\n]+)", text, re.IGNORECASE):
+            scope_val = m.group(1).strip().lower()
+            prefix = text[:m.start()]
+            clause_prefix = re.split(r"[;,\.\n]", prefix)[-1]
+            if is_negated_prefix(clause_prefix):
+                continue
+            # If the scope declaration references the other tool, it is not exclusive to target
+            if other_pattern.search(scope_val):
+                return False
+            # Check target in scope_val ensuring it is not negated
+            for tm in target_pattern.finditer(scope_val):
+                val_prefix = scope_val[:tm.start()]
+                if is_negated_prefix(val_prefix):
+                    continue
+                found_target_scope = True
+
+        # 2. Inspect shorthand "<tool> only" or "<tool>-only"
+        for m in shorthand_pattern.finditer(text):
+            clause = m.group(0).lower()
+            prefix = text[:m.start()]
+            clause_prefix = re.split(r"[;,\.\n]", prefix)[-1]
+            if is_negated_prefix(clause_prefix):
+                continue
+            if other_pattern.search(clause):
+                return False
+            if target_pattern.search(clause):
+                found_target_scope = True
+
+        return found_target_scope
 
     for adv_id in sorted(deny_set - audit_set):
         reason = deny_entries[adv_id]

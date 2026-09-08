@@ -1698,4 +1698,84 @@ DENYEOF
     fi
 done
 
+echo "=== Test 75: Negated tails in review conditions fail strictly ==="
+for bad_review_tail in \
+    "review: quarterly but not required" \
+    "review: quarterly, but not required" \
+    "review: quarterly not required" \
+    "review: quarterly isn't required" \
+    "review: quarterly won't happen" \
+    "review: quarterly cannot be done" \
+    "review: quarterly - placeholder" \
+    "review: quarterly - tbd" \
+    "review: quarterly - unassigned" \
+    "review: on release but not planned" \
+    "review: on release but not required"; do
+    cat << DENYEOF > "$tmp_dir/deny_review_tail.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; ${bad_review_tail}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_review_tail.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on review with negated tail '${bad_review_tail}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 76: Invalid owner clauses and former/previous owner prefixes fail strictly ==="
+for bad_owner_clause in \
+    "owner: @alice is not responsible; review: quarterly" \
+    "owner: @alice isn't responsible; review: quarterly" \
+    "former owner: @alice; review: quarterly" \
+    "previous owner: @alice; review: quarterly" \
+    "ex-owner: @alice; review: quarterly" \
+    "past owner: @alice; review: quarterly" \
+    "owner: not @alice; review: quarterly" \
+    "not owner: @alice; review: quarterly" \
+    "owner: @alice (former owner); review: quarterly"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_owner_clause.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_owner_clause}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_owner_clause.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on invalid owner clause '${bad_owner_clause}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 77: Multi-tool scope declarations across clauses fail strictly ==="
+for bad_multi_clause_scope in \
+    "scope: cargo-deny, cargo-audit; owner: @security-team; review: quarterly" \
+    "scope: cargo-deny; scope: cargo-audit; owner: @security-team; review: quarterly" \
+    "scope: cargo-deny; tool: cargo-audit; owner: @security-team; review: quarterly" \
+    "cargo-deny only, cargo-audit only; owner: @security-team; review: quarterly" \
+    "scope: cargo-deny; cargo-audit only; owner: @security-team; review: quarterly"; do
+    cat << DENYEOF > "$tmp_dir/deny_multi_clause_scope.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_multi_clause_scope}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_multi_clause_scope.toml" AUDIT_TOML="$tmp_dir/audit_empty.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on multi-clause scope '${bad_multi_clause_scope}', got status $status" >&2
+        exit 1
+    fi
+done
+
 echo "All advisory_exceptions_gate self-tests passed cleanly."
+
