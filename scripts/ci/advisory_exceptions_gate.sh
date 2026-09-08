@@ -311,7 +311,7 @@ DISALLOWED_OWNERS = {
     "nobody", "no body", "no one", "no-one", "no_one", "not assigned",
     "not yet assigned", "unknown", "assigned", "undefined", "anyone", "someone",
     "pending", "false", "empty", "blank", "missing", "unspecified", "no owner",
-    "no maintainer", "not yet", "wontfix"
+    "no maintainer", "not yet", "wontfix", "upstream", "transitive", "dep"
 }
 
 DISALLOWED_REVIEWS = {
@@ -339,22 +339,36 @@ TRACKING_PATTERN = re.compile(
 
 UPSTREAM_PATTERN = re.compile(
     r"(?:"
-    r"\b(?:transitive\s+via|pinned\s+(?:transitively\s+)?by|direct\s+dep)\s+[\w-]+"
-    r"|\bawaiting\s+[\w-]+\s+upstream\b"
+    r"\b(?:transitive\s+via|pinned\s+(?:transitively\s+)?by|direct\s+dep)\s+([a-zA-Z0-9_-]+)"
+    r"|\bawaiting\s+([a-zA-Z0-9_-]+)\s+upstream\b"
     r")",
     re.IGNORECASE
 )
 
+def is_negated_prefix(prefix):
+    clause_prefix = re.split(r"[;,]", prefix)[-1]
+    return bool(re.search(r"\b(?:no|not|without|never|missing|unassigned)\b", clause_prefix, re.IGNORECASE))
+
 def has_accountable_owner(text):
-    if TRACKING_PATTERN.search(text):
+    for m in TRACKING_PATTERN.finditer(text):
+        if is_negated_prefix(text[:m.start()]):
+            continue
         return True
-    if UPSTREAM_PATTERN.search(text):
+
+    for m in UPSTREAM_PATTERN.finditer(text):
+        if is_negated_prefix(text[:m.start()]):
+            continue
+        crate = (m.group(1) or m.group(2) or "").strip().lower()
+        if not crate or crate in DISALLOWED_OWNERS:
+            continue
+        if re.match(r"^(?:no|not|without|none|unassigned|unknown|placeholder|tbd|todo)\b", crate):
+            continue
+        if len(crate) < 2 or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_/-]*$", crate):
+            continue
         return True
 
     for m in OWNER_FIELD_PATTERN.finditer(text):
-        start_idx = m.start()
-        prefix = text[:start_idx]
-        if re.search(r"\b(?:no|without|missing|unassigned|not)\s+$", prefix, re.IGNORECASE):
+        if is_negated_prefix(text[:m.start()]):
             continue
         raw_val = m.group(1).strip()
         clean_val = re.sub(r"\s+", " ", raw_val.lstrip("@")).strip().lower()
@@ -371,21 +385,16 @@ def has_accountable_owner(text):
         return True
 
     for m in BARE_HANDLE_PATTERN.finditer(text):
+        if is_negated_prefix(text[:m.start()]):
+            continue
         handle = m.group(1).lower()
         if handle not in DISALLOWED_OWNERS and len(handle) > 0:
-            start_idx = m.start()
-            prefix = text[:start_idx]
-            if not re.search(r"\b(?:no|without|missing|not)\s+(?:an?\s+)?(?:owner|maintainer)?\s*[:=]?\s*$", prefix, re.IGNORECASE):
-                return True
+            return True
 
     return False
 
-def is_negated_prefix(prefix):
-    clause_prefix = re.split(r"[;,]", prefix)[-1]
-    return bool(re.search(r"\b(?:no|not|without|never)\b", clause_prefix, re.IGNORECASE))
-
-EXPIRY_DATE_PATTERN = re.compile(
-    r"\b(?:expires?|expiry)\b\s*[:=]?\s*(\d{4}-\d{2}-\d{2})\b",
+EXPIRY_FIELD_PATTERN = re.compile(
+    r"\b(?:expires?|expiry)(?:\s+(?:on|at|by|date))?\b(?:\s*[:=]\s*|\s*)([^;,]*)",
     re.IGNORECASE
 )
 
@@ -404,25 +413,33 @@ LIFECYCLE_OTHER_PATTERN = re.compile(
 )
 
 def has_lifecycle_condition(text):
-    # 1. Check explicit expiry keywords.
+    # 1. Check explicit expiry declarations.
+    # Every declared deadline must be a valid, unexpired calendar date.
     # An invalid or expired deadline strictly fails and cannot be overridden by fallback markers.
-    has_expiry_kw = False
-    for m in EXPIRY_DATE_PATTERN.finditer(text):
+    has_valid_expiry = False
+    for m in EXPIRY_FIELD_PATTERN.finditer(text):
         if is_negated_prefix(text[:m.start()]):
             continue
-        has_expiry_kw = True
-        date_str = m.group(1)
+        raw_val = m.group(1).strip()
+        if not raw_val:
+            return False, "invalid or empty expiry deadline"
+        date_m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", raw_val)
+        if not date_m:
+            return False, f"invalid expiry deadline '{raw_val}'"
+        date_str = date_m.group(1)
         try:
             exp_date = datetime.date.fromisoformat(date_str)
         except ValueError:
-            return False, f"invalid calendar date '{date_str}'"
+            return False, f"invalid calendar date '{date_str}' in expiry deadline"
         if exp_date < today:
             return False, f"expired on {date_str} (current date is {today.isoformat()})"
+        has_valid_expiry = True
+
+    if has_valid_expiry:
         return True, None
-    if has_expiry_kw:
-        return False, "invalid or expired deadline"
 
     # 2. Check review / revisit condition
+    has_valid_review = False
     for m in REVIEW_CONDITION_PATTERN.finditer(text):
         if is_negated_prefix(text[:m.start()]):
             continue
@@ -443,6 +460,9 @@ def has_lifecycle_condition(text):
                 return False, f"invalid calendar date '{date_str}' in review condition"
             if rev_date < today:
                 return False, f"review date expired on {date_str} (current date is {today.isoformat()})"
+        has_valid_review = True
+
+    if has_valid_review:
         return True, None
 
     # 3. Check recognized milestone / ongoing conditions

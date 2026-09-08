@@ -33,8 +33,10 @@
 # 29. Negated and qualified negative review conditions and milestones fail.
 # 30. Invalid calendar dates in review conditions fail.
 # 31. Resolved-state prose without review or expiry trigger fails.
-# 32. Comment in audit.toml missing fails.
-# 33. Missing config file fails strictly with exit status 2.
+# 32. Negated owner shortcuts and placeholder upstream crates fail.
+# 33. Explicit malformed or stale expiry declarations override fallbacks and fail.
+# 34. Comment in audit.toml missing fails.
+# 35. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -591,7 +593,57 @@ DENYEOF
     fi
 done
 
-echo "=== Test 32: Missing comment in audit.toml fails ==="
+echo "=== Test 32: Negated owner shortcuts and placeholder upstream crates fail ==="
+for bad_owner in \
+    "no tracking issue #123; awaiting upgrade" \
+    "not tracking #123; awaiting upgrade" \
+    "not transitive via foo; awaiting upgrade" \
+    "awaiting unknown upstream; awaiting upgrade" \
+    "awaiting none upstream; awaiting upgrade" \
+    "awaiting tbd upstream; awaiting upgrade" \
+    "transitive via unknown; awaiting upgrade" \
+    "pinned by placeholder; awaiting upgrade"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_owner_shortcut.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_owner}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_owner_shortcut.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on bad owner shortcut '${bad_owner}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 33: Explicit malformed or stale expiry declarations override fallbacks ==="
+for bad_expiry in \
+    "tracking #123; expires: TBD; awaiting upgrade" \
+    "tracking #123; expires: none; awaiting upgrade" \
+    "tracking #123; expires: 2026-02-30; awaiting upgrade" \
+    "tracking #123; expires: 2099-01-01; expires: 2000-01-01" \
+    "tracking #123; expires: 2000-01-01; expires: 2099-01-01" \
+    "tracking #123; review due: 2099-01-01; review due: 2000-01-01"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_expiry_override.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_expiry}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_expiry_override.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on bad expiry override '${bad_expiry}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 34: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -603,7 +655,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 33: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 35: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?
