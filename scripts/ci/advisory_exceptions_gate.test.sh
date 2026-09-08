@@ -19,8 +19,10 @@
 # 15. Qualified review due and date conditions pass.
 # 16. Blank lifecycle values are rejected.
 # 17. Invalid owner tokens are rejected.
-# 18. Comment in audit.toml missing fails.
-# 19. Missing config file fails strictly with exit status 2.
+# 18. Negative bare-owner prose is rejected.
+# 19. Punctuation-leading and qualified review conditions pass.
+# 20. Comment in audit.toml missing fails.
+# 21. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -266,7 +268,36 @@ if [ "$status" -ne 1 ]; then
     exit 1
 fi
 
-echo "=== Test 18: Missing comment in audit.toml fails ==="
+echo "=== Test 18: Negative bare-owner prose is rejected ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_no_owner_prose.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "no owner assigned; review: quarterly" },
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_no_owner_prose.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected validation failure status 1 on 'no owner assigned', got $status" >&2
+    exit 1
+fi
+
+echo "=== Test 19: Punctuation-leading and qualified review conditions pass ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_punct_review.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: security-team; review: >= 47.0.5" },
+    { id = "RUSTSEC-2099-0002", reason = "tracking #123; review on #123" },
+]
+DENYEOF
+if ! DENY_TOML="$tmp_dir/deny_punct_review.toml" bash "$gate" >/dev/null 2>&1; then
+    echo "FAIL: Expected success on punctuation-leading review conditions" >&2
+    exit 1
+fi
+
+echo "=== Test 20: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -278,7 +309,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 19: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 21: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?
