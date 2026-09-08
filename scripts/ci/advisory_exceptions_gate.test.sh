@@ -1788,26 +1788,60 @@ if [ "$status" -ne 2 ]; then
 fi
 
 echo "=== Test 79: Push event before SHA resolution detects added exceptions ==="
-head_commit=$(git rev-parse HEAD)
-parent_commit=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
-cat << JEOF > "$tmp_dir/push_event.json"
-{
-  "before": "$parent_commit",
-  "after": "$head_commit"
-}
-JEOF
-cat << DENYEOF > "$tmp_dir/deny_push_test.toml"
+push_git_dir="$tmp_dir/push_git_repo"
+git init -q "$push_git_dir"
+git -C "$push_git_dir" config user.email "ci@example.com"
+git -C "$push_git_dir" config user.name "CI"
+mkdir -p "$push_git_dir/.cargo"
+# Master commit: has a legacy unreviewed exception grandfathered
+cat << 'AUDITEOF' > "$push_git_dir/.cargo/audit.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "no owner or expiry here" },
+    "RUSTSEC-2099-0001", # cargo-audit only; legacy unmaintained; tracking #8519
 ]
+AUDITEOF
+cat << 'DENYEOF' > "$push_git_dir/deny.toml"
+[advisories]
+ignore = []
 DENYEOF
+git -C "$push_git_dir" add .
+git -C "$push_git_dir" commit -qm "master commit"
+
+# Pre-push base branch: exception removed
+git -C "$push_git_dir" checkout -qb feature
+cat << 'AUDITEOF' > "$push_git_dir/.cargo/audit.toml"
+[advisories]
+ignore = []
+AUDITEOF
+git -C "$push_git_dir" commit -qam "remove exception in pre-push base"
+before_push_sha=$(git -C "$push_git_dir" rev-parse HEAD)
+
+# Pushed head: re-adds the unreviewed exception
+cat << 'AUDITEOF' > "$push_git_dir/.cargo/audit.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # cargo-audit only; legacy unmaintained; tracking #8519
+]
+AUDITEOF
+git -C "$push_git_dir" commit -qam "re-add legacy exception in push head"
+after_push_sha=$(git -C "$push_git_dir" rev-parse HEAD)
+
+# 1. Against master baseline, it passes because the exception matches master:
+(cd "$push_git_dir" && REPO_ROOT="$push_git_dir" BASE_REF="master" bash "$gate" >/dev/null)
+
+# 2. Against push event with before = before_push_sha, it must FAIL because it is newly re-added relative to before_push_sha:
+cat << JEOF > "$tmp_dir/push_event.json"
+{
+  "before": "$before_push_sha",
+  "after": "$after_push_sha"
+}
+JEOF
 set +e
-GITHUB_EVENT_PATH="$tmp_dir/push_event.json" BASE_REF="" DENY_TOML="$tmp_dir/deny_push_test.toml" bash "$gate" >/dev/null 2>&1
+(cd "$push_git_dir" && REPO_ROOT="$push_git_dir" BASE_REF="" GITHUB_BASE_REF="" GITHUB_EVENT_PATH="$tmp_dir/push_event.json" bash "$gate" >/dev/null 2>&1)
 status=$?
 set -e
 if [ "$status" -ne 1 ]; then
-    echo "FAIL: Expected failure on new exception using push event before SHA baseline, got status $status" >&2
+    echo "FAIL: Expected failure when push event before SHA has exception removed, got status $status" >&2
     exit 1
 fi
 
@@ -1894,6 +1928,79 @@ DENYEOF
     fi
 done
 
+echo "=== Test 84: Contradictory owner declarations across clauses fail strictly ==="
+for bad_contradictory_owner in \
+    "owner: @alice; no owner is assigned; review: quarterly" \
+    "owner: @alice; not responsible; review: quarterly" \
+    "owner: @alice; owner: none; review: quarterly" \
+    "owner: @alice; unassigned owner; review: quarterly" \
+    "owner: @alice; owner is not assigned; review: quarterly"; do
+    cat << DENYEOF > "$tmp_dir/deny_contradictory_owner.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_contradictory_owner}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_contradictory_owner.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on contradictory owner '${bad_contradictory_owner}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 85: Negated lifecycle suffixes in containing clauses fail strictly ==="
+for bad_lifecycle_suffix in \
+    "owner: @security-team; awaiting fix will never happen" \
+    "owner: @security-team; upstream fix pending is false" \
+    "owner: @security-team; awaiting upgrade is cancelled" \
+    "owner: @security-team; awaiting migration is aborted" \
+    "owner: @security-team; upstream fix pending will not happen"; do
+    cat << DENYEOF > "$tmp_dir/deny_lifecycle_suffix.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_lifecycle_suffix}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_lifecycle_suffix.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on negated lifecycle suffix '${bad_lifecycle_suffix}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 86: Cargo-deny yanked crate exceptions validate properly ==="
+# 1. Valid yanked crate exception with scope: cargo-deny and lifecycle passes
+cat << DENYEOF > "$tmp_dir/deny_yanked_valid.toml"
+[advisories]
+ignore = [
+    { crate = "foo@1.0.0", reason = "scope: cargo-deny; owner: @security-team; review: quarterly" },
+]
+DENYEOF
+DENY_TOML="$tmp_dir/deny_yanked_valid.toml" AUDIT_TOML="$tmp_dir/audit_empty.toml" bash "$gate" >/dev/null
+
+# 2. Yanked crate exception missing scope: cargo-deny fails
+cat << DENYEOF > "$tmp_dir/deny_yanked_no_scope.toml"
+[advisories]
+ignore = [
+    { crate = "foo@1.0.0", reason = "owner: @security-team; review: quarterly" },
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_yanked_no_scope.toml" AUDIT_TOML="$tmp_dir/audit_empty.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on yanked crate exception missing scope, got status $status" >&2
+    exit 1
+fi
+
 echo "All advisory_exceptions_gate self-tests passed cleanly."
+
 
 

@@ -594,6 +594,17 @@ def get_owner_clause_spans(text):
     return spans
 
 def has_accountable_owner(text):
+    # Reject contradictory negated owner declarations across the complete reason
+    for clause_raw in re.split(r"[;\n]", text):
+        c_norm = normalize_contractions(clause_raw.strip()).lower()
+        if not c_norm:
+            continue
+        if re.search(r"\b(?:owner|maintainer)\b(?:\s*[:=]|\s+is)?\s*(?:none|unassigned|placeholder|tbd|tba|todo|unknown|undefined|not\s+assigned|not\s+responsible|no\b|not\b|nobody|false)\b", c_norm):
+            return False
+        if re.search(r"\b(?:no\s+(?:accountable\s+)?(?:owner|maintainer)|not\s+owned|unowned|unassigned\s+owner|no\s+owner\s+(?:is\s+)?assigned|not\s+responsible|not\s+an\s+owner)\b", c_norm):
+            return False
+
+    has_owner = False
     for m in OWNER_FIELD_PATTERN.finditer(text):
         if is_negated_prefix(text[:m.start()]):
             continue
@@ -609,6 +620,10 @@ def has_accountable_owner(text):
             continue
         if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_/-]*$", clean_val):
             continue
+        has_owner = True
+        break
+
+    if has_owner:
         return True
 
     owner_clause_spans = get_owner_clause_spans(text)
@@ -761,8 +776,23 @@ def has_lifecycle_condition(text):
 
     # 3. Check recognized milestone / ongoing conditions
     for m in LIFECYCLE_OTHER_PATTERN.finditer(text):
-        if is_negated_prefix(text[:m.start()]):
+        c_start = 0
+        for delim in re.finditer(r"[;\n]", text[:m.start()]):
+            c_start = delim.end()
+        next_delim = re.search(r"[;\n]", text[m.end():])
+        c_end = m.end() + next_delim.start() if next_delim else len(text)
+        containing_clause = text[c_start:c_end]
+
+        prefix = containing_clause[:m.start() - c_start]
+        suffix = containing_clause[m.end() - c_start:]
+
+        if is_negated_prefix(prefix):
             continue
+
+        norm_suffix = normalize_contractions(suffix).lower()
+        if re.search(r"\b(?:no|not|never|without|none|false|untrue|canceled|cancelled|aborted|dropped|rejected|invalid|wontfix)\b", norm_suffix):
+            continue
+
         matched_text = m.group(0).lower()
         if matched_text.startswith("awaiting") and re.search(r"\b(?:no|not|without|never)\b", matched_text):
             continue
@@ -782,6 +812,56 @@ def validate_lifecycle(text):
     has_expiry, expiry_msg = has_lifecycle_condition(text)
     return has_owner, has_expiry, expiry_msg
 
+def has_explicit_tool_scope(text, expected_tool):
+    # Exclusive non-negated tool scope declaration for the expected tool.
+    # Must not declare or include the other tool.
+    target = "deny" if "deny" in expected_tool else "audit"
+    other = "audit" if target == "deny" else "deny"
+
+    target_pattern = re.compile(rf"\b(?:cargo-)?{target}\b", re.IGNORECASE)
+    other_pattern = re.compile(rf"\b(?:cargo-)?{other}\b", re.IGNORECASE)
+    shorthand_pattern = re.compile(r"\b(?:cargo-)?(?:deny|audit)(?:-only|\s+only)\b", re.IGNORECASE)
+
+    found_target_scope = False
+
+    # 1. Inspect all explicit scope / tool field declarations
+    for m in re.finditer(r"\b(?:tool|scope)\b\s*[:=]\s*([^;\n]+)", text, re.IGNORECASE):
+        scope_val = m.group(1).strip().lower()
+        prefix = text[:m.start()]
+        clause_prefix = re.split(r"[;,\.\n]", prefix)[-1]
+        if is_negated_prefix(clause_prefix):
+            continue
+        # If the scope declaration references the other tool, it is not exclusive to target
+        if other_pattern.search(scope_val):
+            return False
+        # Check target in scope_val ensuring it is not negated
+        for tm in target_pattern.finditer(scope_val):
+            val_prefix = scope_val[:tm.start()]
+            if is_negated_prefix(val_prefix):
+                continue
+            found_target_scope = True
+
+    # 2. Inspect shorthand "<tool> only" or "<tool>-only"
+    for m in shorthand_pattern.finditer(text):
+        # Inspect the whole containing clause up to [;\n]
+        c_start = 0
+        for delim in re.finditer(r"[;\n]", text[:m.start()]):
+            c_start = delim.end()
+        next_delim = re.search(r"[;\n]", text[m.end():])
+        c_end = m.end() + next_delim.start() if next_delim else len(text)
+        containing_clause = text[c_start:c_end]
+
+        prefix = text[:m.start()]
+        clause_prefix = re.split(r"[;,\.\n]", prefix)[-1]
+        if is_negated_prefix(clause_prefix):
+            continue
+        if other_pattern.search(containing_clause):
+            return False
+        if target_pattern.search(m.group(0)):
+            found_target_scope = True
+
+    return found_target_scope
+
 # Derive baseline grandfathered advisories directly from the base branch / commit in git (single source of truth).
 # If the base branch cannot be resolved, fail closed (no static fallback list) so removed advisories cannot be re-added without full review metadata.
 baseline_deny_entries = {}   # adv_id -> normalized reason
@@ -799,10 +879,11 @@ if base_deny_file or base_audit_file:
                 elems, _ = p.parse_advisories_ignore()
                 if elems:
                     for item, _ in elems:
-                        if isinstance(item, dict) and "id" in item:
-                            adv_id = item["id"].strip()
-                            reason = re.sub(r"\s+", " ", item.get("reason", "").strip())
-                            baseline_deny_entries[adv_id] = reason
+                        if isinstance(item, dict):
+                            entry_id = item.get("id", "").strip() or item.get("crate", "").strip()
+                            if entry_id:
+                                reason = re.sub(r"\s+", " ", item.get("reason", "").strip())
+                                baseline_deny_entries[entry_id] = reason
         except Exception:
             pass
     if base_audit_file and os.path.isfile(base_audit_file):
@@ -858,10 +939,11 @@ else:
                 elems, _ = parser.parse_advisories_ignore()
                 if elems:
                     for item, _ in elems:
-                        if isinstance(item, dict) and "id" in item:
-                            adv_id = item["id"].strip()
-                            reason = re.sub(r"\s+", " ", item.get("reason", "").strip())
-                            baseline_deny_entries[adv_id] = reason
+                        if isinstance(item, dict):
+                            entry_id = item.get("id", "").strip() or item.get("crate", "").strip()
+                            if entry_id:
+                                reason = re.sub(r"\s+", " ", item.get("reason", "").strip())
+                                baseline_deny_entries[entry_id] = reason
             res2 = subprocess.run(["git", "show", f"{base_ref}:.cargo/audit.toml"], capture_output=True, text=True, check=False)
             if res2.returncode == 0:
                 parser2 = TomlArrayParser(res2.stdout)
@@ -895,33 +977,39 @@ else:
     for elem, _ in deny_elements:
         if isinstance(elem, dict):
             adv_id = elem.get("id", "").strip()
+            crate_spec = elem.get("crate", "").strip()
             reason = elem.get("reason", "").strip()
-            if not adv_id:
-                errors.append(f"deny.toml: Inline table entry missing required 'id' key: {elem}")
+            if not adv_id and not crate_spec:
+                errors.append(f"deny.toml: Inline table entry missing required 'id' or 'crate' key: {elem}")
                 continue
 
-            if adv_id in deny_entries:
-                errors.append(f"deny.toml: Duplicate advisory exception ID '{adv_id}' detected")
+            entry_id = adv_id if adv_id else crate_spec
+            if entry_id in deny_entries:
+                errors.append(f"deny.toml: Duplicate advisory exception ID '{entry_id}' detected")
             else:
-                deny_entries[adv_id] = reason
+                deny_entries[entry_id] = reason
 
-            if adv_id in RETIRED_ADVISORIES:
+            if adv_id and adv_id in RETIRED_ADVISORIES:
                 errors.append(f"deny.toml: Retired advisory '{adv_id}' is still present in deny.toml: {RETIRED_ADVISORIES[adv_id]}")
 
             norm_reason = re.sub(r"\s+", " ", reason)
             is_grandfathered = (
-                adv_id in baseline_deny_entries and
-                norm_reason == baseline_deny_entries[adv_id]
+                entry_id in baseline_deny_entries and
+                norm_reason == baseline_deny_entries[entry_id]
             )
             if not is_grandfathered:
                 if not reason:
-                    errors.append(f"deny.toml: Advisory '{adv_id}' missing 'reason' field with owner and review/expiry condition")
+                    errors.append(f"deny.toml: Exception '{entry_id}' missing 'reason' field with owner and review/expiry condition")
                 else:
                     has_owner, has_expiry, expiry_msg = validate_lifecycle(reason)
                     if not has_owner or not has_expiry:
                         errors.append(
-                            f"deny.toml: New or modified advisory exception '{adv_id}' reason '{reason}' lacks required lifecycle metadata: "
+                            f"deny.toml: New or modified advisory exception '{entry_id}' reason '{reason}' lacks required lifecycle metadata: "
                             f"owner={'ok' if has_owner else 'MISSING'}, review/expiry={'ok' if has_expiry else (expiry_msg or 'MISSING')}"
+                        )
+                    if crate_spec and not has_explicit_tool_scope(reason, "cargo-deny"):
+                        errors.append(
+                            f"deny.toml: Yanked crate exception '{crate_spec}' is cargo-deny specific and must declare 'scope: cargo-deny'"
                         )
             else:
                 if reason:
@@ -995,56 +1083,6 @@ is_single_file_override = (
 if not is_single_file_override:
     deny_set = set(deny_entries.keys())
     audit_set = set(audit_entries.keys())
-
-    def has_explicit_tool_scope(text, expected_tool):
-        # Exclusive non-negated tool scope declaration for the expected tool.
-        # Must not declare or include the other tool.
-        target = "deny" if "deny" in expected_tool else "audit"
-        other = "audit" if target == "deny" else "deny"
-
-        target_pattern = re.compile(rf"\b(?:cargo-)?{target}\b", re.IGNORECASE)
-        other_pattern = re.compile(rf"\b(?:cargo-)?{other}\b", re.IGNORECASE)
-        shorthand_pattern = re.compile(r"\b(?:cargo-)?(?:deny|audit)(?:-only|\s+only)\b", re.IGNORECASE)
-
-        found_target_scope = False
-
-        # 1. Inspect all explicit scope / tool field declarations
-        for m in re.finditer(r"\b(?:tool|scope)\b\s*[:=]\s*([^;\n]+)", text, re.IGNORECASE):
-            scope_val = m.group(1).strip().lower()
-            prefix = text[:m.start()]
-            clause_prefix = re.split(r"[;,\.\n]", prefix)[-1]
-            if is_negated_prefix(clause_prefix):
-                continue
-            # If the scope declaration references the other tool, it is not exclusive to target
-            if other_pattern.search(scope_val):
-                return False
-            # Check target in scope_val ensuring it is not negated
-            for tm in target_pattern.finditer(scope_val):
-                val_prefix = scope_val[:tm.start()]
-                if is_negated_prefix(val_prefix):
-                    continue
-                found_target_scope = True
-
-        # 2. Inspect shorthand "<tool> only" or "<tool>-only"
-        for m in shorthand_pattern.finditer(text):
-            # Inspect the whole containing clause up to [;\n]
-            c_start = 0
-            for delim in re.finditer(r"[;\n]", text[:m.start()]):
-                c_start = delim.end()
-            next_delim = re.search(r"[;\n]", text[m.end():])
-            c_end = m.end() + next_delim.start() if next_delim else len(text)
-            containing_clause = text[c_start:c_end]
-
-            prefix = text[:m.start()]
-            clause_prefix = re.split(r"[;,\.\n]", prefix)[-1]
-            if is_negated_prefix(clause_prefix):
-                continue
-            if other_pattern.search(containing_clause):
-                return False
-            if target_pattern.search(m.group(0)):
-                found_target_scope = True
-
-        return found_target_scope
 
     for adv_id in sorted(deny_set - audit_set):
         reason = deny_entries[adv_id]
