@@ -314,6 +314,14 @@ DISALLOWED_OWNERS = {
     "no maintainer", "not yet", "wontfix", "upstream", "transitive", "dep"
 }
 
+DISALLOWED_UPSTREAM_WORDS = {
+    "awaiting", "fix", "fixes", "upgrade", "upgrades", "migration", "cleanup",
+    "release", "patch", "patches", "update", "updates", "upstream", "transitive",
+    "dep", "direct", "pinned", "transitively", "via", "issue", "pr", "ticket",
+    "todo", "tbd", "none", "unknown", "placeholder", "unassigned", "undefined",
+    "missing", "na", "n/a"
+}
+
 DISALLOWED_REVIEWS = {
     "none", "null", "nil", "na", "n/a", "n_a", "never", "no", "false",
     "unassigned", "tbd", "tba", "todo", "to do", "to be determined", "to be decided",
@@ -366,7 +374,7 @@ def has_accountable_owner(text):
         if is_negated_prefix(text[:m.start()]):
             continue
         crate = (m.group(1) or m.group(2) or "").strip().lower()
-        if not crate or crate in DISALLOWED_OWNERS:
+        if not crate or crate in DISALLOWED_OWNERS or crate in DISALLOWED_UPSTREAM_WORDS:
             continue
         if re.match(r"^(?:no|not|without|none|unassigned|unknown|placeholder|tbd|todo)\b", crate):
             continue
@@ -453,7 +461,13 @@ def has_lifecycle_condition(text):
         clean_cond = re.sub(r"\s+", " ", raw_cond).lower()
         if not re.search(r"[a-zA-Z0-9]", clean_cond):
             return False, f"empty review condition '{raw_cond}'"
-        if clean_cond in DISALLOWED_REVIEWS or re.match(r"^(?:no|not|never|without|none|tbd|tba|todo|pending|placeholder|unknown|undefined|unassigned|fixed|patched|resolved|wontfix)\b", clean_cond):
+
+        norm_cond = re.sub(r"^[\s\(\[\{\"\'`\-]+", "", clean_cond).strip()
+        norm_cond = re.sub(r"[\s\)\]\}\"\'`\-]+$", "", norm_cond).strip()
+
+        if norm_cond in DISALLOWED_REVIEWS or clean_cond in DISALLOWED_REVIEWS:
+            return False, f"placeholder or invalid review condition '{raw_cond}'"
+        if re.match(r"^(?:no|not|never|without|none|tbd|tba|todo|pending|placeholder|unknown|undefined|unassigned|fixed|patched|resolved|wontfix|open|in\s+progress|later|soon|future|closed)\b", norm_cond):
             return False, f"placeholder or invalid review condition '{raw_cond}'"
         date_m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", clean_cond)
         if date_m:
@@ -486,6 +500,8 @@ def validate_lifecycle(text):
     return has_owner, has_expiry, expiry_msg
 
 errors = []
+deny_entries = {}
+audit_entries = {}
 
 # --- 1. Validate deny.toml ---
 try:
@@ -507,6 +523,8 @@ else:
             if not adv_id:
                 errors.append(f"deny.toml: Inline table entry missing required 'id' key: {elem}")
                 continue
+
+            deny_entries[adv_id] = reason
 
             if adv_id in RETIRED_ADVISORIES:
                 errors.append(f"deny.toml: Retired advisory '{adv_id}' is still present in deny.toml: {RETIRED_ADVISORIES[adv_id]}")
@@ -544,6 +562,8 @@ else:
     for elem, comment in audit_elements:
         if isinstance(elem, str):
             adv_id = elem.strip()
+            audit_entries[adv_id] = comment or ""
+
             if adv_id in RETIRED_ADVISORIES:
                 errors.append(f".cargo/audit.toml: Retired advisory '{adv_id}' is still present in audit.toml: {RETIRED_ADVISORIES[adv_id]}")
 
@@ -558,6 +578,17 @@ else:
                     )
         else:
             errors.append(f".cargo/audit.toml: Expected string advisory entry, found {type(elem).__name__}: {elem!r}")
+
+# --- 3. Validate consistency across shared advisory entries ---
+shared_ids = set(deny_entries.keys()) & set(audit_entries.keys())
+for adv_id in sorted(shared_ids):
+    d_reason = re.sub(r"\s+", " ", deny_entries[adv_id].strip())
+    a_comment = re.sub(r"\s+", " ", audit_entries[adv_id].strip())
+    if d_reason != a_comment:
+        errors.append(
+            f"Shared advisory '{adv_id}' metadata mismatch across configs: "
+            f"deny.toml reason '{d_reason}' != .cargo/audit.toml comment '{a_comment}'"
+        )
 
 if errors:
     print("advisory-exceptions gate: FAIL", file=sys.stderr)

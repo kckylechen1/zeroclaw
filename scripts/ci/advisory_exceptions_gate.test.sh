@@ -39,8 +39,11 @@
 # 35. Placeholder and resolved-status review values fail.
 # 36. Negation inside awaiting clauses fails.
 # 37. Bare issue numbers without tracking qualifier fail to satisfy owner.
-# 38. Comment in audit.toml missing fails.
-# 39. Missing config file fails strictly with exit status 2.
+# 38. Lifecycle words captured as dependency names fail.
+# 39. Enclosing punctuation, quotes, and leading status phrases in reviews fail.
+# 40. Shared advisory entries with mismatched metadata across configs fail.
+# 41. Comment in audit.toml missing fails.
+# 42. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -129,7 +132,7 @@ echo "=== Test 6: Reordered keys in deny.toml inline tables pass ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_reordered.toml"
 [advisories]
 ignore = [
-    { reason = "owner: @security-team; expires: 2027-01-01", id = "RUSTSEC-2025-0141" },
+    { reason = "owner: @security-team; expires: 2027-01-01", id = "RUSTSEC-2099-0001" },
 ]
 DENYEOF
 if ! DENY_TOML="$tmp_dir/deny_reordered.toml" bash "$gate" >/dev/null 2>&1; then
@@ -187,7 +190,7 @@ echo "=== Test 10: Table header with trailing comment is accepted ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_header_comment.toml"
 [advisories] # dependency and security policies
 ignore = [
-    { id = "RUSTSEC-2025-0141", reason = "owner: @security-team; expires: 2027-01-01" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; expires: 2027-01-01" },
 ]
 [licenses] # license policies
 allow = ["MIT"]
@@ -737,7 +740,90 @@ DENYEOF
     fi
 done
 
-echo "=== Test 38: Missing comment in audit.toml fails ==="
+echo "=== Test 38: Lifecycle words captured as dependency names fail ==="
+for bad_dep in \
+    "direct dep awaiting upgrade" \
+    "transitive via awaiting upgrade" \
+    "pinned by awaiting fix" \
+    "pinned transitively by awaiting cleanup" \
+    "awaiting fix upstream" \
+    "awaiting upgrade upstream"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_dep_name.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_dep}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_dep_name.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on lifecycle word as dep name '${bad_dep}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 39: Enclosing punctuation, quotes, and leading status phrases in reviews fail ==="
+for bad_norm in \
+    'review: (pending)' \
+    'review: [TBD]' \
+    'review: "never"' \
+    'review: -- resolved' \
+    'review: open until fixed' \
+    'review: in progress until Q4' \
+    'review: later this year' \
+    'review: soon after release' \
+    'review: future cleanup' \
+    'review: closed after upstream issue'; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_norm_review.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; ${bad_norm}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_norm_review.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on bad review normalization '${bad_norm}', got status $status" >&2
+        exit 1
+    fi
+done
+
+# Assert valid version review condition passes
+cat << 'DENYEOF' > "$tmp_dir/deny_version_review.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review: >= 47.0.5" },
+]
+DENYEOF
+DENY_TOML="$tmp_dir/deny_version_review.toml" bash "$gate" >/dev/null
+
+echo "=== Test 40: Shared advisory entries with mismatched metadata across configs fail ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_mismatch.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @alice; expires: 2099-12-31" },
+]
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_mismatch.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # owner: @bob; review: quarterly
+]
+AUDITEOF
+set +e
+DENY_TOML="$tmp_dir/deny_mismatch.toml" AUDIT_TOML="$tmp_dir/audit_mismatch.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on metadata mismatch between deny.toml and audit.toml, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 41: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -749,7 +835,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 39: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 42: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?
