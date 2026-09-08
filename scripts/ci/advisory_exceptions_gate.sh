@@ -553,7 +553,7 @@ TRACKING_PATTERN = re.compile(
 )
 
 def is_negated_prefix(prefix):
-    clause_prefix = re.split(r"[;,]", prefix)[-1]
+    clause_prefix = re.split(r"[;,\.\n]", prefix)[-1]
     return bool(re.search(r"\b(?:no|not|without|never|missing|unassigned)\b", clause_prefix, re.IGNORECASE))
 
 def has_accountable_owner(text):
@@ -571,7 +571,7 @@ def has_accountable_owner(text):
             continue
         if clean_val in DISALLOWED_OWNERS:
             continue
-        if re.match(r"^(?:no|not|without|missing|unassigned|none)\b", clean_val):
+        if re.match(r"^(?:no|not|without|missing|unassigned|none|tbd|tba|todo|placeholder|unknown|undefined)(?:$|[-_]|\b)", clean_val):
             continue
         if " " in clean_val:
             continue
@@ -583,13 +583,16 @@ def has_accountable_owner(text):
         if is_negated_prefix(text[:m.start()]):
             continue
         handle = m.group(1).lower()
-        if handle not in DISALLOWED_OWNERS and len(handle) > 0:
-            return True
+        if not handle or handle in DISALLOWED_OWNERS:
+            continue
+        if re.match(r"^(?:no|not|without|missing|unassigned|none|tbd|tba|todo|placeholder|unknown|undefined)(?:$|[-_]|\b)", handle):
+            continue
+        return True
 
     return False
 
 EXPIRY_FIELD_PATTERN = re.compile(
-    r"\b(?:expires?|expiry|expired)(?:(?:\s+(?:on|at|by|date))\b)?(?:(?:\s*[:=]\s*([^;,]*))|(?:\s+(?=\d{4}-\d{2}-\d{2}\b)([^;,]*)))",
+    r"\b(?:expires?|expiry|expired)(?:(?:\s+(?:on|at|by|date))\b)?(?:(?:\s*[:=]\s*([^;,]*))|(?:\s+(?=(?:\d{4}-\d{2}-\d{2}|tbd|tba|todo|none|never|unknown|undefined|placeholder|no|not|without)\b)([^;,]*)))",
     re.IGNORECASE
 )
 
@@ -759,7 +762,7 @@ else:
     import subprocess
     base_ref = os.environ.get("BASE_REF") or os.environ.get("GITHUB_BASE_REF")
     if not base_ref:
-        for candidate in ["origin/master", "master", "HEAD~1"]:
+        for candidate in ["origin/master", "master"]:
             try:
                 res = subprocess.run(
                     ["git", "rev-parse", "--verify", candidate],
@@ -914,12 +917,6 @@ is_single_file_override = (
 )
 
 if not is_single_file_override:
-    DECLARED_TOOL_SCOPES = {
-        # Declared tool-specific exceptions per docs/maintainers/audit-policy.md
-        "RUSTSEC-2024-0384": "cargo-audit",
-        "RUSTSEC-2026-0253": "cargo-deny",
-    }
-
     deny_set = set(deny_entries.keys())
     audit_set = set(audit_entries.keys())
 
@@ -939,18 +936,28 @@ if not is_single_file_override:
         return False
 
     for adv_id in sorted(deny_set - audit_set):
-        declared = DECLARED_TOOL_SCOPES.get(adv_id)
         reason = deny_entries[adv_id]
-        if declared != "cargo-deny" and not has_explicit_tool_scope(reason, "cargo-deny"):
+        norm_reason = re.sub(r"\s+", " ", reason)
+        is_grandfathered = (
+            adv_id in baseline_deny_entries and
+            adv_id not in baseline_audit_entries and
+            norm_reason == baseline_deny_entries[adv_id]
+        )
+        if not is_grandfathered and not has_explicit_tool_scope(reason, "cargo-deny"):
             errors.append(
                 f"deny.toml: Undeclared one-sided advisory exception '{adv_id}' is missing from .cargo/audit.toml. "
                 f"All exceptions must be present in both files unless declared tool-specific."
             )
 
     for adv_id in sorted(audit_set - deny_set):
-        declared = DECLARED_TOOL_SCOPES.get(adv_id)
         comment = audit_entries[adv_id]
-        if declared != "cargo-audit" and not has_explicit_tool_scope(comment, "cargo-audit"):
+        norm_comment = re.sub(r"\s+", " ", comment)
+        is_grandfathered = (
+            adv_id in baseline_audit_entries and
+            adv_id not in baseline_deny_entries and
+            norm_comment == baseline_audit_entries[adv_id]
+        )
+        if not is_grandfathered and not has_explicit_tool_scope(comment, "cargo-audit"):
             errors.append(
                 f".cargo/audit.toml: Undeclared one-sided advisory exception '{adv_id}' is missing from deny.toml. "
                 f"All exceptions must be present in both files unless declared tool-specific."

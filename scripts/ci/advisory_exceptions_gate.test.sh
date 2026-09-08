@@ -67,6 +67,11 @@
 # 63. Non-delimited expiry prose passes without false failure.
 # 64. Modifying audit entry with empty baseline comment without compliant review metadata fails.
 # 65. GITHUB_BASE_REF and GITHUB_EVENT_PATH resolve base commit for stacked PRs.
+# 66. Negation before a period or newline does not leak into subsequent clauses.
+# 67. Bare handles with placeholder or negation prefixes fail to satisfy owner.
+# 68. Non-delimited placeholder expiry tokens fail strictly while normal expiry prose passes.
+# 69. Tool-specific exceptions derive scopes dynamically and reject one-sided additions lacking scope.
+# 70. Fallback baseline fails closed when neither event base nor master exists.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -1458,6 +1463,157 @@ status=$?
 set -e
 if [ "$status" -ne 1 ]; then
     echo "FAIL: Expected failure when stacked child re-adds exception against GITHUB_EVENT_PATH base sha, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 66: Negation before a period or newline does not leak into subsequent clauses ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_sentence_negation.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "not exploitable on default builds. owner: @security-team; review: quarterly" },
+]
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_sentence_negation.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # not exploitable on default builds. owner: @security-team; review: quarterly
+]
+AUDITEOF
+DENY_TOML="$tmp_dir/deny_sentence_negation.toml" AUDIT_TOML="$tmp_dir/audit_sentence_negation.toml" bash "$gate" >/dev/null
+
+echo "=== Test 67: Bare handles with placeholder or negation prefixes fail ==="
+for bad_handle in \
+    "@not-assigned" \
+    "@no-maintainer" \
+    "@none" \
+    "@tbd" \
+    "@placeholder" \
+    "@unassigned" \
+    "@unknown"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_handle.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: ${bad_handle}; review: quarterly" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_handle.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on bad owner handle '${bad_handle}', got status $status" >&2
+        exit 1
+    fi
+
+    # Also test as bare handle without owner: prefix
+    cat << DENYEOF > "$tmp_dir/deny_bare_bad_handle.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "assigned to ${bad_handle}; review: quarterly" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bare_bad_handle.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on bare bad handle '${bad_handle}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 68: Non-delimited placeholder expiry tokens fail strictly ==="
+for bad_expiry in \
+    "tracking #123; expires TBD; awaiting fix" \
+    "tracking #123; expires never; awaiting fix" \
+    "tracking #123; expires none; awaiting fix" \
+    "tracking #123; expiry todo; awaiting fix"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_expiry_token.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_expiry}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_expiry_token.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on non-delimited placeholder expiry '${bad_expiry}', got status $status" >&2
+        exit 1
+    fi
+done
+
+# Non-placeholder expiry prose still passes
+cat << 'DENYEOF' > "$tmp_dir/deny_expiry_prose_pass.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; expired at runtime; awaiting fix" },
+]
+DENYEOF
+DENY_TOML="$tmp_dir/deny_expiry_prose_pass.toml" bash "$gate" >/dev/null
+
+echo "=== Test 69: Tool-specific exceptions derive scopes dynamically and reject one-sided additions lacking scope ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_0253_no_scope.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2026-0253", reason = "upstream fix pending; tracking #8519" },
+]
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_empty_69.toml"
+[advisories]
+ignore = []
+AUDITEOF
+set +e
+DENY_TOML="$tmp_dir/deny_0253_no_scope.toml" AUDIT_TOML="$tmp_dir/audit_empty_69.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on one-sided RUSTSEC-2026-0253 without cargo-deny only scope, got status $status" >&2
+    exit 1
+fi
+
+cat << 'DENYEOF' > "$tmp_dir/deny_0253_with_scope.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2026-0253", reason = "upstream fix pending; tracking #8519; cargo-deny only" },
+]
+DENYEOF
+DENY_TOML="$tmp_dir/deny_0253_with_scope.toml" AUDIT_TOML="$tmp_dir/audit_empty_69.toml" bash "$gate" >/dev/null
+
+echo "=== Test 70: Fallback baseline fails closed when neither event base nor master exists ==="
+nomaster_git_dir="$tmp_dir/nomaster_repo"
+mkdir -p "$nomaster_git_dir/.cargo"
+git -C "$nomaster_git_dir" init -q -b main-trunk
+git -C "$nomaster_git_dir" config user.email "ci@example.com"
+git -C "$nomaster_git_dir" config user.name "CI"
+
+cat << 'AUDITEOF' > "$nomaster_git_dir/.cargo/audit.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # unreviewed legacy entry without owner or expiry
+]
+AUDITEOF
+cat << 'DENYEOF' > "$nomaster_git_dir/deny.toml"
+[advisories]
+ignore = []
+DENYEOF
+git -C "$nomaster_git_dir" add .
+git -C "$nomaster_git_dir" commit -qm "initial commit on non-master branch"
+
+# Add a second commit so HEAD~1 exists
+echo "# update" >> "$nomaster_git_dir/deny.toml"
+git -C "$nomaster_git_dir" commit -qam "second commit on non-master branch"
+
+# In a repository without master or origin/master, and no BASE_REF/GITHUB_BASE_REF,
+# it must NOT fallback to HEAD~1 to grandfather penultimate entries.
+# It must fail closed because baseline is empty.
+set +e
+(cd "$nomaster_git_dir" && REPO_ROOT="$nomaster_git_dir" BASE_REF="" GITHUB_BASE_REF="" GITHUB_EVENT_PATH="" bash "$gate" >/dev/null 2>&1)
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on unreviewed entry in non-master repo without baseline fallback, got status $status" >&2
     exit 1
 fi
 
