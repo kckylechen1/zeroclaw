@@ -316,10 +316,13 @@ DISALLOWED_OWNERS = {
 
 DISALLOWED_REVIEWS = {
     "none", "null", "nil", "na", "n/a", "n_a", "never", "no", "false",
-    "unassigned", "tbd", "todo", "placeholder", "unknown", "undefined",
+    "unassigned", "tbd", "tba", "todo", "to do", "to be determined", "to be decided",
+    "placeholder", "unknown", "undefined", "unspecified", "missing",
     "not needed", "not planned", "not required", "not applicable",
     "no review", "no review needed", "no review planned", "unnecessary",
-    "wontfix", "won't fix", "n / a", "empty", "blank"
+    "wontfix", "won't fix", "n / a", "empty", "blank",
+    "pending", "in progress", "in-progress", "open", "ongoing",
+    "fixed", "patched", "resolved", "closed", "later", "soon", "future"
 }
 
 OWNER_FIELD_PATTERN = re.compile(
@@ -333,7 +336,11 @@ BARE_HANDLE_PATTERN = re.compile(
 )
 
 TRACKING_PATTERN = re.compile(
-    r"(?:\btracking\b\s*(?:issue\s*)?(?:#\d+|https?://\S+)|(?<!\w)#\d+\b)",
+    r"(?:"
+    r"\btracking\b(?:\s+(?:upstream|local|repo|issue|pr|ticket))*\s*[:=]?\s*(?:#\d+|https?://\S+)"
+    r"|\b(?:upstream|local)\s+(?:issue\s+|pr\s+|ticket\s+)?#\d+\b"
+    r"|\b[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+#\d+\b"
+    r")",
     re.IGNORECASE
 )
 
@@ -405,7 +412,7 @@ REVIEW_CONDITION_PATTERN = re.compile(
 
 LIFECYCLE_OTHER_PATTERN = re.compile(
     r"(?:"
-    r"\bawaiting\b\s+(?:[\w-]+\s+)*(?:migration|upgrade|fix|cleanup|upstream)\b"
+    r"\bawaiting\b\s+(?:(?!(?:no|not|without|never)\b)[\w-]+\s+)*(?:migration|upgrade|fix|cleanup|upstream)\b"
     r"|\b(?:upstream\s+)?fix\s+pending\b"
     r"|\bno\s+compatible\s+fix\b(?:\s+in\s+[\w.-]+)?"
     r")",
@@ -413,10 +420,12 @@ LIFECYCLE_OTHER_PATTERN = re.compile(
 )
 
 def has_lifecycle_condition(text):
-    # 1. Check explicit expiry declarations.
-    # Every declared deadline must be a valid, unexpired calendar date.
-    # An invalid or expired deadline strictly fails and cannot be overridden by fallback markers.
     has_valid_expiry = False
+    has_valid_review = False
+    has_valid_milestone = False
+
+    # 1. Validate every explicit expiry declaration.
+    # Every declared deadline must be a valid, unexpired calendar date.
     for m in EXPIRY_FIELD_PATTERN.finditer(text):
         if is_negated_prefix(text[:m.start()]):
             continue
@@ -435,22 +444,17 @@ def has_lifecycle_condition(text):
             return False, f"expired on {date_str} (current date is {today.isoformat()})"
         has_valid_expiry = True
 
-    if has_valid_expiry:
-        return True, None
-
-    # 2. Check review / revisit condition
-    has_valid_review = False
+    # 2. Validate every explicit review declaration.
+    # Reject placeholder, resolved-status, or expired review deadlines.
     for m in REVIEW_CONDITION_PATTERN.finditer(text):
         if is_negated_prefix(text[:m.start()]):
             continue
         raw_cond = m.group(1).strip()
         clean_cond = re.sub(r"\s+", " ", raw_cond).lower()
         if not re.search(r"[a-zA-Z0-9]", clean_cond):
-            continue
-        if clean_cond in DISALLOWED_REVIEWS:
-            continue
-        if re.match(r"^(?:no|not|never|without)\b", clean_cond):
-            continue
+            return False, f"empty review condition '{raw_cond}'"
+        if clean_cond in DISALLOWED_REVIEWS or re.match(r"^(?:no|not|never|without|none|tbd|tba|todo|pending|placeholder|unknown|undefined|unassigned|fixed|patched|resolved|wontfix)\b", clean_cond):
+            return False, f"placeholder or invalid review condition '{raw_cond}'"
         date_m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", clean_cond)
         if date_m:
             date_str = date_m.group(1)
@@ -462,13 +466,16 @@ def has_lifecycle_condition(text):
                 return False, f"review date expired on {date_str} (current date is {today.isoformat()})"
         has_valid_review = True
 
-    if has_valid_review:
-        return True, None
-
     # 3. Check recognized milestone / ongoing conditions
     for m in LIFECYCLE_OTHER_PATTERN.finditer(text):
         if is_negated_prefix(text[:m.start()]):
             continue
+        matched_text = m.group(0).lower()
+        if matched_text.startswith("awaiting") and re.search(r"\b(?:no|not|without|never)\b", matched_text):
+            continue
+        has_valid_milestone = True
+
+    if has_valid_expiry or has_valid_review or has_valid_milestone:
         return True, None
 
     return False, "MISSING"

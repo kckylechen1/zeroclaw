@@ -68,7 +68,7 @@ Resolved groups:
 - Add the entry in `deny.toml` as an inline table: `{ id = "RUSTSEC-...", reason = "..." }`.
 - Add the corresponding entry in `.cargo/audit.toml` with a matching inline comment: `"RUSTSEC-...",  # ...`.
 - Every entry's reason and inline comment must include:
-  1. **Accountable owner / tracking reference**: e.g. `tracking #<issue>`, `owner: @<handle>`, or explicit upstream source (`transitive via <crate>`).
+  1. **Accountable owner / tracking reference**: e.g. `tracking #<issue>`, `tracking upstream #<issue>`, `owner: @<handle>`, or explicit upstream source (`transitive via <crate>`).
   2. **Review / expiry condition**: e.g. `expires: YYYY-MM-DD`, `review: <condition>`, `awaiting <upgrade|migration|fix>`, or `upstream fix pending`.
 - When a fix lands, remove the entry from **both** `.cargo/audit.toml`
   *and* `deny.toml` in the same PR. A drift here re-introduces the

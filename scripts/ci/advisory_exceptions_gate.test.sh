@@ -35,8 +35,12 @@
 # 31. Resolved-state prose without review or expiry trigger fails.
 # 32. Negated owner shortcuts and placeholder upstream crates fail.
 # 33. Explicit malformed or stale expiry declarations override fallbacks and fail.
-# 34. Comment in audit.toml missing fails.
-# 35. Missing config file fails strictly with exit status 2.
+# 34. Future expiry date does not bypass expired or invalid review date.
+# 35. Placeholder and resolved-status review values fail.
+# 36. Negation inside awaiting clauses fails.
+# 37. Bare issue numbers without tracking qualifier fail to satisfy owner.
+# 38. Comment in audit.toml missing fails.
+# 39. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -643,7 +647,97 @@ DENYEOF
     fi
 done
 
-echo "=== Test 34: Missing comment in audit.toml fails ==="
+echo "=== Test 34: Future expiry date does not bypass expired or invalid review date ==="
+for bad_combo in \
+    "tracking #123; expires: 2099-01-01; review: 2000-01-01" \
+    "tracking #123; expires: 2099-01-01; review: 2026-02-30" \
+    "tracking #123; expires: 2099-01-01; review: pending"; do
+    cat << DENYEOF > "$tmp_dir/deny_expiry_review_combo.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_combo}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_expiry_review_combo.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on bad expiry/review combo '${bad_combo}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 35: Placeholder and resolved-status review values fail ==="
+for bad_review in \
+    "review: pending" \
+    "review: in progress" \
+    "review: resolved" \
+    "review: fixed" \
+    "review: closed" \
+    "review: open" \
+    "review: tbd" \
+    "review: todo"; do
+    cat << DENYEOF > "$tmp_dir/deny_placeholder_review.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; ${bad_review}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_placeholder_review.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on placeholder review '${bad_review}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 36: Negation inside awaiting clauses fails ==="
+for bad_awaiting in \
+    "awaiting no upgrade" \
+    "awaiting not fix" \
+    "awaiting without upgrade" \
+    "awaiting never migration"; do
+    cat << DENYEOF > "$tmp_dir/deny_awaiting_negated.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; ${bad_awaiting}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_awaiting_negated.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on negated awaiting '${bad_awaiting}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 37: Bare issue numbers without tracking qualifier fail to satisfy owner ==="
+for bare_num in \
+    "patch #123 was rejected; awaiting upgrade" \
+    "commit #8519 fixed it; awaiting upgrade" \
+    "step #2 in plan; awaiting upgrade"; do
+    cat << DENYEOF > "$tmp_dir/deny_bare_num.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bare_num}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bare_num.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on bare issue number '${bare_num}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 38: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -655,7 +749,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 35: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 39: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?
