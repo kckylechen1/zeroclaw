@@ -69,7 +69,7 @@ Resolved groups:
 - Shared entries across both configurations must have matching lifecycle metadata, enforced by `scripts/ci/advisory_exceptions_gate.sh`.
 - Tool-specific exceptions: `cargo-audit` scans the entire workspace `Cargo.lock` flatly, whereas `cargo-deny` checks the build graph for active targets. Tool-specific entries (e.g. `RUSTSEC-2024-0384` in `.cargo/audit.toml` only, or `RUSTSEC-2026-0253` in `deny.toml` only) are scoped to the detecting tool rather than duplicated into unaffected configurations. Every exception, whether shared or tool-specific, must satisfy all lifecycle requirements below.
 - Every entry's reason and inline comment must include:
-  1. **Accountable owner / tracking reference**: e.g. `tracking #<issue>`, `tracking upstream #<issue>`, `owner: @<handle>`, or explicit upstream source (`transitive via <crate>`).
+  1. **Accountable owner / tracking reference**: e.g. `tracking #<issue>`, `tracking upstream #<issue>`, `owner: @<handle>`, or `maintainer: @<handle>`. Provenance notes such as `transitive via <crate>` are encouraged for context but do not substitute for an accountable tracking reference or owner.
   2. **Review / expiry condition**: e.g. `expires: YYYY-MM-DD`, `review: <condition>`, `awaiting <upgrade|migration|fix>`, or `upstream fix pending`.
 - When a fix lands, remove the exception from whatever files contain it in the same PR.
 - Each file has a one-line `── tracking #... ──` header above its

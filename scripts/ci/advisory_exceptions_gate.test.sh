@@ -54,11 +54,16 @@
 # 50. Zero-valued issue numbers in tracker or review fail.
 # 51. Multiline strings ending in 4 and 5 quotes pass.
 # 52. Grandfathered baseline entries without review condition pass.
-# 53. Non-baseline entries without review condition fail strictly.
-# 54. Negated and ambiguous tool scope markers in one-sided exceptions fail.
-# 55. Valid TOML table headers and quoted keys pass.
-# 56. Comment in audit.toml missing fails.
-# 57. Missing config file fails strictly with exit status 2.
+# 53. Modified grandfathered entry without review condition fails strictly.
+# 54. Non-baseline entries without review condition fail strictly.
+# 55. Negated and ambiguous tool scope markers in one-sided exceptions fail.
+# 56. Malformed tracking-reference suffixes fail strictly.
+# 57. Expiration prose without deadline delimiter passes.
+# 58. Multi-date review conditions with expired date fail.
+# 59. Adding audit-only baseline ID to deny.toml without review condition fails.
+# 60. Valid TOML table headers and quoted keys pass.
+# 61. Comment in audit.toml missing fails.
+# 62. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -1105,31 +1110,67 @@ AUDITEOF
 DENY_TOML="$tmp_dir/deny_multiline_quotes.toml" AUDIT_TOML="$tmp_dir/audit_multiline_quotes.toml" bash "$gate" >/dev/null
 
 echo "=== Test 52: Grandfathered baseline entries without review condition pass ==="
+cat << 'BASEEOF' > "$tmp_dir/base_deny_grandfathered.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "legacy crate binding unmaintained; tracking #8519" },
+]
+BASEEOF
+cat << 'BASEEOF' > "$tmp_dir/base_audit_grandfathered.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # legacy crate binding unmaintained; tracking #8519
+]
+BASEEOF
 cat << 'DENYEOF' > "$tmp_dir/deny_grandfathered.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2024-0411", reason = "gdkwayland-sys unmaintained gtk-rs GTK3 bindings; tracking #8519" },
+    { id = "RUSTSEC-2099-0001", reason = "legacy crate binding unmaintained; tracking #8519" },
 ]
 DENYEOF
 cat << 'AUDITEOF' > "$tmp_dir/audit_grandfathered.toml"
 [advisories]
 ignore = [
-    "RUSTSEC-2024-0411", # gdkwayland-sys unmaintained gtk-rs GTK3 bindings; tracking #8519
+    "RUSTSEC-2099-0001", # legacy crate binding unmaintained; tracking #8519
 ]
 AUDITEOF
+BASE_DENY_TOML="$tmp_dir/base_deny_grandfathered.toml" BASE_AUDIT_TOML="$tmp_dir/base_audit_grandfathered.toml" \
 DENY_TOML="$tmp_dir/deny_grandfathered.toml" AUDIT_TOML="$tmp_dir/audit_grandfathered.toml" bash "$gate" >/dev/null
 
-echo "=== Test 53: Non-baseline entries without review condition fail strictly ==="
+echo "=== Test 53: Modified grandfathered entry without review condition fails strictly ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_modified_grandfathered.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "legacy crate binding changed text; tracking #8519" },
+]
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_modified_grandfathered.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # legacy crate binding changed text; tracking #8519
+]
+AUDITEOF
+set +e
+BASE_DENY_TOML="$tmp_dir/base_deny_grandfathered.toml" BASE_AUDIT_TOML="$tmp_dir/base_audit_grandfathered.toml" \
+DENY_TOML="$tmp_dir/deny_modified_grandfathered.toml" AUDIT_TOML="$tmp_dir/audit_modified_grandfathered.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on modified grandfathered entry without review condition, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 54: Non-baseline entries without review condition fail strictly ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_non_baseline.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2099-0001", reason = "gdkwayland-sys unmaintained gtk-rs GTK3 bindings; tracking #8519" },
+    { id = "RUSTSEC-2099-9999", reason = "gdkwayland-sys unmaintained gtk-rs GTK3 bindings; tracking #8519" },
 ]
 DENYEOF
 cat << 'AUDITEOF' > "$tmp_dir/audit_non_baseline.toml"
 [advisories]
 ignore = [
-    "RUSTSEC-2099-0001", # gdkwayland-sys unmaintained gtk-rs GTK3 bindings; tracking #8519
+    "RUSTSEC-2099-9999", # gdkwayland-sys unmaintained gtk-rs GTK3 bindings; tracking #8519
 ]
 AUDITEOF
 set +e
@@ -1141,7 +1182,7 @@ if [ "$status" -ne 1 ]; then
     exit 1
 fi
 
-echo "=== Test 54: Negated and ambiguous tool scope markers in one-sided exceptions fail ==="
+echo "=== Test 55: Negated and ambiguous tool scope markers in one-sided exceptions fail ==="
 for bad_scope in \
     "not cargo-deny only; tracking #123; review: quarterly" \
     "cargo-deny is affected; tracking #123; review: quarterly" \
@@ -1171,7 +1212,97 @@ ignore = [
 DENYEOF
 DENY_TOML="$tmp_dir/deny_valid_scope.toml" AUDIT_TOML="$tmp_dir/audit_empty.toml" bash "$gate" >/dev/null
 
-echo "=== Test 55: Valid TOML table headers and quoted keys pass ==="
+echo "=== Test 56: Malformed tracking-reference suffixes fail strictly ==="
+for bad_track in \
+    "tracking #123oops; review: quarterly" \
+    "tracking #123_bad; review: quarterly" \
+    "tracking #123; review: #456oops" \
+    "tracking #123; review: on upstream #456oops"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_track_suffix.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_track}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_track_suffix.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on malformed tracking suffix '${bad_track}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 57: Expiration prose without deadline delimiter passes ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_expiry_prose.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "certificate expires unexpectedly; tracking #123; awaiting fix" },
+]
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_expiry_prose.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # certificate expires unexpectedly; tracking #123; awaiting fix
+]
+AUDITEOF
+DENY_TOML="$tmp_dir/deny_expiry_prose.toml" AUDIT_TOML="$tmp_dir/audit_expiry_prose.toml" bash "$gate" >/dev/null
+
+echo "=== Test 58: Multi-date review conditions with expired date fail ==="
+for bad_multidate in \
+    "tracking #123; review: 2099-01-01 or 2000-01-01" \
+    "tracking #123; review: by 2099-01-01, expired 2000-01-01"; do
+    cat << DENYEOF > "$tmp_dir/deny_multidate.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_multidate}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_multidate.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on multi-date review with expired date '${bad_multidate}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 59: Adding audit-only baseline ID to deny.toml without review condition fails ==="
+cat << 'BASEEOF' > "$tmp_dir/base_deny_empty.toml"
+[advisories]
+ignore = []
+BASEEOF
+cat << 'BASEEOF' > "$tmp_dir/base_audit_onesided.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # legacy audit-only advisory; tracking #8519
+]
+BASEEOF
+cat << 'DENYEOF' > "$tmp_dir/deny_new_from_audit.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "legacy audit-only advisory; tracking #8519" },
+]
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_new_from_audit.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # legacy audit-only advisory; tracking #8519
+]
+AUDITEOF
+set +e
+BASE_DENY_TOML="$tmp_dir/base_deny_empty.toml" BASE_AUDIT_TOML="$tmp_dir/base_audit_onesided.toml" \
+DENY_TOML="$tmp_dir/deny_new_from_audit.toml" AUDIT_TOML="$tmp_dir/audit_new_from_audit.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure when audit-only ID added to deny.toml without review metadata, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 60: Valid TOML table headers and quoted keys pass ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_toml_headers.toml"
 [ advisories ]
 "ignore" = [
@@ -1186,7 +1317,7 @@ cat << 'AUDITEOF' > "$tmp_dir/audit_toml_headers.toml"
 AUDITEOF
 DENY_TOML="$tmp_dir/deny_toml_headers.toml" AUDIT_TOML="$tmp_dir/audit_toml_headers.toml" bash "$gate" >/dev/null
 
-echo "=== Test 56: Missing comment in audit.toml fails ==="
+echo "=== Test 61: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -1198,7 +1329,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 57: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 62: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?

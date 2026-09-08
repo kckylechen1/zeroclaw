@@ -526,9 +526,9 @@ BARE_HANDLE_PATTERN = re.compile(
 
 TRACKING_PATTERN = re.compile(
     r"(?:"
-    r"\btracking\b(?:\s+(?:upstream|local|repo|issue|pr|ticket))*\s*[:=]?\s*(?:#[1-9]\d*|https?://\S+)"
-    r"|\b(?:upstream|local)\s+(?:issue\s+|pr\s+|ticket\s+)?#[1-9]\d*\b"
-    r"|\b[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+#[1-9]\d*\b"
+    r"\btracking\b(?:\s+(?:upstream|local|repo|issue|pr|ticket))*\s*[:=]?\s*(?:#[1-9]\d*(?!\w)|https?://[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_./#?=&%-]*)?)"
+    r"|\b(?:upstream|local)\s+(?:issue\s+|pr\s+|ticket\s+)?#[1-9]\d*(?!\w)"
+    r"|\b[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+#[1-9]\d*(?!\w)"
     r")",
     re.IGNORECASE
 )
@@ -570,7 +570,7 @@ def has_accountable_owner(text):
     return False
 
 EXPIRY_FIELD_PATTERN = re.compile(
-    r"\b(?:expires?|expiry)(?:\s+(?:on|at|by|date))?\b(?:\s*[:=]\s*|\s*)([^;,]*)",
+    r"\b(?:expires?|expiry|expired)(?:(?:\s+(?:on|at|by|date))\b\s*[:=]?|\s*[:=]\s*|\s+(?=\d{4}-\d{2}-\d{2}\b))([^;,]*)",
     re.IGNORECASE
 )
 
@@ -635,15 +635,17 @@ def has_lifecycle_condition(text):
             return False, f"placeholder or invalid review condition '{raw_cond}'"
         if re.search(r"#0+\b", norm_cond):
             return False, f"invalid zero-valued issue reference in review condition '{raw_cond}'"
-        date_m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", clean_cond)
-        if date_m:
-            date_str = date_m.group(1)
-            try:
-                rev_date = datetime.date.fromisoformat(date_str)
-            except ValueError:
-                return False, f"invalid calendar date '{date_str}' in review condition"
-            if rev_date < today:
-                return False, f"review date expired on {date_str} (current date is {today.isoformat()})"
+        if re.search(r"#[0-9]+[a-zA-Z_]", norm_cond):
+            return False, f"malformed issue reference in review condition '{raw_cond}'"
+        dates = re.findall(r"\b(\d{4}-\d{2}-\d{2})\b", clean_cond)
+        if dates:
+            for date_str in dates:
+                try:
+                    rev_date = datetime.date.fromisoformat(date_str)
+                except ValueError:
+                    return False, f"invalid calendar date '{date_str}' in review condition"
+                if rev_date < today:
+                    return False, f"review date expired on {date_str} (current date is {today.isoformat()})"
             has_valid_review = True
             continue
 
@@ -657,7 +659,10 @@ def has_lifecycle_condition(text):
                 is_version = True
 
         is_cadence = bool(re.search(r"\b(?:quarterly|monthly|weekly|bi-weekly|semi-annually|annually|daily)\b", norm_cond))
-        is_tracker = bool(re.search(r"#[1-9]\d*", norm_cond))
+        is_tracker = bool(re.match(
+            r"^(?:(?:on|upon|via|in|at)\s+)?(?:(?:upstream|local|repo|issue|pr|ticket)\s+)?(?:#[1-9]\d*(?!\w)|https?://[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_./#?=&%-]*)?)$",
+            norm_cond
+        ))
 
         # Check if it's an actionable milestone condition: requires content after milestone word
         is_milestone = False
@@ -665,8 +670,9 @@ def has_lifecycle_condition(text):
         if milestone_m:
             remainder = milestone_m.group(1).strip()
             if not re.match(r"^(?:no|not|never|without|none|tbd|tba|todo|placeholder|unknown|undefined|unassigned|fixed|patched|resolved|wontfix|completed|done|finished|passed|approved|closed|obsolete|retired)\b", remainder):
-                if re.search(r"(?:#[1-9]\d*|\b\d+(?:\.\d+)*\b|\b(?:release|releases|upgrade|upgrades|migration|migrations|update|updates|cleanup|cleanups|sprint|sprints|quarter|quarters|audit|audits|patch|patches|pr|prs)\b)", remainder):
-                    is_milestone = True
+                if not re.search(r"#[0-9]+[a-zA-Z_]", remainder):
+                    if re.search(r"(?:#[1-9]\d*(?!\w)|\b\d+(?:\.\d+)*\b|\b(?:release|releases|upgrade|upgrades|migration|migrations|update|updates|cleanup|cleanups|sprint|sprints|quarter|quarters|audit|audits|patch|patches|pr|prs)\b)", remainder):
+                        is_milestone = True
         elif re.search(r"\b(?:next\s+(?:release|sprint|quarter|audit|update))\b", norm_cond):
             is_milestone = True
 
@@ -696,7 +702,8 @@ def validate_lifecycle(text):
 
 # Derive baseline grandfathered advisories directly from the base branch / commit in git (single source of truth).
 # If the base branch cannot be resolved, fail closed (no static fallback list) so removed advisories cannot be re-added without full review metadata.
-baseline_advisories = set()
+baseline_deny_entries = {}   # adv_id -> normalized reason
+baseline_audit_entries = {}  # adv_id -> normalized comment
 
 base_deny_file = os.environ.get("BASE_DENY_TOML")
 base_audit_file = os.environ.get("BASE_AUDIT_TOML")
@@ -711,7 +718,9 @@ if base_deny_file or base_audit_file:
                 if elems:
                     for item, _ in elems:
                         if isinstance(item, dict) and "id" in item:
-                            baseline_advisories.add(item["id"].strip())
+                            adv_id = item["id"].strip()
+                            reason = re.sub(r"\s+", " ", item.get("reason", "").strip())
+                            baseline_deny_entries[adv_id] = reason
         except Exception:
             pass
     if base_audit_file and os.path.isfile(base_audit_file):
@@ -720,9 +729,11 @@ if base_deny_file or base_audit_file:
                 p = TomlArrayParser(f.read())
                 elems, _ = p.parse_advisories_ignore()
                 if elems:
-                    for item, _ in elems:
+                    for item, comment in elems:
                         if isinstance(item, str):
-                            baseline_advisories.add(item.strip())
+                            adv_id = item.strip()
+                            comm = re.sub(r"\s+", " ", (comment or "").strip())
+                            baseline_audit_entries[adv_id] = comm
         except Exception:
             pass
 else:
@@ -750,15 +761,19 @@ else:
                 if elems:
                     for item, _ in elems:
                         if isinstance(item, dict) and "id" in item:
-                            baseline_advisories.add(item["id"].strip())
+                            adv_id = item["id"].strip()
+                            reason = re.sub(r"\s+", " ", item.get("reason", "").strip())
+                            baseline_deny_entries[adv_id] = reason
             res2 = subprocess.run(["git", "show", f"{base_ref}:.cargo/audit.toml"], capture_output=True, text=True, check=False)
             if res2.returncode == 0:
                 parser2 = TomlArrayParser(res2.stdout)
                 elems2, _ = parser2.parse_advisories_ignore()
                 if elems2:
-                    for item, _ in elems2:
+                    for item, comment in elems2:
                         if isinstance(item, str):
-                            baseline_advisories.add(item.strip())
+                            adv_id = item.strip()
+                            comm = re.sub(r"\s+", " ", (comment or "").strip())
+                            baseline_audit_entries[adv_id] = comm
         except Exception:
             pass
 
@@ -795,18 +810,24 @@ else:
             if adv_id in RETIRED_ADVISORIES:
                 errors.append(f"deny.toml: Retired advisory '{adv_id}' is still present in deny.toml: {RETIRED_ADVISORIES[adv_id]}")
 
-            is_new = adv_id not in baseline_advisories
-            if not reason:
-                errors.append(f"deny.toml: Advisory '{adv_id}' missing 'reason' field with owner and review/expiry condition")
-            else:
-                has_owner, has_expiry, expiry_msg = validate_lifecycle(reason)
-                if is_new:
+            norm_reason = re.sub(r"\s+", " ", reason)
+            is_grandfathered = (
+                adv_id in baseline_deny_entries and
+                norm_reason == baseline_deny_entries[adv_id]
+            )
+            if not is_grandfathered:
+                if not reason:
+                    errors.append(f"deny.toml: Advisory '{adv_id}' missing 'reason' field with owner and review/expiry condition")
+                else:
+                    has_owner, has_expiry, expiry_msg = validate_lifecycle(reason)
                     if not has_owner or not has_expiry:
                         errors.append(
-                            f"deny.toml: New advisory exception '{adv_id}' reason '{reason}' lacks required lifecycle metadata: "
+                            f"deny.toml: New or modified advisory exception '{adv_id}' reason '{reason}' lacks required lifecycle metadata: "
                             f"owner={'ok' if has_owner else 'MISSING'}, review/expiry={'ok' if has_expiry else (expiry_msg or 'MISSING')}"
                         )
-                else:
+            else:
+                if reason:
+                    has_owner, has_expiry, expiry_msg = validate_lifecycle(reason)
                     if expiry_msg and expiry_msg != "MISSING":
                         errors.append(f"deny.toml: Advisory exception '{adv_id}' has expired or invalid review/expiry: {expiry_msg}")
         elif isinstance(elem, str):
@@ -842,18 +863,24 @@ else:
             if adv_id in RETIRED_ADVISORIES:
                 errors.append(f".cargo/audit.toml: Retired advisory '{adv_id}' is still present in audit.toml: {RETIRED_ADVISORIES[adv_id]}")
 
-            is_new = adv_id not in baseline_advisories
-            if not comment:
-                errors.append(f".cargo/audit.toml: Advisory '{adv_id}' missing inline comment with owner and review/expiry condition")
-            else:
-                has_owner, has_expiry, expiry_msg = validate_lifecycle(comment)
-                if is_new:
+            norm_comment = re.sub(r"\s+", " ", comment or "")
+            is_grandfathered = (
+                adv_id in baseline_audit_entries and
+                (norm_comment == baseline_audit_entries[adv_id] or not baseline_audit_entries[adv_id])
+            )
+            if not is_grandfathered:
+                if not comment:
+                    errors.append(f".cargo/audit.toml: Advisory '{adv_id}' missing inline comment with owner and review/expiry condition")
+                else:
+                    has_owner, has_expiry, expiry_msg = validate_lifecycle(comment)
                     if not has_owner or not has_expiry:
                         errors.append(
-                            f".cargo/audit.toml: New advisory exception '{adv_id}' comment '{comment}' lacks required lifecycle metadata: "
+                            f".cargo/audit.toml: New or modified advisory exception '{adv_id}' comment '{comment}' lacks required lifecycle metadata: "
                             f"owner={'ok' if has_owner else 'MISSING'}, review/expiry={'ok' if has_expiry else (expiry_msg or 'MISSING')}"
                         )
-                else:
+            else:
+                if comment:
+                    has_owner, has_expiry, expiry_msg = validate_lifecycle(comment)
                     if expiry_msg and expiry_msg != "MISSING":
                         errors.append(f".cargo/audit.toml: Advisory exception '{adv_id}' has expired or invalid review/expiry: {expiry_msg}")
         else:
