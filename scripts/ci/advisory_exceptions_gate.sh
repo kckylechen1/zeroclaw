@@ -65,46 +65,66 @@ class TomlArrayParser:
         self.length = len(text)
 
     def parse_advisories_ignore(self):
-        sec_m = re.search(r'^[ \t]*\[advisories\][ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)', self.text, re.MULTILINE)
+        # Match valid TOML table header: [advisories], [ advisories ], ["advisories"], ['advisories']
+        sec_m = re.search(
+            r'^[ \t]*\[[ \t]*(?:"advisories"|\'advisories\'|advisories)[ \t]*\][ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)',
+            self.text,
+            re.MULTILINE
+        )
         if not sec_m:
             return None, "No [advisories] section found"
 
         start_sec = sec_m.end()
-        next_sec_m = re.search(r'^[ \t]*\[[^\]]+\][ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)', self.text[start_sec:], re.MULTILINE)
+        next_sec_m = re.search(
+            r'^[ \t]*\[+[ \t]*(?:[^\]\r\n]+)[ \t]*\]+[ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)',
+            self.text[start_sec:],
+            re.MULTILINE
+        )
         sec_end = start_sec + next_sec_m.start() if next_sec_m else self.length
         sec_text = self.text[start_sec:sec_end]
 
-        # Locate ignore = [ within [advisories], skipping comments outside strings
+        # Locate ignore = [ within [advisories], skipping comments outside strings.
+        # Key can be bare: ignore, or quoted: "ignore" or 'ignore'.
         pos = 0
         in_quote = False
         quote_char = ''
         array_start = None
         while pos < len(sec_text):
             ch = sec_text[pos]
-            if ch in ('"', "'"):
-                if not in_quote:
-                    in_quote = True
-                    quote_char = ch
-                elif ch == quote_char and (pos == 0 or sec_text[pos-1] != '\\'):
-                    in_quote = False
-                pos += 1
-            elif ch == '#' and not in_quote:
+            if ch == '#' and not in_quote:
                 while pos < len(sec_text) and sec_text[pos] != '\n':
                     pos += 1
-            elif not in_quote:
-                if sec_text[pos:pos+6] == 'ignore':
-                    prev_ch = sec_text[pos-1] if pos > 0 else '\n'
-                    if not (prev_ch.isalnum() or prev_ch == '_'):
-                        k = pos + 6
-                        while k < len(sec_text) and sec_text[k] in ' \t\r\n':
-                            k += 1
-                        if k < len(sec_text) and sec_text[k] == '=':
-                            k += 1
-                            while k < len(sec_text) and sec_text[k] in ' \t\r\n':
-                                k += 1
-                            if k < len(sec_text) and sec_text[k] == '[':
-                                array_start = start_sec + k + 1
-                                break
+                continue
+
+            if in_quote:
+                if ch == quote_char and (pos == 0 or sec_text[pos-1] != '\\'):
+                    in_quote = False
+                pos += 1
+                continue
+
+            matched_key_len = 0
+            if sec_text[pos:pos+8] == '"ignore"' or sec_text[pos:pos+8] == "'ignore'":
+                matched_key_len = 8
+            elif sec_text[pos:pos+6] == 'ignore':
+                prev_ch = sec_text[pos-1] if pos > 0 else '\n'
+                if not (prev_ch.isalnum() or prev_ch in '_-'):
+                    matched_key_len = 6
+
+            if matched_key_len > 0:
+                k = pos + matched_key_len
+                while k < len(sec_text) and sec_text[k] in ' \t\r\n':
+                    k += 1
+                if k < len(sec_text) and sec_text[k] == '=':
+                    k += 1
+                    while k < len(sec_text) and sec_text[k] in ' \t\r\n':
+                        k += 1
+                    if k < len(sec_text) and sec_text[k] == '[':
+                        array_start = start_sec + k + 1
+                        break
+
+            if ch in ('"', "'"):
+                in_quote = True
+                quote_char = ch
                 pos += 1
             else:
                 pos += 1
@@ -513,13 +533,6 @@ TRACKING_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-UPSTREAM_PATTERN = re.compile(
-    r"(?:"
-    r"\b(?:transitive\s+(?:dep\s+)?via|copy\s+via|pinned\s+(?:transitively\s+)?by)\s+([a-zA-Z0-9_-]+)"
-    r")",
-    re.IGNORECASE
-)
-
 def is_negated_prefix(prefix):
     clause_prefix = re.split(r"[;,]", prefix)[-1]
     return bool(re.search(r"\b(?:no|not|without|never|missing|unassigned)\b", clause_prefix, re.IGNORECASE))
@@ -527,18 +540,6 @@ def is_negated_prefix(prefix):
 def has_accountable_owner(text):
     for m in TRACKING_PATTERN.finditer(text):
         if is_negated_prefix(text[:m.start()]):
-            continue
-        return True
-
-    for m in UPSTREAM_PATTERN.finditer(text):
-        if is_negated_prefix(text[:m.start()]):
-            continue
-        crate = m.group(1).strip().lower()
-        if not crate or crate in DISALLOWED_OWNERS or crate in DISALLOWED_UPSTREAM_WORDS:
-            continue
-        if re.match(r"^(?:no|not|without|none|unassigned|unknown|placeholder|tbd|todo)\b", crate):
-            continue
-        if len(crate) < 2 or crate.isdigit() or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$", crate):
             continue
         return True
 
@@ -693,44 +694,73 @@ def validate_lifecycle(text):
     has_expiry, expiry_msg = has_lifecycle_condition(text)
     return has_owner, has_expiry, expiry_msg
 
-STATIC_BASELINE_ADVISORIES = {
-    # Baseline advisory exceptions grandfathered as of Issue #296.
-    # Issue #296 limits the strict owner + review/expiry condition grammar to new exceptions,
-    # keeping unrelated grandfathered triage unchanged.
-    "RUSTSEC-2025-0141", "RUSTSEC-2025-0134", "RUSTSEC-2026-0097",
-    "RUSTSEC-2026-0104", "RUSTSEC-2024-0429", "RUSTSEC-2026-0049",
-    "RUSTSEC-2026-0098", "RUSTSEC-2026-0099", "RUSTSEC-2024-0384",
-    "RUSTSEC-2024-0411", "RUSTSEC-2024-0412", "RUSTSEC-2024-0413",
-    "RUSTSEC-2024-0414", "RUSTSEC-2024-0415", "RUSTSEC-2024-0416",
-    "RUSTSEC-2024-0417", "RUSTSEC-2024-0418", "RUSTSEC-2024-0419",
-    "RUSTSEC-2024-0420", "RUSTSEC-2025-0075", "RUSTSEC-2025-0080",
-    "RUSTSEC-2025-0081", "RUSTSEC-2025-0098", "RUSTSEC-2025-0100",
-    "RUSTSEC-2026-0173", "RUSTSEC-2024-0388", "RUSTSEC-2026-0253",
-}
+# Derive baseline grandfathered advisories directly from the base branch / commit in git (single source of truth).
+# If the base branch cannot be resolved, fail closed (no static fallback list) so removed advisories cannot be re-added without full review metadata.
+baseline_advisories = set()
 
-baseline_advisories = set(STATIC_BASELINE_ADVISORIES)
-base_ref = os.environ.get("BASE_REF", "")
-if base_ref:
-    try:
-        import subprocess
-        res = subprocess.run(["git", "show", f"{base_ref}:deny.toml"], capture_output=True, text=True, check=False)
-        if res.returncode == 0:
-            parser = TomlArrayParser(res.stdout)
-            elems, _ = parser.parse_advisories_ignore()
-            if elems:
-                for item, _ in elems:
-                    if isinstance(item, dict) and "id" in item:
-                        baseline_advisories.add(item["id"].strip())
-        res2 = subprocess.run(["git", "show", f"{base_ref}:.cargo/audit.toml"], capture_output=True, text=True, check=False)
-        if res2.returncode == 0:
-            parser2 = TomlArrayParser(res2.stdout)
-            elems2, _ = parser2.parse_advisories_ignore()
-            if elems2:
-                for item, _ in elems2:
-                    if isinstance(item, str):
-                        baseline_advisories.add(item.strip())
-    except Exception:
-        pass
+base_deny_file = os.environ.get("BASE_DENY_TOML")
+base_audit_file = os.environ.get("BASE_AUDIT_TOML")
+
+if base_deny_file or base_audit_file:
+    # Test fixture or custom baseline files
+    if base_deny_file and os.path.isfile(base_deny_file):
+        try:
+            with open(base_deny_file, "r", encoding="utf-8") as f:
+                p = TomlArrayParser(f.read())
+                elems, _ = p.parse_advisories_ignore()
+                if elems:
+                    for item, _ in elems:
+                        if isinstance(item, dict) and "id" in item:
+                            baseline_advisories.add(item["id"].strip())
+        except Exception:
+            pass
+    if base_audit_file and os.path.isfile(base_audit_file):
+        try:
+            with open(base_audit_file, "r", encoding="utf-8") as f:
+                p = TomlArrayParser(f.read())
+                elems, _ = p.parse_advisories_ignore()
+                if elems:
+                    for item, _ in elems:
+                        if isinstance(item, str):
+                            baseline_advisories.add(item.strip())
+        except Exception:
+            pass
+else:
+    import subprocess
+    base_ref = os.environ.get("BASE_REF") or os.environ.get("GITHUB_BASE_REF")
+    if not base_ref:
+        for candidate in ["origin/master", "master", "HEAD~1"]:
+            try:
+                res = subprocess.run(
+                    ["git", "rev-parse", "--verify", candidate],
+                    capture_output=True, text=True, check=False
+                )
+                if res.returncode == 0:
+                    base_ref = candidate
+                    break
+            except Exception:
+                pass
+
+    if base_ref:
+        try:
+            res = subprocess.run(["git", "show", f"{base_ref}:deny.toml"], capture_output=True, text=True, check=False)
+            if res.returncode == 0:
+                parser = TomlArrayParser(res.stdout)
+                elems, _ = parser.parse_advisories_ignore()
+                if elems:
+                    for item, _ in elems:
+                        if isinstance(item, dict) and "id" in item:
+                            baseline_advisories.add(item["id"].strip())
+            res2 = subprocess.run(["git", "show", f"{base_ref}:.cargo/audit.toml"], capture_output=True, text=True, check=False)
+            if res2.returncode == 0:
+                parser2 = TomlArrayParser(res2.stdout)
+                elems2, _ = parser2.parse_advisories_ignore()
+                if elems2:
+                    for item, _ in elems2:
+                        if isinstance(item, str):
+                            baseline_advisories.add(item.strip())
+        except Exception:
+            pass
 
 errors = []
 deny_entries = {}
@@ -847,10 +877,25 @@ if not is_single_file_override:
     deny_set = set(deny_entries.keys())
     audit_set = set(audit_entries.keys())
 
+    def has_explicit_tool_scope(text, expected_tool):
+        # Explicit non-negated tool scope declaration, e.g.:
+        # 'scope: cargo-deny', 'tool: cargo-deny', 'cargo-deny only', 'deny-only'
+        target = "deny" if "deny" in expected_tool else "audit"
+        pattern = re.compile(
+            rf"(?:\b(?:tool|scope)\s*[:=]\s*(?:cargo-)?{target}\b"
+            rf"|\b(?:cargo-)?{target}\s+only\b"
+            rf"|\b{target}-only\b)",
+            re.IGNORECASE
+        )
+        for m in pattern.finditer(text):
+            if not is_negated_prefix(text[:m.start()]):
+                return True
+        return False
+
     for adv_id in sorted(deny_set - audit_set):
         declared = DECLARED_TOOL_SCOPES.get(adv_id)
         reason = deny_entries[adv_id]
-        if declared != "cargo-deny" and not re.search(r"\b(?:cargo-deny(?:\s+only)?|deny-only)\b", reason, re.I):
+        if declared != "cargo-deny" and not has_explicit_tool_scope(reason, "cargo-deny"):
             errors.append(
                 f"deny.toml: Undeclared one-sided advisory exception '{adv_id}' is missing from .cargo/audit.toml. "
                 f"All exceptions must be present in both files unless declared tool-specific."
@@ -859,7 +904,7 @@ if not is_single_file_override:
     for adv_id in sorted(audit_set - deny_set):
         declared = DECLARED_TOOL_SCOPES.get(adv_id)
         comment = audit_entries[adv_id]
-        if declared != "cargo-audit" and not re.search(r"\b(?:cargo-audit(?:\s+only)?|audit-only)\b", comment, re.I):
+        if declared != "cargo-audit" and not has_explicit_tool_scope(comment, "cargo-audit"):
             errors.append(
                 f".cargo/audit.toml: Undeclared one-sided advisory exception '{adv_id}' is missing from deny.toml. "
                 f"All exceptions must be present in both files unless declared tool-specific."

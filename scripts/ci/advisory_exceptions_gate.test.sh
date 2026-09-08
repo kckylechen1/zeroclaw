@@ -47,15 +47,18 @@
 # 43. Negated or placeholder expiry values fail.
 # 44. Terminal review conditions fail.
 # 45. Multiline basic and literal strings in inline tables pass.
-# 46. Prose tokens masquerading as dependency owners fail.
+# 46. Dependency provenance without accountable owner fails.
 # 47. Incomplete version review conditions and bare milestone words fail.
 # 48. Actionable semver requirements and milestone conditions pass.
 # 49. Undeclared one-sided advisory exceptions fail.
 # 50. Zero-valued issue numbers in tracker or review fail.
 # 51. Multiline strings ending in 4 and 5 quotes pass.
 # 52. Grandfathered baseline entries without review condition pass.
-# 53. Comment in audit.toml missing fails.
-# 54. Missing config file fails strictly with exit status 2.
+# 53. Non-baseline entries without review condition fail strictly.
+# 54. Negated and ambiguous tool scope markers in one-sided exceptions fail.
+# 55. Valid TOML table headers and quoted keys pass.
+# 56. Comment in audit.toml missing fails.
+# 57. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -932,7 +935,7 @@ echo "=== Test 45: Multiline basic and literal strings in inline tables pass ===
 cat << 'AUDITEOF' > "$tmp_dir/audit_multiline.toml"
 [advisories]
 ignore = [
-    "RUSTSEC-2099-0001", # transitive via probe-rs; review: quarterly
+    "RUSTSEC-2099-0001", # owner: @security-lead; review: quarterly
     "RUSTSEC-2099-0002", # tracking #123; expires: 2099-01-01
 ]
 AUDITEOF
@@ -941,7 +944,7 @@ cat << 'DENYEOF' > "$tmp_dir/deny_multiline.toml"
 [advisories]
 ignore = [
     { id = "RUSTSEC-2099-0001", reason = """
-transitive via probe-rs;
+owner: @security-lead;
 review: quarterly
 """ },
     { id = "RUSTSEC-2099-0002", reason = '''
@@ -952,8 +955,12 @@ expires: 2099-01-01
 DENYEOF
 DENY_TOML="$tmp_dir/deny_multiline.toml" AUDIT_TOML="$tmp_dir/audit_multiline.toml" bash "$gate" >/dev/null
 
-echo "=== Test 46: Prose tokens masquerading as dependency owners fail ==="
+echo "=== Test 46: Dependency provenance without accountable owner fails ==="
 for bad_owner in \
+    "transitive via foo; upstream fix pending" \
+    "transitive via probe-rs; review: quarterly" \
+    "pinned by rumqttc; awaiting upgrade" \
+    "copy via rumqttc; review: quarterly" \
     "direct dep is affected; awaiting fix" \
     "transitive via the dependency; awaiting fix" \
     "transitive via a crate; awaiting fix" \
@@ -969,7 +976,7 @@ DENYEOF
     status=$?
     set -e
     if [ "$status" -ne 1 ]; then
-        echo "FAIL: Expected failure on prose owner '${bad_owner}', got status $status" >&2
+        echo "FAIL: Expected failure on provenance without owner '${bad_owner}', got status $status" >&2
         exit 1
     fi
 done
@@ -1112,7 +1119,74 @@ ignore = [
 AUDITEOF
 DENY_TOML="$tmp_dir/deny_grandfathered.toml" AUDIT_TOML="$tmp_dir/audit_grandfathered.toml" bash "$gate" >/dev/null
 
-echo "=== Test 53: Missing comment in audit.toml fails ==="
+echo "=== Test 53: Non-baseline entries without review condition fail strictly ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_non_baseline.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "gdkwayland-sys unmaintained gtk-rs GTK3 bindings; tracking #8519" },
+]
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_non_baseline.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # gdkwayland-sys unmaintained gtk-rs GTK3 bindings; tracking #8519
+]
+AUDITEOF
+set +e
+DENY_TOML="$tmp_dir/deny_non_baseline.toml" AUDIT_TOML="$tmp_dir/audit_non_baseline.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on non-baseline entry without review condition, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 54: Negated and ambiguous tool scope markers in one-sided exceptions fail ==="
+for bad_scope in \
+    "not cargo-deny only; tracking #123; review: quarterly" \
+    "cargo-deny is affected; tracking #123; review: quarterly" \
+    "affects cargo-deny; tracking #123; review: quarterly"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_scope.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_scope}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_scope.toml" AUDIT_TOML="$tmp_dir/audit_empty.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on ambiguous/negated tool scope '${bad_scope}', got status $status" >&2
+        exit 1
+    fi
+done
+
+# Valid explicit scope passes for one-sided exception
+cat << 'DENYEOF' > "$tmp_dir/deny_valid_scope.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "cargo-deny only; tracking #123; review: quarterly" },
+]
+DENYEOF
+DENY_TOML="$tmp_dir/deny_valid_scope.toml" AUDIT_TOML="$tmp_dir/audit_empty.toml" bash "$gate" >/dev/null
+
+echo "=== Test 55: Valid TOML table headers and quoted keys pass ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_toml_headers.toml"
+[ advisories ]
+"ignore" = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review: quarterly" },
+]
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_toml_headers.toml"
+["advisories"]
+'ignore' = [
+    "RUSTSEC-2099-0001", # tracking #123; review: quarterly
+]
+AUDITEOF
+DENY_TOML="$tmp_dir/deny_toml_headers.toml" AUDIT_TOML="$tmp_dir/audit_toml_headers.toml" bash "$gate" >/dev/null
+
+echo "=== Test 56: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -1124,7 +1198,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 54: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 57: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?
