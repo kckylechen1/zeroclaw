@@ -42,29 +42,195 @@ RETIRED_ADVISORIES = {
     "RUSTSEC-2026-0269": "Cleared by wasmtime 47.0.4 update (#285, #296) - filesystem sandbox escape",
 }
 
-def strip_comment(line):
-    in_quote = False
-    quote_char = ''
-    for i, ch in enumerate(line):
+class TomlArrayParser:
+    """Robust parser for TOML [advisories].ignore array elements."""
+
+    def __init__(self, text):
+        self.text = text
+        self.pos = 0
+        self.length = len(text)
+
+    def parse_advisories_ignore(self):
+        sec_m = re.search(r'^[ \t]*\[advisories\][ \t]*(?:\r?\n|$)', self.text, re.MULTILINE)
+        if not sec_m:
+            return None, "No [advisories] section found"
+
+        start_sec = sec_m.end()
+        next_sec_m = re.search(r'^[ \t]*\[[^\]]+\][ \t]*(?:\r?\n|$)', self.text[start_sec:], re.MULTILINE)
+        sec_end = start_sec + next_sec_m.start() if next_sec_m else self.length
+        sec_text = self.text[start_sec:sec_end]
+
+        ign_m = re.search(r'\bignore\s*=\s*\[', sec_text)
+        if not ign_m:
+            return None, "No ignore = [ array found in [advisories] section"
+
+        self.pos = start_sec + ign_m.end()
+        elements = []
+        while self.pos < self.length:
+            self._skip_ws_and_comments()
+            if self.pos >= self.length:
+                return None, "Unclosed array: EOF reached before ']'"
+
+            ch = self.text[self.pos]
+            if ch == ']':
+                self.pos += 1
+                return elements, None
+
+            elem, err = self._parse_element()
+            if err:
+                return None, err
+
+            comment = self._consume_comma_and_grab_comment()
+            elements.append((elem, comment))
+
+            self._skip_ws()
+            if self.pos < self.length and self.text[self.pos] == ']':
+                self.pos += 1
+                return elements, None
+
+        return None, "Unclosed array: EOF reached before ']'"
+
+    def _skip_ws(self):
+        while self.pos < self.length and self.text[self.pos] in ' \t\r\n':
+            self.pos += 1
+
+    def _skip_ws_and_comments(self):
+        while self.pos < self.length:
+            if self.text[self.pos] in ' \t\r\n':
+                self.pos += 1
+            elif self.text[self.pos] == '#':
+                while self.pos < self.length and self.text[self.pos] != '\n':
+                    self.pos += 1
+            else:
+                break
+
+    def _consume_comma_and_grab_comment(self):
+        while self.pos < self.length and self.text[self.pos] in ' \t':
+            self.pos += 1
+        if self.pos < self.length and self.text[self.pos] == ',':
+            self.pos += 1
+        while self.pos < self.length and self.text[self.pos] in ' \t':
+            self.pos += 1
+
+        comment = ""
+        if self.pos < self.length and self.text[self.pos] == '#':
+            comm_start = self.pos + 1
+            while self.pos < self.length and self.text[self.pos] not in '\r\n':
+                self.pos += 1
+            comment = self.text[comm_start:self.pos].strip()
+        return comment
+
+    def _parse_element(self):
+        ch = self.text[self.pos]
         if ch in ('"', "'"):
-            if not in_quote:
-                in_quote = True
-                quote_char = ch
-            elif ch == quote_char and (i == 0 or line[i-1] != '\\'):
-                in_quote = False
-        elif ch == '#' and not in_quote:
-            return line[:i].strip(), line[i+1:].strip()
-    return line.strip(), ""
+            return self._parse_string()
+        elif ch == '{':
+            return self._parse_inline_table()
+        else:
+            start = self.pos
+            while self.pos < self.length and self.text[self.pos] not in ',]\r\n#':
+                self.pos += 1
+            raw = self.text[start:self.pos].strip()
+            return raw, None
+
+    def _parse_string(self):
+        quote_char = self.text[self.pos]
+        self.pos += 1
+        res = []
+        while self.pos < self.length:
+            ch = self.text[self.pos]
+            if ch == '\\':
+                self.pos += 1
+                if self.pos < self.length:
+                    res.append(self.text[self.pos])
+                    self.pos += 1
+            elif ch == quote_char:
+                self.pos += 1
+                return "".join(res), None
+            else:
+                res.append(ch)
+                self.pos += 1
+        return None, "Unterminated string literal"
+
+    def _parse_inline_table(self):
+        self.pos += 1
+        table = {}
+        while self.pos < self.length:
+            self._skip_ws_and_comments()
+            if self.pos >= self.length:
+                return None, "Unclosed inline table: EOF reached before '}'"
+            ch = self.text[self.pos]
+            if ch == '}':
+                self.pos += 1
+                return table, None
+
+            key_start = self.pos
+            while self.pos < self.length and self.text[self.pos] not in '= \t\r\n}':
+                self.pos += 1
+            key = self.text[key_start:self.pos].strip().strip('"\'')
+
+            self._skip_ws()
+            if self.pos >= self.length or self.text[self.pos] != '=':
+                return None, f"Expected '=' after key '{key}' in inline table"
+            self.pos += 1
+            self._skip_ws()
+
+            if self.pos >= self.length:
+                return None, "Expected value after '=' in inline table"
+
+            vch = self.text[self.pos]
+            if vch in ('"', "'"):
+                val, err = self._parse_string()
+            else:
+                vstart = self.pos
+                while self.pos < self.length and self.text[self.pos] not in ',}\r\n#':
+                    self.pos += 1
+                val = self.text[vstart:self.pos].strip()
+                err = None
+
+            if err:
+                return None, err
+            table[key] = val
+
+            self._skip_ws()
+            if self.pos < self.length and self.text[self.pos] == ',':
+                self.pos += 1
+            elif self.pos < self.length and self.text[self.pos] == '}':
+                self.pos += 1
+                return table, None
+        return None, "Unclosed inline table: EOF reached before '}'"
+
+
+OWNER_PATTERN = re.compile(
+    r"(?:"
+    r"(?:owner|maintainer)\s*[:=]?\s*[@\w-]+"
+    r"|@[a-zA-Z0-9_-]+"
+    r"|tracking\s*(?:issue\s*)?(?:#\d+|https?://\S+)"
+    r"|#\d+"
+    r"|(?:transitive\s+via|pinned\s+(?:transitively\s+)?by|direct\s+dep)\s+[\w-]+"
+    r"|awaiting\s+[\w-]+\s+upstream"
+    r")",
+    re.IGNORECASE
+)
+
+EXPIRY_PATTERN = re.compile(
+    r"(?:"
+    r"expires?\s*[:=]?\s*\d{4}-\d{2}-\d{2}"
+    r"|review\s*(?:by|date|at|on)?\s*[:=]?\s*(?:\d{4}-\d{2}-\d{2}|[\w-]+)"
+    r"|revisit\s+(?:when|after|on|at)"
+    r"|awaiting\s+(?:upstream|[\w-]+\s+upgrade|[\w-]+\s+migration|cleanup|migration|fix|upgrade)"
+    r"|(?:upstream\s+)?fix\s+pending"
+    r"|(?:fixed|patched)\s+(?:in|at|>=|>)\s*[\w.-]+"
+    r"|(?:predates|outside\s+affected\s+range)"
+    r"|no\s+compatible\s+fix(?:\s+in\s+[\w.-]+)?"
+    r"|informational(?:\s+only)?(?:\s*,\s*no\s+cve|\s+advisory)"
+    r")",
+    re.IGNORECASE
+)
 
 def validate_lifecycle(text):
-    has_owner = bool(re.search(
-        r'(?:tracking\s*#|#\d+|@[\w-]+|upstream|team|maintainer|zeroclaw|transitive|direct|probe-rs|tauri|webkit2gtk|glib|rumqttc|nostr-sdk|ratatui|rand|bincode|rustls|unic|wasmtime)',
-        text, re.IGNORECASE
-    ))
-    has_expiry = bool(re.search(
-        r'(?:awaiting|fixed|patched|predates|unmaintained|informational|upgrade|migration|pending|revisit|cleared|latest compatible|no compatible fix|no fix|outside)',
-        text, re.IGNORECASE
-    ))
+    has_owner = bool(OWNER_PATTERN.search(text))
+    has_expiry = bool(EXPIRY_PATTERN.search(text))
     return has_owner, has_expiry
 
 errors = []
@@ -77,43 +243,38 @@ except Exception as e:
     print(f"FATAL: cannot read deny.toml: {e}", file=sys.stderr)
     sys.exit(2)
 
-adv_m = re.search(r'\[advisories\]\s*(?:[^\n]*\n)*?ignore\s*=\s*\[(.*?)\](?:\s*\n\s*\[|\s*\Z)', deny_content, re.DOTALL)
-if not adv_m:
-    errors.append("deny.toml: Could not locate valid [advisories].ignore array or array is unclosed")
+deny_parser = TomlArrayParser(deny_content)
+deny_elements, parse_err = deny_parser.parse_advisories_ignore()
+if parse_err:
+    errors.append(f"deny.toml: Failed to parse [advisories].ignore: {parse_err}")
 else:
-    raw_block = adv_m.group(1)
-    for line in raw_block.splitlines():
-        line_code, _ = strip_comment(line)
-        if not line_code:
-            continue
-        
-        # Check for bare string ignores (e.g. "RUSTSEC-...")
-        bare_m = re.search(r'^"(RUSTSEC-[^"]+)"', line_code)
-        if bare_m:
-            adv_id = bare_m.group(1)
-            if adv_id in RETIRED_ADVISORIES:
-                errors.append(f"deny.toml: Retired advisory '{adv_id}' is still present in deny.toml: {RETIRED_ADVISORIES[adv_id]}")
-            errors.append(f"deny.toml: Advisory '{adv_id}' specified as bare string; must be an inline table with 'id' and 'reason' enforcing owner and review/expiry lifecycle")
-            continue
+    for elem, _ in deny_elements:
+        if isinstance(elem, dict):
+            adv_id = elem.get("id", "").strip()
+            reason = elem.get("reason", "").strip()
+            if not adv_id:
+                errors.append(f"deny.toml: Inline table entry missing required 'id' key: {elem}")
+                continue
 
-        # Check for inline table ignores (e.g. { id = "...", reason = "..." })
-        tbl_m = re.search(r'\{\s*id\s*=\s*"([^"]+)"(?:,\s*reason\s*=\s*"([^"]*)")?\s*\}', line_code)
-        if tbl_m:
-            adv_id = tbl_m.group(1)
-            reason = tbl_m.group(2) or ""
             if adv_id in RETIRED_ADVISORIES:
                 errors.append(f"deny.toml: Retired advisory '{adv_id}' is still present in deny.toml: {RETIRED_ADVISORIES[adv_id]}")
-            if not reason.strip():
-                errors.append(f"deny.toml: Advisory '{adv_id}' missing reason field with owner and review/expiry condition")
+
+            if not reason:
+                errors.append(f"deny.toml: Advisory '{adv_id}' missing 'reason' field with owner and review/expiry condition")
             else:
                 has_owner, has_expiry = validate_lifecycle(reason)
                 if not has_owner or not has_expiry:
                     errors.append(
-                        f"deny.toml: Advisory '{adv_id}' reason '{reason}' lacks required lifecycle fields: "
+                        f"deny.toml: Advisory '{adv_id}' reason '{reason}' lacks required lifecycle metadata: "
                         f"owner={'ok' if has_owner else 'MISSING'}, review/expiry={'ok' if has_expiry else 'MISSING'}"
                     )
-        elif "RUSTSEC-" in line_code:
-            errors.append(f"deny.toml: Malformed or unparseable advisory entry in ignore list: '{line_code}'")
+        elif isinstance(elem, str):
+            adv_id = elem.strip()
+            if adv_id in RETIRED_ADVISORIES:
+                errors.append(f"deny.toml: Retired advisory '{adv_id}' is still present in deny.toml: {RETIRED_ADVISORIES[adv_id]}")
+            errors.append(f"deny.toml: Advisory '{adv_id}' specified as bare string; must be an inline table with 'id' and 'reason' enforcing owner and review/expiry lifecycle")
+        else:
+            errors.append(f"deny.toml: Malformed or unexpected advisory ignore element: {elem!r}")
 
 # --- 2. Validate .cargo/audit.toml ---
 try:
@@ -123,33 +284,28 @@ except Exception as e:
     print(f"FATAL: cannot read audit.toml: {e}", file=sys.stderr)
     sys.exit(2)
 
-audit_m = re.search(r'\[advisories\]\s*(?:[^\n]*\n)*?ignore\s*=\s*\[(.*?)\](?:\s*\n\s*\[|\s*\Z)', audit_content, re.DOTALL)
-if not audit_m:
-    errors.append(".cargo/audit.toml: Could not locate valid [advisories].ignore array or array is unclosed")
+audit_parser = TomlArrayParser(audit_content)
+audit_elements, parse_err = audit_parser.parse_advisories_ignore()
+if parse_err:
+    errors.append(f".cargo/audit.toml: Failed to parse [advisories].ignore: {parse_err}")
 else:
-    raw_block = audit_m.group(1)
-    for line in raw_block.splitlines():
-        line_code, line_comment = strip_comment(line)
-        if not line_code:
-            continue
-        
-        id_m = re.search(r'"(RUSTSEC-[^"]+)"', line_code)
-        if id_m:
-            adv_id = id_m.group(1)
+    for elem, comment in audit_elements:
+        if isinstance(elem, str):
+            adv_id = elem.strip()
             if adv_id in RETIRED_ADVISORIES:
                 errors.append(f".cargo/audit.toml: Retired advisory '{adv_id}' is still present in audit.toml: {RETIRED_ADVISORIES[adv_id]}")
-            
-            if not line_comment:
+
+            if not comment:
                 errors.append(f".cargo/audit.toml: Advisory '{adv_id}' missing inline comment with owner and review/expiry condition")
             else:
-                has_owner, has_expiry = validate_lifecycle(line_comment)
+                has_owner, has_expiry = validate_lifecycle(comment)
                 if not has_owner or not has_expiry:
                     errors.append(
-                        f".cargo/audit.toml: Advisory '{adv_id}' comment '{line_comment}' lacks required lifecycle fields: "
+                        f".cargo/audit.toml: Advisory '{adv_id}' comment '{comment}' lacks required lifecycle metadata: "
                         f"owner={'ok' if has_owner else 'MISSING'}, review/expiry={'ok' if has_expiry else 'MISSING'}"
                     )
-        elif "RUSTSEC-" in line_code:
-            errors.append(f".cargo/audit.toml: Malformed or unparseable advisory entry in ignore list: '{line_code}'")
+        else:
+            errors.append(f".cargo/audit.toml: Expected string advisory entry, found {type(elem).__name__}: {elem!r}")
 
 if errors:
     print("advisory-exceptions gate: FAIL", file=sys.stderr)

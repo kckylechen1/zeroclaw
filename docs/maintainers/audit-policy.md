@@ -58,8 +58,11 @@ wasmtime `43` → `45.0.3` bump in `crates/zeroclaw-plugins/Cargo.toml`
 
 **Process for this category:**
 
-- Add the entry with a single-line `reason` ending in the tracking
-  issue URL or PR number.
+- Add the entry in `deny.toml` as an inline table: `{ id = "RUSTSEC-...", reason = "..." }`.
+- Add the corresponding entry in `.cargo/audit.toml` with a matching inline comment: `"RUSTSEC-...",  # ...`.
+- Every entry's reason and inline comment must include:
+  1. **Accountable owner / tracking reference**: e.g. `tracking #<issue>`, `owner: @<handle>`, or explicit upstream source (`transitive via <crate>`).
+  2. **Review / expiry condition**: e.g. `expires: YYYY-MM-DD`, `review: <condition>`, `awaiting <upgrade|migration|fix>`, or `upstream fix pending`.
 - When a fix lands, remove the entry from **both** `.cargo/audit.toml`
   *and* `deny.toml` in the same PR. A drift here re-introduces the
   original CI failure.
@@ -109,11 +112,8 @@ Resolved groups:
 
 **Process for this category:**
 
-- Use a short reason naming the crate role, e.g.
-  `gtk-rs GTK3 bindings; transitive via zeroclaw-desktop/tauri/webkit2gtk`.
-- Do not add `; tracking #...` for entries that are stable
-  unmaintained warnings and unlikely to be resolved in the next
-  release cycle.
+- Add the entry to both `deny.toml` and `.cargo/audit.toml` with explicit role, owner/tracking reference (`tracking #8519`), and review condition (e.g. `awaiting upstream migration`).
+- Bare strings in `deny.toml` or missing inline comments in `.cargo/audit.toml` are rejected by `advisory_exceptions_gate.sh`.
 - When a replacement lands upstream and the dep gets bumped, remove
   the entry from both files.
 
