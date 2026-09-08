@@ -5,9 +5,11 @@
 # 1. Production configs pass cleanly.
 # 2. Presence of retired advisory RUSTSEC-2026-0268 in deny.toml fails.
 # 3. Presence of retired advisory RUSTSEC-2026-0269 in audit.toml fails.
-# 4. Missing reason in deny.toml fails.
-# 5. Missing explanation comment in audit.toml fails.
-# 6. Missing config file fails with fatal status.
+# 4. Bare string in deny.toml fails (bypassing table structure).
+# 5. Missing reason in deny.toml fails.
+# 6. Reason without owner or review/expiry condition fails.
+# 7. Comment in audit.toml without owner or review/expiry condition fails.
+# 8. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -26,7 +28,7 @@ echo "=== Test 2: Retired advisory in deny.toml fails ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_bad.toml"
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2026-0268", reason = "temporarily ignored" },
+    { id = "RUSTSEC-2026-0268", reason = "tracking #8519; fix pending" },
 ]
 DENYEOF
 if DENY_TOML="$tmp_dir/deny_bad.toml" bash "$gate" >/dev/null 2>&1; then
@@ -38,7 +40,7 @@ echo "=== Test 3: Retired advisory in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_bad.toml"
 [advisories]
 ignore = [
-    "RUSTSEC-2026-0269", # wasmtime sandbox escape
+    "RUSTSEC-2026-0269", # tracking #8519; fix pending
 ]
 AUDITEOF
 if AUDIT_TOML="$tmp_dir/audit_bad.toml" bash "$gate" >/dev/null 2>&1; then
@@ -46,7 +48,19 @@ if AUDIT_TOML="$tmp_dir/audit_bad.toml" bash "$gate" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 4: Missing reason in deny.toml fails ==="
+echo "=== Test 4: Bare string in deny.toml fails ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_bare.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2025-0141",
+]
+DENYEOF
+if DENY_TOML="$tmp_dir/deny_bare.toml" bash "$gate" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure on bare string in deny.toml" >&2
+    exit 1
+fi
+
+echo "=== Test 5: Missing reason in deny.toml fails ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_no_reason.toml"
 [advisories]
 ignore = [
@@ -58,21 +72,37 @@ if DENY_TOML="$tmp_dir/deny_no_reason.toml" bash "$gate" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 5: Missing comment in audit.toml fails ==="
-cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
+echo "=== Test 6: Reason without owner or review/expiry condition fails ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_no_lifecycle.toml"
 [advisories]
 ignore = [
-    "RUSTSEC-2099-0001",
+    { id = "RUSTSEC-2099-0001", reason = "temporarily ignored" },
 ]
-AUDITEOF
-if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; then
-    echo "FAIL: Expected failure on missing inline comment in audit.toml" >&2
+DENYEOF
+if DENY_TOML="$tmp_dir/deny_no_lifecycle.toml" bash "$gate" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure on reason without owner/expiry in deny.toml" >&2
     exit 1
 fi
 
-echo "=== Test 6: Missing config file fails with status 2 ==="
-if AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1; then
-    echo "FAIL: Expected fatal error on missing config file" >&2
+echo "=== Test 7: Comment in audit.toml without owner or review/expiry condition fails ==="
+cat << 'AUDITEOF' > "$tmp_dir/audit_no_lifecycle.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # temporary ignore
+]
+AUDITEOF
+if AUDIT_TOML="$tmp_dir/audit_no_lifecycle.toml" bash "$gate" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure on audit comment without owner/expiry" >&2
+    exit 1
+fi
+
+echo "=== Test 8: Missing config file fails strictly with exit status 2 ==="
+set +e
+AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "FAIL: Expected status 2 for missing config file, got $status" >&2
     exit 1
 fi
 

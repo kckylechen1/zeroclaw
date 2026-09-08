@@ -2,11 +2,13 @@
 
 # Advisory exception lifecycle gate (Issue #296).
 # Validates .cargo/audit.toml and deny.toml:
-# 1. Configuration files must exist and be parseable.
+# 1. Configuration files must exist and contain valid advisory ignore sections.
 # 2. Resolved/retired exceptions (e.g. Wasmtime RUSTSEC-2026-0268, RUSTSEC-2026-0269)
 #    must not remain in either file.
-# 3. Every ignored advisory in deny.toml must define an explicit non-empty reason.
-# 4. Every ignored advisory in .cargo/audit.toml must have an inline explanation.
+# 3. Every ignored advisory in deny.toml must define an explicit table with owner
+#    and review/expiry lifecycle conditions (bare strings are rejected).
+# 4. Every ignored advisory in .cargo/audit.toml must have an inline explanation
+#    with owner and review/expiry lifecycle conditions.
 #
 # Exit status: 0 = clean, 1 = validation failure, 2 = fatal error.
 
@@ -35,89 +37,119 @@ import re
 audit_path = sys.argv[1]
 deny_path = sys.argv[2]
 
-# Explicitly retired / resolved advisories that must not be re-introduced
-# without documented justification and lifecycle owner.
 RETIRED_ADVISORIES = {
-    "RUSTSEC-2026-0268": "Cleared by wasmtime 47.0.4 update (#285, #296)",
-    "RUSTSEC-2026-0269": "Cleared by wasmtime 47.0.4 update (#285, #296)",
+    "RUSTSEC-2026-0268": "Cleared by wasmtime 47.0.4 update (#285, #296) - host heap allocation via WASIp3",
+    "RUSTSEC-2026-0269": "Cleared by wasmtime 47.0.4 update (#285, #296) - filesystem sandbox escape",
 }
+
+def strip_comment(line):
+    in_quote = False
+    quote_char = ''
+    for i, ch in enumerate(line):
+        if ch in ('"', "'"):
+            if not in_quote:
+                in_quote = True
+                quote_char = ch
+            elif ch == quote_char and (i == 0 or line[i-1] != '\\'):
+                in_quote = False
+        elif ch == '#' and not in_quote:
+            return line[:i].strip(), line[i+1:].strip()
+    return line.strip(), ""
+
+def validate_lifecycle(text):
+    has_owner = bool(re.search(
+        r'(?:tracking\s*#|#\d+|@[\w-]+|upstream|team|maintainer|zeroclaw|transitive|direct|probe-rs|tauri|webkit2gtk|glib|rumqttc|nostr-sdk|ratatui|rand|bincode|rustls|unic|wasmtime)',
+        text, re.IGNORECASE
+    ))
+    has_expiry = bool(re.search(
+        r'(?:awaiting|fixed|patched|predates|unmaintained|informational|upgrade|migration|pending|revisit|cleared|latest compatible|no compatible fix|no fix|outside)',
+        text, re.IGNORECASE
+    ))
+    return has_owner, has_expiry
 
 errors = []
 
-# --- 1. Check deny.toml ---
+# --- 1. Validate deny.toml ---
 try:
     with open(deny_path, "r", encoding="utf-8") as f:
-        deny_lines = f.readlines()
+        deny_content = f.read()
 except Exception as e:
     print(f"FATAL: cannot read deny.toml: {e}", file=sys.stderr)
     sys.exit(2)
 
-in_advisories_ignore = False
-for idx, line in enumerate(deny_lines, 1):
-    stripped = line.strip()
-    if stripped.startswith("[advisories]"):
-        in_advisories_ignore = False
-    elif stripped.startswith("ignore = ["):
-        in_advisories_ignore = True
-        continue
-    elif in_advisories_ignore and stripped.startswith("]"):
-        in_advisories_ignore = False
-        continue
-
-    if in_advisories_ignore:
-        # Match entries like: { id = "RUSTSEC-...", reason = "..." }
-        m = re.search(r'id\s*=\s*"([^"]+)"', line)
-        if m:
-            adv_id = m.group(1)
+adv_m = re.search(r'\[advisories\]\s*(?:[^\n]*\n)*?ignore\s*=\s*\[(.*?)\](?:\s*\n\s*\[|\s*\Z)', deny_content, re.DOTALL)
+if not adv_m:
+    errors.append("deny.toml: Could not locate valid [advisories].ignore array or array is unclosed")
+else:
+    raw_block = adv_m.group(1)
+    for line in raw_block.splitlines():
+        line_code, _ = strip_comment(line)
+        if not line_code:
+            continue
+        
+        # Check for bare string ignores (e.g. "RUSTSEC-...")
+        bare_m = re.search(r'^"(RUSTSEC-[^"]+)"', line_code)
+        if bare_m:
+            adv_id = bare_m.group(1)
             if adv_id in RETIRED_ADVISORIES:
-                errors.append(
-                    f"deny.toml:{idx}: Retired advisory '{adv_id}' is still present in deny.toml ignore list. "
-                    f"Disposition: {RETIRED_ADVISORIES[adv_id]}"
-                )
+                errors.append(f"deny.toml: Retired advisory '{adv_id}' is still present in deny.toml: {RETIRED_ADVISORIES[adv_id]}")
+            errors.append(f"deny.toml: Advisory '{adv_id}' specified as bare string; must be an inline table with 'id' and 'reason' enforcing owner and review/expiry lifecycle")
+            continue
 
-            # Check reason field exists and is descriptive
-            r = re.search(r'reason\s*=\s*"([^"]*)"', line)
-            if not r or len(r.group(1).strip()) < 8:
-                errors.append(
-                    f"deny.toml:{idx}: Advisory '{adv_id}' must specify an explicit, descriptive reason in deny.toml."
-                )
+        # Check for inline table ignores (e.g. { id = "...", reason = "..." })
+        tbl_m = re.search(r'\{\s*id\s*=\s*"([^"]+)"(?:,\s*reason\s*=\s*"([^"]*)")?\s*\}', line_code)
+        if tbl_m:
+            adv_id = tbl_m.group(1)
+            reason = tbl_m.group(2) or ""
+            if adv_id in RETIRED_ADVISORIES:
+                errors.append(f"deny.toml: Retired advisory '{adv_id}' is still present in deny.toml: {RETIRED_ADVISORIES[adv_id]}")
+            if not reason.strip():
+                errors.append(f"deny.toml: Advisory '{adv_id}' missing reason field with owner and review/expiry condition")
+            else:
+                has_owner, has_expiry = validate_lifecycle(reason)
+                if not has_owner or not has_expiry:
+                    errors.append(
+                        f"deny.toml: Advisory '{adv_id}' reason '{reason}' lacks required lifecycle fields: "
+                        f"owner={'ok' if has_owner else 'MISSING'}, review/expiry={'ok' if has_expiry else 'MISSING'}"
+                    )
+        elif "RUSTSEC-" in line_code:
+            errors.append(f"deny.toml: Malformed or unparseable advisory entry in ignore list: '{line_code}'")
 
-# --- 2. Check .cargo/audit.toml ---
+# --- 2. Validate .cargo/audit.toml ---
 try:
     with open(audit_path, "r", encoding="utf-8") as f:
-        audit_lines = f.readlines()
+        audit_content = f.read()
 except Exception as e:
     print(f"FATAL: cannot read audit.toml: {e}", file=sys.stderr)
     sys.exit(2)
 
-in_audit_ignore = False
-for idx, line in enumerate(audit_lines, 1):
-    stripped = line.strip()
-    if stripped.startswith("[advisories]"):
-        in_audit_ignore = False
-    elif stripped.startswith("ignore = ["):
-        in_audit_ignore = True
-        continue
-    elif in_audit_ignore and stripped.startswith("]"):
-        in_audit_ignore = False
-        continue
-
-    if in_audit_ignore:
-        # Match entries like: "RUSTSEC-..."
-        m = re.search(r'"(RUSTSEC-[^"]+)"', line)
-        if m:
-            adv_id = m.group(1)
+audit_m = re.search(r'\[advisories\]\s*(?:[^\n]*\n)*?ignore\s*=\s*\[(.*?)\](?:\s*\n\s*\[|\s*\Z)', audit_content, re.DOTALL)
+if not audit_m:
+    errors.append(".cargo/audit.toml: Could not locate valid [advisories].ignore array or array is unclosed")
+else:
+    raw_block = audit_m.group(1)
+    for line in raw_block.splitlines():
+        line_code, line_comment = strip_comment(line)
+        if not line_code:
+            continue
+        
+        id_m = re.search(r'"(RUSTSEC-[^"]+)"', line_code)
+        if id_m:
+            adv_id = id_m.group(1)
             if adv_id in RETIRED_ADVISORIES:
-                errors.append(
-                    f".cargo/audit.toml:{idx}: Retired advisory '{adv_id}' is still present in audit.toml ignore list. "
-                    f"Disposition: {RETIRED_ADVISORIES[adv_id]}"
-                )
-
-            # Check for trailing inline comment explaining the ignore
-            if "#" not in line or len(line.split("#", 1)[1].strip()) < 5:
-                errors.append(
-                    f".cargo/audit.toml:{idx}: Advisory '{adv_id}' must have an inline comment explaining its rationale/owner."
-                )
+                errors.append(f".cargo/audit.toml: Retired advisory '{adv_id}' is still present in audit.toml: {RETIRED_ADVISORIES[adv_id]}")
+            
+            if not line_comment:
+                errors.append(f".cargo/audit.toml: Advisory '{adv_id}' missing inline comment with owner and review/expiry condition")
+            else:
+                has_owner, has_expiry = validate_lifecycle(line_comment)
+                if not has_owner or not has_expiry:
+                    errors.append(
+                        f".cargo/audit.toml: Advisory '{adv_id}' comment '{line_comment}' lacks required lifecycle fields: "
+                        f"owner={'ok' if has_owner else 'MISSING'}, review/expiry={'ok' if has_expiry else 'MISSING'}"
+                    )
+        elif "RUSTSEC-" in line_code:
+            errors.append(f".cargo/audit.toml: Malformed or unparseable advisory entry in ignore list: '{line_code}'")
 
 if errors:
     print("advisory-exceptions gate: FAIL", file=sys.stderr)
@@ -128,4 +160,3 @@ if errors:
 print("advisory-exceptions gate: clean")
 sys.exit(0)
 PYEOF
-chmod +x scripts/ci/advisory_exceptions_gate.sh

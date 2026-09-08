@@ -189,6 +189,10 @@ jobs:
         run: |
           bash scripts/ci/wire_budget_exception_gate.test.sh
           bash scripts/ci/wire_budget_exception_gate.sh
+      - name: Advisory exceptions gate (explicit lifecycle for audit/deny exceptions)
+        run: |
+          bash scripts/ci/advisory_exceptions_gate.test.sh
+          bash scripts/ci/advisory_exceptions_gate.sh
 
 
   windows-clippy-tools-changes:
