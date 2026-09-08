@@ -21,7 +21,7 @@ ignore = [
     # rand -- re-entrancy unsoundness via custom global logger; fixed in rand 0.8.6
     # for the 0.8.x copy in our tree; the 0.7.x copy predates rand::rng() entirely
     # and is not affected; the 0.9.x copy is outside the advisory's affected range
-    { id = "RUSTSEC-2026-0097", reason = "rand re-entrancy unsoundness; 0.8.6 copy is patched; 0.7.x copy predates rand::rng() and is not affected; tracking #8519" },
+    { id = "RUSTSEC-2026-0097", reason = "rand re-entrancy unsoundness; 0.8.6 copy is patched; 0.7.x copy predates rand::rng() and is not affected; review on #8519; tracking #8519" },
     # rustls-pemfile -- unmaintained, functionality moved to rustls-pki-types;
     # transitive dep, upstream migration tracked
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive dep awaiting upstream migration to rustls-pki-types; tracking #8519" },

@@ -56,6 +56,13 @@ wasmtime `43` → `45.0.3` bump in `crates/zeroclaw-plugins/Cargo.toml`
 (see PR #8542, awaiting maintainer re-approval after the latest
 `upstream/master` merge).
 
+Resolved groups:
+
+- **Wasmtime advisories (`RUSTSEC-2026-0268`, `-0269`)**: Wasmtime guest-controlled
+  host heap allocation through WASIp3 streams (`-0268`) and filesystem sandbox escape
+  when paths contain trailing slashes (`-0269`). Cleared by wasmtime 47.0.4 update in
+  PR #285, with obsolete exceptions retired in #296.
+
 **Process for this category:**
 
 - Add the entry in `deny.toml` as an inline table: `{ id = "RUSTSEC-...", reason = "..." }`.
@@ -100,10 +107,6 @@ Live groups:
 
 Resolved groups:
 
-- **Wasmtime advisories (`RUSTSEC-2026-0268`, `-0269`)**: Wasmtime guest-controlled
-  host heap allocation through WASIp3 streams (`-0268`) and filesystem sandbox escape
-  when paths contain trailing slashes (`-0269`). Cleared by wasmtime 47.0.4 update in
-  PR #285, with obsolete exceptions retired in #296.
 - **GTK3 stack (10 entries, `RUSTSEC-2024-0411..-0420`)**: pulled in
   transitively by the now-removed `zeroclaw-desktop` (Tauri →
   webkit2gtk → gtk-rs bindings). These ignore entries were dropped in

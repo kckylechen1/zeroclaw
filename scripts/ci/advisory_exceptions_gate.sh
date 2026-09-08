@@ -380,6 +380,10 @@ def has_accountable_owner(text):
 
     return False
 
+def is_negated_prefix(prefix):
+    clause_prefix = re.split(r"[;,]", prefix)[-1]
+    return bool(re.search(r"\b(?:no|not|without|never)\b", clause_prefix, re.IGNORECASE))
+
 EXPIRY_DATE_PATTERN = re.compile(
     r"\b(?:expires?|expiry)\b\s*[:=]?\s*(\d{4}-\d{2}-\d{2})\b",
     re.IGNORECASE
@@ -392,33 +396,35 @@ REVIEW_CONDITION_PATTERN = re.compile(
 
 LIFECYCLE_OTHER_PATTERN = re.compile(
     r"(?:"
-    r"\bawaiting\b\s+(?:upstream|[\w-]+\s+upgrade|[\w-]+\s+migration|cleanup|migration|fix|upgrade)\b"
+    r"\bawaiting\b\s+(?:[\w-]+\s+)*(?:migration|upgrade|fix|cleanup|upstream)\b"
     r"|\b(?:upstream\s+)?fix\s+pending\b"
-    r"|\b(?:fixed|patched)\b\s+(?:in|at|>=|>)\s*[\w.-]+"
-    r"|\b(?:predates|outside\s+affected\s+range)\b"
     r"|\bno\s+compatible\s+fix\b(?:\s+in\s+[\w.-]+)?"
-    r"|\binformational(?:\s+only)?(?:\s*,\s*no\s+cve|\s+advisory)\b"
     r")",
     re.IGNORECASE
 )
 
 def has_lifecycle_condition(text):
+    # 1. Check explicit expiry keywords.
+    # An invalid or expired deadline strictly fails and cannot be overridden by fallback markers.
+    has_expiry_kw = False
     for m in EXPIRY_DATE_PATTERN.finditer(text):
-        prefix = text[:m.start()]
-        if re.search(r"\b(?:no|not|without|never)\s+$", prefix, re.IGNORECASE):
+        if is_negated_prefix(text[:m.start()]):
             continue
+        has_expiry_kw = True
         date_str = m.group(1)
         try:
             exp_date = datetime.date.fromisoformat(date_str)
         except ValueError:
-            continue
+            return False, f"invalid calendar date '{date_str}'"
         if exp_date < today:
-            continue
-        return True
+            return False, f"expired on {date_str} (current date is {today.isoformat()})"
+        return True, None
+    if has_expiry_kw:
+        return False, "invalid or expired deadline"
 
+    # 2. Check review / revisit condition
     for m in REVIEW_CONDITION_PATTERN.finditer(text):
-        prefix = text[:m.start()]
-        if re.search(r"\b(?:no|not|without|never)\s+$", prefix, re.IGNORECASE):
+        if is_negated_prefix(text[:m.start()]):
             continue
         raw_cond = m.group(1).strip()
         clean_cond = re.sub(r"\s+", " ", raw_cond).lower()
@@ -430,26 +436,27 @@ def has_lifecycle_condition(text):
             continue
         date_m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", clean_cond)
         if date_m:
+            date_str = date_m.group(1)
             try:
-                rev_date = datetime.date.fromisoformat(date_m.group(1))
+                rev_date = datetime.date.fromisoformat(date_str)
             except ValueError:
-                continue
+                return False, f"invalid calendar date '{date_str}' in review condition"
             if rev_date < today:
-                continue
-        return True
+                return False, f"review date expired on {date_str} (current date is {today.isoformat()})"
+        return True, None
 
+    # 3. Check recognized milestone / ongoing conditions
     for m in LIFECYCLE_OTHER_PATTERN.finditer(text):
-        prefix = text[:m.start()]
-        if re.search(r"\b(?:no|not|without|never)\s+$", prefix, re.IGNORECASE):
+        if is_negated_prefix(text[:m.start()]):
             continue
-        return True
+        return True, None
 
-    return False
+    return False, "MISSING"
 
 def validate_lifecycle(text):
     has_owner = has_accountable_owner(text)
-    has_expiry = has_lifecycle_condition(text)
-    return has_owner, has_expiry
+    has_expiry, expiry_msg = has_lifecycle_condition(text)
+    return has_owner, has_expiry, expiry_msg
 
 errors = []
 
@@ -480,11 +487,11 @@ else:
             if not reason:
                 errors.append(f"deny.toml: Advisory '{adv_id}' missing 'reason' field with owner and review/expiry condition")
             else:
-                has_owner, has_expiry = validate_lifecycle(reason)
+                has_owner, has_expiry, expiry_msg = validate_lifecycle(reason)
                 if not has_owner or not has_expiry:
                     errors.append(
                         f"deny.toml: Advisory '{adv_id}' reason '{reason}' lacks required lifecycle metadata: "
-                        f"owner={'ok' if has_owner else 'MISSING'}, review/expiry={'ok' if has_expiry else 'MISSING'}"
+                        f"owner={'ok' if has_owner else 'MISSING'}, review/expiry={'ok' if has_expiry else (expiry_msg or 'MISSING')}"
                     )
         elif isinstance(elem, str):
             adv_id = elem.strip()
@@ -516,11 +523,11 @@ else:
             if not comment:
                 errors.append(f".cargo/audit.toml: Advisory '{adv_id}' missing inline comment with owner and review/expiry condition")
             else:
-                has_owner, has_expiry = validate_lifecycle(comment)
+                has_owner, has_expiry, expiry_msg = validate_lifecycle(comment)
                 if not has_owner or not has_expiry:
                     errors.append(
                         f".cargo/audit.toml: Advisory '{adv_id}' comment '{comment}' lacks required lifecycle metadata: "
-                        f"owner={'ok' if has_owner else 'MISSING'}, review/expiry={'ok' if has_expiry else 'MISSING'}"
+                        f"owner={'ok' if has_owner else 'MISSING'}, review/expiry={'ok' if has_expiry else (expiry_msg or 'MISSING')}"
                     )
         else:
             errors.append(f".cargo/audit.toml: Expected string advisory entry, found {type(elem).__name__}: {elem!r}")

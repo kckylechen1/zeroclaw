@@ -29,11 +29,12 @@
 # 25. Placeholder or negated review conditions are rejected.
 # 26. Multi-word placeholder owners are rejected.
 # 27. Generic upstream phrases without a concrete crate or tracking issue fail.
-# 28. Expired lifecycle dates in the past fail.
-# 29. Negated review conditions and milestones fail.
+# 28. Expired lifecycle dates in the past fail and override fallback markers.
+# 29. Negated and qualified negative review conditions and milestones fail.
 # 30. Invalid calendar dates in review conditions fail.
-# 31. Comment in audit.toml missing fails.
-# 32. Missing config file fails strictly with exit status 2.
+# 31. Resolved-state prose without review or expiry trigger fails.
+# 32. Comment in audit.toml missing fails.
+# 33. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -47,6 +48,10 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 echo "=== Test 1: Production configs pass ==="
 bash "$gate"
+
+# Pin deterministic reference date for fixture tests (2026-09-08) so future dates
+# like 2026-12-01 or 2027-01-01 remain deterministic across time.
+export GATE_CURRENT_DATE="2026-09-08"
 
 echo "=== Test 2: Retired advisory in deny.toml fails ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_bad.toml"
@@ -502,6 +507,21 @@ if [ "$status" -ne 1 ]; then
     exit 1
 fi
 
+cat << 'DENYEOF' > "$tmp_dir/deny_past_expiry_fallback.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; expires: 2000-01-01; awaiting upgrade" },
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_past_expiry_fallback.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on expired deadline with fallback marker, got status $status" >&2
+    exit 1
+fi
+
 cat << 'DENYEOF' > "$tmp_dir/deny_past_review.toml"
 [advisories]
 ignore = [
@@ -518,7 +538,7 @@ if [ "$status" -ne 1 ]; then
 fi
 
 echo "=== Test 29: Negated review conditions and milestones fail ==="
-for bad_lifecycle in "no review: quarterly" "not awaiting fix" "no upstream fix pending"; do
+for bad_lifecycle in "no review: quarterly" "not awaiting fix" "no longer awaiting fix" "not currently awaiting fix" "no upstream fix pending"; do
     cat << DENYEOF > "$tmp_dir/deny_negated_lifecycle.toml"
 [advisories]
 ignore = [
@@ -553,7 +573,25 @@ DENYEOF
     fi
 done
 
-echo "=== Test 31: Missing comment in audit.toml fails ==="
+echo "=== Test 31: Resolved-state prose without review or expiry trigger fails ==="
+for resolved_prose in "patched in 1.2.3" "fixed in 1.2.3" "predates 1.0 and is not affected"; do
+    cat << DENYEOF > "$tmp_dir/deny_resolved_prose.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; ${resolved_prose}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_resolved_prose.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on resolved-state prose without trigger '${resolved_prose}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 32: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -565,7 +603,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 32: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 33: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?
