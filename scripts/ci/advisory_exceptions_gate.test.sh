@@ -50,8 +50,12 @@
 # 46. Prose tokens masquerading as dependency owners fail.
 # 47. Incomplete version review conditions and bare milestone words fail.
 # 48. Actionable semver requirements and milestone conditions pass.
-# 49. Comment in audit.toml missing fails.
-# 50. Missing config file fails strictly with exit status 2.
+# 49. Undeclared one-sided advisory exceptions fail.
+# 50. Zero-valued issue numbers in tracker or review fail.
+# 51. Multiline strings ending in 4 and 5 quotes pass.
+# 52. Grandfathered baseline entries without review condition pass.
+# 53. Comment in audit.toml missing fails.
+# 54. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -925,9 +929,12 @@ DENYEOF
 done
 
 echo "=== Test 45: Multiline basic and literal strings in inline tables pass ==="
-cat << 'AUDITEOF' > "$tmp_dir/empty_audit.toml"
+cat << 'AUDITEOF' > "$tmp_dir/audit_multiline.toml"
 [advisories]
-ignore = []
+ignore = [
+    "RUSTSEC-2099-0001", # transitive via probe-rs; review: quarterly
+    "RUSTSEC-2099-0002", # tracking #123; expires: 2099-01-01
+]
 AUDITEOF
 
 cat << 'DENYEOF' > "$tmp_dir/deny_multiline.toml"
@@ -943,7 +950,7 @@ expires: 2099-01-01
 ''' },
 ]
 DENYEOF
-DENY_TOML="$tmp_dir/deny_multiline.toml" AUDIT_TOML="$tmp_dir/empty_audit.toml" bash "$gate" >/dev/null
+DENY_TOML="$tmp_dir/deny_multiline.toml" AUDIT_TOML="$tmp_dir/audit_multiline.toml" bash "$gate" >/dev/null
 
 echo "=== Test 46: Prose tokens masquerading as dependency owners fail ==="
 for bad_owner in \
@@ -992,6 +999,16 @@ DENYEOF
 done
 
 echo "=== Test 48: Actionable semver requirements and milestone conditions pass ==="
+cat << 'AUDITEOF' > "$tmp_dir/audit_valid_reviews.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # tracking #123; review: >= 47.0.5
+    "RUSTSEC-2099-0002", # tracking #123; review: v0.103.13
+    "RUSTSEC-2099-0003", # tracking #123; review: on next release
+    "RUSTSEC-2099-0004", # tracking #123; review: upon upstream migration
+]
+AUDITEOF
+
 cat << 'DENYEOF' > "$tmp_dir/deny_valid_reviews.toml"
 [advisories]
 ignore = [
@@ -1001,9 +1018,101 @@ ignore = [
     { id = "RUSTSEC-2099-0004", reason = "tracking #123; review: upon upstream migration" },
 ]
 DENYEOF
-DENY_TOML="$tmp_dir/deny_valid_reviews.toml" AUDIT_TOML="$tmp_dir/empty_audit.toml" bash "$gate" >/dev/null
+DENY_TOML="$tmp_dir/deny_valid_reviews.toml" AUDIT_TOML="$tmp_dir/audit_valid_reviews.toml" bash "$gate" >/dev/null
 
-echo "=== Test 49: Missing comment in audit.toml fails ==="
+echo "=== Test 49: Undeclared one-sided advisory exceptions fail ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_onesided.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review: quarterly" },
+]
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_empty.toml"
+[advisories]
+ignore = []
+AUDITEOF
+set +e
+DENY_TOML="$tmp_dir/deny_onesided.toml" AUDIT_TOML="$tmp_dir/audit_empty.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on undeclared one-sided exception in deny.toml, got status $status" >&2
+    exit 1
+fi
+
+cat << 'AUDITEOF' > "$tmp_dir/audit_onesided.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # tracking #123; review: quarterly
+]
+AUDITEOF
+cat << 'DENYEOF' > "$tmp_dir/deny_empty.toml"
+[advisories]
+ignore = []
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_empty.toml" AUDIT_TOML="$tmp_dir/audit_onesided.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on undeclared one-sided exception in audit.toml, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 50: Zero-valued issue numbers in tracker or review fail ==="
+for bad_zero in \
+    "tracking #0; review: quarterly" \
+    "tracking #123; review: #0" \
+    "tracking #123; review: on upstream #0"; do
+    cat << DENYEOF > "$tmp_dir/deny_zero_issue.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_zero}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_zero_issue.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on zero-valued issue '${bad_zero}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 51: Multiline strings ending in 4 and 5 quotes pass ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_multiline_quotes.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = """"tracking #123; review: quarterly"""" },
+    { id = "RUSTSEC-2099-0002", reason = ''''tracking #123; expires: 2099-01-01'''' },
+]
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_multiline_quotes.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # "tracking #123; review: quarterly"
+    "RUSTSEC-2099-0002", # 'tracking #123; expires: 2099-01-01'
+]
+AUDITEOF
+DENY_TOML="$tmp_dir/deny_multiline_quotes.toml" AUDIT_TOML="$tmp_dir/audit_multiline_quotes.toml" bash "$gate" >/dev/null
+
+echo "=== Test 52: Grandfathered baseline entries without review condition pass ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_grandfathered.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2024-0411", reason = "gdkwayland-sys unmaintained gtk-rs GTK3 bindings; tracking #8519" },
+]
+DENYEOF
+cat << 'AUDITEOF' > "$tmp_dir/audit_grandfathered.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2024-0411", # gdkwayland-sys unmaintained gtk-rs GTK3 bindings; tracking #8519
+]
+AUDITEOF
+DENY_TOML="$tmp_dir/deny_grandfathered.toml" AUDIT_TOML="$tmp_dir/audit_grandfathered.toml" bash "$gate" >/dev/null
+
+echo "=== Test 53: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -1015,7 +1124,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 50: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 54: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?
