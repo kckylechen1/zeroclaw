@@ -237,7 +237,7 @@ class TomlArrayParser:
 
 OWNER_PATTERN = re.compile(
     r"(?:"
-    r"\b(?:owner|maintainer)\b\s*(?:[:=]\s*[@\w-]+|\s+@[a-zA-Z0-9_-]+)"
+    r"\b(?:owner|maintainer)\b\s*(?:[:=]\s*[^;,\n\r]+|\s+@[a-zA-Z0-9_-]+)"
     r"|(?<!\w)@[a-zA-Z0-9_-]+"
     r"|\btracking\b\s*(?:issue\s*)?(?:#\d+|https?://\S+)"
     r"|(?<!\w)#\d+\b"
@@ -251,8 +251,9 @@ EXPIRY_PATTERN = re.compile(
     r"(?:"
     r"\bexpires?\b\s*[:=]?\s*\d{4}-\d{2}-\d{2}\b"
     r"|\bexpiry\b\s*[:=]?\s*\d{4}-\d{2}-\d{2}\b"
-    r"|\breview\b\s*(?:by|date|due|at|on)?\s*[:=]?\s*(?:\d{4}-\d{2}-\d{2}\b|on\s+release\b|on\s+[\w-]+\s+release\b)"
-    r"|\brevisit\b\s+(?:when|after|on|at)\b\s+[\w-]+"
+    r"|\breview\b\s*[:=]\s*[^;,\n\r]+"
+    r"|\breview\b\s+(?:by|due|before|at|on)\s+[^;,\n\r]+"
+    r"|\brevisit\b\s+(?:when|after|on|at)\b\s+[^;,\n\r]+"
     r"|\bawaiting\b\s+(?:upstream|[\w-]+\s+upgrade|[\w-]+\s+migration|cleanup|migration|fix|upgrade)\b"
     r"|\b(?:upstream\s+)?fix\s+pending\b"
     r"|\b(?:fixed|patched)\b\s+(?:in|at|>=|>)\s*[\w.-]+"

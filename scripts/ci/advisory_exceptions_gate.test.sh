@@ -15,8 +15,9 @@
 # 11. Loose prose without accountable owner and expiry condition fails.
 # 12. Word-prefix false positives (e.g. "ownership unclear; reviewed recently") are strictly rejected.
 # 13. Explicit structured lifecycle metadata (owner @alice; expires YYYY-MM-DD) passes.
-# 14. Comment in audit.toml missing fails.
-# 15. Missing config file fails strictly with exit status 2.
+# 14. Free-form review condition (review: <condition>) passes.
+# 15. Comment in audit.toml missing fails.
+# 16. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -50,7 +51,14 @@ ignore = [
     { id = "RUSTSEC-2025-0141", reason = "owner: @team; expires: 2026-12-31" }, { id = "RUSTSEC-2026-0268", reason = "owner: @team; expires: 2026-12-31" },
 ]
 DENYEOF
-err_out=$(DENY_TOML="$tmp_dir/deny_multi_retired.toml" bash "$gate" 2>&1 || true)
+set +e
+err_out=$(DENY_TOML="$tmp_dir/deny_multi_retired.toml" bash "$gate" 2>&1)
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected validation failure status 1 in multi-item line deny test, got $status" >&2
+    exit 1
+fi
 if ! echo "$err_out" | grep -q "Retired advisory 'RUSTSEC-2026-0268'"; then
     echo "FAIL: Expected error diagnostic for retired advisory RUSTSEC-2026-0268 in multi-item line deny test" >&2
     echo "Output was: $err_out" >&2
@@ -76,7 +84,14 @@ ignore = [
     "RUSTSEC-2025-0141", "RUSTSEC-2026-0269", # tracking #8519; fix pending
 ]
 AUDITEOF
-err_out=$(AUDIT_TOML="$tmp_dir/audit_multi_retired.toml" bash "$gate" 2>&1 || true)
+set +e
+err_out=$(AUDIT_TOML="$tmp_dir/audit_multi_retired.toml" bash "$gate" 2>&1)
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected validation failure status 1 in multi-item line audit test, got $status" >&2
+    exit 1
+fi
 if ! echo "$err_out" | grep -q "Retired advisory 'RUSTSEC-2026-0269'"; then
     echo "FAIL: Expected error diagnostic for retired advisory RUSTSEC-2026-0269 in multi-item line audit test" >&2
     echo "Output was: $err_out" >&2
@@ -127,7 +142,14 @@ ignore = [
     { id = "RUSTSEC-2026-0268", reason = "owner: @security-team; expires: 2027-01-01" },
 ]
 DENYEOF
-err_out=$(DENY_TOML="$tmp_dir/deny_commented_ignore.toml" bash "$gate" 2>&1 || true)
+set +e
+err_out=$(DENY_TOML="$tmp_dir/deny_commented_ignore.toml" bash "$gate" 2>&1)
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected validation failure status 1 in commented-out ignore test, got $status" >&2
+    exit 1
+fi
 if ! echo "$err_out" | grep -q "Retired advisory 'RUSTSEC-2026-0268'"; then
     echo "FAIL: Expected commented-out ignore to not shadow real ignore assignment" >&2
     echo "Output was: $err_out" >&2
@@ -184,7 +206,19 @@ if ! DENY_TOML="$tmp_dir/deny_explicit_lifecycle.toml" bash "$gate" >/dev/null 2
     exit 1
 fi
 
-echo "=== Test 14: Missing comment in audit.toml fails ==="
+echo "=== Test 14: Free-form review condition passes ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_freeform_review.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review: quarterly" },
+]
+DENYEOF
+if ! DENY_TOML="$tmp_dir/deny_freeform_review.toml" bash "$gate" >/dev/null 2>&1; then
+    echo "FAIL: Expected success on free-form 'tracking #123; review: quarterly'" >&2
+    exit 1
+fi
+
+echo "=== Test 15: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -196,7 +230,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 15: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 16: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?
