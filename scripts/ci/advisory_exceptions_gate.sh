@@ -51,20 +51,54 @@ class TomlArrayParser:
         self.length = len(text)
 
     def parse_advisories_ignore(self):
-        sec_m = re.search(r'^[ \t]*\[advisories\][ \t]*(?:\r?\n|$)', self.text, re.MULTILINE)
+        sec_m = re.search(r'^[ \t]*\[advisories\][ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)', self.text, re.MULTILINE)
         if not sec_m:
             return None, "No [advisories] section found"
 
         start_sec = sec_m.end()
-        next_sec_m = re.search(r'^[ \t]*\[[^\]]+\][ \t]*(?:\r?\n|$)', self.text[start_sec:], re.MULTILINE)
+        next_sec_m = re.search(r'^[ \t]*\[[^\]]+\][ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)', self.text[start_sec:], re.MULTILINE)
         sec_end = start_sec + next_sec_m.start() if next_sec_m else self.length
         sec_text = self.text[start_sec:sec_end]
 
-        ign_m = re.search(r'\bignore\s*=\s*\[', sec_text)
-        if not ign_m:
+        # Locate ignore = [ within [advisories], skipping comments outside strings
+        pos = 0
+        in_quote = False
+        quote_char = ''
+        array_start = None
+        while pos < len(sec_text):
+            ch = sec_text[pos]
+            if ch in ('"', "'"):
+                if not in_quote:
+                    in_quote = True
+                    quote_char = ch
+                elif ch == quote_char and (pos == 0 or sec_text[pos-1] != '\\'):
+                    in_quote = False
+                pos += 1
+            elif ch == '#' and not in_quote:
+                while pos < len(sec_text) and sec_text[pos] != '\n':
+                    pos += 1
+            elif not in_quote:
+                if sec_text[pos:pos+6] == 'ignore':
+                    prev_ch = sec_text[pos-1] if pos > 0 else '\n'
+                    if not (prev_ch.isalnum() or prev_ch == '_'):
+                        k = pos + 6
+                        while k < len(sec_text) and sec_text[k] in ' \t\r\n':
+                            k += 1
+                        if k < len(sec_text) and sec_text[k] == '=':
+                            k += 1
+                            while k < len(sec_text) and sec_text[k] in ' \t\r\n':
+                                k += 1
+                            if k < len(sec_text) and sec_text[k] == '[':
+                                array_start = start_sec + k + 1
+                                break
+                pos += 1
+            else:
+                pos += 1
+
+        if array_start is None:
             return None, "No ignore = [ array found in [advisories] section"
 
-        self.pos = start_sec + ign_m.end()
+        self.pos = array_start
         elements = []
         while self.pos < self.length:
             self._skip_ws_and_comments()
@@ -203,27 +237,28 @@ class TomlArrayParser:
 
 OWNER_PATTERN = re.compile(
     r"(?:"
-    r"(?:owner|maintainer)\s*[:=]?\s*[@\w-]+"
-    r"|@[a-zA-Z0-9_-]+"
-    r"|tracking\s*(?:issue\s*)?(?:#\d+|https?://\S+)"
-    r"|#\d+"
-    r"|(?:transitive\s+via|pinned\s+(?:transitively\s+)?by|direct\s+dep)\s+[\w-]+"
-    r"|awaiting\s+[\w-]+\s+upstream"
+    r"\b(?:owner|maintainer)\b\s*(?:[:=]\s*[@\w-]+|\s+@[a-zA-Z0-9_-]+)"
+    r"|(?<!\w)@[a-zA-Z0-9_-]+"
+    r"|\btracking\b\s*(?:issue\s*)?(?:#\d+|https?://\S+)"
+    r"|(?<!\w)#\d+\b"
+    r"|\b(?:transitive\s+via|pinned\s+(?:transitively\s+)?by|direct\s+dep)\s+[\w-]+"
+    r"|\bawaiting\s+[\w-]+\s+upstream\b"
     r")",
     re.IGNORECASE
 )
 
 EXPIRY_PATTERN = re.compile(
     r"(?:"
-    r"expires?\s*[:=]?\s*\d{4}-\d{2}-\d{2}"
-    r"|review\s*(?:by|date|at|on)?\s*[:=]?\s*(?:\d{4}-\d{2}-\d{2}|[\w-]+)"
-    r"|revisit\s+(?:when|after|on|at)"
-    r"|awaiting\s+(?:upstream|[\w-]+\s+upgrade|[\w-]+\s+migration|cleanup|migration|fix|upgrade)"
-    r"|(?:upstream\s+)?fix\s+pending"
-    r"|(?:fixed|patched)\s+(?:in|at|>=|>)\s*[\w.-]+"
-    r"|(?:predates|outside\s+affected\s+range)"
-    r"|no\s+compatible\s+fix(?:\s+in\s+[\w.-]+)?"
-    r"|informational(?:\s+only)?(?:\s*,\s*no\s+cve|\s+advisory)"
+    r"\bexpires?\b\s*[:=]?\s*\d{4}-\d{2}-\d{2}\b"
+    r"|\bexpiry\b\s*[:=]?\s*\d{4}-\d{2}-\d{2}\b"
+    r"|\breview\b\s*(?:by|date|due|at|on)?\s*[:=]?\s*(?:\d{4}-\d{2}-\d{2}\b|on\s+release\b|on\s+[\w-]+\s+release\b)"
+    r"|\brevisit\b\s+(?:when|after|on|at)\b\s+[\w-]+"
+    r"|\bawaiting\b\s+(?:upstream|[\w-]+\s+upgrade|[\w-]+\s+migration|cleanup|migration|fix|upgrade)\b"
+    r"|\b(?:upstream\s+)?fix\s+pending\b"
+    r"|\b(?:fixed|patched)\b\s+(?:in|at|>=|>)\s*[\w.-]+"
+    r"|\b(?:predates|outside\s+affected\s+range)\b"
+    r"|\bno\s+compatible\s+fix\b(?:\s+in\s+[\w.-]+)?"
+    r"|\binformational(?:\s+only)?(?:\s*,\s*no\s+cve|\s+advisory)\b"
     r")",
     re.IGNORECASE
 )

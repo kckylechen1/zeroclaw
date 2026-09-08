@@ -4,16 +4,19 @@
 # Asserts:
 # 1. Production configs pass cleanly.
 # 2. Presence of retired advisory RUSTSEC-2026-0268 in deny.toml fails.
-# 3. Retired advisory on a multi-item line in deny.toml fails.
+# 3. Retired advisory on a multi-item line in deny.toml fails, specifically diagnosing the retired ID.
 # 4. Presence of retired advisory RUSTSEC-2026-0269 in audit.toml fails.
-# 5. Retired advisory on a multi-item line in audit.toml fails.
+# 5. Retired advisory on a multi-item line in audit.toml fails, specifically diagnosing the retired ID.
 # 6. Reordered keys in deny.toml inline tables pass when valid.
 # 7. Bare string in deny.toml fails (bypassing table structure).
 # 8. Missing reason in deny.toml fails.
-# 9. Loose prose without accountable owner and expiry condition fails.
-# 10. Explicit structured lifecycle metadata (owner @alice; expires YYYY-MM-DD) passes.
-# 11. Comment in audit.toml missing or without lifecycle metadata fails.
-# 12. Missing config file fails strictly with exit status 2.
+# 9. Commented-out ignore assignment before real assignment does not bypass the gate.
+# 10. Table headers with trailing comments are parsed cleanly.
+# 11. Loose prose without accountable owner and expiry condition fails.
+# 12. Word-prefix false positives (e.g. "ownership unclear; reviewed recently") are strictly rejected.
+# 13. Explicit structured lifecycle metadata (owner @alice; expires YYYY-MM-DD) passes.
+# 14. Comment in audit.toml missing fails.
+# 15. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -47,8 +50,10 @@ ignore = [
     { id = "RUSTSEC-2025-0141", reason = "owner: @team; expires: 2026-12-31" }, { id = "RUSTSEC-2026-0268", reason = "owner: @team; expires: 2026-12-31" },
 ]
 DENYEOF
-if DENY_TOML="$tmp_dir/deny_multi_retired.toml" bash "$gate" >/dev/null 2>&1; then
-    echo "FAIL: Expected failure on retired advisory in multi-item line in deny.toml" >&2
+err_out=$(DENY_TOML="$tmp_dir/deny_multi_retired.toml" bash "$gate" 2>&1 || true)
+if ! echo "$err_out" | grep -q "Retired advisory 'RUSTSEC-2026-0268'"; then
+    echo "FAIL: Expected error diagnostic for retired advisory RUSTSEC-2026-0268 in multi-item line deny test" >&2
+    echo "Output was: $err_out" >&2
     exit 1
 fi
 
@@ -71,8 +76,10 @@ ignore = [
     "RUSTSEC-2025-0141", "RUSTSEC-2026-0269", # tracking #8519; fix pending
 ]
 AUDITEOF
-if AUDIT_TOML="$tmp_dir/audit_multi_retired.toml" bash "$gate" >/dev/null 2>&1; then
-    echo "FAIL: Expected failure on retired advisory in multi-item line in audit.toml" >&2
+err_out=$(AUDIT_TOML="$tmp_dir/audit_multi_retired.toml" bash "$gate" 2>&1 || true)
+if ! echo "$err_out" | grep -q "Retired advisory 'RUSTSEC-2026-0269'"; then
+    echo "FAIL: Expected error diagnostic for retired advisory RUSTSEC-2026-0269 in multi-item line audit test" >&2
+    echo "Output was: $err_out" >&2
     exit 1
 fi
 
@@ -112,7 +119,36 @@ if DENY_TOML="$tmp_dir/deny_no_reason.toml" bash "$gate" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 9: Loose prose without accountable owner and expiry fails ==="
+echo "=== Test 9: Commented-out ignore assignment does not bypass gate ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_commented_ignore.toml"
+[advisories]
+# example: ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0268", reason = "owner: @security-team; expires: 2027-01-01" },
+]
+DENYEOF
+err_out=$(DENY_TOML="$tmp_dir/deny_commented_ignore.toml" bash "$gate" 2>&1 || true)
+if ! echo "$err_out" | grep -q "Retired advisory 'RUSTSEC-2026-0268'"; then
+    echo "FAIL: Expected commented-out ignore to not shadow real ignore assignment" >&2
+    echo "Output was: $err_out" >&2
+    exit 1
+fi
+
+echo "=== Test 10: Table header with trailing comment is accepted ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_header_comment.toml"
+[advisories] # dependency and security policies
+ignore = [
+    { id = "RUSTSEC-2025-0141", reason = "owner: @security-team; expires: 2027-01-01" },
+]
+[licenses] # license policies
+allow = ["MIT"]
+DENYEOF
+if ! DENY_TOML="$tmp_dir/deny_header_comment.toml" bash "$gate" >/dev/null 2>&1; then
+    echo "FAIL: Expected table header with trailing comment to be accepted" >&2
+    exit 1
+fi
+
+echo "=== Test 11: Loose prose without accountable owner and expiry fails ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_loose_prose.toml"
 [advisories]
 ignore = [
@@ -124,7 +160,19 @@ if DENY_TOML="$tmp_dir/deny_loose_prose.toml" bash "$gate" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "=== Test 10: Explicit structured lifecycle metadata passes ==="
+echo "=== Test 12: Word-prefix false positive is rejected ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_word_prefix.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "ownership unclear; reviewed recently" },
+]
+DENYEOF
+if DENY_TOML="$tmp_dir/deny_word_prefix.toml" bash "$gate" >/dev/null 2>&1; then
+    echo "FAIL: Expected failure on word-prefix 'ownership unclear; reviewed recently'" >&2
+    exit 1
+fi
+
+echo "=== Test 13: Explicit structured lifecycle metadata passes ==="
 cat << 'DENYEOF' > "$tmp_dir/deny_explicit_lifecycle.toml"
 [advisories]
 ignore = [
@@ -136,7 +184,7 @@ if ! DENY_TOML="$tmp_dir/deny_explicit_lifecycle.toml" bash "$gate" >/dev/null 2
     exit 1
 fi
 
-echo "=== Test 11: Missing comment in audit.toml fails ==="
+echo "=== Test 14: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -148,7 +196,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 12: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 15: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?
