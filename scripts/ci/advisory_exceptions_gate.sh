@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Advisory exception lifecycle gate (Issue #296).
+# Advisory exception lifecycle gate.
 # Validates .cargo/audit.toml and deny.toml:
 # 1. Configuration files must exist and contain valid advisory ignore sections.
 # 2. Resolved/retired exceptions (e.g. Wasmtime RUSTSEC-2026-0268, RUSTSEC-2026-0269)
@@ -237,7 +237,7 @@ class TomlArrayParser:
 
 OWNER_PATTERN = re.compile(
     r"(?:"
-    r"\b(?:owner|maintainer)\b\s*(?:[:=]\s*[^;,\n\r]+|\s+@[a-zA-Z0-9_-]+)"
+    r"\b(?:owner|maintainer)\b(?:\s*[:=]\s*|\s+)@?[a-zA-Z0-9_-]+"
     r"|(?<!\w)@[a-zA-Z0-9_-]+"
     r"|\btracking\b\s*(?:issue\s*)?(?:#\d+|https?://\S+)"
     r"|(?<!\w)#\d+\b"
@@ -251,9 +251,8 @@ EXPIRY_PATTERN = re.compile(
     r"(?:"
     r"\bexpires?\b\s*[:=]?\s*\d{4}-\d{2}-\d{2}\b"
     r"|\bexpiry\b\s*[:=]?\s*\d{4}-\d{2}-\d{2}\b"
-    r"|\breview\b\s*[:=]\s*[^;,\n\r]+"
-    r"|\breview\b\s+(?:by|due|before|at|on)\s+[^;,\n\r]+"
-    r"|\brevisit\b\s+(?:when|after|on|at)\b\s+[^;,\n\r]+"
+    r"|\breview\b(?:\s+(?:by|due|before|at|on|date)\b\s*[:=]?|\s*[:=])\s*[\w][^;,\n\r]*"
+    r"|\brevisit\b\s+(?:when|after|on|at)\b\s+[\w][^;,\n\r]*"
     r"|\bawaiting\b\s+(?:upstream|[\w-]+\s+upgrade|[\w-]+\s+migration|cleanup|migration|fix|upgrade)\b"
     r"|\b(?:upstream\s+)?fix\s+pending\b"
     r"|\b(?:fixed|patched)\b\s+(?:in|at|>=|>)\s*[\w.-]+"
