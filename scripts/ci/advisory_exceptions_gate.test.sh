@@ -21,8 +21,11 @@
 # 17. Invalid owner tokens are rejected.
 # 18. Negative bare-owner prose is rejected.
 # 19. Punctuation-leading and qualified review conditions pass.
-# 20. Comment in audit.toml missing fails.
-# 21. Missing config file fails strictly with exit status 2.
+# 20. Retired advisory with TOML unicode escape fails in deny.toml and audit.toml.
+# 21. Placeholder owner values (e.g. none, unassigned, tbd) are rejected.
+# 22. Negated delimited owner prose is rejected.
+# 23. Comment in audit.toml missing fails.
+# 24. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -297,7 +300,82 @@ if ! DENY_TOML="$tmp_dir/deny_punct_review.toml" bash "$gate" >/dev/null 2>&1; t
     exit 1
 fi
 
-echo "=== Test 20: Missing comment in audit.toml fails ==="
+echo "=== Test 20: Retired advisory with TOML unicode escape fails ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_escaped_retired.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2026-0\u003268", reason = "owner: @team; review: 2026-12-01" },
+]
+DENYEOF
+set +e
+err_out=$(DENY_TOML="$tmp_dir/deny_escaped_retired.toml" bash "$gate" 2>&1)
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected validation failure status 1 on unicode-escaped retired advisory in deny.toml, got $status" >&2
+    exit 1
+fi
+if ! echo "$err_out" | grep -q "Retired advisory 'RUSTSEC-2026-0268'"; then
+    echo "FAIL: Expected error diagnostic for retired advisory RUSTSEC-2026-0268 in unicode escape test" >&2
+    exit 1
+fi
+
+cat << 'AUDITEOF' > "$tmp_dir/audit_escaped_retired.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0\u003269",  # owner: @team; review: 2026-12-01
+]
+AUDITEOF
+set +e
+err_out=$(AUDIT_TOML="$tmp_dir/audit_escaped_retired.toml" bash "$gate" 2>&1)
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected validation failure status 1 on unicode-escaped retired advisory in audit.toml, got $status" >&2
+    exit 1
+fi
+if ! echo "$err_out" | grep -q "Retired advisory 'RUSTSEC-2026-0269'"; then
+    echo "FAIL: Expected error diagnostic for retired advisory RUSTSEC-2026-0269 in unicode escape test" >&2
+    exit 1
+fi
+
+echo "=== Test 21: Placeholder owner values are rejected ==="
+for bad_owner in "owner: none" "owner: unassigned" "owner: tbd" "owner: n/a" "owner: placeholder" "maintainer: null"; do
+    cat << DENYEOF > "$tmp_dir/deny_placeholder_owner.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_owner}; review: quarterly" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_placeholder_owner.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on placeholder owner '${bad_owner}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 22: Negated delimited owner prose is rejected ==="
+for bad_prose in "no owner: assigned" "without owner: none" "no maintainer = assigned"; do
+    cat << DENYEOF > "$tmp_dir/deny_negated_owner.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_prose}; review: quarterly" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_negated_owner.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on negated owner prose '${bad_prose}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 23: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -309,7 +387,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 21: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 24: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?

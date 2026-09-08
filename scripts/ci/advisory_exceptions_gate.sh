@@ -170,14 +170,57 @@ class TomlArrayParser:
     def _parse_string(self):
         quote_char = self.text[self.pos]
         self.pos += 1
+        if quote_char == "'":
+            end = self.text.find("'", self.pos)
+            if end == -1:
+                return None, "Unterminated literal string literal"
+            val = self.text[self.pos:end]
+            self.pos = end + 1
+            return val, None
+
         res = []
+        ESCAPE_MAP = {
+            '"': '"',
+            '\\': '\\',
+            'b': '\b',
+            't': '\t',
+            'n': '\n',
+            'f': '\f',
+            'r': '\r',
+        }
         while self.pos < self.length:
             ch = self.text[self.pos]
             if ch == '\\':
                 self.pos += 1
-                if self.pos < self.length:
-                    res.append(self.text[self.pos])
+                if self.pos >= self.length:
+                    return None, "Unfinished escape sequence in string literal"
+                esc = self.text[self.pos]
+                if esc in ESCAPE_MAP:
+                    res.append(ESCAPE_MAP[esc])
                     self.pos += 1
+                elif esc == 'u':
+                    self.pos += 1
+                    if self.pos + 4 > self.length:
+                        return None, "Incomplete \\u unicode escape"
+                    hex_str = self.text[self.pos:self.pos+4]
+                    if not all(c in '0123456789abcdefABCDEF' for c in hex_str):
+                        return None, f"Invalid unicode escape \\u{hex_str}"
+                    self.pos += 4
+                    res.append(chr(int(hex_str, 16)))
+                elif esc == 'U':
+                    self.pos += 1
+                    if self.pos + 8 > self.length:
+                        return None, "Incomplete \\U unicode escape"
+                    hex_str = self.text[self.pos:self.pos+8]
+                    if not all(c in '0123456789abcdefABCDEF' for c in hex_str):
+                        return None, f"Invalid unicode escape \\U{hex_str}"
+                    self.pos += 8
+                    try:
+                        res.append(chr(int(hex_str, 16)))
+                    except (ValueError, OverflowError):
+                        return None, f"Invalid unicode codepoint \\U{hex_str}"
+                else:
+                    return None, f"Unknown escape sequence \\{esc} in string literal"
             elif ch == quote_char:
                 self.pos += 1
                 return "".join(res), None
@@ -235,18 +278,64 @@ class TomlArrayParser:
         return None, "Unclosed inline table: EOF reached before '}'"
 
 
-OWNER_PATTERN = re.compile(
+DISALLOWED_OWNERS = {
+    "none", "null", "nil", "na", "n/a", "n_a", "unassigned", "tbd", "todo",
+    "placeholder", "nobody", "unknown", "assigned", "undefined",
+    "anyone", "someone", "noone", "no-one", "no_one", "pending",
+    "false", "empty", "blank", "missing", "unspecified"
+}
+
+OWNER_FIELD_PATTERN = re.compile(
+    r"\b(?:owner|maintainer)\b(?:\s*[:=]\s*|\s+@)(@?[a-zA-Z0-9_/-]+)",
+    re.IGNORECASE
+)
+
+BARE_HANDLE_PATTERN = re.compile(
+    r"(?<!\w)@([a-zA-Z0-9_-]+)",
+    re.IGNORECASE
+)
+
+TRACKING_PATTERN = re.compile(
+    r"(?:\btracking\b\s*(?:issue\s*)?(?:#\d+|https?://\S+)|(?<!\w)#\d+\b)",
+    re.IGNORECASE
+)
+
+UPSTREAM_PATTERN = re.compile(
     r"(?:"
-    r"\b(?:owner|maintainer)\b\s*[:=]\s*@?[a-zA-Z0-9_-]+"
-    r"|\b(?:owner|maintainer)\b\s+@[a-zA-Z0-9_-]+"
-    r"|(?<!\w)@[a-zA-Z0-9_-]+"
-    r"|\btracking\b\s*(?:issue\s*)?(?:#\d+|https?://\S+)"
-    r"|(?<!\w)#\d+\b"
-    r"|\b(?:transitive\s+via|pinned\s+(?:transitively\s+)?by|direct\s+dep)\s+[\w-]+"
+    r"\b(?:transitive\s+via|pinned\s+(?:transitively\s+)?by|direct\s+dep)\s+[\w-]+"
+    r"|\btransitive\s+(?:macro|derive)\s+helper\b"
+    r"|\btransitive\s+dep\b"
     r"|\bawaiting\s+[\w-]+\s+upstream\b"
     r")",
     re.IGNORECASE
 )
+
+def has_accountable_owner(text):
+    if TRACKING_PATTERN.search(text):
+        return True
+    if UPSTREAM_PATTERN.search(text):
+        return True
+
+    for m in OWNER_FIELD_PATTERN.finditer(text):
+        start_idx = m.start()
+        prefix = text[:start_idx]
+        if re.search(r"\b(?:no|without|missing|unassigned|not)\s+$", prefix, re.IGNORECASE):
+            continue
+        raw_target = m.group(1).lstrip("@").strip()
+        if raw_target.lower() in DISALLOWED_OWNERS:
+            continue
+        if len(raw_target) > 0:
+            return True
+
+    for m in BARE_HANDLE_PATTERN.finditer(text):
+        handle = m.group(1).lower()
+        if handle not in DISALLOWED_OWNERS and len(handle) > 0:
+            start_idx = m.start()
+            prefix = text[:start_idx]
+            if not re.search(r"\b(?:no|without|missing|not)\s+(?:an?\s+)?(?:owner|maintainer)?\s*[:=]?\s*$", prefix, re.IGNORECASE):
+                return True
+
+    return False
 
 EXPIRY_PATTERN = re.compile(
     r"(?:"
@@ -265,7 +354,7 @@ EXPIRY_PATTERN = re.compile(
 )
 
 def validate_lifecycle(text):
-    has_owner = bool(OWNER_PATTERN.search(text))
+    has_owner = has_accountable_owner(text)
     has_expiry = bool(EXPIRY_PATTERN.search(text))
     return has_owner, has_expiry
 
