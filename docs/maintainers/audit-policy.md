@@ -65,14 +65,13 @@ Resolved groups:
 
 **Process for this category:**
 
-- Add the entry in `deny.toml` as an inline table: `{ id = "RUSTSEC-...", reason = "..." }`.
-- Add the corresponding entry in `.cargo/audit.toml` with a matching inline comment: `"RUSTSEC-...",  # ...`.
+- For advisories detected across both tools, add the entry in `deny.toml` as an inline table: `{ id = "RUSTSEC-...", reason = "..." }`, and the corresponding entry in `.cargo/audit.toml` with a matching inline comment: `"RUSTSEC-...",  # ...`.
+- Shared entries across both configurations must have matching lifecycle metadata, enforced by `scripts/ci/advisory_exceptions_gate.sh`.
+- Tool-specific exceptions: `cargo-audit` scans the entire workspace `Cargo.lock` flatly, whereas `cargo-deny` checks the build graph for active targets. Tool-specific entries (e.g. `RUSTSEC-2024-0384` in `.cargo/audit.toml` only, or `RUSTSEC-2026-0253` in `deny.toml` only) are scoped to the detecting tool rather than duplicated into unaffected configurations. Every exception, whether shared or tool-specific, must satisfy all lifecycle requirements below.
 - Every entry's reason and inline comment must include:
   1. **Accountable owner / tracking reference**: e.g. `tracking #<issue>`, `tracking upstream #<issue>`, `owner: @<handle>`, or explicit upstream source (`transitive via <crate>`).
   2. **Review / expiry condition**: e.g. `expires: YYYY-MM-DD`, `review: <condition>`, `awaiting <upgrade|migration|fix>`, or `upstream fix pending`.
-- When a fix lands, remove the entry from **both** `.cargo/audit.toml`
-  *and* `deny.toml` in the same PR. A drift here re-introduces the
-  original CI failure.
+- When a fix lands, remove the exception from whatever files contain it in the same PR.
 - Each file has a one-line `── tracking #... ──` header above its
   block. Preserve the header when adding entries to the same category;
   introduce a new header for a new category.

@@ -42,8 +42,12 @@
 # 38. Lifecycle words captured as dependency names fail.
 # 39. Enclosing punctuation, quotes, and leading status phrases in reviews fail.
 # 40. Shared advisory entries with mismatched metadata across configs fail.
-# 41. Comment in audit.toml missing fails.
-# 42. Missing config file fails strictly with exit status 2.
+# 41. Duplicate advisory IDs fail in deny.toml and audit.toml.
+# 42. Missing comma separator between inline table keys fails.
+# 43. Negated or placeholder expiry values fail.
+# 44. Terminal review conditions fail.
+# 45. Comment in audit.toml missing fails.
+# 46. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -823,7 +827,100 @@ if [ "$status" -ne 1 ]; then
     exit 1
 fi
 
-echo "=== Test 41: Missing comment in audit.toml fails ==="
+echo "=== Test 41: Duplicate advisory IDs fail in deny.toml and audit.toml ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_duplicate.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @alice; review: quarterly" },
+    { id = "RUSTSEC-2099-0001", reason = "owner: @bob; review: monthly" },
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_duplicate.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on duplicate advisory ID in deny.toml, got status $status" >&2
+    exit 1
+fi
+
+cat << 'AUDITEOF' > "$tmp_dir/audit_duplicate.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001", # owner: @alice; review: quarterly
+    "RUSTSEC-2099-0001", # owner: @bob; review: monthly
+]
+AUDITEOF
+set +e
+AUDIT_TOML="$tmp_dir/audit_duplicate.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on duplicate advisory ID in audit.toml, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 42: Missing comma separator between inline table keys fails ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_no_comma.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001" reason = "owner: @alice; review: quarterly" },
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_no_comma.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on missing comma separator in inline table, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 43: Negated or placeholder expiry values fail ==="
+for bad_exp in \
+    "tracking #123; expires: not 2099-01-01" \
+    "tracking #123; expires: TBD 2099-01-01" \
+    "tracking #123; expires: none 2099-01-01"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_exp_val.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_exp}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_exp_val.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on bad expiry value '${bad_exp}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 44: Terminal review conditions fail ==="
+for terminal_review in \
+    "review: completed" \
+    "review: done" \
+    "review: finished" \
+    "review: passed" \
+    "review: approved"; do
+    cat << DENYEOF > "$tmp_dir/deny_terminal_review.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; ${terminal_review}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_terminal_review.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on terminal review condition '${terminal_review}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 45: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -835,7 +932,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 42: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 46: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?

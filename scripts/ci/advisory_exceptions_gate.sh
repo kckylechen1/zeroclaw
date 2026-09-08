@@ -297,11 +297,15 @@ class TomlArrayParser:
             table[key] = val
 
             self._skip_ws()
-            if self.pos < self.length and self.text[self.pos] == ',':
+            if self.pos >= self.length:
+                return None, "Unclosed inline table: EOF reached before '}'"
+            if self.text[self.pos] == ',':
                 self.pos += 1
-            elif self.pos < self.length and self.text[self.pos] == '}':
+            elif self.text[self.pos] == '}':
                 self.pos += 1
                 return table, None
+            else:
+                return None, f"Expected ',' or '}}' after value in inline table, found '{self.text[self.pos]}'"
         return None, "Unclosed inline table: EOF reached before '}'"
 
 
@@ -330,7 +334,8 @@ DISALLOWED_REVIEWS = {
     "no review", "no review needed", "no review planned", "unnecessary",
     "wontfix", "won't fix", "n / a", "empty", "blank",
     "pending", "in progress", "in-progress", "open", "ongoing",
-    "fixed", "patched", "resolved", "closed", "later", "soon", "future"
+    "fixed", "patched", "resolved", "closed", "later", "soon", "future",
+    "completed", "done", "finished", "passed", "approved", "obsolete", "retired"
 }
 
 OWNER_FIELD_PATTERN = re.compile(
@@ -440,7 +445,10 @@ def has_lifecycle_condition(text):
         raw_val = m.group(1).strip()
         if not raw_val:
             return False, "invalid or empty expiry deadline"
-        date_m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", raw_val)
+        clean_val = re.sub(r"^[\s\"']+|[\s\"']+$", "", raw_val).strip()
+        if re.search(r"\b(?:no|not|never|without|none|tbd|tba|todo|placeholder|unknown|undefined)\b", clean_val, re.IGNORECASE):
+            return False, f"placeholder or negated expiry deadline '{raw_val}'"
+        date_m = re.match(r"^(\d{4}-\d{2}-\d{2})$", clean_val)
         if not date_m:
             return False, f"invalid expiry deadline '{raw_val}'"
         date_str = date_m.group(1)
@@ -467,7 +475,7 @@ def has_lifecycle_condition(text):
 
         if norm_cond in DISALLOWED_REVIEWS or clean_cond in DISALLOWED_REVIEWS:
             return False, f"placeholder or invalid review condition '{raw_cond}'"
-        if re.match(r"^(?:no|not|never|without|none|tbd|tba|todo|pending|placeholder|unknown|undefined|unassigned|fixed|patched|resolved|wontfix|open|in\s+progress|later|soon|future|closed)\b", norm_cond):
+        if re.match(r"^(?:no|not|never|without|none|tbd|tba|todo|pending|placeholder|unknown|undefined|unassigned|fixed|patched|resolved|wontfix|open|in\s+progress|later|soon|future|closed|completed|done|finished|passed|approved|obsolete|retired)\b", norm_cond):
             return False, f"placeholder or invalid review condition '{raw_cond}'"
         date_m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", clean_cond)
         if date_m:
@@ -478,6 +486,17 @@ def has_lifecycle_condition(text):
                 return False, f"invalid calendar date '{date_str}' in review condition"
             if rev_date < today:
                 return False, f"review date expired on {date_str} (current date is {today.isoformat()})"
+            has_valid_review = True
+            continue
+
+        is_version = bool(re.match(r"^[><=^~v\d]", norm_cond))
+        is_cadence = bool(re.search(r"\b(?:quarterly|monthly|weekly|bi-weekly|semi-annually|annually|daily)\b", norm_cond))
+        is_milestone = bool(re.match(r"^(?:on|at|after|when|upon|before|with|by|until)\b", norm_cond))
+        is_tracker = bool(re.search(r"#\d+", norm_cond))
+
+        if not (is_version or is_cadence or is_milestone or is_tracker):
+            return False, f"unrecognized or non-actionable review condition '{raw_cond}'"
+
         has_valid_review = True
 
     # 3. Check recognized milestone / ongoing conditions
@@ -524,7 +543,10 @@ else:
                 errors.append(f"deny.toml: Inline table entry missing required 'id' key: {elem}")
                 continue
 
-            deny_entries[adv_id] = reason
+            if adv_id in deny_entries:
+                errors.append(f"deny.toml: Duplicate advisory exception ID '{adv_id}' detected")
+            else:
+                deny_entries[adv_id] = reason
 
             if adv_id in RETIRED_ADVISORIES:
                 errors.append(f"deny.toml: Retired advisory '{adv_id}' is still present in deny.toml: {RETIRED_ADVISORIES[adv_id]}")
@@ -562,7 +584,11 @@ else:
     for elem, comment in audit_elements:
         if isinstance(elem, str):
             adv_id = elem.strip()
-            audit_entries[adv_id] = comment or ""
+
+            if adv_id in audit_entries:
+                errors.append(f".cargo/audit.toml: Duplicate advisory exception ID '{adv_id}' detected")
+            else:
+                audit_entries[adv_id] = comment or ""
 
             if adv_id in RETIRED_ADVISORIES:
                 errors.append(f".cargo/audit.toml: Retired advisory '{adv_id}' is still present in audit.toml: {RETIRED_ADVISORIES[adv_id]}")
