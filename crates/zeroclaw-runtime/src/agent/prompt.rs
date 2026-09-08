@@ -117,17 +117,11 @@ pub struct PromptContext<'a> {
     /// (allowed commands, forbidden paths, autonomy level) so it can plan
     /// tool calls without trial-and-error.  See
     pub security_summary: Option<String>,
-    /// Autonomy level the prompt describes. On the Agent path this is
-    /// resolved at render time from the canonical `ApprovalManager` the
-    /// execution gate consults; the standalone builder passes the configured
-    /// risk profile directly. Full autonomy omits "ask before acting"
-    /// instructions for uncovered tools so the model executes those directly
-    /// without simulating approval. `always_ask` still prompts even under Full.
+    /// Autonomy level the prompt describes. Full autonomy omits "ask before
+    /// acting" instructions so the model executes tools directly without
+    /// simulating approval. Policy-aware builders separately supply any
+    /// `always_ask` exceptions without expanding this public context struct.
     pub autonomy_level: AutonomyLevel,
-    /// Tools that still require operator approval (or fail closed with no
-    /// approver) even when `autonomy_level` is Full. Empty means no
-    /// configured exception.
-    pub always_ask: &'a [String],
     /// The shell the runtime adapter will spawn, or `None` for a shell-less
     /// runtime (which omits the `Shell:` field and the dialect guidance).
     /// Resolved from `RuntimeAdapter::shell_profile` so the reported shell
@@ -171,6 +165,16 @@ fn full_autonomy_safety_lines(always_ask: &[String]) -> String {
 pub trait PromptSection: Send + Sync {
     fn name(&self) -> &str;
     fn build(&self, ctx: &PromptContext<'_>) -> Result<String>;
+
+    /// Build with canonical approval-policy details when the caller has them.
+    /// The default preserves compatibility for third-party prompt sections.
+    fn build_with_approval_policy(
+        &self,
+        ctx: &PromptContext<'_>,
+        _always_ask: &[String],
+    ) -> Result<String> {
+        self.build(ctx)
+    }
 }
 
 #[derive(Default)]
@@ -203,9 +207,20 @@ impl SystemPromptBuilder {
     }
 
     pub fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        self.build_with_approval_policy(ctx, &[])
+    }
+
+    /// Render built-in policy-aware sections from the same `always_ask`
+    /// values that execution enforces, while leaving custom sections source
+    /// compatible through `PromptSection`'s default method.
+    pub fn build_with_approval_policy(
+        &self,
+        ctx: &PromptContext<'_>,
+        always_ask: &[String],
+    ) -> Result<String> {
         let mut output = String::new();
         for section in &self.sections {
-            let part = section.build(ctx)?;
+            let part = section.build_with_approval_policy(ctx, always_ask)?;
             if part.trim().is_empty() {
                 continue;
             }
@@ -374,6 +389,14 @@ impl PromptSection for SafetySection {
     }
 
     fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        self.build_with_approval_policy(ctx, &[])
+    }
+
+    fn build_with_approval_policy(
+        &self,
+        ctx: &PromptContext<'_>,
+        always_ask: &[String],
+    ) -> Result<String> {
         let mut out = String::from("## Safety\n\n- Do not exfiltrate private data.\n");
 
         // Omit generic "ask before acting" instructions when autonomy is Full —
@@ -394,7 +417,7 @@ impl PromptSection for SafetySection {
             zeroclaw_api::runtime_traits::ShellProfile::safe_deletion_guidance,
         ));
         match ctx.autonomy_level {
-            AutonomyLevel::Full => out.push_str(&full_autonomy_safety_lines(ctx.always_ask)),
+            AutonomyLevel::Full => out.push_str(&full_autonomy_safety_lines(always_ask)),
             AutonomyLevel::ReadOnly => {
                 out.push_str(
                     "- This runtime is read-only. Write operations will be rejected by the runtime if attempted.\n\
@@ -721,7 +744,6 @@ mod tests {
 
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -757,7 +779,6 @@ mod tests {
 
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
         let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
@@ -783,7 +804,6 @@ mod tests {
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -821,7 +841,6 @@ mod tests {
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -847,7 +866,6 @@ mod tests {
 
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
         let prompt = SystemPromptBuilder::with_defaults().build(&ctx).unwrap();
@@ -873,7 +891,6 @@ mod tests {
 
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -929,7 +946,6 @@ mod tests {
 
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -985,7 +1001,6 @@ mod tests {
 
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -1030,7 +1045,6 @@ mod tests {
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -1082,7 +1096,6 @@ mod tests {
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -1113,7 +1126,6 @@ mod tests {
 
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -1168,7 +1180,6 @@ mod tests {
 
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -1207,7 +1218,6 @@ mod tests {
 
             security_summary: Some(summary.clone()),
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -1247,7 +1257,6 @@ mod tests {
 
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -1279,7 +1288,6 @@ mod tests {
 
             security_summary: None,
             autonomy_level: AutonomyLevel::Full,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -1328,11 +1336,12 @@ mod tests {
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Full,
-            always_ask: &always_ask,
             shell_profile: None,
         };
 
-        let output = SafetySection.build(&ctx).unwrap();
+        let output = SafetySection
+            .build_with_approval_policy(&ctx, &always_ask)
+            .unwrap();
         assert!(
             output.contains("shell"),
             "exact always_ask tool must be named in the Full safety contract"
@@ -1364,11 +1373,12 @@ mod tests {
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Full,
-            always_ask: &always_ask,
             shell_profile: None,
         };
 
-        let output = SafetySection.build(&ctx).unwrap();
+        let output = SafetySection
+            .build_with_approval_policy(&ctx, &always_ask)
+            .unwrap();
         assert!(
             output.contains("`always_ask` is set to `*`"),
             "wildcard always_ask must cover every tool"
@@ -1396,7 +1406,6 @@ mod tests {
 
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile: None,
         };
 
@@ -1430,7 +1439,6 @@ mod tests {
             sends_native_tool_specs: false,
             security_summary: None,
             autonomy_level: AutonomyLevel::Supervised,
-            always_ask: &[],
             shell_profile,
         }
     }

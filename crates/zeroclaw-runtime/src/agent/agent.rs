@@ -367,9 +367,9 @@ pub struct Agent {
     /// Pre-rendered security policy summary injected into the system prompt
     /// so the LLM knows the concrete constraints before making tool calls.
     security_summary: Option<String>,
-    /// Autonomy and `always_ask` are no longer stored here: at render time
-    /// they are read from the same `ApprovalManager` the execution gate
-    /// consults, so the prompt cannot contradict enforcement.
+    /// Compatibility fallback for configless builders. When an
+    /// `ApprovalManager` exists, its autonomy level remains canonical.
+    autonomy_level: crate::security::AutonomyLevel,
     /// The shell this agent's runtime adapter will spawn, so the system
     /// prompt reports the dialect the agent actually executes under.
     /// `None` for a shell-less runtime.
@@ -540,6 +540,7 @@ pub struct AgentBuilder {
     allowed_tools: Option<Vec<String>>,
     response_cache: Option<Arc<zeroclaw_memory::response_cache::ResponseCache>>,
     security_summary: Option<String>,
+    autonomy_level: Option<crate::security::AutonomyLevel>,
     shell_profile: Option<zeroclaw_api::runtime_traits::ShellProfile>,
     approval_route: Option<zeroclaw_config::autonomy::ApprovalRoute>,
     activated_tools: Option<Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
@@ -593,6 +594,7 @@ impl AgentBuilder {
             allowed_tools: None,
             response_cache: None,
             security_summary: None,
+            autonomy_level: None,
             shell_profile: None,
             approval_route: None,
             activated_tools: None,
@@ -780,6 +782,13 @@ impl AgentBuilder {
 
     pub fn security_summary(mut self, summary: Option<String>) -> Self {
         self.security_summary = summary;
+        self
+    }
+
+    /// Set the prompt autonomy fallback used only when no `ApprovalManager`
+    /// is attached. Retained for compatibility with existing builder users.
+    pub fn autonomy_level(mut self, level: crate::security::AutonomyLevel) -> Self {
+        self.autonomy_level = Some(level);
         self
     }
 
@@ -986,6 +995,9 @@ impl AgentBuilder {
             route_model_by_hint: self.route_model_by_hint.unwrap_or_default(),
             response_cache: self.response_cache,
             security_summary: self.security_summary,
+            autonomy_level: self
+                .autonomy_level
+                .unwrap_or(crate::security::AutonomyLevel::Supervised),
             approval_route: self.approval_route,
             shell_profile: self.shell_profile,
             activated_tools: self.activated_tools,
@@ -1855,6 +1867,7 @@ impl Agent {
             .auto_save(config.memory.auto_save)
             .exclude_memory(exclude_memory)
             .security_summary(Some(security.prompt_summary()))
+            .autonomy_level(risk_profile.level)
             .approval_route(risk_profile.approval_route.clone())
             .activated_tools(activated_handle)
             .mcp_deferred_section(Some(deferred_section))
@@ -2073,11 +2086,11 @@ impl Agent {
         let instructions = dispatcher.prompt_instructions(prompt_tools);
         // Prompt policy facts come from the same ApprovalManager the
         // execution gate consults (borrowed, render-time). A builder without
-        // a manager renders generic safety guidance: it cannot see a real
-        // policy, so it must not claim Full autonomy or name exceptions.
+        // a manager retains its legacy autonomy fallback but cannot name
+        // `always_ask` exceptions it does not own.
         let (prompt_autonomy_level, prompt_always_ask) = match self.approval_manager.as_deref() {
             Some(mgr) => (mgr.autonomy_level(), mgr.always_ask_tools()),
-            None => (crate::security::AutonomyLevel::Supervised, Vec::new()),
+            None => (self.autonomy_level, Vec::new()),
         };
         let ctx = PromptContext {
             workspace_dir: &self.workspace_dir,
@@ -2093,10 +2106,11 @@ impl Agent {
                 && !prompt_tools.is_empty(),
             security_summary: self.security_summary.clone(),
             autonomy_level: prompt_autonomy_level,
-            always_ask: &prompt_always_ask,
             shell_profile: self.shell_profile.clone(),
         };
-        let mut prompt = self.prompt_builder.build(&ctx)?;
+        let mut prompt = self
+            .prompt_builder
+            .build_with_approval_policy(&ctx, &prompt_always_ask)?;
         append_timestamp_orientation(&mut prompt);
         let receipts = &self.config.resolved.tool_receipts;
         if receipts.enabled && receipts.inject_system_prompt {
@@ -5158,6 +5172,80 @@ mod tests {
         assert!(xml_prompt.contains("## Tools"));
         assert!(xml_prompt.contains("echo"));
         assert!(xml_prompt.contains("## Tool Use Protocol"));
+    }
+
+    #[test]
+    fn approval_manager_policy_overrides_legacy_builder_autonomy() {
+        let workspace = tempfile::TempDir::new().expect("temp dir");
+        let memory_cfg = zeroclaw_config::schema::MemoryConfig {
+            backend: "none".into(),
+            ..zeroclaw_config::schema::MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> = Arc::from(
+            zeroclaw_memory::create_memory(&memory_cfg, workspace.path(), None)
+                .expect("memory creation should succeed"),
+        );
+        let risk_profile = zeroclaw_config::schema::RiskProfileConfig {
+            level: crate::security::AutonomyLevel::Full,
+            always_ask: vec!["shell".into()],
+            ..Default::default()
+        };
+        let manager = Arc::new(ApprovalManager::for_non_interactive(&risk_profile));
+
+        let agent = Agent::builder()
+            .model_provider(Box::new(MockModelProvider {
+                responses: Mutex::new(vec![]),
+            }))
+            .tools(crate::tools::scoped::ScopedToolRegistry::from_raw_for_test(
+                vec![],
+            ))
+            .memory(Arc::clone(&mem))
+            .observer(Arc::new(crate::observability::NoopObserver {}))
+            .tool_dispatcher(Box::new(NativeToolDispatcher))
+            .prompt_builder(SystemPromptBuilder::with_defaults())
+            .workspace_dir(workspace.path().to_path_buf())
+            // Deliberately conflict with the manager to prove this restored
+            // public builder method is only a managerless fallback.
+            .autonomy_level(crate::security::AutonomyLevel::Supervised)
+            .approval_manager(Some(manager))
+            .build()
+            .expect("agent builder should succeed");
+
+        let prompt = agent.build_system_prompt().expect("prompt should render");
+        assert!(
+            prompt.contains("Full autonomy auto-approves tools")
+                && prompt.contains("shell")
+                && prompt.contains("still require operator approval"),
+            "manager-owned Full/always_ask policy must win: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Ask for approval when the runtime policy requires it"),
+            "legacy Supervised fallback must not override the manager: {prompt}"
+        );
+
+        let managerless = Agent::builder()
+            .model_provider(Box::new(MockModelProvider {
+                responses: Mutex::new(vec![]),
+            }))
+            .tools(crate::tools::scoped::ScopedToolRegistry::from_raw_for_test(
+                vec![],
+            ))
+            .memory(mem)
+            .observer(Arc::new(crate::observability::NoopObserver {}))
+            .tool_dispatcher(Box::new(NativeToolDispatcher))
+            .prompt_builder(SystemPromptBuilder::with_defaults())
+            .workspace_dir(workspace.path().to_path_buf())
+            .autonomy_level(crate::security::AutonomyLevel::Full)
+            .build()
+            .expect("managerless agent builder should succeed");
+        let prompt = managerless
+            .build_system_prompt()
+            .expect("managerless prompt should render");
+        assert!(
+            prompt.contains("Full autonomy auto-approves tools")
+                && prompt.contains("No tools are listed in `always_ask`"),
+            "legacy builder fallback must still render Full autonomy: {prompt}"
+        );
     }
 
     mod surface2_tests {
