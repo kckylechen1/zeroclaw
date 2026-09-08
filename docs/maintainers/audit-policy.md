@@ -97,6 +97,9 @@ Live groups:
 
 Resolved groups:
 
+- **Wasmtime advisories (`RUSTSEC-2026-0268`, `-0269`)**: Wasmtime type confusion
+  and filesystem sandbox escape. Cleared by wasmtime 47.0.4 update in PR #285,
+  with obsolete exceptions retired in #296.
 - **GTK3 stack (10 entries, `RUSTSEC-2024-0411..-0420`)**: pulled in
   transitively by the now-removed `zeroclaw-desktop` (Tauri →
   webkit2gtk → gtk-rs bindings). These ignore entries were dropped in
