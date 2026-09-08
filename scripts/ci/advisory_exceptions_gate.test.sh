@@ -46,8 +46,12 @@
 # 42. Missing comma separator between inline table keys fails.
 # 43. Negated or placeholder expiry values fail.
 # 44. Terminal review conditions fail.
-# 45. Comment in audit.toml missing fails.
-# 46. Missing config file fails strictly with exit status 2.
+# 45. Multiline basic and literal strings in inline tables pass.
+# 46. Prose tokens masquerading as dependency owners fail.
+# 47. Incomplete version review conditions and bare milestone words fail.
+# 48. Actionable semver requirements and milestone conditions pass.
+# 49. Comment in audit.toml missing fails.
+# 50. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -920,7 +924,86 @@ DENYEOF
     fi
 done
 
-echo "=== Test 45: Missing comment in audit.toml fails ==="
+echo "=== Test 45: Multiline basic and literal strings in inline tables pass ==="
+cat << 'AUDITEOF' > "$tmp_dir/empty_audit.toml"
+[advisories]
+ignore = []
+AUDITEOF
+
+cat << 'DENYEOF' > "$tmp_dir/deny_multiline.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = """
+transitive via probe-rs;
+review: quarterly
+""" },
+    { id = "RUSTSEC-2099-0002", reason = '''
+tracking #123;
+expires: 2099-01-01
+''' },
+]
+DENYEOF
+DENY_TOML="$tmp_dir/deny_multiline.toml" AUDIT_TOML="$tmp_dir/empty_audit.toml" bash "$gate" >/dev/null
+
+echo "=== Test 46: Prose tokens masquerading as dependency owners fail ==="
+for bad_owner in \
+    "direct dep is affected; awaiting fix" \
+    "transitive via the dependency; awaiting fix" \
+    "transitive via a crate; awaiting fix" \
+    "pinned by an unmaintained lib; awaiting fix"; do
+    cat << DENYEOF > "$tmp_dir/deny_prose_owner.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_owner}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_prose_owner.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on prose owner '${bad_owner}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 47: Incomplete version review conditions and bare milestone words fail ==="
+for bad_rev in \
+    "tracking #123; review: >= TBD" \
+    "tracking #123; review: vTBD" \
+    "tracking #123; review: when" \
+    "tracking #123; review: when fixed" \
+    "tracking #123; review: when done" \
+    "tracking #123; review: on tbd"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_rev_expr.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_rev}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_rev_expr.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on bad review expression '${bad_rev}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 48: Actionable semver requirements and milestone conditions pass ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_valid_reviews.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "tracking #123; review: >= 47.0.5" },
+    { id = "RUSTSEC-2099-0002", reason = "tracking #123; review: v0.103.13" },
+    { id = "RUSTSEC-2099-0003", reason = "tracking #123; review: on next release" },
+    { id = "RUSTSEC-2099-0004", reason = "tracking #123; review: upon upstream migration" },
+]
+DENYEOF
+DENY_TOML="$tmp_dir/deny_valid_reviews.toml" AUDIT_TOML="$tmp_dir/empty_audit.toml" bash "$gate" >/dev/null
+
+echo "=== Test 49: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -932,7 +1015,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 46: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 50: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?

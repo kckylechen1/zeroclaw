@@ -195,6 +195,84 @@ class TomlArrayParser:
             return raw, None
 
     def _parse_string(self):
+        if self.text[self.pos:self.pos+3] == "'''":
+            self.pos += 3
+            if self.pos < self.length and self.text[self.pos] == '\n':
+                self.pos += 1
+            elif self.pos + 1 < self.length and self.text[self.pos:self.pos+2] == '\r\n':
+                self.pos += 2
+            end = self.text.find("'''", self.pos)
+            if end == -1:
+                return None, "Unterminated multiline literal string (missing ''')"
+            val = self.text[self.pos:end]
+            self.pos = end + 3
+            return val, None
+
+        if self.text[self.pos:self.pos+3] == '"""':
+            self.pos += 3
+            if self.pos < self.length and self.text[self.pos] == '\n':
+                self.pos += 1
+            elif self.pos + 1 < self.length and self.text[self.pos:self.pos+2] == '\r\n':
+                self.pos += 2
+            res = []
+            ESCAPE_MAP = {
+                '"': '"',
+                '\\': '\\',
+                'b': '\b',
+                't': '\t',
+                'n': '\n',
+                'f': '\f',
+                'r': '\r',
+            }
+            while self.pos < self.length:
+                if self.text[self.pos:self.pos+3] == '"""':
+                    self.pos += 3
+                    return "".join(res), None
+                ch = self.text[self.pos]
+                if ch == '\\':
+                    self.pos += 1
+                    if self.pos >= self.length:
+                        return None, "Unfinished escape sequence in multiline string"
+                    next_ch = self.text[self.pos]
+                    if next_ch in ('\r', '\n'):
+                        if next_ch == '\r' and self.pos + 1 < self.length and self.text[self.pos+1] == '\n':
+                            self.pos += 2
+                        else:
+                            self.pos += 1
+                        while self.pos < self.length and self.text[self.pos] in ' \t\r\n':
+                            self.pos += 1
+                        continue
+                    elif next_ch in ESCAPE_MAP:
+                        res.append(ESCAPE_MAP[next_ch])
+                        self.pos += 1
+                    elif next_ch == 'u':
+                        self.pos += 1
+                        if self.pos + 4 > self.length:
+                            return None, "Incomplete \\u unicode escape"
+                        hex_str = self.text[self.pos:self.pos+4]
+                        if not all(c in '0123456789abcdefABCDEF' for c in hex_str):
+                            return None, f"Invalid unicode escape \\u{hex_str}"
+                        self.pos += 4
+                        res.append(chr(int(hex_str, 16)))
+                    elif next_ch == 'U':
+                        self.pos += 1
+                        if self.pos + 8 > self.length:
+                            return None, "Incomplete \\U unicode escape"
+                        hex_str = self.text[self.pos:self.pos+8]
+                        if not all(c in '0123456789abcdefABCDEF' for c in hex_str):
+                            return None, f"Invalid unicode escape \\U{hex_str}"
+                        self.pos += 8
+                        try:
+                            res.append(chr(int(hex_str, 16)))
+                        except (ValueError, OverflowError):
+                            return None, f"Invalid unicode codepoint \\U{hex_str}"
+                    else:
+                        return None, f"Unknown escape sequence \\{next_ch} in multiline string"
+                else:
+                    res.append(ch)
+                    self.pos += 1
+            return None, "Unterminated multiline string (missing \"\"\")"
+
         quote_char = self.text[self.pos]
         self.pos += 1
         if quote_char == "'":
@@ -202,6 +280,8 @@ class TomlArrayParser:
             if end == -1:
                 return None, "Unterminated literal string literal"
             val = self.text[self.pos:end]
+            if '\n' in val or '\r' in val:
+                return None, "Newline in single-line literal string literal"
             self.pos = end + 1
             return val, None
 
@@ -217,6 +297,8 @@ class TomlArrayParser:
         }
         while self.pos < self.length:
             ch = self.text[self.pos]
+            if ch in ('\r', '\n'):
+                return None, "Newline in single-line string literal"
             if ch == '\\':
                 self.pos += 1
                 if self.pos >= self.length:
@@ -319,11 +401,31 @@ DISALLOWED_OWNERS = {
 }
 
 DISALLOWED_UPSTREAM_WORDS = {
-    "awaiting", "fix", "fixes", "upgrade", "upgrades", "migration", "cleanup",
-    "release", "patch", "patches", "update", "updates", "upstream", "transitive",
-    "dep", "direct", "pinned", "transitively", "via", "issue", "pr", "ticket",
-    "todo", "tbd", "none", "unknown", "placeholder", "unassigned", "undefined",
-    "missing", "na", "n/a"
+    # Lifecycle & action nouns
+    "awaiting", "fix", "fixes", "upgrade", "upgrades", "migration", "migrations",
+    "cleanup", "cleanups", "release", "releases", "patch", "patches", "update",
+    "updates", "upstream", "transitive", "dep", "deps", "dependency", "dependencies",
+    "crate", "crates", "package", "packages", "direct", "pinned", "transitively",
+    "via", "issue", "issues", "pr", "prs", "ticket", "tickets", "repo", "repository",
+    "todo", "tbd", "tba", "none", "unknown", "placeholder", "unassigned", "undefined",
+    "missing", "na", "n/a", "version", "versions", "target", "targets", "series",
+    # English stop words / determiners / pronouns
+    "a", "an", "the", "this", "that", "these", "those", "all", "any", "some", "each",
+    "every", "no", "not", "such", "other", "another", "one", "two",
+    "it", "its", "our", "ours", "their", "theirs", "my", "your", "we", "us", "they",
+    "them", "who", "which", "what", "someone", "anyone", "everyone", "nobody",
+    # Verbs & auxiliaries
+    "is", "are", "was", "were", "be", "been", "being", "has", "have", "had",
+    "do", "does", "did", "done", "get", "gets", "got", "make", "makes", "made",
+    "can", "could", "will", "would", "shall", "should", "may", "might", "must",
+    # Prepositions & conjunctions
+    "in", "on", "at", "to", "for", "of", "with", "by", "from", "into", "through",
+    "about", "above", "over", "under", "between", "among", "and", "or", "but",
+    "if", "then", "else", "when", "where", "why", "how", "as", "so", "because",
+    "since", "while",
+    # Prose adjectives
+    "affected", "vulnerable", "broken", "clean", "new", "old", "current", "next",
+    "latest", "sound", "unsound"
 }
 
 DISALLOWED_REVIEWS = {
@@ -359,8 +461,7 @@ TRACKING_PATTERN = re.compile(
 
 UPSTREAM_PATTERN = re.compile(
     r"(?:"
-    r"\b(?:transitive\s+via|pinned\s+(?:transitively\s+)?by|direct\s+dep)\s+([a-zA-Z0-9_-]+)"
-    r"|\bawaiting\s+([a-zA-Z0-9_-]+)\s+upstream\b"
+    r"\b(?:transitive\s+(?:dep\s+)?via|copy\s+via|pinned\s+(?:transitively\s+)?by)\s+([a-zA-Z0-9_-]+)"
     r")",
     re.IGNORECASE
 )
@@ -378,12 +479,12 @@ def has_accountable_owner(text):
     for m in UPSTREAM_PATTERN.finditer(text):
         if is_negated_prefix(text[:m.start()]):
             continue
-        crate = (m.group(1) or m.group(2) or "").strip().lower()
+        crate = m.group(1).strip().lower()
         if not crate or crate in DISALLOWED_OWNERS or crate in DISALLOWED_UPSTREAM_WORDS:
             continue
         if re.match(r"^(?:no|not|without|none|unassigned|unknown|placeholder|tbd|todo)\b", crate):
             continue
-        if len(crate) < 2 or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_/-]*$", crate):
+        if len(crate) < 2 or crate.isdigit() or not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$", crate):
             continue
         return True
 
@@ -489,10 +590,28 @@ def has_lifecycle_condition(text):
             has_valid_review = True
             continue
 
-        is_version = bool(re.match(r"^[><=^~v\d]", norm_cond))
+        # Check if it's a version condition: must match semver/version pattern and contain digits
+        is_version = False
+        version_pattern = re.compile(
+            r"^(?:(?:[><=^~]=?|\bversion\b|\bv\b)\s*)?v?\d+(?:\.[0-9a-zA-Z*_-]+)*(?:\s*,\s*(?:[><=^~]=?\s*)?v?\d+(?:\.[0-9a-zA-Z*_-]+)*)*$"
+        )
+        if version_pattern.match(norm_cond):
+            if not re.search(r"\b(?:tbd|tba|todo|placeholder|unknown|none|undefined)\b", norm_cond, re.IGNORECASE):
+                is_version = True
+
         is_cadence = bool(re.search(r"\b(?:quarterly|monthly|weekly|bi-weekly|semi-annually|annually|daily)\b", norm_cond))
-        is_milestone = bool(re.match(r"^(?:on|at|after|when|upon|before|with|by|until)\b", norm_cond))
         is_tracker = bool(re.search(r"#\d+", norm_cond))
+
+        # Check if it's an actionable milestone condition: requires content after milestone word
+        is_milestone = False
+        milestone_m = re.match(r"^(?:on|at|after|when|upon|before|with|by|until)\s+(.+)$", norm_cond)
+        if milestone_m:
+            remainder = milestone_m.group(1).strip()
+            if not re.match(r"^(?:no|not|never|without|none|tbd|tba|todo|placeholder|unknown|undefined|unassigned|fixed|patched|resolved|wontfix|completed|done|finished|passed|approved|closed|obsolete|retired)\b", remainder):
+                if re.search(r"(?:#\d+|\b\d+(?:\.\d+)*\b|\b(?:release|releases|upgrade|upgrades|migration|migrations|update|updates|cleanup|cleanups|sprint|sprints|quarter|quarters|audit|audits|patch|patches|pr|prs)\b)", remainder):
+                    is_milestone = True
+        elif re.search(r"\b(?:next\s+(?:release|sprint|quarter|audit|update))\b", norm_cond):
+            is_milestone = True
 
         if not (is_version or is_cadence or is_milestone or is_tracker):
             return False, f"unrecognized or non-actionable review condition '{raw_cond}'"
