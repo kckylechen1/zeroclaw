@@ -20,9 +20,26 @@ repo_root="${REPO_ROOT:-$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/
 audit_toml="${AUDIT_TOML:-$repo_root/.cargo/audit.toml}"
 deny_toml="${DENY_TOML:-$repo_root/deny.toml}"
 
-if [ -z "${BASE_REF:-}" ]; then
+if [ -n "${BASE_REF:-}" ]; then
+    if ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
+        echo "FATAL: explicit BASE_REF '$BASE_REF' could not be resolved" >&2
+        exit 2
+    fi
+else
     if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ]; then
-        event_base_sha=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.get('pull_request', {}).get('base', {}).get('sha', ''))" "$GITHUB_EVENT_PATH" 2>/dev/null || true)
+        event_base_sha=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    sha = d.get('pull_request', {}).get('base', {}).get('sha', '')
+    if not sha:
+        before = d.get('before', '')
+        if before and not set(before) == {'0'}:
+            sha = before
+    print(sha)
+except Exception:
+    pass
+" "$GITHUB_EVENT_PATH" 2>/dev/null || true)
         if [ -n "$event_base_sha" ] && git rev-parse --verify "$event_base_sha" >/dev/null 2>&1; then
             BASE_REF="$event_base_sha"
         fi
@@ -43,9 +60,6 @@ if [ -z "${BASE_REF:-}" ]; then
             BASE_REF=""
         fi
     fi
-fi
-if [ -n "${BASE_REF:-}" ] && ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
-    BASE_REF=""
 fi
 export BASE_REF
 
@@ -639,6 +653,16 @@ def has_lifecycle_condition(text):
     has_valid_review = False
     has_valid_milestone = False
 
+    # Check for contradictory negated review clauses anywhere in text (e.g. "review: quarterly; no review required")
+    for clause_raw in re.split(r"[;\n]", text):
+        c_norm = normalize_contractions(clause_raw.strip()).lower()
+        if not c_norm:
+            continue
+        if re.search(r"\b(?:no\s+(?:further\s+)?review|not\s+(?:currently\s+)?reviewing|review\s+(?:is\s+)?not\s+required|review\s+(?:is\s+)?not\s+needed|no\s+review\s+(?:required|needed|planned)|review\s+(?:is\s+)?unnecessary|not\s+required|not\s+needed|unnecessary|not\s+applicable|no\s+longer\s+(?:needed|required))\b", c_norm):
+            if LIFECYCLE_OTHER_PATTERN.search(clause_raw):
+                continue
+            return False, f"contradictory negated review clause '{clause_raw.strip()}'"
+
     # 1. Validate every explicit expiry declaration.
     # Every declared deadline must be a valid, unexpired calendar date.
     for m in EXPIRY_FIELD_PATTERN.finditer(text):
@@ -725,7 +749,7 @@ def has_lifecycle_condition(text):
             remainder = milestone_m.group(1).strip()
             if not re.match(r"^(?:no|not|never|without|none|tbd|tba|todo|placeholder|unknown|undefined|unassigned|fixed|patched|resolved|wontfix|completed|done|finished|passed|approved|closed|obsolete|retired)\b", remainder):
                 if not re.search(r"#[0-9]+[a-zA-Z_]", remainder):
-                    if re.search(r"(?:#[1-9]\d*(?!\w)|\b\d+(?:\.\d+)*\b|\b(?:release|releases|upgrade|upgrades|migration|migrations|update|updates|cleanup|cleanups|sprint|sprints|quarter|quarters|audit|audits|patch|patches|pr|prs)\b)", remainder):
+                    if re.search(r"(?:#[1-9]\d*(?!\w)|\b\d+(?:\.\d+)*\b|\b(?:release|releases|upgrade|upgrades|migration|migrations|update|updates|cleanup|cleanups|sprint|sprints|quarter|quarters|audit|audits|patch|patches|pr|prs|fix|fixes|replacement|replacements|landing|lands|landed|publish|published|merge|merged)\b)", remainder):
                         is_milestone = True
         elif re.search(r"^\b(?:next\s+(?:release|sprint|quarter|audit|update))\b$", norm_cond):
             is_milestone = True
@@ -1003,14 +1027,21 @@ if not is_single_file_override:
 
         # 2. Inspect shorthand "<tool> only" or "<tool>-only"
         for m in shorthand_pattern.finditer(text):
-            clause = m.group(0).lower()
+            # Inspect the whole containing clause up to [;\n]
+            c_start = 0
+            for delim in re.finditer(r"[;\n]", text[:m.start()]):
+                c_start = delim.end()
+            next_delim = re.search(r"[;\n]", text[m.end():])
+            c_end = m.end() + next_delim.start() if next_delim else len(text)
+            containing_clause = text[c_start:c_end]
+
             prefix = text[:m.start()]
             clause_prefix = re.split(r"[;,\.\n]", prefix)[-1]
             if is_negated_prefix(clause_prefix):
                 continue
-            if other_pattern.search(clause):
+            if other_pattern.search(containing_clause):
                 return False
-            if target_pattern.search(clause):
+            if target_pattern.search(m.group(0)):
                 found_target_scope = True
 
         return found_target_scope
@@ -1059,6 +1090,17 @@ if not is_single_file_override:
                     f"Shared advisory '{adv_id}' metadata mismatch across configs: "
                     f"deny.toml reason '{d_reason}' != .cargo/audit.toml comment '{a_comment}'"
                 )
+
+        if has_explicit_tool_scope(d_reason, "cargo-deny") or has_explicit_tool_scope(d_reason, "cargo-audit"):
+            errors.append(
+                f"Shared advisory '{adv_id}' declares exclusive tool scope in deny.toml but is present in both configurations. "
+                f"Tool-specific exceptions must only be defined in the detecting tool."
+            )
+        elif has_explicit_tool_scope(a_comment, "cargo-deny") or has_explicit_tool_scope(a_comment, "cargo-audit"):
+            errors.append(
+                f"Shared advisory '{adv_id}' declares exclusive tool scope in .cargo/audit.toml but is present in both configurations. "
+                f"Tool-specific exceptions must only be defined in the detecting tool."
+            )
 
 if errors:
     print("advisory-exceptions gate: FAIL", file=sys.stderr)

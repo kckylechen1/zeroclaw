@@ -1777,5 +1777,123 @@ DENYEOF
     fi
 done
 
+echo "=== Test 78: Unresolvable explicit BASE_REF fails closed with status 2 ==="
+set +e
+BASE_REF="definitely_nonexistent_ref_123456" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 2 ]; then
+    echo "FAIL: Expected exit 2 on unresolvable explicit BASE_REF, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 79: Push event before SHA resolution detects added exceptions ==="
+head_commit=$(git rev-parse HEAD)
+parent_commit=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
+cat << JEOF > "$tmp_dir/push_event.json"
+{
+  "before": "$parent_commit",
+  "after": "$head_commit"
+}
+JEOF
+cat << DENYEOF > "$tmp_dir/deny_push_test.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "no owner or expiry here" },
+]
+DENYEOF
+set +e
+GITHUB_EVENT_PATH="$tmp_dir/push_event.json" BASE_REF="" DENY_TOML="$tmp_dir/deny_push_test.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on new exception using push event before SHA baseline, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 80: Exclusive tool scope declared on shared exception fails strictly ==="
+cat << DENYEOF > "$tmp_dir/deny_shared_scoped.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "scope: cargo-deny; owner: @security-team; review: quarterly" },
+]
+DENYEOF
+cat << AUDITEOF > "$tmp_dir/audit_shared_scoped.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001",  # scope: cargo-deny; owner: @security-team; review: quarterly
+]
+AUDITEOF
+set +e
+DENY_TOML="$tmp_dir/deny_shared_scoped.toml" AUDIT_TOML="$tmp_dir/audit_shared_scoped.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on shared exception declaring exclusive tool scope, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 81: Shorthand tool scope with neighboring other-tool reference fails strictly ==="
+cat << DENYEOF > "$tmp_dir/deny_shorthand_multi.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "cargo-deny only and cargo-audit; owner: @security-team; review: quarterly" },
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_shorthand_multi.toml" AUDIT_TOML="$tmp_dir/audit_empty.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected failure on shorthand tool scope with other-tool in clause, got status $status" >&2
+    exit 1
+fi
+
+echo "=== Test 82: Negated review clauses across delimiters fail strictly ==="
+for bad_negated_clause in \
+    "review: quarterly; no review required" \
+    "review: quarterly; not required" \
+    "review: quarterly; review not required" \
+    "review: quarterly; no review needed" \
+    "review: quarterly; unnecessary"; do
+    cat << DENYEOF > "$tmp_dir/deny_negated_clause.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; ${bad_negated_clause}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_negated_clause.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on negated review clause across delimiter '${bad_negated_clause}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 83: Actionable fix-based review conditions pass ==="
+for good_fix_review in \
+    "review: when upstream fix lands" \
+    "review: when replacement crate published" \
+    "review: upon fix" \
+    "review: when PR #123 merged"; do
+    cat << DENYEOF > "$tmp_dir/deny_good_fix.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @security-team; ${good_fix_review}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_good_fix.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 0 ]; then
+        echo "FAIL: Expected success on actionable fix condition '${good_fix_review}', got status $status" >&2
+        exit 1
+    fi
+done
+
 echo "All advisory_exceptions_gate self-tests passed cleanly."
+
 
