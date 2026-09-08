@@ -33,6 +33,7 @@ fi
 python3 - "$audit_toml" "$deny_toml" <<'PYEOF'
 import sys
 import re
+import datetime
 
 audit_path = sys.argv[1]
 deny_path = sys.argv[2]
@@ -105,8 +106,7 @@ class TomlArrayParser:
             if self.pos >= self.length:
                 return None, "Unclosed array: EOF reached before ']'"
 
-            ch = self.text[self.pos]
-            if ch == ']':
+            if self.text[self.pos] == ']':
                 self.pos += 1
                 return elements, None
 
@@ -114,13 +114,42 @@ class TomlArrayParser:
             if err:
                 return None, err
 
-            comment = self._consume_comma_and_grab_comment()
-            elements.append((elem, comment))
+            comment = self._grab_inline_comment()
+            had_comma = False
 
-            self._skip_ws()
-            if self.pos < self.length and self.text[self.pos] == ']':
+            while self.pos < self.length and self.text[self.pos] in ' \t':
+                self.pos += 1
+
+            if self.pos < self.length and self.text[self.pos] == ',':
+                had_comma = True
+                self.pos += 1
+                if not comment:
+                    comment = self._grab_inline_comment()
+
+            self._skip_ws_and_comments()
+            if self.pos >= self.length:
+                return None, "Unclosed array: EOF reached before ']'"
+
+            if self.text[self.pos] == ']':
+                elements.append((elem, comment))
                 self.pos += 1
                 return elements, None
+
+            if not had_comma:
+                if self.text[self.pos] == ',':
+                    had_comma = True
+                    self.pos += 1
+                    self._skip_ws_and_comments()
+                    if self.pos >= self.length:
+                        return None, "Unclosed array: EOF reached before ']'"
+                    if self.text[self.pos] == ']':
+                        elements.append((elem, comment))
+                        self.pos += 1
+                        return elements, None
+                else:
+                    return None, f"Expected ',' between array elements, found '{self.text[self.pos]}'"
+
+            elements.append((elem, comment))
 
         return None, "Unclosed array: EOF reached before ']'"
 
@@ -138,14 +167,9 @@ class TomlArrayParser:
             else:
                 break
 
-    def _consume_comma_and_grab_comment(self):
+    def _grab_inline_comment(self):
         while self.pos < self.length and self.text[self.pos] in ' \t':
             self.pos += 1
-        if self.pos < self.length and self.text[self.pos] == ',':
-            self.pos += 1
-        while self.pos < self.length and self.text[self.pos] in ' \t':
-            self.pos += 1
-
         comment = ""
         if self.pos < self.length and self.text[self.pos] == '#':
             comm_start = self.pos + 1
@@ -279,14 +303,24 @@ class TomlArrayParser:
 
 
 DISALLOWED_OWNERS = {
-    "none", "null", "nil", "na", "n/a", "n_a", "unassigned", "tbd", "todo",
-    "placeholder", "nobody", "unknown", "assigned", "undefined",
-    "anyone", "someone", "noone", "no-one", "no_one", "pending",
-    "false", "empty", "blank", "missing", "unspecified"
+    "none", "null", "nil", "na", "n/a", "n_a", "n / a", "unassigned", "tbd",
+    "to be determined", "to be decided", "todo", "to do", "placeholder",
+    "nobody", "no body", "no one", "no-one", "no_one", "not assigned",
+    "not yet assigned", "unknown", "assigned", "undefined", "anyone", "someone",
+    "pending", "false", "empty", "blank", "missing", "unspecified", "no owner",
+    "no maintainer", "not yet", "wontfix"
+}
+
+DISALLOWED_REVIEWS = {
+    "none", "null", "nil", "na", "n/a", "n_a", "never", "no", "false",
+    "unassigned", "tbd", "todo", "placeholder", "unknown", "undefined",
+    "not needed", "not planned", "not required", "not applicable",
+    "no review", "no review needed", "no review planned", "unnecessary",
+    "wontfix", "won't fix", "n / a", "empty", "blank"
 }
 
 OWNER_FIELD_PATTERN = re.compile(
-    r"\b(?:owner|maintainer)\b(?:\s*[:=]\s*|\s+@)(@?[a-zA-Z0-9_/-]+)",
+    r"\b(?:owner|maintainer)\b(?:\s*[:=]\s*|\s+@)([^;,]+)",
     re.IGNORECASE
 )
 
@@ -321,11 +355,19 @@ def has_accountable_owner(text):
         prefix = text[:start_idx]
         if re.search(r"\b(?:no|without|missing|unassigned|not)\s+$", prefix, re.IGNORECASE):
             continue
-        raw_target = m.group(1).lstrip("@").strip()
-        if raw_target.lower() in DISALLOWED_OWNERS:
+        raw_val = m.group(1).strip()
+        clean_val = re.sub(r"\s+", " ", raw_val.lstrip("@")).strip().lower()
+        if not clean_val:
             continue
-        if len(raw_target) > 0:
-            return True
+        if clean_val in DISALLOWED_OWNERS:
+            continue
+        if re.match(r"^(?:no|not|without|missing|unassigned|none)\b", clean_val):
+            continue
+        if " " in clean_val:
+            continue
+        if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_/-]*$", clean_val):
+            continue
+        return True
 
     for m in BARE_HANDLE_PATTERN.finditer(text):
         handle = m.group(1).lower()
@@ -337,13 +379,19 @@ def has_accountable_owner(text):
 
     return False
 
-EXPIRY_PATTERN = re.compile(
+EXPIRY_DATE_PATTERN = re.compile(
+    r"\b(?:expires?|expiry)\b\s*[:=]?\s*(\d{4}-\d{2}-\d{2})\b",
+    re.IGNORECASE
+)
+
+REVIEW_CONDITION_PATTERN = re.compile(
+    r"(?:\breview\b(?:\s+(?:by|due|before|at|on|date)\b\s*[:=]?|\s*[:=])|\brevisit\b\s+(?:when|after|on|at)\b\s+)([^;,]+)",
+    re.IGNORECASE
+)
+
+LIFECYCLE_OTHER_PATTERN = re.compile(
     r"(?:"
-    r"\bexpires?\b\s*[:=]?\s*\d{4}-\d{2}-\d{2}\b"
-    r"|\bexpiry\b\s*[:=]?\s*\d{4}-\d{2}-\d{2}\b"
-    r"|\breview\b(?:\s+(?:by|due|before|at|on|date)\b\s*[:=]?|\s*[:=])\s*[^;,\n\r]*[a-zA-Z0-9][^;,\n\r]*"
-    r"|\brevisit\b\s+(?:when|after|on|at)\b\s+[^;,\n\r]*[a-zA-Z0-9][^;,\n\r]*"
-    r"|\bawaiting\b\s+(?:upstream|[\w-]+\s+upgrade|[\w-]+\s+migration|cleanup|migration|fix|upgrade)\b"
+    r"\bawaiting\b\s+(?:upstream|[\w-]+\s+upgrade|[\w-]+\s+migration|cleanup|migration|fix|upgrade)\b"
     r"|\b(?:upstream\s+)?fix\s+pending\b"
     r"|\b(?:fixed|patched)\b\s+(?:in|at|>=|>)\s*[\w.-]+"
     r"|\b(?:predates|outside\s+affected\s+range)\b"
@@ -353,9 +401,34 @@ EXPIRY_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+def has_lifecycle_condition(text):
+    for m in EXPIRY_DATE_PATTERN.finditer(text):
+        date_str = m.group(1)
+        try:
+            datetime.date.fromisoformat(date_str)
+            return True
+        except ValueError:
+            pass
+
+    for m in REVIEW_CONDITION_PATTERN.finditer(text):
+        raw_cond = m.group(1).strip()
+        clean_cond = re.sub(r"\s+", " ", raw_cond).lower()
+        if not re.search(r"[a-zA-Z0-9]", clean_cond):
+            continue
+        if clean_cond in DISALLOWED_REVIEWS:
+            continue
+        if re.match(r"^(?:no|not|never|without)\b", clean_cond):
+            continue
+        return True
+
+    if LIFECYCLE_OTHER_PATTERN.search(text):
+        return True
+
+    return False
+
 def validate_lifecycle(text):
     has_owner = has_accountable_owner(text)
-    has_expiry = bool(EXPIRY_PATTERN.search(text))
+    has_expiry = has_lifecycle_condition(text)
     return has_owner, has_expiry
 
 errors = []

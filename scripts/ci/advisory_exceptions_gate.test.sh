@@ -24,8 +24,12 @@
 # 20. Retired advisory with TOML unicode escape fails in deny.toml and audit.toml.
 # 21. Placeholder owner values (e.g. none, unassigned, tbd) are rejected.
 # 22. Negated delimited owner prose is rejected.
-# 23. Comment in audit.toml missing fails.
-# 24. Missing config file fails strictly with exit status 2.
+# 23. Adjacent array elements without separating comma fail strictly.
+# 24. Invalid calendar dates in expiry conditions are rejected.
+# 25. Placeholder or negated review conditions are rejected.
+# 26. Multi-word placeholder owners are rejected.
+# 27. Comment in audit.toml missing fails.
+# 28. Missing config file fails strictly with exit status 2.
 #
 # Exit status: 0 = all assertions pass, nonzero = test failure.
 
@@ -375,7 +379,94 @@ DENYEOF
     fi
 done
 
-echo "=== Test 23: Missing comment in audit.toml fails ==="
+echo "=== Test 23: Adjacent array elements without separating comma fail strictly ==="
+cat << 'DENYEOF' > "$tmp_dir/deny_no_comma.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @team; review: quarterly" }
+    { id = "RUSTSEC-2099-0002", reason = "owner: @team; review: quarterly" }
+]
+DENYEOF
+set +e
+DENY_TOML="$tmp_dir/deny_no_comma.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected validation failure status 1 on adjacent elements without comma in deny.toml, got $status" >&2
+    exit 1
+fi
+
+cat << 'AUDITEOF' > "$tmp_dir/audit_no_comma.toml"
+[advisories]
+ignore = [
+    "RUSTSEC-2099-0001" # owner: @team; review: quarterly
+    "RUSTSEC-2099-0002" # owner: @team; review: quarterly
+]
+AUDITEOF
+set +e
+AUDIT_TOML="$tmp_dir/audit_no_comma.toml" bash "$gate" >/dev/null 2>&1
+status=$?
+set -e
+if [ "$status" -ne 1 ]; then
+    echo "FAIL: Expected validation failure status 1 on adjacent strings without comma in audit.toml, got $status" >&2
+    exit 1
+fi
+
+echo "=== Test 24: Invalid calendar dates in expiry conditions are rejected ==="
+for bad_date in "2026-99-99" "2026-02-30" "2026-13-01"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_calendar.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @team; expires: ${bad_date}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_calendar.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on invalid calendar date '${bad_date}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 25: Placeholder or negated review conditions are rejected ==="
+for bad_review in "review: none" "review: not needed" "review: never" "review: not planned" "review: tbd"; do
+    cat << DENYEOF > "$tmp_dir/deny_bad_review.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "owner: @team; ${bad_review}" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_bad_review.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on bad review condition '${bad_review}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 26: Multi-word placeholder owners are rejected ==="
+for bad_owner in "owner: not assigned" "owner: to be determined" "owner: none assigned" "owner: security team"; do
+    cat << DENYEOF > "$tmp_dir/deny_multi_word_owner.toml"
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2099-0001", reason = "${bad_owner}; review: quarterly" },
+]
+DENYEOF
+    set +e
+    DENY_TOML="$tmp_dir/deny_multi_word_owner.toml" bash "$gate" >/dev/null 2>&1
+    status=$?
+    set -e
+    if [ "$status" -ne 1 ]; then
+        echo "FAIL: Expected failure on multi-word placeholder owner '${bad_owner}', got status $status" >&2
+        exit 1
+    fi
+done
+
+echo "=== Test 27: Missing comment in audit.toml fails ==="
 cat << 'AUDITEOF' > "$tmp_dir/audit_no_comment.toml"
 [advisories]
 ignore = [
@@ -387,7 +478,7 @@ if AUDIT_TOML="$tmp_dir/audit_no_comment.toml" bash "$gate" >/dev/null 2>&1; the
     exit 1
 fi
 
-echo "=== Test 24: Missing config file fails strictly with exit status 2 ==="
+echo "=== Test 28: Missing config file fails strictly with exit status 2 ==="
 set +e
 AUDIT_TOML="$tmp_dir/nonexistent.toml" bash "$gate" >/dev/null 2>&1
 status=$?
