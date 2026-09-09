@@ -56,13 +56,22 @@ wasmtime `43` → `45.0.3` bump in `crates/zeroclaw-plugins/Cargo.toml`
 (see PR #8542, awaiting maintainer re-approval after the latest
 `upstream/master` merge).
 
+Resolved groups:
+
+- **Wasmtime advisories (`RUSTSEC-2026-0268`, `-0269`)**: Wasmtime guest-controlled
+  host heap allocation through WASIp3 streams (`-0268`) and filesystem sandbox escape
+  when paths contain trailing slashes (`-0269`). Cleared by wasmtime 47.0.4 update in
+  PR #285, with obsolete exceptions retired in #296.
+
 **Process for this category:**
 
-- Add the entry with a single-line `reason` ending in the tracking
-  issue URL or PR number.
-- When a fix lands, remove the entry from **both** `.cargo/audit.toml`
-  *and* `deny.toml` in the same PR. A drift here re-introduces the
-  original CI failure.
+- For advisories detected across both tools, add the entry in `deny.toml` as an inline table: `{ id = "RUSTSEC-...", reason = "..." }`, and the corresponding entry in `.cargo/audit.toml` with a matching inline comment: `"RUSTSEC-...",  # ...`.
+- Shared entries across both configurations must have matching lifecycle metadata, enforced by `scripts/ci/advisory_exceptions_gate.sh`.
+- Tool-specific exceptions: `cargo-audit` scans the entire workspace `Cargo.lock` flatly, whereas `cargo-deny` checks the build graph for active targets. Tool-specific entries (e.g. `RUSTSEC-2024-0384` in `.cargo/audit.toml` only, or `RUSTSEC-2026-0253` in `deny.toml` only) are scoped to the detecting tool rather than duplicated into unaffected configurations. Every exception, whether shared or tool-specific, must satisfy all lifecycle requirements below.
+- Every entry's reason and inline comment must include:
+  1. **Accountable owner**: e.g. `owner: @<handle>`, `maintainer: @<handle>`, or bare `@<handle>`. Provenance and tracking notes such as `tracking #<issue>`, `tracking <repo>#<issue>`, or `transitive via <crate>` are encouraged for context but do not substitute for an accountable owner.
+  2. **Review / expiry condition**: e.g. `expires: YYYY-MM-DD`, `review: <condition>`, `awaiting <upgrade|migration|fix>`, or `upstream fix pending`.
+- When a fix lands, remove the exception from whatever files contain it in the same PR.
 - Each file has a one-line `── tracking #... ──` header above its
   block. Preserve the header when adding entries to the same category;
   introduce a new header for a new category.
@@ -105,11 +114,8 @@ Resolved groups:
 
 **Process for this category:**
 
-- Use a short reason naming the crate role, e.g.
-  `gtk-rs GTK3 bindings; transitive via zeroclaw-desktop/tauri/webkit2gtk`.
-- Do not add `; tracking #...` for entries that are stable
-  unmaintained warnings and unlikely to be resolved in the next
-  release cycle.
+- Add the entry to both `deny.toml` and `.cargo/audit.toml` with explicit role, accountable owner (`owner: @<handle>`), tracking reference (`tracking zeroclaw-labs/zeroclaw#8519`), and review condition (e.g. `awaiting upstream migration`).
+- Bare strings in `deny.toml` or missing inline comments in `.cargo/audit.toml` are rejected by `advisory_exceptions_gate.sh`.
 - When a replacement lands upstream and the dep gets bumped, remove
   the entry from both files.
 
