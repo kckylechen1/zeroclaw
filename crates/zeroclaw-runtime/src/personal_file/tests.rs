@@ -10,8 +10,9 @@
 use std::path::Path;
 
 use super::domain::{
-    ExpectedContentIdentity, MAX_TEXT_BYTES, PersonalFileError, PersonalFileRefusal,
-    PersonalFileResult, PersonalRelativePath, PersonalRootRef, TRASH_NAMESPACE,
+    ExpectedContentIdentity, MAX_LIST_ENTRIES, MAX_TEXT_BYTES, PersonalFileError,
+    PersonalFileRefusal, PersonalFileResult, PersonalRelativePath, PersonalRootRef,
+    TRASH_NAMESPACE,
 };
 use super::service::{MoveDestination, MoveSource, PersonalFileService};
 
@@ -887,6 +888,81 @@ async fn read_failure_is_not_reported_as_empty() {
     match service.read_text(&root, &big).await {
         Err(PersonalFileError::TooLarge { .. }) => {}
         other => panic!("over-bound read must be typed, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn create_and_replace_payloads_are_bound() {
+    let _fs_serialized = fs_test_guard().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (service, root) = service_with_rw_root(tmp.path());
+
+    // over-bound create payload: typed refusal, and nothing is created
+    let oversized = "a".repeat((MAX_TEXT_BYTES + 1) as usize);
+    let over = PersonalRelativePath::parse("over.txt").expect("path");
+    match service
+        .create_text_no_clobber(&root, &over, &oversized)
+        .await
+    {
+        Err(PersonalFileError::TooLarge { limit, actual }) => {
+            assert_eq!(limit, MAX_TEXT_BYTES);
+            assert_eq!(actual, MAX_TEXT_BYTES + 1);
+        }
+        other => panic!("over-bound create payload must be typed, got {other:?}"),
+    }
+    assert!(
+        !tmp.path().join("over.txt").exists(),
+        "an over-bound create must not touch the root"
+    );
+
+    // over-bound replacement payload: typed refusal, prior content intact
+    let kept = PersonalRelativePath::parse("kept.txt").expect("path");
+    service
+        .create_text_no_clobber(&root, &kept, "prior\n")
+        .await
+        .expect("create prior");
+    let identity = match service.read_text(&root, &kept).await.expect("read") {
+        PersonalFileResult::ReadText { identity, .. } => identity,
+        other => panic!("unexpected result class: {:?}", other.operation()),
+    };
+    match service
+        .replace_text_if_expected(&root, &kept, &identity, &oversized)
+        .await
+    {
+        Err(PersonalFileError::TooLarge { .. }) => {}
+        other => panic!("over-bound replace payload must be typed, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(tmp.path().join("kept.txt")).expect("prior intact"),
+        b"prior\n",
+        "a refused replacement must not mutate the leaf"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn listing_is_bound_by_the_constant_not_the_caller() {
+    let _fs_serialized = fs_test_guard().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (service, root) = service_with_rw_root(tmp.path());
+
+    // One entry over the constant bound, planted directly (the service
+    // itself now refuses over-bound writes).
+    for index in 0..=MAX_LIST_ENTRIES {
+        std::fs::File::create(tmp.path().join(format!("f{index:05}.txt"))).expect("fixture file");
+    }
+    // The caller's limit cannot widen the constant bound.
+    match service.list(&root, None, usize::MAX).await {
+        Err(PersonalFileError::TooManyEntries(bound)) => {
+            assert_eq!(bound, MAX_LIST_ENTRIES);
+        }
+        other => panic!("listing over the constant bound must be typed, got {other:?}"),
+    }
+    // A caller limit at or below the bound keeps its narrow meaning.
+    match service.list(&root, None, 1).await {
+        Err(PersonalFileError::TooManyEntries(1)) => {}
+        other => panic!("narrow caller limit must be honored, got {other:?}"),
     }
 }
 
