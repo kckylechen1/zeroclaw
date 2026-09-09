@@ -17070,7 +17070,9 @@ async fn admission_decision_is_fail_open_on_store_failure() {
     let store_failed = admission_decision(Ok(Err(rusqlite::Error::QueryReturnedNoRows)));
     assert!(matches!(
         &store_failed,
-        AdmissionDecision::StoreFailed(err) if err.contains("QueryReturnedNoRows")
+        // rusqlite renders this variant as "Query returned no rows"
+        // (stable Display, not the Debug variant name).
+        AdmissionDecision::StoreFailed(err) if err.contains("Query returned no rows")
     ));
     let join_err = tokio::task::spawn_blocking(|| panic!("blocking task fails"))
         .await
