@@ -17065,17 +17065,21 @@ async fn admission_decision_is_fail_open_on_store_failure() {
     // failed or the blocking task failed — must NOT suppress a redelivery.
     // StoreFailed processes the message without dedup; only DropDuplicate
     // drops. This is the at-least-once guarantee against silent loss.
-    assert_eq!(
-        admission_decision(Ok(Err(rusqlite::Error::QueryReturnedNoRows))),
-        AdmissionDecision::StoreFailed
-    );
+    // The failure text must survive into the decision so the bounded
+    // WARN can name the failure mode (it is the only line until restart).
+    let store_failed = admission_decision(Ok(Err(rusqlite::Error::QueryReturnedNoRows)));
+    assert!(matches!(
+        &store_failed,
+        AdmissionDecision::StoreFailed(err) if err.contains("QueryReturnedNoRows")
+    ));
     let join_err = tokio::task::spawn_blocking(|| panic!("blocking task fails"))
         .await
         .expect_err("panicking blocking task must join with an error");
-    assert_eq!(
-        admission_decision(Err(join_err)),
-        AdmissionDecision::StoreFailed
-    );
+    let task_failed = admission_decision(Err(join_err));
+    assert!(matches!(
+        &task_failed,
+        AdmissionDecision::StoreFailed(err) if !err.is_empty()
+    ));
 }
 
 #[test]
