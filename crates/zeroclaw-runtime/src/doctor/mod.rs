@@ -1303,7 +1303,10 @@ fn check_bootstrap_truncation(config: &Config, items: &mut Vec<DiagItem>) {
             let Ok(content) = std::fs::read_to_string(workspace.join(filename)) else {
                 continue;
             };
-            let total = content.chars().count();
+            // Count what the runtime would inject: it trims the file
+            // before applying the cap, so a file over-cap only in
+            // surrounding whitespace is not a finding.
+            let total = content.trim().chars().count();
             if total > cap {
                 items.push(DiagItem::warn(
                     cat,

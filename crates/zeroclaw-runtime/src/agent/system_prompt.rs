@@ -26,26 +26,45 @@ fn load_openclaw_bootstrap_files(
     workspace_dir: &std::path::Path,
     max_chars_per_file: usize,
     inject_memory: bool,
+    compact_context: bool,
 ) {
     prompt.push_str(
         "The following workspace files define your identity, behavior, and context. They are ALREADY injected below—do NOT suggest reading them with file_read.\n\n",
     );
 
     for filename in BOOTSTRAP_FILES {
-        inject_workspace_file(prompt, workspace_dir, filename, max_chars_per_file);
+        inject_workspace_file(
+            prompt,
+            workspace_dir,
+            filename,
+            max_chars_per_file,
+            compact_context,
+        );
     }
 
     // BOOTSTRAP.md — only if it exists (first-run ritual)
     let bootstrap_path = workspace_dir.join("BOOTSTRAP.md");
     if bootstrap_path.exists() {
-        inject_workspace_file(prompt, workspace_dir, "BOOTSTRAP.md", max_chars_per_file);
+        inject_workspace_file(
+            prompt,
+            workspace_dir,
+            "BOOTSTRAP.md",
+            max_chars_per_file,
+            compact_context,
+        );
     }
 
     // MEMORY.md — curated long-term memory (main session only).
     // Skipped when the agent runs without persistent memory (e.g. ACP sessions)
     // so that stale long-term memory does not leak into isolated contexts.
     if inject_memory {
-        inject_workspace_file(prompt, workspace_dir, "MEMORY.md", max_chars_per_file);
+        inject_workspace_file(
+            prompt,
+            workspace_dir,
+            "MEMORY.md",
+            max_chars_per_file,
+            compact_context,
+        );
     }
 }
 
@@ -404,11 +423,14 @@ pub fn build_system_prompt_with_persona(
                     // No AIEOS identity loaded (shouldn't happen if is_aieos_configured returned true)
                     // Fall back to OpenClaw bootstrap files
                     let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
+                    let compact_context =
+                        matches!(bootstrap_max_chars, Some(COMPACT_BOOTSTRAP_MAX_CHARS));
                     load_openclaw_bootstrap_files(
                         &mut prompt,
                         workspace_dir,
                         max_chars,
                         inject_memory,
+                        compact_context,
                     );
                 }
                 Err(e) => {
@@ -417,23 +439,40 @@ pub fn build_system_prompt_with_persona(
                         "Warning: Failed to load AIEOS identity: {e}. Using OpenClaw format."
                     );
                     let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
+                    let compact_context =
+                        matches!(bootstrap_max_chars, Some(COMPACT_BOOTSTRAP_MAX_CHARS));
                     load_openclaw_bootstrap_files(
                         &mut prompt,
                         workspace_dir,
                         max_chars,
                         inject_memory,
+                        compact_context,
                     );
                 }
             }
         } else {
             // OpenClaw format
             let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-            load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars, inject_memory);
+            let compact_context = matches!(bootstrap_max_chars, Some(COMPACT_BOOTSTRAP_MAX_CHARS));
+            load_openclaw_bootstrap_files(
+                &mut prompt,
+                workspace_dir,
+                max_chars,
+                inject_memory,
+                compact_context,
+            );
         }
     } else {
         // No identity config - use OpenClaw format
         let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-        load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars, inject_memory);
+        let compact_context = matches!(bootstrap_max_chars, Some(COMPACT_BOOTSTRAP_MAX_CHARS));
+        load_openclaw_bootstrap_files(
+            &mut prompt,
+            workspace_dir,
+            max_chars,
+            inject_memory,
+            compact_context,
+        );
     }
 
     // ── 6. Date ─────────────────────────────────────────────────
@@ -513,6 +552,7 @@ fn warn_bootstrap_truncation_once(
     filename: &str,
     max_chars: usize,
     total_chars: usize,
+    compact_context: bool,
 ) -> bool {
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -540,11 +580,11 @@ fn warn_bootstrap_truncation_once(
                 "injected": max_chars,
                 "total": total_chars,
                 "discarded": discarded,
-                "compact_context": true,
+                "compact_context": compact_context,
             })),
         &format!(
             "{filename}: injected {max_chars} of {total_chars} chars \
-             ({discarded} discarded, compact_context=true)"
+             ({discarded} discarded, compact_context={compact_context})"
         )
     );
     true
@@ -555,6 +595,7 @@ fn inject_workspace_file(
     workspace_dir: &std::path::Path,
     filename: &str,
     max_chars: usize,
+    compact_context: bool,
 ) {
     use std::fmt::Write;
 
@@ -585,6 +626,7 @@ fn inject_workspace_file(
                     filename,
                     max_chars,
                     trimmed.chars().count(),
+                    compact_context,
                 );
                 prompt.push_str(truncated);
                 let _ = writeln!(
@@ -611,14 +653,14 @@ mod tests {
     #[test]
     fn bootstrap_truncation_warns_once_per_workspace_file() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let first = warn_bootstrap_truncation_once(dir.path(), "AGENTS.md", 6000, 13985);
+        let first = warn_bootstrap_truncation_once(dir.path(), "AGENTS.md", 6000, 13985, true);
         assert!(first, "first truncation of a workspace file must warn");
-        let second = warn_bootstrap_truncation_once(dir.path(), "AGENTS.md", 6000, 13985);
+        let second = warn_bootstrap_truncation_once(dir.path(), "AGENTS.md", 6000, 13985, true);
         assert!(
             !second,
             "same workspace+file must not warn twice per process"
         );
-        let other_file = warn_bootstrap_truncation_once(dir.path(), "SOUL.md", 6000, 9000);
+        let other_file = warn_bootstrap_truncation_once(dir.path(), "SOUL.md", 6000, 9000, false);
         assert!(other_file, "a different file still warns");
     }
 
