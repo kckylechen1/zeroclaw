@@ -85,7 +85,10 @@ impl PersonalFileService {
         #[cfg(not(unix))]
         {
             let _ = (dir, kind);
-            return Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM));
+            // Tail expression, not `return`: with #[cfg(unix)] stripped
+            // on Windows this block is the function tail and a `return`
+            // fails clippy::needless_return in the weekly cross-platform run.
+            Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM))
         }
 
         #[cfg(unix)]
@@ -302,7 +305,10 @@ impl PersonalFileService {
         #[cfg(not(unix))]
         {
             let _ = path;
-            return Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM));
+            // Tail expression, not `return`: with #[cfg(unix)] stripped
+            // on Windows this block is the function tail and a `return`
+            // fails clippy::needless_return in the weekly cross-platform run.
+            Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM))
         }
         #[cfg(unix)]
         {
@@ -329,7 +335,10 @@ impl PersonalFileService {
         #[cfg(not(unix))]
         {
             let _ = (path, content);
-            return Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM));
+            // Tail expression, not `return`: with #[cfg(unix)] stripped
+            // on Windows this block is the function tail and a `return`
+            // fails clippy::needless_return in the weekly cross-platform run.
+            Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM))
         }
         #[cfg(unix)]
         {
@@ -390,7 +399,10 @@ impl PersonalFileService {
         #[cfg(not(unix))]
         {
             let _ = (path, expected, new_content);
-            return Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM));
+            // Tail expression, not `return`: with #[cfg(unix)] stripped
+            // on Windows this block is the function tail and a `return`
+            // fails clippy::needless_return in the weekly cross-platform run.
+            Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM))
         }
         #[cfg(unix)]
         {
@@ -518,7 +530,10 @@ impl PersonalFileService {
         #[cfg(not(unix))]
         {
             let _ = (src_path, dst_path);
-            return Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM));
+            // Tail expression, not `return`: with #[cfg(unix)] stripped
+            // on Windows this block is the function tail and a `return`
+            // fails clippy::needless_return in the weekly cross-platform run.
+            Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM))
         }
         #[cfg(unix)]
         {
@@ -591,7 +606,10 @@ impl PersonalFileService {
         #[cfg(not(unix))]
         {
             let _ = path;
-            return Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM));
+            // Tail expression, not `return`: with #[cfg(unix)] stripped
+            // on Windows this block is the function tail and a `return`
+            // fails clippy::needless_return in the weekly cross-platform run.
+            Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM))
         }
         #[cfg(unix)]
         {
@@ -657,7 +675,10 @@ impl PersonalFileService {
         #[cfg(not(unix))]
         {
             let _ = path;
-            return Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM));
+            // Tail expression, not `return`: with #[cfg(unix)] stripped
+            // on Windows this block is the function tail and a `return`
+            // fails clippy::needless_return in the weekly cross-platform run.
+            Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM))
         }
         #[cfg(unix)]
         {
@@ -692,7 +713,10 @@ impl PersonalFileService {
         #[cfg(not(unix))]
         {
             let _ = (dir, limit);
-            return Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM));
+            // Tail expression, not `return`: with #[cfg(unix)] stripped
+            // on Windows this block is the function tail and a `return`
+            // fails clippy::needless_return in the weekly cross-platform run.
+            Err(PersonalFileError::UnsupportedSafely(UNSUPPORTED_PLATFORM))
         }
         #[cfg(unix)]
         {
