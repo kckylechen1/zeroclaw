@@ -542,9 +542,17 @@ pub fn build_system_prompt_with_persona(
     }
 }
 
+/// Hard cap on distinct truncation-WARN keys held per process. The
+/// once-per-file gate keys on (workspace, file); a host serving many
+/// workspaces would otherwise grow the set without bound. At the cap
+/// the generation resets: files from the previous generation may warn
+/// again, which is the declared policy ("once per file per
+/// generation"), never silent growth.
+const MAX_TRUNCATION_WARN_KEYS: usize = 4096;
+
 /// Inject a single workspace file into the prompt with truncation and missing-file markers.
-/// Emit the operator-facing truncation WARN once per file per process.
-/// The turn paths inject bootstrap files on every turn; warning once
+/// Emit the operator-facing truncation WARN once per file per process
+/// generation. The turn paths inject bootstrap files on every turn; warning once
 /// keeps the signal discoverable in logs (`agent.bootstrap_file_truncated`)
 /// without spamming every turn. `zeroclaw doctor` re-checks offline.
 fn warn_bootstrap_truncation_once(
@@ -564,8 +572,13 @@ fn warn_bootstrap_truncation_once(
     let mut seen = WARNED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !seen.insert((workspace_dir.to_path_buf(), filename.to_string())) {
+    let key = (workspace_dir.to_path_buf(), filename.to_string());
+    if !seen.insert(key.clone()) {
         return false;
+    }
+    if seen.len() > MAX_TRUNCATION_WARN_KEYS {
+        seen.clear();
+        seen.insert(key);
     }
 
     let discarded = total_chars.saturating_sub(max_chars);
@@ -576,7 +589,6 @@ fn warn_bootstrap_truncation_once(
             .with_attrs(::serde_json::json!({
                 "error_key": "agent.bootstrap_file_truncated",
                 "file": filename,
-                "workspace": workspace_dir.display().to_string(),
                 "injected": max_chars,
                 "total": total_chars,
                 "discarded": discarded,
@@ -662,6 +674,37 @@ mod tests {
         );
         let other_file = warn_bootstrap_truncation_once(dir.path(), "SOUL.md", 6000, 9000, false);
         assert!(other_file, "a different file still warns");
+    }
+
+    #[test]
+    fn truncation_warn_cache_is_bounded_per_generation() {
+        // Distinct keys fill the cache up to the hard cap; the next
+        // distinct key starts a new generation (warns again), and a key
+        // from the previous generation may then warn again too — once
+        // per file per generation, never unbounded growth.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        for index in 0..MAX_TRUNCATION_WARN_KEYS {
+            let warned = warn_bootstrap_truncation_once(
+                dir.path(),
+                &format!("f{index}.md"),
+                6000,
+                7000,
+                true,
+            );
+            assert!(warned, "generation member {index} must warn");
+        }
+        let opener = warn_bootstrap_truncation_once(dir.path(), "next-gen.md", 6000, 7000, true);
+        assert!(opener, "the key past the cap must warn and reset");
+        let again = warn_bootstrap_truncation_once(dir.path(), "f0.md", 6000, 7000, true);
+        assert!(
+            again,
+            "after the generation reset the earlier key warns again"
+        );
+        let suppressed = warn_bootstrap_truncation_once(dir.path(), "f0.md", 6000, 7000, true);
+        assert!(
+            !suppressed,
+            "within the new generation the once-per-file rule holds"
+        );
     }
 
     fn build_with_autonomy(tools: &[(&str, &str)], level: AutonomyLevel) -> String {

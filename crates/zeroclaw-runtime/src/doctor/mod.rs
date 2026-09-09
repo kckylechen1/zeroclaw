@@ -1308,11 +1308,16 @@ fn check_bootstrap_truncation(config: &Config, items: &mut Vec<DiagItem>) {
             // surrounding whitespace is not a finding.
             let total = content.trim().chars().count();
             if total > cap {
+                // Describe the cap, not an injection event: doctor runs
+                // offline and cannot know a session's injection mode
+                // (MEMORY.md is conditional, BOOTSTRAP.md depends on the
+                // first-run ritual), so it must not claim actual
+                // injection.
                 items.push(DiagItem::warn(
                     cat,
                     format!(
-                        "{alias}/{filename}: injected {cap} of {total} chars \
-                         ({} discarded, compact_context=true)",
+                        "{alias}/{filename}: compact-context cap {cap} vs {total} chars \
+                         ({} would be discarded)",
                         total - cap
                     ),
                 ));
@@ -2094,7 +2099,56 @@ mod tests {
         assert_eq!(items[0].category, "agent.prompt");
         assert_eq!(
             items[0].message,
-            "alpha/AGENTS.md: injected 6000 of 7000 chars (1000 discarded, compact_context=true)"
+            "alpha/AGENTS.md: compact-context cap 6000 vs 7000 chars (1000 would be discarded)"
+        );
+    }
+
+    #[test]
+    fn check_bootstrap_truncation_matches_runtime_trim_and_injection_honesty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = Config {
+            config_path: tmp.path().join("config.toml"),
+            data_dir: tmp.path().to_path_buf(),
+            ..Config::default()
+        };
+        config.agents.insert(
+            "beta".to_string(),
+            zeroclaw_config::schema::AliasedAgentConfig {
+                ..Default::default()
+            },
+        );
+        let ws = config.agent_workspace_dir("beta");
+        std::fs::create_dir_all(&ws).unwrap();
+        // Over-cap only in surrounding whitespace: the runtime trims
+        // first, so this is not a finding.
+        std::fs::write(
+            ws.join("SOUL.md"),
+            format!("{}{}", " ".repeat(7000), "x".repeat(10)),
+        )
+        .unwrap();
+        // MEMORY.md over cap: doctor cannot know a session's injection
+        // mode, so it must describe the cap without claiming injection.
+        std::fs::write(ws.join("MEMORY.md"), "m".repeat(7000)).unwrap();
+
+        let mut items = Vec::new();
+        check_bootstrap_truncation(&config, &mut items);
+
+        assert_eq!(
+            items.len(),
+            1,
+            "whitespace-only over-cap content is not a finding"
+        );
+        assert!(
+            items[0]
+                .message
+                .starts_with("beta/MEMORY.md: compact-context cap"),
+            "the finding must describe the cap, not claim actual injection: {}",
+            items[0].message
+        );
+        assert!(
+            !items[0].message.contains("injected"),
+            "doctor runs offline and must not claim injection: {}",
+            items[0].message
         );
     }
 
