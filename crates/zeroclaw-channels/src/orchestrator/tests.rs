@@ -7432,6 +7432,38 @@ async fn message_dispatch_completes_every_id_in_a_debounced_turn() {
     );
 }
 
+/// Drive the production dispatch loop with an explicit router and no
+/// channel recording: for discriminations whose authority is the inbox
+/// store state itself (claim release), not the reply count.
+async fn dispatch_messages_through_router(
+    seen_ids: Option<Arc<MessageInbox>>,
+    router: AgentRouter,
+    channel_name: &'static str,
+    messages: &[(&'static str, &'static str)],
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(4);
+    for (message_id, content) in messages {
+        tx.send(zeroclaw_api::channel::ChannelMessage {
+            id: (*message_id).to_string(),
+            sender: "alice".to_string(),
+            reply_target: "alice".to_string(),
+            content: (*content).to_string(),
+            channel: channel_name.into(),
+            channel_alias: None,
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            subject: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    drop(tx);
+    run_message_dispatch_loop(rx, router, 2, seen_ids).await;
+}
+
 async fn deliver_messages_through_loop(
     seen_ids: Option<Arc<MessageInbox>>,
     channel_name: &'static str,
@@ -17160,5 +17192,67 @@ async fn message_dispatch_redelivery_stays_eligible_after_completion_failure() {
     assert_eq!(
         second, 1,
         "a failed completion must leave the redelivery eligible (at-least-once)"
+    );
+}
+
+/// Loop-level discriminator: a message dropped because no agent owns
+/// its channel still went through a Fresh admission, which holds a
+/// durable claim. The claim must be released at the drop so a later
+/// redelivery of the same id is admitted again — never suppressed as
+/// in-flight for the process lifetime. The store probe is the
+/// authority: on unfixed code the redelivery answers
+/// DuplicateInFlight.
+#[tokio::test]
+async fn unowned_channel_drop_releases_the_fresh_claim() {
+    use super::inbox::Admission;
+
+    let seen_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
+    let empty_router = AgentRouter::multi(HashMap::new(), HashMap::new());
+
+    dispatch_messages_through_router(
+        Some(Arc::clone(&store)),
+        empty_router,
+        "test-channel",
+        &[("m-unowned", "hello")],
+    )
+    .await;
+
+    assert!(
+        matches!(
+            store.admit("test-channel", "m-unowned").unwrap(),
+            Admission::Fresh(_)
+        ),
+        "the unowned-channel drop must release its Fresh claim: a redelivery \
+         of the same id must be admissible, not suppressed as in-flight"
+    );
+}
+
+/// Loop-level discriminator: the /stop control itself is Fresh-admitted
+/// and its claim must be released when the control finishes — a
+/// redelivered /stop must not be suppressed as in-flight for the
+/// process lifetime.
+#[tokio::test]
+async fn stop_command_releases_its_own_fresh_claim() {
+    use super::inbox::Admission;
+
+    let seen_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
+
+    deliver_messages_through_loop(
+        Some(Arc::clone(&store)),
+        "test-channel",
+        &[("m-stop", "/stop")],
+        0,
+    )
+    .await;
+
+    assert!(
+        matches!(
+            store.admit("test-channel", "m-stop").unwrap(),
+            Admission::Fresh(_)
+        ),
+        "the /stop control must release its own Fresh claim: a redelivered \
+         /stop must be admissible, not suppressed as in-flight"
     );
 }

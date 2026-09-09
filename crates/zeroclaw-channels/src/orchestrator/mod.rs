@@ -3153,6 +3153,14 @@ async fn run_message_dispatch_loop(
         };
         let Some(ctx) = router.resolve(&msg) else {
             ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"channel_alias": msg.channel_alias, "sender": msg.sender})), "dropping inbound message: no agent owns this channel");
+            // A Fresh admission holds a durable claim: release it so a
+            // later redelivery of the same id is admitted again instead
+            // of being suppressed as in-flight for the process lifetime.
+            if let Some(seen_ids) = &inbox
+                && let Some(receipt) = inbox_receipt
+            {
+                seen_ids.release_claims(std::slice::from_ref(&receipt));
+            }
             continue;
         };
 
@@ -3187,6 +3195,14 @@ async fn run_message_dispatch_loop(
                         .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
                     "stop command: no registered channel found for reply"
                 );
+            }
+            // The /stop control itself was Fresh-admitted: release its
+            // claim so a redelivered /stop is not suppressed as
+            // in-flight for the process lifetime.
+            if let Some(seen_ids) = &inbox
+                && let Some(receipt) = inbox_receipt
+            {
+                seen_ids.release_claims(std::slice::from_ref(&receipt));
             }
             continue;
         }
