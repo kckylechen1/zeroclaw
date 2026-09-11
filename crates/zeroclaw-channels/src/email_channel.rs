@@ -17,12 +17,13 @@ use lettre::message::header::ContentType;
 use lettre::message::{Attachment, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
+use lru::LruCache;
 use mail_parser::{MessageParser, MimeHeaders};
 use pulldown_cmark::{Options, Parser, html};
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::DnsName;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
@@ -40,6 +41,38 @@ pub use zeroclaw_config::scattered_types::EmailConfig;
 // `zeroclaw_tools::email_imap`, the canonical IMAP utility shared by the
 // read-only email tools. Imported here so there is a single definition.
 
+/// Bound transport-local duplicate suppression; evicted IDs may be delivered again.
+const RECENT_MESSAGE_ID_CAPACITY: usize = 4096;
+
+struct RecentMessageIds {
+    cache: LruCache<String, ()>,
+}
+
+impl RecentMessageIds {
+    fn new() -> Self {
+        Self {
+            cache: LruCache::new(
+                NonZeroUsize::new(RECENT_MESSAGE_ID_CAPACITY)
+                    .expect("the fixed cache capacity is non-zero"),
+            ),
+        }
+    }
+
+    fn insert(&mut self, id: String) -> bool {
+        self.cache.put(id, ()).is_none()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+}
+
 pub struct EmailChannel {
     pub config: EmailConfig,
     /// The alias key under `[channels.email.<alias>]` this handle is
@@ -48,7 +81,7 @@ pub struct EmailChannel {
     /// Resolves inbound external peers from canonical state at message-time.
     /// No cache (see AGENTS.md "ABSOLUTE RULE — SINGLE SOURCE OF TRUTH").
     pub peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
-    seen_messages: Arc<Mutex<HashSet<String>>>,
+    seen_messages: Arc<Mutex<RecentMessageIds>>,
     auth_service: Option<Arc<zeroclaw_providers::auth::AuthService>>,
 }
 
@@ -62,7 +95,7 @@ impl EmailChannel {
             config,
             alias: alias.into(),
             peer_resolver,
-            seen_messages: Arc::new(Mutex::new(HashSet::new())),
+            seen_messages: Arc::new(Mutex::new(RecentMessageIds::new())),
             auth_service: None,
         }
     }
@@ -1210,6 +1243,146 @@ mod tests {
         assert!(!seen.insert("first-id".to_string()));
         assert!(seen.insert("second-id".to_string()));
         assert_eq!(seen.len(), 2);
+    }
+
+    fn parsed_test_email(msg_id: &str, sender: &str) -> ParsedEmail {
+        ParsedEmail {
+            msg_id: msg_id.to_string(),
+            sender: sender.to_string(),
+            subject: "Subject".to_string(),
+            content: "body".to_string(),
+            timestamp: 0,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_email_sends_repeated_recent_id_once() {
+        let channel = EmailChannel::new(
+            EmailConfig::default(),
+            "email_test_alias",
+            resolver_from(vec!["sender@example.invalid".to_string()]),
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+
+        assert!(
+            channel
+                .dispatch_email(parsed_test_email("dup-1", "sender@example.invalid"), &tx)
+                .await
+                .unwrap()
+        );
+        assert!(
+            channel
+                .dispatch_email(parsed_test_email("dup-1", "sender@example.invalid"), &tx)
+                .await
+                .unwrap()
+        );
+
+        let delivered = rx.try_recv().expect("first id should be delivered");
+        assert_eq!(delivered.id, "dup-1");
+        assert!(rx.try_recv().is_err(), "duplicate id must not be delivered");
+    }
+
+    #[tokio::test]
+    async fn dispatch_email_keeps_allowlist_gate_and_denied_sender_does_not_pollute_cache() {
+        let channel = EmailChannel::new(
+            EmailConfig::default(),
+            "email_test_alias",
+            resolver_from(vec!["allowed@example.invalid".to_string()]),
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+
+        assert!(
+            channel
+                .dispatch_email(parsed_test_email("denied-1", "denied@example.invalid"), &tx)
+                .await
+                .unwrap()
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "denied sender must not be delivered"
+        );
+        assert!(
+            channel.seen_messages.lock().await.is_empty(),
+            "denied sender must not consume a recent-id slot"
+        );
+
+        assert!(
+            channel
+                .dispatch_email(
+                    parsed_test_email("allowed-1", "allowed@example.invalid"),
+                    &tx
+                )
+                .await
+                .unwrap()
+        );
+        let delivered = rx.try_recv().expect("allowed sender should be delivered");
+        assert_eq!(delivered.id, "allowed-1");
+        assert_eq!(channel.seen_messages.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_email_recent_cache_is_bounded_and_keeps_recent_duplicates() {
+        let channel = EmailChannel::new(
+            EmailConfig::default(),
+            "email_test_alias",
+            resolver_from(vec!["sender@example.invalid".to_string()]),
+        );
+        let capacity = RECENT_MESSAGE_ID_CAPACITY;
+        assert!(
+            channel.seen_messages.lock().await.is_empty(),
+            "cache starts with zero entries"
+        );
+        let (tx, mut rx) = mpsc::channel(capacity + 8);
+
+        for i in 0..(capacity + 2) {
+            assert!(
+                channel
+                    .dispatch_email(
+                        parsed_test_email(&format!("id-{i}"), "sender@example.invalid"),
+                        &tx,
+                    )
+                    .await
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            channel.seen_messages.lock().await.len(),
+            capacity,
+            "cache must stay bounded at capacity"
+        );
+
+        // Most recent id is still remembered: replay is suppressed.
+        assert!(
+            channel
+                .dispatch_email(
+                    parsed_test_email(&format!("id-{}", capacity + 1), "sender@example.invalid"),
+                    &tx,
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(channel.seen_messages.lock().await.len(), capacity);
+
+        // Oldest id has aged out, so a replay is admitted again: the runtime
+        // inbox, not this bounded cache, owns durable message identity.
+        assert!(
+            channel
+                .dispatch_email(parsed_test_email("id-0", "sender@example.invalid"), &tx)
+                .await
+                .unwrap()
+        );
+        assert_eq!(channel.seen_messages.lock().await.len(), capacity);
+
+        let mut delivered = 0usize;
+        while rx.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert_eq!(
+            delivered,
+            capacity + 3,
+            "capacity entries plus the one re-admitted evicted id"
+        );
     }
 
     // EmailConfig tests
