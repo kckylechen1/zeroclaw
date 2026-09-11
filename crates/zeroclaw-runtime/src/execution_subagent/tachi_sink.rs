@@ -25,11 +25,11 @@
 //!   and work-claim binding come from the embedder-constructed
 //!   [`TachiFactSinkConfig`]; env values (e.g. the isolated spine home)
 //!   are secrets — redacted from `Debug`, never logged.
-//! - **Replay-idempotent and source-revision bound.** Every operation is
-//!   safe to re-send (attach replays by idempotency key; events dedup by
-//!   event id), so a dropped transport is repaired by ONE reconnect +
-//!   retry of the failed call — exactly-once at the spine, from the last
-//!   observed revision via `reconnect_session`.
+//! - **Explicit replay policy.** Frozen event ingestion and state reads get
+//!   one transport repair and retry. Other actions return unavailable after
+//!   response loss: their mutation may have committed, so replay cannot stand
+//!   in for the missing receipt. In particular, advertisements append rows and
+//!   reconnect changes the meaning of its next receipt.
 //! - **Typed failures.** Transport death surfaces
 //!   [`SessionFactError::Unavailable`]; spine refusals (including the
 //!   spine-gate's `unsupported_by_lifecycle_owner` refusals) surface as
@@ -383,9 +383,8 @@ impl TachiSessionFactSink {
         Ok(())
     }
 
-    /// Drop the transport (the child is the client's ownership). The next
-    /// call re-spawns; every operation is replay-idempotent, so the ONE
-    /// retry after a drop re-delivers exactly the un-acked fact.
+    /// Drop the transport (the child is the client's ownership). A later
+    /// call establishes a fresh connection, independently of retry eligibility.
     async fn drop_transport(&self) {
         *self.conn.lock().await = None;
     }
@@ -406,12 +405,15 @@ impl TachiSessionFactSink {
         match self.call_once(action, params.clone()).await {
             Ok(receipt) => Ok(receipt),
             Err(SessionFactError::Unavailable) => {
-                // Transport-level failure: repair the transport and retry
-                // ONCE. Safe because every action here is
-                // replay-idempotent at the spine (attach by idempotency
-                // key, events by event id, receipts by request id).
                 self.drop_transport().await;
-                self.call_once(action, params).await
+                // Only these actions have verified safe replay semantics:
+                // immutable event dedup returns the current projection, and
+                // get_state is read-only. Unknown actions default to no retry.
+                if matches!(action, "ingest_session_event" | "get_session_state") {
+                    self.call_once(action, params).await
+                } else {
+                    Err(SessionFactError::Unavailable)
+                }
             }
             Err(error) => Err(error),
         }

@@ -132,15 +132,19 @@ struct TachiSpineState {
     /// Recorded accepted cancel confirmation refs: attachment_id -> set of confirmation refs
     cancel_confirmations: HashMap<String, HashSet<String>>,
     /// Active attachments
-    attachments: HashSet<String>,
+    attachments: HashMap<String, String>,
     attachment_bindings: HashMap<(String, String), String>,
     cancel_requests: HashSet<(String, String)>,
     /// Call counts per action
     call_counts: HashMap<String, usize>,
     /// Projections per attachment (isolated, no cross-session bleeding)
     projections: HashMap<String, AttachmentSpineProjection>,
-    /// Advertisement sequence counter
-    advertisement_seq: u64,
+    /// Append-only advertisement rows, separate from transport call counts.
+    advertisements: Vec<(String, Value)>,
+    drop_next_advertisement_response: bool,
+    drop_next_reconnect_response: bool,
+    /// Last wire receipt, observed before optional response loss.
+    last_reconnect_receipt: Option<Value>,
     /// Injected transport failure: if true, drops transport on next ingest call after recording
     drop_next_ingest_response: bool,
     /// Injected response corruption
@@ -351,7 +355,9 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     ));
                 }
                 let attachment_id = format!("att-test-{}", state.attachments.len() + 1);
-                state.attachments.insert(attachment_id.clone());
+                state
+                    .attachments
+                    .insert(attachment_id.clone(), "attached".to_string());
                 state.attachment_bindings.insert(
                     (
                         args.get("adapter_connection_identity")
@@ -374,7 +380,10 @@ impl McpTransportConn for ScriptedTachiMcpServer {
             }
 
             "advertise_session_capabilities" => {
-                state.advertisement_seq += 1;
+                let attachment_id = args
+                    .get("attachment_id")
+                    .and_then(Value::as_str)
+                    .expect("advertisement attachment");
                 let requested = args
                     .get("session_capabilities")
                     .and_then(Value::as_array)
@@ -401,10 +410,23 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     )
                 })
                 .collect();
+                let sequence = state
+                    .advertisements
+                    .iter()
+                    .filter(|(id, _)| id == attachment_id)
+                    .count()
+                    + 1;
+                state
+                    .advertisements
+                    .push((attachment_id.to_string(), Value::Object(caps.clone())));
+                if state.drop_next_advertisement_response {
+                    state.drop_next_advertisement_response = false;
+                    return Err(anyhow::anyhow!("advertisement response lost after commit"));
+                }
                 let mut receipt = json!({
                     "status": "completed",
                     "action": "advertise_session_capabilities",
-                    "advertisement_seq": state.advertisement_seq,
+                    "advertisement_seq": sequence,
                     "session_capabilities": caps,
                 });
                 if matches!(
@@ -814,16 +836,30 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     .get(&attachment_id)
                     .cloned()
                     .unwrap_or_default();
+                let previous = state
+                    .attachments
+                    .get(&attachment_id)
+                    .expect("attached fixture binding")
+                    .clone();
+                let reconnected = previous != "attached";
+                state
+                    .attachments
+                    .insert(attachment_id.clone(), "attached".to_string());
                 let mut receipt = json!({
                     "status": "completed",
                     "action": "reconnect_session",
                     "attachment_id": attachment_id,
                     "attachment_state": "attached",
-                    "previous_attachment_state": "unknown",
-                    "reconnected": true,
+                    "previous_attachment_state": previous,
+                    "reconnected": reconnected,
                     "resume_from_revision": proj.revision,
                     "canonical_state": state.canonical_state_object(&attachment_id),
                 });
+                state.last_reconnect_receipt = Some(receipt.clone());
+                if state.drop_next_reconnect_response {
+                    state.drop_next_reconnect_response = false;
+                    return Err(anyhow::anyhow!("reconnect response lost after commit"));
+                }
                 if let ResponseCorruption::MissingReconnectField =
                     std::mem::take(&mut state.corruption)
                 {
@@ -921,6 +957,19 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     .get("attachment_id")
                     .and_then(Value::as_str)
                     .unwrap_or("");
+                let target_state = match args.get("connection_fact").and_then(Value::as_str) {
+                    Some("disconnected") => "unknown",
+                    Some("reconnect_failed") => "reconnect_failed",
+                    _ => {
+                        return Ok(Self::make_tool_error(
+                            request.id.clone(),
+                            "invalid connection fact",
+                        ));
+                    }
+                };
+                state
+                    .attachments
+                    .insert(attachment_id.to_string(), target_state.to_string());
                 let proj = state
                     .projections
                     .entry(attachment_id.to_string())
@@ -2025,4 +2074,89 @@ async fn zero_envelope_capacity_retains_no_empty_attachment_maps() {
         assert!(matches!(error, SessionFactError::Refused(reason) if reason.contains("capacity")));
     }
     assert!(sink.retained_envelopes.read().is_empty());
+}
+
+#[tokio::test]
+async fn lost_advertisement_receipt_does_not_append_again() {
+    let state = Arc::new(Mutex::new(TachiSpineState::default()));
+    let fixture = state.clone();
+    let sink = TachiSessionFactSink::new(test_sink_config())
+        .unwrap()
+        .with_transport_factory(move |_| {
+            Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+        });
+    let att = sink.attach(&test_binding(), &[]).await.unwrap();
+    state.lock().drop_next_advertisement_response = true;
+    assert!(matches!(
+        sink.advertise_capabilities(&att, &["observe".into()]).await,
+        Err(SessionFactError::Unavailable)
+    ));
+    assert_eq!(state.lock().advertisements.len(), 1);
+    assert_eq!(state.lock().call_count("advertise_session_capabilities"), 1);
+    assert!(sink.conn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn lost_reconnect_receipt_stays_unavailable_after_committed_rebind() {
+    let state = Arc::new(Mutex::new(TachiSpineState::default()));
+    let fixture = state.clone();
+    let sink = TachiSessionFactSink::new(test_sink_config())
+        .unwrap()
+        .with_transport_factory(move |_| {
+            Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+        });
+    let binding = test_binding();
+    let att = sink.attach(&binding, &[]).await.unwrap();
+    sink.mark_connection(&att, SessionConnectionFactV1::Disconnected)
+        .await
+        .unwrap();
+    state.lock().drop_next_reconnect_response = true;
+    assert!(matches!(
+        sink.reconnect(&binding).await,
+        Err(SessionFactError::Unavailable)
+    ));
+    {
+        let stored = state.lock();
+        assert_eq!(
+            stored.attachments.get(att.as_str()).map(String::as_str),
+            Some("attached")
+        );
+        assert_eq!(stored.call_count("reconnect_session"), 1);
+        assert_eq!(
+            stored.last_reconnect_receipt.as_ref().unwrap()["reconnected"],
+            json!(true)
+        );
+        assert_eq!(
+            stored.last_reconnect_receipt.as_ref().unwrap()["previous_attachment_state"],
+            json!("unknown")
+        );
+    }
+    assert!(sink.conn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn reconnect_receipt_describes_this_transition_not_prior_rebind() {
+    let state = Arc::new(Mutex::new(TachiSpineState::default()));
+    let fixture = state.clone();
+    let sink = TachiSessionFactSink::new(test_sink_config())
+        .unwrap()
+        .with_transport_factory(move |_| {
+            Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+        });
+    let binding = test_binding();
+    let att = sink.attach(&binding, &[]).await.unwrap();
+    sink.mark_connection(&att, SessionConnectionFactV1::Disconnected)
+        .await
+        .unwrap();
+    assert!(sink.reconnect(&binding).await.unwrap().reconnected);
+    assert_eq!(
+        state.lock().last_reconnect_receipt.as_ref().unwrap()["previous_attachment_state"],
+        json!("unknown")
+    );
+    assert!(!sink.reconnect(&binding).await.unwrap().reconnected);
+    assert_eq!(
+        state.lock().last_reconnect_receipt.as_ref().unwrap()["previous_attachment_state"],
+        json!("attached")
+    );
+    assert_eq!(state.lock().call_count("reconnect_session"), 2);
 }
