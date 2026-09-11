@@ -84,6 +84,7 @@ pub fn diagnose(config: &Config) -> Vec<DiagResult> {
     check_config_semantics(config, &mut items);
     check_workspace(config, &mut items);
     check_bootstrap_truncation(config, &mut items);
+    check_personality_truncation(config, &mut items);
     check_daemon_state(config, &mut items);
     check_environment(&mut items);
 
@@ -1326,6 +1327,49 @@ fn check_bootstrap_truncation(config: &Config, items: &mut Vec<DiagItem>) {
     }
 }
 
+/// Personality file cap visibility (#310): workspace personality files
+/// loaded via [`crate::agent::personality::load_personality`] are capped at
+/// [`crate::agent::personality::MAX_FILE_CHARS`] Unicode characters. Check
+/// all well-known personality files regardless of compact context mode and
+/// report any file that exceeds the cap after trimming.
+fn check_personality_truncation(config: &Config, items: &mut Vec<DiagItem>) {
+    let cat = "agent.prompt";
+    let cap = crate::agent::personality::MAX_FILE_CHARS;
+
+    let mut aliases: Vec<&str> = config.agents.keys().map(String::as_str).collect();
+    aliases.sort_unstable();
+    for alias in aliases {
+        let workspace = config.agent_workspace_dir(alias);
+        for &filename in crate::agent::personality::PERSONALITY_FILES {
+            let Ok(content) = std::fs::read_to_string(workspace.join(filename)) else {
+                continue;
+            };
+            // Count trimmed Unicode characters matching runtime truncation behavior:
+            // surrounding whitespace is trimmed before capping.
+            let total = content.trim().chars().count();
+            if total > cap {
+                let discarded = total - cap;
+                let cap_str = cap.to_string();
+                let total_str = total.to_string();
+                let discarded_str = discarded.to_string();
+                // Describe potential discard without claiming actual injection:
+                // doctor runs offline and cannot know if or when a session injects.
+                let message = crate::i18n::get_required_cli_string_with_args(
+                    "cli-doctor-personality-file-truncated",
+                    &[
+                        ("alias", alias),
+                        ("filename", filename),
+                        ("cap", &cap_str),
+                        ("total", &total_str),
+                        ("discarded", &discarded_str),
+                    ],
+                );
+                items.push(DiagItem::warn(cat, message));
+            }
+        }
+    }
+}
+
 fn check_workspace(config: &Config, items: &mut Vec<DiagItem>) {
     let cat = "workspace";
     let ws = &config.data_dir;
@@ -2149,6 +2193,85 @@ mod tests {
             !items[0].message.contains("injected"),
             "doctor runs offline and must not claim injection: {}",
             items[0].message
+        );
+    }
+
+    #[test]
+    fn check_personality_truncation_reports_over_cap_with_compact_off() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = Config {
+            config_path: tmp.path().join("config.toml"),
+            data_dir: tmp.path().to_path_buf(),
+            ..Config::default()
+        };
+        let mut runtime = zeroclaw_config::schema::RuntimeProfileConfig::default();
+        runtime.compact_context = Some(false);
+        config
+            .runtime_profiles
+            .insert("custom".to_string(), runtime);
+
+        config.agents.insert(
+            "gamma".to_string(),
+            zeroclaw_config::schema::AliasedAgentConfig {
+                runtime_profile: "custom".into(),
+                ..Default::default()
+            },
+        );
+        let ws = config.agent_workspace_dir("gamma");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        // Exact cap: no finding
+        std::fs::write(
+            ws.join("IDENTITY.md"),
+            "x".repeat(crate::agent::personality::MAX_FILE_CHARS),
+        )
+        .unwrap();
+
+        // Whitespace-only over-cap: trimmed length is exact cap -> no finding
+        std::fs::write(
+            ws.join("USER.md"),
+            format!(
+                "  \n{} \t ",
+                "u".repeat(crate::agent::personality::MAX_FILE_CHARS)
+            ),
+        )
+        .unwrap();
+
+        // Over-cap personality file: reports finding
+        std::fs::write(
+            ws.join("SOUL.md"),
+            "s".repeat(crate::agent::personality::MAX_FILE_CHARS + 500),
+        )
+        .unwrap();
+
+        let results = diagnose(&config);
+
+        let prompt_warnings: Vec<_> = results
+            .iter()
+            .filter(|r| r.category == "agent.prompt" && r.severity == Severity::Warn)
+            .collect();
+
+        assert_eq!(
+            prompt_warnings.len(),
+            1,
+            "only over-cap personality file is reported when compact is off"
+        );
+        assert!(
+            prompt_warnings[0].message.contains("gamma/SOUL.md"),
+            "warning should cite alias and filename: {}",
+            prompt_warnings[0].message
+        );
+        assert!(
+            prompt_warnings[0]
+                .message
+                .contains("personality cap 20000 vs 20500 chars (500 would be discarded)"),
+            "message must match localized string with potential discard: {}",
+            prompt_warnings[0].message
+        );
+        assert!(
+            !prompt_warnings[0].message.contains("injected"),
+            "offline diagnostic must describe potential discard without claiming actual injection: {}",
+            prompt_warnings[0].message
         );
     }
 
