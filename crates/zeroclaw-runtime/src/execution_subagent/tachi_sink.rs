@@ -1495,15 +1495,17 @@ impl SessionFactSink for TachiSessionFactSink {
                 SessionFactError::Refused("reconnect receipt carries no attachment id".to_string())
             })?;
         validate_attachment_id(attachment_id)?;
-        for field in ["attachment_state", "previous_attachment_state"] {
-            if !matches!(
-                receipt.body.get(field).and_then(Value::as_str),
-                Some("attached" | "reconnect_failed" | "unknown")
-            ) {
-                return Err(SessionFactError::Refused(
-                    "reconnect receipt has missing or unknown attachment state".to_string(),
-                ));
-            }
+        require_receipt_value(&receipt.body, "/attachment_state", &json!("attached"))?;
+        if !matches!(
+            receipt
+                .body
+                .get("previous_attachment_state")
+                .and_then(Value::as_str),
+            Some("attached" | "reconnect_failed" | "unknown")
+        ) {
+            return Err(SessionFactError::Refused(
+                "reconnect receipt has missing or unknown previous attachment state".to_string(),
+            ));
         }
         let reconnected = match receipt.body.get("reconnected") {
             Some(Value::Bool(b)) => *b,
@@ -1548,6 +1550,11 @@ impl SessionFactSink for TachiSessionFactSink {
         };
         let state = {
             let state = Self::parse_state(&receipt.body)?;
+            if resume_from_revision != state.canonical_revision {
+                return Err(SessionFactError::Refused(
+                    "reconnect resume revision does not match canonical projection".to_string(),
+                ));
+            }
             self.note_revision(&SessionAttachmentRef::from_opaque(attachment_id), &state);
             state
         };

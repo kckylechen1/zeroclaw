@@ -124,6 +124,11 @@ enum ResponseCorruption {
     StringCapability,
     ArrayCapabilities,
     MissingReconnectField,
+    ReconnectState(String),
+    ReconnectRevisions {
+        resume: u64,
+        canonical: u64,
+    },
 }
 
 /// In-memory authoritative spine state for scripted MCP fixture.
@@ -891,10 +896,18 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     state.drop_next_reconnect_response = false;
                     return Err(anyhow::Error::msg("reconnect response lost after commit"));
                 }
-                if let ResponseCorruption::MissingReconnectField =
-                    std::mem::take(&mut state.corruption)
-                {
-                    receipt.as_object_mut().unwrap().remove("reconnected");
+                match std::mem::take(&mut state.corruption) {
+                    ResponseCorruption::MissingReconnectField => {
+                        receipt.as_object_mut().unwrap().remove("reconnected");
+                    }
+                    ResponseCorruption::ReconnectState(value) => {
+                        receipt["attachment_state"] = json!(value);
+                    }
+                    ResponseCorruption::ReconnectRevisions { resume, canonical } => {
+                        receipt["resume_from_revision"] = json!(resume);
+                        receipt["canonical_state"]["canonical_revision"] = json!(canonical);
+                    }
+                    _ => {}
                 }
                 Ok(Self::make_tool_success(request.id.clone(), receipt))
             }
@@ -2584,4 +2597,42 @@ async fn lost_attach_and_accepted_cancel_result_receipts_recover_by_identity() {
             .canonical_state,
         SessionCanonicalStateV1::Cancelled
     );
+}
+
+#[tokio::test]
+async fn reconnect_requires_attached_state_and_matching_projection_revision() {
+    let state = Arc::new(Mutex::new(TachiSpineState::default()));
+    let fixture = state.clone();
+    let sink = TachiSessionFactSink::new(test_sink_config())
+        .unwrap()
+        .with_transport_factory(move |_| {
+            Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+        });
+    let binding = test_binding();
+    let att = sink.attach(&binding, &[]).await.unwrap();
+    sink.mark_connection(&att, SessionConnectionFactV1::Disconnected)
+        .await
+        .unwrap();
+    for fault in [
+        ResponseCorruption::ReconnectState("unknown".to_string()),
+        ResponseCorruption::ReconnectState("reconnect_failed".to_string()),
+        ResponseCorruption::ReconnectRevisions {
+            resume: 1,
+            canonical: 0,
+        },
+        ResponseCorruption::ReconnectRevisions {
+            resume: 0,
+            canonical: 1,
+        },
+    ] {
+        let valid = sink.reconnect(&binding).await.unwrap();
+        assert_eq!(valid.resume_from_revision, valid.state.canonical_revision);
+        let previous_revision = sink.revision_for(&att);
+        state.lock().inject_fault(fault);
+        assert!(matches!(
+            sink.reconnect(&binding).await,
+            Err(SessionFactError::Refused(_))
+        ));
+        assert_eq!(sink.revision_for(&att), previous_revision);
+    }
 }
