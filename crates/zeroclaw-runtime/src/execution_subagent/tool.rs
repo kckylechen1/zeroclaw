@@ -27,10 +27,11 @@ use std::time::{Duration, Instant};
 use crate::subagent_v1::SubAgentBudgetMeter;
 use async_trait::async_trait;
 use zeroclaw_api::session_exec::{
-    AdapterConnectionRef, ExecutionInterventionRecordV1, ExecutionRouteV1, ExecutionRunStatusV1,
+    AdapterConnectionRef, ExecutionInterventionRecordV1, ExecutionObligationDispositionV1,
+    ExecutionObligationKindV1, ExecutionObligationV1, ExecutionRouteV1, ExecutionRunStatusV1,
     ExecutionSessionReportV1, ExecutionUsageV1, HostIdentityRef, InterventionRequestIdRef,
     RemoteSessionRef, SessionAttachmentRef, SessionCanonicalStateV1, SessionConnectionFactV1,
-    SessionEventIdRef, SessionEventKindV1, SessionEventReceiptView,
+    SessionEventIdRef, SessionEventKindV1, SessionEventReceiptView, SessionFactError,
     SessionInterventionDispositionV1, SessionInterventionKindV1, SessionTerminalOutcomeV1,
 };
 use zeroclaw_api::subagent_v1::{
@@ -41,6 +42,7 @@ use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 
 use super::controller::{
     ControllerError, GatedSessionController, SessionCapabilities, SessionStartSpec,
+    SessionStopReceipt,
 };
 use super::facts::{SessionBinding, SessionEventFact, SessionFactSink};
 
@@ -219,6 +221,7 @@ impl ExecutionSubagentTool {
             ..ExecutionUsageV1::default()
         };
         let meter = Arc::new(SubAgentBudgetMeter::new(self.profile.budget));
+        let mut obligations: Vec<ExecutionObligationV1> = Vec::new();
 
         // The route is pinned: a run executed by THIS tool is always
         // ephemeral (the router sends durable work to the bridge).
@@ -327,6 +330,7 @@ impl ExecutionSubagentTool {
                     0,
                     None,
                     ExecutionRunStatusV1::Refused,
+                    Vec::new(),
                     format!("controller refused start (fail closed): {error}"),
                 );
             }
@@ -339,6 +343,7 @@ impl ExecutionSubagentTool {
                     0,
                     None,
                     ExecutionRunStatusV1::TimedOut,
+                    Vec::new(),
                     "controller start exceeded the frozen run ceiling (fail closed)".to_string(),
                 );
             }
@@ -369,8 +374,16 @@ impl ExecutionSubagentTool {
             Ok(attachment) => attachment,
             Err(error) => {
                 // Best-effort stop so no unobserved session survives; the
-                // refusal still reports typed.
-                let _ = self.controller.stop(&handle, true).await;
+                // refusal still reports typed, and the attempted stop is
+                // recorded (never silently discarded).
+                let stop_disposition = match self.controller.stop(&handle, true).await {
+                    Ok(receipt) => stop_receipt_disposition(&receipt),
+                    Err(stop_error) => controller_error_disposition(&stop_error),
+                };
+                obligations.push(ExecutionObligationV1 {
+                    operation: ExecutionObligationKindV1::Stop,
+                    disposition: stop_disposition,
+                });
                 return self.typed_failure_report(
                     &run_ref,
                     report_route,
@@ -379,6 +392,7 @@ impl ExecutionSubagentTool {
                     0,
                     Some(handle.remote_session.clone()),
                     ExecutionRunStatusV1::Refused,
+                    obligations,
                     format!("fact sink unavailable at attach (fail closed): {error}"),
                 );
             }
@@ -484,10 +498,18 @@ impl ExecutionSubagentTool {
                     // Dropout: report the connection fact, attempt one
                     // reconnect, resume from the spine's revision.
                     usage.actions += 1;
-                    let _ = self
+                    let connection_disposition = match self
                         .sink
                         .mark_connection(&attachment, SessionConnectionFactV1::Disconnected)
-                        .await;
+                        .await
+                    {
+                        Ok(()) => ExecutionObligationDispositionV1::Satisfied,
+                        Err(error) => sink_error_disposition(&error),
+                    };
+                    obligations.push(ExecutionObligationV1 {
+                        operation: ExecutionObligationKindV1::ConnectionReport,
+                        disposition: connection_disposition,
+                    });
                     match self.sink.reconnect(&binding).await {
                         Ok(receipt) => {
                             // The watch cursor is CONTROLLER-scoped: facts
@@ -566,7 +588,7 @@ impl ExecutionSubagentTool {
                         if corrections_used >= self.profile.max_corrections {
                             // Ceiling reached: stop the session through
                             // the cancel chain; never fake completion.
-                            let (stop_status, stop_refusal, records) = self
+                            let (stop_status, stop_refusal, records, stop_obligations) = self
                                 .stop_via_cancel_chain(
                                     &handle,
                                     &attachment,
@@ -579,11 +601,12 @@ impl ExecutionSubagentTool {
                             decided_status = Some(stop_status);
                             refusal = stop_refusal;
                             interventions.extend(records);
+                            obligations.extend(stop_obligations);
                             saw_terminal = true;
                             break;
                         }
                         let Some(correction) = request.correction_prompt.as_deref() else {
-                            let (stop_status, stop_refusal, records) = self
+                            let (stop_status, stop_refusal, records, stop_obligations) = self
                                 .stop_via_cancel_chain(
                                     &handle,
                                     &attachment,
@@ -596,6 +619,7 @@ impl ExecutionSubagentTool {
                             decided_status = Some(stop_status);
                             refusal = stop_refusal;
                             interventions.extend(records);
+                            obligations.extend(stop_obligations);
                             saw_terminal = true;
                             break;
                         };
@@ -674,7 +698,14 @@ impl ExecutionSubagentTool {
                 | ExecutionRunStatusV1::Aborted
                 | ExecutionRunStatusV1::Failed
         ) {
-            let _ = self.controller.stop(&handle, false).await;
+            let stop_disposition = match self.controller.stop(&handle, false).await {
+                Ok(receipt) => stop_receipt_disposition(&receipt),
+                Err(stop_error) => controller_error_disposition(&stop_error),
+            };
+            obligations.push(ExecutionObligationV1 {
+                operation: ExecutionObligationKindV1::Stop,
+                disposition: stop_disposition,
+            });
         }
 
         // 6. CLEANUP + COLLECT for non-cancelled endings (the cancel chain
@@ -683,7 +714,7 @@ impl ExecutionSubagentTool {
         if !matches!(status, ExecutionRunStatusV1::Refused) {
             meter.try_record_action();
             usage.actions += 1;
-            let _ = self
+            let cleanup_disposition = match self
                 .sink
                 .ingest_event(
                     &attachment,
@@ -700,13 +731,66 @@ impl ExecutionSubagentTool {
                         payload_digest: None,
                     },
                 )
-                .await;
-            facts_reported += 1;
+                .await
+            {
+                Ok(_) => {
+                    // Only an ACCEPTED receipt counts as a reported fact.
+                    facts_reported += 1;
+                    ExecutionObligationDispositionV1::Satisfied
+                }
+                Err(error) => sink_error_disposition(&error),
+            };
+            let cleanup_acknowledged =
+                cleanup_disposition == ExecutionObligationDispositionV1::Satisfied;
+            obligations.push(ExecutionObligationV1 {
+                operation: ExecutionObligationKindV1::CleanupReceipt,
+                disposition: cleanup_disposition,
+            });
             meter.try_record_action();
             usage.actions += 1;
-            collected = self.controller.collect(&handle).await.ok();
-            if let Ok(state) = self.sink.get_state(&attachment).await {
-                final_state = Some(state.canonical_state);
+            match self.controller.collect(&handle).await {
+                Ok(view) => {
+                    collected = Some(view);
+                    obligations.push(ExecutionObligationV1 {
+                        operation: ExecutionObligationKindV1::Collection,
+                        disposition: ExecutionObligationDispositionV1::Satisfied,
+                    });
+                }
+                Err(error) => {
+                    collected = None;
+                    obligations.push(ExecutionObligationV1 {
+                        operation: ExecutionObligationKindV1::Collection,
+                        disposition: controller_error_disposition(&error),
+                    });
+                }
+            }
+            match self.sink.get_state(&attachment).await {
+                Ok(state) => {
+                    // A conflicting/reconciling projection, or an
+                    // unacknowledged cleanup after an attempted cleanup
+                    // receipt, is a partial read; the returned canonical
+                    // state is preserved either way.
+                    let partial = state.conflicting_terminal
+                        || state.canonical_state
+                            == SessionCanonicalStateV1::InconsistentReconciling
+                        || !cleanup_acknowledged
+                        || !state.cleanup_recorded;
+                    final_state = Some(state.canonical_state);
+                    obligations.push(ExecutionObligationV1 {
+                        operation: ExecutionObligationKindV1::StateRead,
+                        disposition: if partial {
+                            ExecutionObligationDispositionV1::Partial
+                        } else {
+                            ExecutionObligationDispositionV1::Satisfied
+                        },
+                    });
+                }
+                Err(error) => {
+                    obligations.push(ExecutionObligationV1 {
+                        operation: ExecutionObligationKindV1::StateRead,
+                        disposition: sink_error_disposition(&error),
+                    });
+                }
             }
         }
 
@@ -723,6 +807,7 @@ impl ExecutionSubagentTool {
             collected_summary: collected.as_ref().and_then(|view| view.summary.clone()),
             collected_digest: collected.as_ref().map(|view| view.digest.clone()),
             interventions,
+            obligations,
             evidence_refs: collected.map(|view| view.evidence_refs).unwrap_or_default(),
             usage,
             refusal,
@@ -747,6 +832,7 @@ impl ExecutionSubagentTool {
         ExecutionRunStatusV1,
         Option<String>,
         Vec<ExecutionInterventionRecordV1>,
+        Vec<ExecutionObligationV1>,
     ) {
         let request_id = InterventionRequestIdRef::from_opaque(format!("{run_ref}-cancel"));
         // (a) the request receipt — zero-fabrication: if the spine
@@ -771,16 +857,19 @@ impl ExecutionSubagentTool {
                          no terminal fact fabricated ({error})"
                     )),
                     Vec::new(),
+                    Vec::new(),
                 );
             }
             return (
                 ExecutionRunStatusV1::Failed,
                 Some(format!("cancel request refused by spine: {error}")),
                 Vec::new(),
+                Vec::new(),
             );
         }
         *facts_reported += 1;
-        // (b) the controller stop — the typed refusal path.
+        // (b) the controller stop — the typed refusal path. The attempt
+        // is recorded exactly once, whichever way it lands.
         let receipt = match self.controller.stop(handle, true).await {
             Ok(receipt) => receipt,
             Err(ControllerError::UnsupportedByLifecycleOwner { operation }) => {
@@ -791,6 +880,10 @@ impl ExecutionSubagentTool {
                          no terminal fact fabricated"
                     )),
                     Vec::new(),
+                    vec![ExecutionObligationV1 {
+                        operation: ExecutionObligationKindV1::Stop,
+                        disposition: ExecutionObligationDispositionV1::Unsupported,
+                    }],
                 );
             }
             Err(error) => {
@@ -798,18 +891,34 @@ impl ExecutionSubagentTool {
                     ExecutionRunStatusV1::Failed,
                     Some(format!("controller stop failed: {error}")),
                     Vec::new(),
+                    vec![ExecutionObligationV1 {
+                        operation: ExecutionObligationKindV1::Stop,
+                        disposition: controller_error_disposition(&error),
+                    }],
                 );
             }
         };
+        // A stop is confirmed only when BOTH the confirmation flag and
+        // the authority confirmation reference are present; either one
+        // alone can never mint a graceful status or an accepted record.
+        let confirmation = receipt.authority_confirmation_ref.clone();
+        let cancel_confirmed = receipt.confirmed && confirmation.is_some();
+        let stop_obligation = ExecutionObligationV1 {
+            operation: ExecutionObligationKindV1::Stop,
+            disposition: if cancel_confirmed {
+                ExecutionObligationDispositionV1::Satisfied
+            } else {
+                ExecutionObligationDispositionV1::Partial
+            },
+        };
         // (c) record the host's authoritative result — accepted ONLY with
         // the harness confirmation reference.
-        let confirmation = receipt.authority_confirmation_ref.clone();
         if let Err(error) = self
             .sink
             .record_intervention_result(
                 attachment,
                 &request_id,
-                if receipt.confirmed && confirmation.is_some() {
+                if cancel_confirmed {
                     SessionInterventionDispositionV1::Accepted
                 } else {
                     SessionInterventionDispositionV1::Failed
@@ -823,6 +932,7 @@ impl ExecutionSubagentTool {
                 ExecutionRunStatusV1::Failed,
                 Some(format!("fact sink refused the cancel result: {error}")),
                 Vec::new(),
+                vec![stop_obligation],
             );
         }
         *facts_reported += 1;
@@ -831,7 +941,7 @@ impl ExecutionSubagentTool {
         // A FAILED terminal-fact write can never surface as graceful: the
         // facts ARE the product, so the run ends failed (zero fabricated
         // completion at the parent boundary).
-        if let (true, Some(confirmation)) = (receipt.confirmed, confirmation.clone()) {
+        if let (true, Some(confirmation)) = (cancel_confirmed, confirmation.clone()) {
             *source_revision += 1;
             let revision = *source_revision;
             // The spine REFUSES a cancelled terminal whose top-level
@@ -860,6 +970,7 @@ impl ExecutionSubagentTool {
                         "fact sink refused the bound terminal fact (no graceful fabrication): {error}"
                     )),
                     Vec::new(),
+                    vec![stop_obligation],
                 );
             }
             *facts_reported += 1;
@@ -867,22 +978,22 @@ impl ExecutionSubagentTool {
         let record = ExecutionInterventionRecordV1 {
             request_id: request_id.as_str().to_string(),
             kind: SessionInterventionKindV1::RequestCancel,
-            disposition: if receipt.confirmed {
+            disposition: if cancel_confirmed {
                 SessionInterventionDispositionV1::Accepted
             } else {
                 SessionInterventionDispositionV1::Failed
             },
         };
-        let status = if receipt.confirmed {
+        let status = if cancel_confirmed {
             ExecutionRunStatusV1::StoppedGracefully
         } else {
             // Requested but unconfirmed: the run did NOT fake success.
             ExecutionRunStatusV1::UnsupportedOperation
         };
-        let refusal = (!receipt.confirmed).then(|| {
+        let refusal = (!cancel_confirmed).then(|| {
             "stop requested but unconfirmed; no cancelled terminal fact was reported".to_string()
         });
-        (status, refusal, vec![record])
+        (status, refusal, vec![record], vec![stop_obligation])
     }
 
     fn effective_lineage(&self) -> LineageRef {
@@ -913,6 +1024,7 @@ impl ExecutionSubagentTool {
             collected_summary: None,
             collected_digest: None,
             interventions: Vec::new(),
+            obligations: Vec::new(),
             evidence_refs: Vec::new(),
             usage: *usage,
             refusal: Some(reason),
@@ -929,6 +1041,7 @@ impl ExecutionSubagentTool {
         events_observed: u64,
         remote_session: Option<RemoteSessionRef>,
         status: ExecutionRunStatusV1,
+        obligations: Vec<ExecutionObligationV1>,
         reason: String,
     ) -> ExecutionSessionReportV1 {
         usage.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -944,6 +1057,7 @@ impl ExecutionSubagentTool {
             collected_summary: None,
             collected_digest: None,
             interventions: Vec::new(),
+            obligations,
             evidence_refs: Vec::new(),
             usage: *usage,
             refusal: Some(reason),
@@ -952,7 +1066,8 @@ impl ExecutionSubagentTool {
 
     /// Stop the session best-effort and report the typed refusal (used
     /// when the sink fails AFTER the session started — the run must never
-    /// continue unobserved).
+    /// continue unobserved). Each attempted operation is recorded exactly
+    /// once, even when it fails.
     async fn abandon(
         &self,
         handle: &super::controller::SessionHandle,
@@ -962,11 +1077,27 @@ impl ExecutionSubagentTool {
         started: Instant,
         reason: String,
     ) -> ExecutionSessionReportV1 {
-        let _ = self.controller.stop(handle, true).await;
-        let _ = self
+        let mut obligations: Vec<ExecutionObligationV1> = Vec::new();
+        let stop_disposition = match self.controller.stop(handle, true).await {
+            Ok(receipt) => stop_receipt_disposition(&receipt),
+            Err(error) => controller_error_disposition(&error),
+        };
+        obligations.push(ExecutionObligationV1 {
+            operation: ExecutionObligationKindV1::Stop,
+            disposition: stop_disposition,
+        });
+        let connection_disposition = match self
             .sink
             .mark_connection(attachment, SessionConnectionFactV1::Disconnected)
-            .await;
+            .await
+        {
+            Ok(()) => ExecutionObligationDispositionV1::Satisfied,
+            Err(error) => sink_error_disposition(&error),
+        };
+        obligations.push(ExecutionObligationV1 {
+            operation: ExecutionObligationKindV1::ConnectionReport,
+            disposition: connection_disposition,
+        });
         let _ = run_ref;
         usage.elapsed_ms = started.elapsed().as_millis() as u64;
         ExecutionSessionReportV1 {
@@ -980,10 +1111,44 @@ impl ExecutionSubagentTool {
             collected_summary: None,
             collected_digest: None,
             interventions: Vec::new(),
+            obligations,
             evidence_refs: Vec::new(),
             usage: *usage,
             refusal: Some(reason),
         }
+    }
+}
+
+/// Disposition of one stop ATTEMPT: only a receipt that carries BOTH the
+/// confirmation flag and the authority confirmation reference is
+/// satisfied; anything else is partial (never fabricated satisfied).
+fn stop_receipt_disposition(receipt: &SessionStopReceipt) -> ExecutionObligationDispositionV1 {
+    if receipt.confirmed && receipt.authority_confirmation_ref.is_some() {
+        ExecutionObligationDispositionV1::Satisfied
+    } else {
+        ExecutionObligationDispositionV1::Partial
+    }
+}
+
+/// Map a typed controller failure onto the closed obligation vocabulary.
+fn controller_error_disposition(error: &ControllerError) -> ExecutionObligationDispositionV1 {
+    match error {
+        ControllerError::Unavailable => ExecutionObligationDispositionV1::Unavailable,
+        ControllerError::UnsupportedByLifecycleOwner { .. } => {
+            ExecutionObligationDispositionV1::Unsupported
+        }
+        ControllerError::Refused(_) => ExecutionObligationDispositionV1::Refused,
+    }
+}
+
+/// Map a typed sink failure onto the closed obligation vocabulary.
+fn sink_error_disposition(error: &SessionFactError) -> ExecutionObligationDispositionV1 {
+    match error {
+        SessionFactError::Unavailable => ExecutionObligationDispositionV1::Unavailable,
+        SessionFactError::Refused(_) => ExecutionObligationDispositionV1::Refused,
+        // Parse-side refusals cannot occur on the write path; if one is
+        // surfaced it is a refusal, never silently dropped.
+        _ => ExecutionObligationDispositionV1::Refused,
     }
 }
 
@@ -1078,6 +1243,27 @@ impl Tool for ExecutionSubagentTool {
                 "collected_summary": {"type": ["string", "null"]},
                 "collected_digest": {"type": ["string", "null"]},
                 "interventions": {"type": "array"},
+                "obligations": {
+                    "type": "array",
+                    "description": "One closed typed record per attempted post-execution/best-effort obligation. An empty array means no attempt was reported, not proof of success.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "operation": {
+                                "type": "string",
+                                "enum": ["Stop", "ConnectionReport", "CleanupReceipt",
+                                         "Collection", "StateRead"]
+                            },
+                            "disposition": {
+                                "type": "string",
+                                "enum": ["Satisfied", "Refused", "Unavailable",
+                                         "Unsupported", "Partial"]
+                            }
+                        },
+                        "required": ["operation", "disposition"],
+                        "additionalProperties": false
+                    }
+                },
                 "evidence_refs": {"type": "array"},
                 "usage": {"type": "object"},
                 "refusal": {"type": ["string", "null"]}
