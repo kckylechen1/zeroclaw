@@ -2204,8 +2204,10 @@ mod tests {
             data_dir: tmp.path().to_path_buf(),
             ..Config::default()
         };
-        let mut runtime = zeroclaw_config::schema::RuntimeProfileConfig::default();
-        runtime.compact_context = Some(false);
+        let runtime = zeroclaw_config::schema::RuntimeProfileConfig {
+            compact_context: Some(false),
+            ..Default::default()
+        };
         config
             .runtime_profiles
             .insert("custom".to_string(), runtime);
