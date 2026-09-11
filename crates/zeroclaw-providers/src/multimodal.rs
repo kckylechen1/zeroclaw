@@ -2034,20 +2034,16 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_messages_keeps_native_tool_result_json_valid_when_over_the_image_cap() {
-        // Regression: partial trimming used to parse markers out of the whole
-        // serialized envelope and append the retained ones after the closing
-        // brace, so the tool result stopped being JSON and the provider
-        // serializers lost `tool_call_id`. Five images against the default cap
-        // of four is enough to force a partial trim.
+        // Trim inside the tool envelope so retained markers cannot be appended
+        // after its closing brace. The default cap retains four of five images.
         let temp = tempfile::tempdir().unwrap();
         let mut markers = Vec::new();
-        for index in 0..5 {
+        let mut expected_uris = Vec::new();
+        for index in 0..5_u8 {
             let image_path = temp.path().join(format!("shot-{index}.png"));
-            std::fs::write(
-                &image_path,
-                [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'],
-            )
-            .unwrap();
+            let bytes = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', index];
+            std::fs::write(&image_path, bytes).unwrap();
+            expected_uris.push(format!("data:image/png;base64,{}", STANDARD.encode(bytes)));
             markers.push(format!("[IMAGE:{}]", image_path.display()));
         }
 
@@ -2100,10 +2096,10 @@ mod tests {
             config.max_images,
             "exactly the budgeted images are retained, and they live inside `content`"
         );
-        assert!(
-            refs.iter()
-                .all(|reference| reference.starts_with("data:image/png;base64,")),
-            "retained images stay normalized data URIs"
+        assert_eq!(
+            refs,
+            expected_uris[1..],
+            "the newest four images survive in order"
         );
     }
 
@@ -2812,11 +2808,23 @@ mod tests {
         // the cap must drop only the oldest marker and leave the newest two as
         // normalized data URIs alongside the unrelated text.
         let temp = tempfile::tempdir().unwrap();
-        let png = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
         let mut paths = Vec::new();
-        for name in ["a.png", "b.png", "c.png"] {
+        let mut expected_uris = Vec::new();
+        for (index, name) in ["a.png", "b.png", "c.png"].iter().enumerate() {
             let path = temp.path().join(name);
-            std::fs::write(&path, png).unwrap();
+            let bytes = [
+                0x89,
+                b'P',
+                b'N',
+                b'G',
+                b'\r',
+                b'\n',
+                0x1a,
+                b'\n',
+                index as u8,
+            ];
+            std::fs::write(&path, bytes).unwrap();
+            expected_uris.push(format!("data:image/png;base64,{}", STANDARD.encode(bytes)));
             paths.push(path);
         }
 
@@ -2842,10 +2850,10 @@ mod tests {
         assert_eq!(result.messages.len(), 1);
         let (cleaned, refs) = parse_image_markers(&result.messages[0].content);
         assert_eq!(refs.len(), 2, "exactly the declared budget survives");
-        assert!(
-            refs.iter()
-                .all(|reference| reference.starts_with("data:image/png;base64,")),
-            "surviving images are normalized data URIs"
+        assert_eq!(
+            refs,
+            expected_uris[1..],
+            "the newest two images survive in order"
         );
         assert!(cleaned.contains("Three pics"), "text survives the cap");
     }
