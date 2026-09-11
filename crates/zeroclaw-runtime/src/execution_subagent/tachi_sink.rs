@@ -718,7 +718,7 @@ fn validate_event_id(id: &str) -> Result<(), SessionFactError> {
 fn project_summary(raw: Option<&str>) -> Result<Option<String>, SessionFactError> {
     let raw = match raw {
         None => return Ok(None),
-        Some(s) if s.is_empty() => return Ok(None),
+        Some("") => return Ok(None),
         Some(s) => s,
     };
     if raw.contains('\0') {
@@ -763,7 +763,7 @@ fn validate_and_project_confirmation_ref(
 ) -> Result<Option<String>, SessionFactError> {
     match raw {
         None => Ok(None),
-        Some(s) if s.is_empty() => Ok(None),
+        Some("") => Ok(None),
         Some(s) => {
             if s.trim().is_empty() {
                 return Err(SessionFactError::Refused(
@@ -790,7 +790,7 @@ fn validate_and_project_payload_digest(
 ) -> Result<Option<String>, SessionFactError> {
     match raw {
         None => Ok(None),
-        Some(s) if s.is_empty() => Ok(None),
+        Some("") => Ok(None),
         Some(s) => {
             if s.trim().is_empty() {
                 return Err(SessionFactError::Refused(

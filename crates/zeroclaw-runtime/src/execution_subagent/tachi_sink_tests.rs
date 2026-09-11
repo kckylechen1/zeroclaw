@@ -508,16 +508,15 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
-                if let Some(r) = &auth_ref {
-                    if r.trim().is_empty()
+                if let Some(r) = &auth_ref
+                    && (r.trim().is_empty()
                         || r.chars().count() > 128
-                        || r.chars().any(|c| c.is_control())
-                    {
-                        return Ok(Self::make_tool_error(
-                            request.id.clone(),
-                            "invalid authority_confirmation_ref",
-                        ));
-                    }
+                        || r.chars().any(|c| c.is_control()))
+                {
+                    return Ok(Self::make_tool_error(
+                        request.id.clone(),
+                        "invalid authority_confirmation_ref",
+                    ));
                 }
 
                 // Writer rejects any char::is_control and requires nonempty <=2000 chars
@@ -526,16 +525,15 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
-                if let Some(s) = &summary {
-                    if s.chars().count() > SUMMARY_CEILING
+                if let Some(s) = &summary
+                    && (s.chars().count() > SUMMARY_CEILING
                         || s.chars().any(|c| c.is_control())
-                        || s.is_empty()
-                    {
-                        return Ok(Self::make_tool_error(
-                            request.id.clone(),
-                            "writer rejects control characters, blank, or oversize summary",
-                        ));
-                    }
+                        || s.is_empty())
+                {
+                    return Ok(Self::make_tool_error(
+                        request.id.clone(),
+                        "writer rejects control characters, blank, or oversize summary",
+                    ));
                 }
 
                 let digest = args
@@ -543,18 +541,17 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
                     .map(str::to_string);
-                if let Some(d) = &digest {
-                    if d.chars().count() > 128
+                if let Some(d) = &digest
+                    && (d.chars().count() > 128
                         || !d.chars().all(|c| {
                             c.is_ascii_alphanumeric()
                                 || matches!(c, '-' | '_' | '=' | '+' | '/' | ':')
-                        })
-                    {
-                        return Ok(Self::make_tool_error(
-                            request.id.clone(),
-                            "invalid payload_digest",
-                        ));
-                    }
+                        }))
+                {
+                    return Ok(Self::make_tool_error(
+                        request.id.clone(),
+                        "invalid payload_digest",
+                    ));
                 }
 
                 if outcome
@@ -643,12 +640,13 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                         "cleanup" => 4,
                         _ => unreachable!(),
                     };
-                    let stale_early = (current_rank < 0
-                        && (source_rev < proj.revision || event_rank < proj.pre_disconnect_rank))
-                        || (current_rank >= 0
-                            && kind == "terminal"
+                    let stale_early = if current_rank < 0 {
+                        source_rev < proj.revision || event_rank < proj.pre_disconnect_rank
+                    } else {
+                        kind == "terminal"
                             && proj.terminal_outcome.is_none()
-                            && source_rev < proj.revision);
+                            && source_rev < proj.revision
+                    };
                     if stale_early {
                         disposition = "journaled_stale";
                     } else {
@@ -698,7 +696,7 @@ impl McpTransportConn for ScriptedTachiMcpServer {
 
                 if state.drop_next_ingest_response {
                     state.drop_next_ingest_response = false;
-                    return Err(anyhow::anyhow!("transport connection closed abruptly"));
+                    return Err(anyhow::Error::msg("transport connection closed abruptly"));
                 }
 
                 let mut ret_att = attachment_id.clone();
@@ -826,11 +824,10 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     "resume_from_revision": proj.revision,
                     "canonical_state": state.canonical_state_object(&attachment_id),
                 });
-                match std::mem::take(&mut state.corruption) {
-                    ResponseCorruption::MissingReconnectField => {
-                        receipt.as_object_mut().unwrap().remove("reconnected");
-                    }
-                    _ => {}
+                if let ResponseCorruption::MissingReconnectField =
+                    std::mem::take(&mut state.corruption)
+                {
+                    receipt.as_object_mut().unwrap().remove("reconnected");
                 }
                 Ok(Self::make_tool_success(request.id.clone(), receipt))
             }
@@ -986,14 +983,13 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     && state
                         .cancel_requests
                         .contains(&(attachment_id.to_string(), request_id.to_string()))
+                    && let Some(r) = auth_ref
                 {
-                    if let Some(r) = auth_ref {
-                        state
-                            .cancel_confirmations
-                            .entry(attachment_id.to_string())
-                            .or_default()
-                            .insert(r.to_string());
-                    }
+                    state
+                        .cancel_confirmations
+                        .entry(attachment_id.to_string())
+                        .or_default()
+                        .insert(r.to_string());
                 }
                 let receipt = json!({
                     "status": "completed",
@@ -1098,7 +1094,7 @@ fn summary_projection_multiline_crlf_tab_replaced() {
 #[test]
 fn summary_projection_multibyte_boundary_safe() {
     let emoji = "🦀"; // 4 bytes, 1 Unicode scalar character
-    let long_emojis: String = std::iter::repeat(emoji).take(2005).collect();
+    let long_emojis: String = emoji.repeat(2005);
     let projected = project_summary(Some(&long_emojis)).unwrap().unwrap();
     assert_eq!(projected.chars().count(), 2000);
     assert!(projected.ends_with("🦀"));
