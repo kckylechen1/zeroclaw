@@ -4,8 +4,13 @@
 use anyhow::Context;
 #[cfg(any(
     feature = "channel-discord",
+    feature = "channel-email",
+    feature = "channel-lark",
+    feature = "channel-signal",
     feature = "channel-slack",
     feature = "channel-telegram",
+    feature = "channel-wechat",
+    feature = "whatsapp-web",
 ))]
 use std::sync::Arc;
 
