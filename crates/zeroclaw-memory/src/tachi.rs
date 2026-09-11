@@ -399,6 +399,12 @@ impl TachiMemory {
                 {
                     return false;
                 }
+                // Ambient recall (no namespace scope) structurally excludes
+                // the reserved Soul namespace; only `recall_namespaced`
+                // opts in.
+                if namespace.is_none() && entry.namespace == crate::soul::SOUL_NAMESPACE {
+                    return false;
+                }
                 if let Some(allowed) = allowed_agents {
                     let agent = entry.agent_id.as_deref().unwrap_or(DEFAULT_AGENT);
                     if !allowed.contains(&agent) {
@@ -459,6 +465,24 @@ impl TachiMemory {
         agent_id: Option<&str>,
         options: StoreOptions,
     ) -> anyhow::Result<()> {
+        // Same storage-level reservation as sqlite: rows under the reserved
+        // Soul key prefix exist only in the reserved Soul namespace, and the
+        // reserved namespace accepts only reserved-prefix keys.
+        let ns = namespace.unwrap_or("default");
+        if ns == crate::soul::SOUL_NAMESPACE {
+            if !key.starts_with(crate::soul::SOUL_KEY_PREFIX) {
+                anyhow::bail!(
+                    "refused: namespace '{}' requires a key with the reserved '{}' prefix",
+                    crate::soul::SOUL_NAMESPACE,
+                    crate::soul::SOUL_KEY_PREFIX
+                );
+            }
+        } else if key.starts_with(crate::soul::SOUL_KEY_PREFIX) {
+            anyhow::bail!(
+                "refused: key prefix '{}' is reserved for the Soul namespace",
+                crate::soul::SOUL_KEY_PREFIX
+            );
+        }
         let path = Self::storage_path(agent_id, namespace, &category, key);
         let embedding = self.compute_embedding(content).await;
         let now = Local::now().to_rfc3339();
@@ -848,6 +872,9 @@ impl Memory for TachiMemory {
 
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
         let mut rows = self.find_rows_by_key(key, None).await?;
+        // Ambient get never returns a Soul row; the typed Soul services
+        // read through `get_for_agent`.
+        rows.retain(|e| e.namespace != crate::soul::SOUL_NAMESPACE);
         Ok(rows.pop())
     }
 
@@ -866,6 +893,8 @@ impl Memory for TachiMemory {
         session_id: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
         let mut entries = self.list_all().await?;
+        // Ambient listing excludes the reserved Soul namespace.
+        entries.retain(|e| e.namespace != crate::soul::SOUL_NAMESPACE);
         if let Some(cat) = category {
             entries.retain(|e| &e.category == cat);
         }
@@ -877,7 +906,14 @@ impl Memory for TachiMemory {
 
     async fn forget(&self, key: &str) -> anyhow::Result<bool> {
         let rows = self.find_rows_by_key(key, None).await?;
-        let ids: Vec<String> = rows.into_iter().map(|e| e.id).collect();
+        // The unscoped delete never reaches the reserved Soul namespace;
+        // Soul rows are forgotten only through `forget_for_agent` with the
+        // admitted identity.
+        let ids: Vec<String> = rows
+            .into_iter()
+            .filter(|e| e.namespace != crate::soul::SOUL_NAMESPACE)
+            .map(|e| e.id)
+            .collect();
         Ok(self.delete_ids(ids).await? > 0)
     }
 
