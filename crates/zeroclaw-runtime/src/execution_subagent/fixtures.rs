@@ -345,6 +345,8 @@ pub struct InMemoryFactSink {
     /// derived one (fault injection for reconciling projections).
     pub forced_canonical_state: Mutex<Option<SessionCanonicalStateV1>>,
     pub cleanup_readback_missing: Mutex<bool>,
+    /// Simulate a committed cleanup whose receipt is lost before reaching the caller.
+    pub cleanup_receipt_lost: Mutex<bool>,
 }
 
 impl InMemoryFactSink {
@@ -447,6 +449,9 @@ impl SessionFactSink for InMemoryFactSink {
         drop(revision);
         drop(reached);
         self.facts.lock().push((fact.clone(), admission));
+        if fact.kind == SessionEventKindV1::Cleanup && *self.cleanup_receipt_lost.lock() {
+            return Err(SessionFactError::Unavailable);
+        }
         Ok(SessionEventReceiptView {
             attachment_ref: attachment.clone(),
             event_id: fact.event_id.clone(),

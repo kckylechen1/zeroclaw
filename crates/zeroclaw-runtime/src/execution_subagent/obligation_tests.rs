@@ -558,3 +558,52 @@ async fn accepted_cleanup_with_missing_readback_is_partial() {
         Some(SessionCanonicalStateV1::Completed)
     );
 }
+
+#[tokio::test]
+async fn lost_cleanup_receipt_stays_partial_even_when_readback_records_cleanup() {
+    let controller = Arc::new(ScriptedController::new(full_caps()));
+    let sink = Arc::new(InMemoryFactSink::default());
+    *sink.cleanup_receipt_lost.lock() = true;
+    let tool = tool_for_test(Arc::clone(&controller), Arc::clone(&sink));
+    controller.push(ScriptedStep::Emit(completed_events()));
+
+    let report = tool.run(&request()).await;
+
+    assert_eq!(report.status, ExecutionRunStatusV1::Completed);
+    assert_eq!(
+        dispositions(&report, Operation::CleanupReceipt),
+        vec![Disposition::Unavailable]
+    );
+    let state = sink
+        .get_state(report.attachment_ref.as_ref().expect("attached"))
+        .await
+        .expect("readback succeeds independently");
+    assert!(
+        state.cleanup_recorded,
+        "the cleanup was committed before its receipt was lost"
+    );
+    assert_eq!(
+        dispositions(&report, Operation::StateRead),
+        vec![Disposition::Partial],
+        "canonical readback cannot replace the missing attempt receipt"
+    );
+    assert_eq!(
+        dispositions(&report, Operation::Collection),
+        vec![Disposition::Satisfied]
+    );
+    assert_eq!(
+        report.usage.facts_reported, 3,
+        "count acknowledged facts only"
+    );
+    assert_eq!(*controller.started_count.lock(), 1);
+    assert_eq!(*sink.reconnections.lock(), 0);
+    assert_eq!(
+        sink.facts
+            .lock()
+            .iter()
+            .filter(|(fact, _)| fact.kind == SessionEventKindV1::Cleanup)
+            .count(),
+        1,
+        "a lost receipt must not launch or ingest again"
+    );
+}
