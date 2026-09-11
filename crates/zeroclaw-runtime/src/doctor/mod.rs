@@ -1431,13 +1431,23 @@ fn parse_df_available_mb(stdout: &str) -> Option<u64> {
 }
 
 fn workspace_probe_path(workspace_dir: &Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Process-local monotonic sequence. Clock resolution alone (SystemTime
+    // nanos) is not guaranteed to advance between two immediate calls, so the
+    // counter is what makes same-process probe names distinct; pid + nanos
+    // remain as the cross-process discriminator in the common case.
+    static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let sequence = PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     workspace_dir.join(format!(
-        ".zeroclaw_doctor_probe_{}_{}",
+        ".zeroclaw_doctor_probe_{}_{}_{}",
         std::process::id(),
-        nanos
+        nanos,
+        sequence
     ))
 }
 
@@ -2446,6 +2456,39 @@ mod tests {
                 "expected per-agent SOUL.md diagnostic for {alias}; got {messages:?}"
             );
         }
+    }
+
+    #[test]
+    fn check_workspace_writable_probe_is_cleaned_up_and_preserves_files() {
+        let tmp = TempDir::new().unwrap();
+        let config = workspace_test_config(tmp.path());
+        let sentinel = config.data_dir.join("keep.txt");
+        std::fs::write(&sentinel, b"unrelated sentinel").unwrap();
+
+        let mut items = Vec::new();
+        check_workspace(&config, &mut items);
+
+        assert!(
+            items.iter().any(|i| i.message == "directory is writable"),
+            "writable workspace must report success; got {:?}",
+            items.iter().map(|i| &i.message).collect::<Vec<_>>()
+        );
+
+        let leftovers: Vec<String> = std::fs::read_dir(&config.data_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".zeroclaw_doctor_probe_"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "writability probe must remove its own file; found {leftovers:?}"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"unrelated sentinel",
+            "probe must not alter unrelated workspace files"
+        );
     }
 
     #[test]
