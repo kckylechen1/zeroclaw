@@ -1,4 +1,6 @@
-//! Exact-contract transport boundary tests for [`TachiSessionFactSink`].
+//! Event and receipt transport boundary tests for [`TachiSessionFactSink`].
+//! Admission and policy are synthetic: this is not live vertical acceptance.
+//! Cache-only tests may use opaque unattached identifiers to exercise local bounds.
 //!
 //! Authoritative Consumer Contract Map:
 //! - Consumer Pin SHA: `1d32e63bfd11c14e1b306c576d1c677d567dbc6d`
@@ -43,7 +45,7 @@ use super::{
 };
 
 // ─────────────────────────────────────────────────────────────────────────
-// Scripted Exact-Contract Tachi Spine Fixture
+// Scripted Event and Receipt Wire Fixture
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Stored event row in the authoritative spine store.
@@ -134,7 +136,12 @@ struct TachiSpineState {
     /// Active attachments
     attachments: HashMap<String, String>,
     attachment_bindings: HashMap<(String, String), String>,
-    cancel_requests: HashSet<(String, String)>,
+    intervention_requests: HashMap<(String, String), String>,
+    unit_receipt_corruption: Option<(String, Option<Value>)>,
+    legacy_request_replay: bool,
+    drop_next_attach_response: bool,
+    drop_next_result_response: bool,
+    intervention_results: HashMap<(String, String), Value>,
     /// Call counts per action
     call_counts: HashMap<String, usize>,
     /// Projections per attachment (isolated, no cross-session bleeding)
@@ -152,6 +159,22 @@ struct TachiSpineState {
 }
 
 impl TachiSpineState {
+    fn corrupt_unit_receipt(&mut self, receipt: &mut Value) {
+        if let Some((path, replacement)) = self.unit_receipt_corruption.take() {
+            let (parent, key) = path.rsplit_once('/').unwrap();
+            let object = receipt
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            if let Some(value) = replacement {
+                object.insert(key.to_string(), value);
+            } else {
+                object.remove(key);
+            }
+        }
+    }
+
     fn record_call(&mut self, action: &str) {
         *self.call_counts.entry(action.to_string()).or_default() += 1;
     }
@@ -354,23 +377,29 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                         "attach_session missing required binding fields",
                     ));
                 }
-                let attachment_id = format!("att-test-{}", state.attachments.len() + 1);
-                state
-                    .attachments
-                    .insert(attachment_id.clone(), "attached".to_string());
-                state.attachment_bindings.insert(
-                    (
-                        args.get("adapter_connection_identity")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                        args.get("remote_session_id")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                    ),
-                    attachment_id.clone(),
+                let binding_key = (
+                    args.get("adapter_connection_identity")
+                        .and_then(Value::as_str)
+                        .unwrap()
+                        .to_string(),
+                    args.get("remote_session_id")
+                        .and_then(Value::as_str)
+                        .unwrap()
+                        .to_string(),
                 );
+                let attachment_id =
+                    if let Some(existing) = state.attachment_bindings.get(&binding_key) {
+                        existing.clone()
+                    } else {
+                        let id = format!("att-test-{}", state.attachments.len() + 1);
+                        state.attachments.insert(id.clone(), "attached".to_string());
+                        state.attachment_bindings.insert(binding_key, id.clone());
+                        id
+                    };
+                if state.drop_next_attach_response {
+                    state.drop_next_attach_response = false;
+                    return Err(anyhow::Error::msg("attach response lost after commit"));
+                }
                 let receipt = json!({
                     "status": "completed",
                     "action": "attach_session",
@@ -421,7 +450,9 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     .push((attachment_id.to_string(), Value::Object(caps.clone())));
                 if state.drop_next_advertisement_response {
                     state.drop_next_advertisement_response = false;
-                    return Err(anyhow::anyhow!("advertisement response lost after commit"));
+                    return Err(anyhow::Error::msg(
+                        "advertisement response lost after commit",
+                    ));
                 }
                 let mut receipt = json!({
                     "status": "completed",
@@ -858,7 +889,7 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                 state.last_reconnect_receipt = Some(receipt.clone());
                 if state.drop_next_reconnect_response {
                     state.drop_next_reconnect_response = false;
-                    return Err(anyhow::anyhow!("reconnect response lost after commit"));
+                    return Err(anyhow::Error::msg("reconnect response lost after commit"));
                 }
                 if let ResponseCorruption::MissingReconnectField =
                     std::mem::take(&mut state.corruption)
@@ -967,6 +998,12 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                         ));
                     }
                 };
+                let previous = state
+                    .attachments
+                    .get(attachment_id)
+                    .map(String::as_str)
+                    .unwrap_or("attached")
+                    .to_string();
                 state
                     .attachments
                     .insert(attachment_id.to_string(), target_state.to_string());
@@ -978,11 +1015,17 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     proj.pre_disconnect_rank = state_rank(proj.canonical_state.as_deref());
                     proj.canonical_state = Some("unknown_orphaned".to_string());
                 }
-                let receipt = json!({
+                let mut receipt = json!({
                     "status": "completed",
                     "action": "mark_session_connection",
                     "attachment_id": attachment_id,
+                    "fact": args.get("connection_fact"),
+                    "attachment_state": target_state,
+                    "previous_attachment_state": previous,
+                    "changed": previous != target_state,
+                    "canonical_state": state.canonical_state_object(attachment_id),
                 });
+                state.corrupt_unit_receipt(&mut receipt);
                 Ok(Self::make_tool_success(request.id.clone(), receipt))
             }
 
@@ -991,24 +1034,38 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     .get("attachment_id")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if args.get("intervention_kind").and_then(Value::as_str) == Some("request_cancel") {
-                    let request_id = args
-                        .get("intervention_request_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    state
-                        .cancel_requests
-                        .insert((attachment_id.to_string(), request_id.to_string()));
-                }
-                let receipt = json!({
+                let request_id = args
+                    .get("intervention_request_id")
+                    .and_then(Value::as_str)
+                    .unwrap();
+                let kind = args
+                    .get("intervention_kind")
+                    .and_then(Value::as_str)
+                    .unwrap();
+                state.intervention_requests.insert(
+                    (attachment_id.to_string(), request_id.to_string()),
+                    kind.to_string(),
+                );
+                let mut receipt = json!({
                     "status": "completed",
                     "action": "request_intervention",
                     "admission": "created",
                     "request": {
                         "attachment_id": attachment_id,
                         "request_id": args.get("intervention_request_id"),
+                        "kind": kind,
+                        "reason": args.get("intervention_reason"),
+                        "expected_session_revision": args.get("expected_session_revision"),
+                        "requested_by": self.expected_host_identity,
                     },
+                    "capability_source": "declared",
+                    "canonical_state": state.canonical_state_object(attachment_id),
                 });
+                if state.legacy_request_replay {
+                    receipt["admission"] = json!("replayed");
+                    receipt["capability_source"] = json!("legacy_unknown");
+                }
+                state.corrupt_unit_receipt(&mut receipt);
                 Ok(Self::make_tool_success(request.id.clone(), receipt))
             }
 
@@ -1030,8 +1087,9 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     .unwrap_or("");
                 if disposition == "accepted"
                     && state
-                        .cancel_requests
-                        .contains(&(attachment_id.to_string(), request_id.to_string()))
+                        .intervention_requests
+                        .get(&(attachment_id.to_string(), request_id.to_string()))
+                        .is_some_and(|kind| kind == "request_cancel")
                     && let Some(r) = auth_ref
                 {
                     state
@@ -1040,15 +1098,42 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                         .or_default()
                         .insert(r.to_string());
                 }
-                let receipt = json!({
+                let kind = state
+                    .intervention_requests
+                    .get(&(attachment_id.to_string(), request_id.to_string()))
+                    .expect("recorded request");
+                let mut receipt = json!({
                     "status": "completed",
                     "action": "record_intervention_result",
                     "admission": "created",
                     "result": {
                         "attachment_id": attachment_id,
                         "request_id": args.get("intervention_request_id"),
+                        "request_kind": kind,
+                        "disposition": disposition,
+                        "authority_confirmation_ref": auth_ref.filter(|s| !s.is_empty()),
+                        "detail": args.get("intervention_detail").and_then(Value::as_str).filter(|s| !s.is_empty()),
                     },
+                    "canonical_state": state.canonical_state_object(attachment_id),
                 });
+                let key = (attachment_id.to_string(), request_id.to_string());
+                let result = receipt["result"].clone();
+                if let Some(existing) = state.intervention_results.get(&key) {
+                    if existing != &result {
+                        return Ok(Self::make_tool_error(
+                            request.id.clone(),
+                            "different result material",
+                        ));
+                    }
+                    receipt["admission"] = json!("replayed");
+                } else {
+                    state.intervention_results.insert(key, result);
+                }
+                if state.drop_next_result_response {
+                    state.drop_next_result_response = false;
+                    return Err(anyhow::Error::msg("result response lost after commit"));
+                }
+                state.corrupt_unit_receipt(&mut receipt);
                 Ok(Self::make_tool_success(request.id.clone(), receipt))
             }
 
@@ -1367,11 +1452,14 @@ async fn test_reconnect_then_replay_unchanged_envelope() {
     let fixture_state = Arc::new(Mutex::new(TachiSpineState::default()));
     let fixture_clone = fixture_state.clone();
 
+    let clock = Arc::new(Mutex::new("2026-09-12T00:00:00Z".to_string()));
+    let clock_source = clock.clone();
     let sink = TachiSessionFactSink::new(test_sink_config())
         .expect("construct sink")
         .with_transport_factory(move |_cfg| {
             Ok(Box::new(ScriptedTachiMcpServer::new(fixture_clone.clone())))
-        });
+        })
+        .with_clock(move || clock_source.lock().clone());
 
     let binding = test_binding();
     let att = sink
@@ -1384,9 +1472,9 @@ async fn test_reconnect_then_replay_unchanged_envelope() {
         kind: SessionEventKindV1::Started,
         outcome: None,
         source_revision: 1,
-        authority_confirmation_ref: None,
+        authority_confirmation_ref: Some("reconnect-confirmation".to_string()),
         summary: Some("recon start".to_string()),
-        payload_digest: None,
+        payload_digest: Some("sha256:reconnect_123".to_string()),
     };
 
     let rec1 = sink.ingest_event(&att, &fact).await.unwrap();
@@ -1394,6 +1482,14 @@ async fn test_reconnect_then_replay_unchanged_envelope() {
     assert_eq!(rec1.disposition, "advanced");
     assert_eq!(fixture_state.lock().stored_events_count(), 1);
 
+    let event_key = (att.as_str().to_string(), fact.event_id.as_str().to_string());
+    let frozen = fixture_state
+        .lock()
+        .stored_events
+        .get(&event_key)
+        .unwrap()
+        .clone();
+    *clock.lock() = "2026-09-12T00:00:30Z".to_string();
     // Mark connection dropped and reconnect
     sink.mark_connection(&att, SessionConnectionFactV1::Disconnected)
         .await
@@ -1409,6 +1505,11 @@ async fn test_reconnect_then_replay_unchanged_envelope() {
     // Replay unchanged fact post-reconnect
     let rec2 = sink.ingest_event(&att, &fact).await.unwrap();
     assert_eq!(rec2.admission, SessionReceiptAdmissionV1::Replayed);
+    assert_eq!(
+        fixture_state.lock().stored_events.get(&event_key),
+        Some(&frozen)
+    );
+    assert_eq!(fixture_state.lock().call_count("attach_session"), 1);
     assert_eq!(rec2.disposition, "advanced");
     assert_eq!(
         rec2.state.canonical_state,
@@ -2159,4 +2260,328 @@ async fn reconnect_receipt_describes_this_transition_not_prior_rebind() {
         json!("attached")
     );
     assert_eq!(state.lock().call_count("reconnect_session"), 2);
+}
+
+async fn invoke_unit_receipt(
+    action: &str,
+    sink: &TachiSessionFactSink,
+    attachment: &SessionAttachmentRef,
+    request_id: &InterventionRequestIdRef,
+) -> Result<(), SessionFactError> {
+    match action {
+        "request_intervention" => {
+            sink.request_intervention(
+                attachment,
+                request_id,
+                SessionInterventionKindV1::RequestStatus,
+                "status check",
+            )
+            .await
+        }
+        "record_intervention_result" => {
+            sink.record_intervention_result(
+                attachment,
+                request_id,
+                SessionInterventionDispositionV1::Refused,
+                Some("confirmation"),
+                Some("result detail"),
+            )
+            .await
+        }
+        "mark_session_connection" => {
+            sink.mark_connection(attachment, SessionConnectionFactV1::Disconnected)
+                .await
+        }
+        _ => unreachable!("fixed test actions"),
+    }
+}
+
+#[tokio::test]
+async fn unit_receipts_require_each_field_and_bind_acknowledged_values() {
+    for action in [
+        "request_intervention",
+        "record_intervention_result",
+        "mark_session_connection",
+    ] {
+        let state = Arc::new(Mutex::new(TachiSpineState::default()));
+        let fixture = state.clone();
+        let sink = TachiSessionFactSink::new(test_sink_config())
+            .unwrap()
+            .with_transport_factory(move |_| {
+                Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+            });
+        let att = sink.attach(&test_binding(), &[]).await.unwrap();
+        let request_id = InterventionRequestIdRef::from_opaque("receipt-contract-request");
+        sink.request_intervention(
+            &att,
+            &request_id,
+            SessionInterventionKindV1::RequestStatus,
+            "status check",
+        )
+        .await
+        .unwrap();
+        let mut fields = vec![
+            ("/status", json!("not_completed")),
+            ("/action", json!("wrong_action")),
+            ("/canonical_state", json!([])),
+            ("/canonical_state/canonical_state", json!("invented_state")),
+            ("/canonical_state/canonical_revision", json!(-1)),
+            ("/canonical_state/cleanup_recorded", json!("false")),
+            ("/canonical_state/conflicting_terminal", json!("false")),
+            ("/canonical_state/last_event_id", json!("")),
+        ];
+        match action {
+            "request_intervention" => fields.extend([
+                ("/admission", json!("journaled")),
+                ("/request/attachment_id", json!("other-attachment")),
+                ("/request/request_id", json!("other-request")),
+                ("/request/kind", json!("request_cancel")),
+                ("/request/reason", json!("other reason")),
+                ("/request/expected_session_revision", json!(99)),
+                ("/request/requested_by", json!("other-host")),
+                ("/capability_source", json!("invented-source")),
+            ]),
+            "record_intervention_result" => fields.extend([
+                ("/admission", json!("journaled")),
+                ("/result/attachment_id", json!("other-attachment")),
+                ("/result/request_id", json!("other-request")),
+                ("/result/request_kind", json!("invented_kind")),
+                ("/result/disposition", json!("accepted")),
+                (
+                    "/result/authority_confirmation_ref",
+                    json!("wrong-confirmation"),
+                ),
+                ("/result/detail", json!("wrong detail")),
+            ]),
+            "mark_session_connection" => fields.extend([
+                ("/attachment_id", json!("other-attachment")),
+                ("/fact", json!("reconnect_failed")),
+                ("/attachment_state", json!("attached")),
+                ("/previous_attachment_state", json!("invented-state")),
+                ("/changed", json!("true")),
+            ]),
+            _ => unreachable!(),
+        }
+        for (path, wrong_value) in fields {
+            for replacement in [None, Some(json!([])), Some(wrong_value)] {
+                invoke_unit_receipt(action, &sink, &att, &request_id)
+                    .await
+                    .expect("uncorrupted receipt succeeds");
+                state.lock().unit_receipt_corruption = Some((path.to_string(), replacement));
+                let result = invoke_unit_receipt(action, &sink, &att, &request_id).await;
+                assert!(
+                    matches!(result, Err(SessionFactError::Refused(_))),
+                    "{action}: {path} must refuse"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn unit_receipts_accept_complete_pre_event_projection_and_exact_empty_result_text() {
+    let state = Arc::new(Mutex::new(TachiSpineState::default()));
+    let fixture = state.clone();
+    let sink = TachiSessionFactSink::new(test_sink_config())
+        .unwrap()
+        .with_transport_factory(move |_| {
+            Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+        });
+    let att = sink.attach(&test_binding(), &[]).await.unwrap();
+    let request = InterventionRequestIdRef::from_opaque("pre-event-status");
+    assert_eq!(
+        state.lock().canonical_state_object(att.as_str())["canonical_state"],
+        Value::Null
+    );
+    sink.request_intervention(
+        &att,
+        &request,
+        SessionInterventionKindV1::RequestStatus,
+        "status check",
+    )
+    .await
+    .unwrap();
+    for value in [None, Some("")] {
+        sink.record_intervention_result(
+            &att,
+            &request,
+            SessionInterventionDispositionV1::Refused,
+            value,
+            value,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(state.lock().stored_events_count(), 0);
+    // A state-returning API still cannot represent lawful pre-event absence.
+    assert!(sink.get_state(&att).await.is_err());
+}
+
+#[tokio::test]
+async fn historical_capability_source_is_accepted_only_on_request_replay() {
+    let state = Arc::new(Mutex::new(TachiSpineState::default()));
+    let fixture = state.clone();
+    let sink = TachiSessionFactSink::new(test_sink_config())
+        .unwrap()
+        .with_transport_factory(move |_| {
+            Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+        });
+    let att = sink.attach(&test_binding(), &[]).await.unwrap();
+    let request = InterventionRequestIdRef::from_opaque("legacy-request");
+    state.lock().legacy_request_replay = true;
+    sink.request_intervention(
+        &att,
+        &request,
+        SessionInterventionKindV1::RequestStatus,
+        "status check",
+    )
+    .await
+    .unwrap();
+    state.lock().legacy_request_replay = false;
+    state.lock().unit_receipt_corruption = Some((
+        "/capability_source".to_string(),
+        Some(json!("legacy_unknown")),
+    ));
+    assert!(
+        sink.request_intervention(
+            &att,
+            &request,
+            SessionInterventionKindV1::RequestStatus,
+            "status check"
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn summary_projection_is_enforced_at_ingest_transport_boundary() {
+    let state = Arc::new(Mutex::new(TachiSpineState::default()));
+    let fixture = state.clone();
+    let sink = TachiSessionFactSink::new(test_sink_config())
+        .unwrap()
+        .with_transport_factory(move |_| {
+            Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+        });
+    let att = sink.attach(&test_binding(), &[]).await.unwrap();
+    let cases = vec![
+        (
+            Some("first\nsecond".to_string()),
+            Some("first second".to_string()),
+        ),
+        (
+            Some("first\r\nsecond\tthird".to_string()),
+            Some("first  second third".to_string()),
+        ),
+        (Some("界".repeat(2001)), Some("界".repeat(2000))),
+        (Some(String::new()), None),
+        (None, None),
+    ];
+    for (index, (input, expected)) in cases.into_iter().enumerate() {
+        let event_id = format!("summary-{index}");
+        let fact = SessionEventFact {
+            event_id: SessionEventIdRef::from_opaque(&event_id),
+            kind: SessionEventKindV1::Started,
+            outcome: None,
+            source_revision: index as u64,
+            authority_confirmation_ref: None,
+            summary: input,
+            payload_digest: None,
+        };
+        sink.ingest_event(&att, &fact).await.unwrap();
+        assert_eq!(
+            state
+                .lock()
+                .stored_events
+                .get(&(att.as_str().to_string(), event_id))
+                .unwrap()
+                .event_summary,
+            expected
+        );
+    }
+    let before = state.lock().call_count("ingest_session_event");
+    for (index, invalid) in ["bad\0summary", "bad\u{0085}summary"]
+        .into_iter()
+        .enumerate()
+    {
+        let fact = SessionEventFact {
+            event_id: SessionEventIdRef::from_opaque(format!("invalid-summary-{index}")),
+            kind: SessionEventKindV1::Started,
+            outcome: None,
+            source_revision: 9,
+            authority_confirmation_ref: None,
+            summary: Some(invalid.to_string()),
+            payload_digest: None,
+        };
+        assert!(sink.ingest_event(&att, &fact).await.is_err());
+    }
+    assert_eq!(state.lock().call_count("ingest_session_event"), before);
+}
+
+#[tokio::test]
+async fn lost_attach_and_accepted_cancel_result_receipts_recover_by_identity() {
+    let state = Arc::new(Mutex::new(TachiSpineState::default()));
+    let fixture = state.clone();
+    let sink = TachiSessionFactSink::new(test_sink_config())
+        .unwrap()
+        .with_transport_factory(move |_| {
+            Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+        });
+    let binding = test_binding();
+    state.lock().drop_next_attach_response = true;
+    let att = sink.attach(&binding, &[]).await.unwrap();
+    assert_eq!(state.lock().attachments.len(), 1);
+    assert_eq!(state.lock().attachment_bindings.len(), 1);
+    assert_eq!(state.lock().call_count("attach_session"), 2);
+    assert_eq!(
+        state
+            .lock()
+            .attachment_bindings
+            .get(&(
+                binding.adapter_connection.as_str().to_string(),
+                binding.remote_session.as_str().to_string()
+            ))
+            .map(String::as_str),
+        Some(att.as_str())
+    );
+    let request = InterventionRequestIdRef::from_opaque("lost-cancel-result");
+    sink.request_intervention(
+        &att,
+        &request,
+        SessionInterventionKindV1::RequestCancel,
+        "cancel request",
+    )
+    .await
+    .unwrap();
+    state.lock().drop_next_result_response = true;
+    sink.record_intervention_result(
+        &att,
+        &request,
+        SessionInterventionDispositionV1::Accepted,
+        Some("lost-cancel-confirmation"),
+        Some("cancel confirmed"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(state.lock().intervention_results.len(), 1);
+    assert_eq!(state.lock().call_count("record_intervention_result"), 2);
+    let terminal = SessionEventFact {
+        event_id: SessionEventIdRef::from_opaque("cancel-after-recovery"),
+        kind: SessionEventKindV1::Terminal,
+        outcome: Some(SessionTerminalOutcomeV1::Cancelled {
+            confirmation: AuthorityConfirmationRef::from_opaque("lost-cancel-confirmation"),
+        }),
+        source_revision: 1,
+        authority_confirmation_ref: Some("lost-cancel-confirmation".to_string()),
+        summary: Some("cancel confirmed".to_string()),
+        payload_digest: None,
+    };
+    assert_eq!(
+        sink.ingest_event(&att, &terminal)
+            .await
+            .unwrap()
+            .state
+            .canonical_state,
+        SessionCanonicalStateV1::Cancelled
+    );
 }

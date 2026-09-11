@@ -25,11 +25,11 @@
 //!   and work-claim binding come from the embedder-constructed
 //!   [`TachiFactSinkConfig`]; env values (e.g. the isolated spine home)
 //!   are secrets — redacted from `Debug`, never logged.
-//! - **Explicit replay policy.** Frozen event ingestion and state reads get
-//!   one transport repair and retry. Other actions return unavailable after
-//!   response loss: their mutation may have committed, so replay cannot stand
-//!   in for the missing receipt. In particular, advertisements append rows and
-//!   reconnect changes the meaning of its next receipt.
+//! - **Explicit replay policy.** Attachments, events and intervention receipts
+//!   deduplicate by identity; connection facts and state reads are safe to
+//!   retry once. Advertisements and reconnect return unavailable after response
+//!   loss: the former appends another row, and the latter replaces evidence of
+//!   the transition with a new receipt. Future actions default to no retry.
 //! - **Typed failures.** Transport death surfaces
 //!   [`SessionFactError::Unavailable`]; spine refusals (including the
 //!   spine-gate's `unsupported_by_lifecycle_owner` refusals) surface as
@@ -406,10 +406,19 @@ impl TachiSessionFactSink {
             Ok(receipt) => Ok(receipt),
             Err(SessionFactError::Unavailable) => {
                 self.drop_transport().await;
-                // Only these actions have verified safe replay semantics:
-                // immutable event dedup returns the current projection, and
-                // get_state is read-only. Unknown actions default to no retry.
-                if matches!(action, "ingest_session_event" | "get_session_state") {
+                // Attachment/event/request/result identities deduplicate at the
+                // consumer; connection facts are idempotent and state reads do
+                // not mutate. Advertisements and reconnect receipts cannot be
+                // replayed transparently. Unknown actions default to no retry.
+                if matches!(
+                    action,
+                    "attach_session"
+                        | "ingest_session_event"
+                        | "request_intervention"
+                        | "record_intervention_result"
+                        | "mark_session_connection"
+                        | "get_session_state"
+                ) {
                     self.call_once(action, params).await
                 } else {
                     Err(SessionFactError::Unavailable)
@@ -510,6 +519,14 @@ impl TachiSessionFactSink {
     }
 
     fn parse_state(body: &Value) -> Result<SessionStateView, SessionFactError> {
+        Self::validate_state(body)?.ok_or_else(|| SessionFactError::Refused(
+            "spine canonical_state is null (pre-event state unrepresentable in SessionStateView API)".to_string(),
+        ))
+    }
+
+    /// Unit-returning receipts may legally describe the state before any event.
+    /// Validate every projection field before accepting that explicit absence.
+    fn validate_state(body: &Value) -> Result<Option<SessionStateView>, SessionFactError> {
         let state = body.get("canonical_state").ok_or_else(|| {
             SessionFactError::Refused("spine receipt carries no canonical_state".to_string())
         })?;
@@ -519,20 +536,12 @@ impl TachiSessionFactSink {
             ));
         }
         let canonical = match state.get("canonical_state") {
-            Some(Value::String(raw)) if raw == raw.trim() => SessionCanonicalStateV1::parse(raw)
-                .map_err(|_| {
+            Some(Value::String(raw)) if raw == raw.trim() => {
+                Some(SessionCanonicalStateV1::parse(raw).map_err(|_| {
                     SessionFactError::Refused("spine returned unknown canonical state".to_string())
-                })?,
-            Some(Value::Null) => {
-                // Honest typed incompatibility when observed:
-                // Pre-event null canonical state is legitimately null in Tachi before any fact,
-                // but the current SessionStateView API cannot represent a null canonical state.
-                // We return an honest typed refusal rather than fabricating Accepted or Completed.
-                return Err(SessionFactError::Refused(
-                    "spine canonical_state is null (pre-event state unrepresentable in SessionStateView API)"
-                        .to_string(),
-                ));
+                })?)
             }
+            Some(Value::Null) => None,
             Some(_) => {
                 return Err(SessionFactError::Refused(
                     "spine state projection canonical_state is not a string or null".to_string(),
@@ -622,13 +631,13 @@ impl TachiSessionFactSink {
                 ));
             }
         };
-        Ok(SessionStateView {
-            canonical_state: canonical,
+        Ok(canonical.map(|canonical_state| SessionStateView {
+            canonical_state,
             canonical_revision,
             cleanup_recorded,
             conflicting_terminal,
             last_event_id,
-        })
+        }))
     }
 
     fn note_revision(&self, attachment: &SessionAttachmentRef, view: &SessionStateView) {
@@ -646,6 +655,31 @@ impl TachiSessionFactSink {
             .copied()
             .unwrap_or(0)
     }
+}
+
+fn require_receipt_value(
+    body: &Value,
+    path: &str,
+    expected: &Value,
+) -> Result<(), SessionFactError> {
+    if body.pointer(path) != Some(expected) {
+        return Err(SessionFactError::Refused(format!(
+            "spine receipt field mismatch or missing: {path}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_intervention_admission(body: &Value) -> Result<(), SessionFactError> {
+    if !matches!(
+        body.get("admission").and_then(Value::as_str),
+        Some("created" | "replayed")
+    ) {
+        return Err(SessionFactError::Refused(
+            "intervention receipt has invalid admission".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Preserve a known refusal code without returning arbitrary peer text.
@@ -1172,6 +1206,7 @@ impl SessionFactSink for TachiSessionFactSink {
         kind: SessionInterventionKindV1,
         reason: &str,
     ) -> Result<(), SessionFactError> {
+        let expected_revision = self.revision_for(attachment);
         let receipt = self
             .call(
                 "request_intervention",
@@ -1180,7 +1215,7 @@ impl SessionFactSink for TachiSessionFactSink {
                     "intervention_request_id": request_id.as_str(),
                     "intervention_kind": kind.as_str(),
                     "intervention_reason": reason,
-                    "expected_session_revision": self.revision_for(attachment),
+                    "expected_session_revision": expected_revision,
                 }),
             )
             .await?;
@@ -1224,6 +1259,33 @@ impl SessionFactSink for TachiSessionFactSink {
                 "intervention receipt request_id mismatch or missing".to_string(),
             ));
         }
+        validate_intervention_admission(&receipt.body)?;
+        for (path, expected) in [
+            ("/request/kind", json!(kind.as_str())),
+            ("/request/reason", json!(reason)),
+            (
+                "/request/expected_session_revision",
+                json!(expected_revision),
+            ),
+            ("/request/requested_by", json!(self.config.host_identity)),
+        ] {
+            require_receipt_value(&receipt.body, path, &expected)?;
+        }
+        let capability_source = receipt
+            .body
+            .get("capability_source")
+            .and_then(Value::as_str);
+        let known_source = matches!(capability_source, Some("advertised" | "declared"));
+        // Legacy stored requests keep their historical source on replay;
+        // fresh requests only resolve advertised or declared capabilities.
+        let legacy_replay = capability_source == Some("legacy_unknown")
+            && receipt.body.get("admission").and_then(Value::as_str) == Some("replayed");
+        if !known_source && !legacy_replay {
+            return Err(SessionFactError::Refused(
+                "intervention receipt has invalid capability_source".to_string(),
+            ));
+        }
+        let _ = Self::validate_state(&receipt.body)?;
         Ok(())
     }
 
@@ -1301,6 +1363,38 @@ impl SessionFactSink for TachiSessionFactSink {
                 "intervention receipt request_id mismatch or missing".to_string(),
             ));
         }
+        validate_intervention_admission(&receipt.body)?;
+        if !matches!(
+            receipt
+                .body
+                .pointer("/result/request_kind")
+                .and_then(Value::as_str),
+            Some(
+                "request_status"
+                    | "prompt_or_correct"
+                    | "request_pause"
+                    | "request_cancel"
+                    | "request_resume"
+            )
+        ) {
+            return Err(SessionFactError::Refused(
+                "intervention result has invalid request_kind".to_string(),
+            ));
+        }
+        for (path, expected) in [
+            ("/result/disposition", json!(disposition.as_str())),
+            (
+                "/result/authority_confirmation_ref",
+                json!(authority_confirmation_ref.filter(|value| !value.is_empty())),
+            ),
+            (
+                "/result/detail",
+                json!(detail.filter(|value| !value.is_empty())),
+            ),
+        ] {
+            require_receipt_value(&receipt.body, path, &expected)?;
+        }
+        let _ = Self::validate_state(&receipt.body)?;
         Ok(())
     }
 
@@ -1343,6 +1437,29 @@ impl SessionFactSink for TachiSessionFactSink {
                 "mark_session_connection receipt attachment_id mismatch".to_string(),
             ));
         }
+        require_receipt_value(&receipt.body, "/fact", &json!(fact.as_str()))?;
+        let target = match fact {
+            SessionConnectionFactV1::Disconnected => "unknown",
+            SessionConnectionFactV1::ReconnectFailed => "reconnect_failed",
+        };
+        require_receipt_value(&receipt.body, "/attachment_state", &json!(target))?;
+        if !matches!(
+            receipt
+                .body
+                .get("previous_attachment_state")
+                .and_then(Value::as_str),
+            Some("attached" | "unknown" | "reconnect_failed")
+        ) || receipt
+            .body
+            .get("changed")
+            .and_then(Value::as_bool)
+            .is_none()
+        {
+            return Err(SessionFactError::Refused(
+                "connection receipt has invalid transition fields".to_string(),
+            ));
+        }
+        let _ = Self::validate_state(&receipt.body)?;
         Ok(())
     }
 
