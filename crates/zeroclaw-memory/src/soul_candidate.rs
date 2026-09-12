@@ -193,8 +193,8 @@ pub enum CandidateOrigin {
     BenchmarkResult,
     /// A receipt from an external worker/harness.
     WorkerReceipt,
-    /// A verified Tachi evidence reference (envelope contract
-    /// the pending Tachi envelope contract). Supports candidates; never activates Soul.
+    /// A verified Tachi evidence reference (the pending Tachi envelope
+    /// contract). Supports candidates; never activates Soul.
     TachiVerifiedEvidence,
     /// A model-generated summary of observations.
     ModelSummary,

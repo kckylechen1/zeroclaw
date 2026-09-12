@@ -1,4 +1,4 @@
-//! AgentSoul domain seam — identity-bound Soul storage .
+//! AgentSoul domain seam — identity-bound Soul storage.
 //!
 //! Soul is the reviewed operating disposition of ONE persistent agent
 //! identity, carried unchanged across replaceable model / provider /
@@ -6,7 +6,7 @@
 //! identity-binding storage surface:
 //!
 //! - the identity vocabulary type is [`AgentIdentityId`] from
-//!   `zeroclaw_api::companion` (the the pending Tachi envelope contract substrate's minted-once
+//!   `zeroclaw_api::companion` (the pending Tachi envelope contract substrate's minted-once
 //!   identity slot) — this module never mints or derives identities,
 //!   it only admits and resolves them;
 //! - every namespace read/write resolves to a stable admitted identity
@@ -27,7 +27,7 @@
 //! with true composite attribution (SQLite) enforce isolation
 //! structurally.
 //!
-//! Verified identity evidence from Tachi (envelope contract the pending Tachi envelope contract)
+//! Verified identity evidence from Tachi (the pending Tachi envelope contract)
 //! is NOT wired yet: the [`IdentityRegistry`] seam keeps a provenance
 //! note per admission so external evidence can attach later without
 //! widening this API.
@@ -54,7 +54,7 @@ pub enum SoulError {
     InvalidIdentityToken(String),
     /// The key starts with the `candidate::` segment reserved for Soul
     /// candidate rows. Candidate rows are owned by the sibling
-    /// `soul_candidate` module  and are written/read only through
+    /// `soul_candidate` module and are written/read only through
     /// its typed intake surface — raw Soul store/forget must refuse the
     /// segment so a disposition write can never overwrite or delete a
     /// candidate row.
@@ -139,7 +139,7 @@ pub(crate) fn validate_identity_token(id: &AgentIdentityId) -> Result<(), SoulEr
 }
 
 /// Key segment reserved for Soul candidate rows, owned by the sibling
-/// `soul_candidate` module . Raw Soul store/forget refuse keys in
+/// `soul_candidate` module. Raw Soul store/forget refuse keys in
 /// this segment so the two modules' key spaces cannot collide.
 pub(crate) const RESERVED_CANDIDATE_PREFIX: &str = "candidate::";
 
