@@ -45,8 +45,8 @@ urlencoding = "2.1"
 uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
 which = "8.0"
 
-async-imap = { version = "0.11", features = ["runtime-tokio"], default-features = false }
-mail-parser = "0.11"
+async-imap = { version = "0.11", features = ["runtime-tokio"], default-features = false, optional = true }
+mail-parser = { version = "0.11", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.14.0"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
@@ -61,7 +61,8 @@ integrations-saas = []
 # Concrete hardware board/memory tool family. Default-on; the hardware install
 # templates enable the `hardware` root feature, which forwards this.
 hardware-tools = []
-default = ["integrations-saas", "hardware-tools"]
+email-tools = ["dep:async-imap", "dep:mail-parser"]
+default = ["integrations-saas", "hardware-tools", "email-tools"]
 browser-native = ["dep:fantoccini"]
 probe = ["dep:probe-rs", "hardware-tools"]
 # Exposes cross-crate test-only constructors (e.g.

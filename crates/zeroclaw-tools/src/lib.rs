@@ -45,8 +45,11 @@ pub mod cloud_patterns;
 pub mod content_search;
 pub mod data_management;
 pub mod discord_search;
+#[cfg(feature = "email-tools")]
 pub mod email_imap;
+#[cfg(feature = "email-tools")]
 pub mod email_read;
+#[cfg(feature = "email-tools")]
 pub mod email_search;
 pub mod escalate;
 pub mod file_download;

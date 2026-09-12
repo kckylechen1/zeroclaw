@@ -343,7 +343,7 @@ schema-export = ["zeroclaw-config/schema-export"]
 acp-bridge = ["dep:tokio-tungstenite"]
 
 # Channels — each forwards to zeroclaw-channels.
-channel-email = ["zeroclaw-channels/channel-email", "zeroclaw-gateway?/channel-email", "dep:lettre", "dep:mail-parser", "dep:async-imap"]
+channel-email = ["zeroclaw-channels/channel-email", "zeroclaw-runtime?/email-tools", "zeroclaw-gateway?/channel-email", "dep:lettre", "dep:mail-parser", "dep:async-imap"]
 channel-telegram = ["zeroclaw-channels/channel-telegram"]
 channel-lark = ["zeroclaw-channels/channel-lark"]
 channel-nostr = ["zeroclaw-channels/channel-nostr", "dep:nostr-sdk"]

@@ -107,6 +107,7 @@ default = [
     "schema-export",
     "integrations-saas",
     "hardware-tools",
+    "email-tools",
 ]
 observability-prometheus = ["dep:prometheus"]
 observability-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
@@ -121,6 +122,7 @@ browser-native = []
 # its own default so the slim companion selection can omit them.
 integrations-saas = ["zeroclaw-tools/integrations-saas"]
 hardware-tools = ["zeroclaw-tools/hardware-tools"]
+email-tools = ["zeroclaw-tools/email-tools"]
 plugins-wasm = ["dep:zeroclaw-plugins", "zeroclaw-plugins/plugins-wasmtime"]
 webauthn = []
 sandbox-bubblewrap = []

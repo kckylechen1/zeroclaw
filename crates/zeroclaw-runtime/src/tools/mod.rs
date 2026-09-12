@@ -43,7 +43,9 @@ pub use zeroclaw_tools::composio::ComposioTool;
 pub use zeroclaw_tools::content_search::ContentSearchTool;
 pub use zeroclaw_tools::data_management::DataManagementTool;
 pub use zeroclaw_tools::discord_search::DiscordSearchTool;
+#[cfg(feature = "email-tools")]
 pub use zeroclaw_tools::email_read::EmailReadTool;
+#[cfg(feature = "email-tools")]
 pub use zeroclaw_tools::email_search::EmailSearchTool;
 pub use zeroclaw_tools::escalate::EscalateToHumanTool;
 pub use zeroclaw_tools::file_download::FileDownloadTool;
@@ -767,6 +769,7 @@ pub fn all_tools_with_runtime(
     }
 
     // email_search — registered when at least one email channel is enabled
+    #[cfg(feature = "email-tools")]
     {
         let email_configs: std::collections::HashMap<
             String,
@@ -1639,6 +1642,62 @@ mod tests {
             data_dir: tmp.path().join("data"),
             config_path: tmp.path().join("config.toml"),
             ..Config::default()
+        }
+    }
+
+    #[test]
+    fn email_factory_respects_compile_feature_and_channel_activation() {
+        for enabled in [None, Some(false), Some(true)] {
+            let tmp = TempDir::new().unwrap();
+            let mut cfg = test_config(&tmp);
+            cfg.composition = Some(zeroclaw_config::composition::Composition::Full);
+            cfg.plugins.enabled = false;
+            cfg.knowledge.enabled = false;
+            if let Some(enabled) = enabled {
+                cfg.channels.email.insert(
+                    "fixture".into(),
+                    zeroclaw_config::scattered_types::EmailConfig {
+                        enabled,
+                        imap_host: "mail.invalid".into(),
+                        ..Default::default()
+                    },
+                );
+            }
+            let security = Arc::new(SecurityPolicy {
+                workspace_dir: tmp.path().to_path_buf(),
+                ..SecurityPolicy::default()
+            });
+            let mem_cfg = MemoryConfig {
+                backend: "markdown".into(),
+                ..MemoryConfig::default()
+            };
+            let mem: Arc<dyn Memory> =
+                Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+            let tools = all_tools(
+                Arc::new(cfg.clone()),
+                &security,
+                &zeroclaw_config::schema::RiskProfileConfig::default(),
+                "test-agent",
+                mem,
+                None,
+                None,
+                &BrowserConfig::default(),
+                &zeroclaw_config::schema::HttpRequestConfig::default(),
+                &zeroclaw_config::schema::WebFetchConfig::default(),
+                tmp.path(),
+                &HashMap::new(),
+                None,
+                &cfg,
+                None,
+                false,
+                None,
+            )
+            .tools;
+            let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+            let expected = cfg!(feature = "email-tools") && enabled == Some(true);
+            assert_eq!(names.contains(&"email_search"), expected, "{enabled:?}");
+            assert_eq!(names.contains(&"email_read"), expected, "{enabled:?}");
+            assert!(names.contains(&"file_read"));
         }
     }
 
