@@ -1120,3 +1120,109 @@ fn personal_file_is_registered_nowhere() {
         );
     }
 }
+
+/// Skipped entries consume the fixed scan budget too. Grow one
+/// private directory across the boundary; no test-selected production limit.
+#[cfg(unix)]
+#[tokio::test]
+async fn listing_scan_bound_counts_skipped_and_mixed_entries() {
+    use super::domain::MAX_LIST_SCAN_ENTRIES;
+    let _fs_serialized = fs_test_guard().await;
+    let tmp = tempfile::tempdir().expect("scan fixture");
+    let (service, root) = service_with_rw_root(tmp.path());
+    for limit in [0, 1] {
+        match service
+            .list(&root, None, limit)
+            .await
+            .expect("empty listing")
+        {
+            PersonalFileResult::Listed { entries } => assert!(entries.is_empty()),
+            other => panic!("expected listing, got {other:?}"),
+        }
+    }
+    // Only these links and the reserved namespace are directory entries.
+    // The dangling target is private and never created or followed.
+    let target = tmp.path().join("absent-private-target");
+    std::fs::create_dir(tmp.path().join(TRASH_NAMESPACE)).expect("private trash");
+    for index in 0..MAX_LIST_SCAN_ENTRIES - 2 {
+        unix_symlink(&target, &tmp.path().join(format!("skip-{index:05}")));
+    }
+    // 19,999 non-dot entries, then exactly 20,000: both are complete empty
+    // results even at caller limit zero. Trash must count without listing.
+    for total in [MAX_LIST_SCAN_ENTRIES - 1, MAX_LIST_SCAN_ENTRIES] {
+        if total == MAX_LIST_SCAN_ENTRIES {
+            unix_symlink(&target, &tmp.path().join("exact-cap-link"));
+        }
+        match service
+            .list(&root, None, 0)
+            .await
+            .expect("within scan bound")
+        {
+            PersonalFileResult::Listed { entries } => assert!(entries.is_empty()),
+            other => panic!("expected skipped-only listing, got {other:?}"),
+        }
+    }
+    unix_symlink(&target, &tmp.path().join("overflow-link"));
+    for limit in [0, 1, usize::MAX] {
+        let result = service.list(&root, None, limit).await;
+        eprintln!(
+            "PERSONAL_FILE_SCAN_BOUND total={} caller_limit={limit} result={result:?}",
+            MAX_LIST_SCAN_ENTRIES + 1
+        );
+        assert!(
+            matches!(result, Err(PersonalFileError::ScanLimitExceeded(bound)) if bound == MAX_LIST_SCAN_ENTRIES)
+        );
+    }
+    // Replace skipped entries with listable files while staying exactly at
+    // the scan cap. Outcomes cannot depend on filesystem enumeration order.
+    std::fs::remove_file(tmp.path().join("overflow-link")).expect("remove private link");
+    std::fs::remove_file(tmp.path().join("exact-cap-link")).expect("replace private link");
+    std::fs::write(tmp.path().join("visible-a.txt"), "a").expect("private file");
+    match service
+        .list(&root, None, 1)
+        .await
+        .expect("one visible entry")
+    {
+        PersonalFileResult::Listed { entries } => {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].name, "visible-a.txt");
+        }
+        other => panic!("expected mixed listing, got {other:?}"),
+    }
+    assert!(matches!(
+        service.list(&root, None, 0).await,
+        Err(PersonalFileError::TooManyEntries(0))
+    ));
+    std::fs::remove_file(tmp.path().join("skip-00000")).expect("replace private link");
+    std::fs::write(tmp.path().join("visible-b.txt"), "b").expect("second private file");
+    assert!(matches!(
+        service.list(&root, None, 1).await,
+        Err(PersonalFileError::TooManyEntries(1))
+    ));
+    match service
+        .list(&root, None, 2)
+        .await
+        .expect("two visible entries")
+    {
+        PersonalFileResult::Listed { entries } => {
+            assert_eq!(
+                entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                vec!["visible-a.txt", "visible-b.txt"]
+            );
+        }
+        other => panic!("expected mixed listing, got {other:?}"),
+    }
+    unix_symlink(&target, &tmp.path().join("mixed-overflow-link"));
+    assert!(
+        matches!(service.list(&root, None, 2).await, Err(PersonalFileError::ScanLimitExceeded(bound)) if bound == MAX_LIST_SCAN_ENTRIES)
+    );
+    assert!(!target.exists());
+    assert_eq!(
+        std::fs::read(tmp.path().join("visible-a.txt")).unwrap(),
+        b"a"
+    );
+    assert_eq!(
+        std::fs::read(tmp.path().join("visible-b.txt")).unwrap(),
+        b"b"
+    );
+}
