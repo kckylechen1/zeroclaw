@@ -540,7 +540,7 @@ impl PersonalFileService {
             match src_kind {
                 FileType::RegularFile => safety::require_unshared_inode(&src_stat, &src_display)?,
                 FileType::Directory => {
-                    probe_target_dir_not_git(&src_parent, src_path.leaf(), &src_display)?
+                    refuse_directory_mutation(&src_parent, src_path.leaf(), &src_display)?
                 }
                 _ => {
                     return Err(PersonalFileRefusal::NotRegularFile { path: src_display }.into());
@@ -609,7 +609,7 @@ impl PersonalFileService {
             let kind = FileType::from_raw_mode(stat.st_mode);
             match kind {
                 FileType::RegularFile => safety::require_unshared_inode(&stat, &display)?,
-                FileType::Directory => probe_target_dir_not_git(&parent, path.leaf(), &display)?,
+                FileType::Directory => refuse_directory_mutation(&parent, path.leaf(), &display)?,
                 _ => return Err(PersonalFileRefusal::NotRegularFile { path: display }.into()),
             }
             let trash = safety::open_trash(&root.inner)?;
@@ -857,10 +857,10 @@ fn open_regular_verified(
     Ok((file, restat))
 }
 
-/// For directory targets of move/delete: refuse a directory that is
-/// itself a repository root (holds a `.git` entry).
+/// Preserve the specific immediate Git refusal, then refuse every other
+/// directory target: descendant safety cannot be proven before mutation.
 #[cfg(unix)]
-fn probe_target_dir_not_git(
+fn refuse_directory_mutation(
     parent: &OwnedFd,
     leaf: &str,
     display: &str,
@@ -878,6 +878,8 @@ fn probe_target_dir_not_git(
             at: display.to_string(),
         }
         .into()),
-        None => Ok(()),
+        None => Err(PersonalFileError::UnsupportedSafely(
+            "directory mutation is unsupported; descendant repository safety cannot be proven",
+        )),
     }
 }
