@@ -48,6 +48,9 @@ pub struct ScriptedController {
     pub events: Mutex<Vec<ControllerEvent>>,
     pub next_seq: Mutex<u64>,
     pub unavailable: Mutex<bool>,
+    /// Number of leading `watch` calls that fail with `Unavailable`
+    /// before the transport recovers. Default `0` (no fault).
+    pub watch_failures_remaining: Mutex<u32>,
     pub started_count: Mutex<u32>,
     pub stop_requests: Mutex<Vec<bool>>,
     pub interrupt_requests: Mutex<u32>,
@@ -56,6 +59,15 @@ pub struct ScriptedController {
     /// When set, `start` refuses with this typed error.
     pub start_refusal: Option<ControllerError>,
     pub collect_view: Mutex<Option<SessionCollectView>>,
+    /// When set, `stop` records the request and then refuses typed (the
+    /// transport was asked and failed). Default `None`.
+    pub stop_refusal: Option<ControllerError>,
+    /// When set, `stop` answers `confirmed: true` with NO authority
+    /// confirmation reference (the fabrication-guard fault). Default
+    /// `false`.
+    pub stop_confirmed_without_ref: bool,
+    /// When set, `collect` refuses typed with this error. Default `None`.
+    pub collect_refusal: Option<ControllerError>,
 }
 
 impl ScriptedController {
@@ -152,6 +164,10 @@ impl SessionController for ScriptedController {
         limit: usize,
     ) -> Result<SessionEventPage, ControllerError> {
         self.drain_queue().await?;
+        if *self.watch_failures_remaining.lock() > 0 {
+            *self.watch_failures_remaining.lock() -= 1;
+            return Err(ControllerError::Unavailable);
+        }
         let events = self.events.lock();
         let pending: Vec<ControllerEvent> = events
             .iter()
@@ -202,6 +218,16 @@ impl SessionController for ScriptedController {
             return Err(ControllerError::Unavailable);
         }
         self.stop_requests.lock().push(graceful);
+        if let Some(refusal) = &self.stop_refusal {
+            return Err(refusal.clone());
+        }
+        if self.stop_confirmed_without_ref {
+            return Ok(SessionStopReceipt {
+                confirmed: true,
+                authority_confirmation_ref: None,
+                detail: None,
+            });
+        }
         // The fixture records a terminal cancelled fact ONLY when the stop
         // was confirmable (confirmation ref present); the spine's law that
         // a receipt is not a state is exercised at the sink layer.
@@ -238,6 +264,9 @@ impl SessionController for ScriptedController {
     ) -> Result<SessionCollectView, ControllerError> {
         if self.unavailable() {
             return Err(ControllerError::Unavailable);
+        }
+        if let Some(refusal) = &self.collect_refusal {
+            return Err(refusal.clone());
         }
         let guarded = self.collect_view.lock();
         Ok(guarded.clone().unwrap_or_else(|| SessionCollectView {
@@ -302,6 +331,22 @@ pub struct InMemoryFactSink {
     /// state transition the real spine performs).
     pub disconnected: Mutex<bool>,
     pub reconnections: Mutex<u32>,
+    /// Event kinds the sink REFUSES typed (fault injection; empty by
+    /// default, so existing callers see the ledger unchanged).
+    pub ingest_refusals: Mutex<Vec<SessionEventKindV1>>,
+    /// When set, `advertise_capabilities` refuses typed (attach still
+    /// succeeds — the fault isolates the abandon leg).
+    pub advertise_refusal: Mutex<bool>,
+    /// When set, `get_state` refuses typed with this error.
+    pub state_refusal: Mutex<Option<SessionFactError>>,
+    /// When set, `read_state` reports `conflicting_terminal = true`.
+    pub conflicting_terminal: Mutex<bool>,
+    /// When set, `read_state` reports this canonical state instead of the
+    /// derived one (fault injection for reconciling projections).
+    pub forced_canonical_state: Mutex<Option<SessionCanonicalStateV1>>,
+    pub cleanup_readback_missing: Mutex<bool>,
+    /// Simulate a committed cleanup whose receipt is lost before reaching the caller.
+    pub cleanup_receipt_lost: Mutex<bool>,
 }
 
 impl InMemoryFactSink {
@@ -345,6 +390,11 @@ impl SessionFactSink for InMemoryFactSink {
         capabilities: &[String],
     ) -> Result<SessionAdvertiseReceiptView, SessionFactError> {
         self.unavailable()?;
+        if *self.advertise_refusal.lock() {
+            return Err(SessionFactError::Refused(
+                "fixture refused capability advertisement".to_string(),
+            ));
+        }
         self.advertised.lock().push(capabilities.to_vec());
         let seq = self.advertised.lock().len() as u64;
         Ok(SessionAdvertiseReceiptView {
@@ -360,6 +410,12 @@ impl SessionFactSink for InMemoryFactSink {
         fact: &SessionEventFact,
     ) -> Result<SessionEventReceiptView, SessionFactError> {
         self.unavailable()?;
+        if self.ingest_refusals.lock().contains(&fact.kind) {
+            return Err(SessionFactError::Refused(format!(
+                "fixture refused {} ingest",
+                fact.kind.as_str()
+            )));
+        }
         // Replay-idempotent by event id.
         let mut seen = self.seen_event_ids.lock();
         if seen.contains(&fact.event_id.as_str().to_string()) {
@@ -393,6 +449,9 @@ impl SessionFactSink for InMemoryFactSink {
         drop(revision);
         drop(reached);
         self.facts.lock().push((fact.clone(), admission));
+        if fact.kind == SessionEventKindV1::Cleanup && *self.cleanup_receipt_lost.lock() {
+            return Err(SessionFactError::Unavailable);
+        }
         Ok(SessionEventReceiptView {
             attachment_ref: attachment.clone(),
             event_id: fact.event_id.clone(),
@@ -507,6 +566,9 @@ impl SessionFactSink for InMemoryFactSink {
         _attachment: &SessionAttachmentRef,
     ) -> Result<SessionStateView, SessionFactError> {
         self.unavailable()?;
+        if let Some(error) = self.state_refusal.lock().clone() {
+            return Err(error);
+        }
         Ok(self.read_state())
     }
 }
@@ -548,11 +610,12 @@ impl InMemoryFactSink {
             }
             last = Some(fact.event_id.as_str().to_string());
         }
+        let forced = *self.forced_canonical_state.lock();
         SessionStateView {
-            canonical_state: canonical,
+            canonical_state: forced.unwrap_or(canonical),
             canonical_revision: *self.canonical_revision.lock(),
-            cleanup_recorded: cleanup,
-            conflicting_terminal: false,
+            cleanup_recorded: cleanup && !*self.cleanup_readback_missing.lock(),
+            conflicting_terminal: *self.conflicting_terminal.lock(),
             last_event_id: last,
         }
     }

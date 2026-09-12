@@ -52,6 +52,9 @@ pub mod tachi_sink;
 pub mod tool;
 
 #[cfg(test)]
+mod obligation_tests;
+
+#[cfg(test)]
 mod tests;
 
 pub use acpx::{AcpxController, AcpxControllerConfig};
