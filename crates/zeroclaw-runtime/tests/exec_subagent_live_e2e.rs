@@ -221,10 +221,17 @@ impl SessionFactSink for RecordingSink {
 
     async fn reconnect(
         &self,
+        expected_attachment: &SessionAttachmentRef,
         _binding: &SessionBinding,
     ) -> Result<SessionReconnectReceiptView, SessionFactError> {
+        let attachment = SessionAttachmentRef::from_opaque("att-live-1");
+        if &attachment != expected_attachment {
+            return Err(SessionFactError::Refused(
+                "reconnect receipt attachment binding mismatch".to_string(),
+            ));
+        }
         Ok(SessionReconnectReceiptView {
-            attachment_ref: SessionAttachmentRef::from_opaque("att-live-1"),
+            attachment_ref: attachment,
             reconnected: true,
             resume_from_revision: *self.revision.lock(),
             state: SessionStateView {

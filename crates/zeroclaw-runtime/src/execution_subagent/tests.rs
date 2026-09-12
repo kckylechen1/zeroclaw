@@ -1136,14 +1136,14 @@ async fn discrimination_reconnect_replays_facts_without_regressing_canonical_sta
         .unwrap();
     let orphaned = sink.get_state(&attachment).await.unwrap();
     let _ = orphaned;
-    let reconnect = sink.reconnect(&binding()).await.unwrap();
+    let reconnect = sink.reconnect(&attachment, &binding()).await.unwrap();
     assert!(
         reconnect.reconnected,
         "reconnected must reflect the marked dropout (a reconnect with no          dropout is not a recovery)"
     );
     assert_eq!(reconnect.resume_from_revision, 3);
     // A reconnect with NO marked dropout is not a recovery.
-    let stray = sink.reconnect(&binding()).await.unwrap();
+    let stray = sink.reconnect(&attachment, &binding()).await.unwrap();
     assert!(!stray.reconnected);
     // replay: the SAME fact (same id, same revision) dedups; a STALE fact
     // journals without moving anything; the terminal then advances.
