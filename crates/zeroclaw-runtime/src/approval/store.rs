@@ -10,7 +10,7 @@
 //! - **Who approved what, a month ago?** The audit log is a `Vec` in memory.
 //!   A restart erases the evidence.
 //!
-//! This store closes both. A grant is bound to one boot, one run, one tool, and
+//! This store closes both. A local-tool grant is bound to one boot, one run, one tool, and
 //! one argument hash, and is consumed by its first use. Everything that reaches
 //! the gate — granted, denied, timed out, auto-approved, blocked — is appended
 //! to a durable trail whether or not a human was involved.
@@ -23,40 +23,14 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
-const SCHEMA: &str = "
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA busy_timeout = 5000;
-CREATE TABLE IF NOT EXISTS approval_grants (
-    approval_id TEXT PRIMARY KEY,
-    boot_id     TEXT NOT NULL,
-    run_id      TEXT NOT NULL,
-    tool_name   TEXT NOT NULL,
-    args_hash   TEXT NOT NULL,
-    granted_at  TEXT NOT NULL,
-    expires_at  TEXT NOT NULL,
-    consumed_at TEXT,
-    approver    TEXT NOT NULL,
-    channel     TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_grants_lookup
-    ON approval_grants(boot_id, run_id, tool_name, args_hash);
-CREATE TABLE IF NOT EXISTS approval_audit (
-    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts           TEXT NOT NULL,
-    boot_id      TEXT NOT NULL,
-    run_id       TEXT,
-    agent        TEXT,
-    tool_name    TEXT NOT NULL,
-    args_hash    TEXT NOT NULL,
-    args_summary TEXT NOT NULL,
-    decision     TEXT NOT NULL,
-    approver     TEXT,
-    channel      TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_audit_ts ON approval_audit(ts);
-CREATE INDEX IF NOT EXISTS idx_audit_run ON approval_audit(run_id);
-";
+mod node;
+mod schema;
+pub use node::{
+    ClaimedNodeGrant, NodeClaimFailure, NodeGrantClaim, NodeGrantKind, NodeGrantProjection,
+};
+
+#[cfg(test)]
+mod node_tests;
 
 /// Default grant lifetime. Short on purpose: an approval is permission to do
 /// one thing now, not standing authority.
@@ -168,15 +142,14 @@ pub struct ApprovalStore {
 
 impl ApprovalStore {
     /// Open (creating if absent) the store under `data_dir`, scoped to
-    /// `boot_id`. Grants written by an earlier boot stay in the table as
-    /// evidence but can never be redeemed again.
+    /// `boot_id`. Local-tool grants written by an earlier boot stay as evidence
+    /// but cannot redeem in this boot. Node claims instead bind a stable grant ID.
     pub fn open(data_dir: &Path, boot_id: impl Into<String>) -> Result<Self> {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("creating approval store dir {}", data_dir.display()))?;
         let db_path = data_dir.join("approvals.db");
-        let conn = Connection::open(&db_path).context("opening approvals.db")?;
-        conn.execute_batch(SCHEMA)
-            .context("applying approval store schema")?;
+        let mut conn = Connection::open(&db_path).context("opening approvals.db")?;
+        schema::initialize(&mut conn, true).context("applying approval store schema")?;
         zeroclaw_infra::sqlite_perms::harden_sqlite_owner_only(&db_path);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -186,8 +159,8 @@ impl ApprovalStore {
 
     #[cfg(test)]
     fn open_in_memory(boot_id: impl Into<String>) -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
+        let mut conn = Connection::open_in_memory()?;
+        schema::initialize(&mut conn, false)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             boot_id: boot_id.into(),
@@ -231,9 +204,9 @@ impl ApprovalStore {
 
         self.lock().execute(
             "INSERT INTO approval_grants
-                 (approval_id, boot_id, run_id, tool_name, args_hash,
+                 (approval_id, grant_kind, boot_id, run_id, tool_name, args_hash,
                   granted_at, expires_at, consumed_at, approver, channel)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)",
+             VALUES (?1, 'local_tool', ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)",
             params![
                 grant.approval_id,
                 grant.boot_id,
@@ -271,7 +244,7 @@ impl ApprovalStore {
                     SET consumed_at = ?1
                   WHERE approval_id = (
                         SELECT approval_id FROM approval_grants
-                         WHERE boot_id = ?2 AND run_id = ?3
+                         WHERE grant_kind = 'local_tool' AND boot_id = ?2 AND run_id = ?3
                            AND tool_name = ?4 AND args_hash = ?5
                            AND consumed_at IS NULL
                            AND expires_at > ?1
@@ -291,7 +264,7 @@ impl ApprovalStore {
         let consumed: Option<String> = conn
             .query_row(
                 "SELECT consumed_at FROM approval_grants
-                  WHERE boot_id = ?1 AND run_id = ?2
+                  WHERE grant_kind = 'local_tool' AND boot_id = ?1 AND run_id = ?2
                     AND tool_name = ?3 AND args_hash = ?4
                     AND consumed_at IS NOT NULL
                   ORDER BY consumed_at DESC LIMIT 1",
@@ -306,7 +279,7 @@ impl ApprovalStore {
         let expired: Option<String> = conn
             .query_row(
                 "SELECT approval_id FROM approval_grants
-                  WHERE boot_id = ?1 AND run_id = ?2
+                  WHERE grant_kind = 'local_tool' AND boot_id = ?1 AND run_id = ?2
                     AND tool_name = ?3 AND args_hash = ?4
                     AND expires_at <= ?5
                   LIMIT 1",
