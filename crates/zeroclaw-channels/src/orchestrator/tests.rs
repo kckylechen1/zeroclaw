@@ -7432,38 +7432,6 @@ async fn message_dispatch_completes_every_id_in_a_debounced_turn() {
     );
 }
 
-/// Drive the production dispatch loop with an explicit router and no
-/// channel recording: for discriminations whose authority is the inbox
-/// store state itself (claim release), not the reply count.
-async fn dispatch_messages_through_router(
-    seen_ids: Option<Arc<MessageInbox>>,
-    router: AgentRouter,
-    channel_name: &'static str,
-    messages: &[(&'static str, &'static str)],
-) {
-    let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(4);
-    for (message_id, content) in messages {
-        tx.send(zeroclaw_api::channel::ChannelMessage {
-            id: (*message_id).to_string(),
-            sender: "alice".to_string(),
-            reply_target: "alice".to_string(),
-            content: (*content).to_string(),
-            channel: channel_name.into(),
-            channel_alias: None,
-            timestamp: 1,
-            thread_ts: None,
-            interruption_scope_id: None,
-            attachments: vec![],
-            subject: None,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    }
-    drop(tx);
-    run_message_dispatch_loop(rx, router, 2, seen_ids).await;
-}
-
 async fn deliver_messages_through_loop(
     seen_ids: Option<Arc<MessageInbox>>,
     channel_name: &'static str,
@@ -17195,64 +17163,222 @@ async fn message_dispatch_redelivery_stays_eligible_after_completion_failure() {
     );
 }
 
-/// Loop-level discriminator: a message dropped because no agent owns
-/// its channel still went through a Fresh admission, which holds a
-/// durable claim. The claim must be released at the drop so a later
-/// redelivery of the same id is admitted again — never suppressed as
-/// in-flight for the process lifetime. The store probe is the
-/// authority: on unfixed code the redelivery answers
-/// DuplicateInFlight.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn unowned_channel_drop_releases_the_fresh_claim() {
+async fn message_dispatch_loop_unowned_channel_warns_once_with_diagnostics_and_no_pii() {
+    let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+    let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+    zeroclaw_log::try_install_capture_subscriber();
+    let mut logs = zeroclaw_log::subscribe_or_install();
+    while logs.try_recv().is_ok() {}
+
+    let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let channel = Arc::new(StaticNameRecordingChannel {
+        name: "owned-channel",
+        sent_messages: Arc::clone(&sent),
+    });
+    let provider = Arc::new(ConcurrencyTrackingProvider {
+        delay: Duration::from_millis(1),
+        in_flight: Arc::new(AtomicUsize::new(0)),
+        peak_in_flight: Arc::new(AtomicUsize::new(0)),
+    });
+    let mut config = zeroclaw_config::schema::Config::default();
+    config.channels.debounce_ms = 0;
+    let ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
+        channel,
+        provider,
+        config,
+        zeroclaw_config::schema::AliasedAgentConfig::default(),
+        "test-provider",
+        None,
+    );
+    let router = AgentRouter::multi(
+        HashMap::from([("test-agent".to_string(), ctx)]),
+        HashMap::from([("owned-channel".to_string(), "test-agent".to_string())]),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let inbox = Arc::new(MessageInbox::open(dir.path()).unwrap());
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    // Distinct IDs and senders must not bypass per-channel warning suppression.
+    for (index, (channel, alias)) in [
+        ("discord", Some("bot_alpha")),
+        ("discord", Some("bot_alpha")),
+        ("discord", Some("bot_beta")),
+        ("telegram", None),
+        ("telegram", None),
+        ("owned-channel", None),
+        ("owned-channel", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let owned = channel == "owned-channel";
+        tx.send(ChannelMessage {
+            id: if owned {
+                "owned-duplicate".into()
+            } else {
+                format!("unowned-{index}")
+            },
+            sender: format!("private-sender-{index}"),
+            reply_target: "test-room".into(),
+            content: "private-message-content".into(),
+            channel: channel.into(),
+            channel_alias: alias.map(str::to_owned),
+            timestamp: index as u64,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    drop(tx);
+    run_message_dispatch_loop(rx, router, 2, Some(inbox)).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut warnings = Vec::new();
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(50), logs.recv()).await {
+            Ok(Ok(event))
+                if event["message"] == "dropping inbound message: no agent owns this channel" =>
+            {
+                warnings.push(event)
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        warnings.len(),
+        3,
+        "expected one warning per channel identity: {warnings:?}"
+    );
+    for (channel, alias) in [
+        ("discord", Some("bot_alpha")),
+        ("discord", Some("bot_beta")),
+        ("telegram", None),
+    ] {
+        let event = warnings
+            .iter()
+            .find(|event| {
+                event["attributes"]["channel"] == channel
+                    && event["attributes"]["channel_alias"].as_str() == alias
+            })
+            .expect("each distinct unowned channel must remain diagnosable");
+        assert_eq!(event["attributes"]["error_key"], "channels.unowned_channel");
+        assert!(event["attributes"].get("sender").is_none());
+        let json = event.to_string();
+        assert!(!json.contains("private-sender"));
+        assert!(!json.contains("private-message-content"));
+    }
+    assert_eq!(
+        sent.lock().await.len(),
+        1,
+        "owned delivery and inbox dedup must still work"
+    );
+    zeroclaw_log::clear_broadcast_hook();
+}
+
+#[test]
+fn unowned_channel_warn_gate_lru_bounded_eviction_and_reload() {
+    let mut gate = UnownedChannelWarnGate::new(std::num::NonZeroUsize::new(2).unwrap());
+    assert!(gate.should_warn("a"));
+    assert!(!gate.should_warn("a"));
+    assert!(gate.should_warn("b"));
+    assert!(!gate.should_warn("a")); // Make b the least recently used entry.
+    assert!(gate.should_warn("c"));
+    assert_eq!(gate.seen.len(), 2);
+    assert!(!gate.should_warn("a"));
+    assert!(gate.should_warn("b"), "evicted identities may warn again");
+    assert_eq!(gate.seen.len(), 2);
+    assert!(UnownedChannelWarnGate::default().should_warn("a"));
+}
+
+async fn dispatch_messages_through_router(
+    seen_ids: Option<Arc<MessageInbox>>,
+    router: AgentRouter,
+    channel_name: &'static str,
+    messages: &[(&'static str, &'static str)],
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(4);
+    for (message_id, content) in messages {
+        tx.send(zeroclaw_api::channel::ChannelMessage {
+            id: (*message_id).to_string(),
+            sender: "alice".to_string(),
+            reply_target: "alice".to_string(),
+            content: (*content).to_string(),
+            channel: channel_name.into(),
+            channel_alias: None,
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            subject: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    drop(tx);
+    run_message_dispatch_loop(rx, router, 2, seen_ids).await;
+}
+
+#[tokio::test]
+async fn unowned_channel_drop_replays_through_valid_router_with_same_inbox() {
     use super::inbox::Admission;
 
     let seen_dir = tempfile::tempdir().unwrap();
     let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
-    let empty_router = AgentRouter::multi(HashMap::new(), HashMap::new());
+    let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let channel = Arc::new(StaticNameRecordingChannel {
+        name: "test-channel",
+        sent_messages: Arc::clone(&sent),
+    });
+    let provider = Arc::new(ModelCaptureModelProvider::default());
+    let mut config = zeroclaw_config::schema::Config::default();
+    config.channels.debounce_ms = 0;
+    let ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
+        channel,
+        provider.clone(),
+        config,
+        zeroclaw_config::schema::AliasedAgentConfig::default(),
+        "test-provider",
+        None,
+    );
+    let delivery = [("m-unowned", "hello")];
 
     dispatch_messages_through_router(
         Some(Arc::clone(&store)),
-        empty_router,
+        AgentRouter::multi(HashMap::new(), HashMap::new()),
         "test-channel",
-        &[("m-unowned", "hello")],
+        &delivery,
     )
     .await;
+    assert_eq!(provider.call_count.load(Ordering::SeqCst), 0);
+    assert!(sent.lock().await.is_empty());
 
-    assert!(
-        matches!(
-            store.admit("test-channel", "m-unowned").unwrap(),
-            Admission::Fresh(_)
-        ),
-        "the unowned-channel drop must release its Fresh claim: a redelivery \
-         of the same id must be admissible, not suppressed as in-flight"
-    );
-}
-
-/// Loop-level discriminator: the /stop control itself is Fresh-admitted
-/// and its claim must be released when the control finishes — a
-/// redelivered /stop must not be suppressed as in-flight for the
-/// process lifetime.
-#[tokio::test]
-async fn stop_command_releases_its_own_fresh_claim() {
-    use super::inbox::Admission;
-
-    let seen_dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
-
-    deliver_messages_through_loop(
+    // Replay through the production loop without an admission probe taking
+    // the released claim away from the valid router.
+    dispatch_messages_through_router(
         Some(Arc::clone(&store)),
+        AgentRouter::single(Arc::clone(&ctx)),
         "test-channel",
-        &[("m-stop", "/stop")],
-        0,
+        &delivery,
     )
     .await;
-
-    assert!(
-        matches!(
-            store.admit("test-channel", "m-stop").unwrap(),
-            Admission::Fresh(_)
-        ),
-        "the /stop control must release its own Fresh claim: a redelivered \
-         /stop must be admissible, not suppressed as in-flight"
+    assert_eq!(provider.call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(sent.lock().await.as_slice(), &["ok".to_string()]);
+    assert_eq!(
+        store.admit("test-channel", "m-unowned").unwrap(),
+        Admission::DuplicateCompleted,
+        "the replay must finish processing and durably complete its receipt"
     );
+
+    dispatch_messages_through_router(
+        Some(Arc::clone(&store)),
+        AgentRouter::single(ctx),
+        "test-channel",
+        &delivery,
+    )
+    .await;
+    assert_eq!(provider.call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(sent.lock().await.as_slice(), &["ok".to_string()]);
 }

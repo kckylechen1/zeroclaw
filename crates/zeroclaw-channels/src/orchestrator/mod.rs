@@ -3076,6 +3076,36 @@ pub(crate) fn warn_inbox_failure_once(key: &str) -> bool {
     seen.insert(key.to_string())
 }
 
+/// Suppress repeated channel-identity warnings within one dispatch loop. At most
+/// 256 keys are retained; eviction or a new loop allows a channel to warn again.
+/// This bounds entry count, not the byte length of channel names.
+struct UnownedChannelWarnGate {
+    seen: lru::LruCache<String, ()>,
+}
+
+impl UnownedChannelWarnGate {
+    fn new(capacity: std::num::NonZeroUsize) -> Self {
+        Self {
+            seen: lru::LruCache::new(capacity),
+        }
+    }
+
+    fn should_warn(&mut self, channel_key: &str) -> bool {
+        if self.seen.get(channel_key).is_some() {
+            return false;
+        }
+        self.seen.put(channel_key.to_string(), ());
+        true
+    }
+}
+
+impl Default for UnownedChannelWarnGate {
+    fn default() -> Self {
+        // A zero capacity would fail at compile time, not during dispatch.
+        Self::new(const { std::num::NonZeroUsize::new(256).unwrap() })
+    }
+}
+
 async fn run_message_dispatch_loop(
     mut rx: tokio::sync::mpsc::Receiver<zeroclaw_api::channel::ChannelMessage>,
     router: AgentRouter,
@@ -3089,6 +3119,7 @@ async fn run_message_dispatch_loop(
         InFlightSenderTaskState,
     >::new()));
     let task_sequence = Arc::new(AtomicU64::new(1));
+    let mut unowned_channel_warn_gate = UnownedChannelWarnGate::default();
 
     while let Some(msg) = rx.recv().await {
         // Inbox admission stays first: every message class handled
@@ -3152,10 +3183,22 @@ async fn run_message_dispatch_loop(
             None
         };
         let Some(ctx) = router.resolve(&msg) else {
-            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"channel_alias": msg.channel_alias, "sender": msg.sender})), "dropping inbound message: no agent owns this channel");
-            // A Fresh admission holds a durable claim: release it so a
-            // later redelivery of the same id is admitted again instead
-            // of being suppressed as in-flight for the process lifetime.
+            let channel_key = composite_channel_key(&msg.channel, msg.channel_alias.as_deref());
+            if unowned_channel_warn_gate.should_warn(&channel_key) {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({
+                            "error_key": "channels.unowned_channel",
+                            "channel": msg.channel,
+                            "channel_alias": msg.channel_alias,
+                        })),
+                    "dropping inbound message: no agent owns this channel"
+                );
+            }
+            // No agent took ownership: keep the received row replayable once
+            // routing is available again in this process.
             if let Some(seen_ids) = &inbox
                 && let Some(receipt) = inbox_receipt
             {
@@ -3195,14 +3238,6 @@ async fn run_message_dispatch_loop(
                         .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
                     "stop command: no registered channel found for reply"
                 );
-            }
-            // The /stop control itself was Fresh-admitted: release its
-            // claim so a redelivered /stop is not suppressed as
-            // in-flight for the process lifetime.
-            if let Some(seen_ids) = &inbox
-                && let Some(receipt) = inbox_receipt
-            {
-                seen_ids.release_claims(std::slice::from_ref(&receipt));
             }
             continue;
         }
