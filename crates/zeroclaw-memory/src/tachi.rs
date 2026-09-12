@@ -1255,13 +1255,14 @@ mod tests {
             "recording-soul-boundary"
         }
         fn dimensions(&self) -> usize {
-            2
+            // The pinned memcore vec0 schema stores 1024-dimensional vectors.
+            1024
         }
         async fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
             self.inputs
                 .lock()
                 .extend(texts.iter().map(|text| (*text).to_string()));
-            Ok(texts.iter().map(|_| vec![0.2, 0.8]).collect())
+            Ok(texts.iter().map(|_| vec![0.2; self.dimensions()]).collect())
         }
     }
 

@@ -362,8 +362,20 @@ mod tests {
         tier: &str,
         revision: i64,
     ) {
+        let entry = raw_entry(id, text, summary, keywords, tier, revision);
+        store.upsert(&entry).expect("seed");
+    }
+
+    fn raw_entry(
+        id: &str,
+        text: &str,
+        summary: &str,
+        keywords: &[&str],
+        tier: &str,
+        revision: i64,
+    ) -> MemoryEntry {
         let now = chrono::Local::now().to_rfc3339();
-        let entry = MemoryEntry {
+        MemoryEntry {
             id: id.into(),
             path: format!("/agents/default/default/core/{id}"),
             summary: summary.into(),
@@ -398,28 +410,29 @@ mod tests {
             recall_count: 0,
             query_diversity: 0,
             tier: tier.into(),
-        };
-        store.upsert(&entry).expect("seed");
+        }
     }
 
-    /// Overwrite (or remove, for `None`) the `zeroclaw_namespace` metadata on a
-    /// seeded row, leaving every other seeded field untouched.
-    fn set_namespace(store: &mut MemoryStore, id: &str, namespace: Option<&str>) {
-        let mut row = store.get(id).unwrap().expect("seeded row");
-        if let Some(obj) = row.metadata.as_object_mut() {
-            match namespace {
-                Some(ns) => {
-                    obj.insert(
-                        crate::tachi::METADATA_ZC_NAMESPACE.to_string(),
-                        serde_json::Value::String(ns.to_string()),
-                    );
-                }
-                None => {
-                    obj.remove(crate::tachi::METADATA_ZC_NAMESPACE);
-                }
+    fn seed_namespaced_raw(store: &mut MemoryStore, id: &str, text: &str, namespace: Option<&str>) {
+        let mut entry = raw_entry(id, text, "", &[], "raw", 1);
+        let metadata = entry
+            .metadata
+            .as_object_mut()
+            .expect("fixture metadata object");
+        match namespace {
+            Some(namespace) => {
+                metadata.insert(
+                    crate::tachi::METADATA_ZC_NAMESPACE.into(),
+                    serde_json::Value::String(namespace.into()),
+                );
+            }
+            None => {
+                metadata.remove(crate::tachi::METADATA_ZC_NAMESPACE);
             }
         }
-        store.upsert(&row).expect("set namespace");
+        // Seed once so the first revision remains 1; an extra upsert would
+        // increment revision before the enrichment preservation assertion.
+        store.upsert(&entry).expect("seed namespaced row");
     }
 
     #[tokio::test]
@@ -759,23 +772,17 @@ mod tests {
         let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
         {
             let mut store = mem.store_handle().lock();
-            seed_raw(
+            seed_namespaced_raw(
                 &mut store,
                 "soul::identity-a::disposition",
                 "RESERVED_DISPOSITION_TEXT",
-                "",
-                &[],
-                "raw",
-                1,
+                Some(crate::soul::SOUL_NAMESPACE),
             );
-            seed_raw(
+            seed_namespaced_raw(
                 &mut store,
                 "soul::identity-a::candidate::density",
                 "RESERVED_CANDIDATE_TEXT",
-                "",
-                &[],
-                "raw",
-                1,
+                Some(crate::soul::SOUL_NAMESPACE),
             );
             seed_raw(
                 &mut store,
@@ -786,22 +793,7 @@ mod tests {
                 "raw",
                 1,
             );
-            seed_raw(
-                &mut store,
-                "raw-legacy",
-                "ORDINARY_LEGACY_TEXT",
-                "",
-                &[],
-                "raw",
-                1,
-            );
-            set_namespace(&mut store, "soul::identity-a::disposition", Some("soul"));
-            set_namespace(
-                &mut store,
-                "soul::identity-a::candidate::density",
-                Some("soul"),
-            );
-            set_namespace(&mut store, "raw-legacy", None);
+            seed_namespaced_raw(&mut store, "raw-legacy", "ORDINARY_LEGACY_TEXT", None);
         }
 
         let provider = FixedJsonProvider::ok(
@@ -867,29 +859,17 @@ mod tests {
         let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
         {
             let mut store = mem.store_handle().lock();
-            seed_raw(
+            seed_namespaced_raw(
                 &mut store,
                 "soul::identity-b::disposition",
                 "RESERVED_ONLY_DISPOSITION",
-                "",
-                &[],
-                "raw",
-                1,
+                Some(crate::soul::SOUL_NAMESPACE),
             );
-            seed_raw(
+            seed_namespaced_raw(
                 &mut store,
                 "soul::identity-b::candidate::density",
                 "RESERVED_ONLY_CANDIDATE",
-                "",
-                &[],
-                "raw",
-                1,
-            );
-            set_namespace(&mut store, "soul::identity-b::disposition", Some("soul"));
-            set_namespace(
-                &mut store,
-                "soul::identity-b::candidate::density",
-                Some("soul"),
+                Some(crate::soul::SOUL_NAMESPACE),
             );
         }
 
@@ -946,16 +926,7 @@ mod tests {
         let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
         {
             let mut store = mem.store_handle().lock();
-            seed_raw(
-                &mut store,
-                "raw-no-ns",
-                "LEGACY_NO_NAMESPACE_TEXT",
-                "",
-                &[],
-                "raw",
-                1,
-            );
-            set_namespace(&mut store, "raw-no-ns", None);
+            seed_namespaced_raw(&mut store, "raw-no-ns", "LEGACY_NO_NAMESPACE_TEXT", None);
         }
 
         let provider = FixedJsonProvider::ok(
