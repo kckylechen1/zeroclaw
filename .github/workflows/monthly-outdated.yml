@@ -42,89 +42,33 @@ jobs:
         id: scan
         continue-on-error: true
         shell: bash
-        run: |
-          OUTPUT_FILE="${{ runner.temp }}/outdated-output.txt"
+        run: bash scripts/ci/monthly_outdated.sh scan
 
-          # Write header
-          {
-            echo "## Toolchain versions"
-            echo
-            rustc --version
-            cargo --version
-            echo
-            echo "## Crate versions"
-            echo
-          } > "$OUTPUT_FILE"
-
-          # Run outdated with exit code capture (exit 1 = outdated found — expected)
-          set +e
-          cargo outdated --workspace --exit-code 1 &>> "$OUTPUT_FILE"
-          exit_code=$?
-          set -e
-
-          echo "scan_exit_code=$exit_code" >> "$GITHUB_OUTPUT"
-
-          # exit > 1 = crash/network error — don't create garbage issue
-          if [ "$exit_code" -gt 1 ]; then
-            echo "::error::cargo outdated crashed with exit code $exit_code. Check the step log for details."
-          fi
-          exit "$exit_code"
+      - name: Retain outdated scan report
+        if: always() && steps.scan.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: monthly-outdated-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/outdated-output.txt
+          if-no-files-found: error
 
       - name: Open issue on outdated dependencies
         id: outdated_issue
-        if: steps.scan.outputs.scan_exit_code == '1'
+        if: steps.scan.outputs.scan_exit_code == '10'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          issues_enabled=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.has_issues')
-          if [[ "$issues_enabled" != "true" ]]; then
-            echo "::notice::Repository issues are disabled; skipping issue creation."
-            exit 0
-          fi
-
-          # Avoid duplicate while one is still open — link to the existing one.
-          existing_url=$(gh issue list \
-            --repo "$GITHUB_REPOSITORY" \
-            --label "dependencies" \
-            --state open \
-            --search "Outdated dependencies found in:title" \
-            --json url \
-            --jq '.[0].url // ""')
-
-          if [[ -n "$existing_url" ]]; then
-            echo "issue_url=$existing_url" >> "$GITHUB_OUTPUT"
-            echo "An open outdated-dependency issue already exists: $existing_url"
-            exit 0
-          fi
-
-          OUTPUT_FILE="${{ runner.temp }}/outdated-output.txt"
-          scan_output=$(cat "$OUTPUT_FILE")
-
-          {
-            printf '## Outdated dependencies found\n\n'
-            printf 'Workflow run: %s\n\n' "${RUN_URL}"
-            printf 'The following dependencies have newer versions available:\n\n'
-            printf '```\n%s\n```\n\n' "${scan_output}"
-            printf 'Review and update dependencies at your earliest convenience.\n'
-            printf 'Breaking changes may require more attention than patch bumps.\n'
-          } > "${{ runner.temp }}/issue-body.md"
-
-          issue_url=$(gh issue create \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "ci: Outdated dependencies found — $(date -u +%Y-%m-%d)" \
-            --label "dependencies" \
-            --body-file "${{ runner.temp }}/issue-body.md")
-          echo "issue_url=$issue_url" >> "$GITHUB_OUTPUT"
+          SCAN_EXIT_CODE: ${{ steps.scan.outputs.scan_exit_code }}
+        run: bash scripts/ci/monthly_outdated.sh issue
 
       - name: Propagate scan failure
-        if: steps.scan.outputs.scan_exit_code != '0'
+        if: always() && steps.scan.outputs.scan_exit_code != '0'
         env:
           ISSUE_URL: ${{ steps.outdated_issue.outputs.issue_url }}
           SCAN_EXIT_CODE: ${{ steps.scan.outputs.scan_exit_code }}
         run: |
-          if [[ "$SCAN_EXIT_CODE" == "1" ]]; then
+          if [[ "$SCAN_EXIT_CODE" == "10" ]]; then
             if [[ -n "$ISSUE_URL" ]]; then
               echo "::error::Outdated dependencies detected. See $ISSUE_URL for details."
             else
