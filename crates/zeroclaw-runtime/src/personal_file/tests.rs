@@ -1120,3 +1120,230 @@ fn personal_file_is_registered_nowhere() {
         );
     }
 }
+
+/// Skipped entries consume the fixed scan budget too. Grow one
+/// private directory across the boundary; no test-selected production limit.
+#[cfg(unix)]
+#[tokio::test]
+async fn listing_scan_bound_counts_skipped_and_mixed_entries() {
+    use super::domain::MAX_LIST_SCAN_ENTRIES;
+    let _fs_serialized = fs_test_guard().await;
+    let tmp = tempfile::tempdir().expect("scan fixture");
+    let (service, root) = service_with_rw_root(tmp.path());
+    for limit in [0, 1] {
+        match service
+            .list(&root, None, limit)
+            .await
+            .expect("empty listing")
+        {
+            PersonalFileResult::Listed { entries } => assert!(entries.is_empty()),
+            other => panic!("expected listing, got {other:?}"),
+        }
+    }
+    // Only these links and the reserved namespace are directory entries.
+    // The dangling target is private and never created or followed.
+    let target = tmp.path().join("absent-private-target");
+    std::fs::create_dir(tmp.path().join(TRASH_NAMESPACE)).expect("private trash");
+    for index in 0..MAX_LIST_SCAN_ENTRIES - 2 {
+        unix_symlink(&target, &tmp.path().join(format!("skip-{index:05}")));
+    }
+    // 19,999 non-dot entries, then exactly 20,000: both are complete empty
+    // results even at caller limit zero. Trash must count without listing.
+    for total in [MAX_LIST_SCAN_ENTRIES - 1, MAX_LIST_SCAN_ENTRIES] {
+        if total == MAX_LIST_SCAN_ENTRIES {
+            unix_symlink(&target, &tmp.path().join("exact-cap-link"));
+        }
+        match service
+            .list(&root, None, 0)
+            .await
+            .expect("within scan bound")
+        {
+            PersonalFileResult::Listed { entries } => assert!(entries.is_empty()),
+            other => panic!("expected skipped-only listing, got {other:?}"),
+        }
+    }
+    unix_symlink(&target, &tmp.path().join("overflow-link"));
+    for limit in [0, 1, usize::MAX] {
+        let result = service.list(&root, None, limit).await;
+        eprintln!(
+            "PERSONAL_FILE_SCAN_BOUND total={} caller_limit={limit} result={result:?}",
+            MAX_LIST_SCAN_ENTRIES + 1
+        );
+        assert!(
+            matches!(result, Err(PersonalFileError::ScanLimitExceeded(bound)) if bound == MAX_LIST_SCAN_ENTRIES)
+        );
+    }
+    // Replace skipped entries with listable files while staying exactly at
+    // the scan cap. Outcomes cannot depend on filesystem enumeration order.
+    std::fs::remove_file(tmp.path().join("overflow-link")).expect("remove private link");
+    std::fs::remove_file(tmp.path().join("exact-cap-link")).expect("replace private link");
+    std::fs::write(tmp.path().join("visible-a.txt"), "a").expect("private file");
+    match service
+        .list(&root, None, 1)
+        .await
+        .expect("one visible entry")
+    {
+        PersonalFileResult::Listed { entries } => {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].name, "visible-a.txt");
+        }
+        other => panic!("expected mixed listing, got {other:?}"),
+    }
+    assert!(matches!(
+        service.list(&root, None, 0).await,
+        Err(PersonalFileError::TooManyEntries(0))
+    ));
+    std::fs::remove_file(tmp.path().join("skip-00000")).expect("replace private link");
+    std::fs::write(tmp.path().join("visible-b.txt"), "b").expect("second private file");
+    assert!(matches!(
+        service.list(&root, None, 1).await,
+        Err(PersonalFileError::TooManyEntries(1))
+    ));
+    match service
+        .list(&root, None, 2)
+        .await
+        .expect("two visible entries")
+    {
+        PersonalFileResult::Listed { entries } => {
+            assert_eq!(
+                entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                vec!["visible-a.txt", "visible-b.txt"]
+            );
+        }
+        other => panic!("expected mixed listing, got {other:?}"),
+    }
+    unix_symlink(&target, &tmp.path().join("mixed-overflow-link"));
+    assert!(
+        matches!(service.list(&root, None, 2).await, Err(PersonalFileError::ScanLimitExceeded(bound)) if bound == MAX_LIST_SCAN_ENTRIES)
+    );
+    assert!(!target.exists());
+    assert_eq!(
+        std::fs::read(tmp.path().join("visible-a.txt")).unwrap(),
+        b"a"
+    );
+    assert_eq!(
+        std::fs::read(tmp.path().join("visible-b.txt")).unwrap(),
+        b"b"
+    );
+}
+
+/// Both mutation entry points must refuse classified directories before
+/// creating destination parents or allocating recovery state.
+#[cfg(unix)]
+async fn directory_mutation_refusal_fixture(trash: bool) {
+    let _fs_serialized = fs_test_guard().await;
+    for shape in [
+        "nested-git-dir",
+        "nested-worktree-file",
+        "empty",
+        "plain",
+        "immediate-git",
+    ] {
+        let tmp = tempfile::tempdir().expect("private directory fixture");
+        let (service, root) = service_with_rw_root(tmp.path());
+        let folder = tmp.path().join("folder");
+        std::fs::create_dir(&folder).expect("private source directory");
+        let mut expected_files = Vec::new();
+        match shape {
+            "nested-git-dir" | "nested-worktree-file" => {
+                let project = folder.join("project");
+                std::fs::create_dir(&project).expect("private nested project");
+                let sentinel = project.join("sentinel.txt");
+                std::fs::write(&sentinel, "nested source must remain").expect("sentinel");
+                expected_files.push((sentinel, b"nested source must remain".to_vec()));
+                let git = project.join(".git");
+                if shape == "nested-git-dir" {
+                    std::fs::create_dir(&git).expect("private Git-shaped directory");
+                    let marker = git.join("marker");
+                    std::fs::write(&marker, "private Git marker").expect("marker");
+                    expected_files.push((marker, b"private Git marker".to_vec()));
+                } else {
+                    // Synthetic worktree metadata only: no real repository,
+                    // external gitdir or Git process is involved.
+                    let contents = "gitdir: private-nonexistent-gitdir\n";
+                    std::fs::write(&git, contents).expect("private worktree marker");
+                    expected_files.push((git, contents.as_bytes().to_vec()));
+                }
+            }
+            "plain" => {
+                let sentinel = folder.join("plain.txt");
+                std::fs::write(&sentinel, "plain source").expect("plain file");
+                expected_files.push((sentinel, b"plain source".to_vec()));
+            }
+            "immediate-git" => {
+                let marker = folder.join(".git");
+                let contents = "gitdir: private-nonexistent-gitdir\n";
+                std::fs::write(&marker, contents).expect("immediate private marker");
+                expected_files.push((marker, contents.as_bytes().to_vec()));
+            }
+            "empty" => {}
+            _ => unreachable!("fixed fixture shapes"),
+        }
+        let source = PersonalRelativePath::parse("folder").expect("source path");
+        let destination =
+            PersonalRelativePath::parse("new/parents/moved").expect("destination path");
+        let result = if trash {
+            service.delete_to_trash(&root, &source).await
+        } else {
+            service
+                .move_no_clobber(
+                    MoveSource {
+                        root: &root,
+                        path: &source,
+                    },
+                    MoveDestination {
+                        root: &root,
+                        path: &destination,
+                    },
+                )
+                .await
+        };
+        let source_present = folder.is_dir();
+        let destination_allocated = tmp.path().join("new").exists();
+        let trash_allocated = tmp.path().join(TRASH_NAMESPACE).exists();
+        eprintln!(
+            "DIRECTORY_MUTATION_REFUSAL trash={trash} shape={shape} source_present={source_present} destination_allocated={destination_allocated} trash_allocated={trash_allocated} result={result:?}"
+        );
+        if shape == "immediate-git" {
+            assert!(matches!(
+                result,
+                Err(PersonalFileError::Refused(
+                    PersonalFileRefusal::GitRepository { .. }
+                ))
+            ));
+        } else {
+            assert!(matches!(
+                result,
+                Err(PersonalFileError::UnsupportedSafely(_))
+            ));
+        }
+        assert!(source_present);
+        assert!(!destination_allocated);
+        assert!(!trash_allocated);
+        for (path, contents) in expected_files {
+            assert_eq!(
+                std::fs::read(path).expect("preserved source bytes"),
+                contents
+            );
+        }
+        if shape == "empty" {
+            assert_eq!(std::fs::read_dir(&folder).expect("empty source").count(), 0);
+        }
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).expect("private root").count(),
+            1
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn directory_move_refuses_nested_git_and_allocates_nothing() {
+    directory_mutation_refusal_fixture(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn directory_trash_refuses_nested_git_and_allocates_nothing() {
+    directory_mutation_refusal_fixture(true).await;
+}

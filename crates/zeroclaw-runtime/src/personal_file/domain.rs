@@ -215,6 +215,12 @@ pub const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 /// Upper bound for one bounded listing.
 pub const MAX_LIST_ENTRIES: usize = 10_000;
 
+/// Maximum non-dot directory entries classified by one listing, including
+/// entries hidden from its output. One extra iterator result distinguishes
+/// an exact-cap directory from overflow; that sentinel is not classified.
+#[cfg(unix)]
+pub(crate) const MAX_LIST_SCAN_ENTRIES: usize = 20_000;
+
 /// Sha-256 digest, lowercase hex. The content identity used by
 /// `replace_text_if_expected`: a mismatch answers a typed conflict with
 /// zero mutation.
@@ -566,6 +572,10 @@ pub enum PersonalFileError {
     /// Listing exceeds the explicit bound.
     #[error("too many entries: more than {0}")]
     TooManyEntries(usize),
+    /// Enumeration exceeded the scan budget, independently of output size.
+    /// No partial listing is returned.
+    #[error("list scan limit exceeded: more than {0} entries")]
+    ScanLimitExceeded(usize),
     /// Content is not valid UTF-8; v1 is text-only and answers typed
     /// unsupported rather than corrupting content.
     #[error("content is not text (utf-8): {0}")]
