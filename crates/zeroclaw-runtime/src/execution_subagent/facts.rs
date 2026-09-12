@@ -142,6 +142,9 @@ pub trait SessionFactSink: Send + Sync {
         fact: SessionConnectionFactV1,
     ) -> Result<(), SessionFactError>;
 
+    /// Reconnect only the already accepted `expected_attachment`; a mismatched
+    /// receipt must be refused before recording its revision or accepting state.
+    /// Rust callers and implementers must supply the borrowed attachment identity.
     /// Reconnect after attachment loss: the spine verifies the full
     /// fresh-claim admission and returns `resume_from_revision` — the
     /// revision the host resumes fact replay from. Canonical state never
@@ -149,6 +152,7 @@ pub trait SessionFactSink: Send + Sync {
     /// authoritative facts after this.
     async fn reconnect(
         &self,
+        expected_attachment: &SessionAttachmentRef,
         binding: &SessionBinding,
     ) -> Result<SessionReconnectReceiptView, SessionFactError>;
 

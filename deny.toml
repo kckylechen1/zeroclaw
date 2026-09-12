@@ -99,12 +99,11 @@ unused-allowed-license = "allow"
 multiple-versions = "deny"
 wildcards = "deny"
 
-# Pre-existing duplicate-version crates as of 2026-07-01.
-# Each skip entry removes one specific duplicate version from the
-# multiple-versions check. The canonical (unskipped) version is the
-# newest one currently in the resolved graph; remove skip entries as
-# dependency bumps eliminate the older duplicates. Version-scoping
-# ensures that any future unlisted duplicate version fails CI.
+# Reviewed exceptions for specific transitive versions in the selected graph.
+# A skip removes that version from the multiple-versions check; it does not
+# designate another version as canonical or necessarily skip the oldest one.
+# Remove exceptions when the owning dependency no longer needs them. Unlisted
+# duplicates fail only when reached by the graph selected for the check.
 
 [[bans.skip]]
 name = "async-channel"

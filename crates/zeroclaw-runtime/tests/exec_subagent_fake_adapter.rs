@@ -388,6 +388,7 @@ async fn fake_adapter_tool_run_completes_with_clean_fact_order() {
         }
         async fn reconnect(
             &self,
+            _expected_attachment: &zeroclaw_api::session_exec::SessionAttachmentRef,
             _binding: &zeroclaw_runtime::execution_subagent::SessionBinding,
         ) -> Result<
             zeroclaw_api::session_exec::SessionReconnectReceiptView,

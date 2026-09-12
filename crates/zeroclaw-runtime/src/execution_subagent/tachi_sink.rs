@@ -1481,6 +1481,7 @@ impl SessionFactSink for TachiSessionFactSink {
 
     async fn reconnect(
         &self,
+        expected_attachment: &SessionAttachmentRef,
         binding: &SessionBinding,
     ) -> Result<SessionReconnectReceiptView, SessionFactError> {
         let receipt = self
@@ -1511,6 +1512,11 @@ impl SessionFactSink for TachiSessionFactSink {
                 SessionFactError::Refused("reconnect receipt carries no attachment id".to_string())
             })?;
         validate_attachment_id(attachment_id)?;
+        if attachment_id != expected_attachment.as_str() {
+            return Err(SessionFactError::Refused(
+                "reconnect receipt attachment binding mismatch".to_string(),
+            ));
+        }
         require_receipt_value(&receipt.body, "/attachment_state", &json!("attached"))?;
         if !matches!(
             receipt
