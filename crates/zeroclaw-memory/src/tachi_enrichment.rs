@@ -191,6 +191,20 @@ fn push_raw_candidate(
     else {
         return Ok(());
     };
+    // The reserved Soul namespace is structurally excluded from every ambient
+    // memory surface, and optional LLM enrichment is one of them: a disposition
+    // or candidate row must never be shipped to the provider as candidate text.
+    // The canonical namespace lives in the memcore entry metadata (single
+    // source: `METADATA_ZC_NAMESPACE`); a missing/blank namespace stays
+    // ordinary and eligible.
+    if entry
+        .metadata
+        .get(crate::tachi::METADATA_ZC_NAMESPACE)
+        .and_then(|v| v.as_str())
+        == Some(crate::soul::SOUL_NAMESPACE)
+    {
+        return Ok(());
+    }
     if entry.archived || !entry.tier.eq_ignore_ascii_case("raw") {
         return Ok(());
     }
@@ -285,6 +299,8 @@ mod tests {
         body: String,
         calls: AtomicUsize,
         fail: bool,
+        /// Raw user messages received, in call order (enrichment payloads).
+        messages: Mutex<Vec<String>>,
     }
 
     impl FixedJsonProvider {
@@ -293,6 +309,7 @@ mod tests {
                 body: body.into(),
                 calls: AtomicUsize::new(0),
                 fail: false,
+                messages: Mutex::new(Vec::new()),
             }
         }
         fn failing() -> Self {
@@ -300,7 +317,12 @@ mod tests {
                 body: String::new(),
                 calls: AtomicUsize::new(0),
                 fail: true,
+                messages: Mutex::new(Vec::new()),
             }
+        }
+        /// Snapshot of every user message the provider was asked to enrich.
+        fn received(&self) -> Vec<String> {
+            self.messages.lock().clone()
         }
     }
 
@@ -318,11 +340,12 @@ mod tests {
         async fn chat_with_system(
             &self,
             _system_prompt: Option<&str>,
-            _message: &str,
+            message: &str,
             _model: &str,
             _temperature: Option<f64>,
         ) -> anyhow::Result<String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.messages.lock().push(message.to_string());
             if self.fail {
                 anyhow::bail!("provider error");
             }
@@ -377,6 +400,26 @@ mod tests {
             tier: tier.into(),
         };
         store.upsert(&entry).expect("seed");
+    }
+
+    /// Overwrite (or remove, for `None`) the `zeroclaw_namespace` metadata on a
+    /// seeded row, leaving every other seeded field untouched.
+    fn set_namespace(store: &mut MemoryStore, id: &str, namespace: Option<&str>) {
+        let mut row = store.get(id).unwrap().expect("seeded row");
+        if let Some(obj) = row.metadata.as_object_mut() {
+            match namespace {
+                Some(ns) => {
+                    obj.insert(
+                        crate::tachi::METADATA_ZC_NAMESPACE.to_string(),
+                        serde_json::Value::String(ns.to_string()),
+                    );
+                }
+                None => {
+                    obj.remove(crate::tachi::METADATA_ZC_NAMESPACE);
+                }
+            }
+        }
+        store.upsert(&row).expect("set namespace");
     }
 
     #[tokio::test]
@@ -705,6 +748,237 @@ mod tests {
             store.get("raw-done").unwrap().unwrap().summary,
             "Existing summary"
         );
+    }
+
+    #[tokio::test]
+    async fn enrich_skips_reserved_soul_rows_and_enriches_ordinary() {
+        // Mixed store: reserved Soul disposition + candidate rows are eligible
+        // by summary/tier but must never reach the provider; ordinary rows
+        // (default namespace and missing namespace) still enrich.
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        {
+            let mut store = mem.store_handle().lock();
+            seed_raw(
+                &mut store,
+                "soul::identity-a::disposition",
+                "RESERVED_DISPOSITION_TEXT",
+                "",
+                &[],
+                "raw",
+                1,
+            );
+            seed_raw(
+                &mut store,
+                "soul::identity-a::candidate::density",
+                "RESERVED_CANDIDATE_TEXT",
+                "",
+                &[],
+                "raw",
+                1,
+            );
+            seed_raw(
+                &mut store,
+                "raw-ordinary",
+                "ORDINARY_DEFAULT_TEXT",
+                "",
+                &[],
+                "raw",
+                1,
+            );
+            seed_raw(
+                &mut store,
+                "raw-legacy",
+                "ORDINARY_LEGACY_TEXT",
+                "",
+                &[],
+                "raw",
+                1,
+            );
+            set_namespace(&mut store, "soul::identity-a::disposition", Some("soul"));
+            set_namespace(
+                &mut store,
+                "soul::identity-a::candidate::density",
+                Some("soul"),
+            );
+            set_namespace(&mut store, "raw-legacy", None);
+        }
+
+        let provider = FixedJsonProvider::ok(
+            r#"{"summary":"Enriched ordinary","keywords":["ordinary"],"entities":[]}"#,
+        );
+        let n = mem
+            .run_llm_enrichment(&provider, "test-model")
+            .await
+            .unwrap();
+        // Exactly the two ordinary rows are enriched.
+        assert_eq!(n, 2);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+        let received = provider.received();
+        assert!(
+            received.iter().any(|m| m.contains("ORDINARY_DEFAULT_TEXT")),
+            "ordinary default-namespace row must reach the provider: {received:?}"
+        );
+        assert!(
+            received.iter().any(|m| m.contains("ORDINARY_LEGACY_TEXT")),
+            "ordinary missing-namespace row must reach the provider: {received:?}"
+        );
+        assert!(
+            !received
+                .iter()
+                .any(|m| m.contains("RESERVED_DISPOSITION_TEXT")),
+            "reserved Soul disposition text must never reach the provider: {received:?}"
+        );
+        assert!(
+            !received
+                .iter()
+                .any(|m| m.contains("RESERVED_CANDIDATE_TEXT")),
+            "reserved Soul candidate text must never reach the provider: {received:?}"
+        );
+
+        // Reserved rows are untouched; ordinary rows are enriched.
+        let store = mem.store_handle().lock();
+        let reserved_ids = [
+            "soul::identity-a::disposition",
+            "soul::identity-a::candidate::density",
+        ];
+        for reserved in reserved_ids {
+            let row = store.get(reserved).unwrap().expect("reserved row");
+            assert_eq!(row.summary, "", "reserved row {reserved} must be untouched");
+            assert!(row.keywords.is_empty());
+            assert_eq!(row.revision, 1);
+        }
+        assert_eq!(
+            store.get("raw-ordinary").unwrap().unwrap().summary,
+            "Enriched ordinary"
+        );
+        assert_eq!(
+            store.get("raw-legacy").unwrap().unwrap().summary,
+            "Enriched ordinary"
+        );
+    }
+
+    #[tokio::test]
+    async fn enrich_all_reserved_rows_makes_no_provider_calls() {
+        // Empty-after-filter: every collected candidate is reserved, so the
+        // provider must not be called at all and nothing is enriched.
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        {
+            let mut store = mem.store_handle().lock();
+            seed_raw(
+                &mut store,
+                "soul::identity-b::disposition",
+                "RESERVED_ONLY_DISPOSITION",
+                "",
+                &[],
+                "raw",
+                1,
+            );
+            seed_raw(
+                &mut store,
+                "soul::identity-b::candidate::density",
+                "RESERVED_ONLY_CANDIDATE",
+                "",
+                &[],
+                "raw",
+                1,
+            );
+            set_namespace(&mut store, "soul::identity-b::disposition", Some("soul"));
+            set_namespace(
+                &mut store,
+                "soul::identity-b::candidate::density",
+                Some("soul"),
+            );
+        }
+
+        // Prove the reserved rows are scanner-eligible, otherwise the zero
+        // provider calls below would be vacuous rather than an exclusion.
+        {
+            let store = mem.store_handle().lock();
+            let surfaced: Vec<String> = store
+                .entries_missing_summaries()
+                .unwrap()
+                .into_iter()
+                .map(|(id, _, _)| id)
+                .collect();
+            for reserved in [
+                "soul::identity-b::disposition",
+                "soul::identity-b::candidate::density",
+            ] {
+                assert!(
+                    surfaced.iter().any(|id| id == reserved),
+                    "reserved row {reserved} must be scanner-eligible: {surfaced:?}"
+                );
+            }
+        }
+
+        let provider = FixedJsonProvider::ok(
+            r#"{"summary":"should not apply","keywords":["x"],"entities":[]}"#,
+        );
+        let n = mem
+            .run_llm_enrichment(&provider, "test-model")
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(provider.received().is_empty());
+
+        let store = mem.store_handle().lock();
+        let reserved_ids = [
+            "soul::identity-b::disposition",
+            "soul::identity-b::candidate::density",
+        ];
+        for reserved in reserved_ids {
+            let row = store.get(reserved).unwrap().expect("reserved row");
+            assert_eq!(row.summary, "");
+            assert!(row.keywords.is_empty());
+            assert_eq!(row.revision, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn enrich_missing_namespace_row_preserves_ordinary_behavior() {
+        // A legacy row with no `zeroclaw_namespace` metadata is ordinary, not
+        // reserved: it is enriched exactly as before this exclusion.
+        let tmp = TempDir::new().unwrap();
+        let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
+        {
+            let mut store = mem.store_handle().lock();
+            seed_raw(
+                &mut store,
+                "raw-no-ns",
+                "LEGACY_NO_NAMESPACE_TEXT",
+                "",
+                &[],
+                "raw",
+                1,
+            );
+            set_namespace(&mut store, "raw-no-ns", None);
+        }
+
+        let provider = FixedJsonProvider::ok(
+            r#"{"summary":"Legacy enriched","keywords":["legacy"],"entities":[]}"#,
+        );
+        let n = mem
+            .run_llm_enrichment(&provider, "test-model")
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert!(
+            provider
+                .received()
+                .iter()
+                .any(|m| m.contains("LEGACY_NO_NAMESPACE_TEXT")),
+            "missing-namespace row must still reach the provider"
+        );
+
+        let store = mem.store_handle().lock();
+        let row = store.get("raw-no-ns").unwrap().unwrap();
+        assert_eq!(row.summary, "Legacy enriched");
+        assert!(row.keywords.iter().any(|k| k == "legacy"));
     }
 
     #[tokio::test]

@@ -484,7 +484,12 @@ impl TachiMemory {
             );
         }
         let path = Self::storage_path(agent_id, namespace, &category, key);
-        let embedding = self.compute_embedding(content).await;
+        // Soul persistence does not authorize external embedding of its content.
+        let embedding = if ns == crate::soul::SOUL_NAMESPACE {
+            None
+        } else {
+            self.compute_embedding(content).await
+        };
         let now = Local::now().to_rfc3339();
         let importance = importance.unwrap_or(0.7);
         let scope = match namespace {
@@ -1237,6 +1242,112 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mem = TachiMemory::new("tachi", tmp.path()).unwrap();
         (tmp, mem)
+    }
+
+    #[derive(Default)]
+    struct RecordingSoulEmbedding {
+        inputs: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for RecordingSoulEmbedding {
+        fn name(&self) -> &str {
+            "recording-soul-boundary"
+        }
+        fn dimensions(&self) -> usize {
+            2
+        }
+        async fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.inputs
+                .lock()
+                .extend(texts.iter().map(|text| (*text).to_string()));
+            Ok(texts.iter().map(|_| vec![0.2, 0.8]).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn soul_store_persists_locally_without_implicit_provider_calls() {
+        let (_tmp, mem) = temp_tachi();
+        let embedder = Arc::new(RecordingSoulEmbedding::default());
+        mem.swap_embedder(embedder.clone());
+        for (key, namespace) in [
+            (
+                "ordinary-key".to_string(),
+                Some(crate::soul::SOUL_NAMESPACE.to_string()),
+            ),
+            (
+                format!("{}agent::invalid", crate::soul::SOUL_KEY_PREFIX),
+                None,
+            ),
+        ] {
+            mem.store_with_options(
+                &key,
+                "rejected payload",
+                MemoryCategory::Core,
+                None,
+                StoreOptions {
+                    namespace,
+                    ..StoreOptions::default()
+                },
+            )
+            .await
+            .expect_err("invalid reservation");
+            assert!(embedder.inputs.lock().is_empty());
+        }
+        for suffix in ["disposition", "candidate::pending"] {
+            mem.store_with_options(
+                &format!("{}agent::{suffix}", crate::soul::SOUL_KEY_PREFIX),
+                "reserved local payload",
+                MemoryCategory::Core,
+                None,
+                StoreOptions {
+                    namespace: Some(crate::soul::SOUL_NAMESPACE.into()),
+                    ..StoreOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                embedder.inputs.lock().is_empty(),
+                "Soul storage must not send content to the embedder"
+            );
+        }
+        for (key, namespace) in [
+            ("ordinary-missing", None),
+            ("ordinary-default", Some("default".into())),
+        ] {
+            mem.store_with_options(
+                key,
+                key,
+                MemoryCategory::Core,
+                None,
+                StoreOptions {
+                    namespace,
+                    ..StoreOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            &*embedder.inputs.lock(),
+            &[
+                "ordinary-missing".to_string(),
+                "ordinary-default".to_string()
+            ]
+        );
+        // Query-time embedding is a separate surface; use the existing local
+        // query path without a provider to inspect persistence after the call audit.
+        mem.swap_embedder(Arc::new(super::super::embeddings::NoopEmbedding));
+        let rows = mem
+            .recall_namespaced(crate::soul::SOUL_NAMESPACE, "*", 10, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|row| row.content == "reserved local payload")
+        );
     }
 
     fn temp_tachi_small_page() -> (TempDir, TachiMemory) {

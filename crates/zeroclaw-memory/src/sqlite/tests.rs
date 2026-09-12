@@ -3397,3 +3397,164 @@ async fn plain_stores_cannot_write_into_the_soul_key_space() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn soul_invalid_store_refuses_before_embedding() {
+    let (_tmp, mem) = temp_sqlite();
+    let embedder = Arc::new(StubEmbedding::new(4, 0.2));
+    mem.swap_embedder(embedder.clone());
+    for (key, namespace) in [
+        (
+            "ordinary-key".to_string(),
+            Some(crate::soul::SOUL_NAMESPACE.to_string()),
+        ),
+        (
+            format!("{}agent::disposition", crate::soul::SOUL_KEY_PREFIX),
+            None,
+        ),
+    ] {
+        mem.store_with_options(
+            &key,
+            "rejected payload",
+            MemoryCategory::Core,
+            None,
+            StoreOptions {
+                namespace,
+                ..StoreOptions::default()
+            },
+        )
+        .await
+        .expect_err("invalid reservation must refuse");
+        assert_eq!(
+            embedder.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "reservation refusal must precede provider invocation"
+        );
+        assert_eq!(mem.count().await.unwrap(), 0);
+    }
+}
+
+#[tokio::test]
+async fn soul_valid_store_persists_without_embedding() {
+    let (_tmp, mem) = temp_sqlite();
+    let embedder = Arc::new(StubEmbedding::new(4, 0.2));
+    mem.swap_embedder(embedder.clone());
+    for suffix in ["disposition", "candidate::pending"] {
+        let key = format!("{}agent::{suffix}", crate::soul::SOUL_KEY_PREFIX);
+        mem.store_with_options(
+            &key,
+            "reserved local payload",
+            MemoryCategory::Core,
+            None,
+            StoreOptions {
+                namespace: Some(crate::soul::SOUL_NAMESPACE.into()),
+                ..StoreOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(embedder.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let row: (String, Option<Vec<u8>>) = mem
+            .conn
+            .lock()
+            .query_row(
+                "SELECT content, embedding FROM memories WHERE key = ?1",
+                params![key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("reserved local payload".into(), None));
+    }
+    mem.store(
+        "ordinary",
+        "ordinary embedded payload",
+        MemoryCategory::Core,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        embedder.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "ordinary storage must still use its configured embedder"
+    );
+}
+
+#[tokio::test]
+async fn soul_reindex_excludes_reserved_rows_through_scoped_handle() {
+    for ordinary_count in [0usize, 2] {
+        let (_tmp, mem) = temp_sqlite();
+        let mem = Arc::new(mem);
+        let scoped = crate::agent_scoped::AgentScopedMemory::new(mem.clone(), "agent", []);
+        assert_eq!(
+            scoped.reindex().await.unwrap(),
+            0,
+            "empty store remains valid"
+        );
+        for suffix in ["disposition", "candidate::pending"] {
+            mem.store_with_options(
+                &format!("{}agent::{suffix}", crate::soul::SOUL_KEY_PREFIX),
+                "reserved local payload",
+                MemoryCategory::Core,
+                None,
+                StoreOptions {
+                    namespace: Some(crate::soul::SOUL_NAMESPACE.into()),
+                    ..StoreOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        for index in 0..ordinary_count {
+            mem.store(
+                &format!("ordinary-{index}"),
+                &format!("ordinary payload {index}"),
+                MemoryCategory::Core,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        if ordinary_count > 0 {
+            mem.conn
+                .lock()
+                .execute(
+                    "UPDATE memories SET namespace = NULL WHERE key = 'ordinary-1'",
+                    [],
+                )
+                .unwrap();
+        }
+        let embedder = Arc::new(StubEmbedding::new(4, 0.2));
+        mem.swap_embedder(embedder.clone());
+        assert_eq!(scoped.reindex().await.unwrap(), ordinary_count);
+        assert_eq!(
+            embedder.calls.load(std::sync::atomic::Ordering::SeqCst),
+            ordinary_count,
+            "only ordinary missing/default namespace content may reach the embedder"
+        );
+        let conn = mem.conn.lock();
+        let reserved: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = ?1 AND content = 'reserved local payload' AND embedding IS NULL",
+            params![crate::soul::SOUL_NAMESPACE], |r| r.get(0)).unwrap();
+        assert_eq!(reserved, 2, "ambient reindex must preserve reserved rows");
+        let embedded: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE embedding IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(embedded, ordinary_count);
+        let indexed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'reserved'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            indexed, 2,
+            "local FTS maintenance must still rebuild protected rows"
+        );
+    }
+}
