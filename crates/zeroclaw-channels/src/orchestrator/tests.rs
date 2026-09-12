@@ -17365,7 +17365,7 @@ async fn unowned_channel_drop_replays_through_valid_router_with_same_inbox() {
     )
     .await;
     assert_eq!(provider.call_count.load(Ordering::SeqCst), 1);
-    assert_eq!(sent.lock().await.as_slice(), &["ok".to_string()]);
+    assert_eq!(sent.lock().await.as_slice(), &["alice:ok".to_string()]);
     assert_eq!(
         store.admit("test-channel", "m-unowned").unwrap(),
         Admission::DuplicateCompleted,
@@ -17380,5 +17380,5 @@ async fn unowned_channel_drop_replays_through_valid_router_with_same_inbox() {
     )
     .await;
     assert_eq!(provider.call_count.load(Ordering::SeqCst), 1);
-    assert_eq!(sent.lock().await.as_slice(), &["ok".to_string()]);
+    assert_eq!(sent.lock().await.as_slice(), &["alice:ok".to_string()]);
 }
