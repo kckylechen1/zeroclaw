@@ -206,6 +206,7 @@ channels-full = [
 ]
 # Channels with optional deps
 channel-email = [
+  "zeroclaw-tools/email-tools",
   "dep:async-imap",
   "dep:lettre",
   "dep:mail-parser",
