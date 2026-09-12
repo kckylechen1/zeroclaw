@@ -3205,6 +3205,14 @@ async fn run_message_dispatch_loop(
                     "dropping inbound message: no agent owns this channel"
                 );
             }
+            // Ordinary messages remain replayable when routing recovers. A stop
+            // must not become fresh and cancel a later turn in the same scope.
+            if !is_stop_command(&msg.content)
+                && let Some(seen_ids) = &inbox
+                && let Some(receipt) = inbox_receipt
+            {
+                seen_ids.release_claims(std::slice::from_ref(&receipt));
+            }
             continue;
         };
 
