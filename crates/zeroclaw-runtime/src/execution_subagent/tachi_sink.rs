@@ -895,6 +895,22 @@ impl SessionFactSink for TachiSessionFactSink {
                 SessionFactError::Refused("attach receipt carries no attachment id".to_string())
             })?;
         validate_attachment_id(attachment_id)?;
+        let remote_session_id = receipt
+            .body
+            .get("binding")
+            .and_then(|binding| binding.get("remote_session_id"))
+            .and_then(Value::as_str)
+            .filter(|remote_session_id| !remote_session_id.trim().is_empty())
+            .ok_or_else(|| {
+                SessionFactError::Refused(
+                    "attach receipt carries no valid binding.remote_session_id".to_string(),
+                )
+            })?;
+        if remote_session_id != binding.remote_session.as_str() {
+            return Err(SessionFactError::Refused(
+                "attach receipt remote session binding mismatch".to_string(),
+            ));
+        }
         Ok(SessionAttachmentRef::from_opaque(attachment_id))
     }
 
