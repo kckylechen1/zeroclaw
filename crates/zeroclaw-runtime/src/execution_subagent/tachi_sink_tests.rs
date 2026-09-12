@@ -2721,8 +2721,14 @@ async fn reconnect_rejects_foreign_attachment_before_revision_cache_mutation() {
     }
     let original_revision = sink.revision_for(&att);
     assert_eq!(sink.revision_for(&foreign), 0);
+    let reconnect_result = sink.reconnect(&att, &binding).await;
+    eprintln!(
+        "RECONNECT_BINDING_OBSERVED direct result={reconnect_result:?} original_revision={} foreign_revision={}",
+        sink.revision_for(&att),
+        sink.revision_for(&foreign)
+    );
     assert!(matches!(
-        sink.reconnect(&att, &binding).await,
+        reconnect_result,
         Err(SessionFactError::Refused(message))
             if message == "reconnect receipt attachment binding mismatch"
     ));
@@ -2798,6 +2804,14 @@ async fn runtime_rejects_foreign_reconnect_and_preserves_post_run_obligations() 
         })
         .await;
 
+    eprintln!(
+        "RECONNECT_BINDING_OBSERVED runtime status={:?} watches={} starts={} facts={} foreign_revision={}",
+        report.status,
+        *controller.watch_calls.lock(),
+        *controller.started_count.lock(),
+        report.usage.facts_reported,
+        sink.revision_for(&foreign)
+    );
     assert_eq!(report.status, ExecutionRunStatusV1::Failed);
     assert!(
         report
