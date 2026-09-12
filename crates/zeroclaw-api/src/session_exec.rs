@@ -574,6 +574,46 @@ pub struct ExecutionInterventionRecordV1 {
     pub disposition: SessionInterventionDispositionV1,
 }
 
+/// Closed vocabulary of post-execution / best-effort obligations whose
+/// ATTEMPT one run reports. There is no overall-success member: an
+/// obligation records what was attempted, never a lifecycle status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExecutionObligationKindV1 {
+    /// A stop request was attempted (graceful or immediate).
+    Stop,
+    /// A connection-dropout fact write was attempted.
+    ConnectionReport,
+    /// A cleanup event receipt was attempted — an accepted Tachi event
+    /// receipt only, never physical process teardown.
+    CleanupReceipt,
+    /// A bounded collect read was attempted.
+    Collection,
+    /// A canonical state read was attempted.
+    StateRead,
+}
+
+/// Closed disposition vocabulary for one reported obligation attempt.
+/// `Partial` marks an attempt that neither succeeded nor was refused
+/// (e.g. an unconfirmed stop, or a state read whose cleanup is not yet
+/// acknowledged).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExecutionObligationDispositionV1 {
+    Satisfied,
+    Refused,
+    Unavailable,
+    Unsupported,
+    Partial,
+}
+
+/// One closed typed record for one attempted post-execution / best-effort
+/// obligation. No strings, paths, argv, or provider error text: the
+/// record is the operation and its disposition only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionObligationV1 {
+    pub operation: ExecutionObligationKindV1,
+    pub disposition: ExecutionObligationDispositionV1,
+}
+
 /// Structured report of one ephemeral execution run. Receipts and refs
 /// only: the collected summary is bounded and digest-bound; no transcript
 /// crosses to the Parent.
@@ -603,6 +643,14 @@ pub struct ExecutionSessionReportV1 {
     /// SHA-256 over the collected terminal projection (hex), when collected.
     pub collected_digest: Option<String>,
     pub interventions: Vec<ExecutionInterventionRecordV1>,
+    /// One typed record per attempted post-execution / best-effort
+    /// obligation (stop, connection report, cleanup receipt, collection,
+    /// state read). Repeated attempts append; failures cannot be
+    /// overwritten. An empty list means no attempt was REPORTED (legacy
+    /// payloads included) — it is not proof that the obligations
+    /// succeeded. These records are independent of `status`.
+    #[serde(default)]
+    pub obligations: Vec<ExecutionObligationV1>,
     /// Evidence refs surfaced by collect (artifact paths as refs, no
     /// content).
     pub evidence_refs: Vec<String>,
@@ -817,6 +865,7 @@ mod tests {
             collected_summary: Some("done".to_string()),
             collected_digest: Some("abc".to_string()),
             interventions: vec![],
+            obligations: vec![],
             evidence_refs: vec![],
             usage: ExecutionUsageV1::default(),
             refusal: None,
@@ -827,6 +876,53 @@ mod tests {
             ..report.clone()
         };
         assert_ne!(report.compute_digest(), drifted.compute_digest());
+    }
+
+    #[test]
+    fn report_obligations_are_backward_deserializable_and_roundtrip_typed() {
+        let report = ExecutionSessionReportV1 {
+            run_ref: "run-legacy".to_string(),
+            route: ExecutionRouteV1::EphemeralExec,
+            controller_ref: "acpx-fixture".to_string(),
+            status: ExecutionRunStatusV1::Completed,
+            remote_session_ref: None,
+            attachment_ref: None,
+            final_canonical_state: None,
+            collected_summary: None,
+            collected_digest: None,
+            interventions: vec![],
+            obligations: vec![],
+            evidence_refs: vec![],
+            usage: ExecutionUsageV1::default(),
+            refusal: None,
+        };
+        // A legacy payload has no `obligations` key at all: it must
+        // deserialize (defaulting to the empty list), and the empty list
+        // means "no attempt reported", never "all obligations succeeded".
+        let mut legacy = serde_json::to_value(&report).expect("serialize");
+        let object = legacy.as_object_mut().expect("object payload");
+        object.remove("obligations");
+        let decoded: ExecutionSessionReportV1 =
+            serde_json::from_value(legacy).expect("legacy payload decodes");
+        assert_eq!(decoded, report);
+        assert!(decoded.obligations.is_empty());
+        // The typed field round-trips.
+        let typed = ExecutionSessionReportV1 {
+            obligations: vec![
+                ExecutionObligationV1 {
+                    operation: ExecutionObligationKindV1::Stop,
+                    disposition: ExecutionObligationDispositionV1::Partial,
+                },
+                ExecutionObligationV1 {
+                    operation: ExecutionObligationKindV1::CleanupReceipt,
+                    disposition: ExecutionObligationDispositionV1::Satisfied,
+                },
+            ],
+            ..report
+        };
+        let json = serde_json::to_string(&typed).expect("serialize");
+        let back: ExecutionSessionReportV1 = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back, typed);
     }
 
     #[test]
