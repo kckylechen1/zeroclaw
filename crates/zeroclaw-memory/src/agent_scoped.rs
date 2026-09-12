@@ -45,6 +45,42 @@ impl AgentScopedMemory {
     fn allowed_slice(&self) -> Vec<&str> {
         self.allowed_agent_ids.iter().map(String::as_str).collect()
     }
+
+    /// This wrapper is an ambient surface: it is what tools, the agent
+    /// loop, and RPC hold. The reserved Soul key space is reachable only
+    /// through the typed Soul services on the raw backend, never through
+    /// per-agent wrappers, because Soul rows are attributed to the SAME
+    /// agent UUID the wrapper is bound to (agent scoping alone cannot
+    /// discriminate them).
+    fn refuses_soul_key(key: &str) -> bool {
+        key.starts_with(crate::soul::SOUL_KEY_PREFIX)
+    }
+
+    /// Ambient wrappers never operate in the reserved Soul namespace.
+    fn refuses_soul_namespace(namespace: Option<&str>) -> bool {
+        namespace == Some(crate::soul::SOUL_NAMESPACE)
+    }
+
+    /// Typed refusal for any store that would write into the Soul key
+    /// space through an ambient wrapper.
+    fn refuse_soul_write(key: &str, namespace: Option<&str>) -> Result<()> {
+        if Self::refuses_soul_key(key) || Self::refuses_soul_namespace(namespace) {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "key": key,
+                        "namespace": namespace.unwrap_or("default"),
+                    })),
+                "store refused: Soul key space is not writable through AgentScopedMemory"
+            );
+            anyhow::bail!(
+                "AgentScopedMemory refuses stores into the reserved Soul key space; use the typed Soul services on the raw backend"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -94,6 +130,7 @@ impl Memory for AgentScopedMemory {
         category: MemoryCategory,
         session_id: Option<&str>,
     ) -> Result<()> {
+        Self::refuse_soul_write(key, None)?;
         self.inner
             .store_with_agent(
                 key,
@@ -116,6 +153,7 @@ impl Memory for AgentScopedMemory {
         namespace: Option<&str>,
         importance: Option<f64>,
     ) -> Result<()> {
+        Self::refuse_soul_write(key, namespace)?;
         self.inner
             .store_with_agent(
                 key,
@@ -137,6 +175,7 @@ impl Memory for AgentScopedMemory {
         session_id: Option<&str>,
         options: StoreOptions,
     ) -> Result<()> {
+        Self::refuse_soul_write(key, options.namespace.as_deref())?;
         self.inner
             .store_with_options_and_agent(
                 key,
@@ -197,6 +236,7 @@ impl Memory for AgentScopedMemory {
                 "AgentScopedMemory refuses store_with_agent for foreign agent_id; use a wrapper bound to the target agent"
             );
         }
+        Self::refuse_soul_write(key, namespace)?;
         self.inner
             .store_with_agent(
                 key,
@@ -255,6 +295,12 @@ impl Memory for AgentScopedMemory {
     }
 
     async fn get(&self, key: &str) -> Result<Option<MemoryEntry>> {
+        // Ambient reads never see Soul rows even for the bound agent:
+        // Soul rows are attributed to the same agent UUID, so agent
+        // scoping alone cannot discriminate them.
+        if Self::refuses_soul_key(key) {
+            return Ok(None);
+        }
         if let Some(own) = self.inner.get_for_agent(key, &self.agent_id).await? {
             return Ok(Some(own));
         }
@@ -271,6 +317,9 @@ impl Memory for AgentScopedMemory {
 
     async fn get_for_agent(&self, key: &str, agent_id: &str) -> Result<Option<MemoryEntry>> {
         if agent_id != self.agent_id && !self.allowed_agent_ids.iter().any(|a| a == agent_id) {
+            return Ok(None);
+        }
+        if Self::refuses_soul_key(key) {
             return Ok(None);
         }
         self.inner.get_for_agent(key, agent_id).await
@@ -293,6 +342,23 @@ impl Memory for AgentScopedMemory {
     }
 
     async fn forget(&self, key: &str) -> Result<bool> {
+        // Ambient deletes never reach Soul rows, even through the bound
+        // agent's own scope.
+        if Self::refuses_soul_key(key) {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "key": key,
+                        "bound_agent": self.agent_id,
+                    })),
+                "forget refused: Soul key space is not deletable through AgentScopedMemory"
+            );
+            anyhow::bail!(
+                "AgentScopedMemory refuses deletes in the reserved Soul key space; use the typed Soul services on the raw backend"
+            );
+        }
         if self.inner.forget_for_agent(key, &self.agent_id).await? {
             return Ok(true);
         }
@@ -351,6 +417,21 @@ impl Memory for AgentScopedMemory {
             );
             anyhow::bail!(
                 "AgentScopedMemory refuses cross-agent forget_for_agent: bound agent and target agent differ"
+            );
+        }
+        if Self::refuses_soul_key(key) {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "key": key,
+                        "bound_agent": self.agent_id,
+                    })),
+                "forget_for_agent refused: Soul key space is not deletable through AgentScopedMemory"
+            );
+            anyhow::bail!(
+                "AgentScopedMemory refuses deletes in the reserved Soul key space; use the typed Soul services on the raw backend"
             );
         }
         self.inner.forget_for_agent(key, agent_id).await
@@ -1101,6 +1182,85 @@ mod tests {
         assert!(
             !hits.iter().any(|e| e.key == "rogue-key"),
             "caller allowlist must be intersected, not unioned"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrapper_never_touches_the_soul_key_space() {
+        let (_tmp, inner) = fresh_live_sqlite();
+        let agent = inner.ensure_agent_uuid("default").await.unwrap();
+        // A Soul row planted through the raw backend, attributed to the
+        // same agent the wrapper is bound to: agent scoping alone cannot
+        // discriminate it, so the wrapper must refuse on key shape.
+        inner
+            .store_with_agent(
+                "soul::agent-a::disposition",
+                "soul disposition content",
+                MemoryCategory::Custom("soul".to_string()),
+                None,
+                Some(crate::soul::SOUL_NAMESPACE),
+                None,
+                Some(&agent),
+            )
+            .await
+            .unwrap();
+        let wrapper =
+            AgentScopedMemory::new(as_dyn(inner.clone()), agent.clone(), Vec::<String>::new());
+
+        // Ambient reads through the wrapper never see the Soul row.
+        assert!(
+            wrapper
+                .get("soul::agent-a::disposition")
+                .await
+                .unwrap()
+                .is_none(),
+            "wrapper get must not return a Soul row"
+        );
+        assert!(
+            wrapper
+                .get_for_agent("soul::agent-a::disposition", &agent)
+                .await
+                .unwrap()
+                .is_none(),
+            "wrapper get_for_agent must not return a Soul row"
+        );
+        let hits = wrapper
+            .recall("soul disposition content", 10, None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            hits.iter()
+                .all(|e| e.namespace != crate::soul::SOUL_NAMESPACE),
+            "wrapper recall must not leak Soul rows"
+        );
+
+        // Ambient writes and deletes through the wrapper are refused.
+        assert!(
+            wrapper
+                .store(
+                    "soul::agent-a::disposition",
+                    "forged",
+                    MemoryCategory::Core,
+                    None,
+                )
+                .await
+                .is_err(),
+            "wrapper store into the reserved key prefix must be refused"
+        );
+        assert!(
+            wrapper.forget("soul::agent-a::disposition").await.is_err(),
+            "wrapper forget of a reserved key must be refused"
+        );
+
+        // The typed channel on the raw backend still works: the Soul row
+        // survived every ambient attempt above.
+        assert!(
+            inner
+                .get_for_agent("soul::agent-a::disposition", &agent)
+                .await
+                .unwrap()
+                .is_some(),
+            "the Soul row must survive ambient access through the wrapper"
         );
     }
 }

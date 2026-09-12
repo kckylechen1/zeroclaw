@@ -409,6 +409,28 @@ impl SqliteMemory {
         let content = content.to_string();
         let sid = session_id.map(String::from);
         let ns = options.namespace.unwrap_or_else(|| "default".to_string());
+
+        // Storage-level reservation for the Soul key space: rows under the
+        // reserved prefix exist only in the reserved namespace, and the
+        // reserved namespace accepts only reserved-prefix keys. Ambient
+        // stores (namespace "default") can therefore never upsert-overwrite
+        // a Soul row through the (agent_id, key) conflict target, and a
+        // Soul-namespace write can never smuggle an ambient key shape.
+        if ns == crate::soul::SOUL_NAMESPACE {
+            if !key.starts_with(crate::soul::SOUL_KEY_PREFIX) {
+                anyhow::bail!(
+                    "refused: namespace '{}' requires a key with the reserved '{}' prefix",
+                    crate::soul::SOUL_NAMESPACE,
+                    crate::soul::SOUL_KEY_PREFIX
+                );
+            }
+        } else if key.starts_with(crate::soul::SOUL_KEY_PREFIX) {
+            anyhow::bail!(
+                "refused: key prefix '{}' is reserved for the Soul namespace",
+                crate::soul::SOUL_KEY_PREFIX
+            );
+        }
+
         let imp = options.importance.unwrap_or(0.5);
         let kind = options
             .kind
@@ -682,19 +704,7 @@ impl SqliteMemory {
         query: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<(String, f32)>> {
-        Self::fts5_search_scoped(conn, query, limit, None, None)
-    }
-
-    /// FTS5 BM25 search constrained to the rows a live vector-stage recall
-    /// may return for a session. Applying this predicate inside FTS keeps
-    /// excluded rows out of BM25 ranking, limiting, and normalization.
-    fn fts5_search_for_session(
-        conn: &Connection,
-        query: &str,
-        limit: usize,
-        session_id: Option<&str>,
-    ) -> anyhow::Result<Vec<(String, f32)>> {
-        Self::fts5_search_scoped(conn, query, limit, session_id, None)
+        Self::fts5_search_scoped(conn, query, limit, None, None, None)
     }
 
     fn fts5_search_for_session_and_agents(
@@ -703,8 +713,16 @@ impl SqliteMemory {
         limit: usize,
         session_id: Option<&str>,
         allowed_agent_ids: &[String],
+        namespace: Option<&str>,
     ) -> anyhow::Result<Vec<(String, f32)>> {
-        Self::fts5_search_scoped(conn, query, limit, session_id, Some(allowed_agent_ids))
+        Self::fts5_search_scoped(
+            conn,
+            query,
+            limit,
+            session_id,
+            Some(allowed_agent_ids),
+            namespace,
+        )
     }
 
     fn fts5_search_scoped(
@@ -713,6 +731,7 @@ impl SqliteMemory {
         limit: usize,
         session_id: Option<&str>,
         allowed_agent_ids: Option<&[String]>,
+        namespace: Option<&str>,
     ) -> anyhow::Result<Vec<(String, f32)>> {
         // Escape FTS5 special chars and build query
         let fts_query: String = query
@@ -732,6 +751,25 @@ impl SqliteMemory {
             .to_string();
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(fts_query)];
         let mut param_idx = 2;
+
+        // Namespace scope: `None` is the ambient recall surface, which
+        // structurally excludes the reserved Soul namespace; `Some(ns)`
+        // restricts to exactly that namespace (the explicit opt-in read
+        // channel used by `recall_namespaced`).
+        match namespace {
+            Some(ns) => {
+                let _ = write!(sql, " AND m.namespace = ?{param_idx}");
+                param_values.push(Box::new(ns.to_string()));
+                param_idx += 1;
+            }
+            None => {
+                let _ = write!(
+                    sql,
+                    " AND (m.namespace IS NULL OR m.namespace != '{}')",
+                    crate::soul::SOUL_NAMESPACE
+                );
+            }
+        }
 
         if let Some(sid) = session_id {
             let category_placeholders = Self::DURABLE_GLOBAL_CATEGORIES
@@ -852,7 +890,15 @@ impl SqliteMemory {
         category: Option<&str>,
         session_id: Option<&str>,
     ) -> anyhow::Result<Vec<(String, f32)>> {
-        Self::vector_search_scoped(conn, query_embedding, limit, category, session_id, None)
+        Self::vector_search_scoped(
+            conn,
+            query_embedding,
+            limit,
+            category,
+            session_id,
+            None,
+            None,
+        )
     }
 
     fn vector_search_for_agents(
@@ -862,6 +908,7 @@ impl SqliteMemory {
         category: Option<&str>,
         session_id: Option<&str>,
         allowed_agent_ids: &[String],
+        namespace: Option<&str>,
     ) -> anyhow::Result<Vec<(String, f32)>> {
         Self::vector_search_scoped(
             conn,
@@ -870,6 +917,7 @@ impl SqliteMemory {
             category,
             session_id,
             Some(allowed_agent_ids),
+            namespace,
         )
     }
 
@@ -880,10 +928,28 @@ impl SqliteMemory {
         category: Option<&str>,
         session_id: Option<&str>,
         allowed_agent_ids: Option<&[String]>,
+        namespace: Option<&str>,
     ) -> anyhow::Result<Vec<(String, f32)>> {
         let mut sql = "SELECT id, embedding FROM memories WHERE embedding IS NOT NULL".to_string();
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut idx = 1;
+
+        // See fts5_search_scoped: `None` is the ambient surface (Soul
+        // namespace excluded), `Some(ns)` restricts to that namespace.
+        match namespace {
+            Some(ns) => {
+                let _ = write!(sql, " AND namespace = ?{idx}");
+                param_values.push(Box::new(ns.to_string()));
+                idx += 1;
+            }
+            None => {
+                let _ = write!(
+                    sql,
+                    " AND (namespace IS NULL OR namespace != '{}')",
+                    crate::soul::SOUL_NAMESPACE
+                );
+            }
+        }
 
         if let Some(cat) = category {
             let _ = write!(sql, " AND category = ?{idx}");
@@ -951,11 +1017,13 @@ impl SqliteMemory {
         session_id: Option<&str>,
         since: Option<&str>,
         until: Option<&str>,
+        namespace: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
         let conn = self.conn.clone();
         let sid = session_id.map(String::from);
         let since_owned = since.map(String::from);
         let until_owned = until.map(String::from);
+        let ns_owned = namespace.map(String::from);
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<MemoryEntry>> {
             let conn = conn.lock();
@@ -969,6 +1037,23 @@ impl SqliteMemory {
                     .to_string();
             let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             let mut idx = 1;
+
+            // See fts5_search_scoped: `None` is the ambient surface (Soul
+            // namespace excluded), `Some(ns)` restricts to that namespace.
+            match ns_owned.as_deref() {
+                Some(ns) => {
+                    let _ = write!(sql, " AND m.namespace = ?{idx}");
+                    param_values.push(Box::new(ns.to_string()));
+                    idx += 1;
+                }
+                None => {
+                    let _ = write!(
+                        sql,
+                        " AND (m.namespace IS NULL OR m.namespace != '{}')",
+                        crate::soul::SOUL_NAMESPACE
+                    );
+                }
+            }
 
             if let Some(sid) = sid.as_deref() {
                 let _ = write!(sql, " AND m.session_id = ?{idx}");
@@ -1030,6 +1115,32 @@ impl SqliteMemory {
         until: Option<&str>,
         allowed_agent_ids: Option<Vec<String>>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
+        self.recall_scoped_with_namespace(
+            query,
+            limit,
+            session_id,
+            since,
+            until,
+            allowed_agent_ids,
+            None,
+        )
+        .await
+    }
+
+    /// The recall pipeline with an explicit namespace scope. `None` is the
+    /// ambient surface (reserved Soul namespace excluded from every search
+    /// channel); `Some(ns)` is the namespaced opt-in channel and restricts
+    /// every search channel to exactly that namespace.
+    async fn recall_scoped_with_namespace(
+        &self,
+        query: &str,
+        limit: usize,
+        session_id: Option<&str>,
+        since: Option<&str>,
+        until: Option<&str>,
+        allowed_agent_ids: Option<Vec<String>>,
+        namespace: Option<&str>,
+    ) -> anyhow::Result<Vec<MemoryEntry>> {
         let allowed_agent_ids = allowed_agent_ids.unwrap_or_default();
         // Time-only query: list by time range when no keywords.
         // Treat only a bare "*" as the same recent-entry request; keep
@@ -1041,7 +1152,7 @@ impl SqliteMemory {
                 self.count().await?.max(limit)
             };
             let raw = self
-                .recall_by_time_only(recall_limit, session_id, since, until)
+                .recall_by_time_only(recall_limit, session_id, since, until, namespace)
                 .await?;
             if allowed_agent_ids.is_empty() {
                 return Ok(raw);
@@ -1070,6 +1181,7 @@ impl SqliteMemory {
         let sid = session_id.map(String::from);
         let since_owned = since.map(String::from);
         let until_owned = until.map(String::from);
+        let ns_owned = namespace.map(String::from);
         let vector_weight = self.vector_weight;
         let keyword_weight = self.keyword_weight;
         let search_mode = self.search_mode.clone();
@@ -1080,6 +1192,7 @@ impl SqliteMemory {
             let session_ref = sid.as_deref();
             let since_ref = since_owned.as_deref();
             let until_ref = until_owned.as_deref();
+            let ns_ref = ns_owned.as_deref();
             let agent_filter = if allowed.is_empty() {
                 None
             } else {
@@ -1102,17 +1215,26 @@ impl SqliteMemory {
                         limit * 2,
                         session_ref,
                         agent_filter,
+                        ns_ref,
                     )
                     .unwrap_or_default()
                 } else {
-                    Self::fts5_search_scoped(&conn, &query, limit * 2, None, Some(agent_filter))
-                        .unwrap_or_default()
+                    Self::fts5_search_scoped(
+                        &conn,
+                        &query,
+                        limit * 2,
+                        None,
+                        Some(agent_filter),
+                        ns_ref,
+                    )
+                    .unwrap_or_default()
                 }
             } else if vector_live {
-                Self::fts5_search_for_session(&conn, &query, limit * 2, session_ref)
+                Self::fts5_search_scoped(&conn, &query, limit * 2, session_ref, None, ns_ref)
                     .unwrap_or_default()
             } else {
-                Self::fts5_search(&conn, &query, limit * 2).unwrap_or_default()
+                Self::fts5_search_scoped(&conn, &query, limit * 2, None, None, ns_ref)
+                    .unwrap_or_default()
             };
 
             // Vector similarity search (skip for BM25-only mode)
@@ -1120,10 +1242,27 @@ impl SqliteMemory {
                 Vec::new()
             } else if let Some(ref qe) = query_embedding {
                 if let Some(agent_filter) = agent_filter {
-                    Self::vector_search_for_agents(&conn, qe, limit * 2, None, session_ref, agent_filter)
-                        .unwrap_or_default()
+                    Self::vector_search_for_agents(
+                        &conn,
+                        qe,
+                        limit * 2,
+                        None,
+                        session_ref,
+                        agent_filter,
+                        ns_ref,
+                    )
+                    .unwrap_or_default()
                 } else {
-                    Self::vector_search(&conn, qe, limit * 2, None, session_ref).unwrap_or_default()
+                    Self::vector_search_scoped(
+                        &conn,
+                        qe,
+                        limit * 2,
+                        None,
+                        session_ref,
+                        None,
+                        ns_ref,
+                    )
+                    .unwrap_or_default()
                 }
             } else {
                 Vec::new()
@@ -1346,10 +1485,28 @@ impl SqliteMemory {
                         let _ = write!(agent_conditions, " AND m.agent_id IN ({agent_placeholders})");
                         param_idx += agent_filter.len();
                     }
+                    // The LIKE fallback carries the same namespace scope
+                    // as the FTS/vector stages it backs up: ambient recall
+                    // excludes the reserved Soul namespace, a namespaced
+                    // recall restricts to it.
+                    let (namespace_condition, namespace_param) = match ns_ref {
+                        Some(ns) => {
+                            let placeholder = format!(" AND m.namespace = ?{param_idx}");
+                            param_idx += 1;
+                            (placeholder, Some(ns.to_string()))
+                        }
+                        None => (
+                            format!(
+                                " AND (m.namespace IS NULL OR m.namespace != '{}')",
+                                crate::soul::SOUL_NAMESPACE
+                            ),
+                            None,
+                        ),
+                    };
                     let sql = format!(
                         "SELECT m.id, m.key, m.content, m.category, m.created_at, m.session_id, m.namespace, m.importance, m.superseded_by, m.kind, m.pinned, a.alias, m.agent_id, m.tenant_id
                          FROM memories m LEFT JOIN agents a ON a.id = m.agent_id
-                         WHERE m.superseded_by IS NULL AND ({where_clause}){time_conditions}{agent_conditions}
+                         WHERE m.superseded_by IS NULL AND ({where_clause}){time_conditions}{agent_conditions}{namespace_condition}
                          ORDER BY m.updated_at DESC
                          LIMIT ?{param_idx}"
                     );
@@ -1369,6 +1526,9 @@ impl SqliteMemory {
                         for agent_id in agent_filter {
                             param_values.push(Box::new(agent_id.clone()));
                         }
+                    }
+                    if let Some(ns_param) = namespace_param {
+                        param_values.push(Box::new(ns_param));
                     }
                     #[allow(clippy::cast_possible_wrap)]
                     param_values.push(Box::new(sql_limit as i64));
@@ -1514,10 +1674,10 @@ impl Memory for SqliteMemory {
             let mut stmt = conn.prepare(
                 "SELECT m.id, m.key, m.content, m.category, m.created_at, m.session_id, m.namespace, m.importance, m.superseded_by, m.kind, m.pinned, a.alias, m.agent_id, m.tenant_id \
                  FROM memories m LEFT JOIN agents a ON a.id = m.agent_id \
-                 WHERE m.key = ?1",
+                 WHERE m.key = ?1 AND (m.namespace IS NULL OR m.namespace != ?2)",
             )?;
 
-            let mut rows = stmt.query_map(params![key], |row| {
+            let mut rows = stmt.query_map(params![key, crate::soul::SOUL_NAMESPACE], |row| {
                 Ok(MemoryEntry {
                     id: row.get(0)?,
                     key: row.get(1)?,
@@ -1631,9 +1791,9 @@ impl Memory for SqliteMemory {
                 let mut stmt = conn.prepare(
                     "SELECT m.id, m.key, m.content, m.category, m.created_at, m.session_id, m.namespace, m.importance, m.superseded_by, m.kind, m.pinned, a.alias, m.agent_id, m.tenant_id
                      FROM memories m LEFT JOIN agents a ON a.id = m.agent_id
-                     WHERE m.superseded_by IS NULL AND m.category = ?1 ORDER BY m.updated_at DESC LIMIT ?2",
+                     WHERE m.superseded_by IS NULL AND m.category = ?1 AND (m.namespace IS NULL OR m.namespace != ?3) ORDER BY m.updated_at DESC LIMIT ?2",
                 )?;
-                let rows = stmt.query_map(params![cat_str, DEFAULT_LIST_LIMIT], row_mapper)?;
+                let rows = stmt.query_map(params![cat_str, DEFAULT_LIST_LIMIT, crate::soul::SOUL_NAMESPACE], row_mapper)?;
                 for row in rows {
                     let entry = row?;
                     if let Some(sid) = session_ref
@@ -1646,9 +1806,9 @@ impl Memory for SqliteMemory {
                 let mut stmt = conn.prepare(
                     "SELECT m.id, m.key, m.content, m.category, m.created_at, m.session_id, m.namespace, m.importance, m.superseded_by, m.kind, m.pinned, a.alias, m.agent_id, m.tenant_id
                      FROM memories m LEFT JOIN agents a ON a.id = m.agent_id
-                     WHERE m.superseded_by IS NULL ORDER BY m.updated_at DESC LIMIT ?1",
+                     WHERE m.superseded_by IS NULL AND (m.namespace IS NULL OR m.namespace != ?2) ORDER BY m.updated_at DESC LIMIT ?1",
                 )?;
-                let rows = stmt.query_map(params![DEFAULT_LIST_LIMIT], row_mapper)?;
+                let rows = stmt.query_map(params![DEFAULT_LIST_LIMIT, crate::soul::SOUL_NAMESPACE], row_mapper)?;
                 for row in rows {
                     let entry = row?;
                     if let Some(sid) = session_ref
@@ -1670,7 +1830,13 @@ impl Memory for SqliteMemory {
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             let conn = conn.lock();
-            let affected = conn.execute("DELETE FROM memories WHERE key = ?1", params![key])?;
+            // The unscoped delete never reaches the reserved Soul
+            // namespace; Soul rows are forgotten only through their typed
+            // service (`forget_for_agent` with the admitted identity).
+            let affected = conn.execute(
+                "DELETE FROM memories WHERE key = ?1 AND (namespace IS NULL OR namespace != ?2)",
+                params![key, crate::soul::SOUL_NAMESPACE],
+            )?;
             Ok(affected > 0)
         })
         .await?
@@ -2017,15 +2183,21 @@ impl Memory for SqliteMemory {
         since: Option<&str>,
         until: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
-        let entries = self
-            .recall(query, limit * 2, session_id, since, until)
-            .await?;
-        let filtered: Vec<MemoryEntry> = entries
-            .into_iter()
-            .filter(|e| e.namespace == namespace)
-            .take(limit)
-            .collect();
-        Ok(filtered)
+        // The namespace restriction is pushed into every search channel
+        // (FTS, vector, time-only) rather than post-filtering an ambient
+        // recall, because ambient recall structurally excludes the
+        // reserved Soul namespace; a post-filter on top of it could never
+        // recover namespaced rows.
+        self.recall_scoped_with_namespace(
+            query,
+            limit,
+            session_id,
+            since,
+            until,
+            None,
+            Some(namespace),
+        )
+        .await
     }
 
     async fn store_with_metadata(

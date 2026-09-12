@@ -741,7 +741,15 @@ impl SoulCandidateService {
     ) -> Result<Vec<SoulCandidate>, CandidateError> {
         let resolved = self.resolve(identity)?;
         let prefix = Self::candidate_key(&resolved, "");
-        let rows = match self.backend.list(None, None).await {
+        // Namespaced read channel: ambient `list` structurally excludes
+        // the reserved Soul namespace, so the typed listing reads through
+        // `recall_namespaced` (the "*" recent-query lists rows by time,
+        // the same shape the ambient listing used to return).
+        let rows = match self
+            .backend
+            .recall_namespaced(crate::soul::SOUL_NAMESPACE, "*", 1000, None, None, None)
+            .await
+        {
             Ok(rows) => rows,
             Err(e) => {
                 ::zeroclaw_log::record!(
@@ -911,12 +919,14 @@ mod tests {
         assert_eq!(stored.recurrence.supporting_observations, 1);
         assert_eq!(stored.recurrence.confidence.as_deref(), Some("high"));
 
-        // Active Soul disposition count -> 0: scan the ENTIRE backend.
-        // The only Soul rows for this identity may be (a) the one
-        // candidate row and (b) the untouched disposition row; no
-        // row of any other shape may exist, because this module can
-        // only ever write candidate rows.
-        let rows = backend.list(None, None).await.unwrap();
+        // Active Soul disposition count -> 0: scan the reserved Soul
+        // namespace through the namespaced opt-in channel (ambient list
+        // structurally excludes it, and this module cannot write outside
+        // it — the storage reservation refuses non-soul shapes).
+        let rows = backend
+            .recall_namespaced(crate::soul::SOUL_NAMESPACE, "*", 1000, None, None, None)
+            .await
+            .unwrap();
         let candidate_prefix = SoulCandidateService::candidate_key(&id, "");
         let mut candidate_rows = 0;
         let mut disposition_byte_compared = false;
