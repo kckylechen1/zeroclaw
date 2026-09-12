@@ -132,8 +132,15 @@ impl ApprovalStore {
     /// In particular, Tachi unavailability is not permission to synthesize a local projection.
     /// This has no production activation in the storage-only leaf.
     pub fn insert_trusted_node_projection(&self, grant: &NodeGrantProjection) -> Result<()> {
-        let identity_epoch = epoch(grant.identity_epoch)
-            .ok_or_else(|| anyhow::anyhow!("identity epoch exceeds canonical storage range"))?;
+        let identity_epoch = epoch(grant.identity_epoch).ok_or_else(|| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+                "node_grant_identity_epoch_out_of_range"
+            );
+            anyhow::Error::msg("identity epoch exceeds canonical storage range")
+        })?;
         ensure!(
             [
                 grant.grant_id.as_str(),
@@ -158,7 +165,15 @@ impl ApprovalStore {
             None => grant
                 .granted_at
                 .checked_add_signed(Duration::seconds(DEFAULT_GRANT_TTL_SECS))
-                .ok_or_else(|| anyhow::anyhow!("invalid grant lifetime"))?,
+                .ok_or_else(|| {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+                        "node_grant_lifetime_overflow"
+                    );
+                    anyhow::Error::msg("invalid grant lifetime")
+                })?,
         };
         ensure!(
             expires > grant.granted_at && expires - grant.granted_at <= Duration::minutes(15),
