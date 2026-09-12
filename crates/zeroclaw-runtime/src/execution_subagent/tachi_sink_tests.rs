@@ -409,7 +409,12 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     "status": "completed",
                     "action": "attach_session",
                     "attachment_id": attachment_id,
+                    "binding": {
+                        "remote_session_id": args.get("remote_session_id"),
+                    },
                 });
+                let mut receipt = receipt;
+                state.corrupt_unit_receipt(&mut receipt);
                 Ok(Self::make_tool_success(request.id.clone(), receipt))
             }
 
@@ -1190,6 +1195,38 @@ fn test_binding() -> SessionBinding {
         adapter_connection: AdapterConnectionRef::from_opaque("conn-1"),
         remote_session: RemoteSessionRef::from_opaque("session-1"),
         idempotency_key: "idem-1".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn attach_receipt_requires_exact_requested_remote_session_binding() {
+    let cases = [
+        ("/binding", None),
+        ("/binding/remote_session_id", None),
+        ("/binding/remote_session_id", Some(Value::Null)),
+        ("/binding/remote_session_id", Some(json!([]))),
+        ("/binding/remote_session_id", Some(json!(""))),
+        ("/binding/remote_session_id", Some(json!(" \t"))),
+        (
+            "/binding/remote_session_id",
+            Some(json!("different-session")),
+        ),
+    ];
+
+    for (path, replacement) in cases {
+        let state = Arc::new(Mutex::new(TachiSpineState::default()));
+        let fixture = state.clone();
+        let sink = TachiSessionFactSink::new(test_sink_config())
+            .unwrap()
+            .with_transport_factory(move |_| {
+                Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+            });
+        state.lock().unit_receipt_corruption = Some((path.to_string(), replacement));
+
+        assert!(matches!(
+            sink.attach(&test_binding(), &[]).await,
+            Err(SessionFactError::Refused(_))
+        ));
     }
 }
 
