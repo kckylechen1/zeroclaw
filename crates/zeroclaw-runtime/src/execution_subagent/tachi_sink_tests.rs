@@ -145,6 +145,7 @@ struct TachiSpineState {
     unit_receipt_corruption: Option<(String, Option<Value>)>,
     legacy_request_replay: bool,
     drop_next_attach_response: bool,
+    foreign_reconnect_attachment: Option<String>,
     drop_next_result_response: bool,
     intervention_results: HashMap<(String, String), Value>,
     /// Call counts per action
@@ -914,6 +915,15 @@ impl McpTransportConn for ScriptedTachiMcpServer {
                     }
                     _ => {}
                 }
+                if let Some(foreign) = state.foreign_reconnect_attachment.take() {
+                    receipt["attachment_id"] = json!(foreign);
+                    receipt["attachment_state"] = json!("attached");
+                    receipt["previous_attachment_state"] = json!("attached");
+                    receipt["reconnected"] = json!(false);
+                    receipt["canonical_state"] = state.canonical_state_object(&foreign);
+                    receipt["resume_from_revision"] =
+                        receipt["canonical_state"]["canonical_revision"].clone();
+                }
                 Ok(Self::make_tool_success(request.id.clone(), receipt))
             }
 
@@ -1544,7 +1554,7 @@ async fn test_reconnect_then_replay_unchanged_envelope() {
     sink.mark_connection(&att, SessionConnectionFactV1::Disconnected)
         .await
         .unwrap();
-    let recon = sink.reconnect(&binding).await.unwrap();
+    let recon = sink.reconnect(&att, &binding).await.unwrap();
     assert!(recon.reconnected);
     assert_eq!(recon.attachment_ref, att);
     assert_eq!(
@@ -2118,12 +2128,12 @@ async fn test_reconnect_success_missing_fields_refused() {
 
     let binding = test_binding();
 
-    sink.attach(&binding, &[]).await.unwrap();
+    let att = sink.attach(&binding, &[]).await.unwrap();
     // Missing reconnected field must be refused, not defaulted to false
     fixture_state
         .lock()
         .inject_fault(ResponseCorruption::MissingReconnectField);
-    let err = sink.reconnect(&binding).await.unwrap_err();
+    let err = sink.reconnect(&att, &binding).await.unwrap_err();
     assert!(matches!(err, SessionFactError::Refused(_)));
 }
 
@@ -2263,7 +2273,7 @@ async fn lost_reconnect_receipt_stays_unavailable_after_committed_rebind() {
         .unwrap();
     state.lock().drop_next_reconnect_response = true;
     assert!(matches!(
-        sink.reconnect(&binding).await,
+        sink.reconnect(&att, &binding).await,
         Err(SessionFactError::Unavailable)
     ));
     {
@@ -2299,12 +2309,12 @@ async fn reconnect_receipt_describes_this_transition_not_prior_rebind() {
     sink.mark_connection(&att, SessionConnectionFactV1::Disconnected)
         .await
         .unwrap();
-    assert!(sink.reconnect(&binding).await.unwrap().reconnected);
+    assert!(sink.reconnect(&att, &binding).await.unwrap().reconnected);
     assert_eq!(
         state.lock().last_reconnect_receipt.as_ref().unwrap()["previous_attachment_state"],
         json!("unknown")
     );
-    assert!(!sink.reconnect(&binding).await.unwrap().reconnected);
+    assert!(!sink.reconnect(&att, &binding).await.unwrap().reconnected);
     assert_eq!(
         state.lock().last_reconnect_receipt.as_ref().unwrap()["previous_attachment_state"],
         json!("attached")
@@ -2662,14 +2672,176 @@ async fn reconnect_requires_attached_state_and_matching_projection_revision() {
             canonical: 1,
         },
     ] {
-        let valid = sink.reconnect(&binding).await.unwrap();
+        let valid = sink.reconnect(&att, &binding).await.unwrap();
         assert_eq!(valid.resume_from_revision, valid.state.canonical_revision);
         let previous_revision = sink.revision_for(&att);
         state.lock().inject_fault(fault);
         assert!(matches!(
-            sink.reconnect(&binding).await,
+            sink.reconnect(&att, &binding).await,
             Err(SessionFactError::Refused(_))
         ));
         assert_eq!(sink.revision_for(&att), previous_revision);
     }
+}
+
+#[tokio::test]
+async fn reconnect_rejects_foreign_attachment_before_revision_cache_mutation() {
+    let state = Arc::new(Mutex::new(TachiSpineState::default()));
+    let fixture = state.clone();
+    let sink = TachiSessionFactSink::new(test_sink_config())
+        .unwrap()
+        .with_transport_factory(move |_| {
+            Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+        });
+    let binding = test_binding();
+    let att = sink.attach(&binding, &[]).await.unwrap();
+    sink.mark_connection(&att, SessionConnectionFactV1::Disconnected)
+        .await
+        .unwrap();
+    let matching = sink.reconnect(&att, &binding).await.unwrap();
+    assert_eq!(matching.attachment_ref, att);
+
+    let foreign_binding = SessionBinding {
+        remote_session: RemoteSessionRef::from_opaque("foreign-session"),
+        idempotency_key: "foreign-idempotency".to_string(),
+        ..test_binding()
+    };
+    let foreign = sink.attach(&foreign_binding, &[]).await.unwrap();
+    {
+        let mut fixture = state.lock();
+        fixture.projections.insert(
+            foreign.as_str().to_string(),
+            AttachmentSpineProjection {
+                revision: 77,
+                canonical_state: Some("progressing".to_string()),
+                ..Default::default()
+            },
+        );
+        fixture.foreign_reconnect_attachment = Some(foreign.as_str().to_string());
+    }
+    let original_revision = sink.revision_for(&att);
+    assert_eq!(sink.revision_for(&foreign), 0);
+    assert!(matches!(
+        sink.reconnect(&att, &binding).await,
+        Err(SessionFactError::Refused(message))
+            if message == "reconnect receipt attachment binding mismatch"
+    ));
+    assert_eq!(sink.revision_for(&att), original_revision);
+    assert_eq!(sink.revision_for(&foreign), 0);
+    assert_eq!(state.lock().call_count("reconnect_session"), 2);
+}
+
+#[tokio::test]
+async fn runtime_rejects_foreign_reconnect_and_preserves_post_run_obligations() {
+    use super::super::controller::{
+        ControllerEvent, GatedSessionController, SessionCapabilities, SessionController,
+    };
+    use super::super::fixtures::{ScriptedController, ScriptedStep};
+    use super::super::tool::{ExecutionRunRequest, ExecutionSubagentTool};
+    use zeroclaw_api::session_exec::{
+        ExecutionObligationDispositionV1 as Disposition, ExecutionObligationKindV1 as Operation,
+        ExecutionRunStatusV1,
+    };
+
+    let state = Arc::new(Mutex::new(TachiSpineState::default()));
+    let fixture = state.clone();
+    let sink = Arc::new(
+        TachiSessionFactSink::new(test_sink_config())
+            .unwrap()
+            .with_transport_factory(move |_| {
+                Ok(Box::new(ScriptedTachiMcpServer::new(fixture.clone())))
+            }),
+    );
+    let foreign = sink.attach(&test_binding(), &[]).await.unwrap();
+    {
+        let mut fixture = state.lock();
+        fixture.projections.insert(
+            foreign.as_str().to_string(),
+            AttachmentSpineProjection {
+                revision: 77,
+                canonical_state: Some("progressing".to_string()),
+                ..Default::default()
+            },
+        );
+        fixture.foreign_reconnect_attachment = Some(foreign.as_str().to_string());
+    }
+    let controller = Arc::new(ScriptedController::new(SessionCapabilities {
+        observe: true,
+        wait: true,
+        prompt: true,
+        cancel: true,
+        resume: true,
+        load: true,
+        events: true,
+        artifacts: true,
+    }));
+    *controller.watch_failures_remaining.lock() = 1;
+    controller.push(ScriptedStep::Emit(vec![ControllerEvent {
+        seq: 0,
+        event_id: SessionEventIdRef::from_opaque("must-not-consume-terminal"),
+        kind: SessionEventKindV1::Terminal,
+        outcome: Some(SessionTerminalOutcomeV1::Completed),
+        summary: None,
+    }]));
+    let gated = Arc::new(GatedSessionController::new(
+        controller.clone() as Arc<dyn SessionController>
+    ));
+    let tool = ExecutionSubagentTool::new(
+        gated,
+        sink.clone() as Arc<dyn SessionFactSink>,
+        HostIdentityRef::from_opaque("test-host"),
+    );
+    let report = tool
+        .run(&ExecutionRunRequest {
+            objective: "bounded reconnect correlation probe".to_string(),
+            correction_prompt: None,
+        })
+        .await;
+
+    assert_eq!(report.status, ExecutionRunStatusV1::Failed);
+    assert!(
+        report
+            .refusal
+            .as_deref()
+            .unwrap()
+            .contains("reconnect receipt attachment binding mismatch")
+    );
+    assert_ne!(report.attachment_ref.as_ref(), Some(&foreign));
+    assert_eq!(*controller.started_count.lock(), 1);
+    assert_eq!(
+        *controller.watch_calls.lock(),
+        1,
+        "no watch after refused reconnect"
+    );
+    assert_eq!(controller.stop_requests.lock().len(), 1);
+    assert_eq!(
+        report.facts_reported, 2,
+        "only accepted and cleanup, never wrong reconnect"
+    );
+    for operation in [
+        Operation::ConnectionReport,
+        Operation::CleanupReceipt,
+        Operation::Collection,
+    ] {
+        assert!(report.obligations.iter().any(
+            |entry| entry.operation == operation && entry.disposition == Disposition::Satisfied
+        ));
+    }
+    assert!(
+        report
+            .obligations
+            .iter()
+            .any(|entry| entry.operation == Operation::StateRead)
+    );
+    assert_eq!(sink.revision_for(&foreign), 0);
+    let fixture = state.lock();
+    assert_eq!(fixture.call_count("reconnect_session"), 1);
+    assert_eq!(fixture.call_count("mark_session_connection"), 1);
+    assert_eq!(fixture.call_count("get_session_state"), 1);
+    assert!(
+        !fixture
+            .stored_events
+            .values()
+            .any(|event| event.session_event_id == "must-not-consume-terminal")
+    );
 }
