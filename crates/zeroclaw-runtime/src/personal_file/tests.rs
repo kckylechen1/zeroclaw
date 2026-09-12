@@ -1121,7 +1121,7 @@ fn personal_file_is_registered_nowhere() {
     }
 }
 
-/// #271 C: skipped entries consume the fixed scan budget too. Grow one
+/// Skipped entries consume the fixed scan budget too. Grow one
 /// private directory across the boundary; no test-selected production limit.
 #[cfg(unix)]
 #[tokio::test]
