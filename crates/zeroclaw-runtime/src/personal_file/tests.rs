@@ -1226,3 +1226,124 @@ async fn listing_scan_bound_counts_skipped_and_mixed_entries() {
         b"b"
     );
 }
+
+/// Both mutation entry points must refuse classified directories before
+/// creating destination parents or allocating recovery state.
+#[cfg(unix)]
+async fn directory_mutation_refusal_fixture(trash: bool) {
+    let _fs_serialized = fs_test_guard().await;
+    for shape in [
+        "nested-git-dir",
+        "nested-worktree-file",
+        "empty",
+        "plain",
+        "immediate-git",
+    ] {
+        let tmp = tempfile::tempdir().expect("private directory fixture");
+        let (service, root) = service_with_rw_root(tmp.path());
+        let folder = tmp.path().join("folder");
+        std::fs::create_dir(&folder).expect("private source directory");
+        let mut expected_files = Vec::new();
+        match shape {
+            "nested-git-dir" | "nested-worktree-file" => {
+                let project = folder.join("project");
+                std::fs::create_dir(&project).expect("private nested project");
+                let sentinel = project.join("sentinel.txt");
+                std::fs::write(&sentinel, "nested source must remain").expect("sentinel");
+                expected_files.push((sentinel, b"nested source must remain".to_vec()));
+                let git = project.join(".git");
+                if shape == "nested-git-dir" {
+                    std::fs::create_dir(&git).expect("private Git-shaped directory");
+                    let marker = git.join("marker");
+                    std::fs::write(&marker, "private Git marker").expect("marker");
+                    expected_files.push((marker, b"private Git marker".to_vec()));
+                } else {
+                    // Synthetic worktree metadata only: no real repository,
+                    // external gitdir or Git process is involved.
+                    let contents = "gitdir: private-nonexistent-gitdir\n";
+                    std::fs::write(&git, contents).expect("private worktree marker");
+                    expected_files.push((git, contents.as_bytes().to_vec()));
+                }
+            }
+            "plain" => {
+                let sentinel = folder.join("plain.txt");
+                std::fs::write(&sentinel, "plain source").expect("plain file");
+                expected_files.push((sentinel, b"plain source".to_vec()));
+            }
+            "immediate-git" => {
+                let marker = folder.join(".git");
+                let contents = "gitdir: private-nonexistent-gitdir\n";
+                std::fs::write(&marker, contents).expect("immediate private marker");
+                expected_files.push((marker, contents.as_bytes().to_vec()));
+            }
+            "empty" => {}
+            _ => unreachable!("fixed fixture shapes"),
+        }
+        let source = PersonalRelativePath::parse("folder").expect("source path");
+        let destination =
+            PersonalRelativePath::parse("new/parents/moved").expect("destination path");
+        let result = if trash {
+            service.delete_to_trash(&root, &source).await
+        } else {
+            service
+                .move_no_clobber(
+                    MoveSource {
+                        root: &root,
+                        path: &source,
+                    },
+                    MoveDestination {
+                        root: &root,
+                        path: &destination,
+                    },
+                )
+                .await
+        };
+        let source_present = folder.is_dir();
+        let destination_allocated = tmp.path().join("new").exists();
+        let trash_allocated = tmp.path().join(TRASH_NAMESPACE).exists();
+        eprintln!(
+            "DIRECTORY_MUTATION_REFUSAL trash={trash} shape={shape} source_present={source_present} destination_allocated={destination_allocated} trash_allocated={trash_allocated} result={result:?}"
+        );
+        if shape == "immediate-git" {
+            assert!(matches!(
+                result,
+                Err(PersonalFileError::Refused(
+                    PersonalFileRefusal::GitRepository { .. }
+                ))
+            ));
+        } else {
+            assert!(matches!(
+                result,
+                Err(PersonalFileError::UnsupportedSafely(_))
+            ));
+        }
+        assert!(source_present);
+        assert!(!destination_allocated);
+        assert!(!trash_allocated);
+        for (path, contents) in expected_files {
+            assert_eq!(
+                std::fs::read(path).expect("preserved source bytes"),
+                contents
+            );
+        }
+        if shape == "empty" {
+            assert_eq!(std::fs::read_dir(&folder).expect("empty source").count(), 0);
+        }
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).expect("private root").count(),
+            1
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn directory_move_refuses_nested_git_and_allocates_nothing() {
+    directory_mutation_refusal_fixture(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn directory_trash_refuses_nested_git_and_allocates_nothing() {
+    directory_mutation_refusal_fixture(true).await;
+}
