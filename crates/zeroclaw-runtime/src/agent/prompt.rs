@@ -900,4 +900,114 @@ mod tests {
         );
         assert!(!with_voice_section_but_no_persona.contains("## Voice"));
     }
+
+    #[test]
+    fn identity_section_build_emits_warn_on_over_cap_content_and_preserves_prompt() {
+        let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+        let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+        zeroclaw_log::try_install_capture_subscriber();
+        let mut rx = zeroclaw_log::subscribe_or_install();
+        while rx.try_recv().is_ok() {}
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let over_cap = "z".repeat(crate::agent::personality::MAX_FILE_CHARS + 300);
+        std::fs::write(dir.path().join("SOUL.md"), &over_cap).unwrap();
+
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = PromptContext {
+            workspace_dir: dir.path(),
+            agent_workspace_dir: dir.path(),
+            model_name: "test-model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            sends_native_tool_specs: false,
+            security_summary: None,
+            autonomy_level: AutonomyLevel::Supervised,
+        };
+
+        // First build emits the structured warning
+        let section = IdentitySection;
+        let output = section.build(&ctx).unwrap();
+
+        // 1. Structured log verification
+        let matches_probe = |event: &serde_json::Value| {
+            event["attributes"]["error_key"] == "agent.personality_file_truncated"
+                && event["attributes"]["file"] == "SOUL.md"
+                && event["attributes"]["total"] == crate::agent::personality::MAX_FILE_CHARS + 300
+        };
+        let event = std::iter::from_fn(|| rx.try_recv().ok())
+            .find(matches_probe)
+            .expect("first over-cap build must emit truncation log event");
+        assert_eq!(
+            event.get("severity_text").and_then(|v| v.as_str()),
+            Some("WARN"),
+            "event must be WARN level"
+        );
+        let attrs = event.get("attributes").expect("event must have attributes");
+        assert_eq!(
+            attrs.get("error_key").and_then(|v| v.as_str()),
+            Some("agent.personality_file_truncated")
+        );
+        assert_eq!(attrs.get("file").and_then(|v| v.as_str()), Some("SOUL.md"));
+        assert_eq!(
+            attrs.get("retained").and_then(|v| v.as_u64()),
+            Some(crate::agent::personality::MAX_FILE_CHARS as u64)
+        );
+        assert_eq!(
+            attrs.get("total").and_then(|v| v.as_u64()),
+            Some((crate::agent::personality::MAX_FILE_CHARS + 300) as u64)
+        );
+        assert_eq!(attrs.get("discarded").and_then(|v| v.as_u64()), Some(300));
+        // Ensure no leakage of content, sender, compact_context, or absolute path
+        assert!(
+            attrs.get("content").is_none(),
+            "no content diagnostic in attrs"
+        );
+        assert!(
+            attrs.get("sender").is_none(),
+            "no sender diagnostic in attrs"
+        );
+        assert!(
+            attrs.get("compact_context").is_none(),
+            "no compact_context claim"
+        );
+        let msg = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg.contains("SOUL.md: retained 20000 of 20300 chars (300 discarded)"),
+            "message format mismatch: {msg}"
+        );
+        assert!(
+            !msg.contains(dir.path().to_str().unwrap()),
+            "no absolute path diagnostics in message"
+        );
+
+        // 2. Prompt output remains byte-identical to expected existing behavior
+        let mut expected_prompt = String::from(
+            "## Project Context\n\n\
+             The following workspace files define your identity, behavior, and context.\n\n\
+             ### SOUL.md\n\n",
+        );
+        expected_prompt.push_str(&"z".repeat(crate::agent::personality::MAX_FILE_CHARS));
+        expected_prompt
+            .push_str("\n\n[... truncated at 20000 chars — use `read` for full file]\n\n");
+        assert_eq!(
+            output, expected_prompt,
+            "prompt must remain byte-identical to pre-existing truncation format"
+        );
+
+        // 3. Repeated build on same workspace/file must be suppressed
+        let output2 = section.build(&ctx).unwrap();
+        assert_eq!(
+            output2, output,
+            "second build must produce identical prompt output"
+        );
+        assert!(
+            !std::iter::from_fn(|| rx.try_recv().ok()).any(|event| matches_probe(&event)),
+            "second build on same workspace/file must not emit duplicate warning"
+        );
+        zeroclaw_log::clear_broadcast_hook();
+    }
 }
