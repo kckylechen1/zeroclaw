@@ -2807,6 +2807,32 @@ async fn runtime_rejects_foreign_reconnect_and_preserves_post_run_obligations() 
             .contains("reconnect receipt attachment binding mismatch")
     );
     assert_ne!(report.attachment_ref.as_ref(), Some(&foreign));
+    let started_remote = controller.started.lock()[0].remote_session.clone();
+    let initial_attachment = {
+        let fixture = state.lock();
+        let matches: Vec<_> = fixture
+            .attachment_bindings
+            .iter()
+            .filter(|((_, remote), _)| remote == started_remote.as_str())
+            .map(|(_, attachment)| SessionAttachmentRef::from_opaque(attachment.clone()))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "one attachment for the actual started session"
+        );
+        matches[0].clone()
+    };
+    assert_eq!(report.attachment_ref.as_ref(), Some(&initial_attachment));
+    assert!(
+        report.final_canonical_state.is_some(),
+        "actual final readback is reported"
+    );
+    assert_ne!(
+        report.final_canonical_state,
+        Some(SessionCanonicalStateV1::Progressing),
+        "foreign reconnect state must not become the report's final state"
+    );
     assert_eq!(*controller.started_count.lock(), 1);
     assert_eq!(
         *controller.watch_calls.lock(),
