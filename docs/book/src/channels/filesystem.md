@@ -1,34 +1,19 @@
 # Filesystem
 
-The `filesystem` channel watches one or more paths and feeds each change into the agent loop. (It formerly also dispatched changes to the SOP engine; that dispatch was removed with the run side.) It is gated by the `channel-filesystem` build feature (default on).
+The `filesystem` channel section is RETIRED with the run side. Filesystem
+listeners were SOP-trigger-only fan-in: they fed watched-path changes into the
+SOP engine as events. SOP runs are Tachi-side ProcedureRuns since #243
+(#197 wall 5), and the run-side listener config went with them.
 
-> **This is a SOP event source.** For trigger syntax and path matching, see [SOP Fan-In: Filesystem](../sop/fan-in/filesystem.md). This page covers what is watched and the safety scoping.
+Any `[channels.filesystem]` section, even an empty header, now fails config
+parse with the migration message. Remove the section; there is no replacement
+`[channels.*]` key for it.
 
-## Configuration
-
-The full field list, derived from the live schema. For a basic watcher you set `paths`.
-
-{{#config-fields channels.filesystem}}
-
-Full field reference: [config reference](../reference/config.md#channels).
-
-## Scoping what is watched
-
-`paths` lists the roots to watch; `recursive` controls whether subdirectories are included. `include` and `exclude` globs narrow which paths emit events, and `events` narrows by change kind. `debounce_ms` and `settle_ms` collapse bursts of rapid changes into a single settled event.
-
-## Safety
-
-The broad system roots `/`, `/home`, `/etc`, `/var`, `/proc`, `/sys`, `/dev`, and `/tmp` are rejected at config validation unless `allow_broad_roots` is set. Symlink event paths are rejected before any metadata, hash, or content read by default; `follow_symlinks` opts in but still requires the canonical target to resolve inside a watched root.
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Listener does not start | a broad root was rejected at validation | Narrow `paths` away from the broad roots, or set `allow_broad_roots` |
-| Change ignored | excluded by glob, or outside `events` kinds | Check `include`, `exclude`, and `events` against the changed file |
-| SOP not starting | trigger `path` glob does not match | Verify the [trigger](../sop/fan-in/filesystem.md) `path` matches and the file is in watch scope |
+For the historical trigger syntax and path matching that these listeners
+drove, see [SOP Fan-In: Filesystem](../sop/fan-in/filesystem.md). That page
+describes the retired wiring only.
 
 ## See also
 
-- [SOP Fan-In: Filesystem](../sop/fan-in/filesystem.md): trigger syntax and path matching
+- [SOP Fan-In: Filesystem](../sop/fan-in/filesystem.md): historical trigger syntax and path matching
 - [Channels overview](./overview.md)
