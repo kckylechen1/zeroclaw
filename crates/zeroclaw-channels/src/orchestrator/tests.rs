@@ -17495,22 +17495,25 @@ async fn unowned_stop_replay_does_not_cancel_new_turn_with_same_inbox() {
             _model: &str,
             _temperature: Option<f64>,
         ) -> anyhow::Result<String> {
-            self.started.send(()).await.unwrap();
-            let permit = tokio::time::timeout(Duration::from_secs(5), self.release.acquire())
-                .await
-                .expect("test releases provider")
-                .unwrap();
-            permit.forget();
-            Ok("ok".to_string())
+            Ok("fallback".to_string())
         }
 
         async fn chat_with_history(
             &self,
             _messages: &[ChatMessage],
-            model: &str,
-            temperature: Option<f64>,
+            _model: &str,
+            _temperature: Option<f64>,
         ) -> anyhow::Result<String> {
-            self.chat_with_system(None, "", model, temperature).await
+            if !self.release.is_closed() {
+                self.started.send(()).await.unwrap();
+                // Closing releases every waiter and leaves follow-up calls open;
+                // a consumed pair of permits would strand additional calls.
+                let result = tokio::time::timeout(Duration::from_secs(5), self.release.acquire())
+                    .await
+                    .expect("test releases provider");
+                assert!(result.is_err(), "release closes the latch");
+            }
+            Ok("ok".to_string())
         }
     }
 
@@ -17536,6 +17539,12 @@ async fn unowned_stop_replay_does_not_cancel_new_turn_with_same_inbox() {
         &[("old-stop", "/stop")],
     )
     .await;
+
+    assert_eq!(
+        inbox.admit("test-channel", "old-stop").unwrap(),
+        Admission::DuplicateInFlight,
+        "an unowned stop must retain its claim before routing recovers"
+    );
 
     let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let channel = Arc::new(StaticNameRecordingChannel {
@@ -17591,7 +17600,7 @@ async fn unowned_stop_replay_does_not_cancel_new_turn_with_same_inbox() {
         .expect("dispatch advances beyond replay")
         .expect("provider start channel open");
     drop(tx);
-    provider.release.add_permits(2);
+    provider.release.close();
     tokio::time::timeout(Duration::from_secs(5), dispatch)
         .await
         .expect("dispatch joins both turns")
