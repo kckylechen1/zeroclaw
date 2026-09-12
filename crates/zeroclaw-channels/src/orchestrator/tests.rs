@@ -17353,7 +17353,11 @@ async fn message_dispatch_admission_warning_retains_error_without_message_identi
     drop(tx);
     run_message_dispatch_loop(rx, AgentRouter::single(ctx), 2, Some(inbox)).await;
     assert_eq!(provider.call_count.load(Ordering::SeqCst), 2);
-    assert_eq!(sent.lock().await.len(), 2, "admission failure stays fail-open");
+    assert_eq!(
+        sent.lock().await.len(),
+        2,
+        "admission failure stays fail-open"
+    );
 
     let warnings: Vec<_> = std::iter::from_fn(|| logs.try_recv().ok())
         .filter(|event| {
