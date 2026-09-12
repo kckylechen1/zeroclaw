@@ -423,8 +423,6 @@ pub fn build_system_prompt_with_persona(
                     // No AIEOS identity loaded (shouldn't happen if is_aieos_configured returned true)
                     // Fall back to OpenClaw bootstrap files
                     let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-                    let compact_context =
-                        matches!(bootstrap_max_chars, Some(COMPACT_BOOTSTRAP_MAX_CHARS));
                     load_openclaw_bootstrap_files(
                         &mut prompt,
                         workspace_dir,
@@ -439,8 +437,6 @@ pub fn build_system_prompt_with_persona(
                         "Warning: Failed to load AIEOS identity: {e}. Using OpenClaw format."
                     );
                     let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-                    let compact_context =
-                        matches!(bootstrap_max_chars, Some(COMPACT_BOOTSTRAP_MAX_CHARS));
                     load_openclaw_bootstrap_files(
                         &mut prompt,
                         workspace_dir,
@@ -453,7 +449,6 @@ pub fn build_system_prompt_with_persona(
         } else {
             // OpenClaw format
             let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-            let compact_context = matches!(bootstrap_max_chars, Some(COMPACT_BOOTSTRAP_MAX_CHARS));
             load_openclaw_bootstrap_files(
                 &mut prompt,
                 workspace_dir,
@@ -465,7 +460,6 @@ pub fn build_system_prompt_with_persona(
     } else {
         // No identity config - use OpenClaw format
         let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-        let compact_context = matches!(bootstrap_max_chars, Some(COMPACT_BOOTSTRAP_MAX_CHARS));
         load_openclaw_bootstrap_files(
             &mut prompt,
             workspace_dir,
@@ -715,6 +709,75 @@ mod tests {
             !suppressed,
             "within the new generation the once-per-file rule holds"
         );
+    }
+
+    #[test]
+    fn bootstrap_warning_uses_explicit_mode_with_independent_file_cap() {
+        let _cache_guard = TRUNCATION_WARN_TEST_LOCK
+            .lock()
+            .expect("warning-cache test lock");
+        let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+        let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+        zeroclaw_log::try_install_capture_subscriber();
+        let mut rx = zeroclaw_log::subscribe_or_install();
+        let identities = [
+            None,
+            Some(zeroclaw_config::schema::IdentityConfig::default()),
+            Some(zeroclaw_config::schema::IdentityConfig {
+                format: "aieos".into(),
+                aieos_inline: Some("not valid json".into()),
+                ..Default::default()
+            }),
+        ];
+        for (identity_index, identity) in identities.iter().enumerate() {
+            for (case_index, (cap, compact)) in [
+                (Some(COMPACT_BOOTSTRAP_MAX_CHARS), false),
+                (Some(1234), true),
+                (None, true),
+                (Some(0), false),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let dir = tempfile::tempdir().unwrap();
+                let retained = cap.unwrap_or(BOOTSTRAP_MAX_CHARS);
+                let total = BOOTSTRAP_MAX_CHARS + 111 + identity_index * 10 + case_index;
+                std::fs::write(dir.path().join("AGENTS.md"), "中".repeat(total)).unwrap();
+                let prompt = build_system_prompt_with_mode_and_autonomy(
+                    dir.path(),
+                    "test-model",
+                    &[],
+                    &[],
+                    identity.as_ref(),
+                    cap,
+                    None,
+                    false,
+                    zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+                    compact,
+                    0,
+                    false,
+                    false,
+                );
+                let event = std::iter::from_fn(|| rx.try_recv().ok())
+                    .find(|event| {
+                        event["attributes"]["error_key"] == "agent.bootstrap_file_truncated"
+                            && event["attributes"]["file"] == "AGENTS.md"
+                            && event["attributes"]["total"] == total
+                    })
+                    .expect("public prompt builder must emit the truncation warning");
+                let attrs = &event["attributes"];
+                assert_eq!(
+                    attrs["compact_context"], compact,
+                    "identity {identity_index}, cap {cap:?}"
+                );
+                assert_eq!(attrs["injected"], retained);
+                assert_eq!(attrs["discarded"], total - retained);
+                assert_eq!(prompt.contains("## Channel Capabilities"), !compact);
+                assert!(prompt.contains(&"中".repeat(retained)));
+                assert!(!prompt.contains(&"中".repeat(retained + 1)));
+            }
+        }
+        zeroclaw_log::clear_broadcast_hook();
     }
 
     fn build_with_autonomy(tools: &[(&str, &str)], level: AutonomyLevel) -> String {
