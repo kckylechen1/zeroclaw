@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ComposeRejection","ForbiddenCategory"],"fn":["compose_intent","scan_client_authored_refs","scan_intent","scan_text"],"struct":["ComposeError","RequesterBridgePolicy","StructuralIntentContext","TaskIntentInputs"]};

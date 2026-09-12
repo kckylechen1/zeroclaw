@@ -1,0 +1,53 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The typed SessionController port — the ZeroClaw-owned lifecycle seam between the ExecutionSubAgent and the ephemeral harness session over ACPX (the ephemeral-execution vertical; the tachi attached-session spine’s host-side contract)."><title>zeroclaw_runtime::execution_subagent::controller - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="zeroclaw_runtime" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module controller</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../zeroclaw_runtime/index.html">zeroclaw_<wbr>runtime</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module controller</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#traits" title="Traits">Traits</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In zeroclaw_<wbr>runtime::<wbr>execution_<wbr>subagent</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">zeroclaw_runtime</a>::<wbr><a href="../index.html">execution_subagent</a></div><h1>Module <span>controller</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The typed SessionController port — the ZeroClaw-owned lifecycle seam
+between the ExecutionSubAgent and the ephemeral harness session over
+ACPX (the ephemeral-execution vertical; the tachi attached-session spine’s host-side contract).</p>
+<div class="example-wrap"><pre class="language-text"><code>ExecutionSubagentTool (parent-side, bounded)
+  → SessionController port                    (THIS FILE)
+     start / watch / prompt / interrupt / stop / collect / reattach
+  → ACPX transport (host-configured; NOT a port parameter)
+  → Codex / Claude / GLM session (operates the repository)</code></pre></div>
+<p>Authority boundaries encoded here:</p>
+<ul>
+<li><strong>The host owns the lifecycle; the port owns the vocabulary.</strong> The
+transport implementation is constructed with the host’s own
+workspace/transport binding. The port’s request types carry NO
+workspace path, no CLI flags, no credentials — the compile-level
+signature is the negative-capability evidence.</li>
+<li><strong>Capability-gated operations.</strong> Every lifecycle op checks the
+session’s advertised capability set and returns a typed
+<a href="enum.ControllerError.html#variant.UnsupportedByLifecycleOwner" title="variant zeroclaw_runtime::execution_subagent::controller::ControllerError::UnsupportedByLifecycleOwner"><code>ControllerError::UnsupportedByLifecycleOwner</code></a> when the set does
+not admit it. There is no “do it anyway” path and no fake success.</li>
+<li><strong>Fail closed.</strong> <a href="enum.ControllerError.html#variant.Unavailable" title="variant zeroclaw_runtime::execution_subagent::controller::ControllerError::Unavailable"><code>ControllerError::Unavailable</code></a> is terminal for
+the ephemeral path: callers must not degrade to local execution.</li>
+<li><strong>Reconnect honors the spine’s recovery semantics.</strong>
+<a href="trait.SessionController.html#tymethod.reattach" title="method zeroclaw_runtime::execution_subagent::controller::SessionController::reattach"><code>SessionController::reattach</code></a> resumes from the spine-issued
+<code>resume_from_revision</code>; facts after that revision replay exactly
+once (the sink dedups by event id), and an <code>unknown_orphaned</code>
+canonical state is recoverable by authoritative facts — never
+guessed into failed/completed.</li>
+<li><strong>Bounded collect.</strong> <a href="struct.SessionCollectView.html" title="struct zeroclaw_runtime::execution_subagent::controller::SessionCollectView"><code>SessionCollectView</code></a> carries a bounded
+summary, a digest, and evidence refs — never a transcript.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ControllerEvent.html" title="struct zeroclaw_runtime::execution_subagent::controller::ControllerEvent">Controller<wbr>Event</a></dt><dd>One event observed from the harness session.</dd><dt><a class="struct" href="struct.GatedSessionController.html" title="struct zeroclaw_runtime::execution_subagent::controller::GatedSessionController">Gated<wbr>Session<wbr>Controller</a></dt><dd>The gated client every consumer of the port MUST hold (the tool holds
+exactly this type, never a raw <code>dyn SessionController</code>). It enforces,
+once and transport-independently:</dd><dt><a class="struct" href="struct.PromptReceipt.html" title="struct zeroclaw_runtime::execution_subagent::controller::PromptReceipt">Prompt<wbr>Receipt</a></dt><dd>Receipt for a prompt/correct delivery.</dd><dt><a class="struct" href="struct.SessionCapabilities.html" title="struct zeroclaw_runtime::execution_subagent::controller::SessionCapabilities">Session<wbr>Capabilities</a></dt><dd>The closed ACP session capability vocabulary (mirrors the spine’s
+declared/advertised set: observe / wait / prompt / cancel / resume /
+load / events / artifacts).</dd><dt><a class="struct" href="struct.SessionCollectView.html" title="struct zeroclaw_runtime::execution_subagent::controller::SessionCollectView">Session<wbr>Collect<wbr>View</a></dt><dd>The bounded terminal projection from <code>collect</code>.</dd><dt><a class="struct" href="struct.SessionEventPage.html" title="struct zeroclaw_runtime::execution_subagent::controller::SessionEventPage">Session<wbr>Event<wbr>Page</a></dt><dd>One page of watched events. <code>next_seq</code> is monotone: it never goes
+backwards, even when a transport returns stale pages.</dd><dt><a class="struct" href="struct.SessionHandle.html" title="struct zeroclaw_runtime::execution_subagent::controller::SessionHandle">Session<wbr>Handle</a></dt><dd>A host-minted handle for one live session. The remote session identity
+is minted by the transport at <code>start</code> and is OBSERVED here, never
+chosen by the caller. Opaque: the subagent can hold it and pass it
+back, not introspect transport details.</dd><dt><a class="struct" href="struct.SessionStartSpec.html" title="struct zeroclaw_runtime::execution_subagent::controller::SessionStartSpec">Session<wbr>Start<wbr>Spec</a></dt><dd>What the host asks the controller to start: an ephemeral harness
+session bound to the objective’s bounded prompt. NO workspace path,
+NO CLI flags, NO credentials — the transport was constructed with the
+host’s own binding; the request cannot widen it. The remote session
+identity is MINTED BY THE TRANSPORT at start (the consumer cannot
+choose it — it only observes it on the returned handle).</dd><dt><a class="struct" href="struct.SessionStopReceipt.html" title="struct zeroclaw_runtime::execution_subagent::controller::SessionStopReceipt">Session<wbr>Stop<wbr>Receipt</a></dt><dd>Receipt for a stop/cancel request. A request is never a confirmation:
+<code>confirmed</code> carries the authority confirmation reference that the
+eventual terminal <code>cancelled</code> fact must bind to.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ControllerError.html" title="enum zeroclaw_runtime::execution_subagent::controller::ControllerError">Controller<wbr>Error</a></dt><dd>Typed controller failures. <code>Unavailable</code> is fail-closed (no local
+fallback exists); <code>UnsupportedByLifecycleOwner</code> is the typed refusal
+for capability-gated ops (never fake success).</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.SessionController.html" title="trait zeroclaw_runtime::execution_subagent::controller::SessionController">Session<wbr>Controller</a></dt><dd>The typed SessionController port. Exactly the six execution-vertical operations
+(start / watch / prompt / interrupt+stop / collect) plus the reconnect
+consumption op (<code>reattach</code>) — no raw process control surface exists on
+the trait, so no caller of the port can acquire one.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,38 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The Tachi fact-reporting path — the `SessionFactSink` port through which an ephemeral ExecutionSubAgent run reports authoritative session facts to the tachi attached-session receipt spine (the attached-session receipt spine: `ingest_session_event`, `advertise_session_capabilities`, `request_intervention` pickup, `record_intervention_result`, `mark_session_connection`, `reconnect_session`, `get_session_state`)."><title>zeroclaw_runtime::execution_subagent::facts - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="zeroclaw_runtime" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module facts</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../zeroclaw_runtime/index.html">zeroclaw_<wbr>runtime</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module facts</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#traits" title="Traits">Traits</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In zeroclaw_<wbr>runtime::<wbr>execution_<wbr>subagent</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">zeroclaw_runtime</a>::<wbr><a href="../index.html">execution_subagent</a></div><h1>Module <span>facts</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The Tachi fact-reporting path — the <a href="trait.SessionFactSink.html" title="trait zeroclaw_runtime::execution_subagent::facts::SessionFactSink"><code>SessionFactSink</code></a> port through
+which an ephemeral ExecutionSubAgent run reports authoritative session
+facts to the tachi attached-session receipt spine (the attached-session receipt spine: <code>ingest_session_event</code>, <code>advertise_session_capabilities</code>,
+<code>request_intervention</code> pickup, <code>record_intervention_result</code>,
+<code>mark_session_connection</code>, <code>reconnect_session</code>, <code>get_session_state</code>).</p>
+<div class="example-wrap"><pre class="language-text"><code>SessionController (host lifecycle)         SessionFactSink (THIS FILE)
+  start/watch/prompt/stop/collect  ──facts──▶ attach / advertise /
+  (spawn/wait/cancel stay HERE,             ingest_event / record_result /
+   host-owned)                              mark_connection / reconnect /
+                                            get_state / get_intervention
+                                         ──▶ tachi spine (receipts only)</code></pre></div>
+<p>Law recap encoded here:</p>
+<ul>
+<li><strong>Receipts only.</strong> The port’s surface has no spawn/wait/cancel/resume
+operation and no session handle: the sink can record, read, and
+reconnect-bind facts; it can never signal or reap a process. The
+source-scan test in this module’s tests pins the absence of any
+process/filesystem capability across the module.</li>
+<li><strong>No new durable store.</strong> This module owns no DDL and opens no
+database; the spine is tachi-owned. The in-memory double is
+<code>#[cfg(test)]</code>-gated for the same reason the tachi_bridge’s
+in-memory ledger is (it is structurally a fact ledger).</li>
+<li><strong>Fail closed.</strong> <a href="../../../zeroclaw_api/session_exec/enum.SessionFactError.html#variant.Unavailable" title="variant zeroclaw_api::session_exec::SessionFactError::Unavailable"><code>SessionFactError::Unavailable</code></a> never degrades to
+a local-only path: the run reports the outage and ends <code>failed</code> (or
+refuses to start when facts cannot flow at all) — the facts ARE the
+product here.</li>
+<li><strong>A request is never a state.</strong> Intervention receipts record asks;
+only the spine’s terminal event facts move canonical state, and a
+<code>cancelled</code> terminal must bind the authority confirmation reference
+recorded via <code>record_intervention_result</code>.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SessionBinding.html" title="struct zeroclaw_runtime::execution_subagent::facts::SessionBinding">Session<wbr>Binding</a></dt><dd>The identity/binding facts one session attachment carries. All fields
+are host-side binding facts; none is a credential.</dd><dt><a class="struct" href="struct.SessionEventFact.html" title="struct zeroclaw_runtime::execution_subagent::facts::SessionEventFact">Session<wbr>Event<wbr>Fact</a></dt><dd>One event fact to ingest. <code>source_revision</code> is the host’s monotone
+revision for the session’s fact stream (the spine’s stale-guard rank).</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.SessionFactSink.html" title="trait zeroclaw_runtime::execution_subagent::facts::SessionFactSink">Session<wbr>Fact<wbr>Sink</a></dt><dd>The receipts-only fact sink. Implementations transport these calls to
+the tachi spine (or, test-only, to an in-memory double); the port
+itself has zero execution capability.</dd></dl></section></div></main></body></html>

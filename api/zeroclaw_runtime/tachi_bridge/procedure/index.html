@@ -1,0 +1,34 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The procedure-run submit carrier (vertical V4; DECISION KP-16/E option (b) — embedded bounded payload). This is a TRANSPORT ATTACHMENT extension of the bridge, deliberately NOT a seventh operation on [`TachiTaskBridge`]: the owner-scoped base port stays frozen at submit/get/watch/collect (+ intervene/request_stop from V3). A transport that can carry procedure runs implements this extension trait next to the base port."><title>zeroclaw_runtime::tachi_bridge::procedure - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="zeroclaw_runtime" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module procedure</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../zeroclaw_runtime/index.html">zeroclaw_<wbr>runtime</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module procedure</a></h2><h3><a href="#traits">Module Items</a></h3><ul class="block"><li><a href="#traits" title="Traits">Traits</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In zeroclaw_<wbr>runtime::<wbr>tachi_<wbr>bridge</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">zeroclaw_runtime</a>::<wbr><a href="../index.html">tachi_bridge</a></div><h1>Module <span>procedure</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The procedure-run submit carrier (vertical V4; DECISION KP-16/E
+option (b) — embedded bounded payload). This is a TRANSPORT
+ATTACHMENT extension of the bridge, deliberately NOT a seventh
+operation on [<code>TachiTaskBridge</code>]: the owner-scoped base port stays
+frozen at submit/get/watch/collect (+ intervene/request_stop from
+V3). A transport that can carry procedure runs implements this
+extension trait next to the base port.</p>
+<p>Carrier law (the DECISION KP-16/E ratified common denominator):</p>
+<ul>
+<li><strong>Verify-before-ack</strong>: the implementation MUST persist the
+snapshot bytes (its own content-addressed store) and byte-verify
+the canonical digest BEFORE acknowledging run creation — there is
+no acknowledge-then-fetch window on any conforming transport.</li>
+<li><strong>The retained ref never resolves through the mutable definitions
+directory</strong>: implementations hold the bytes (or a CAS ref into
+their own immutable store), never a path into ZeroClaw’s
+definitions tree.</li>
+<li><strong>The intent still rides the frozen wire unchanged</strong>: the snapshot
+is envelope content beside <code>(intent, request_id)</code>, never a
+<code>TaskIntentV1</code> field; the intent’s <code>context_bundle_ref</code> carries
+the <code>proceduresnap:&lt;digest&gt;</code> CAS ref.</li>
+<li><strong>ZeroClaw-side</strong>: the client half of this seam (see
+<code>procedure_v1::run</code>) writes no durable state — the snapshot bytes
+exist at admission handoff only (in the envelope), and every
+durable copy is Tachi-side.</li>
+</ul>
+</div></details><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.ProcedureSubmitPort.html" title="trait zeroclaw_runtime::tachi_bridge::procedure::ProcedureSubmitPort">Procedure<wbr>Submit<wbr>Port</a></dt><dd>The DECISION KP-16/E option-(b) carrier port: transports that accept
+procedure-run submissions implement this beside
+<a href="../client/trait.TachiTaskBridge.html" title="trait zeroclaw_runtime::tachi_bridge::client::TachiTaskBridge"><code>super::TachiTaskBridge</code></a>. Implementations are Tachi-side truth:
+they verify + retain the snapshot before acknowledging, mint the
+task through the same admission law as every other submit, and never
+resolve the retained ref against a ZeroClaw definitions directory.</dd></dl></section></div></main></body></html>

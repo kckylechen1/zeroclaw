@@ -1,0 +1,34 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Snapshot mint (KP-11): bind an immutable, content-addressed `ProcedureSnapshotV1` from a PUBLISHED captured revision."><title>zeroclaw_runtime::procedure_v1::snapshot - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="zeroclaw_runtime" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module snapshot</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../zeroclaw_runtime/index.html">zeroclaw_<wbr>runtime</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module snapshot</a></h2><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In zeroclaw_<wbr>runtime::<wbr>procedure_<wbr>v1</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">zeroclaw_runtime</a>::<wbr><a href="../index.html">procedure_v1</a></div><h1>Module <span>snapshot</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Snapshot mint (KP-11): bind an immutable, content-addressed
+<code>ProcedureSnapshotV1</code> from a PUBLISHED captured revision.</p>
+<p>Publication rules encoded here:</p>
+<ol>
+<li><strong>Draft-revision mint refused</strong>: the capture’s review state must
+be <code>Published</code> — a typed <code>DraftRevision</code> refusal otherwise.</li>
+<li><strong>Complete-definition atomicity</strong>: the snapshot embeds the exact
+captured <code>SOP.toml</code>/<code>SOP.md</code> bytes; the parsed steps derive from
+those bytes only (single-read capture in
+<a href="../definition/fn.capture_definition.html" title="fn zeroclaw_runtime::procedure_v1::definition::capture_definition"><code>super::definition::capture_definition</code></a>; this module never
+re-reads the tree — no mixed/partial snapshot can exist).</li>
+<li><strong>Race-free mint</strong>: the snapshot’s canonical digest binds the
+whole payload; re-deriving the digest over the same snapshot
+yields the same value, and any later edit of the definitions tree
+changes nothing already minted (KP-12 — proven by tests).</li>
+</ol>
+<p>Admission scans over the snapshot content (fail closed):</p>
+<ul>
+<li>credential-shaped content refused (a definition is not a secret
+store);</li>
+<li>Private-Dyad-markered content refused with an EXISTENCE-BLIND
+error (KP-20/RULING-207 §11: content, ids, and counts of Private
+Dyad must not enter Tachi — the refusal names the category, never
+the material);</li>
+<li>worktree/filesystem-path-shaped content refused (definitions are
+machine-independent; a path in a definition is placement detail);</li>
+<li>oversize content refused by the bounded-carrier law (typed
+<code>Oversize</code>, never silent truncation).</li>
+</ul>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.SnapshotContentCategory.html" title="enum zeroclaw_runtime::procedure_v1::snapshot::SnapshotContentCategory">Snapshot<wbr>Content<wbr>Category</a></dt><dd>Content-scan categories admitted at mint.</dd><dt><a class="enum" href="enum.SnapshotMintError.html" title="enum zeroclaw_runtime::procedure_v1::snapshot::SnapshotMintError">Snapshot<wbr>Mint<wbr>Error</a></dt><dd>Typed mint refusal.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.mint_snapshot.html" title="fn zeroclaw_runtime::procedure_v1::snapshot::mint_snapshot">mint_<wbr>snapshot</a></dt><dd>Mint the immutable snapshot from a captured revision (KP-11 full
+field set). Pure over the capture: no I/O, no durable writes.</dd><dt><a class="fn" href="fn.snapshot_content_scan.html" title="fn zeroclaw_runtime::procedure_v1::snapshot::snapshot_content_scan">snapshot_<wbr>content_<wbr>scan</a></dt><dd>Scan captured definition content for mint-refusal categories. Shared
+by the mint and by tests proving the privacy law.</dd></dl></section></div></main></body></html>

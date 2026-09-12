@@ -1,0 +1,49 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="AgentSoul domain seam — identity-bound Soul storage."><title>zeroclaw::memory::soul - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="zeroclaw" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module soul</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../zeroclaw/index.html">zeroclaw</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module soul</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In zeroclaw::<wbr>memory</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">zeroclaw</a>::<wbr><a href="../index.html">memory</a></div><h1>Module <span>soul</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>AgentSoul domain seam — identity-bound Soul storage.</p>
+<p>Soul is the reviewed operating disposition of ONE persistent agent
+identity, carried unchanged across replaceable model / provider /
+harness carriers. This leaf defines only the admission seam and the
+identity-binding storage surface:</p>
+<ul>
+<li>the identity vocabulary type is <a href="../../../zeroclaw_api/companion/struct.AgentIdentityId.html" title="struct zeroclaw_api::companion::AgentIdentityId"><code>AgentIdentityId</code></a> from
+<code>zeroclaw_api::companion</code> (the pending Tachi envelope contract substrate’s minted-once
+identity slot) — this module never mints or derives identities,
+it only admits and resolves them;</li>
+<li>every namespace read/write resolves to a stable admitted identity
+first and fails closed when that identity is missing, ambiguous,
+revoked, or malformed;</li>
+<li>the storage namespace is derived from the identity alone — carrier
+attributes (model, provider, harness, session, display name) are
+structurally irrelevant to the key;</li>
+<li>no disposition capture, review/promotion, persona projection, or
+reset/erase lifecycle exists here (later leaves under the AgentSoul tracker);</li>
+<li>durability is delegated to the existing <a href="../trait.Memory.html" title="trait zeroclaw::memory::Memory"><code>Memory</code></a> backend; this
+module introduces no new persistence, revision, or receipt engine.</li>
+</ul>
+<p>Backend boundary: row-attribution verification is only as honest as
+the backend. The markdown backend both stamps reads with its own
+alias AND drops the <code>soul</code> namespace on round-trip, so both Soul
+services refuse it at construction (<code>UnsupportedBackend</code>). Backends
+with true composite attribution (SQLite) enforce isolation
+structurally.</p>
+<p>Verified identity evidence from Tachi (the pending Tachi envelope contract)
+is NOT wired yet: the <a href="struct.IdentityRegistry.html" title="struct zeroclaw::memory::soul::IdentityRegistry"><code>IdentityRegistry</code></a> seam keeps a provenance
+note per admission so external evidence can attach later without
+widening this API.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AdmissionRecord.html" title="struct zeroclaw::memory::soul::AdmissionRecord">Admission<wbr>Record</a></dt><dd>Why/how an identity was admitted. Free-form for locally admitted
+identities today; reserved as the attachment point for verified
+Tachi evidence envelopes  without widening the API.</dd><dt><a class="struct" href="struct.CarrierContext.html" title="struct zeroclaw::memory::soul::CarrierContext">Carrier<wbr>Context</a></dt><dd>Carrier attributes a Soul deliberately ignores. Present in the API so
+call sites can state their context explicitly and tests can prove the
+namespace is invariant under carrier replacement — model, provider,
+harness, session, and display name never enter the derived key.</dd><dt><a class="struct" href="struct.IdentityRegistry.html" title="struct zeroclaw::memory::soul::IdentityRegistry">Identity<wbr>Registry</a></dt><dd>Local admission registry: the fail-closed resolver every Soul
+read/write must pass through. An identity that was never admitted,
+or was admitted and then revoked, resolves to a typed error — never
+to a fallback key. Lock poisoning is absorbed rather than panicking:
+resolution continues on the last consistent snapshot.</dd><dt><a class="struct" href="struct.SoulService.html" title="struct zeroclaw::memory::soul::SoulService">Soul<wbr>Service</a></dt><dd>Identity-bound Soul storage over an existing <a href="../trait.Memory.html" title="trait zeroclaw::memory::Memory"><code>Memory</code></a> backend.
+Every method first resolves the caller’s identity through the
+<a href="struct.IdentityRegistry.html" title="struct zeroclaw::memory::soul::IdentityRegistry"><code>IdentityRegistry</code></a> and fails closed on unavailable / ambiguous /
+revoked / malformed identities; rows are attributed to the resolved
+identity and read back through the agent-scoped composite lookup, so
+sibling identities are structurally invisible to each other.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.AdmissionStatus.html" title="enum zeroclaw::memory::soul::AdmissionStatus">Admission<wbr>Status</a></dt><dd>Admission lifecycle of one identity in the local registry.</dd><dt><a class="enum" href="enum.SoulError.html" title="enum zeroclaw::memory::soul::SoulError">Soul<wbr>Error</a></dt><dd>Typed fail-closed errors for the Soul seam. No variant ever falls back
+to an alias, model, display name, or “best guess” identity.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_statement","list_candidates","list_heads","review_candidate"]};

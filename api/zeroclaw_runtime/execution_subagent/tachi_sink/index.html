@@ -1,0 +1,40 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The production fact-sink transport — a real `SessionFactSink` that consumes the PUBLIC tachi MCP facade (`tachi_agent_eval`, the attached-session receipt spine) over the existing MCP stdio client. This is the production wire the stage-b JSON stand-in pointed at (the 261-vertical’s honest gap); every sink operation is a real MCP `tools/call` to a spawned `tachi serve` child."><title>zeroclaw_runtime::execution_subagent::tachi_sink - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="zeroclaw_runtime" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module tachi_sink</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../zeroclaw_runtime/index.html">zeroclaw_<wbr>runtime</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module tachi_<wbr>sink</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In zeroclaw_<wbr>runtime::<wbr>execution_<wbr>subagent</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">zeroclaw_runtime</a>::<wbr><a href="../index.html">execution_subagent</a></div><h1>Module <span>tachi_<wbr>sink</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The production fact-sink transport — a real <a href="../facts/trait.SessionFactSink.html" title="trait zeroclaw_runtime::execution_subagent::facts::SessionFactSink"><code>SessionFactSink</code></a> that
+consumes the PUBLIC tachi MCP facade (<code>tachi_agent_eval</code>, the
+attached-session receipt spine) over the existing MCP stdio client.
+This is the production wire the stage-b JSON stand-in pointed at
+(the 261-vertical’s honest gap); every sink operation is a real MCP <code>tools/call</code>
+to a spawned <code>tachi serve</code> child.</p>
+<div class="example-wrap"><pre class="language-text"><code>SessionFactSink port (receipts only)          (facts.rs)
+  → TachiSessionFactSink (THIS FILE)
+    → McpServer (zeroclaw-tools stdio client, transport-owned child)
+      → tachi serve (the tachi-owned spine; receipts only)</code></pre></div>
+<p>Transport laws encoded here:</p>
+<ul>
+<li><strong>Public facade only.</strong> Every fact moves through the documented
+<code>tachi_agent_eval</code> action surface (<code>attach_session</code>,
+<code>advertise_session_capabilities</code>, <code>ingest_session_event</code>,
+<code>record_intervention_result</code>, <code>mark_session_connection</code>,
+<code>reconnect_session</code>, <code>get_session_state</code>). No DB access, no
+tachi-internal seam, no second transport family.</li>
+<li><strong>Admission context is operator-configured, never model-supplied.</strong>
+The host identity, admitted agent identity, admission receipt ref,
+and work-claim binding come from the embedder-constructed
+<a href="struct.TachiFactSinkConfig.html" title="struct zeroclaw_runtime::execution_subagent::tachi_sink::TachiFactSinkConfig"><code>TachiFactSinkConfig</code></a>; env values (e.g. the isolated spine home)
+are secrets — redacted from <code>Debug</code>, never logged.</li>
+<li><strong>Replay-idempotent and source-revision bound.</strong> Every operation is
+safe to re-send (attach replays by idempotency key; events dedup by
+event id), so a dropped transport is repaired by ONE reconnect +
+retry of the failed call — exactly-once at the spine, from the last
+observed revision via <code>reconnect_session</code>.</li>
+<li><strong>Typed failures.</strong> Transport death surfaces
+<a href="../../../zeroclaw_api/session_exec/enum.SessionFactError.html#variant.Unavailable" title="variant zeroclaw_api::session_exec::SessionFactError::Unavailable"><code>SessionFactError::Unavailable</code></a>; spine refusals (including the
+spine-gate’s <code>unsupported_by_lifecycle_owner</code> refusals) surface as
+<a href="../../../zeroclaw_api/session_exec/enum.SessionFactError.html#variant.Refused" title="variant zeroclaw_api::session_exec::SessionFactError::Refused"><code>SessionFactError::Refused</code></a> carrying the typed text. Nothing is
+fabricated on failure.</li>
+<li><strong>No new durable store.</strong> This adapter opens no database and owns no
+DDL; the only persistence is the tachi-owned spine across the wire.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.TachiFactSinkConfig.html" title="struct zeroclaw_runtime::execution_subagent::tachi_sink::TachiFactSinkConfig">Tachi<wbr>Fact<wbr>Sink<wbr>Config</a></dt><dd>Operator/embedder-constructed admission and transport binding. The
+port cannot widen any field; values here are configuration facts.</dd><dt><a class="struct" href="struct.TachiSessionFactSink.html" title="struct zeroclaw_runtime::execution_subagent::tachi_sink::TachiSessionFactSink">Tachi<wbr>Session<wbr>Fact<wbr>Sink</a></dt><dd>The production <a href="../facts/trait.SessionFactSink.html" title="trait zeroclaw_runtime::execution_subagent::facts::SessionFactSink"><code>SessionFactSink</code></a> over the tachi MCP facade.</dd></dl></section></div></main></body></html>

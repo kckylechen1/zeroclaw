@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DOCUMENTED_VALUES","MINIMAL_TOOL_MEMBERSHIP"],"enum":["Composition"],"fn":["is_minimal_member"]};
