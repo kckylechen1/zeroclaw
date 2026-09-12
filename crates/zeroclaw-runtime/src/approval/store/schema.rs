@@ -175,6 +175,17 @@ pub(super) fn initialize(conn: &mut Connection, persistent: bool) -> Result<()> 
         tx.commit()?;
         return Ok(());
     }
+    // Preserve the validated legacy index statement, including its stored SQL.
+    // Dropping the old grant table also drops this index inside the transaction.
+    let legacy_lookup_sql: Option<String> = if empty {
+        None
+    } else {
+        Some(tx.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_grants_lookup'",
+            [],
+            |row| row.get(0),
+        )?)
+    };
     if empty {
         tx.execute_batch(GRANTS)?;
         tx.execute_batch(AUDIT)?;
@@ -199,7 +210,13 @@ pub(super) fn initialize(conn: &mut Connection, persistent: bool) -> Result<()> 
             "DROP TABLE approval_grants; ALTER TABLE approval_grants_v1 RENAME TO approval_grants;",
         )?;
     }
-    for (_, sql) in INDEXES {
+    for (name, sql) in INDEXES {
+        if name == "idx_grants_lookup"
+            && let Some(original) = legacy_lookup_sql.as_deref()
+        {
+            tx.execute_batch(original)?;
+            continue;
+        }
         tx.execute_batch(&sql.replacen("CREATE INDEX", "CREATE INDEX IF NOT EXISTS", 1))?;
     }
     tx.pragma_update(None, "user_version", 1)?;
