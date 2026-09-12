@@ -662,8 +662,15 @@ mod tests {
     use super::*;
     use zeroclaw_config::schema::SkillsPromptInjectionMode;
 
+    // These fixtures inspect multiple calls across the process-global WARNED
+    // cache. Keep a generation reset from splitting another fixture's calls.
+    static TRUNCATION_WARN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn bootstrap_truncation_warns_once_per_workspace_file() {
+        let _cache_guard = TRUNCATION_WARN_TEST_LOCK
+            .lock()
+            .expect("warning-cache test lock");
         let dir = tempfile::TempDir::new().expect("tempdir");
         let first = warn_bootstrap_truncation_once(dir.path(), "AGENTS.md", 6000, 13985, true);
         assert!(first, "first truncation of a workspace file must warn");
@@ -678,6 +685,9 @@ mod tests {
 
     #[test]
     fn truncation_warn_cache_is_bounded_per_generation() {
+        let _cache_guard = TRUNCATION_WARN_TEST_LOCK
+            .lock()
+            .expect("warning-cache test lock");
         // Distinct keys fill the cache up to the hard cap; the next
         // distinct key starts a new generation (warns again), and a key
         // from the previous generation may then warn again too — once
