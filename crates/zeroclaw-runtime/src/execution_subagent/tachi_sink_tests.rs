@@ -2841,7 +2841,7 @@ async fn runtime_rejects_foreign_reconnect_and_preserves_post_run_obligations() 
     );
     assert_eq!(controller.stop_requests.lock().len(), 1);
     assert_eq!(
-        report.facts_reported, 2,
+        report.usage.facts_reported, 2,
         "only accepted and cleanup, never wrong reconnect"
     );
     for operation in [
