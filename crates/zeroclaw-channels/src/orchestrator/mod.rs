@@ -2881,9 +2881,11 @@ async fn dispatch_worker(
                 .await
             {
                 Ok(Ok(())) => {}
-                Ok(Err(_err)) => {
+                Ok(Err(err)) => {
                     // Bounded WARN — completion failure means at-least-once
                     // re-processing on the next delivery, never a silent drop.
+                    // The error text rides along: this line is the only one
+                    // until restart, so it must distinguish the failure mode.
                     if warn_inbox_failure_once("inbox_completion_failed") {
                         ::zeroclaw_log::record!(
                             WARN,
@@ -2894,12 +2896,13 @@ async fn dispatch_worker(
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                             .with_attrs(::serde_json::json!({
                                 "error_key": "channels.inbox_completion_failed",
+                                "err": err.to_string(),
                             })),
                             "inbox completion failed; redelivery remains eligible"
                         );
                     }
                 }
-                Err(_err) => {
+                Err(err) => {
                     if warn_inbox_failure_once("inbox_completion_task_failed") {
                         ::zeroclaw_log::record!(
                             WARN,
@@ -2910,6 +2913,7 @@ async fn dispatch_worker(
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                             .with_attrs(::serde_json::json!({
                                 "error_key": "channels.inbox_completion_task_failed",
+                                "err": err.to_string(),
                             })),
                             "inbox completion task failed; redelivery remains eligible"
                         );
@@ -3033,8 +3037,10 @@ pub(crate) enum AdmissionDecision {
     DropDuplicate(DuplicateBoundary),
     /// Store unusable (write error or blocking-task failure): process
     /// WITHOUT dedup — at-least-once delivery is preserved, never a
-    /// silent drop.
-    StoreFailed,
+    /// silent drop. Carries the failure text so the bounded WARN (one
+    /// line per key per process) can distinguish disk-full from a
+    /// locked database from a schema fault.
+    StoreFailed(String),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -3054,7 +3060,8 @@ pub(crate) fn admission_decision(
         Ok(Ok(Admission::DuplicateInFlight)) => {
             AdmissionDecision::DropDuplicate(DuplicateBoundary::InFlight)
         }
-        Ok(Err(_)) | Err(_) => AdmissionDecision::StoreFailed,
+        Ok(Err(e)) => AdmissionDecision::StoreFailed(e.to_string()),
+        Err(e) => AdmissionDecision::StoreFailed(e.to_string()),
     }
 }
 
@@ -3157,7 +3164,7 @@ async fn run_message_dispatch_loop(
                     );
                     continue;
                 }
-                AdmissionDecision::StoreFailed => {
+                AdmissionDecision::StoreFailed(err) => {
                     // Fail-open: no dedup evidence, so the message MUST be
                     // processed — at-least-once, never a silent drop.
                     if warn_inbox_failure_once(&format!("inbox_admit_store_failed:{}", msg.channel))
@@ -3172,6 +3179,7 @@ async fn run_message_dispatch_loop(
                             .with_attrs(::serde_json::json!({
                                 "error_key": "channels.inbox_admit_store_failed",
                                 "channel": msg.channel,
+                                "err": err,
                             })),
                             "inbox store failed; processing without dedup"
                         );
@@ -3196,6 +3204,13 @@ async fn run_message_dispatch_loop(
                         })),
                     "dropping inbound message: no agent owns this channel"
                 );
+            }
+            // No agent took ownership: keep the received row replayable once
+            // routing is available again in this process.
+            if let Some(seen_ids) = &inbox
+                && let Some(receipt) = inbox_receipt
+            {
+                seen_ids.release_claims(std::slice::from_ref(&receipt));
             }
             continue;
         };
