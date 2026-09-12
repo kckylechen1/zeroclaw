@@ -30,6 +30,20 @@ Fresh required CI is normally the shared evidence for the Cargo surfaces it actu
 - a release target is outside the PR matrix and only covered by release/manual workflows;
 - stale, cancelled, skipped, or unavailable CI is not fresh evidence.
 
+### Dependency policy coverage
+
+The required security job runs `cargo deny check` from the root package with its default features. The root manifest is also a workspace manifest, but this command does not select every workspace member as a graph root or enable every optional feature. Its passing result covers the selected graph, not every package version recorded in `Cargo.lock`. The exact-version skips in `deny.toml` apply within that graph; they do not identify a canonical newest version.
+
+This root/default coverage is the accepted required gate. To diagnose the broader duplicate and wildcard policy without changing the lockfile, run:
+
+```bash
+cargo deny --locked --workspace --all-features check bans
+```
+
+The broader graph has known duplicate and wildcard failures and is not a passing required gate. Expanding enforcement requires a separate reviewed policy change; do not add exceptions merely to turn that diagnostic green. Daily `cargo deny check advisories` checks advisory policy on its selected graph, not duplicate-version bans. Neither its success nor a lockfile advisory audit proves that all-workspace bans pass.
+
+Dependency-refresh PRs must disclose downgrades (or explicitly state none), newly added duplicate versions, and any deny exception changes with their reasons in the PR template. Compare package and source identities as well as versions: adding a parallel major is a new duplicate, not by itself a downgrade. Record unknown resolver causes as unknown.
+
 ### Daily Advisory Scan (`daily-audit.yml`)
 
 Runs `cargo deny check advisories` daily at 09:00 UTC against the dependency tree. Opens an issue on findings. No action unless a vulnerability is reported.
@@ -89,6 +103,10 @@ Docs are built and published as part of the release pipeline rather than on ever
 ### Monthly Outdated Scan (`monthly-outdated.yml`)
 
 Scheduled monthly scan on the 1st of every month at 09:00 UTC. Runs `cargo outdated --workspace` across all workspace members. Opens a `dependencies`-labeled issue when stale deps are found. Permissions: `contents: read` + `issues: write`. Dedup guard prevents piling up if the previous issue is still open.
+
+The scanner remains pinned to `cargo-outdated@0.19.0`, including its latest-version graph. Exit `0` means a completed scan with no findings; `10` means a completed outdated inventory and is the only status allowed to create or reuse an issue. Every other exit status is a scanner failure. Findings and scanner failures both fail the workflow. Resolver failures are not evidence that the checked-in dependency graph is broken.
+
+Every scan retains `outdated-output.txt` as a workflow artifact, including clean scans, scanner failures and existing-issue reuse. The report includes the exact head, runner image, toolchain and scanner versions, raw combined output and exit classification. Run `bash scripts/ci/monthly_outdated.test.sh` for isolated command-stub coverage; it does not install a scanner or contact GitHub.
 
 First triage step for a new issue: check if the reported outdated crates have semver-incompatible bumps and whether the consuming crate's API changed. If the bump is trivial (patch/minor), create a short dep-only PR. If the upgrade is blocked by semver breaks, close the issue with a note and the blocking crate name.
 
@@ -184,7 +202,7 @@ All third-party refs are pinned to a full commit SHA with a trailing version com
 | `actions/checkout` (`v6.0.2`) | Most workflows | Repository checkout |
 | `actions/cache` (`v4.2.3`, `v5.0.5`) | `docker-image-pr.yml`, `tweet-release.yml` | Generic dependency and Trivy database caching |
 | `actions/setup-node` (`v6.4.0`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml` | Node toolchain for the web-dashboard build |
-| `actions/upload-artifact` (`v7.0.1`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `docker-publish.yml`, `trivy-scheduled.yml` | Upload build artifacts and Trivy SARIF handoff artifacts |
+| `actions/upload-artifact` (`v7.0.1`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `docker-publish.yml`, `trivy-scheduled.yml`, `monthly-outdated.yml` | Upload build artifacts, Trivy SARIF handoff artifacts and monthly dependency scan reports |
 | `actions/download-artifact` (`v8.0.1`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `docker-publish.yml` | Download build artifacts and Trivy SARIF handoff artifacts |
 | `actions/labeler` (`v6.1.0`) | `pr-path-labeler.yml` | Apply path/scope labels from `.github/labeler.yml` |
 | `dtolnay/rust-toolchain` (`stable`) | `ci.yml`, `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `cross-platform-clippy.yml`, `daily-audit.yml`, `docs-deploy.yml` | Install Rust toolchain |

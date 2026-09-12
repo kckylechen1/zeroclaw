@@ -510,7 +510,7 @@ impl ExecutionSubagentTool {
                         operation: ExecutionObligationKindV1::ConnectionReport,
                         disposition: connection_disposition,
                     });
-                    match self.sink.reconnect(&binding).await {
+                    match self.sink.reconnect(&attachment, &binding).await {
                         Ok(receipt) => {
                             // The watch cursor is CONTROLLER-scoped: facts
                             // already consumed stay consumed; the spine's

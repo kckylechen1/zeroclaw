@@ -11,6 +11,14 @@
   example `type:docs`, `risk:low`, `size:S`, `docs`. During label-spelling
   migration, copy the exact live label spelling from the GitHub UI.
 
+## Dependency refresh disclosure (only when dependencies change)
+
+Omit this section for other changes. Adding a parallel major is a new duplicate, not by itself a downgrade.
+
+- **Downgrades:** Package/source identity, old → new version and reason, or `None`; state unknown causes as unknown.
+- **New duplicate versions:** Package/source identity, added versions and owning dependency paths, or `None`.
+- **Deny exception changes:** Exact entries and reasons, or `None`; name the graph/features checked in the testing evidence.
+
 ## Testing (required)
 
 ### How you can test (when useful)

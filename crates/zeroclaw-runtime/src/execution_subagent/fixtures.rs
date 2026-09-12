@@ -51,6 +51,7 @@ pub struct ScriptedController {
     /// Number of leading `watch` calls that fail with `Unavailable`
     /// before the transport recovers. Default `0` (no fault).
     pub watch_failures_remaining: Mutex<u32>,
+    pub watch_calls: Mutex<u32>,
     pub started_count: Mutex<u32>,
     pub stop_requests: Mutex<Vec<bool>>,
     pub interrupt_requests: Mutex<u32>,
@@ -163,6 +164,7 @@ impl SessionController for ScriptedController {
         after_seq: u64,
         limit: usize,
     ) -> Result<SessionEventPage, ControllerError> {
+        *self.watch_calls.lock() += 1;
         self.drain_queue().await?;
         if *self.watch_failures_remaining.lock() > 0 {
             *self.watch_failures_remaining.lock() -= 1;
@@ -537,15 +539,21 @@ impl SessionFactSink for InMemoryFactSink {
 
     async fn reconnect(
         &self,
+        expected_attachment: &SessionAttachmentRef,
         _binding: &SessionBinding,
     ) -> Result<SessionReconnectReceiptView, SessionFactError> {
         self.unavailable()?;
-        *self.reconnections.lock() += 1;
         let attachment = self
             .attachment
             .lock()
             .clone()
             .ok_or_else(|| SessionFactError::Refused("not attached".to_string()))?;
+        if &attachment != expected_attachment {
+            return Err(SessionFactError::Refused(
+                "reconnect receipt attachment binding mismatch".to_string(),
+            ));
+        }
+        *self.reconnections.lock() += 1;
         // Bind BEFORE the struct literal: a guard temporary inside a
         // struct expression lives until the end of the literal, and
         // read_state() re-locks the same mutex (self-deadlock).
