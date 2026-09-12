@@ -188,7 +188,7 @@ All third-party refs are pinned to a full commit SHA with a trailing version com
 | `actions/checkout` (`v6.0.2`) | Most workflows | Repository checkout |
 | `actions/cache` (`v4.2.3`, `v5.0.5`) | `docker-image-pr.yml`, `tweet-release.yml` | Generic dependency and Trivy database caching |
 | `actions/setup-node` (`v6.4.0`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml` | Node toolchain for the web-dashboard build |
-| `actions/upload-artifact` (`v7.0.1`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `docker-publish.yml`, `trivy-scheduled.yml` | Upload build artifacts and Trivy SARIF handoff artifacts |
+| `actions/upload-artifact` (`v7.0.1`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `docker-publish.yml`, `trivy-scheduled.yml`, `monthly-outdated.yml` | Upload build artifacts, Trivy SARIF handoff artifacts and monthly dependency scan reports |
 | `actions/download-artifact` (`v8.0.1`) | `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `docker-publish.yml` | Download build artifacts and Trivy SARIF handoff artifacts |
 | `actions/labeler` (`v6.1.0`) | `pr-path-labeler.yml` | Apply path/scope labels from `.github/labeler.yml` |
 | `dtolnay/rust-toolchain` (`stable`) | `ci.yml`, `release-stable-manual.yml`, `cross-platform-build-manual.yml`, `cross-platform-clippy.yml`, `daily-audit.yml`, `docs-deploy.yml` | Install Rust toolchain |
