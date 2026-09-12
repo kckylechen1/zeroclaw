@@ -26,26 +26,45 @@ fn load_openclaw_bootstrap_files(
     workspace_dir: &std::path::Path,
     max_chars_per_file: usize,
     inject_memory: bool,
+    compact_context: bool,
 ) {
     prompt.push_str(
         "The following workspace files define your identity, behavior, and context. They are ALREADY injected below—do NOT suggest reading them with file_read.\n\n",
     );
 
     for filename in BOOTSTRAP_FILES {
-        inject_workspace_file(prompt, workspace_dir, filename, max_chars_per_file);
+        inject_workspace_file(
+            prompt,
+            workspace_dir,
+            filename,
+            max_chars_per_file,
+            compact_context,
+        );
     }
 
     // BOOTSTRAP.md — only if it exists (first-run ritual)
     let bootstrap_path = workspace_dir.join("BOOTSTRAP.md");
     if bootstrap_path.exists() {
-        inject_workspace_file(prompt, workspace_dir, "BOOTSTRAP.md", max_chars_per_file);
+        inject_workspace_file(
+            prompt,
+            workspace_dir,
+            "BOOTSTRAP.md",
+            max_chars_per_file,
+            compact_context,
+        );
     }
 
     // MEMORY.md — curated long-term memory (main session only).
     // Skipped when the agent runs without persistent memory (e.g. ACP sessions)
     // so that stale long-term memory does not leak into isolated contexts.
     if inject_memory {
-        inject_workspace_file(prompt, workspace_dir, "MEMORY.md", max_chars_per_file);
+        inject_workspace_file(
+            prompt,
+            workspace_dir,
+            "MEMORY.md",
+            max_chars_per_file,
+            compact_context,
+        );
     }
 }
 
@@ -409,6 +428,7 @@ pub fn build_system_prompt_with_persona(
                         workspace_dir,
                         max_chars,
                         inject_memory,
+                        compact_context,
                     );
                 }
                 Err(e) => {
@@ -422,18 +442,31 @@ pub fn build_system_prompt_with_persona(
                         workspace_dir,
                         max_chars,
                         inject_memory,
+                        compact_context,
                     );
                 }
             }
         } else {
             // OpenClaw format
             let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-            load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars, inject_memory);
+            load_openclaw_bootstrap_files(
+                &mut prompt,
+                workspace_dir,
+                max_chars,
+                inject_memory,
+                compact_context,
+            );
         }
     } else {
         // No identity config - use OpenClaw format
         let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-        load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars, inject_memory);
+        load_openclaw_bootstrap_files(
+            &mut prompt,
+            workspace_dir,
+            max_chars,
+            inject_memory,
+            compact_context,
+        );
     }
 
     // ── 6. Date ─────────────────────────────────────────────────
@@ -503,9 +536,17 @@ pub fn build_system_prompt_with_persona(
     }
 }
 
+/// Hard cap on distinct truncation-WARN keys held per process. The
+/// once-per-file gate keys on (workspace, file); a host serving many
+/// workspaces would otherwise grow the set without bound. At the cap
+/// the generation resets: files from the previous generation may warn
+/// again, which is the declared policy ("once per file per
+/// generation"), never silent growth.
+const MAX_TRUNCATION_WARN_KEYS: usize = 4096;
+
 /// Inject a single workspace file into the prompt with truncation and missing-file markers.
-/// Emit the operator-facing truncation WARN once per file per process.
-/// The turn paths inject bootstrap files on every turn; warning once
+/// Emit the operator-facing truncation WARN once per file per process
+/// generation. The turn paths inject bootstrap files on every turn; warning once
 /// keeps the signal discoverable in logs (`agent.bootstrap_file_truncated`)
 /// without spamming every turn. `zeroclaw doctor` re-checks offline.
 fn warn_bootstrap_truncation_once(
@@ -513,6 +554,7 @@ fn warn_bootstrap_truncation_once(
     filename: &str,
     max_chars: usize,
     total_chars: usize,
+    compact_context: bool,
 ) -> bool {
     use std::collections::HashSet;
     use std::path::PathBuf;
@@ -524,8 +566,13 @@ fn warn_bootstrap_truncation_once(
     let mut seen = WARNED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !seen.insert((workspace_dir.to_path_buf(), filename.to_string())) {
+    let key = (workspace_dir.to_path_buf(), filename.to_string());
+    if !seen.insert(key.clone()) {
         return false;
+    }
+    if seen.len() > MAX_TRUNCATION_WARN_KEYS {
+        seen.clear();
+        seen.insert(key);
     }
 
     let discarded = total_chars.saturating_sub(max_chars);
@@ -536,15 +583,14 @@ fn warn_bootstrap_truncation_once(
             .with_attrs(::serde_json::json!({
                 "error_key": "agent.bootstrap_file_truncated",
                 "file": filename,
-                "workspace": workspace_dir.display().to_string(),
                 "injected": max_chars,
                 "total": total_chars,
                 "discarded": discarded,
-                "compact_context": true,
+                "compact_context": compact_context,
             })),
         &format!(
             "{filename}: injected {max_chars} of {total_chars} chars \
-             ({discarded} discarded, compact_context=true)"
+             ({discarded} discarded, compact_context={compact_context})"
         )
     );
     true
@@ -555,6 +601,7 @@ fn inject_workspace_file(
     workspace_dir: &std::path::Path,
     filename: &str,
     max_chars: usize,
+    compact_context: bool,
 ) {
     use std::fmt::Write;
 
@@ -585,6 +632,7 @@ fn inject_workspace_file(
                     filename,
                     max_chars,
                     trimmed.chars().count(),
+                    compact_context,
                 );
                 prompt.push_str(truncated);
                 let _ = writeln!(
@@ -608,18 +656,128 @@ mod tests {
     use super::*;
     use zeroclaw_config::schema::SkillsPromptInjectionMode;
 
+    // These fixtures inspect multiple calls across the process-global WARNED
+    // cache. Keep a generation reset from splitting another fixture's calls.
+    static TRUNCATION_WARN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn bootstrap_truncation_warns_once_per_workspace_file() {
+        let _cache_guard = TRUNCATION_WARN_TEST_LOCK
+            .lock()
+            .expect("warning-cache test lock");
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let first = warn_bootstrap_truncation_once(dir.path(), "AGENTS.md", 6000, 13985);
+        let first = warn_bootstrap_truncation_once(dir.path(), "AGENTS.md", 6000, 13985, true);
         assert!(first, "first truncation of a workspace file must warn");
-        let second = warn_bootstrap_truncation_once(dir.path(), "AGENTS.md", 6000, 13985);
+        let second = warn_bootstrap_truncation_once(dir.path(), "AGENTS.md", 6000, 13985, true);
         assert!(
             !second,
             "same workspace+file must not warn twice per process"
         );
-        let other_file = warn_bootstrap_truncation_once(dir.path(), "SOUL.md", 6000, 9000);
+        let other_file = warn_bootstrap_truncation_once(dir.path(), "SOUL.md", 6000, 9000, false);
         assert!(other_file, "a different file still warns");
+    }
+
+    #[test]
+    fn truncation_warn_cache_is_bounded_per_generation() {
+        let _cache_guard = TRUNCATION_WARN_TEST_LOCK
+            .lock()
+            .expect("warning-cache test lock");
+        // Distinct keys fill the cache up to the hard cap; the next
+        // distinct key starts a new generation (warns again), and a key
+        // from the previous generation may then warn again too — once
+        // per file per generation, never unbounded growth.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        for index in 0..MAX_TRUNCATION_WARN_KEYS {
+            let warned = warn_bootstrap_truncation_once(
+                dir.path(),
+                &format!("f{index}.md"),
+                6000,
+                7000,
+                true,
+            );
+            assert!(warned, "generation member {index} must warn");
+        }
+        let opener = warn_bootstrap_truncation_once(dir.path(), "next-gen.md", 6000, 7000, true);
+        assert!(opener, "the key past the cap must warn and reset");
+        let again = warn_bootstrap_truncation_once(dir.path(), "f0.md", 6000, 7000, true);
+        assert!(
+            again,
+            "after the generation reset the earlier key warns again"
+        );
+        let suppressed = warn_bootstrap_truncation_once(dir.path(), "f0.md", 6000, 7000, true);
+        assert!(
+            !suppressed,
+            "within the new generation the once-per-file rule holds"
+        );
+    }
+
+    #[test]
+    fn bootstrap_warning_uses_explicit_mode_with_independent_file_cap() {
+        let _cache_guard = TRUNCATION_WARN_TEST_LOCK
+            .lock()
+            .expect("warning-cache test lock");
+        let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+        let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+        zeroclaw_log::try_install_capture_subscriber();
+        let mut rx = zeroclaw_log::subscribe_or_install();
+        let identities = [
+            None,
+            Some(zeroclaw_config::schema::IdentityConfig::default()),
+            Some(zeroclaw_config::schema::IdentityConfig {
+                format: "aieos".into(),
+                aieos_inline: Some("not valid json".into()),
+                ..Default::default()
+            }),
+        ];
+        for (identity_index, identity) in identities.iter().enumerate() {
+            for (case_index, (cap, compact)) in [
+                (Some(COMPACT_BOOTSTRAP_MAX_CHARS), false),
+                (Some(1234), true),
+                (None, true),
+                (Some(0), false),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let dir = tempfile::tempdir().unwrap();
+                let retained = cap.unwrap_or(BOOTSTRAP_MAX_CHARS);
+                let total = BOOTSTRAP_MAX_CHARS + 111 + identity_index * 10 + case_index;
+                std::fs::write(dir.path().join("AGENTS.md"), "中".repeat(total)).unwrap();
+                let prompt = build_system_prompt_with_mode_and_autonomy(
+                    dir.path(),
+                    "test-model",
+                    &[],
+                    &[],
+                    identity.as_ref(),
+                    cap,
+                    None,
+                    false,
+                    zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+                    compact,
+                    0,
+                    false,
+                    false,
+                );
+                let event = std::iter::from_fn(|| rx.try_recv().ok())
+                    .find(|event| {
+                        event["attributes"]["error_key"] == "agent.bootstrap_file_truncated"
+                            && event["attributes"]["file"] == "AGENTS.md"
+                            && event["attributes"]["total"] == total
+                    })
+                    .expect("public prompt builder must emit the truncation warning");
+                let attrs = &event["attributes"];
+                assert_eq!(
+                    attrs["compact_context"], compact,
+                    "identity {identity_index}, cap {cap:?}"
+                );
+                assert_eq!(attrs["injected"], retained);
+                assert_eq!(attrs["discarded"], total - retained);
+                assert_eq!(prompt.contains("## Channel Capabilities"), !compact);
+                assert!(prompt.contains(&"中".repeat(retained)));
+                assert!(!prompt.contains(&"中".repeat(retained + 1)));
+            }
+        }
+        zeroclaw_log::clear_broadcast_hook();
     }
 
     fn build_with_autonomy(tools: &[(&str, &str)], level: AutonomyLevel) -> String {
