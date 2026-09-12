@@ -17415,8 +17415,12 @@ async fn dispatch_messages_through_router(
     run_message_dispatch_loop(rx, router, 2, seen_ids).await;
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn unowned_channel_drop_replays_through_valid_router_with_same_inbox() {
+    // This fixture emits unowned-channel warnings into the global log hook.
+    let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+    let _hook_guard = zeroclaw_log::__private_test_hook_lock();
     use super::inbox::Admission;
 
     let seen_dir = tempfile::tempdir().unwrap();
@@ -17477,8 +17481,12 @@ async fn unowned_channel_drop_replays_through_valid_router_with_same_inbox() {
     assert_eq!(sent.lock().await.as_slice(), &["alice:ok".to_string()]);
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn unowned_stop_replay_does_not_cancel_new_turn_with_same_inbox() {
+    // This fixture emits unowned-channel warnings into the global log hook.
+    let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+    let _hook_guard = zeroclaw_log::__private_test_hook_lock();
     use super::inbox::Admission;
 
     struct LatchedProvider {
