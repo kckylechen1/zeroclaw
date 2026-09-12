@@ -18,7 +18,8 @@ use crate::personal_file::domain::{
 };
 #[cfg(unix)]
 use crate::personal_file::domain::{
-    ListedEntry, MAX_LIST_ENTRIES, MAX_TEXT_BYTES, ObjectId, RootInner, TRASH_NAMESPACE,
+    ListedEntry, MAX_LIST_ENTRIES, MAX_LIST_SCAN_ENTRIES, MAX_TEXT_BYTES, ObjectId, RootInner,
+    TRASH_NAMESPACE,
 };
 
 /// Fail-closed message for platforms without descriptor primitives.
@@ -731,13 +732,25 @@ impl PersonalFileService {
             // planted dirent flood.
             let bound = limit.min(MAX_LIST_ENTRIES);
             let mut entries: Vec<ListedEntry> = Vec::new();
+            let mut scanned = 0;
             for entry in rustix::fs::Dir::read_from(&dir_fd).map_err(rustix_errno_to_io)? {
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(error) => return Err(rustix_errno_to_io(error)),
                 };
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name == "." || name == ".." || name == TRASH_NAMESPACE {
+                let name = entry.file_name();
+                if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                    continue;
+                }
+                // Every non-dot dirent consumes scan budget before any
+                // hidden/type/disappearance filtering or per-entry stat.
+                // The extra dirent proves overflow; never return partial data.
+                if scanned >= MAX_LIST_SCAN_ENTRIES {
+                    return Err(PersonalFileError::ScanLimitExceeded(MAX_LIST_SCAN_ENTRIES));
+                }
+                scanned += 1;
+                let name = name.to_string_lossy().into_owned();
+                if name == TRASH_NAMESPACE {
                     continue;
                 }
                 // Symlinks are refused objects in this domain, never
