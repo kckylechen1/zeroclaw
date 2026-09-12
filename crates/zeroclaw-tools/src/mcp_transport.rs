@@ -2112,7 +2112,8 @@ mod tests {
             // Background a bounded process that inherits stdout, then the
             // direct shell child exits immediately. stdout stays open long
             // enough to prove the direct-child watcher wins over EOF.
-            args: vec!["-c".into(), "sleep 2 & exit 0".into()],
+            // Keep private transport stdout open without retaining runner stderr.
+            args: vec!["-c".into(), "sleep 2 2>/dev/null & exit 0".into()],
             ..Default::default()
         };
         let transport = StdioTransport::new(&config).expect("build transport");
