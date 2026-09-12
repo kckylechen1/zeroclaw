@@ -18881,7 +18881,7 @@ impl Config {
                     format!(
                         "runtime_profiles.{alias}.context_compression.enabled is set but context \
                          compression is not currently implemented in the runtime (the compressor \
-                         was removed in); this setting has no effect."
+                         was removed in #8196); this setting has no effect."
                     ),
                     format!("runtime_profiles.{alias}.context_compression.enabled"),
                 ));
@@ -18948,7 +18948,7 @@ impl Config {
                     format!(
                         "runtime_profiles.{alias}.context_compression.{field} is set to a \
                          non-default value but context compression is not currently implemented \
-                         in the runtime (the compressor was removed in); this setting has \
+                         in the runtime (the compressor was removed in #8196); this setting has \
                          no effect."
                     ),
                     format!("runtime_profiles.{alias}.context_compression.{field}"),
