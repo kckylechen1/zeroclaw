@@ -23,13 +23,16 @@ fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn harden_if_exists(path: &Path) {
-    if !path.exists() {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    // Guarded block instead of an early `return`: with `#[cfg(unix)]`
+    // stripped on Windows the early return becomes the function's tail
+    // statement and fails `clippy::needless_return` in the weekly
+    // cross-platform clippy run.
+    if path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
     }
 }
 
