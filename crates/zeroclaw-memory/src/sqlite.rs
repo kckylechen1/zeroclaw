@@ -386,24 +386,6 @@ impl SqliteMemory {
         options: StoreOptions,
         agent_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        let embedding_bytes = match self.get_or_compute_embedding(content).await {
-            Ok(emb) => emb.map(|emb| vector::vec_to_bytes(&emb)),
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({
-                            "key": key,
-                            "error": format!("{e}"),
-                        })),
-                    "memory store: embedding failed; persisting row without a vector \
-                     (run `zeroclaw memory reindex` to backfill once the embedder recovers)"
-                );
-                None
-            }
-        };
-
         let conn = self.conn.clone();
         let key = key.to_string();
         let content = content.to_string();
@@ -430,6 +412,30 @@ impl SqliteMemory {
                 crate::soul::SOUL_KEY_PREFIX
             );
         }
+
+        // Reserved Soul content is local-only on implicit provider paths.
+        // Validate its reservation above before any embedding request.
+        let embedding_bytes = if ns == crate::soul::SOUL_NAMESPACE {
+            None
+        } else {
+            match self.get_or_compute_embedding(&content).await {
+                Ok(emb) => emb.map(|emb| vector::vec_to_bytes(&emb)),
+                Err(e) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "key": key,
+                                "error": format!("{e}"),
+                            })),
+                        "memory store: embedding failed; persisting row without a vector \
+                     (run `zeroclaw memory reindex` to backfill once the embedder recovers)"
+                    );
+                    None
+                }
+            }
+        };
 
         let imp = options.importance.unwrap_or(0.5);
         let kind = options
@@ -2030,9 +2036,11 @@ impl Memory for SqliteMemory {
         let conn = self.conn.clone();
         let entries: Vec<(String, String)> = tokio::task::spawn_blocking(move || {
             let conn = conn.lock();
-            let mut stmt =
-                conn.prepare("SELECT id, content FROM memories WHERE embedding IS NULL")?;
-            let rows = stmt.query_map([], |row| {
+            let mut stmt = conn.prepare(
+                "SELECT id, content FROM memories WHERE embedding IS NULL \
+                 AND (namespace IS NULL OR namespace != ?1)",
+            )?;
+            let rows = stmt.query_map(params![crate::soul::SOUL_NAMESPACE], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
             Ok::<_, anyhow::Error>(rows.filter_map(std::result::Result::ok).collect())
