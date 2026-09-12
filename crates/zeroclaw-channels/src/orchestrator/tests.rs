@@ -17476,3 +17476,140 @@ async fn unowned_channel_drop_replays_through_valid_router_with_same_inbox() {
     assert_eq!(provider.call_count.load(Ordering::SeqCst), 1);
     assert_eq!(sent.lock().await.as_slice(), &["alice:ok".to_string()]);
 }
+
+#[tokio::test]
+async fn unowned_stop_replay_does_not_cancel_new_turn_with_same_inbox() {
+    use super::inbox::Admission;
+
+    struct LatchedProvider {
+        started: tokio::sync::mpsc::Sender<()>,
+        release: tokio::sync::Semaphore,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for LatchedProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            self.started.send(()).await.unwrap();
+            let permit = tokio::time::timeout(Duration::from_secs(5), self.release.acquire())
+                .await
+                .expect("test releases provider")
+                .unwrap();
+            permit.forget();
+            Ok("ok".to_string())
+        }
+
+        async fn chat_with_history(
+            &self,
+            _messages: &[ChatMessage],
+            model: &str,
+            temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            self.chat_with_system(None, "", model, temperature).await
+        }
+    }
+
+    impl ::zeroclaw_api::attribution::Attributable for LatchedProvider {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Provider(
+                ::zeroclaw_api::attribution::ProviderKind::Model(
+                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+                ),
+            )
+        }
+        fn alias(&self) -> &str {
+            "LatchedProvider"
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let inbox = Arc::new(MessageInbox::open(dir.path()).unwrap());
+    dispatch_messages_through_router(
+        Some(Arc::clone(&inbox)),
+        AgentRouter::multi(HashMap::new(), HashMap::new()),
+        "test-channel",
+        &[("old-stop", "/stop")],
+    )
+    .await;
+
+    let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let channel = Arc::new(StaticNameRecordingChannel {
+        name: "test-channel",
+        sent_messages: Arc::clone(&sent),
+    });
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::channel(4);
+    let provider = Arc::new(LatchedProvider {
+        started: started_tx,
+        release: tokio::sync::Semaphore::new(0),
+    });
+    let mut config = zeroclaw_config::schema::Config::default();
+    config.channels.debounce_ms = 0;
+    let ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
+        channel,
+        provider.clone(),
+        config,
+        zeroclaw_config::schema::AliasedAgentConfig::default(),
+        "test-provider",
+        None,
+    );
+    let message = |id: &str, sender: &str, content: &str| ChannelMessage {
+        id: id.into(),
+        sender: sender.into(),
+        reply_target: sender.into(),
+        content: content.into(),
+        channel: "test-channel".into(),
+        timestamp: 1,
+        ..Default::default()
+    };
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let loop_inbox = Arc::clone(&inbox);
+    let dispatch = zeroclaw_spawn::spawn!(async move {
+        run_message_dispatch_loop(rx, AgentRouter::single(ctx), 2, Some(loop_inbox)).await;
+    });
+    tx.send(message("new-turn", "alice", "hello"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
+        .await
+        .expect("new turn enters provider")
+        .expect("provider start channel open");
+    tx.send(message("old-stop", "alice", "/stop"))
+        .await
+        .unwrap();
+    // FIFO dispatch of a different sender proves the replay was considered
+    // while Alice's new turn was still held inside its provider call.
+    tx.send(message("dispatch-fence", "bob", "hello"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started_rx.recv())
+        .await
+        .expect("dispatch advances beyond replay")
+        .expect("provider start channel open");
+    drop(tx);
+    provider.release.add_permits(2);
+    tokio::time::timeout(Duration::from_secs(5), dispatch)
+        .await
+        .expect("dispatch joins both turns")
+        .unwrap();
+
+    let replies = sent.lock().await;
+    assert_eq!(replies.len(), 2, "stop replay must emit no stop reply");
+    assert!(
+        replies.contains(&"alice:ok".to_string()),
+        "new turn completes"
+    );
+    assert!(replies.contains(&"bob:ok".to_string()));
+    assert_eq!(
+        inbox.admit("test-channel", "new-turn").unwrap(),
+        Admission::DuplicateCompleted
+    );
+    assert_eq!(
+        inbox.admit("test-channel", "old-stop").unwrap(),
+        Admission::DuplicateInFlight
+    );
+}
