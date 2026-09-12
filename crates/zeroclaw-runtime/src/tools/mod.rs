@@ -1673,10 +1673,14 @@ mod tests {
             };
             let mem: Arc<dyn Memory> =
                 Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+            let risk_profile = zeroclaw_config::schema::RiskProfileConfig {
+                sandbox_enabled: Some(false),
+                ..Default::default()
+            };
             let tools = all_tools(
                 Arc::new(cfg.clone()),
                 &security,
-                &zeroclaw_config::schema::RiskProfileConfig::default(),
+                &risk_profile,
                 "test-agent",
                 mem,
                 None,
