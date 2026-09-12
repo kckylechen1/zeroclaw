@@ -56,8 +56,8 @@
       "path": "crates/zeroclaw-channels/src/orchestrator/tests.rs",
       "store": "channel_seen_ids.db",
       "role": "test",
-      "basis": "#181 loop-level discriminators (PR #281, cross-vendor-review directed): two fault-injection connections (rusqlite::Connection::open on the same channel_seen_ids.db) plus one error-construction mention - test-only, no production write path",
-      "signals": 5
+      "basis": "#181 loop-level discriminators (PR #281, cross-vendor-review directed): two fault-injection connections (rusqlite::Connection::open on the same channel_seen_ids.db) plus one error-construction mention - test-only, no production write path. TB-22 test-only exemption (PR #305): signals 5->7 add one fault-injection connection in an isolated temporary channel_seen_ids.db to capture admission WARN diagnostics; no new production store, table or writer path",
+      "signals": 7
     },
     {
       "path": "crates/zeroclaw-channels/src/slack.rs",

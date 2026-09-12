@@ -17065,17 +17065,23 @@ async fn admission_decision_is_fail_open_on_store_failure() {
     // failed or the blocking task failed — must NOT suppress a redelivery.
     // StoreFailed processes the message without dedup; only DropDuplicate
     // drops. This is the at-least-once guarantee against silent loss.
-    assert_eq!(
-        admission_decision(Ok(Err(rusqlite::Error::QueryReturnedNoRows))),
-        AdmissionDecision::StoreFailed
-    );
+    // The failure text must survive into the decision so the bounded
+    // WARN can name the failure mode (it is the only line until restart).
+    let store_failed = admission_decision(Ok(Err(rusqlite::Error::QueryReturnedNoRows)));
+    assert!(matches!(
+        &store_failed,
+        // The database error renders this variant as "Query returned no rows"
+        // (stable Display, not the Debug variant name).
+        AdmissionDecision::StoreFailed(err) if err.contains("Query returned no rows")
+    ));
     let join_err = tokio::task::spawn_blocking(|| panic!("blocking task fails"))
         .await
         .expect_err("panicking blocking task must join with an error");
-    assert_eq!(
-        admission_decision(Err(join_err)),
-        AdmissionDecision::StoreFailed
-    );
+    let task_failed = admission_decision(Err(join_err));
+    assert!(matches!(
+        &task_failed,
+        AdmissionDecision::StoreFailed(err) if !err.is_empty()
+    ));
 }
 
 #[test]
@@ -17290,4 +17296,183 @@ fn unowned_channel_warn_gate_lru_bounded_eviction_and_reload() {
     assert!(gate.should_warn("b"), "evicted identities may warn again");
     assert_eq!(gate.seen.len(), 2);
     assert!(UnownedChannelWarnGate::default().should_warn("a"));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn message_dispatch_admission_warning_retains_error_without_message_identity() {
+    let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+    let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+    zeroclaw_log::try_install_capture_subscriber();
+    let mut logs = zeroclaw_log::subscribe_or_install();
+    while logs.try_recv().is_ok() {}
+
+    let dir = tempfile::tempdir().unwrap();
+    let inbox = Arc::new(MessageInbox::open(dir.path()).unwrap());
+    let injector = rusqlite::Connection::open(dir.path().join("channel_seen_ids.db")).unwrap();
+    injector
+        .execute_batch(
+            "CREATE TRIGGER fail_admission BEFORE INSERT ON seen_message_ids
+             BEGIN SELECT RAISE(ABORT, 'injected admission diagnostic'); END;",
+        )
+        .unwrap();
+    drop(injector);
+
+    // This channel owns a unique once-gate key; no global warning reset.
+    let channel_name = "inbox-admission-diagnostic-probe";
+    let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let channel = Arc::new(StaticNameRecordingChannel {
+        name: channel_name,
+        sent_messages: Arc::clone(&sent),
+    });
+    let provider = Arc::new(ModelCaptureModelProvider::default());
+    let mut config = zeroclaw_config::schema::Config::default();
+    config.channels.debounce_ms = 0;
+    let ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
+        channel,
+        provider.clone(),
+        config,
+        zeroclaw_config::schema::AliasedAgentConfig::default(),
+        "test-provider",
+        None,
+    );
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    for _ in 0..2 {
+        tx.send(ChannelMessage {
+            id: "synthetic-private-chat-id:message-id".into(),
+            sender: "synthetic-private-sender".into(),
+            reply_target: "synthetic-private-room".into(),
+            content: "synthetic-private-message-content".into(),
+            channel: channel_name.into(),
+            timestamp: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    drop(tx);
+    run_message_dispatch_loop(rx, AgentRouter::single(ctx), 2, Some(inbox)).await;
+    assert_eq!(provider.call_count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        sent.lock().await.len(),
+        2,
+        "admission failure stays fail-open"
+    );
+
+    let warnings: Vec<_> = std::iter::from_fn(|| logs.try_recv().ok())
+        .filter(|event| {
+            event["attributes"]["error_key"] == "channels.inbox_admit_store_failed"
+                && event["attributes"]["channel"] == channel_name
+        })
+        .collect();
+    assert_eq!(warnings.len(), 1, "repeated failures remain bounded");
+    let warning = &warnings[0];
+    assert_eq!(warning["severity_text"], "WARN");
+    let attrs = &warning["attributes"];
+    assert!(attrs["err"].as_str().is_some_and(|err| !err.is_empty()));
+    assert!(
+        attrs["err"]
+            .as_str()
+            .unwrap()
+            .contains("injected admission diagnostic")
+    );
+    for field in ["message_id", "sender", "content", "reply_target"] {
+        assert!(
+            attrs.get(field).is_none(),
+            "unexpected identity field: {field}"
+        );
+    }
+    assert!(!warning.to_string().contains("synthetic-private"));
+    zeroclaw_log::clear_broadcast_hook();
+}
+
+async fn dispatch_messages_through_router(
+    seen_ids: Option<Arc<MessageInbox>>,
+    router: AgentRouter,
+    channel_name: &'static str,
+    messages: &[(&'static str, &'static str)],
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(4);
+    for (message_id, content) in messages {
+        tx.send(zeroclaw_api::channel::ChannelMessage {
+            id: (*message_id).to_string(),
+            sender: "alice".to_string(),
+            reply_target: "alice".to_string(),
+            content: (*content).to_string(),
+            channel: channel_name.into(),
+            channel_alias: None,
+            timestamp: 1,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+            subject: None,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    drop(tx);
+    run_message_dispatch_loop(rx, router, 2, seen_ids).await;
+}
+
+#[tokio::test]
+async fn unowned_channel_drop_replays_through_valid_router_with_same_inbox() {
+    use super::inbox::Admission;
+
+    let seen_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
+    let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let channel = Arc::new(StaticNameRecordingChannel {
+        name: "test-channel",
+        sent_messages: Arc::clone(&sent),
+    });
+    let provider = Arc::new(ModelCaptureModelProvider::default());
+    let mut config = zeroclaw_config::schema::Config::default();
+    config.channels.debounce_ms = 0;
+    let ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
+        channel,
+        provider.clone(),
+        config,
+        zeroclaw_config::schema::AliasedAgentConfig::default(),
+        "test-provider",
+        None,
+    );
+    let delivery = [("m-unowned", "hello")];
+
+    dispatch_messages_through_router(
+        Some(Arc::clone(&store)),
+        AgentRouter::multi(HashMap::new(), HashMap::new()),
+        "test-channel",
+        &delivery,
+    )
+    .await;
+    assert_eq!(provider.call_count.load(Ordering::SeqCst), 0);
+    assert!(sent.lock().await.is_empty());
+
+    // Replay through the production loop without an admission probe taking
+    // the released claim away from the valid router.
+    dispatch_messages_through_router(
+        Some(Arc::clone(&store)),
+        AgentRouter::single(Arc::clone(&ctx)),
+        "test-channel",
+        &delivery,
+    )
+    .await;
+    assert_eq!(provider.call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(sent.lock().await.as_slice(), &["alice:ok".to_string()]);
+    assert_eq!(
+        store.admit("test-channel", "m-unowned").unwrap(),
+        Admission::DuplicateCompleted,
+        "the replay must finish processing and durably complete its receipt"
+    );
+
+    dispatch_messages_through_router(
+        Some(Arc::clone(&store)),
+        AgentRouter::single(ctx),
+        "test-channel",
+        &delivery,
+    )
+    .await;
+    assert_eq!(provider.call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(sent.lock().await.as_slice(), &["alice:ok".to_string()]);
 }
