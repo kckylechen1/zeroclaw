@@ -17168,3 +17168,132 @@ async fn message_dispatch_redelivery_stays_eligible_after_completion_failure() {
         "a failed completion must leave the redelivery eligible (at-least-once)"
     );
 }
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn message_dispatch_loop_unowned_channel_warns_once_with_diagnostics_and_no_pii() {
+    let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+    let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+    zeroclaw_log::try_install_capture_subscriber();
+    let mut logs = zeroclaw_log::subscribe_or_install();
+    while logs.try_recv().is_ok() {}
+
+    let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let channel = Arc::new(StaticNameRecordingChannel {
+        name: "owned-channel",
+        sent_messages: Arc::clone(&sent),
+    });
+    let provider = Arc::new(ConcurrencyTrackingProvider {
+        delay: Duration::from_millis(1),
+        in_flight: Arc::new(AtomicUsize::new(0)),
+        peak_in_flight: Arc::new(AtomicUsize::new(0)),
+    });
+    let mut config = zeroclaw_config::schema::Config::default();
+    config.channels.debounce_ms = 0;
+    let ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
+        channel,
+        provider,
+        config,
+        zeroclaw_config::schema::AliasedAgentConfig::default(),
+        "test-provider",
+        None,
+    );
+    let router = AgentRouter::multi(
+        HashMap::from([("test-agent".to_string(), ctx)]),
+        HashMap::from([("owned-channel".to_string(), "test-agent".to_string())]),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let inbox = Arc::new(MessageInbox::open(dir.path()).unwrap());
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    // Distinct IDs and senders must not bypass per-channel warning suppression.
+    for (index, (channel, alias)) in [
+        ("discord", Some("bot_alpha")),
+        ("discord", Some("bot_alpha")),
+        ("discord", Some("bot_beta")),
+        ("telegram", None),
+        ("telegram", None),
+        ("owned-channel", None),
+        ("owned-channel", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let owned = channel == "owned-channel";
+        tx.send(ChannelMessage {
+            id: if owned {
+                "owned-duplicate".into()
+            } else {
+                format!("unowned-{index}")
+            },
+            sender: format!("private-sender-{index}"),
+            reply_target: "test-room".into(),
+            content: "private-message-content".into(),
+            channel: channel.into(),
+            channel_alias: alias.map(str::to_owned),
+            timestamp: index as u64,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    }
+    drop(tx);
+    run_message_dispatch_loop(rx, router, 2, Some(inbox)).await;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut warnings = Vec::new();
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(50), logs.recv()).await {
+            Ok(Ok(event))
+                if event["message"] == "dropping inbound message: no agent owns this channel" =>
+            {
+                warnings.push(event)
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        warnings.len(),
+        3,
+        "expected one warning per channel identity: {warnings:?}"
+    );
+    for (channel, alias) in [
+        ("discord", Some("bot_alpha")),
+        ("discord", Some("bot_beta")),
+        ("telegram", None),
+    ] {
+        let event = warnings
+            .iter()
+            .find(|event| {
+                event["attributes"]["channel"] == channel
+                    && event["attributes"]["channel_alias"].as_str() == alias
+            })
+            .expect("each distinct unowned channel must remain diagnosable");
+        assert_eq!(event["attributes"]["error_key"], "channels.unowned_channel");
+        assert!(event["attributes"].get("sender").is_none());
+        let json = event.to_string();
+        assert!(!json.contains("private-sender"));
+        assert!(!json.contains("private-message-content"));
+    }
+    assert_eq!(
+        sent.lock().await.len(),
+        1,
+        "owned delivery and inbox dedup must still work"
+    );
+    zeroclaw_log::clear_broadcast_hook();
+}
+
+#[test]
+fn unowned_channel_warn_gate_lru_bounded_eviction_and_reload() {
+    let mut gate = UnownedChannelWarnGate::new(std::num::NonZeroUsize::new(2).unwrap());
+    assert!(gate.should_warn("a"));
+    assert!(!gate.should_warn("a"));
+    assert!(gate.should_warn("b"));
+    assert!(!gate.should_warn("a")); // Make b the least recently used entry.
+    assert!(gate.should_warn("c"));
+    assert_eq!(gate.seen.len(), 2);
+    assert!(!gate.should_warn("a"));
+    assert!(gate.should_warn("b"), "evicted identities may warn again");
+    assert_eq!(gate.seen.len(), 2);
+    assert!(UnownedChannelWarnGate::default().should_warn("a"));
+}
