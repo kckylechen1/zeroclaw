@@ -6,7 +6,7 @@ An agent lists the channels it answers on; see [Agents](../agents/overview.md) f
 
 Channels are implementations of the `Channel` trait in `zeroclaw-api`. Each one is feature-gated at compile time, so a minimal build only includes the channels you want.
 
-The default ZeroClaw build includes a lean channel bundle: ACP, webhook, email, Telegram, Discord, and filesystem. These cover local/editor sessions, gateway ingress, and common first-run external messaging without compiling every bundled platform integration. Standard pre-built binaries add Matrix, Lark, and WhatsApp Web; the Android artifact omits WhatsApp Web for target compatibility. For source installs that need the historical broad channel set, run `install.sh --source --preset full`, build with `--features channels-full`, or use individual `channel-*` features for selective builds:
+The default ZeroClaw build includes a lean channel bundle: ACP, webhook, email, Telegram, and Discord. These cover local/editor sessions, gateway ingress, and common first-run external messaging without compiling every bundled platform integration. Standard pre-built binaries add Matrix, Lark, and WhatsApp Web; the Android artifact omits WhatsApp Web for target compatibility. For source installs that need the historical broad channel set, run `install.sh --source --preset full`, build with `--features channels-full`, or use individual `channel-*` features for selective builds:
 
 <div class="os-tabs-src">
 
@@ -92,15 +92,15 @@ See [Webhooks](./webhook.md) and [ACP](./acp.md).
 
 ### Event sources
 
-Input-only transports that feed events into the agent loop. (They formerly also fed the SOP engine; that fan-in was removed with the run side.) They have no outbound reply; each one was also a [SOP fan-in](../sop/fan-in/overview.md).
+Input-only transports that feed events into the agent loop. They have no outbound reply.
 
 | Channel | Feature flag | Shape |
 |---|---|---|
-| MQTT | `channel-mqtt` | Broker messages → agent or SOP |
-| AMQP | `channel-amqp` | Broker deliveries → agent or SOP |
-| Filesystem | `channel-filesystem` | Path changes → agent or SOP |
+| AMQP | `channel-amqp` | Broker deliveries → agent loop |
 
-See [MQTT](./mqtt.md), [AMQP](./amqp.md), and [Filesystem](./filesystem.md).
+See [AMQP](./amqp.md). AMQP deliveries drive the agent loop directly. Its former SOP `dispatch` config key is no longer supported; remove it from existing AMQP configurations.
+
+> **Retired event channels:** The earlier MQTT and filesystem channels were retired when the SOP run side was removed. Their compile flags (`channel-mqtt`, `channel-filesystem`) were removed from Cargo, and their configuration sections (`[channels.mqtt]`, `[channels.filesystem]`) are rejected during configuration parsing, even if the section is empty. For historical trigger syntax and wiring, see the retirement pages ([MQTT](./mqtt.md), [Filesystem](./filesystem.md)) and [SOP Fan-In: Overview](../sop/fan-in/overview.md).
 
 ## Configuration
 
