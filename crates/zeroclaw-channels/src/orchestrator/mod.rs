@@ -3179,7 +3179,6 @@ async fn run_message_dispatch_loop(
                             .with_attrs(::serde_json::json!({
                                 "error_key": "channels.inbox_admit_store_failed",
                                 "channel": msg.channel,
-                                "message_id": msg.id,
                                 "err": err,
                             })),
                             "inbox store failed; processing without dedup"
