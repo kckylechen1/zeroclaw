@@ -112,6 +112,21 @@ impl std::error::Error for SoulError {}
 /// `soul_candidate` module (same namespace scheme, same rule).
 pub(crate) const NAMESPACE_DELIMITER: &str = "::";
 
+/// The reserved storage namespace for Soul rows (dispositions and
+/// candidates). Ambient memory surfaces — plain recall, list, get,
+/// forget, and plain stores — exclude and refuse this namespace
+/// structurally at the storage layer (sqlite and tachi backends); only
+/// the typed Soul services opt in through explicit namespaced calls.
+/// The exclusion belongs where the rows live so every ambient consumer
+/// (tools, RPC, wrappers) inherits it without per-caller discipline.
+pub(crate) const SOUL_NAMESPACE: &str = "soul";
+
+/// Reserved key prefix: every Soul row key starts with this segment
+/// (`soul::<identity>::<key>`). Plain stores cannot write into it and
+/// ambient deletes cannot reach rows under it; the two invariants are
+/// enforced together with [`SOUL_NAMESPACE`] at the storage layer.
+pub(crate) const SOUL_KEY_PREFIX: &str = "soul::";
+
 pub(crate) fn validate_identity_token(id: &AgentIdentityId) -> Result<(), SoulError> {
     let token = id.as_str();
     if token.is_empty() {
@@ -321,7 +336,7 @@ impl SoulService {
         _carrier: &CarrierContext,
     ) -> String {
         format!(
-            "soul{NAMESPACE_DELIMITER}{}{NAMESPACE_DELIMITER}{key}",
+            "{SOUL_KEY_PREFIX}{}{NAMESPACE_DELIMITER}{key}",
             identity.as_str()
         )
     }

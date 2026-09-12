@@ -1303,13 +1303,21 @@ fn check_bootstrap_truncation(config: &Config, items: &mut Vec<DiagItem>) {
             let Ok(content) = std::fs::read_to_string(workspace.join(filename)) else {
                 continue;
             };
-            let total = content.chars().count();
+            // Count what the runtime would inject: it trims the file
+            // before applying the cap, so a file over-cap only in
+            // surrounding whitespace is not a finding.
+            let total = content.trim().chars().count();
             if total > cap {
+                // Describe the cap, not an injection event: doctor runs
+                // offline and cannot know a session's injection mode
+                // (MEMORY.md is conditional, BOOTSTRAP.md depends on the
+                // first-run ritual), so it must not claim actual
+                // injection.
                 items.push(DiagItem::warn(
                     cat,
                     format!(
-                        "{alias}/{filename}: injected {cap} of {total} chars \
-                         ({} discarded, compact_context=true)",
+                        "{alias}/{filename}: compact-context cap {cap} vs {total} chars \
+                         ({} would be discarded)",
                         total - cap
                     ),
                 ));
@@ -1431,13 +1439,23 @@ fn parse_df_available_mb(stdout: &str) -> Option<u64> {
 }
 
 fn workspace_probe_path(workspace_dir: &Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Process-local monotonic sequence. Clock resolution alone (SystemTime
+    // nanos) is not guaranteed to advance between two immediate calls, so the
+    // counter is what makes same-process probe names distinct; pid + nanos
+    // remain as the cross-process discriminator in the common case.
+    static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let sequence = PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     workspace_dir.join(format!(
-        ".zeroclaw_doctor_probe_{}_{}",
+        ".zeroclaw_doctor_probe_{}_{}_{}",
         std::process::id(),
-        nanos
+        nanos,
+        sequence
     ))
 }
 
@@ -2091,7 +2109,56 @@ mod tests {
         assert_eq!(items[0].category, "agent.prompt");
         assert_eq!(
             items[0].message,
-            "alpha/AGENTS.md: injected 6000 of 7000 chars (1000 discarded, compact_context=true)"
+            "alpha/AGENTS.md: compact-context cap 6000 vs 7000 chars (1000 would be discarded)"
+        );
+    }
+
+    #[test]
+    fn check_bootstrap_truncation_matches_runtime_trim_and_injection_honesty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = Config {
+            config_path: tmp.path().join("config.toml"),
+            data_dir: tmp.path().to_path_buf(),
+            ..Config::default()
+        };
+        config.agents.insert(
+            "beta".to_string(),
+            zeroclaw_config::schema::AliasedAgentConfig {
+                ..Default::default()
+            },
+        );
+        let ws = config.agent_workspace_dir("beta");
+        std::fs::create_dir_all(&ws).unwrap();
+        // Over-cap only in surrounding whitespace: the runtime trims
+        // first, so this is not a finding.
+        std::fs::write(
+            ws.join("SOUL.md"),
+            format!("{}{}", " ".repeat(7000), "x".repeat(10)),
+        )
+        .unwrap();
+        // MEMORY.md over cap: doctor cannot know a session's injection
+        // mode, so it must describe the cap without claiming injection.
+        std::fs::write(ws.join("MEMORY.md"), "m".repeat(7000)).unwrap();
+
+        let mut items = Vec::new();
+        check_bootstrap_truncation(&config, &mut items);
+
+        assert_eq!(
+            items.len(),
+            1,
+            "whitespace-only over-cap content is not a finding"
+        );
+        assert!(
+            items[0]
+                .message
+                .starts_with("beta/MEMORY.md: compact-context cap"),
+            "the finding must describe the cap, not claim actual injection: {}",
+            items[0].message
+        );
+        assert!(
+            !items[0].message.contains("injected"),
+            "doctor runs offline and must not claim injection: {}",
+            items[0].message
         );
     }
 
@@ -2446,6 +2513,39 @@ mod tests {
                 "expected per-agent SOUL.md diagnostic for {alias}; got {messages:?}"
             );
         }
+    }
+
+    #[test]
+    fn check_workspace_writable_probe_is_cleaned_up_and_preserves_files() {
+        let tmp = TempDir::new().unwrap();
+        let config = workspace_test_config(tmp.path());
+        let sentinel = config.data_dir.join("keep.txt");
+        std::fs::write(&sentinel, b"unrelated sentinel").unwrap();
+
+        let mut items = Vec::new();
+        check_workspace(&config, &mut items);
+
+        assert!(
+            items.iter().any(|i| i.message == "directory is writable"),
+            "writable workspace must report success; got {:?}",
+            items.iter().map(|i| &i.message).collect::<Vec<_>>()
+        );
+
+        let leftovers: Vec<String> = std::fs::read_dir(&config.data_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".zeroclaw_doctor_probe_"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "writability probe must remove its own file; found {leftovers:?}"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"unrelated sentinel",
+            "probe must not alter unrelated workspace files"
+        );
     }
 
     #[test]

@@ -3219,3 +3219,181 @@ async fn sqlite_session_metadata_ordering_ties_are_deterministic() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Reserved Soul namespace boundary (storage layer)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Plant one Soul-shaped row exactly as the typed Soul services write
+/// them (reserved key prefix, reserved namespace, soul category, agent
+/// attribution) plus one ambient row for contrast.
+async fn seed_soul_and_ambient(mem: &SqliteMemory, agent_id: &str) {
+    mem.store_with_agent(
+        "soul::agent-a::disposition",
+        "soul disposition content",
+        MemoryCategory::Custom("soul".to_string()),
+        None,
+        Some(crate::soul::SOUL_NAMESPACE),
+        None,
+        Some(agent_id),
+    )
+    .await
+    .unwrap();
+    mem.store(
+        "ambient_pref",
+        "ambient content",
+        MemoryCategory::Core,
+        None,
+    )
+    .await
+    .unwrap();
+}
+
+fn soul_leaks(entries: &[MemoryEntry]) -> Vec<&MemoryEntry> {
+    entries
+        .iter()
+        .filter(|e| e.namespace == crate::soul::SOUL_NAMESPACE)
+        .collect()
+}
+
+#[tokio::test]
+async fn ambient_surfaces_never_see_soul_rows() {
+    let (_tmp, mem) = temp_sqlite();
+    let agent = mem.ensure_agent_uuid("default").await.unwrap();
+    seed_soul_and_ambient(&mem, &agent).await;
+
+    // Keyword recall (FTS channel): the Soul row is the only match for
+    // its own content, so any leak is visible.
+    let hits = mem
+        .recall("soul disposition content", 10, None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        soul_leaks(&hits).is_empty(),
+        "ambient keyword recall leaked Soul rows: {:?}",
+        soul_leaks(&hits)
+    );
+
+    // Recent/time-only recall channel.
+    let recent = mem.recall("*", 10, None, None, None).await.unwrap();
+    assert!(
+        soul_leaks(&recent).is_empty(),
+        "ambient recent recall leaked Soul rows"
+    );
+
+    // Listing.
+    let listed = mem.list(None, None).await.unwrap();
+    assert!(
+        soul_leaks(&listed).is_empty(),
+        "ambient listing leaked Soul rows"
+    );
+
+    // Exact-key ambient get: reserved row is invisible, ambient row
+    // still resolves.
+    assert!(
+        mem.get("soul::agent-a::disposition")
+            .await
+            .unwrap()
+            .is_none(),
+        "ambient exact-key get must not return a Soul row"
+    );
+    assert!(mem.get("ambient_pref").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn recall_namespaced_still_reads_soul_rows() {
+    let (_tmp, mem) = temp_sqlite();
+    let agent = mem.ensure_agent_uuid("default").await.unwrap();
+    seed_soul_and_ambient(&mem, &agent).await;
+
+    // The namespaced opt-in channel reads the reserved rows and nothing
+    // outside the namespace.
+    let rows = mem
+        .recall_namespaced("soul", "soul disposition content", 10, None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        rows.iter().any(|e| e.key == "soul::agent-a::disposition"),
+        "namespaced recall must read the Soul row"
+    );
+    assert!(
+        rows.iter()
+            .all(|e| e.namespace == crate::soul::SOUL_NAMESPACE),
+        "namespaced recall must not return rows outside the namespace"
+    );
+}
+
+#[tokio::test]
+async fn ambient_forget_cannot_delete_soul_rows() {
+    let (_tmp, mem) = temp_sqlite();
+    let agent = mem.ensure_agent_uuid("default").await.unwrap();
+    seed_soul_and_ambient(&mem, &agent).await;
+
+    // Unscoped forget reports nothing deleted for the reserved key and
+    // the row survives through the typed read channel.
+    let deleted = mem.forget("soul::agent-a::disposition").await.unwrap();
+    assert!(!deleted, "ambient forget must not reach Soul rows");
+    assert!(
+        mem.get_for_agent("soul::agent-a::disposition", &agent)
+            .await
+            .unwrap()
+            .is_some(),
+        "the Soul row must survive an ambient forget"
+    );
+
+    // Ambient rows still delete normally through the same surface.
+    assert!(mem.forget("ambient_pref").await.unwrap());
+}
+
+#[tokio::test]
+async fn plain_stores_cannot_write_into_the_soul_key_space() {
+    let (_tmp, mem) = temp_sqlite();
+    let agent = mem.ensure_agent_uuid("default").await.unwrap();
+
+    // Ambient store (default namespace) at a reserved key: refused —
+    // this is the upsert-overwrite path through the (agent_id, key)
+    // conflict target.
+    let refused = mem
+        .store(
+            "soul::agent-a::disposition",
+            "forged",
+            MemoryCategory::Core,
+            None,
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "an ambient store into the reserved key prefix must be refused"
+    );
+
+    // Reserved namespace with a non-reserved key shape: refused too.
+    let mismatched = mem
+        .store_with_agent(
+            "plain-key",
+            "x",
+            MemoryCategory::Custom("soul".to_string()),
+            None,
+            Some(crate::soul::SOUL_NAMESPACE),
+            None,
+            Some(&agent),
+        )
+        .await;
+    assert!(
+        mismatched.is_err(),
+        "the reserved namespace must refuse non-reserved key shapes"
+    );
+
+    // Neither refusal wrote anything.
+    assert!(
+        mem.get_for_agent("soul::agent-a::disposition", &agent)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        mem.get_for_agent("plain-key", &agent)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

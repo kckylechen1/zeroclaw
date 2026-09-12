@@ -18,7 +18,7 @@ use crate::personal_file::domain::{
 };
 #[cfg(unix)]
 use crate::personal_file::domain::{
-    ListedEntry, MAX_TEXT_BYTES, ObjectId, RootInner, TRASH_NAMESPACE,
+    ListedEntry, MAX_LIST_ENTRIES, MAX_TEXT_BYTES, ObjectId, RootInner, TRASH_NAMESPACE,
 };
 
 /// Fail-closed message for platforms without descriptor primitives.
@@ -342,6 +342,7 @@ impl PersonalFileService {
         }
         #[cfg(unix)]
         {
+            refuse_over_bound(content.len())?;
             safety::verify_root_identity(&root.inner)?;
             safety::probe_git_at_root(&root.inner)?;
             let parent = safety::walk_parents(&root.inner, path, true, true)?;
@@ -406,6 +407,7 @@ impl PersonalFileService {
         }
         #[cfg(unix)]
         {
+            refuse_over_bound(new_content.len())?;
             safety::verify_root_identity(&root.inner)?;
             safety::probe_git_at_root(&root.inner)?;
             let parent = safety::walk_parents(&root.inner, path, false, true)?;
@@ -747,6 +749,11 @@ impl PersonalFileService {
             // held descriptor only, so a swapped name elsewhere cannot
             // be adopted into the result.
             let stat_dir = dup(&dir_fd)?;
+            // The caller's limit can only narrow the constant bound;
+            // entries beyond the effective bound error instead of
+            // accumulating, so collection memory never scales with a
+            // planted dirent flood.
+            let bound = limit.min(MAX_LIST_ENTRIES);
             let mut entries: Vec<ListedEntry> = Vec::new();
             for entry in rustix::fs::Dir::read_from(&dir_fd).map_err(rustix_errno_to_io)? {
                 let entry = match entry {
@@ -766,26 +773,24 @@ impl PersonalFileService {
                     Some(stat) => stat,
                     None => continue,
                 };
-                match FileType::from_raw_mode(stat.st_mode) {
-                    FileType::RegularFile => {
+                let listed = match FileType::from_raw_mode(stat.st_mode) {
+                    FileType::RegularFile =>
+                    {
                         #[allow(clippy::unnecessary_cast)]
-                        let size = stat.st_size as u64;
-                        entries.push(ListedEntry {
-                            name,
-                            is_dir: false,
-                            size,
-                        });
+                        Some((false, stat.st_size as u64))
                     }
-                    FileType::Directory => entries.push(ListedEntry {
-                        name,
-                        is_dir: true,
-                        size: 0,
-                    }),
-                    _ => continue,
+                    FileType::Directory => Some((true, 0)),
+                    _ => None,
+                };
+                let Some((is_dir, size)) = listed else {
+                    continue;
+                };
+                // One more listable entry than the bound allows: answer
+                // the bound typed rather than collecting it.
+                if entries.len() >= bound {
+                    return Err(PersonalFileError::TooManyEntries(bound));
                 }
-            }
-            if entries.len() > limit {
-                return Err(PersonalFileError::TooManyEntries(limit));
+                entries.push(ListedEntry { name, is_dir, size });
             }
             entries.sort_by(|left, right| left.name.cmp(&right.name));
             Ok(PersonalFileResult::Listed { entries })
@@ -810,6 +815,21 @@ fn join_error(error: tokio::task::JoinError) -> PersonalFileError {
 #[cfg(unix)]
 fn rustix_errno_to_io(error: rustix::io::Errno) -> PersonalFileError {
     PersonalFileError::Io(std::io::Error::from(error))
+}
+
+/// Typed refusal for a write payload over [`MAX_TEXT_BYTES`]. The bound
+/// is checked before any filesystem work so an over-bound request
+/// neither touches nor mutates the root.
+#[cfg(unix)]
+fn refuse_over_bound(len: usize) -> Result<(), PersonalFileError> {
+    let len = len as u64;
+    if len > MAX_TEXT_BYTES {
+        return Err(PersonalFileError::TooLarge {
+            limit: MAX_TEXT_BYTES,
+            actual: len,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
