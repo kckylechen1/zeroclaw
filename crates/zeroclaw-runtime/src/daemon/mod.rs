@@ -2088,12 +2088,13 @@ mod tests {
         config.agents.insert(agent_alias.to_string(), agent);
     }
 
-    /// Wait up to 2s for a log event whose `message` matches, or `None`.
+    /// Wait up to 2s for this fixture's log event, or `None`.
     /// Retries at 50ms steps because a broadcast receiver only observes new
     /// sends when polled.
     async fn try_recv_log_event(
         rx: &mut tokio::sync::broadcast::Receiver<serde_json::Value>,
         message: &str,
+        socket: &str,
     ) -> Option<serde_json::Value> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
@@ -2104,7 +2105,8 @@ mod tests {
                     if value
                         .get("message")
                         .and_then(|v| v.as_str())
-                        .is_some_and(|candidate| candidate == message) =>
+                        .is_some_and(|candidate| candidate == message)
+                        && value["attributes"]["socket"].as_str() == Some(socket) =>
                 {
                     return Some(value);
                 }
@@ -2114,6 +2116,34 @@ mod tests {
             }
         }
         None
+    }
+
+    #[tokio::test]
+    async fn log_event_matcher_ignores_foreign_same_message_and_missing_socket() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let message = "ZeroClaw daemon started";
+        let socket = "/fixture/daemon.sock";
+        tx.send(serde_json::json!({
+            "message": message,
+            "attributes": { "socket": "/other/daemon.sock", "requested_gateway": "http://127.0.0.1:4243" }
+        })).unwrap();
+        tx.send(serde_json::json!({ "message": message })).unwrap();
+        tx.send(serde_json::json!({
+            "message": "another event",
+            "attributes": { "socket": socket }
+        }))
+        .unwrap();
+        tx.send(serde_json::json!({
+            "message": message,
+            "attributes": { "socket": socket, "requested_gateway": "http://127.0.0.1:0" }
+        }))
+        .unwrap();
+
+        let found = try_recv_log_event(&mut rx, message, socket).await.unwrap();
+        assert_eq!(
+            found["attributes"]["requested_gateway"],
+            "http://127.0.0.1:0"
+        );
     }
 
     #[test]
@@ -2194,6 +2224,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut config = test_config(&tmp);
         config.gateway.require_pairing = true;
+        let expected_socket = crate::rpc::local::socket_path(&config)
+            .display()
+            .to_string();
 
         // The process-global broadcast channel this test subscribes to also
         // carries every log line the other parallel tests emit, and the hook
@@ -2210,7 +2243,9 @@ mod tests {
             let mut rx = zeroclaw_log::subscribe_or_install();
             while rx.try_recv().is_ok() {}
             record_daemon_started(&config, "127.0.0.1", 0);
-            if let Some(found) = try_recv_log_event(&mut rx, "ZeroClaw daemon started").await {
+            if let Some(found) =
+                try_recv_log_event(&mut rx, "ZeroClaw daemon started", &expected_socket).await
+            {
                 value = Some(found);
                 break;
             }
