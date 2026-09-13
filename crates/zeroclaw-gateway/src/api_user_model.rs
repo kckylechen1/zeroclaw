@@ -429,4 +429,87 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
+    fn review_scope_rows(data_dir: &std::path::Path) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+        let conn = rusqlite::Connection::open_with_flags(
+            data_dir.join("user_model.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        [
+            "user_model_candidates",
+            "user_model_review_receipts",
+            "user_model_revisions",
+        ]
+        .iter()
+        .map(|table| {
+            let mut stmt = conn
+                .prepare(&format!("SELECT * FROM {table} ORDER BY id"))
+                .unwrap();
+            let columns = stmt.column_count();
+            stmt.query_map([], |row| (0..columns).map(|i| row.get(i)).collect())
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        })
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn invalid_narrow_scope_over_http_leaves_no_receipt() {
+        let (dir, state) = state_with_tempdir();
+        let store = cached_store(&dir.path().to_path_buf()).unwrap();
+        let candidate = store
+            .record_observation(
+                UserModelKind::Habit,
+                "private observation",
+                "private.scope",
+                "[]",
+                100,
+            )
+            .unwrap();
+        let before = review_scope_rows(dir.path());
+        let (status, response) = json_of(
+            review_candidate(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+                Path(candidate.id.clone()),
+                body(&serde_json::json!({"action":"narrow","narrowed_scope":"task:unsupported"})),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response["error"]
+                .as_str()
+                .unwrap()
+                .contains("invalid narrowed scope")
+        );
+        assert_eq!(review_scope_rows(dir.path()), before);
+        let (status, response) = json_of(
+            review_candidate(
+                State(state),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+                Path(candidate.id),
+                body(&serde_json::json!({"action":"narrow","narrowed_scope":"session:A"})),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["receipt"]["action"], "narrow");
+        let after = review_scope_rows(dir.path());
+        assert_eq!(after[0], before[0]);
+        assert_eq!(after[1].len(), 1);
+        assert_eq!(after[2].len(), 1);
+        let heads = store.active_heads(None).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].scope, "session:A");
+        assert_eq!(
+            serde_json::to_value(&heads[0]).unwrap()["authority"],
+            "owner_ratified"
+        );
+    }
 }

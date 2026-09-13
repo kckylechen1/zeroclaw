@@ -123,6 +123,13 @@
       "signals": 20
     },
     {
+      "path": "crates/zeroclaw-gateway/src/api_user_model.rs",
+      "store": "private user_model.db",
+      "role": "test",
+      "basis": "#186 TB-22 test-only exemption: temporary actual-handler READ-ONLY snapshot connection and rusqlite type references; no production writer, table, store or new dependency",
+      "signals": 4
+    },
+    {
       "path": "crates/zeroclaw-gateway/src/device_identity.rs",
       "store": "device_identities",
       "role": "store",
@@ -217,8 +224,8 @@
       "path": "crates/zeroclaw-memory/src/companion/user_model.rs",
       "store": "user_model.db",
       "role": "store",
-      "basis": "#205 keeper: append-only user-model review receipts; #183 adds two read-only clock/range error mappings and one isolated test expiry update, no new production writer or store",
-      "signals": 37
+      "basis": "#205 keeper: append-only user-model review receipts; #183 adds two read-only clock/range error mappings and one isolated test expiry update, no new production writer or store. #186 TB-22 test-only exemption: three additional rusqlite type/error references for private full-row review snapshots (37 to 40); no new production writer, store or DDL",
+      "signals": 40
     },
     {
       "path": "crates/zeroclaw-memory/src/conflict.rs",
