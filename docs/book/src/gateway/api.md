@@ -92,6 +92,16 @@ placeholders. Neither config read surface returns the underlying secret value.
 `{populated: true}`; `DELETE` clears it and responds with
 `{populated: false}`. There is no HTTP path to retrieve a secret by any means.
 
+## User Model review history
+
+`GET /api/user-model/candidates/{id}` requires the operator identity used by
+the other User Model routes. It returns the candidate and its evidence,
+`review_receipts` in oldest-first order, and a `review_state` derived from the
+latest committed receipt: `pending`, `accepted`, `rejected`, `narrowed`, or
+`superseded`. A candidate with no receipt is `pending` and has an empty receipt
+array. An unknown candidate ID returns 404. The read uses the existing local
+User Model store, so committed reviews remain inspectable after a reconnect.
+
 ## Stable error codes
 
 Errors return JSON with a stable `code` field plus a human-readable `message`.

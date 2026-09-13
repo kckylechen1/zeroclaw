@@ -330,6 +330,70 @@ impl UserModelStore {
         Ok(candidates)
     }
 
+    /// One candidate and its committed review receipts, oldest first.
+    /// The read transaction keeps the candidate and receipts on one
+    /// committed snapshot, including after a store reopen.
+    pub fn candidate_history(
+        &self,
+        candidate_id: &str,
+    ) -> Result<Option<(UserModelCandidate, Vec<UserModelReviewReceipt>)>, rusqlite::Error> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let candidate = match tx.query_row(
+            "SELECT id, kind, statement, semantic_key, scope, evidence, created_at_unix
+             FROM user_model_candidates WHERE id = ?1",
+            rusqlite::params![candidate_id],
+            |row| {
+                let kind_raw: String = row.get(1)?;
+                Ok(UserModelCandidate {
+                    id: row.get(0)?,
+                    kind: kind_from_str(&kind_raw).ok_or(rusqlite::Error::InvalidQuery)?,
+                    statement: row.get(2)?,
+                    semantic_key: row.get(3)?,
+                    scope: row.get(4)?,
+                    evidence: row.get(5)?,
+                    created_at_unix: row.get::<_, i64>(6)?.max(0) as u64,
+                })
+            },
+        ) {
+            Ok(candidate) => candidate,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let receipts = {
+            let mut stmt = tx.prepare(
+                "SELECT id, candidate_id, action, reviewer, note, at_unix
+                 FROM user_model_review_receipts
+                 WHERE candidate_id = ?1 ORDER BY at_unix ASC, id ASC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![candidate_id], |row| {
+                let action_raw: String = row.get(2)?;
+                let action = match action_raw.as_str() {
+                    "accept" => ReviewAction::Accept,
+                    "reject" => ReviewAction::Reject,
+                    "narrow" => ReviewAction::Narrow,
+                    "supersede" => ReviewAction::Supersede,
+                    _ => return Err(rusqlite::Error::InvalidQuery),
+                };
+                Ok(UserModelReviewReceipt {
+                    id: row.get(0)?,
+                    candidate_id: row.get(1)?,
+                    action,
+                    reviewer: row.get(3)?,
+                    note: row.get(4)?,
+                    at_unix: row.get::<_, i64>(5)?.max(0) as u64,
+                })
+            })?;
+            let mut receipts = Vec::new();
+            for row in rows {
+                receipts.push(row?);
+            }
+            receipts
+        };
+        tx.commit()?;
+        Ok(Some((candidate, receipts)))
+    }
+
     /// Apply an explicit review action to a candidate. Every action writes
     /// a receipt; `accept`/`narrow`/`supersede` additionally append a
     /// revision. `reject` never deletes the candidate or its evidence.
