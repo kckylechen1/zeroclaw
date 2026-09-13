@@ -3558,3 +3558,137 @@ async fn soul_reindex_excludes_reserved_rows_through_scoped_handle() {
         );
     }
 }
+
+fn single_row_error_snapshot(mem: &SqliteMemory) -> Vec<Vec<rusqlite::types::Value>> {
+    let conn = mem.conn.lock();
+    let mut statement = conn.prepare("SELECT * FROM memories ORDER BY id").unwrap();
+    let columns = statement.column_count();
+    statement
+        .query_map([], |row| (0..columns).map(|index| row.get(index)).collect())
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn single_row_reads_propagate_decode_errors_without_mutation() {
+    let (_tmp, mem) = temp_sqlite();
+    let own = mem.ensure_agent_uuid("own").await.unwrap();
+    let foreign = mem.ensure_agent_uuid("foreign").await.unwrap();
+    mem.store_with_agent(
+        "row",
+        "original",
+        MemoryCategory::Core,
+        None,
+        None,
+        None,
+        Some(&own),
+    )
+    .await
+    .unwrap();
+    assert_eq!(mem.get("row").await.unwrap().unwrap().content, "original");
+    assert_eq!(
+        mem.get_for_agent("row", &own)
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        "original"
+    );
+    assert!(mem.get("missing").await.unwrap().is_none());
+    assert!(mem.get_for_agent("missing", &own).await.unwrap().is_none());
+    assert!(mem.get_for_agent("row", &foreign).await.unwrap().is_none());
+    // This private non-STRICT SQLite column permits TEXT, but the production
+    // mapper must decode pinned as i64. No query or mapper is stubbed.
+    {
+        let conn = mem.conn.lock();
+        assert_eq!(
+            conn.execute(
+                "UPDATE memories SET pinned = ?1 WHERE key = ?2 AND agent_id = ?3",
+                params!["not-an-integer", "row", own]
+            )
+            .unwrap(),
+            1
+        );
+    }
+    let before = single_row_error_snapshot(&mem);
+    for error in [
+        mem.get("row").await.unwrap_err(),
+        mem.get_for_agent("row", &own).await.unwrap_err(),
+    ] {
+        assert!(matches!(
+            error.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::InvalidColumnType(
+                10,
+                _,
+                rusqlite::types::Type::Text
+            ))
+        ));
+    }
+    assert_eq!(single_row_error_snapshot(&mem), before);
+}
+
+#[tokio::test]
+async fn scoped_get_does_not_fall_back_to_sibling_after_own_decode_error() {
+    let (_tmp, mem) = temp_sqlite();
+    let mem = Arc::new(mem);
+    let own = mem.ensure_agent_uuid("own").await.unwrap();
+    let sibling = mem.ensure_agent_uuid("sibling").await.unwrap();
+    for (agent, content) in [(&own, "own payload"), (&sibling, "sibling payload")] {
+        mem.store_with_agent(
+            "shared-key",
+            content,
+            MemoryCategory::Core,
+            None,
+            None,
+            None,
+            Some(agent),
+        )
+        .await
+        .unwrap();
+    }
+    let scoped =
+        crate::agent_scoped::AgentScopedMemory::new(mem.clone(), &own, vec![sibling.clone()]);
+    assert_eq!(
+        scoped.get("shared-key").await.unwrap().unwrap().content,
+        "own payload"
+    );
+    assert_eq!(
+        mem.get_for_agent("shared-key", &sibling)
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        "sibling payload"
+    );
+    {
+        let conn = mem.conn.lock();
+        assert_eq!(
+            conn.execute(
+                "UPDATE memories SET pinned = ?1 WHERE key = ?2 AND agent_id = ?3",
+                params!["not-an-integer", "shared-key", own]
+            )
+            .unwrap(),
+            1
+        );
+    }
+    let before = single_row_error_snapshot(&mem);
+    let error = scoped.get("shared-key").await.unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::InvalidColumnType(
+            10,
+            _,
+            rusqlite::types::Type::Text
+        ))
+    ));
+    assert_eq!(single_row_error_snapshot(&mem), before);
+    assert_eq!(
+        mem.get_for_agent("shared-key", &sibling)
+            .await
+            .unwrap()
+            .unwrap()
+            .content,
+        "sibling payload"
+    );
+}

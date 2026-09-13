@@ -1705,7 +1705,8 @@ impl Memory for SqliteMemory {
 
             match rows.next() {
                 Some(Ok(entry)) => Ok(Some(entry)),
-                _ => Ok(None),
+                Some(Err(error)) => Err(error.into()),
+                None => Ok(None),
             }
         })
         .await?
@@ -1750,7 +1751,8 @@ impl Memory for SqliteMemory {
 
             match rows.next() {
                 Some(Ok(entry)) => Ok(Some(entry)),
-                _ => Ok(None),
+                Some(Err(error)) => Err(error.into()),
+                None => Ok(None),
             }
         })
         .await?
