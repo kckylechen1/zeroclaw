@@ -475,6 +475,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_http_reports_last_inserted_review_with_same_second_reversed_ids() {
+        let (dir, state) = state_with_tempdir();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        let candidate = store
+            .record_observation(UserModelKind::Habit, "habit", "habit.key", "[]", 100)
+            .unwrap();
+        let fixture = rusqlite::Connection::open(dir.path().join("user_model.db")).unwrap();
+        fixture
+            .execute(
+                "INSERT INTO user_model_review_receipts
+                 (id, candidate_id, action, reviewer, note, at_unix)
+                 VALUES ('zzzz-first', ?1, 'reject', 'operator', NULL, 200)",
+                rusqlite::params![candidate.id],
+            )
+            .unwrap();
+        drop(fixture);
+        let narrowed = store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Narrow,
+                "operator",
+                None,
+                Some("session:fixture"),
+                200,
+            )
+            .unwrap();
+        assert!(narrowed.id.as_str() < "zzzz-first");
+        drop(store);
+
+        let before = review_scope_rows(dir.path());
+        let (status, detail) = history_http(&state, &candidate.id, operator_headers()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["review_state"], "narrowed");
+        assert_eq!(detail["review_receipts"][0]["id"], "zzzz-first");
+        assert_eq!(detail["review_receipts"][1]["id"], narrowed.id);
+        assert_eq!(review_scope_rows(dir.path()), before);
+    }
+
+    #[tokio::test]
     async fn candidate_history_authorizes_before_store_and_unknown_is_not_found() {
         let (dir, state) = state_with_tempdir();
         let (status, _) = history_http(&state, "absent", anon_headers()).await;

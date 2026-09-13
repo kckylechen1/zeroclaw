@@ -96,11 +96,16 @@ placeholders. Neither config read surface returns the underlying secret value.
 
 `GET /api/user-model/candidates/{id}` requires the operator identity used by
 the other User Model routes. It returns the candidate and its evidence,
-`review_receipts` in oldest-first order, and a `review_state` derived from the
-latest committed receipt: `pending`, `accepted`, `rejected`, `narrowed`, or
+`review_receipts` in insertion order, and a `review_state` derived from the
+last inserted receipt: `pending`, `accepted`, `rejected`, `narrowed`, or
 `superseded`. A candidate with no receipt is `pending` and has an empty receipt
 array. An unknown candidate ID returns 404. The read uses the existing local
 User Model store, so committed reviews remain inspectable after a reconnect.
+Receipt insertion order uses SQLite's implicit rowid in this append-only table.
+That rowid is not a durable receipt identity;
+external deletion, rowid updates, or a `VACUUM` rebuild can invalidate that
+ordering for equal or backdated timestamps. The store does not perform those
+operations on receipts.
 
 ## Stable error codes
 
