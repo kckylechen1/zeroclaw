@@ -691,7 +691,7 @@ impl SoulCandidateService {
         scalar("candidate_id", candidate_id)?;
         let key = Self::candidate_key(resolved, candidate_id);
         match self.backend.get_for_agent(&key, resolved.as_str()).await {
-            Ok(Some(entry)) => decode_candidate(&entry.content).map(Some).map_err(|e| {
+            Ok(Some(entry)) => decode_candidate(&entry.content).map(Some).inspect_err(|e| {
                 ::zeroclaw_log::record!(
                     WARN,
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
@@ -704,7 +704,6 @@ impl SoulCandidateService {
                         })),
                     "stored soul candidate row failed to deserialize"
                 );
-                e
             }),
             Ok(None) => Ok(None),
             Err(e) => {
