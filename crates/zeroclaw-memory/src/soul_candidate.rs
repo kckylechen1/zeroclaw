@@ -79,6 +79,12 @@ pub enum CandidateError {
     /// Identity resolution failed (unavailable / ambiguous / revoked /
     /// malformed / cross-identity). Carries the soul seam's typed cause.
     Soul(SoulError),
+    /// A candidate value exceeds a fixed processing/storage bound.
+    LimitExceeded {
+        field: &'static str,
+        limit: usize,
+        actual: usize,
+    },
     /// The evidence is user-preference-shaped and belongs to the User
     /// Model domain, not Soul. Rejected at intake — never stored.
     UserModelDomain(String),
@@ -112,6 +118,7 @@ pub enum CandidateError {
 impl CandidateError {
     fn message(&self) -> &str {
         match self {
+            Self::LimitExceeded { .. } => "soul candidate size limit exceeded",
             Self::Soul(_) => "soul identity resolution failed",
             Self::UserModelDomain(_) => {
                 "user-preference evidence rejected: route to UserModel, not Soul"
@@ -136,6 +143,15 @@ impl CandidateError {
 impl fmt::Display for CandidateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::LimitExceeded {
+                field,
+                limit,
+                actual,
+            } => write!(
+                f,
+                "{}: {field} limit={limit} actual={actual}",
+                self.message()
+            ),
             Self::Soul(inner) => write!(f, "{}: {inner}", self.message()),
             Self::UserModelDomain(detail) => write!(f, "{}: {detail}", self.message()),
             Self::InvalidCandidateId(id) => write!(f, "{}: {id}", self.message()),
@@ -496,6 +512,98 @@ pub struct CandidateIntake {
     pub sensitivity: Sensitivity,
 }
 
+const MAX_SCALAR_BYTES: usize = 4096;
+const MAX_RULE_BYTES: usize = 16384;
+const MAX_TAGS: usize = 64;
+const MAX_EVIDENCE: usize = 256;
+const MAX_ENCODED_BYTES: usize = 262144;
+
+fn bound(field: &'static str, actual: usize, limit: usize) -> Result<(), CandidateError> {
+    if actual > limit {
+        return Err(CandidateError::LimitExceeded {
+            field,
+            limit,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn scalar(field: &'static str, value: &str) -> Result<(), CandidateError> {
+    bound(field, value.len(), MAX_SCALAR_BYTES)
+}
+
+fn evidence_bounds(evidence: &EvidenceRef) -> Result<(), CandidateError> {
+    scalar("evidence.id", &evidence.id)?;
+    if let Some(value) = &evidence.source_revision {
+        scalar("source_revision", value)?;
+    }
+    if let Some(value) = &evidence.derived_from {
+        scalar("derived_from", value)?;
+    }
+    Ok(())
+}
+
+fn metadata_bounds(
+    contexts: &[String],
+    outcomes: &[String],
+    confidence: Option<&str>,
+) -> Result<(), CandidateError> {
+    bound("context_shapes", contexts.len(), MAX_TAGS)?;
+    bound("outcome_refs", outcomes.len(), MAX_TAGS)?;
+    for value in contexts {
+        scalar("context_shape", value)?;
+    }
+    for value in outcomes {
+        scalar("outcome_ref", value)?;
+    }
+    if let Some(value) = confidence {
+        scalar("confidence", value)?;
+    }
+    Ok(())
+}
+
+fn intake_bounds(intake: &CandidateIntake) -> Result<(), CandidateError> {
+    scalar("candidate_id", &intake.candidate_id)?;
+    scalar("disposition", &intake.disposition)?;
+    bound("proposed_rule", intake.proposed_rule.len(), MAX_RULE_BYTES)?;
+    evidence_bounds(&intake.evidence)?;
+    metadata_bounds(
+        &intake.context_shapes,
+        &intake.outcome_refs,
+        intake.confidence.as_deref(),
+    )
+}
+
+fn candidate_bounds(candidate: &SoulCandidate) -> Result<(), CandidateError> {
+    scalar("candidate_id", &candidate.candidate_id)?;
+    scalar("disposition", &candidate.disposition)?;
+    bound(
+        "proposed_rule",
+        candidate.proposed_rule.len(),
+        MAX_RULE_BYTES,
+    )?;
+    bound("evidence", candidate.evidence.len(), MAX_EVIDENCE)?;
+    for evidence in &candidate.evidence {
+        evidence_bounds(evidence)?;
+    }
+    metadata_bounds(
+        &candidate.context_shapes,
+        &candidate.recurrence.outcome_refs,
+        candidate.recurrence.confidence.as_deref(),
+    )
+}
+
+// The backend has already allocated the String. This bounds decoding and
+// subsequent processing, not the backend's initial read allocation.
+fn decode_candidate(content: &str) -> Result<SoulCandidate, CandidateError> {
+    bound("encoded_candidate", content.len(), MAX_ENCODED_BYTES)?;
+    let candidate: SoulCandidate =
+        serde_json::from_str(content).map_err(|e| CandidateError::Corrupt(e.to_string()))?;
+    candidate_bounds(&candidate)?;
+    Ok(candidate)
+}
+
 fn validate_candidate_id(candidate_id: &str) -> Result<(), CandidateError> {
     if candidate_id.trim().is_empty() {
         Err(CandidateError::InvalidCandidateId("(empty)".to_string()))
@@ -580,25 +688,23 @@ impl SoulCandidateService {
         resolved: &AgentIdentityId,
         candidate_id: &str,
     ) -> Result<Option<SoulCandidate>, CandidateError> {
+        scalar("candidate_id", candidate_id)?;
         let key = Self::candidate_key(resolved, candidate_id);
         match self.backend.get_for_agent(&key, resolved.as_str()).await {
-            Ok(Some(entry)) => serde_json::from_str::<SoulCandidate>(&entry.content)
-                .map(Some)
-                .map_err(|e| {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({
-                                "error_key": "memory.soul_candidate_corrupt",
-                                "identity": resolved.as_str(),
-                                "candidate": candidate_id,
-                                "err": e.to_string(),
-                            })),
-                        "stored soul candidate row failed to deserialize"
-                    );
-                    CandidateError::Corrupt(e.to_string())
-                }),
+            Ok(Some(entry)) => decode_candidate(&entry.content).map(Some).inspect_err(|e| {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "error_key": "memory.soul_candidate_corrupt",
+                            "identity": resolved.as_str(),
+                            "candidate": candidate_id,
+                            "err": e.to_string(),
+                        })),
+                    "stored soul candidate row failed to deserialize"
+                );
+            }),
             Ok(None) => Ok(None),
             Err(e) => {
                 ::zeroclaw_log::record!(
@@ -623,9 +729,11 @@ impl SoulCandidateService {
         resolved: &AgentIdentityId,
         candidate: &SoulCandidate,
     ) -> Result<(), CandidateError> {
+        candidate_bounds(candidate)?;
         let key = Self::candidate_key(resolved, &candidate.candidate_id);
         let content =
             serde_json::to_string(candidate).map_err(|e| CandidateError::Corrupt(e.to_string()))?;
+        bound("encoded_candidate", content.len(), MAX_ENCODED_BYTES)?;
         if let Err(e) = self
             .backend
             .store_with_agent(
@@ -673,6 +781,7 @@ impl SoulCandidateService {
         intake: CandidateIntake,
     ) -> Result<SoulCandidate, CandidateError> {
         let resolved = self.resolve(identity)?;
+        intake_bounds(&intake)?;
         validate_candidate_id(&intake.candidate_id)?;
         validate_disposition(&intake.disposition, &intake.proposed_rule)?;
         intake.evidence.validate(intake.origin)?;
@@ -705,6 +814,7 @@ impl SoulCandidateService {
         origin: CandidateOrigin,
     ) -> Result<SoulCandidate, CandidateError> {
         let resolved = self.resolve(identity)?;
+        scalar("candidate_id", candidate_id)?;
         validate_candidate_id(candidate_id)?;
         if origin != CandidateOrigin::OwnerCorrection {
             return Err(CandidateError::RetractionRequiresOwnerCorrection);
@@ -733,6 +843,7 @@ impl SoulCandidateService {
         candidate_id: &str,
     ) -> Result<Option<SoulCandidate>, CandidateError> {
         let resolved = self.resolve(identity)?;
+        scalar("candidate_id", candidate_id)?;
         validate_candidate_id(candidate_id)?;
         self.read_raw(&resolved, candidate_id).await
     }
@@ -778,10 +889,7 @@ impl SoulCandidateService {
             // identity; the row attribution filter additionally rejects
             // any foreign-agent row that somehow shared the key.
             if row.key.starts_with(&prefix) && row.agent_id.as_deref() == Some(resolved.as_str()) {
-                match serde_json::from_str::<SoulCandidate>(&row.content) {
-                    Ok(candidate) => candidates.push(candidate),
-                    Err(e) => return Err(CandidateError::Corrupt(e.to_string())),
-                }
+                candidates.push(decode_candidate(&row.content)?);
             }
         }
         candidates.sort_by(|a, b| a.candidate_id.cmp(&b.candidate_id));
@@ -1717,5 +1825,224 @@ mod tests {
         )
         .unwrap();
         assert_eq!(after, before);
+    }
+    async fn seed_bounded_fixture(
+        backend: &SqliteMemory,
+        id: &AgentIdentityId,
+        candidate: &SoulCandidate,
+    ) {
+        backend
+            .store_with_agent(
+                &SoulCandidateService::candidate_key(id, &candidate.candidate_id),
+                &serde_json::to_string(candidate).unwrap(),
+                MemoryCategory::Custom("soul".into()),
+                None,
+                Some("soul"),
+                None,
+                Some(id.as_str()),
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn bounded_fixture_bytes(
+        backend: &SqliteMemory,
+        id: &AgentIdentityId,
+        key: &str,
+    ) -> String {
+        backend
+            .get_for_agent(&SoulCandidateService::candidate_key(id, key), id.as_str())
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+    }
+
+    #[tokio::test]
+    async fn candidate_bounds_scalar_rule_and_raw_vectors() {
+        let (_tmp, backend) = fresh_backend();
+        let (registry, _, service) = services(&backend);
+        let id = identity_for(&backend, "bounds").await;
+        registry.admit(&id, "fixture").unwrap();
+        for (name, value) in [
+            ("ascii", "x".repeat(MAX_SCALAR_BYTES)),
+            ("utf8", "é".repeat(MAX_SCALAR_BYTES / 2)),
+        ] {
+            let mut input = intake(name, "e");
+            input.disposition = value;
+            input.proposed_rule = "r".repeat(MAX_RULE_BYTES);
+            input.context_shapes = vec!["same".into(); MAX_TAGS];
+            input.outcome_refs = vec!["same".into(); MAX_TAGS];
+            service.submit(&id, input.clone()).await.unwrap();
+            let before = bounded_fixture_bytes(&backend, &id, name).await;
+            let mut over = input.clone();
+            over.disposition.push('x');
+            assert!(matches!(
+                service.submit(&id, over).await,
+                Err(CandidateError::LimitExceeded {
+                    field: "disposition",
+                    ..
+                })
+            ));
+            let mut over = input.clone();
+            over.proposed_rule.push('r');
+            assert!(matches!(
+                service.submit(&id, over).await,
+                Err(CandidateError::LimitExceeded {
+                    field: "proposed_rule",
+                    ..
+                })
+            ));
+            let mut over = input.clone();
+            over.context_shapes.push("same".into());
+            assert!(matches!(
+                service.submit(&id, over).await,
+                Err(CandidateError::LimitExceeded {
+                    field: "context_shapes",
+                    ..
+                })
+            ));
+            let mut over = input;
+            over.outcome_refs.push("same".into());
+            assert!(matches!(
+                service.submit(&id, over).await,
+                Err(CandidateError::LimitExceeded {
+                    field: "outcome_refs",
+                    ..
+                })
+            ));
+            assert_eq!(bounded_fixture_bytes(&backend, &id, name).await, before);
+        }
+    }
+
+    #[tokio::test]
+    async fn candidate_bounds_aggregate_vectors_and_evidence_preserve_raw_row() {
+        let (_tmp, backend) = fresh_backend();
+        let (registry, _, service) = services(&backend);
+        let id = identity_for(&backend, "bounds").await;
+        registry.admit(&id, "fixture").unwrap();
+        let mut seed = SoulCandidate::from_intake(&intake("aggregate", "e0"));
+        seed.context_shapes = (0..MAX_TAGS - 1).map(|i| format!("context-{i}")).collect();
+        seed.recurrence.outcome_refs = (0..MAX_TAGS - 1).map(|i| format!("outcome-{i}")).collect();
+        seed.evidence = (0..MAX_EVIDENCE)
+            .map(|i| intake("aggregate", &format!("e{i}")).evidence)
+            .collect();
+        seed.recurrence.recount(&seed.evidence);
+        seed_bounded_fixture(&backend, &id, &seed).await;
+        let mut refresh = intake("aggregate", "e0");
+        refresh.context_shapes = vec![format!("context-{}", MAX_TAGS - 1)];
+        refresh.outcome_refs = vec![format!("outcome-{}", MAX_TAGS - 1)];
+        let record = service.submit(&id, refresh.clone()).await.unwrap();
+        assert_eq!(record.evidence.len(), MAX_EVIDENCE);
+        assert_eq!(record.context_shapes.len(), MAX_TAGS);
+        assert_eq!(record.recurrence.outcome_refs.len(), MAX_TAGS);
+        let before = bounded_fixture_bytes(&backend, &id, "aggregate").await;
+        for stance in [EvidenceStance::Supporting, EvidenceStance::Countering] {
+            let mut over = refresh.clone();
+            over.evidence.id = "new".into();
+            over.evidence.stance = stance;
+            over.confidence = Some("changed".into());
+            assert!(matches!(
+                service.submit(&id, over).await,
+                Err(CandidateError::LimitExceeded {
+                    field: "evidence",
+                    ..
+                })
+            ));
+            assert_eq!(
+                bounded_fixture_bytes(&backend, &id, "aggregate").await,
+                before
+            );
+        }
+        for context in [true, false] {
+            let mut over = refresh.clone();
+            if context {
+                over.context_shapes.push("new-context".into());
+            } else {
+                over.outcome_refs.push("new-outcome".into());
+            }
+            assert!(matches!(
+                service.submit(&id, over).await,
+                Err(CandidateError::LimitExceeded { .. })
+            ));
+            assert_eq!(
+                bounded_fixture_bytes(&backend, &id, "aggregate").await,
+                before
+            );
+        }
+        assert_eq!(
+            service.get(&id, "aggregate").await.unwrap().unwrap(),
+            record
+        );
+    }
+
+    #[tokio::test]
+    async fn candidate_bounds_encoded_escaping_and_legacy_read_refusal() {
+        let (_tmp, backend) = fresh_backend();
+        let (registry, _, service) = services(&backend);
+        let id = identity_for(&backend, "bounds").await;
+        registry.admit(&id, "fixture").unwrap();
+        // Each string is valid; escape expansion alone exceeds the row cap.
+        let mut input = intake("encoded", "e");
+        input.context_shapes = (0..16)
+            .map(|i| format!("{i}{}", "\u{0001}".repeat(3000)))
+            .collect();
+        let mut control = input.clone();
+        control.context_shapes = (0..16)
+            .map(|i| format!("{i}{}", "x".repeat(3000)))
+            .collect();
+        service.submit(&id, control).await.unwrap();
+        let before = bounded_fixture_bytes(&backend, &id, "encoded").await;
+        assert!(matches!(
+            service.submit(&id, input.clone()).await,
+            Err(CandidateError::LimitExceeded {
+                field: "encoded_candidate",
+                ..
+            })
+        ));
+        assert_eq!(
+            bounded_fixture_bytes(&backend, &id, "encoded").await,
+            before
+        );
+        let legacy = SoulCandidate::from_intake(&input);
+        seed_bounded_fixture(&backend, &id, &legacy).await;
+        let oversized = bounded_fixture_bytes(&backend, &id, "encoded").await;
+        assert!(oversized.len() > MAX_ENCODED_BYTES);
+        assert!(matches!(
+            service.get(&id, "encoded").await,
+            Err(CandidateError::LimitExceeded {
+                field: "encoded_candidate",
+                ..
+            })
+        ));
+        assert!(matches!(
+            service.candidates(&id).await,
+            Err(CandidateError::LimitExceeded {
+                field: "encoded_candidate",
+                ..
+            })
+        ));
+        assert!(matches!(
+            service.submit(&id, intake("encoded", "new")).await,
+            Err(CandidateError::LimitExceeded {
+                field: "encoded_candidate",
+                ..
+            })
+        ));
+        assert_eq!(
+            bounded_fixture_bytes(&backend, &id, "encoded").await,
+            oversized
+        );
+        // A small encoded row can still exceed the evidence-count bound.
+        let mut legacy = SoulCandidate::from_intake(&intake("encoded", "e"));
+        legacy.evidence = vec![legacy.evidence[0].clone(); MAX_EVIDENCE + 1];
+        seed_bounded_fixture(&backend, &id, &legacy).await;
+        assert!(matches!(
+            service.get(&id, "encoded").await,
+            Err(CandidateError::LimitExceeded {
+                field: "evidence",
+                ..
+            })
+        ));
     }
 }
