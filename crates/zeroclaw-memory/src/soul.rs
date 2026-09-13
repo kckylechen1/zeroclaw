@@ -35,7 +35,7 @@
 use crate::traits::{Memory, MemoryCategory};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, RwLock};
 use zeroclaw_api::companion::AgentIdentityId;
 use zeroclaw_api::memory_traits::MemoryEntry;
 
@@ -170,8 +170,8 @@ pub struct AdmissionRecord {
 /// Local admission registry: the fail-closed resolver every Soul
 /// read/write must pass through. An identity that was never admitted,
 /// or was admitted and then revoked, resolves to a typed error — never
-/// to a fallback key. Lock poisoning is absorbed rather than panicking:
-/// resolution continues on the last consistent snapshot.
+/// to a fallback key. Lock poisoning makes admission and resolution unavailable:
+/// potentially inconsistent state is never recovered for authority decisions.
 #[derive(Debug, Default)]
 pub struct IdentityRegistry {
     admitted: RwLock<HashMap<AgentIdentityId, AdmissionRecord>>,
@@ -185,16 +185,20 @@ impl IdentityRegistry {
 
     fn lock_read(
         &self,
-    ) -> std::sync::RwLockReadGuard<'_, HashMap<AgentIdentityId, AdmissionRecord>> {
-        self.admitted.read().unwrap_or_else(PoisonError::into_inner)
+    ) -> Result<std::sync::RwLockReadGuard<'_, HashMap<AgentIdentityId, AdmissionRecord>>, SoulError>
+    {
+        self.admitted
+            .read()
+            .map_err(|_| SoulError::IdentityUnavailable)
     }
 
     fn lock_write(
         &self,
-    ) -> std::sync::RwLockWriteGuard<'_, HashMap<AgentIdentityId, AdmissionRecord>> {
+    ) -> Result<std::sync::RwLockWriteGuard<'_, HashMap<AgentIdentityId, AdmissionRecord>>, SoulError>
+    {
         self.admitted
             .write()
-            .unwrap_or_else(PoisonError::into_inner)
+            .map_err(|_| SoulError::IdentityUnavailable)
     }
 
     /// Admit (or re-admit after revocation) a stable identity, recording
@@ -205,7 +209,7 @@ impl IdentityRegistry {
         provenance: impl Into<String>,
     ) -> Result<(), SoulError> {
         validate_identity_token(id)?;
-        self.lock_write().insert(
+        self.lock_write()?.insert(
             id.clone(),
             AdmissionRecord {
                 status: AdmissionStatus::Active,
@@ -218,10 +222,12 @@ impl IdentityRegistry {
     /// Revoke an admitted identity. The record is kept (revocation is a
     /// state, not a deletion) so re-admission is an explicit act and a
     /// stale active Soul can never be resurrected by re-insertion.
-    pub fn revoke(&self, id: &AgentIdentityId) {
-        if let Some(record) = self.lock_write().get_mut(id) {
+    /// A poisoned registry is unavailable; an unknown healthy identity is a no-op.
+    pub fn revoke(&self, id: &AgentIdentityId) -> Result<(), SoulError> {
+        if let Some(record) = self.lock_write()?.get_mut(id) {
             record.status = AdmissionStatus::Revoked;
         }
+        Ok(())
     }
 
     /// Resolve one candidate identity. `None` (the caller could not
@@ -237,32 +243,34 @@ impl IdentityRegistry {
     }
 
     /// Resolve exactly one identity from a candidate set. Zero admitted
-    /// candidates fail unavailable; more than one ACTIVE candidate fails
+    /// candidates fail unavailable; more than one distinct ACTIVE identity fails
     /// ambiguous; a single revoked candidate keeps its typed revoked
     /// error instead of collapsing into "unavailable".
     pub fn resolve_exactly(
         &self,
         candidates: &[AgentIdentityId],
     ) -> Result<AgentIdentityId, SoulError> {
-        let admitted = self.lock_read();
-        let mut active: Vec<&AgentIdentityId> = Vec::new();
+        let admitted = self.lock_read()?;
+        let mut active: Option<&AgentIdentityId> = None;
         let mut revoked: Option<&AgentIdentityId> = None;
         for id in candidates {
             match admitted.get(id).map(|r| r.status) {
-                Some(AdmissionStatus::Active) => active.push(id),
+                Some(AdmissionStatus::Active) => match active {
+                    Some(existing) if existing != id => return Err(SoulError::IdentityAmbiguous),
+                    _ => active = Some(id),
+                },
                 Some(AdmissionStatus::Revoked) => revoked = Some(id),
                 None => {}
             }
         }
-        match active.as_slice() {
-            [one] => Ok((*one).clone()),
-            [] => match revoked {
+        match active {
+            Some(one) => Ok(one.clone()),
+            None => match revoked {
                 Some(revoked_id) => {
                     Err(SoulError::IdentityRevoked(revoked_id.as_str().to_string()))
                 }
                 None => Err(SoulError::IdentityUnavailable),
             },
-            _ => Err(SoulError::IdentityAmbiguous),
         }
     }
 
@@ -270,7 +278,7 @@ impl IdentityRegistry {
         &self,
         id: &'a AgentIdentityId,
     ) -> Result<&'a AgentIdentityId, SoulError> {
-        let admitted = self.lock_read();
+        let admitted = self.lock_read()?;
         match admitted.get(id) {
             Some(record) if record.status == AdmissionStatus::Active => Ok(id),
             Some(_) => Err(SoulError::IdentityRevoked(id.as_str().to_string())),
@@ -717,7 +725,7 @@ mod tests {
         // single-candidate path AND the multi-candidate path, which must
         // keep the typed revoked error instead of degrading to
         // "unavailable".
-        registry.revoke(&a);
+        registry.revoke(&a).unwrap();
         let revoked = soul
             .get(&a, "k", &CarrierContext::default())
             .await
@@ -842,5 +850,143 @@ mod tests {
             SoulService::namespace_key(&id, "disposition", &a),
             SoulService::namespace_key(&id, "disposition", &c)
         );
+    }
+    fn poison_registry(registry: &Arc<IdentityRegistry>) {
+        let registry = Arc::clone(registry);
+        let result = std::thread::spawn(move || {
+            let _guard = registry.admitted.write().unwrap();
+            panic!("private registry writer poison fixture");
+        })
+        .join();
+        assert!(
+            result.is_err(),
+            "fixture must panic while holding the writer"
+        );
+    }
+
+    #[test]
+    fn poisoned_registry_denies_resolution_and_mutation() {
+        let registry = Arc::new(IdentityRegistry::new());
+        let a = AgentIdentityId::from_opaque("a");
+        let b = AgentIdentityId::from_opaque("b");
+        registry.admit(&a, "private admission").unwrap();
+        let before = registry.admitted.read().unwrap().clone();
+        poison_registry(&registry);
+        assert!(registry.admitted.is_poisoned());
+        assert_eq!(
+            registry.resolve(Some(&a)),
+            Err(SoulError::IdentityUnavailable)
+        );
+        assert_eq!(registry.resolve(None), Err(SoulError::IdentityUnavailable));
+        assert_eq!(
+            registry.resolve_exactly(std::slice::from_ref(&a)),
+            Err(SoulError::IdentityUnavailable)
+        );
+        assert_eq!(
+            registry.resolve_exactly(&[]),
+            Err(SoulError::IdentityUnavailable)
+        );
+        assert_eq!(
+            registry.admit(&b, "must not enter"),
+            Err(SoulError::IdentityUnavailable)
+        );
+        assert_eq!(registry.revoke(&a), Err(SoulError::IdentityUnavailable));
+        assert_eq!(registry.revoke(&b), Err(SoulError::IdentityUnavailable));
+        assert!(registry.admitted.is_poisoned());
+        // Test-only inspection; production must never recover this guard.
+        let after = registry.admitted.read().unwrap_err().into_inner().clone();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn duplicate_identity_candidates_preserve_distinct_and_revoked_precedence() {
+        let registry = IdentityRegistry::new();
+        let a = AgentIdentityId::from_opaque("a");
+        let b = AgentIdentityId::from_opaque("b");
+        let revoked = AgentIdentityId::from_opaque("revoked");
+        let unknown = AgentIdentityId::from_opaque("unknown");
+        for id in [&a, &b, &revoked] {
+            registry.admit(id, "private").unwrap();
+        }
+        registry.revoke(&revoked).unwrap();
+        assert_eq!(registry.revoke(&unknown), Ok(()));
+        assert_eq!(
+            registry.resolve_exactly(&[]),
+            Err(SoulError::IdentityUnavailable)
+        );
+        assert_eq!(
+            registry.resolve_exactly(std::slice::from_ref(&unknown)),
+            Err(SoulError::IdentityUnavailable)
+        );
+        assert_eq!(
+            registry.resolve_exactly(&[a.clone(), a.clone()]),
+            Ok(a.clone())
+        );
+        assert_eq!(
+            registry.resolve_exactly(&[a.clone(), a.clone(), a.clone()]),
+            Ok(a.clone())
+        );
+        assert_eq!(
+            registry.resolve_exactly(&[a.clone(), a.clone(), b.clone()]),
+            Err(SoulError::IdentityAmbiguous)
+        );
+        assert_eq!(
+            registry.resolve_exactly(&[a.clone(), b, a.clone()]),
+            Err(SoulError::IdentityAmbiguous)
+        );
+        assert_eq!(
+            registry.resolve_exactly(&[revoked.clone(), revoked.clone()]),
+            Err(SoulError::IdentityRevoked("revoked".into()))
+        );
+        assert_eq!(
+            registry.resolve_exactly(&[unknown.clone(), revoked.clone(), a.clone(), a.clone()]),
+            Ok(a.clone())
+        );
+        assert_eq!(
+            registry.resolve_exactly(&[a.clone(), revoked, unknown]),
+            Ok(a)
+        );
+    }
+
+    #[tokio::test]
+    async fn poisoned_registry_blocks_actual_soul_storage_boundary() {
+        let (_tmp, backend) = fresh_backend();
+        let (registry, soul) = service(Arc::clone(&backend));
+        let id = identity_for(&backend, "private-poison").await;
+        registry.admit(&id, "private admission").unwrap();
+        let carrier = CarrierContext::default();
+        soul.store(&id, "posture", "original", &carrier)
+            .await
+            .unwrap();
+        let key = SoulService::namespace_key(&id, "posture", &carrier);
+        let before = backend
+            .get_for_agent(&key, id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        poison_registry(&registry);
+        assert!(registry.admitted.is_poisoned());
+        assert_eq!(
+            soul.get(&id, "posture", &carrier).await.unwrap_err(),
+            SoulError::IdentityUnavailable
+        );
+        assert_eq!(
+            soul.store(&id, "posture", "replacement", &carrier).await,
+            Err(SoulError::IdentityUnavailable)
+        );
+        assert_eq!(
+            soul.forget(&id, "posture", &carrier).await,
+            Err(SoulError::IdentityUnavailable)
+        );
+        let after = backend
+            .get_for_agent(&key, id.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        assert!(registry.admitted.is_poisoned());
     }
 }
