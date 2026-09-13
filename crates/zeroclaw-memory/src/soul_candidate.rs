@@ -1351,7 +1351,7 @@ mod tests {
         // Admitted-then-revoked identity: keeps its typed revoked error.
         let id = identity_for(&backend, "identity-a").await;
         registry.admit(&id, "local bootstrap").unwrap();
-        registry.revoke(&id);
+        registry.revoke(&id).unwrap();
         assert_eq!(
             candidates
                 .submit(&id, intake("density", "bench-1"))
