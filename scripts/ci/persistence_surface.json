@@ -217,8 +217,8 @@
       "path": "crates/zeroclaw-memory/src/companion/user_model.rs",
       "store": "user_model.db",
       "role": "store",
-      "basis": "#205 keeper: append-only user-model review receipts",
-      "signals": 34
+      "basis": "#205 keeper: append-only user-model review receipts; #183 adds two read-only clock/range error mappings and one isolated test expiry update, no new production writer or store",
+      "signals": 37
     },
     {
       "path": "crates/zeroclaw-memory/src/conflict.rs",

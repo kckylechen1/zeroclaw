@@ -410,8 +410,19 @@ impl UserModelStore {
         &self,
         as_of_unix: Option<u64>,
     ) -> Result<Vec<UserModelRevision>, rusqlite::Error> {
-        // "Now" must fit sqlite's i64; u64::MAX would overflow the binding.
-        let as_of = as_of_unix.unwrap_or(i64::MAX as u64);
+        let as_of = match as_of_unix {
+            Some(as_of) => as_of,
+            None => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
+                    .as_secs();
+                // Validate SQLite's signed range without changing explicit as-of semantics.
+                i64::try_from(now)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                now
+            }
+        };
         let conn = self.conn.lock();
         // Per key: take the newest revision that had already started at the
         // read instant, THEN gate it on its own validity window. A key whose
@@ -928,5 +939,48 @@ mod tests {
         }
         let reopened = UserModelStore::open(dir.path()).unwrap();
         assert_eq!(reopened.active_heads(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn current_time_heads_include_live_windows_and_exclude_future_starts() {
+        let (_dir, s) = store();
+        assert!(s.active_heads(None).unwrap().is_empty());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let past = now.checked_sub(3_600).unwrap();
+        let future = now.checked_add(3_600).unwrap();
+        for (key, starts) in [
+            ("active", past),
+            ("future-start", future),
+            ("future-expiry", past),
+        ] {
+            let revision = s
+                .record_owner_statement(UserModelKind::Preference, key, key, "global", starts)
+                .unwrap();
+            if key == "future-expiry" {
+                s.conn
+                    .lock()
+                    .execute(
+                        "UPDATE user_model_revisions SET valid_until_unix = ?1 WHERE id = ?2",
+                        rusqlite::params![future, revision.id],
+                    )
+                    .unwrap();
+            }
+        }
+        let heads = s.active_heads(None).unwrap();
+        let keys: Vec<_> = heads
+            .iter()
+            .map(|head| head.semantic_key.as_str())
+            .collect();
+        eprintln!(
+            "USER_MODEL_CURRENT_TIME_OBSERVED active={} future_start={} future_expiry={}",
+            keys.contains(&"active"),
+            keys.contains(&"future-start"),
+            keys.contains(&"future-expiry")
+        );
+        assert_eq!(keys, vec!["active", "future-expiry"]);
+        assert_eq!(s.active_heads(Some(now)).unwrap(), heads);
     }
 }
