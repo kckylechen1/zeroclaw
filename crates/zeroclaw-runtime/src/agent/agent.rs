@@ -12305,6 +12305,7 @@ mod approval_route_tests {
             tool_name: "shell".into(),
             arguments_summary: "rm -rf /".into(),
             raw_arguments: None,
+            position: None,
         }
     }
 
