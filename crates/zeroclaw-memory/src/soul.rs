@@ -967,8 +967,8 @@ mod tests {
         poison_registry(&registry);
         assert!(registry.admitted.is_poisoned());
         assert_eq!(
-            soul.get(&id, "posture", &carrier).await,
-            Err(SoulError::IdentityUnavailable)
+            soul.get(&id, "posture", &carrier).await.unwrap_err(),
+            SoulError::IdentityUnavailable
         );
         assert_eq!(
             soul.store(&id, "posture", "replacement", &carrier).await,
