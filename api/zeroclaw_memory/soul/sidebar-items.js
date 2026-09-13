@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AdmissionStatus","SoulError"],"struct":["AdmissionRecord","CarrierContext","IdentityRegistry","SoulService"]};

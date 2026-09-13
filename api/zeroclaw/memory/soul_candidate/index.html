@@ -1,0 +1,104 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="AgentSoul candidate intake — evidence is not authority (AgentSoul tracker contract)."><title>zeroclaw::memory::soul_candidate - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="zeroclaw" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module soul_candidate</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../zeroclaw/index.html">zeroclaw</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module soul_<wbr>candidate</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In zeroclaw::<wbr>memory</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">zeroclaw</a>::<wbr><a href="../index.html">memory</a></div><h1>Module <span>soul_<wbr>candidate</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>AgentSoul candidate intake — evidence is not authority (AgentSoul tracker contract).</p>
+<p>This leaf builds on the soul seam (<a href="../soul/index.html" title="mod zeroclaw::memory::soul"><code>crate::soul</code></a>): it records
+<em>candidate</em> Soul dispositions plus evidence/counterevidence
+references for exactly one admitted
+<a href="../../../zeroclaw_api/companion/struct.AgentIdentityId.html" title="struct zeroclaw_api::companion::AgentIdentityId"><code>AgentIdentityId</code></a>, while
+making implicit promotion structurally unrepresentable:</p>
+<ul>
+<li>only the frozen authority list may create/update a candidate —
+one incident, repeated behavior, benchmark result, worker
+receipt, Tachi verified evidence ref, model summary, owner
+correction — encoded as the closed <a href="enum.CandidateOrigin.html" title="enum zeroclaw::memory::soul_candidate::CandidateOrigin"><code>CandidateOrigin</code></a> enum, and
+NONE of them can create an active Soul disposition;</li>
+<li><a href="enum.CandidateStatus.html" title="enum zeroclaw::memory::soul_candidate::CandidateStatus"><code>CandidateStatus</code></a> has exactly two variants, <code>Candidate</code> and
+<code>Retracted</code>. There is no <code>Active</code> variant anywhere in this
+module, so no method — however named — can return or store an
+active disposition. Promotion belongs to the explicit authorized
+later review leaf alone;</li>
+<li>counts, frequency, recurrence, and confidence are evidence
+QUALITY metadata (<a href="struct.RecurrenceMetadata.html" title="struct zeroclaw::memory::soul_candidate::RecurrenceMetadata"><code>RecurrenceMetadata</code></a>), recomputed from the
+deduped evidence refs on every write. They never feed any
+authority decision because no authority decision exists here;</li>
+<li>evidence refs are opaque ids into their owning source systems
+(incident store, benchmark run, Tachi envelope, worker receipt).
+Referenced content is NEVER copied into a second truth store;
+each ref keeps its source revision and derivation ref so a later
+invalidation leaf (a future AgentSoul leaf) can find dependents;</li>
+<li>user-preference-shaped evidence is rejected with a typed error
+naming the User Model (<a href="enum.CandidateError.html#variant.UserModelDomain" title="variant zeroclaw::memory::soul_candidate::CandidateError::UserModelDomain"><code>CandidateError::UserModelDomain</code></a>) —
+never silently stored as Soul. Every intake must carry an
+explicit <a href="enum.DomainClassification.html" title="enum zeroclaw::memory::soul_candidate::DomainClassification"><code>DomainClassification</code></a>;</li>
+<li>identity resolution reuses the same fail-closed
+<a href="../soul/struct.IdentityRegistry.html" title="struct zeroclaw::memory::soul::IdentityRegistry"><code>IdentityRegistry</code></a>: unadmitted, ambiguous, revoked, or
+malformed identities fail closed before any storage access;</li>
+<li>storage is one row per candidate under the soul namespace
+(<code>soul::&lt;identity&gt;::candidate::&lt;id&gt;</code>) through the existing
+<a href="../trait.Memory.html" title="trait zeroclaw::memory::Memory"><code>Memory</code></a> trait; carrier attributes never enter the key;</li>
+<li>Tachi verified evidence can support a candidate but never
+activates Soul (structurally: nothing can). When Tachi is
+unavailable, local observations may still create local
+candidates while the external ref is marked
+<a href="enum.EvidenceVerification.html#variant.Unavailable" title="variant zeroclaw::memory::soul_candidate::EvidenceVerification::Unavailable"><code>EvidenceVerification::Unavailable</code></a> — never fabricated as
+verified;</li>
+<li>no persona projection, no promotion path, no suspend/resume/
+reset/erase lifecycle exists here (later leaves under).
+Retraction (<a href="struct.SoulCandidateService.html#method.retract" title="method zeroclaw::memory::soul_candidate::SoulCandidateService::retract"><code>SoulCandidateService::retract</code></a>) is the one
+lifecycle-shaped operation: owner-correction-only, and it keeps
+the row as history instead of erasing it.</li>
+</ul>
+<p>Deliberate scope boundary (repair-round adjudication for this leaf): this
+module performs NO owner principal/grant authentication — any caller
+claiming the <a href="enum.CandidateOrigin.html#variant.OwnerCorrection" title="variant zeroclaw::memory::soul_candidate::CandidateOrigin::OwnerCorrection"><code>CandidateOrigin::OwnerCorrection</code></a> origin is taken at
+its word. Authenticating who may speak for an owner belongs to the
+explicit review/promotion leaf  and its authorization
+substrate , not to intake.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CandidateIntake.html" title="struct zeroclaw::memory::soul_candidate::CandidateIntake">Candidate<wbr>Intake</a></dt><dd>One intake event: what a frozen-list origin submits for one
+candidate. Every field that classifies the submission
+(<code>domain</code>, <code>sensitivity</code>, <code>origin</code>) is required — there is no
+unclassified intake path.</dd><dt><a class="struct" href="struct.EvidenceRef.html" title="struct zeroclaw::memory::soul_candidate::EvidenceRef">Evidence<wbr>Ref</a></dt><dd>A reference to one piece of evidence. Refs are opaque ids into
+their OWNING source system — incident store, benchmark run ledger,
+Tachi envelope, worker receipt log. Referenced content is never
+copied here: this module holds no second copy of any source truth
+(project engineering precedent stays in project/precedent memory,
+per the AgentSoul domain boundary).</dd><dt><a class="struct" href="struct.RecurrenceMetadata.html" title="struct zeroclaw::memory::soul_candidate::RecurrenceMetadata">Recurrence<wbr>Metadata</a></dt><dd>Repetition/frequency/confidence metadata — evidence QUALITY signals
+only (per the leaf’s frozen rule). Recomputed from the deduped evidence refs
+on every write, so these numbers can never drift from the evidence
+they describe, and nothing in this module reads them to make any
+authority decision (there is no authority decision to make).</dd><dt><a class="struct" href="struct.SoulCandidate.html" title="struct zeroclaw::memory::soul_candidate::SoulCandidate">Soul<wbr>Candidate</a></dt><dd>One stored Soul candidate: a proposed behavioral disposition bound
+to exactly one admitted AgentIdentity (the binding lives in the
+agent-scoped row — key prefix plus row attribution — which is why
+the record itself carries no identity field to drift).</dd><dt><a class="struct" href="struct.SoulCandidateService.html" title="struct zeroclaw::memory::soul_candidate::SoulCandidateService">Soul<wbr>Candidate<wbr>Service</a></dt><dd>Candidate intake/query service behind the Soul domain seam.
+Every method resolves the caller’s identity through the same
+fail-closed <a href="../soul/struct.IdentityRegistry.html" title="struct zeroclaw::memory::soul::IdentityRegistry"><code>IdentityRegistry</code></a> as <a href="../soul/struct.SoulService.html" title="struct zeroclaw::memory::soul::SoulService"><code>SoulService</code></a>, stores one row
+per candidate under <code>soul::&lt;identity&gt;::candidate::&lt;id&gt;</code> through the
+existing <a href="../trait.Memory.html" title="trait zeroclaw::memory::Memory"><code>Memory</code></a> trait, and exposes NO activation, promotion, or
+reset path — candidate status is the only lifecycle this type can
+write, and it has no active variant.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CandidateError.html" title="enum zeroclaw::memory::soul_candidate::CandidateError">Candidate<wbr>Error</a></dt><dd>Typed fail-closed errors for Soul candidate intake. Identity
+failures reuse <a href="../soul/enum.SoulError.html" title="enum zeroclaw::memory::soul::SoulError"><code>SoulError</code></a> through the <a href="enum.CandidateError.html#variant.Soul" title="variant zeroclaw::memory::soul_candidate::CandidateError::Soul"><code>CandidateError::Soul</code></a>
+variant; every candidate-domain failure has its own explicit
+variant. No variant ever stores, guesses, or promotes anything.</dd><dt><a class="enum" href="enum.CandidateOrigin.html" title="enum zeroclaw::memory::soul_candidate::CandidateOrigin">Candidate<wbr>Origin</a></dt><dd>The frozen authority list : the ONLY origins that may create
+or update a candidate. Closed by construction — there is no
+<code>Other</code>/<code>Custom</code> variant, so no caller can smuggle an origin past
+this enum. None of these origins can activate Soul; they only ever
+feed candidate/evidence state.</dd><dt><a class="enum" href="enum.CandidateStatus.html" title="enum zeroclaw::memory::soul_candidate::CandidateStatus">Candidate<wbr>Status</a></dt><dd>The complete lifecycle vocabulary of a Soul candidate in this leaf.
+Deliberately two variants: <code>Candidate</code> and <code>Retracted</code>. There is NO
+<code>Active</code> variant — an active Soul disposition is created only by the
+explicit authorized review leaf , through its own types, never
+through candidate intake. The exhaustive-match test in this module
+fails to compile if a variant is added here.</dd><dt><a class="enum" href="enum.DomainClassification.html" title="enum zeroclaw::memory::soul_candidate::DomainClassification">Domain<wbr>Classification</a></dt><dd>Explicit domain classification required at intake (per the AgentSoul domain
+boundary: Soul is not a user-preference store). Evidence classified
+as <a href="enum.DomainClassification.html#variant.UserPreference" title="variant zeroclaw::memory::soul_candidate::DomainClassification::UserPreference"><code>DomainClassification::UserPreference</code></a> is typed-rejected with
+<a href="enum.CandidateError.html#variant.UserModelDomain" title="variant zeroclaw::memory::soul_candidate::CandidateError::UserModelDomain"><code>CandidateError::UserModelDomain</code></a> and must be routed to the User
+Model store instead — this is the “explicit domain classification
+path” the discrimination demands; there is no unclassified
+intake.</dd><dt><a class="enum" href="enum.EvidenceStance.html" title="enum zeroclaw::memory::soul_candidate::EvidenceStance">Evidence<wbr>Stance</a></dt><dd>Whether one evidence reference supports or counters the candidate.
+Counterevidence is a first-class citizen: it is recorded alongside
+supporting evidence and never deletes or demotes the candidate —
+weighing is review’s job .</dd><dt><a class="enum" href="enum.EvidenceVerification.html" title="enum zeroclaw::memory::soul_candidate::EvidenceVerification">Evidence<wbr>Verification</a></dt><dd>Verification state of an evidence reference. Tachi being unavailable
+is represented as <a href="enum.EvidenceVerification.html#variant.Unavailable" title="variant zeroclaw::memory::soul_candidate::EvidenceVerification::Unavailable"><code>EvidenceVerification::Unavailable</code></a> — external
+evidence is marked, never fabricated as verified, so local
+observations can still create local candidates (per the leaf’s failure model).</dd><dt><a class="enum" href="enum.Sensitivity.html" title="enum zeroclaw::memory::soul_candidate::Sensitivity">Sensitivity</a></dt><dd>Privacy/sensitivity classification of the candidate. Required on
+every intake so no Soul row exists unclassified; consumed by the
+future privacy-erase leaf (a future privacy-erase leaf).</dd></dl></section></div></main></body></html>

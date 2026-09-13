@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CandidateError","CandidateOrigin","CandidateStatus","DomainClassification","EvidenceStance","EvidenceVerification","Sensitivity"],"struct":["CandidateIntake","EvidenceRef","RecurrenceMetadata","SoulCandidate","SoulCandidateService"]};
