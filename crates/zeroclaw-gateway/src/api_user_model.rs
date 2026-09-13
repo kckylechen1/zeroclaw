@@ -512,4 +512,59 @@ mod tests {
             "owner_ratified"
         );
     }
+    #[tokio::test]
+    async fn review_revision_insert_failure_over_http_rolls_back_receipt() {
+        let (dir, state) = state_with_tempdir();
+        let store = cached_store(&dir.path().to_path_buf()).unwrap();
+        let candidate = store
+            .record_observation(UserModelKind::Habit, "private", "atomic.http", "[]", 100)
+            .unwrap();
+        // Persistent only inside this disposable fixture DB: the handler's
+        // canonical connection must see it; TEMP would be connection-local.
+        let fixture = rusqlite::Connection::open(dir.path().join("user_model.db")).unwrap();
+        fixture.execute_batch("CREATE TRIGGER private_http_revision_fault BEFORE INSERT ON user_model_revisions BEGIN SELECT RAISE(ABORT, 'private HTTP revision fault'); END;").unwrap();
+        let before = review_scope_rows(dir.path());
+        let (status, response) = json_of(
+            review_candidate(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+                Path(candidate.id.clone()),
+                body(&serde_json::json!({"action":"accept"})),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response["error"]
+                .as_str()
+                .unwrap()
+                .contains("private HTTP revision fault")
+        );
+        assert_eq!(review_scope_rows(dir.path()), before);
+        fixture
+            .execute_batch("DROP TRIGGER private_http_revision_fault;")
+            .unwrap();
+        let (status, _) = json_of(
+            review_candidate(
+                State(state),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+                Path(candidate.id),
+                body(&serde_json::json!({"action":"accept"})),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let after = review_scope_rows(dir.path());
+        assert_eq!(after[0], before[0]);
+        assert_eq!(after[1].len(), 1);
+        assert_eq!(after[2].len(), 1);
+        assert_eq!(
+            serde_json::to_value(&store.active_heads(None).unwrap()[0]).unwrap()["authority"],
+            "owner_ratified"
+        );
+    }
 }

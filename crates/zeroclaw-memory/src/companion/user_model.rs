@@ -327,7 +327,7 @@ impl UserModelStore {
         narrowed_scope: Option<&str>,
         now_unix: u64,
     ) -> Result<UserModelReviewReceipt, rusqlite::Error> {
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
         let candidate = conn.query_row(
             "SELECT kind, statement, semantic_key FROM user_model_candidates WHERE id = ?1",
             rusqlite::params![candidate_id],
@@ -354,6 +354,7 @@ impl UserModelStore {
             )));
         }
 
+        let tx = conn.transaction()?;
         let receipt = UserModelReviewReceipt {
             id: uuid::Uuid::new_v4().to_string(),
             candidate_id: candidate_id.to_string(),
@@ -362,7 +363,7 @@ impl UserModelStore {
             note: note.map(str::to_string),
             at_unix: now_unix,
         };
-        conn.execute(
+        tx.execute(
             "INSERT INTO user_model_review_receipts
                  (id, candidate_id, action, reviewer, note, at_unix)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -379,7 +380,7 @@ impl UserModelStore {
         match action {
             ReviewAction::Reject => {}
             ReviewAction::Accept | ReviewAction::Narrow | ReviewAction::Supersede => {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO user_model_revisions
                          (id, semantic_key, kind, statement, scope, authority, supersedes,
                           valid_from_unix, valid_until_unix, source_candidate, created_at_unix)
@@ -403,6 +404,7 @@ impl UserModelStore {
                 )?;
             }
         }
+        tx.commit()?;
         Ok(receipt)
     }
 
@@ -1067,5 +1069,162 @@ mod tests {
         assert_eq!(heads.len(), 1);
         assert_eq!(heads[0].scope, "session:A");
         assert_eq!(heads[0].authority, AuthorityClass::OwnerRatified);
+    }
+    #[test]
+    fn review_insert_failure_rolls_back_receipt_and_preserves_reject() {
+        let (_dir, store) = store();
+        let candidate = store
+            .record_observation(UserModelKind::Habit, "private", "atomic.key", "[]", 100)
+            .unwrap();
+        store.conn.lock().execute_batch("CREATE TEMP TRIGGER review_insert_fault BEFORE INSERT ON main.user_model_revisions BEGIN SELECT RAISE(ABORT, 'private revision insert fault'); END;").unwrap();
+        let before = review_scope_snapshot(&store);
+        let error = store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Accept,
+                "owner",
+                None,
+                None,
+                200,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("private revision insert fault"));
+        assert_eq!(review_scope_snapshot(&store), before);
+        assert!(store.conn.lock().is_autocommit());
+        let rejected = store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Reject,
+                "owner",
+                None,
+                Some("ignored"),
+                201,
+            )
+            .unwrap();
+        assert_eq!(rejected.action, ReviewAction::Reject);
+        let after_reject = review_scope_snapshot(&store);
+        assert_eq!(after_reject[0], before[0]);
+        assert_eq!(after_reject[1].len(), 1);
+        assert_eq!(after_reject[2], before[2]);
+        store
+            .conn
+            .lock()
+            .execute_batch("DROP TRIGGER temp.review_insert_fault;")
+            .unwrap();
+        store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Narrow,
+                "owner",
+                None,
+                Some("session:A"),
+                202,
+            )
+            .unwrap();
+        let after = review_scope_snapshot(&store);
+        assert_eq!(after[0], before[0]);
+        assert_eq!(after[1].len(), 2);
+        assert_eq!(after[2].len(), 1);
+        assert_eq!(
+            store.active_heads(Some(202)).unwrap()[0].authority,
+            AuthorityClass::OwnerRatified
+        );
+    }
+
+    #[test]
+    fn review_commit_failure_rolls_back_canonical_and_auxiliary_rows() {
+        let (_dir, store) = store();
+        let candidate = store
+            .record_observation(UserModelKind::Habit, "private", "atomic.key", "[]", 100)
+            .unwrap();
+        store
+            .record_owner_statement(
+                UserModelKind::Habit,
+                "baseline",
+                "baseline.key",
+                "global",
+                100,
+            )
+            .unwrap();
+        {
+            let conn = store.conn.lock();
+            conn.execute_batch("PRAGMA foreign_keys = ON;
+                CREATE TEMP TABLE review_fault_parent (id INTEGER PRIMARY KEY);
+                CREATE TEMP TABLE review_fault_child (parent_id INTEGER REFERENCES review_fault_parent(id) DEFERRABLE INITIALLY DEFERRED);
+                CREATE TEMP TRIGGER review_commit_fault AFTER INSERT ON main.user_model_revisions BEGIN INSERT INTO review_fault_child VALUES (1); END;").unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+        let before = review_scope_snapshot(&store);
+        // Calibrate the exact trigger: revision INSERT succeeds, explicit
+        // COMMIT fails. A statement-level abort is not this discriminator.
+        {
+            let mut conn = store.conn.lock();
+            let tx = conn.transaction().unwrap();
+            assert_eq!(tx.execute("INSERT INTO user_model_revisions
+                (id, semantic_key, kind, statement, scope, authority, supersedes, valid_from_unix, valid_until_unix, source_candidate, created_at_unix)
+                SELECT 'private-calibration', semantic_key, kind, statement, scope, authority, supersedes, valid_from_unix, valid_until_unix, source_candidate, created_at_unix FROM user_model_revisions LIMIT 1", []).unwrap(), 1);
+            assert_eq!(
+                tx.query_row("SELECT COUNT(*) FROM review_fault_child", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            let error = tx.commit().unwrap_err();
+            assert!(
+                matches!(error, rusqlite::Error::SqliteFailure(ref code, _) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY)
+            );
+            assert!(conn.is_autocommit());
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM review_fault_child", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        assert_eq!(review_scope_snapshot(&store), before);
+        let error = store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Accept,
+                "owner",
+                None,
+                None,
+                200,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, rusqlite::Error::SqliteFailure(ref code, _) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY)
+        );
+        assert_eq!(review_scope_snapshot(&store), before);
+        {
+            let conn = store.conn.lock();
+            assert!(conn.is_autocommit());
+            for table in ["review_fault_child", "review_fault_parent"] {
+                assert_eq!(
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+            }
+            conn.execute_batch("DROP TRIGGER temp.review_commit_fault; DROP TABLE temp.review_fault_child; DROP TABLE temp.review_fault_parent;").unwrap();
+        }
+        store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Accept,
+                "owner",
+                None,
+                None,
+                201,
+            )
+            .unwrap();
+        let after = review_scope_snapshot(&store);
+        assert_eq!(after[1].len(), 1);
+        assert_eq!(after[2].len(), 2);
     }
 }
