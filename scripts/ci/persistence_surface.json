@@ -224,8 +224,8 @@
       "path": "crates/zeroclaw-memory/src/companion/user_model.rs",
       "store": "user_model.db",
       "role": "store",
-      "basis": "#205 keeper: append-only user-model review receipts; #183 adds two read-only clock/range error mappings and one isolated test expiry update, no new production writer or store. #186 TB-22 test-only exemption: three additional rusqlite type/error references for private full-row review snapshots (37 to 40); no new production writer, store or DDL. #186 atomicity fixture adds four test-only rusqlite error references (40 to 44), private TEMP fault tables/triggers and foreign_keys pragma calibration (TEMP DDL is not detector-counted); no production DDL, schema, store, writer or dependency growth",
-      "signals": 44
+      "basis": "#205 keeper: append-only user-model review receipts; #183 adds two read-only clock/range error mappings and one isolated test expiry update, no new production writer or store. #186 TB-22 test-only exemption: three additional rusqlite type/error references for private full-row review snapshots (37 to 40); no new production writer, store or DDL. #186 atomicity fixture adds four test-only rusqlite error references (40 to 44), private TEMP fault tables/triggers and foreign_keys pragma calibration (TEMP DDL is not detector-counted); no production DDL, schema, store, writer or dependency growth. #186 pending query adds three production read-only references (44 to 47): two read-method rusqlite error signatures and one read-query parameter macro; same existing keeper and connection, no new production writer, store, schema or consumer subsystem. Private TEMP fault trigger verifies failed reviews remain pending",
+      "signals": 47
     },
     {
       "path": "crates/zeroclaw-memory/src/conflict.rs",

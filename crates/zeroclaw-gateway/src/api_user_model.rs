@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use parking_lot::Mutex;
 use zeroclaw_memory::companion::{
@@ -51,19 +51,36 @@ fn data_dir_of(state: &AppState) -> PathBuf {
     state.config.read().data_dir.clone()
 }
 
-/// GET /api/user-model/candidates — pending observations with evidence.
+#[derive(Default, serde::Deserialize)]
+struct CandidateQuery {
+    #[serde(default)]
+    pending: bool,
+}
+
+/// GET /api/user-model/candidates — all history by default; pending=true
+/// selects candidates without a committed review receipt.
 pub async fn list_candidates(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    uri: Uri,
 ) -> Response {
     if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
         return err;
     }
+    let query = match axum::extract::Query::<CandidateQuery>::try_from_uri(&uri) {
+        Ok(query) => query.0,
+        Err(error) => return error_json(StatusCode::BAD_REQUEST, &error.to_string()),
+    };
     let data_dir = data_dir_of(&state);
     let result = tokio::task::spawn_blocking(move || {
         let store = cached_store(&data_dir)?;
-        store.list_candidates().map_err(|err| err.to_string())
+        if query.pending {
+            store.list_pending_candidates()
+        } else {
+            store.list_candidates()
+        }
+        .map_err(|err| err.to_string())
     })
     .await;
     match result {
@@ -358,6 +375,7 @@ mod tests {
                 State(state.clone()),
                 ConnectInfo(loopback_peer()),
                 operator_headers(),
+                Uri::from_static("/api/user-model/candidates"),
             )
             .await
             .into_response(),
@@ -480,6 +498,14 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let (pending_status, pending) = pending_http(
+            &state,
+            "/api/user-model/candidates?pending=true",
+            operator_headers(),
+        )
+        .await;
+        assert_eq!(pending_status, StatusCode::OK);
+        assert_eq!(pending["candidates"].as_array().unwrap().len(), 1);
         assert!(
             response["error"]
                 .as_str()
@@ -536,6 +562,14 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let (pending_status, pending) = pending_http(
+            &state,
+            "/api/user-model/candidates?pending=true",
+            operator_headers(),
+        )
+        .await;
+        assert_eq!(pending_status, StatusCode::OK);
+        assert_eq!(pending["candidates"].as_array().unwrap().len(), 1);
         assert!(
             response["error"]
                 .as_str()
@@ -566,5 +600,124 @@ mod tests {
             serde_json::to_value(&store.active_heads(None).unwrap()[0]).unwrap()["authority"],
             "owner_ratified"
         );
+    }
+    async fn pending_http(
+        state: &AppState,
+        uri: &str,
+        headers: HeaderMap,
+    ) -> (StatusCode, serde_json::Value) {
+        json_of(
+            list_candidates(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                headers,
+                uri.parse().unwrap(),
+            )
+            .await,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn pending_query_uri_preserves_history_and_review_authority() {
+        let (dir, state) = state_with_tempdir();
+        let (status, empty) = pending_http(
+            &state,
+            "/api/user-model/candidates?pending=true",
+            operator_headers(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty["candidates"], serde_json::json!([]));
+        let store = cached_store(&dir.path().to_path_buf()).unwrap();
+        let c = store
+            .record_observation(UserModelKind::Habit, "C", "c", "[]", 100)
+            .unwrap();
+        let d = store
+            .record_observation(UserModelKind::Habit, "D", "d", "[]", 101)
+            .unwrap();
+        let (_, both) = pending_http(
+            &state,
+            "/api/user-model/candidates?pending=true",
+            operator_headers(),
+        )
+        .await;
+        assert_eq!(both["candidates"].as_array().unwrap().len(), 2);
+        assert_eq!(both["candidates"][0]["id"], d.id);
+        assert_eq!(both["candidates"][1]["id"], c.id);
+        for (candidate, action, remaining) in [(&c, "reject", 1), (&d, "accept", 0)] {
+            let (status, _) = json_of(
+                review_candidate(
+                    State(state.clone()),
+                    ConnectInfo(loopback_peer()),
+                    operator_headers(),
+                    Path(candidate.id.clone()),
+                    body(&serde_json::json!({"action":action})),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let (status, pending) = pending_http(
+                &state,
+                "/api/user-model/candidates?pending=true",
+                operator_headers(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(pending["candidates"].as_array().unwrap().len(), remaining);
+            if action == "reject" {
+                assert_eq!(pending["candidates"][0]["id"], d.id);
+            } else {
+                assert_eq!(pending["candidates"], serde_json::json!([]));
+            }
+        }
+        for uri in [
+            "/api/user-model/candidates",
+            "/api/user-model/candidates?pending=false",
+        ] {
+            let (status, history) = pending_http(&state, uri, operator_headers()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(history["candidates"].as_array().unwrap().len(), 2);
+            assert_eq!(history["candidates"][0]["id"], d.id);
+            assert_eq!(history["candidates"][1]["id"], c.id);
+        }
+        let e = store
+            .record_observation(UserModelKind::Habit, "E", "e", "[]", 202)
+            .unwrap();
+        let before = review_scope_rows(dir.path());
+        let (_, pending) = pending_http(
+            &state,
+            "/api/user-model/candidates?pending=true",
+            operator_headers(),
+        )
+        .await;
+        assert_eq!(pending["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(pending["candidates"][0]["id"], e.id);
+        pending_http(&state, "/api/user-model/candidates", operator_headers()).await;
+        assert_eq!(review_scope_rows(dir.path()), before);
+        assert_eq!(
+            serde_json::to_value(&store.active_heads(None).unwrap()[0]).unwrap()["authority"],
+            "owner_ratified"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_query_rejects_malformed_after_auth_without_store_open() {
+        let (dir, state) = state_with_tempdir();
+        for query in [
+            "pending=",
+            "pending=0",
+            "pending=invalid",
+            "pending=true&pending=false",
+        ] {
+            let uri = format!("/api/user-model/candidates?{query}");
+            let (status, _) = pending_http(&state, &uri, anon_headers()).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let (status, _) = pending_http(&state, &uri, operator_headers()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(!dir.path().join("user_model.db").exists());
+            assert!(!store_handles().lock().contains_key(dir.path()));
+        }
     }
 }

@@ -290,13 +290,28 @@ impl UserModelStore {
 
     /// All candidates, newest first, with their evidence.
     pub fn list_candidates(&self) -> Result<Vec<UserModelCandidate>, rusqlite::Error> {
+        self.list_candidates_by_review(false)
+    }
+
+    /// Candidates with no committed review receipt, in history order.
+    pub fn list_pending_candidates(&self) -> Result<Vec<UserModelCandidate>, rusqlite::Error> {
+        self.list_candidates_by_review(true)
+    }
+
+    fn list_candidates_by_review(
+        &self,
+        pending: bool,
+    ) -> Result<Vec<UserModelCandidate>, rusqlite::Error> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, kind, statement, semantic_key, scope, evidence, created_at_unix
-             FROM user_model_candidates
+             FROM user_model_candidates c
+             WHERE (?1 = 0 OR NOT EXISTS (
+                 SELECT 1 FROM user_model_review_receipts r WHERE r.candidate_id = c.id
+             ))
              ORDER BY created_at_unix DESC, id DESC",
         )?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(rusqlite::params![pending], |row| {
             let kind_raw: String = row.get(1)?;
             Ok((UserModelCandidate {
                 id: row.get(0)?,
@@ -1226,5 +1241,71 @@ mod tests {
         let after = review_scope_snapshot(&store);
         assert_eq!(after[1].len(), 1);
         assert_eq!(after[2].len(), 2);
+    }
+    #[test]
+    fn pending_candidates_derive_only_from_committed_receipts() {
+        let (_dir, store) = store();
+        assert!(store.list_pending_candidates().unwrap().is_empty());
+        let c = store
+            .record_observation(UserModelKind::Habit, "C", "c", "[]", 100)
+            .unwrap();
+        let d = store
+            .record_observation(UserModelKind::Habit, "D", "d", "[]", 101)
+            .unwrap();
+        assert_eq!(
+            store.list_pending_candidates().unwrap(),
+            vec![d.clone(), c.clone()]
+        );
+        assert!(
+            store
+                .review_candidate(
+                    &c.id,
+                    ReviewAction::Narrow,
+                    "owner",
+                    None,
+                    Some("invalid"),
+                    200
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store.list_pending_candidates().unwrap(),
+            vec![d.clone(), c.clone()]
+        );
+        store.conn.lock().execute_batch("CREATE TEMP TRIGGER pending_revision_fault BEFORE INSERT ON main.user_model_revisions BEGIN SELECT RAISE(ABORT, 'private pending fault'); END;").unwrap();
+        assert!(
+            store
+                .review_candidate(&d.id, ReviewAction::Accept, "owner", None, None, 200)
+                .is_err()
+        );
+        assert_eq!(
+            store.list_pending_candidates().unwrap(),
+            vec![d.clone(), c.clone()]
+        );
+        store
+            .conn
+            .lock()
+            .execute_batch("DROP TRIGGER temp.pending_revision_fault;")
+            .unwrap();
+        store
+            .review_candidate(&c.id, ReviewAction::Reject, "owner", None, None, 200)
+            .unwrap();
+        assert_eq!(store.list_pending_candidates().unwrap(), vec![d.clone()]);
+        store
+            .review_candidate(&d.id, ReviewAction::Accept, "owner", None, None, 201)
+            .unwrap();
+        assert!(store.list_pending_candidates().unwrap().is_empty());
+        assert_eq!(store.list_candidates().unwrap(), vec![d, c]);
+        let e = store
+            .record_observation(UserModelKind::Habit, "E", "e", "[]", 202)
+            .unwrap();
+        let before = review_scope_snapshot(&store);
+        assert_eq!(store.list_pending_candidates().unwrap(), vec![e]);
+        assert_eq!(store.list_candidates().unwrap().len(), 3);
+        assert_eq!(review_scope_snapshot(&store), before);
+        assert_eq!(
+            store.active_heads(Some(202)).unwrap()[0].authority,
+            AuthorityClass::OwnerRatified
+        );
     }
 }
