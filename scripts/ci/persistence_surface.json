@@ -294,8 +294,8 @@
       "path": "crates/zeroclaw-memory/src/sqlite/tests.rs",
       "store": "memory/brain.db",
       "role": "test",
-      "basis": "sqlite unit tests extracted from sqlite.rs; test-only direct connections and fixtures",
-      "signals": 8
+      "basis": "sqlite unit tests extracted from sqlite.rs; test-only direct connections and fixtures. TB-22 test-only exemption: seven additional rusqlite type/error references for private malformed-row read discriminators; existing temporary memory/brain.db connections only, no new production store/table/writer path.",
+      "signals": 15
     },
     {
       "path": "crates/zeroclaw-memory/src/tachi_governance.rs",
