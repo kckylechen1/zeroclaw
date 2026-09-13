@@ -413,8 +413,9 @@ impl SoulCandidate {
 
     /// Fold one intake into the candidate: dedupe/refresh evidence by
     /// ref id, merge context/outcome tags, adopt the latest confidence
-    /// label, and let an owner correction amend the disposition/rule
-    /// text. Never touches status and never promotes anything.
+    /// label, retain the more restrictive sensitivity, and let an owner
+    /// correction amend the disposition/rule text. Never touches status
+    /// and never promotes anything.
     fn merge_intake(&mut self, intake: CandidateIntake) -> Result<(), CandidateError> {
         match self
             .evidence
@@ -442,6 +443,11 @@ impl SoulCandidate {
             self.disposition = intake.disposition;
             self.proposed_rule = intake.proposed_rule;
         }
+        self.sensitivity = match (self.sensitivity, intake.sensitivity) {
+            (Sensitivity::Sensitive, _) | (_, Sensitivity::Sensitive) => Sensitivity::Sensitive,
+            (Sensitivity::Internal, _) | (_, Sensitivity::Internal) => Sensitivity::Internal,
+            (Sensitivity::Public, Sensitivity::Public) => Sensitivity::Public,
+        };
         self.recurrence.recount(&self.evidence);
         self.last_origin = intake.origin;
         Ok(())
@@ -1623,5 +1629,93 @@ mod tests {
         assert_eq!(back, candidate);
         assert!(json.contains("\"sensitivity\":\"internal\""));
         assert!(json.contains("\"stance\":\"supporting\""));
+    }
+
+    #[tokio::test]
+    async fn accepted_intakes_persist_monotone_sensitivity() {
+        let (_tmp, backend) = fresh_backend();
+        let (registry, _soul, candidates) = services(&backend);
+        let id = identity_for(&backend, "sensitivity-owner").await;
+        registry.admit(&id, "local bootstrap").unwrap();
+        use Sensitivity::{Internal, Public, Sensitive};
+        let cases = [
+            (Public, Public, Public),
+            (Public, Internal, Internal),
+            (Public, Sensitive, Sensitive),
+            (Internal, Public, Internal),
+            (Internal, Internal, Internal),
+            (Internal, Sensitive, Sensitive),
+            (Sensitive, Public, Sensitive),
+            (Sensitive, Internal, Sensitive),
+            (Sensitive, Sensitive, Sensitive),
+        ];
+        for (index, (initial, incoming, expected)) in cases.into_iter().enumerate() {
+            for refresh in [false, true] {
+                for origin in [
+                    CandidateOrigin::RepeatedBehavior,
+                    CandidateOrigin::OwnerCorrection,
+                ] {
+                    let candidate_id = format!("sensitivity-{index}-{refresh}-{origin:?}");
+                    let mut first = intake(&candidate_id, "original-evidence");
+                    first.sensitivity = initial;
+                    let created = candidates.submit(&id, first).await.unwrap();
+                    assert_eq!(created.sensitivity, initial);
+                    let evidence_id = if refresh {
+                        "original-evidence"
+                    } else {
+                        "new-evidence"
+                    };
+                    let mut next = intake(&candidate_id, evidence_id);
+                    next.sensitivity = incoming;
+                    next.origin = origin;
+                    let submitted = candidates.submit(&id, next).await.unwrap();
+                    let persisted = candidates.get(&id, &candidate_id).await.unwrap().unwrap();
+                    eprintln!(
+                        "CANDIDATE_SENSITIVITY initial={initial:?} incoming={incoming:?} refresh={refresh} origin={origin:?} persisted={:?}",
+                        persisted.sensitivity
+                    );
+                    assert_eq!(persisted, submitted);
+                    assert_eq!(persisted.sensitivity, expected);
+                    assert_eq!(persisted.status, CandidateStatus::Candidate);
+                    assert_eq!(persisted.evidence.len(), if refresh { 1 } else { 2 });
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_sensitive_intake_preserves_stored_candidate_bytes() {
+        let (_tmp, backend) = fresh_backend();
+        let (registry, _soul, candidates) = services(&backend);
+        let id = identity_for(&backend, "rejected-sensitivity-owner").await;
+        registry.admit(&id, "local bootstrap").unwrap();
+        let mut first = intake("density", "same-evidence");
+        first.sensitivity = Sensitivity::Public;
+        candidates.submit(&id, first).await.unwrap();
+        let key = SoulCandidateService::candidate_key(&id, "density");
+        let before = serde_json::to_string(
+            &backend
+                .get_for_agent(&key, id.as_str())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut rejected = intake("density", "same-evidence");
+        rejected.sensitivity = Sensitivity::Sensitive;
+        rejected.evidence.stance = EvidenceStance::Countering;
+        assert_eq!(
+            candidates.submit(&id, rejected).await.unwrap_err(),
+            CandidateError::ConflictingEvidenceStance("same-evidence".to_string())
+        );
+        let after = serde_json::to_string(
+            &backend
+                .get_for_agent(&key, id.as_str())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after, before);
     }
 }
