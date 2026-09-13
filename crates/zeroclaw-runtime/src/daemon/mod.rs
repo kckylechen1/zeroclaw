@@ -2261,7 +2261,12 @@ mod tests {
         );
         assert_eq!(value["attributes"]["pairing_enabled"].as_bool(), Some(true));
         assert_eq!(value["attributes"]["stop_signal"], "Ctrl+C or SIGTERM");
-        assert_eq!(value["attributes"]["socket"], expected_socket);
+        assert_eq!(
+            value["attributes"]["socket"],
+            crate::rpc::local::socket_path(&config)
+                .display()
+                .to_string()
+        );
     }
 
     #[tokio::test]
