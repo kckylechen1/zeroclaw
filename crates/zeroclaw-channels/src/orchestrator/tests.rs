@@ -17630,3 +17630,111 @@ async fn unowned_stop_replay_does_not_cancel_new_turn_with_same_inbox() {
         Admission::DuplicateInFlight
     );
 }
+
+#[tokio::test]
+async fn user_model_current_time_and_session_scope_reach_actual_provider_prompt() {
+    use zeroclaw_memory::companion::{UserModelKind, UserModelStore};
+
+    let private = TempDir::new().unwrap();
+    let store = Arc::new(UserModelStore::open(private.path()).unwrap());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let channel_impl = Arc::new(RecordingChannel::default());
+    let channel: Arc<dyn Channel> = channel_impl.clone();
+    let message_a = zeroclaw_api::channel::ChannelMessage {
+        id: "user-model-clock-a".into(),
+        sender: "private-session-a".into(),
+        reply_target: "private-session-a".into(),
+        content: "Please respond briefly.".into(),
+        channel: channel.name().into(),
+        timestamp: now,
+        ..Default::default()
+    };
+    let message_b = zeroclaw_api::channel::ChannelMessage {
+        id: "user-model-clock-b".into(),
+        sender: "private-session-b".into(),
+        reply_target: "private-session-b".into(),
+        ..message_a.clone()
+    };
+    let scope_a = format!("session:{}", conversation_history_key(&message_a));
+    let scope_b = format!("session:{}", conversation_history_key(&message_b));
+    assert_ne!(scope_a, scope_b);
+    for (key, marker, scope, starts) in [
+        (
+            "clock.global",
+            "CLOCK_GLOBAL_ACTIVE_MARKER",
+            "global",
+            now - 3_600,
+        ),
+        (
+            "clock.session-a",
+            "CLOCK_SESSION_A_MARKER",
+            scope_a.as_str(),
+            now - 3_600,
+        ),
+        (
+            "clock.session-b",
+            "CLOCK_SESSION_B_MARKER",
+            scope_b.as_str(),
+            now - 3_600,
+        ),
+        (
+            "clock.future",
+            "CLOCK_FUTURE_START_MARKER",
+            "global",
+            now + 3_600,
+        ),
+    ] {
+        store
+            .record_owner_statement(UserModelKind::Preference, marker, key, scope, starts)
+            .unwrap();
+    }
+    let provider_impl = Arc::new(HistoryCaptureModelProvider::default());
+    let config = Config {
+        config_path: private.path().join("absent-config.toml"),
+        data_dir: private.path().to_path_buf(),
+        ..Config::default()
+    };
+    let mut ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
+        channel,
+        provider_impl.clone(),
+        config,
+        zeroclaw_config::schema::AliasedAgentConfig::default(),
+        "test-provider",
+        None,
+    );
+    let mutable = Arc::get_mut(&mut ctx).unwrap();
+    mutable.user_model = Some(store);
+    mutable.workspace_dir = Arc::new(private.path().to_path_buf());
+    assert!(mutable.tools_registry.is_empty());
+    assert!(!mutable.auto_save_memory);
+    assert!(process_channel_message(ctx.clone(), message_a, CancellationToken::new()).await);
+    assert!(process_channel_message(ctx, message_b, CancellationToken::new()).await);
+    assert_eq!(channel_impl.sent_messages.lock().await.len(), 2);
+    let calls = provider_impl
+        .calls
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        calls.len(),
+        2,
+        "both real turns must reach the injected provider"
+    );
+    for (index, history) in calls.iter().enumerate() {
+        assert_eq!(history[0].0, "system");
+        let system = &history[0].1;
+        eprintln!(
+            "USER_MODEL_PROMPT_OBSERVED session={index} global={} session_a={} session_b={} future={}",
+            system.contains("CLOCK_GLOBAL_ACTIVE_MARKER"),
+            system.contains("CLOCK_SESSION_A_MARKER"),
+            system.contains("CLOCK_SESSION_B_MARKER"),
+            system.contains("CLOCK_FUTURE_START_MARKER")
+        );
+        assert!(system.contains("CLOCK_GLOBAL_ACTIVE_MARKER"));
+        assert_eq!(system.contains("CLOCK_SESSION_A_MARKER"), index == 0);
+        assert_eq!(system.contains("CLOCK_SESSION_B_MARKER"), index == 1);
+        assert!(!system.contains("CLOCK_FUTURE_START_MARKER"));
+    }
+}
