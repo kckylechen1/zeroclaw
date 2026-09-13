@@ -1971,6 +1971,7 @@ pub async fn run_gateway(
     let inner = inner
         // ── User Model operator review surface ──
         .route("/api/user-model/candidates", get(api_user_model::list_candidates))
+        .route("/api/user-model/candidates/{id}", get(api_user_model::candidate_history))
         .route("/api/user-model/heads", get(api_user_model::list_heads))
         .route(
             "/api/user-model/candidates/{id}/review",

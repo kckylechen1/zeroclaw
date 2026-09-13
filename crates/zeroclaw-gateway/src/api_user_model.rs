@@ -94,6 +94,67 @@ pub async fn list_candidates(
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CandidateReviewState {
+    Pending,
+    Accepted,
+    Rejected,
+    Narrowed,
+    Superseded,
+}
+
+impl From<Option<ReviewAction>> for CandidateReviewState {
+    fn from(action: Option<ReviewAction>) -> Self {
+        match action {
+            None => Self::Pending,
+            Some(ReviewAction::Accept) => Self::Accepted,
+            Some(ReviewAction::Reject) => Self::Rejected,
+            Some(ReviewAction::Narrow) => Self::Narrowed,
+            Some(ReviewAction::Supersede) => Self::Superseded,
+        }
+    }
+}
+
+/// GET /api/user-model/candidates/{id} — candidate evidence and committed
+/// review history, including the latest derived review state.
+pub async fn candidate_history(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(candidate_id): Path<String>,
+) -> Response {
+    if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
+        return err;
+    }
+    let data_dir = data_dir_of(&state);
+    let result = tokio::task::spawn_blocking(move || {
+        let store = cached_store(&data_dir)?;
+        store
+            .candidate_history(&candidate_id)
+            .map_err(|err| err.to_string())
+    })
+    .await;
+    match result {
+        Ok(Ok(Some((candidate, review_receipts)))) => {
+            let review_state =
+                CandidateReviewState::from(review_receipts.last().map(|receipt| receipt.action));
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "candidate": candidate,
+                    "review_state": review_state,
+                    "review_receipts": review_receipts,
+                })),
+            )
+                .into_response()
+        }
+        Ok(Ok(None)) => error_json(StatusCode::NOT_FOUND, "unknown candidate id"),
+        Ok(Err(err)) => error_json(StatusCode::SERVICE_UNAVAILABLE, &err),
+        Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "store task failed"),
+    }
+}
+
 /// GET /api/user-model/heads — active, applicable revisions right now.
 pub async fn list_heads(
     State(state): State<AppState>,
@@ -313,6 +374,155 @@ mod tests {
 
     fn body<T: serde::Serialize>(value: &T) -> Bytes {
         Bytes::from(serde_json::to_vec(value).unwrap())
+    }
+
+    async fn history_http(
+        state: &AppState,
+        candidate_id: &str,
+        headers: HeaderMap,
+    ) -> (StatusCode, serde_json::Value) {
+        json_of(
+            candidate_history(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                headers,
+                Path(candidate_id.to_string()),
+            )
+            .await,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn committed_review_history_survives_store_reopen_without_writes() {
+        let (dir, state) = state_with_tempdir();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        let pending = store
+            .record_observation(UserModelKind::Habit, "pending", "pending.key", "[1]", 100)
+            .unwrap();
+        let mut reviewed = Vec::new();
+        for (index, action, name, expected_state) in [
+            (0, ReviewAction::Accept, "accepted", "accepted"),
+            (1, ReviewAction::Reject, "rejected", "rejected"),
+            (2, ReviewAction::Narrow, "narrowed", "narrowed"),
+            (3, ReviewAction::Supersede, "superseded", "superseded"),
+        ] {
+            let candidate = store
+                .record_observation(UserModelKind::Habit, name, name, "[2]", 110 + index)
+                .unwrap();
+            let receipt = store
+                .review_candidate(
+                    &candidate.id,
+                    action,
+                    "operator",
+                    Some("review note"),
+                    (action == ReviewAction::Narrow).then_some("session:fixture"),
+                    200 + index,
+                )
+                .unwrap();
+            reviewed.push((candidate, receipt, expected_state));
+        }
+        let legacy = store
+            .record_observation(UserModelKind::Habit, "legacy", "legacy.key", "[]", 300)
+            .unwrap();
+        let first = store
+            .review_candidate(
+                &legacy.id,
+                ReviewAction::Reject,
+                "operator",
+                None,
+                None,
+                301,
+            )
+            .unwrap();
+        drop(store);
+        let fixture = rusqlite::Connection::open(dir.path().join("user_model.db")).unwrap();
+        fixture
+            .execute(
+                "INSERT INTO user_model_review_receipts
+                 (id, candidate_id, action, reviewer, note, at_unix)
+                 VALUES (?1, ?2, 'reject', 'operator', NULL, 302)",
+                rusqlite::params!["legacy-later", legacy.id],
+            )
+            .unwrap();
+        drop(fixture);
+        let before = review_scope_rows(dir.path());
+        let (status, detail) = history_http(&state, &pending.id, operator_headers()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["candidate"]["evidence"], "[1]");
+        assert_eq!(detail["review_state"], "pending");
+        assert_eq!(detail["review_receipts"], serde_json::json!([]));
+        for (candidate, receipt, expected_state) in reviewed {
+            let (status, detail) = history_http(&state, &candidate.id, operator_headers()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(detail["candidate"]["id"], candidate.id);
+            assert_eq!(detail["review_state"], expected_state);
+            assert_eq!(detail["review_receipts"].as_array().unwrap().len(), 1);
+            assert_eq!(detail["review_receipts"][0]["id"], receipt.id);
+            assert_eq!(
+                detail["review_receipts"][0]["action"],
+                serde_json::to_value(receipt.action).unwrap()
+            );
+            assert_eq!(detail["review_receipts"][0]["note"], "review note");
+        }
+        let (status, detail) = history_http(&state, &legacy.id, operator_headers()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["review_state"], "rejected");
+        assert_eq!(detail["review_receipts"].as_array().unwrap().len(), 2);
+        assert_eq!(detail["review_receipts"][0]["id"], first.id);
+        assert_eq!(detail["review_receipts"][1]["id"], "legacy-later");
+        assert_eq!(review_scope_rows(dir.path()), before);
+    }
+
+    #[tokio::test]
+    async fn history_http_reports_last_inserted_review_with_same_second_reversed_ids() {
+        let (dir, state) = state_with_tempdir();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        let candidate = store
+            .record_observation(UserModelKind::Habit, "habit", "habit.key", "[]", 100)
+            .unwrap();
+        let fixture = rusqlite::Connection::open(dir.path().join("user_model.db")).unwrap();
+        fixture
+            .execute(
+                "INSERT INTO user_model_review_receipts
+                 (id, candidate_id, action, reviewer, note, at_unix)
+                 VALUES ('zzzz-first', ?1, 'reject', 'operator', NULL, 200)",
+                rusqlite::params![candidate.id],
+            )
+            .unwrap();
+        drop(fixture);
+        let narrowed = store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Narrow,
+                "operator",
+                None,
+                Some("session:fixture"),
+                200,
+            )
+            .unwrap();
+        assert!(narrowed.id.as_str() < "zzzz-first");
+        drop(store);
+
+        let before = review_scope_rows(dir.path());
+        let (status, detail) = history_http(&state, &candidate.id, operator_headers()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["review_state"], "narrowed");
+        assert_eq!(detail["review_receipts"][0]["id"], "zzzz-first");
+        assert_eq!(detail["review_receipts"][1]["id"], narrowed.id);
+        assert_eq!(review_scope_rows(dir.path()), before);
+    }
+
+    #[tokio::test]
+    async fn candidate_history_authorizes_before_store_and_unknown_is_not_found() {
+        let (dir, state) = state_with_tempdir();
+        let (status, _) = history_http(&state, "absent", anon_headers()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(!dir.path().join("user_model.db").exists());
+        assert!(!store_handles().lock().contains_key(dir.path()));
+        let (status, detail) = history_http(&state, "absent", operator_headers()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(detail["error"], "unknown candidate id");
     }
 
     #[tokio::test]
