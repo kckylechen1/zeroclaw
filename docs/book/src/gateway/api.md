@@ -107,6 +107,14 @@ external deletion, rowid updates, or a `VACUUM` rebuild can invalidate that
 ordering for equal or backdated timestamps. The store does not perform those
 operations on receipts.
 
+`POST /api/user-model/candidates/{id}/review` accepts one committed decision
+per candidate. A rejected candidate may be narrowed once; that explicit
+follow-up appends an owner-ratified narrowed revision. Any other repeat returns
+HTTP 409 with `code: "candidate_already_reviewed"` and writes no receipt or
+revision. A failed narrow leaves the rejection available for a later valid
+narrow. Unknown IDs still return 404. The decision and receipt write share one
+SQLite write transaction, including across independent store connections.
+
 ## Stable error codes
 
 Errors return JSON with a stable `code` field plus a human-readable `message`.

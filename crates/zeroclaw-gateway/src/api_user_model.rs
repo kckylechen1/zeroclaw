@@ -15,6 +15,7 @@ use axum::response::{IntoResponse, Response};
 use parking_lot::Mutex;
 use zeroclaw_memory::companion::{
     ReviewAction, UserModelKind, UserModelReviewReceipt, UserModelRevision, UserModelStore,
+    is_candidate_already_reviewed,
 };
 
 use crate::AppState;
@@ -188,6 +189,11 @@ struct ReviewBody {
     narrowed_scope: Option<String>,
 }
 
+enum ReviewStoreError {
+    Open(String),
+    Review(rusqlite::Error),
+}
+
 /// POST /api/user-model/candidates/{id}/review — explicit owner action on
 /// a candidate. `narrow` requires `narrowed_scope`.
 pub async fn review_candidate(
@@ -227,7 +233,7 @@ pub async fn review_candidate(
     let note = body.note.clone();
     let narrowed = body.narrowed_scope.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let store = cached_store(&data_dir)?;
+        let store = cached_store(&data_dir).map_err(ReviewStoreError::Open)?;
         store
             .review_candidate(
                 &candidate,
@@ -237,15 +243,26 @@ pub async fn review_candidate(
                 narrowed.as_deref(),
                 now_unix(),
             )
-            .map_err(|err| err.to_string())
+            .map_err(ReviewStoreError::Review)
     })
     .await;
     match result {
         Ok(Ok(receipt)) => review_response(action, &receipt),
-        Ok(Err(err)) if err.contains("no rows") => {
+        Ok(Err(ReviewStoreError::Review(rusqlite::Error::QueryReturnedNoRows))) => {
             error_json(StatusCode::NOT_FOUND, "unknown candidate id")
         }
-        Ok(Err(err)) => error_json(StatusCode::SERVICE_UNAVAILABLE, &err),
+        Ok(Err(ReviewStoreError::Review(ref error))) if is_candidate_already_reviewed(error) => (
+            StatusCode::CONFLICT,
+            axum::Json(serde_json::json!({
+                "code": "candidate_already_reviewed",
+                "error": "candidate already reviewed",
+            })),
+        )
+            .into_response(),
+        Ok(Err(ReviewStoreError::Review(err))) => {
+            error_json(StatusCode::SERVICE_UNAVAILABLE, &err.to_string())
+        }
+        Ok(Err(ReviewStoreError::Open(err))) => error_json(StatusCode::SERVICE_UNAVAILABLE, &err),
         Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "store task failed"),
     }
 }
@@ -391,6 +408,77 @@ mod tests {
             .await,
         )
         .await
+    }
+
+    async fn review_http(
+        state: &AppState,
+        candidate_id: &str,
+        action: &str,
+        narrowed_scope: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        json_of(
+            review_candidate(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+                Path(candidate_id.to_string()),
+                body(&serde_json::json!({
+                    "action": action,
+                    "narrowed_scope": narrowed_scope,
+                })),
+            )
+            .await,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn reviewed_candidate_retry_is_typed_conflict_without_writes() {
+        let (dir, state) = state_with_tempdir();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        let accepted = store
+            .record_observation(UserModelKind::Habit, "accepted", "accepted.key", "[]", 100)
+            .unwrap();
+        let rejected = store
+            .record_observation(UserModelKind::Habit, "rejected", "rejected.key", "[]", 100)
+            .unwrap();
+        drop(store);
+
+        assert_eq!(
+            review_http(&state, &accepted.id, "accept", None).await.0,
+            StatusCode::OK
+        );
+        let before = review_scope_rows(dir.path());
+        for _ in 0..2 {
+            let (status, response) = review_http(&state, &accepted.id, "accept", None).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(response["code"], "candidate_already_reviewed");
+            assert_eq!(review_scope_rows(dir.path()), before);
+        }
+        assert_eq!(
+            review_http(&state, &rejected.id, "reject", None).await.0,
+            StatusCode::OK
+        );
+        let rejected_rows = review_scope_rows(dir.path());
+        let (status, _) = review_http(&state, &rejected.id, "narrow", Some("invalid")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(review_scope_rows(dir.path()), rejected_rows);
+        assert_eq!(
+            review_http(&state, &rejected.id, "narrow", Some("session:A"))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let narrowed_rows = review_scope_rows(dir.path());
+        let (status, response) =
+            review_http(&state, &rejected.id, "narrow", Some("session:A")).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(response["code"], "candidate_already_reviewed");
+        assert_eq!(review_scope_rows(dir.path()), narrowed_rows);
+        assert_eq!(
+            review_http(&state, "unknown", "accept", None).await.0,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]
