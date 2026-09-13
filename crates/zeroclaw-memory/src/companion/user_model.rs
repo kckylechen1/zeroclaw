@@ -342,6 +342,18 @@ impl UserModelStore {
         let kind =
             kind_from_str(&candidate.0).ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
 
+        // Validate before recording a successful review receipt. Reject ignores
+        // narrowed_scope; the other actions retain their existing scope rules.
+        let scope = match action {
+            ReviewAction::Narrow => narrowed_scope.unwrap_or("global"),
+            _ => "global",
+        };
+        if action != ReviewAction::Reject && Scope::parse(scope).is_none() {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "invalid narrowed scope '{scope}'"
+            )));
+        }
+
         let receipt = UserModelReviewReceipt {
             id: uuid::Uuid::new_v4().to_string(),
             candidate_id: candidate_id.to_string(),
@@ -367,15 +379,6 @@ impl UserModelStore {
         match action {
             ReviewAction::Reject => {}
             ReviewAction::Accept | ReviewAction::Narrow | ReviewAction::Supersede => {
-                let scope = match action {
-                    ReviewAction::Narrow => narrowed_scope.unwrap_or("global"),
-                    _ => "global",
-                };
-                if Scope::parse(scope).is_none() {
-                    return Err(rusqlite::Error::InvalidParameterName(format!(
-                        "invalid narrowed scope '{scope}'"
-                    )));
-                }
                 conn.execute(
                     "INSERT INTO user_model_revisions
                          (id, semantic_key, kind, statement, scope, authority, supersedes,
@@ -982,5 +985,87 @@ mod tests {
         );
         assert_eq!(keys, vec!["active", "future-expiry"]);
         assert_eq!(s.active_heads(Some(now)).unwrap(), heads);
+    }
+    fn review_scope_snapshot(store: &UserModelStore) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+        let conn = store.conn.lock();
+        [
+            "user_model_candidates",
+            "user_model_review_receipts",
+            "user_model_revisions",
+        ]
+        .iter()
+        .map(|table| {
+            let mut stmt = conn
+                .prepare(&format!("SELECT * FROM {table} ORDER BY id"))
+                .unwrap();
+            let columns = stmt.column_count();
+            stmt.query_map([], |row| (0..columns).map(|i| row.get(i)).collect())
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        })
+        .collect()
+    }
+
+    #[test]
+    fn invalid_review_scope_preserves_all_rows_before_receipt() {
+        let (_dir, store) = store();
+        let candidate = store
+            .record_observation(
+                UserModelKind::Habit,
+                "private observation",
+                "private.key",
+                "[]",
+                100,
+            )
+            .unwrap();
+        let before = review_scope_snapshot(&store);
+        for scope in ["", "task:unsupported", "unknown:scope"] {
+            let error = store
+                .review_candidate(
+                    &candidate.id,
+                    ReviewAction::Narrow,
+                    "owner",
+                    None,
+                    Some(scope),
+                    200,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, rusqlite::Error::InvalidParameterName(ref message) if message == &format!("invalid narrowed scope '{scope}'"))
+            );
+            assert_eq!(review_scope_snapshot(&store), before);
+        }
+        assert!(matches!(
+            store.review_candidate(
+                "missing",
+                ReviewAction::Narrow,
+                "owner",
+                None,
+                Some("invalid"),
+                200
+            ),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
+        assert_eq!(review_scope_snapshot(&store), before);
+        let receipt = store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Narrow,
+                "owner",
+                None,
+                Some("session:A"),
+                200,
+            )
+            .unwrap();
+        assert_eq!(receipt.action, ReviewAction::Narrow);
+        let after = review_scope_snapshot(&store);
+        assert_eq!(after[0], before[0]);
+        assert_eq!(after[1].len(), 1);
+        assert_eq!(after[2].len(), 1);
+        let heads = store.active_heads(Some(200)).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].scope, "session:A");
+        assert_eq!(heads[0].authority, AuthorityClass::OwnerRatified);
     }
 }
