@@ -643,6 +643,8 @@ mod tests {
         )
         .await;
         assert_eq!(both["candidates"].as_array().unwrap().len(), 2);
+        assert_eq!(both["candidates"][0]["id"], d.id);
+        assert_eq!(both["candidates"][1]["id"], c.id);
         for (candidate, action, remaining) in [(&c, "reject", 1), (&d, "accept", 0)] {
             let (status, _) = json_of(
                 review_candidate(
@@ -664,6 +666,11 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(pending["candidates"].as_array().unwrap().len(), remaining);
+            if action == "reject" {
+                assert_eq!(pending["candidates"][0]["id"], d.id);
+            } else {
+                assert_eq!(pending["candidates"], serde_json::json!([]));
+            }
         }
         for uri in [
             "/api/user-model/candidates",
@@ -672,6 +679,8 @@ mod tests {
             let (status, history) = pending_http(&state, uri, operator_headers()).await;
             assert_eq!(status, StatusCode::OK);
             assert_eq!(history["candidates"].as_array().unwrap().len(), 2);
+            assert_eq!(history["candidates"][0]["id"], d.id);
+            assert_eq!(history["candidates"][1]["id"], c.id);
         }
         let e = store
             .record_observation(UserModelKind::Habit, "E", "e", "[]", 202)
