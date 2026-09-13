@@ -11,6 +11,7 @@
 //! - `supersede` appends a new revision; history is never rewritten.
 //! - Works fully offline; nothing here requires Tachi.
 
+use std::fmt;
 use std::fmt::Write as _;
 
 use super::user_model_scope::Scope;
@@ -70,6 +71,24 @@ pub enum ReviewAction {
     Reject,
     Narrow,
     Supersede,
+}
+
+/// A committed review already decides this candidate. The one supported
+/// follow-up is narrowing a rejected candidate.
+#[derive(Debug)]
+struct CandidateAlreadyReviewed;
+
+impl fmt::Display for CandidateAlreadyReviewed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("candidate already reviewed")
+    }
+}
+
+impl std::error::Error for CandidateAlreadyReviewed {}
+
+/// Classify the store's typed review conflict without matching error text.
+pub fn is_candidate_already_reviewed(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::ToSqlConversionFailure(inner) if inner.is::<CandidateAlreadyReviewed>())
 }
 
 impl ReviewAction {
@@ -394,8 +413,8 @@ impl UserModelStore {
         Ok(Some((candidate, receipts)))
     }
 
-    /// Apply an explicit review action to a candidate. Every action writes
-    /// a receipt; `accept`/`narrow`/`supersede` additionally append a
+    /// Apply an eligible review action to a candidate. A successful action
+    /// writes a receipt; `accept`/`narrow`/`supersede` additionally append a
     /// revision. `reject` never deletes the candidate or its evidence.
     pub fn review_candidate(
         &self,
@@ -407,7 +426,10 @@ impl UserModelStore {
         now_unix: u64,
     ) -> Result<UserModelReviewReceipt, rusqlite::Error> {
         let mut conn = self.conn.lock();
-        let candidate = conn.query_row(
+        // Acquire the database write slot before reading the decision so a
+        // second store connection cannot act on the same pending snapshot.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let candidate = tx.query_row(
             "SELECT kind, statement, semantic_key FROM user_model_candidates WHERE id = ?1",
             rusqlite::params![candidate_id],
             |row| {
@@ -421,7 +443,33 @@ impl UserModelStore {
         let kind =
             kind_from_str(&candidate.0).ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
 
-        // Validate before recording a successful review receipt. Reject ignores
+        let last_action = match tx.query_row(
+            "SELECT action FROM user_model_review_receipts
+             WHERE candidate_id = ?1 ORDER BY rowid DESC LIMIT 1",
+            rusqlite::params![candidate_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(action) => Some(action),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(last_action) = last_action {
+            let prior = match last_action.as_str() {
+                "accept" => ReviewAction::Accept,
+                "reject" => ReviewAction::Reject,
+                "narrow" => ReviewAction::Narrow,
+                "supersede" => ReviewAction::Supersede,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            if prior != ReviewAction::Reject || action != ReviewAction::Narrow {
+                // Preserve callers' rusqlite::Error contract while carrying
+                // an exact domain marker. This is not a SQL conversion error.
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    CandidateAlreadyReviewed,
+                )));
+            }
+        }
+        // Validate only actions that are still eligible. Reject ignores
         // narrowed_scope; the other actions retain their existing scope rules.
         let scope = match action {
             ReviewAction::Narrow => narrowed_scope.unwrap_or("global"),
@@ -432,8 +480,6 @@ impl UserModelStore {
                 "invalid narrowed scope '{scope}'"
             )));
         }
-
-        let tx = conn.transaction()?;
         let receipt = UserModelReviewReceipt {
             id: uuid::Uuid::new_v4().to_string(),
             candidate_id: candidate_id.to_string(),
@@ -1140,6 +1186,227 @@ mod tests {
                 .unwrap()
         })
         .collect()
+    }
+
+    #[test]
+    fn committed_review_repeats_preserve_all_rows_except_reject_then_narrow() {
+        let (_dir, store) = store();
+        for first in [
+            ReviewAction::Accept,
+            ReviewAction::Narrow,
+            ReviewAction::Supersede,
+        ] {
+            let candidate = store
+                .record_observation(
+                    UserModelKind::Habit,
+                    "habit",
+                    &format!("key.{first:?}"),
+                    "[]",
+                    100,
+                )
+                .unwrap();
+            store
+                .review_candidate(&candidate.id, first, "owner", None, Some("session:A"), 200)
+                .unwrap();
+            let before = review_scope_snapshot(&store);
+            for repeat in [
+                ReviewAction::Accept,
+                ReviewAction::Reject,
+                ReviewAction::Narrow,
+                ReviewAction::Supersede,
+            ] {
+                let error = store
+                    .review_candidate(&candidate.id, repeat, "owner", None, Some("session:A"), 201)
+                    .unwrap_err();
+                assert!(
+                    is_candidate_already_reviewed(&error),
+                    "{first:?} then {repeat:?}: {error}"
+                );
+                assert_eq!(review_scope_snapshot(&store), before);
+            }
+        }
+
+        let candidate = store
+            .record_observation(UserModelKind::Habit, "rejected", "rejected.key", "[]", 100)
+            .unwrap();
+        store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Reject,
+                "owner",
+                None,
+                None,
+                200,
+            )
+            .unwrap();
+        let rejected = review_scope_snapshot(&store);
+        for repeat in [
+            ReviewAction::Accept,
+            ReviewAction::Reject,
+            ReviewAction::Supersede,
+        ] {
+            let error = store
+                .review_candidate(&candidate.id, repeat, "owner", None, None, 201)
+                .unwrap_err();
+            assert!(
+                is_candidate_already_reviewed(&error),
+                "Reject then {repeat:?}: {error}"
+            );
+            assert_eq!(review_scope_snapshot(&store), rejected);
+        }
+        let invalid = store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Narrow,
+                "owner",
+                None,
+                Some("invalid"),
+                201,
+            )
+            .unwrap_err();
+        assert!(matches!(invalid, rusqlite::Error::InvalidParameterName(_)));
+        assert_eq!(review_scope_snapshot(&store), rejected);
+        store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Narrow,
+                "owner",
+                None,
+                Some("session:A"),
+                202,
+            )
+            .unwrap();
+        let narrowed = review_scope_snapshot(&store);
+        assert_eq!(narrowed[1].len(), rejected[1].len() + 1);
+        assert_eq!(narrowed[2].len(), rejected[2].len() + 1);
+        for repeat in [
+            ReviewAction::Accept,
+            ReviewAction::Reject,
+            ReviewAction::Narrow,
+            ReviewAction::Supersede,
+        ] {
+            let error = store
+                .review_candidate(&candidate.id, repeat, "owner", None, Some("session:A"), 203)
+                .unwrap_err();
+            assert!(
+                is_candidate_already_reviewed(&error),
+                "Narrow then {repeat:?}: {error}"
+            );
+            assert_eq!(review_scope_snapshot(&store), narrowed);
+        }
+    }
+
+    #[test]
+    fn independent_connections_serialize_review_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UserModelStore::open(dir.path()).unwrap();
+        let candidate = store
+            .record_observation(UserModelKind::Habit, "habit", "concurrent.key", "[]", 100)
+            .unwrap();
+        let run_pair = |action: ReviewAction| {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+            let mut handles = Vec::new();
+            for _ in 0..2 {
+                let separate = UserModelStore::open(dir.path()).unwrap();
+                let id = candidate.id.clone();
+                let barrier = barrier.clone();
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    separate.review_candidate(&id, action, "owner", None, Some("session:A"), 200)
+                }));
+            }
+            barrier.wait();
+            let results: Vec<_> = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect();
+            assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+            assert_eq!(results.iter().filter(|result| matches!(result, Err(error) if is_candidate_already_reviewed(error))).count(), 1);
+        };
+        run_pair(ReviewAction::Accept);
+        let after_accept = review_scope_snapshot(&store);
+        assert_eq!(after_accept[1].len(), 1);
+        assert_eq!(after_accept[2].len(), 1);
+
+        let rejected = store
+            .record_observation(
+                UserModelKind::Habit,
+                "other",
+                "rejected.concurrent",
+                "[]",
+                100,
+            )
+            .unwrap();
+        store
+            .review_candidate(&rejected.id, ReviewAction::Reject, "owner", None, None, 200)
+            .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let separate = UserModelStore::open(dir.path()).unwrap();
+            let id = rejected.id.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                separate.review_candidate(
+                    &id,
+                    ReviewAction::Narrow,
+                    "owner",
+                    None,
+                    Some("session:A"),
+                    201,
+                )
+            }));
+        }
+        barrier.wait();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(
+                    |result| matches!(result, Err(error) if is_candidate_already_reviewed(error))
+                )
+                .count(),
+            1
+        );
+        let after_narrow = review_scope_snapshot(&store);
+        assert_eq!(after_narrow[1].len(), after_accept[1].len() + 2);
+        assert_eq!(after_narrow[2].len(), after_accept[2].len() + 1);
+    }
+
+    #[test]
+    fn unknown_stored_review_action_fails_without_writing() {
+        let (_dir, store) = store();
+        let candidate = store
+            .record_observation(UserModelKind::Habit, "habit", "unknown.action", "[]", 100)
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .execute(
+                "INSERT INTO user_model_review_receipts
+             (id, candidate_id, action, reviewer, note, at_unix)
+             VALUES ('unknown-action', ?1, 'unsupported', 'owner', NULL, 200)",
+                rusqlite::params![candidate.id],
+            )
+            .unwrap();
+        let before = review_scope_snapshot(&store);
+        let error = store
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Narrow,
+                "owner",
+                None,
+                Some("session:A"),
+                201,
+            )
+            .unwrap_err();
+        assert!(matches!(error, rusqlite::Error::InvalidQuery));
+        assert_eq!(review_scope_snapshot(&store), before);
     }
 
     #[test]

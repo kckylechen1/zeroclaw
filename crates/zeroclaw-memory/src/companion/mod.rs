@@ -36,7 +36,7 @@ pub use outbox::{
 pub use user_model::{
     AuthorityClass, ReviewAction, USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS, UserModelCandidate,
     UserModelKind, UserModelReviewReceipt, UserModelRevision, UserModelStateProjection,
-    UserModelStore, project_active_heads,
+    UserModelStore, is_candidate_already_reviewed, project_active_heads,
 };
 pub use user_model_scope::{ApplicabilityContext, Scope};
 
