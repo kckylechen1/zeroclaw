@@ -354,7 +354,15 @@ mod tests {
         let approval = ApprovalManager::for_non_interactive(&profile);
         let ctx = test_ctx(&observer, &pacing, Some(&approval), None);
 
-        match gate_tool_approval(&ctx, "shell", &serde_json::json!({"command": "ls"}), 0).await {
+        match gate_tool_approval(
+            &ctx,
+            "shell",
+            &serde_json::json!({"command": "ls"}),
+            0,
+            zeroclaw_api::channel::ApprovalPosition { index: 1, total: 1 },
+        )
+        .await
+        {
             ApprovalGateOutcome::Deny(outcome) => {
                 assert!(!outcome.success);
                 assert!(
@@ -370,7 +378,15 @@ mod tests {
             ApprovalGateOutcome::Cancelled => panic!("unexpected cancellation"),
         }
 
-        match gate_tool_approval(&ctx, "file_write", &serde_json::json!({"path": "x"}), 0).await {
+        match gate_tool_approval(
+            &ctx,
+            "file_write",
+            &serde_json::json!({"path": "x"}),
+            0,
+            zeroclaw_api::channel::ApprovalPosition { index: 1, total: 1 },
+        )
+        .await
+        {
             ApprovalGateOutcome::Proceed { approved: true } => {}
             ApprovalGateOutcome::Proceed { approved: false } => {
                 panic!("uncovered Full tool must still auto-approve")
@@ -395,7 +411,15 @@ mod tests {
         };
         let ctx = test_ctx(&observer, &pacing, Some(&approval), Some(&channel));
 
-        match gate_tool_approval(&ctx, "shell", &serde_json::json!({"command": "ls"}), 0).await {
+        match gate_tool_approval(
+            &ctx,
+            "shell",
+            &serde_json::json!({"command": "ls"}),
+            0,
+            zeroclaw_api::channel::ApprovalPosition { index: 1, total: 1 },
+        )
+        .await
+        {
             ApprovalGateOutcome::Proceed { approved: true } => {}
             ApprovalGateOutcome::Proceed { approved: false } => {
                 panic!("back-channel approval must mark the listed tool approved")
@@ -415,7 +439,15 @@ mod tests {
             "listed Full tool must go through the real back-channel request path"
         );
 
-        match gate_tool_approval(&ctx, "file_write", &serde_json::json!({"path": "x"}), 0).await {
+        match gate_tool_approval(
+            &ctx,
+            "file_write",
+            &serde_json::json!({"path": "x"}),
+            0,
+            zeroclaw_api::channel::ApprovalPosition { index: 1, total: 1 },
+        )
+        .await
+        {
             ApprovalGateOutcome::Proceed { approved: true } => {}
             ApprovalGateOutcome::Proceed { approved: false }
             | ApprovalGateOutcome::Deny(_)
