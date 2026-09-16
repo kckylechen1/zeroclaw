@@ -354,7 +354,7 @@
       "signals": 6
     },
     {
-      "path": "crates/zeroclaw-runtime/src/cron/scheduler.rs",
+      "path": "crates/zeroclaw-runtime/src/cron/scheduler/tests.rs",
       "store": "cron/jobs.db",
       "role": "test",
       "basis": "test-only direct connections inspecting cron/jobs.db",
