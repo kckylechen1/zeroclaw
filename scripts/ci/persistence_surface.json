@@ -32,7 +32,7 @@
       "signals": 2
     },
     {
-      "path": "crates/zeroclaw-channels/src/orchestrator/acp_server.rs",
+      "path": "crates/zeroclaw-channels/src/orchestrator/acp_server/tests.rs",
       "store": "channel_seen_ids.db",
       "role": "test",
       "basis": "test-only direct connections",
