@@ -365,7 +365,14 @@
       "store": "cron/jobs.db",
       "role": "store",
       "basis": "#205 annex row 5: schedule definitions stay; cron_runs keeps delivery facts only, never worker truth",
-      "signals": 19
+      "signals": 16
+    },
+    {
+      "path": "crates/zeroclaw-runtime/src/cron/store/tests.rs",
+      "store": "cron/jobs.db",
+      "role": "test",
+      "basis": "test-only direct connections inspecting cron/jobs.db",
+      "signals": 3
     },
     {
       "path": "crates/zeroclaw-runtime/src/doctor/mod.rs",
