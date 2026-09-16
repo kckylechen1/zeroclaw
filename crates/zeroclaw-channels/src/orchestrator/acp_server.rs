@@ -2319,4 +2319,3 @@ type RpcResult = std::result::Result<Value, RpcError>;
 
 #[cfg(test)]
 mod tests;
-

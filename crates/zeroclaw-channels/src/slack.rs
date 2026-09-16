@@ -5258,4 +5258,3 @@ impl Channel for SlackChannel {
 
 #[cfg(test)]
 mod tests;
-

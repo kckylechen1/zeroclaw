@@ -3698,4 +3698,3 @@ impl Channel for DiscordChannel {
 
 #[cfg(test)]
 mod tests;
-

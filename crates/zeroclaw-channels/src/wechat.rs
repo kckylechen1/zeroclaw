@@ -2914,4 +2914,3 @@ impl Channel for WeChatChannel {
 
 #[cfg(test)]
 mod tests;
-

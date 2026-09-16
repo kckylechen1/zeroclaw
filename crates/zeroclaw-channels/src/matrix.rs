@@ -3806,4 +3806,3 @@ fn streaming_key(recipient: &str, message_id: &str) -> Result<streaming::DraftKe
 // ─── tests ─────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests;
-
