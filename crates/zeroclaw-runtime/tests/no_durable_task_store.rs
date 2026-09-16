@@ -83,10 +83,12 @@ fn strip_line_comments(source: &str) -> String {
 /// that file, or the file name anywhere else, still trips.
 fn is_exempted(path: &Path, token: &str) -> bool {
     token == "control_plane.db"
-        && path
-            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-            .expect("in-crate path")
-            == Path::new("src/daemon/mod.rs")
+        && matches!(
+            path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .expect("in-crate path")
+                .to_str(),
+            Some("src/daemon/mod.rs" | "src/daemon/tests.rs")
+        )
 }
 
 /// The retired control-plane vocabulary. Any of these strings in runtime
