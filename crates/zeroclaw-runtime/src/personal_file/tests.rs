@@ -699,6 +699,49 @@ async fn replace_recovers_same_inode_update_racing_final_publication() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn replace_recovery_retains_writes_through_a_prepublication_descriptor() {
+    use std::io::Write;
+
+    let _fs_serialized = fs_test_guard().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (service, root) = service_with_rw_root(tmp.path());
+    let path = PersonalRelativePath::parse("doc.txt").expect("path");
+    service
+        .create_text_no_clobber(&root, &path, "version A")
+        .await
+        .expect("create");
+    let mut concurrent_writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(tmp.path().join("doc.txt"))
+        .expect("open prior inode before replacement");
+    let expected = ExpectedContentIdentity::of_content(b"version A");
+    let prior_in_trash = match service
+        .replace_text_if_expected(&root, &path, &expected, "version C")
+        .await
+        .expect("replace")
+    {
+        PersonalFileResult::Replaced { prior_in_trash, .. } => prior_in_trash,
+        other => panic!("expected replacement, got {}", other.operation().as_str()),
+    };
+
+    // This descriptor still names the displaced inode after publication.
+    // A byte-copy recovery would silently lose this later write.
+    concurrent_writer
+        .write_all(b"version B")
+        .expect("write through the displaced inode");
+    concurrent_writer.sync_all().expect("flush competing write");
+    assert_eq!(
+        read_text_of(&service, &root, "doc.txt").await.unwrap(),
+        "version C"
+    );
+    assert_eq!(
+        std::fs::read(tmp.path().join(prior_in_trash)).unwrap(),
+        b"version B"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn same_root_move_is_no_clobber_and_cross_root_is_unsupported() {
     let _fs_serialized = fs_test_guard().await;
     let tmp = tempfile::tempdir().expect("tempdir");
