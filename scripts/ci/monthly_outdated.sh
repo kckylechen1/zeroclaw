@@ -59,12 +59,24 @@ case "${1:-}" in
 
     OUTPUT_FILE="$RUNNER_TEMP/outdated-output.txt"
     scan_output=$(cat "$OUTPUT_FILE")
+    # GitHub limits issue bodies to 65,536 characters. Keep ample room
+    # for report framing and preserve the complete report in the artifact.
+    issue_report_limit=48000
+    report_excerpt=$scan_output
+    report_truncated=false
+    if (( ${#scan_output} > issue_report_limit )); then
+      report_excerpt=${scan_output:0:issue_report_limit}
+      report_truncated=true
+    fi
 
     {
       printf '## Outdated dependencies found\n\n'
       printf 'Workflow run: %s\n\n' "${RUN_URL}"
       printf 'The following dependencies have newer versions available:\n\n'
-      printf '```\n%s\n```\n\n' "${scan_output}"
+      printf '```\n%s\n```\n\n' "${report_excerpt}"
+      if [[ "$report_truncated" == true ]]; then
+        printf 'Report excerpt truncated to %s characters. The complete outdated-output.txt report is retained in the artifact on the workflow run linked above.\n\n' "$issue_report_limit"
+      fi
       printf 'Review and update dependencies at your earliest convenience.\n'
       printf 'Breaking changes may require more attention than patch bumps.\n'
     } > "$RUNNER_TEMP/issue-body.md"
