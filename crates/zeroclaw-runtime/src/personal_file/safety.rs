@@ -730,6 +730,54 @@ pub(crate) fn link_leaf_into_trash_slot(
     Ok(identity)
 }
 
+/// Re-prove every recovery-path name before publication. A held descriptor
+/// and nlink == 2 alone do not prove the recovery name is still reachable:
+/// an in-root writer can rename the entry, slot, or trash directory.
+/// As with the other namespace checks, this is a pre-publication check;
+/// an independently authorized writer can still rename after the check.
+pub(crate) fn verify_recovery_path(
+    root: &RootInner,
+    trash: &OwnedFd,
+    slot: &TrashSlot,
+    recovery_name: &str,
+    expected: ObjectId,
+    display: &str,
+) -> SafetyResult<()> {
+    for (parent, name, identity, kind) in [
+        (
+            &root.dir,
+            TRASH_NAMESPACE,
+            identity_of(trash)?,
+            FileType::Directory,
+        ),
+        (
+            trash,
+            slot.name.as_str(),
+            slot.identity,
+            FileType::Directory,
+        ),
+        (&slot.dir, recovery_name, expected, FileType::RegularFile),
+    ] {
+        let stat =
+            statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|error| match error {
+                rustix::io::Errno::NOENT | rustix::io::Errno::LOOP => {
+                    PersonalFileRefusal::ConcurrentModification {
+                        path: display.to_string(),
+                    }
+                    .into()
+                }
+                _ => errno_to_io(error),
+            })?;
+        if ObjectId::of(&stat) != identity || file_type_of(&stat) != kind {
+            return Err(PersonalFileRefusal::ConcurrentModification {
+                path: display.to_string(),
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Rename `leaf` (under `parent`) into the freshly minted empty `slot`.
 /// No-clobber by construction; the slot is re-proved to be linked under
 /// the trash immediately before the rename so a relocated slot refuses

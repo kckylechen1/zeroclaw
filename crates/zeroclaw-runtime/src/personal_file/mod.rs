@@ -31,9 +31,14 @@
 //!   file on the root or any ancestor) is refused at admission; every
 //!   mutation re-probes the root and the target's ancestor chain;
 //!   `.git` is unreachable as a path component.
-//! - **Hard-link containment.** Files with `nlink != 1` refuse
-//!   mutation: a foreign inode identity cannot be modified through a
-//!   personal root.
+//! - **Hard-link containment.** Existing files with `nlink != 1` refuse
+//!   mutation. Replace creates one owned recovery link and rechecks both
+//!   inode identities, recovery-path names, digest, and `nlink == 2`
+//!   before publication. Writes through a previously opened descriptor
+//!   remain in that recovery inode after replacement. Namespace checks
+//!   have the same final-syscall race boundary as other operations: an
+//!   independently authorized filesystem writer can rename recovery
+//!   names after the final check; this kernel cannot prevent that.
 //! - **Typed semantics.** Create is no-clobber; replace requires the
 //!   expected content identity and publishes atomically from a staged
 //!   sibling; move is same-root and no-clobber; delete moves into a

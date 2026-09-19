@@ -469,7 +469,9 @@ impl PersonalFileService {
             safety::run_race_hook();
             let recheck = (|| -> Result<(), PersonalFileError> {
                 let (file, restat) = open_regular_verified(&parent, path.leaf(), &display)?;
-                if ObjectId::of(&restat) != ObjectId::of(&stat) {
+                if ObjectId::of(&restat) != ObjectId::of(&stat)
+                    || recovery_identity != ObjectId::of(&stat)
+                {
                     return Err(PersonalFileRefusal::ConcurrentModification {
                         path: display.clone(),
                     }
@@ -486,6 +488,14 @@ impl PersonalFileService {
                         actual: actual.as_hex().to_string(),
                     });
                 }
+                safety::verify_recovery_path(
+                    &root.inner,
+                    &trash,
+                    &slot,
+                    &recovery_name,
+                    ObjectId::of(&stat),
+                    &display,
+                )?;
                 Ok(())
             })();
             if let Err(error) = recheck {

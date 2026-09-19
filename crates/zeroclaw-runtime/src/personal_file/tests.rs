@@ -699,6 +699,95 @@ async fn replace_recovers_same_inode_update_racing_final_publication() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn replace_refuses_recovery_namespace_substitution_before_publication() {
+    let _fs_serialized = fs_test_guard().await;
+    for attack in [
+        "rename-entry",
+        "replace-entry",
+        "rename-slot",
+        "rename-trash",
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (service, root) = service_with_rw_root(tmp.path());
+        let path = PersonalRelativePath::parse("doc.txt").expect("path");
+        service
+            .create_text_no_clobber(&root, &path, "version A")
+            .await
+            .unwrap();
+        let attack_root = tmp.path().to_path_buf();
+        install_one_shot_race_hook(move || {
+            let trash = attack_root.join(TRASH_NAMESPACE);
+            let slot = std::fs::read_dir(&trash)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let entry = std::fs::read_dir(&slot)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            match attack {
+                "rename-entry" | "replace-entry" => {
+                    std::fs::rename(&entry, slot.join("moved-prior")).unwrap();
+                    if attack == "replace-entry" {
+                        std::fs::write(&entry, "foreign replacement").unwrap();
+                    }
+                }
+                "rename-slot" => std::fs::rename(&slot, trash.join("moved-slot")).unwrap(),
+                "rename-trash" => std::fs::rename(&trash, attack_root.join("moved-trash")).unwrap(),
+                _ => unreachable!(),
+            }
+            // Renaming the recovery link or its ancestors preserves the
+            // target inode, digest, and nlink == 2. Those checks alone cannot
+            // prove that the returned recovery path remains reachable.
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(attack_root.join("doc.txt"))
+                    .unwrap()
+                    .nlink(),
+                2
+            );
+        });
+        let result = service
+            .replace_text_if_expected(
+                &root,
+                &path,
+                &ExpectedContentIdentity::of_content(b"version A"),
+                "version C",
+            )
+            .await;
+        clear_race_hook();
+        assert!(
+            matches!(
+                result,
+                Err(PersonalFileError::Refused(
+                    PersonalFileRefusal::ConcurrentModification { .. }
+                ))
+            ),
+            "{attack} must refuse before publication: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("doc.txt")).unwrap(),
+            b"version A"
+        );
+        if attack == "replace-entry" {
+            let slot = std::fs::read_dir(tmp.path().join(TRASH_NAMESPACE))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let foreign = slot.join(super::safety::recovery_name_for("doc.txt"));
+            assert_eq!(std::fs::read(foreign).unwrap(), b"foreign replacement");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn replace_recovery_retains_writes_through_a_prepublication_descriptor() {
     use std::io::Write;
 
