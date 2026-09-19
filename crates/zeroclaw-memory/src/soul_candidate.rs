@@ -1179,7 +1179,8 @@ mod tests {
         registry.admit(&owner, "local bootstrap").unwrap();
         registry.admit(&sibling, "local bootstrap").unwrap();
         let prefix = SoulCandidateService::candidate_key(&owner, "");
-        let now = "2026-09-20T00:00:00+00:00";
+        let candidate_time = "2026-09-19T00:00:00+00:00";
+        let distractor_time = "2026-09-20T00:00:00+00:00";
 
         {
             let conn = backend.connection().lock();
@@ -1205,7 +1206,7 @@ mod tests {
                         uuid::Uuid::new_v4().to_string(),
                         format!("soul::{}::ordinary::{index:04}", owner.as_str()),
                         encoded,
-                        now,
+                        distractor_time,
                         crate::soul::SOUL_NAMESPACE,
                         owner.as_str(),
                     ])
@@ -1215,7 +1216,7 @@ mod tests {
                         uuid::Uuid::new_v4().to_string(),
                         format!("{prefix}sibling-{index:04}"),
                         serde_json::to_string(&candidate).unwrap(),
-                        now,
+                        distractor_time,
                         crate::soul::SOUL_NAMESPACE,
                         sibling.as_str(),
                     ])
@@ -1225,7 +1226,7 @@ mod tests {
                         uuid::Uuid::new_v4().to_string(),
                         format!("{prefix}ambient-{index:04}"),
                         serde_json::to_string(&candidate).unwrap(),
-                        now,
+                        distractor_time,
                         "default",
                         owner.as_str(),
                     ])
@@ -1244,7 +1245,7 @@ mod tests {
                         uuid::Uuid::new_v4().to_string(),
                         SoulCandidateService::candidate_key(&owner, &candidate_id),
                         serde_json::to_string(&candidate).unwrap(),
-                        now,
+                        candidate_time,
                         crate::soul::SOUL_NAMESPACE,
                         owner.as_str(),
                     ])

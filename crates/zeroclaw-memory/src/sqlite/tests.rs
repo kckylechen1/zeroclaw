@@ -3329,7 +3329,8 @@ async fn prefix_pages_apply_namespace_agent_and_key_before_the_limit() {
     let owner = mem.ensure_agent_uuid("owner").await.unwrap();
     let sibling = mem.ensure_agent_uuid("sibling").await.unwrap();
     let prefix = format!("soul::{owner}::candidate::");
-    let now = "2026-09-20T00:00:00+00:00";
+    let candidate_time = "2026-09-19T00:00:00+00:00";
+    let distractor_time = "2026-09-20T00:00:00+00:00";
 
     {
         let conn = mem.connection().lock();
@@ -3351,7 +3352,7 @@ async fn prefix_pages_apply_namespace_agent_and_key_before_the_limit() {
                     Uuid::new_v4().to_string(),
                     format!("soul::{owner}::ordinary::{index:04}"),
                     "same-agent non-candidate",
-                    now,
+                    distractor_time,
                     crate::soul::SOUL_NAMESPACE,
                     owner,
                 ])
@@ -3361,7 +3362,7 @@ async fn prefix_pages_apply_namespace_agent_and_key_before_the_limit() {
                     Uuid::new_v4().to_string(),
                     format!("{prefix}sibling-{index:04}"),
                     "sibling candidate-shaped row",
-                    now,
+                    distractor_time,
                     crate::soul::SOUL_NAMESPACE,
                     sibling,
                 ])
@@ -3371,7 +3372,7 @@ async fn prefix_pages_apply_namespace_agent_and_key_before_the_limit() {
                     Uuid::new_v4().to_string(),
                     format!("{prefix}ambient-{index:04}"),
                     "wrong-namespace candidate-shaped row",
-                    now,
+                    distractor_time,
                     "default",
                     owner,
                 ])
@@ -3383,7 +3384,7 @@ async fn prefix_pages_apply_namespace_agent_and_key_before_the_limit() {
                     Uuid::new_v4().to_string(),
                     format!("{prefix}real-{index:04}"),
                     "real candidate row",
-                    now,
+                    candidate_time,
                     crate::soul::SOUL_NAMESPACE,
                     owner,
                 ])
