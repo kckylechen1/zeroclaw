@@ -1,7 +1,8 @@
 name: Monthly Outdated Dependency Scan
 
 # Runs cargo outdated on the 1st of each month and opens an issue if any
-# direct or transitive dependencies have newer versions available.
+# scanned dependencies have newer versions available. The retained report
+# discloses the rusqlite/Matrix constraint exclusions needed by the SQLite graph.
 #
 # Intentionally separate from the daily advisory scan — stale deps are a
 # maintenance concern, not a security emergency. Monthly cadence gives

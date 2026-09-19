@@ -17,7 +17,7 @@ cat > "$FIXTURE/bin/cargo" <<'STUB'
 case "$*" in
   --version) echo 'cargo fixture-version' ;;
   'outdated --version') echo 'cargo-outdated 0.19.0' ;;
-  'outdated --workspace --exclude rusqlite --exit-code 10')
+  'outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10')
     printf '%s\n' "$*" >> "$RUNNER_TEMP/cargo-calls"
     echo 'raw stdout canary'
     echo 'raw stderr resolver canary' >&2
@@ -58,14 +58,14 @@ for scenario in clean findings reuse disabled error other; do
   "${environment[@]}" /bin/bash "$ROOT/scripts/ci/monthly_outdated.sh" scan > "$run/log" 2>&1 || status=$?
   [[ "$status" == "$code" ]]
   [[ "$(cat "$run/outputs")" == "scan_exit_code=$code" ]]
-  [[ "$(cat "$run/cargo-calls")" == 'outdated --workspace --exclude rusqlite --exit-code 10' ]]
+  [[ "$(cat "$run/cargo-calls")" == 'outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10' ]]
   report=$(cat "$run/outdated-output.txt")
   for expected in 'raw stdout canary' 'raw stderr resolver canary' 'Head: fixture-head' \
     'Runner: fixture-os fixture-arch' 'Image: fixture-image fixture-version' \
     'rustc fixture-version' 'cargo fixture-version' 'cargo-outdated 0.19.0' \
-    'Command: cargo outdated --workspace --exclude rusqlite --exit-code 10' \
-    'Coverage limit: cargo-outdated excludes direct rusqlite dependencies from its hypothetical latest-version graph.' \
-    'This defers reporting direct rusqlite updates (and their libsqlite3-sys selection) while matrix-sdk-sqlite pins rusqlite ^0.37 and libsqlite3-sys is a single-version links=sqlite3 crate (see vendor/libsqlite3-sys/VENDOR.md); all other workspace dependencies remain scanned.' \
+    'Command: cargo outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10' \
+    'Coverage limit: cargo-outdated preserves direct rusqlite and matrix-sdk constraints in its hypothetical latest-version graph.' \
+    'This defers latest-version updates outside the declared rusqlite and matrix-sdk constraints: Matrix 0.18 uses rusqlite ^0.37, while Matrix 0.19 selects an incompatible SQLite links graph. The vendored libsqlite3-sys remains on the checked-in security floor (see vendor/libsqlite3-sys/VENDOR.md). Other dependencies remain eligible for hypothetical updates; transitive choices still obey this constrained graph.' \
     "Scan exit code: $code" "Result: $result"; do
     [[ "$report" == *"$expected"* ]]
   done
