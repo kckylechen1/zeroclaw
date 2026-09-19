@@ -2,7 +2,7 @@
 id: ADR-014
 title: Reviewed AgentSoul uses a closed presentation-only projection
 date: 2026-09-20
-status: proposed
+status: accepted
 relates-to:
   - ADR-010
   - ADR-011
@@ -18,10 +18,10 @@ relates-to:
 
 ## Status
 
-The owner selected the six-row Slice A contract in this record on 2026-09-20.
-The ADR remains proposed until an independent reviewer accepts this exact
-documentation head. It does not activate candidate promotion or prompt
-projection, and it does not declare issues #188, #189, #190, or #295 complete.
+The owner selected the six-row Slice A contract in this record on 2026-09-20,
+and independent review of the exact documentation head is complete. The ADR is
+accepted. It does not activate candidate promotion or prompt projection, and it
+does not declare issues #188, #189, #190, or #295 complete.
 
 ## Context
 
