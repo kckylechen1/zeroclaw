@@ -17,7 +17,7 @@ cat > "$FIXTURE/bin/cargo" <<'STUB'
 case "$*" in
   --version) echo 'cargo fixture-version' ;;
   'outdated --version') echo 'cargo-outdated 0.19.0' ;;
-  'outdated --workspace --exit-code 10')
+  'outdated --workspace --exclude rusqlite --exit-code 10')
     printf '%s\n' "$*" >> "$RUNNER_TEMP/cargo-calls"
     echo 'raw stdout canary'
     echo 'raw stderr resolver canary' >&2
@@ -36,7 +36,7 @@ case "$1 $2" in
   *) exit 99 ;;
 esac
 STUB
-chmod +x "$FIXTURE/bin/"*
+chmod +x "$FIXTURE/bin/rustc" "$FIXTURE/bin/cargo" "$FIXTURE/bin/gh"
 
 for scenario in clean findings reuse disabled error other; do
   case "$scenario" in
@@ -58,11 +58,14 @@ for scenario in clean findings reuse disabled error other; do
   "${environment[@]}" /bin/bash "$ROOT/scripts/ci/monthly_outdated.sh" scan > "$run/log" 2>&1 || status=$?
   [[ "$status" == "$code" ]]
   [[ "$(cat "$run/outputs")" == "scan_exit_code=$code" ]]
-  [[ "$(cat "$run/cargo-calls")" == 'outdated --workspace --exit-code 10' ]]
+  [[ "$(cat "$run/cargo-calls")" == 'outdated --workspace --exclude rusqlite --exit-code 10' ]]
   report=$(cat "$run/outdated-output.txt")
   for expected in 'raw stdout canary' 'raw stderr resolver canary' 'Head: fixture-head' \
     'Runner: fixture-os fixture-arch' 'Image: fixture-image fixture-version' \
     'rustc fixture-version' 'cargo fixture-version' 'cargo-outdated 0.19.0' \
+    'Command: cargo outdated --workspace --exclude rusqlite --exit-code 10' \
+    'Coverage limit: cargo-outdated excludes direct rusqlite dependencies from its hypothetical latest-version graph.' \
+    'This defers reporting direct rusqlite updates (and their libsqlite3-sys selection) while matrix-sdk-sqlite pins rusqlite ^0.37 and libsqlite3-sys is a single-version links=sqlite3 crate (see vendor/libsqlite3-sys/VENDOR.md); all other workspace dependencies remain scanned.' \
     "Scan exit code: $code" "Result: $result"; do
     [[ "$report" == *"$expected"* ]]
   done

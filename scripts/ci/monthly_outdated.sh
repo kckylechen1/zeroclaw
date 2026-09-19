@@ -13,11 +13,14 @@ case "${1:-}" in
       rustc --version
       cargo --version
       cargo outdated --version
-      printf '\nCommand: cargo outdated --workspace --exit-code 10\n\n## Scanner output\n\n'
+      printf '\nCommand: cargo outdated --workspace --exclude rusqlite --exit-code 10\n'
+      printf '%s\n' 'Coverage limit: cargo-outdated excludes direct rusqlite dependencies from its hypothetical latest-version graph.'
+      printf '%s\n' 'This defers reporting direct rusqlite updates (and their libsqlite3-sys selection) while matrix-sdk-sqlite pins rusqlite ^0.37 and libsqlite3-sys is a single-version links=sqlite3 crate (see vendor/libsqlite3-sys/VENDOR.md); all other workspace dependencies remain scanned.'
+      printf '\n## Scanner output\n\n'
     } > "$OUTPUT_FILE" 2>&1
 
     exit_code=0
-    cargo outdated --workspace --exit-code 10 >> "$OUTPUT_FILE" 2>&1 || exit_code=$?
+    cargo outdated --workspace --exclude rusqlite --exit-code 10 >> "$OUTPUT_FILE" 2>&1 || exit_code=$?
     case "$exit_code" in
       0) result=clean ;;
       10) result=inventory ;;
