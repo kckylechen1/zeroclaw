@@ -46,10 +46,10 @@ admission grant.
 
 The current public construction path has two concrete gaps:
 
-1. Agent admission and public claim creation insert an `AgentIdentity` with
-   `capability_json = NULL`. No production/public operation provisions the
-   required closed ACP grant. The grant writes in the inspected sources are test
-   setup only.
+1. Agent admission inserts an `AgentIdentity` with `capability_json = NULL`;
+   public claim creation requires that existing admitted identity and does not
+   provision an ACP grant. No production/public operation provisions the required
+   closed ACP grant. The grant writes in the inspected sources are test setup only.
 2. Initialization records a generated admission and connection reference in
    server state, but the public initialization result does not return the opaque
    reference required by `attach_session`.
