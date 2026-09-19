@@ -303,6 +303,8 @@ mod tests {
             agent_alias: None,
             draft_reasoning: zeroclaw_config::schema::StreamReasoningMode::Status,
             turn_id: "trace-approval-gate",
+            serving_provider_name: None,
+            serving_model: None,
         }
     }
 
