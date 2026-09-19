@@ -82,13 +82,26 @@ fn strip_line_comments(source: &str) -> String {
 /// Only the bare file name is exempted there — any store vocabulary token in
 /// that file, or the file name anywhere else, still trips.
 fn is_exempted(path: &Path, token: &str) -> bool {
+    let relative = path
+        .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+        .expect("in-crate path");
+
     token == "control_plane.db"
-        && matches!(
-            path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                .expect("in-crate path")
-                .to_str(),
-            Some("src/daemon/mod.rs" | "src/daemon/tests.rs")
-        )
+        && (relative == Path::new("src/daemon/mod.rs")
+            || relative == Path::new("src/daemon/tests.rs"))
+}
+
+#[test]
+fn durable_store_exemption_uses_native_path_components_and_exact_token() {
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let daemon_tests = crate_root.join("src").join("daemon").join("tests.rs");
+
+    assert!(is_exempted(&daemon_tests, "control_plane.db"));
+    assert!(!is_exempted(&daemon_tests, "SqliteTaskStore"));
+    assert!(!is_exempted(
+        &crate_root.join("src").join("other").join("tests.rs"),
+        "control_plane.db"
+    ));
 }
 
 /// The retired control-plane vocabulary. Any of these strings in runtime
