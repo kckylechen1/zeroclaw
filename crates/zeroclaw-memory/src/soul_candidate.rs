@@ -639,8 +639,8 @@ static CANDIDATE_WRITE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
 
 /// Each storage read stays bounded while `candidates` walks the exact prefix
 /// to completion. The write lock keeps that multi-page view stable against
-/// candidate updates in this process; cross-process ownership remains the
-/// separate writer-contract decision tracked by #188-D.
+/// candidate updates in this process; cross-process consistency requires a
+/// separately chosen and mechanically enforced supported-writer model.
 const CANDIDATE_PAGE_SIZE: usize = 256;
 
 /// Candidate intake/query service behind the Soul domain seam.
