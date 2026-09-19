@@ -536,7 +536,7 @@ pub trait UserModelService: Send + Sync {
     ) -> Result<Vec<UserModelRevision>, UserModelError>;
 }
 
-/// Transitional adapter over the #174 SQLite store. It introduces no new
+/// Transitional adapter over the existing SQLite User Model store. It introduces no new
 /// tables or lifecycle semantics and is the only production backend in this
 /// delivery.
 pub struct LegacySqliteBackend {
