@@ -24,7 +24,6 @@ pub mod runtime_traits;
 pub mod schema;
 pub mod session_exec;
 pub mod session_keys;
-pub mod soul;
 pub mod subagent_v1;
 pub mod taskintent;
 pub mod tool;

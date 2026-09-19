@@ -64,7 +64,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use zeroclaw_api::companion::AgentIdentityId;
-use zeroclaw_api::soul::EvidenceSource;
+use zeroclaw_api::memory_traits::EvidenceSource;
 
 /// The reserved key prefix separating candidate rows from other Soul
 /// rows under `soul::<identity>::`. Single source of truth:
