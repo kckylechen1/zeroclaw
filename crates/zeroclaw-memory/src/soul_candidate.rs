@@ -20,7 +20,8 @@
 //!   QUALITY metadata ([`RecurrenceMetadata`]), recomputed from the
 //!   deduped evidence refs on every write. They never feed any
 //!   authority decision because no authority decision exists here;
-//! - evidence refs are opaque ids into their owning source systems
+//! - evidence refs are identified by `(source owner, source kind, opaque id)`
+//!   in their owning source systems
 //!   (incident store, benchmark run, Tachi envelope, worker receipt).
 //!   Referenced content is NEVER copied into a second truth store;
 //!   each ref keeps its source revision and derivation ref so a later
@@ -63,6 +64,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use zeroclaw_api::companion::AgentIdentityId;
+use zeroclaw_api::memory_traits::EvidenceSource;
 
 /// The reserved key prefix separating candidate rows from other Soul
 /// rows under `soul::<identity>::`. Single source of truth:
@@ -95,10 +97,19 @@ pub enum CandidateError {
     InvalidDisposition(String),
     /// The evidence reference id is empty.
     InvalidEvidenceRef(String),
-    /// The same evidence ref id was already recorded with the opposite
-    /// stance. Stance flips are explicit rejections, never silent
+    /// The same evidence source identity was already recorded with the
+    /// opposite stance. Stance flips are explicit rejections, never silent
     /// rewrites.
     ConflictingEvidenceStance(String),
+    /// New intake omitted the source owner/kind required to make the evidence
+    /// identity `(owner, kind, id)` collision-safe.
+    MissingEvidenceSource(String),
+    /// A legacy stored reference has the same bare id but no owner/kind. The
+    /// service will not silently adopt it into a caller-declared source.
+    LegacyEvidenceIdentityCollision(String),
+    /// A refresh tried to change evidence payload without proving it was based
+    /// on the currently stored opaque source revision.
+    EvidenceRevisionConflict(String),
     /// Only an owner correction may retract a candidate.
     RetractionRequiresOwnerCorrection,
     /// The candidate is retracted; it stays readable as history but
@@ -129,6 +140,15 @@ impl CandidateError {
             Self::ConflictingEvidenceStance(_) => {
                 "evidence ref already recorded with the opposite stance"
             }
+            Self::MissingEvidenceSource(_) => {
+                "evidence source owner and kind are required for new intake"
+            }
+            Self::LegacyEvidenceIdentityCollision(_) => {
+                "legacy evidence id has no source identity; explicit migration required"
+            }
+            Self::EvidenceRevisionConflict(_) => {
+                "evidence refresh does not match the current source revision"
+            }
             Self::RetractionRequiresOwnerCorrection => {
                 "candidate retraction requires an owner correction origin"
             }
@@ -158,6 +178,13 @@ impl fmt::Display for CandidateError {
             Self::InvalidDisposition(detail) => write!(f, "{}: {detail}", self.message()),
             Self::InvalidEvidenceRef(id) => write!(f, "{}: {id}", self.message()),
             Self::ConflictingEvidenceStance(id) => write!(f, "{}: {id}", self.message()),
+            Self::MissingEvidenceSource(id) => write!(f, "{}: {id}", self.message()),
+            Self::LegacyEvidenceIdentityCollision(id) => {
+                write!(f, "{}: {id}", self.message())
+            }
+            Self::EvidenceRevisionConflict(detail) => {
+                write!(f, "{}: {detail}", self.message())
+            }
             Self::CandidateRetracted(id) => write!(f, "{}: {id}", self.message()),
             Self::NotFound(id) => write!(f, "{}: {id}", self.message()),
             Self::UnsupportedBackend(name) => write!(f, "{}: {name}", self.message()),
@@ -288,8 +315,13 @@ pub enum Sensitivity {
 /// per the AgentSoul domain boundary).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceRef {
+    /// Source owner and kind. Required for every new intake. `None` is retained
+    /// only so rows written before the source-identity contract remain readable;
+    /// such rows are never silently adopted into a scoped identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<EvidenceSource>,
     /// Opaque reference id in the owning source system. Non-empty;
-    /// deduped by value on the candidate.
+    /// deduped by `(source.owner, source.kind, id)` on the candidate.
     pub id: String,
     /// Whether this observation supports or counters the candidate.
     pub stance: EvidenceStance,
@@ -309,6 +341,12 @@ impl EvidenceRef {
         if self.id.trim().is_empty() {
             return Err(CandidateError::InvalidEvidenceRef("(empty)".to_string()));
         }
+        let Some(source) = &self.source else {
+            return Err(CandidateError::MissingEvidenceSource(self.id.clone()));
+        };
+        if source.owner.trim().is_empty() || source.kind.trim().is_empty() {
+            return Err(CandidateError::MissingEvidenceSource(self.id.clone()));
+        }
         // Consistency rule (repair-round adjudication for this leaf): the
         // TachiVerifiedEvidence origin MUST carry a Verified ref — an
         // unverified or unavailable reference can never claim it.
@@ -325,19 +363,52 @@ impl EvidenceRef {
         Ok(())
     }
 
-    /// Fold a refresh of this ref (same id, same stance) into it:
-    /// incoming `Some(...)` revision/derivation values REPLACE the old
-    /// ones, but an incoming `None` KEEPS the existing value — refreshes
-    /// merge, they never lose retained provenance. Verification state
-    /// is non-optional and always takes the incoming value.
-    fn merge_refresh(&mut self, incoming: EvidenceRef) {
-        if incoming.source_revision.is_some() {
-            self.source_revision = incoming.source_revision;
+    fn same_identity(&self, other: &Self) -> bool {
+        self.source == other.source && self.id == other.id
+    }
+
+    /// Fold a refresh of this exact `(owner, kind, id)` into it. Revisions are
+    /// opaque: a changed revision and payload are accepted only when the caller
+    /// names the currently stored revision as its optimistic precondition. A
+    /// same-revision payload change is refused, while omitted revision and
+    /// derivation values retain existing provenance.
+    fn merge_refresh(
+        &mut self,
+        incoming: EvidenceRef,
+        expected_source_revision: Option<&str>,
+    ) -> Result<(), CandidateError> {
+        let incoming_revision = incoming.source_revision.as_deref();
+        let current_revision = self.source_revision.as_deref();
+        let revision_changes = incoming_revision.is_some() && incoming_revision != current_revision;
+        let derived_changes = incoming
+            .derived_from
+            .as_ref()
+            .is_some_and(|incoming| Some(incoming.as_str()) != self.derived_from.as_deref());
+        let payload_changes = self.verification != incoming.verification || derived_changes;
+
+        if !revision_changes {
+            if payload_changes {
+                return Err(CandidateError::EvidenceRevisionConflict(format!(
+                    "source={:?} id={} current={current_revision:?} incoming={incoming_revision:?}",
+                    self.source, self.id
+                )));
+            }
+            return Ok(());
         }
+
+        if expected_source_revision != current_revision {
+            return Err(CandidateError::EvidenceRevisionConflict(format!(
+                "source={:?} id={} expected={expected_source_revision:?} current={current_revision:?}",
+                self.source, self.id
+            )));
+        }
+
+        self.source_revision = incoming.source_revision;
         if incoming.derived_from.is_some() {
             self.derived_from = incoming.derived_from;
         }
         self.verification = incoming.verification;
+        Ok(())
     }
 }
 
@@ -348,7 +419,7 @@ impl EvidenceRef {
 /// authority decision (there is no authority decision to make).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecurrenceMetadata {
-    /// Count of DISTINCT supporting evidence refs (deduped by ref id).
+    /// Count of DISTINCT supporting evidence refs (deduped by source identity).
     pub supporting_observations: usize,
     /// Count of DISTINCT countering evidence refs.
     pub countering_observations: usize,
@@ -428,26 +499,36 @@ impl SoulCandidate {
     }
 
     /// Fold one intake into the candidate: dedupe/refresh evidence by
-    /// ref id, merge context/outcome tags, adopt the latest confidence
+    /// `(source owner, source kind, id)`, merge context/outcome tags, adopt the latest confidence
     /// label, retain the more restrictive sensitivity, and let an owner
     /// correction amend the disposition/rule text. Never touches status
     /// and never promotes anything.
     fn merge_intake(&mut self, intake: CandidateIntake) -> Result<(), CandidateError> {
+        if self.evidence.iter().any(|existing| {
+            existing.source.is_none()
+                && existing.id == intake.evidence.id
+                && intake.evidence.source.is_some()
+        }) {
+            return Err(CandidateError::LegacyEvidenceIdentityCollision(
+                intake.evidence.id,
+            ));
+        }
         match self
             .evidence
             .iter_mut()
-            .find(|existing| existing.id == intake.evidence.id)
+            .find(|existing| existing.same_identity(&intake.evidence))
         {
             Some(existing) if existing.stance != intake.evidence.stance => {
                 return Err(CandidateError::ConflictingEvidenceStance(
                     intake.evidence.id,
                 ));
             }
-            // Same id, same stance: merge the refresh into the existing
+            // Same source identity and stance: merge the refresh into the existing
             // ref (explicit dedupe/reference behavior — no duplicate
             // entry, no authority change, and retained revision/
             // derivation refs are never dropped by a None).
-            Some(existing) => existing.merge_refresh(intake.evidence),
+            Some(existing) => existing
+                .merge_refresh(intake.evidence, intake.expected_source_revision.as_deref())?,
             None => self.evidence.push(intake.evidence),
         }
         merge_dedup(&mut self.context_shapes, intake.context_shapes);
@@ -502,6 +583,13 @@ pub struct CandidateIntake {
     /// The evidence reference for this intake. Ids only — never
     /// content.
     pub evidence: EvidenceRef,
+    /// Optimistic precondition for an opaque source-revision transition.
+    /// A refresh that changes `evidence.source_revision` is accepted only when
+    /// this equals the currently stored revision. Revisions are opaque and are
+    /// never ordered lexically. `None` means the caller expects no stored
+    /// revision, which also allows the first versioned refresh of an
+    /// unversioned reference.
+    pub expected_source_revision: Option<String>,
     /// Context/task-shape tags already available to the observer.
     pub context_shapes: Vec<String>,
     /// Outcome/adjudication refs for this intake.
@@ -535,6 +623,10 @@ fn scalar(field: &'static str, value: &str) -> Result<(), CandidateError> {
 
 fn evidence_bounds(evidence: &EvidenceRef) -> Result<(), CandidateError> {
     scalar("evidence.id", &evidence.id)?;
+    if let Some(source) = &evidence.source {
+        scalar("evidence.source.owner", &source.owner)?;
+        scalar("evidence.source.kind", &source.kind)?;
+    }
     if let Some(value) = &evidence.source_revision {
         scalar("source_revision", value)?;
     }
@@ -568,6 +660,9 @@ fn intake_bounds(intake: &CandidateIntake) -> Result<(), CandidateError> {
     scalar("disposition", &intake.disposition)?;
     bound("proposed_rule", intake.proposed_rule.len(), MAX_RULE_BYTES)?;
     evidence_bounds(&intake.evidence)?;
+    if let Some(value) = &intake.expected_source_revision {
+        scalar("expected_source_revision", value)?;
+    }
     metadata_bounds(
         &intake.context_shapes,
         &intake.outcome_refs,
@@ -776,8 +871,9 @@ impl SoulCandidateService {
     /// Submit one intake event for one candidate of the resolved
     /// identity. Creates the candidate row if absent, otherwise folds
     /// the evidence into it under the bounded dedupe policy (one entry
-    /// per distinct ref id; same id refreshes revision/verification in
-    /// place; same id with opposite stance is a typed error). The
+    /// per distinct `(source owner, source kind, id)`; the same identity
+    /// refreshes only from its current revision and an opposite stance is a
+    /// typed error). The
     /// returned/stored status is always `Candidate` — no amount of
     /// repetition, confidence, or verified evidence can make it
     /// anything else, because no other status exists here.
@@ -981,12 +1077,17 @@ mod tests {
             proposed_rule: "leads with the conclusion, then one example".to_string(),
             origin: CandidateOrigin::RepeatedBehavior,
             evidence: EvidenceRef {
+                source: Some(EvidenceSource {
+                    owner: "test-harness".to_string(),
+                    kind: "observation".to_string(),
+                }),
                 id: evidence_id.to_string(),
                 stance: EvidenceStance::Supporting,
                 verification: EvidenceVerification::Unverified,
                 source_revision: Some("r1".to_string()),
                 derived_from: None,
             },
+            expected_source_revision: None,
             context_shapes: vec!["code-review".to_string()],
             outcome_refs: Vec::new(),
             confidence: Some("high".to_string()),
@@ -1547,7 +1648,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_evidence_dedupes_by_reference_id() {
+    async fn duplicate_evidence_dedupes_by_source_identity() {
         let (tmp, backend) = fresh_backend();
         let (registry, _soul, candidates) = services(&backend);
         let id = identity_for(&backend, "identity-a").await;
@@ -1562,6 +1663,7 @@ mod tests {
         let mut refresh = intake("density", "bench-1");
         refresh.evidence.source_revision = Some("r2".to_string());
         refresh.evidence.derived_from = Some("agg-77".to_string());
+        refresh.expected_source_revision = Some("r1".to_string());
         refresh.context_shapes = vec!["incident-triage".to_string()];
         let record = candidates.submit(&id, refresh).await.unwrap();
         assert_eq!(record.evidence.len(), 1);
@@ -1601,6 +1703,173 @@ mod tests {
         assert_eq!(record.evidence.len(), 2);
         assert_eq!(record.recurrence.supporting_observations, 2);
         drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn equal_ids_from_different_source_owners_or_kinds_do_not_collide() {
+        let (tmp, backend) = fresh_backend();
+        let (registry, _soul, candidates) = services(&backend);
+        let id = identity_for(&backend, "source-identity-owner").await;
+        registry.admit(&id, "local bootstrap").unwrap();
+
+        candidates
+            .submit(&id, intake("density", "shared-id"))
+            .await
+            .unwrap();
+        let mut second = intake("density", "shared-id");
+        second.evidence.source = Some(EvidenceSource {
+            owner: "other-harness".to_string(),
+            kind: "observation".to_string(),
+        });
+        second.evidence.stance = EvidenceStance::Countering;
+        candidates.submit(&id, second).await.unwrap();
+        let mut third = intake("density", "shared-id");
+        third.evidence.source = Some(EvidenceSource {
+            owner: "test-harness".to_string(),
+            kind: "benchmark_run".to_string(),
+        });
+        let record = candidates.submit(&id, third).await.unwrap();
+
+        assert_eq!(record.evidence.len(), 3);
+        assert_eq!(record.recurrence.supporting_observations, 2);
+        assert_eq!(record.recurrence.countering_observations, 1);
+        let mut sources = record
+            .evidence
+            .iter()
+            .map(|evidence| {
+                let source = evidence.source.as_ref().unwrap();
+                (source.owner.as_str(), source.kind.as_str())
+            })
+            .collect::<Vec<_>>();
+        sources.sort_unstable();
+        assert_eq!(
+            sources,
+            vec![
+                ("other-harness", "observation"),
+                ("test-harness", "benchmark_run"),
+                ("test-harness", "observation"),
+            ]
+        );
+        drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn stale_or_same_revision_payload_changes_are_refused() {
+        let (tmp, backend) = fresh_backend();
+        let (registry, _soul, candidates) = services(&backend);
+        let id = identity_for(&backend, "revision-owner").await;
+        registry.admit(&id, "local bootstrap").unwrap();
+
+        candidates
+            .submit(&id, intake("density", "versioned-evidence"))
+            .await
+            .unwrap();
+        let mut revision_two = intake("density", "versioned-evidence");
+        revision_two.origin = CandidateOrigin::WorkerReceipt;
+        revision_two.evidence.source_revision = Some("opaque-r2".to_string());
+        revision_two.evidence.verification = EvidenceVerification::Verified;
+        revision_two.evidence.derived_from = Some("aggregate-r2".to_string());
+        revision_two.expected_source_revision = Some("r1".to_string());
+        let current = candidates.submit(&id, revision_two).await.unwrap();
+        assert_eq!(
+            current.evidence[0].source_revision.as_deref(),
+            Some("opaque-r2")
+        );
+
+        // This writer observed r1. Once r2 is current, its proposed r3 cannot
+        // win even though the revision strings themselves are opaque.
+        let mut stale = intake("density", "versioned-evidence");
+        stale.evidence.source_revision = Some("opaque-r3".to_string());
+        stale.expected_source_revision = Some("r1".to_string());
+        assert!(matches!(
+            candidates.submit(&id, stale).await,
+            Err(CandidateError::EvidenceRevisionConflict(_))
+        ));
+        assert_eq!(
+            candidates.get(&id, "density").await.unwrap().unwrap(),
+            current
+        );
+
+        // Reusing the current revision cannot mutate its payload either.
+        let mut same_revision_conflict = intake("density", "versioned-evidence");
+        same_revision_conflict.evidence.source_revision = Some("opaque-r2".to_string());
+        same_revision_conflict.evidence.verification = EvidenceVerification::Unavailable;
+        same_revision_conflict.expected_source_revision = Some("opaque-r2".to_string());
+        assert!(matches!(
+            candidates.submit(&id, same_revision_conflict).await,
+            Err(CandidateError::EvidenceRevisionConflict(_))
+        ));
+        assert_eq!(
+            candidates.get(&id, "density").await.unwrap().unwrap(),
+            current
+        );
+        drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn legacy_missing_source_metadata_is_readable_but_never_silently_adopted() {
+        let (_tmp, backend) = fresh_backend();
+        let (registry, _soul, candidates) = services(&backend);
+        let id = identity_for(&backend, "legacy-source-owner").await;
+        registry.admit(&id, "local bootstrap").unwrap();
+
+        let mut legacy = SoulCandidate::from_intake(&intake("density", "legacy-bare-id"));
+        legacy.evidence[0].source = None;
+        seed_bounded_fixture(&backend, &id, &legacy).await;
+        let legacy_bytes = bounded_fixture_bytes(&backend, &id, "density").await;
+        assert_eq!(
+            candidates.get(&id, "density").await.unwrap().unwrap(),
+            legacy,
+            "pre-source-identity rows remain readable"
+        );
+        assert_eq!(
+            candidates.candidates(&id).await.unwrap(),
+            vec![legacy.clone()]
+        );
+
+        assert_eq!(
+            candidates
+                .submit(&id, intake("density", "legacy-bare-id"))
+                .await
+                .unwrap_err(),
+            CandidateError::LegacyEvidenceIdentityCollision("legacy-bare-id".to_string())
+        );
+        assert_eq!(
+            candidates.get(&id, "density").await.unwrap().unwrap(),
+            legacy,
+            "refusal must preserve the decoded legacy row"
+        );
+        assert_eq!(
+            bounded_fixture_bytes(&backend, &id, "density").await,
+            legacy_bytes,
+            "refusal must preserve the stored legacy bytes"
+        );
+
+        let merged = candidates
+            .submit(&id, intake("density", "new-scoped-id"))
+            .await
+            .unwrap();
+        assert_eq!(merged.evidence.len(), 2);
+        assert!(
+            merged
+                .evidence
+                .iter()
+                .any(|evidence| evidence.source.is_none())
+        );
+
+        let mut missing = intake("new-candidate", "missing-source");
+        missing.evidence.source = None;
+        assert_eq!(
+            candidates.submit(&id, missing).await.unwrap_err(),
+            CandidateError::MissingEvidenceSource("missing-source".to_string())
+        );
+        assert!(
+            candidates
+                .get(&id, "new-candidate")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -2051,6 +2320,28 @@ mod tests {
                 })
             ));
             assert_eq!(bounded_fixture_bytes(&backend, &id, name).await, before);
+        }
+
+        for (field, mutate) in [
+            ("evidence.source.owner", 0_u8),
+            ("evidence.source.kind", 1_u8),
+            ("expected_source_revision", 2_u8),
+        ] {
+            let mut over = intake(&format!("source-bound-{mutate}"), "evidence");
+            let oversized = "x".repeat(MAX_SCALAR_BYTES + 1);
+            match mutate {
+                0 => over.evidence.source.as_mut().unwrap().owner = oversized,
+                1 => over.evidence.source.as_mut().unwrap().kind = oversized,
+                2 => over.expected_source_revision = Some(oversized),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                service.submit(&id, over).await,
+                Err(CandidateError::LimitExceeded {
+                    field: actual,
+                    ..
+                }) if actual == field
+            ));
         }
     }
 
