@@ -39,6 +39,11 @@ The in-kernel child-spawn tools are retired. The legacy `spawn_subagent` tool (i
 
 The durable control plane itself (the coordinator child host with its admission, persistence, cancellation, and announce chain, plus the `data/control_plane.db` task ledger) was deleted with the control-plane migration wall: its last production writer died with the spawn wall, and durable task/attempt truth is Tachi's through the task-intent bridge (frozen bridge contract annex rows 1 and 6). A leftover `data/control_plane.db` on an older install is never read, migrated, rewritten, or deleted; the daemon reports it once per boot with a warning naming the disposition. Pre-migration `delegate_results/*.json` files are likewise ignored.
 
+Host-owned EPHEMERAL ACP sessions stay outside Tachi WorkClaim ownership until
+the public attachment admission contract is complete. [ADR-013](./decisions/ADR-013-ephemeral-acp-attachment-admission.md)
+records the disabled boundary and the public Tachi interfaces required before
+that decision can be reconsidered.
+
 ## Goal-mode target contract
 
 [ADR-008](./decisions/ADR-008-goal-mode-control-plane-and-usage-accounting.md) accepted the task control plane as the future authority for goal lifecycle, ownership, route, principal, parent relation, and recovery eligibility; it is now superseded: the ZeroClaw-side control plane it anchored on was deleted by the control-plane migration wall, and durable task truth lives in Tachi through the task-intent bridge. Goal-mode execution is not wired end to end on any surface today.
