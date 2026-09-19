@@ -635,6 +635,12 @@ fn validate_disposition(disposition: &str, proposed_rule: &str) -> Result<(), Ca
 static CANDIDATE_WRITE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+/// Each storage read stays bounded while `candidates` walks the exact prefix
+/// to completion. The write lock keeps that multi-page view stable against
+/// candidate updates in this process; cross-process ownership remains the
+/// separate writer-contract decision tracked by #188-D.
+const CANDIDATE_PAGE_SIZE: usize = 256;
+
 /// Candidate intake/query service behind the Soul domain seam.
 /// Every method resolves the caller's identity through the same
 /// fail-closed [`IdentityRegistry`] as [`SoulService`], stores one row
@@ -848,48 +854,84 @@ impl SoulCandidateService {
         self.read_raw(&resolved, candidate_id).await
     }
 
-    /// List all candidates for the resolved identity, ordered by
-    /// candidate id. An on-demand view over the canonical rows: no
-    /// index row is maintained, so the listing cannot drift from the
-    /// stored candidates.
+    /// List all candidates for the resolved identity, ordered by candidate id.
+    /// This is an on-demand, complete walk over bounded backend pages. The
+    /// namespace, agent id, and candidate key prefix are applied by the backend
+    /// before every page boundary; no parallel index row is maintained.
     pub async fn candidates(
         &self,
         identity: &AgentIdentityId,
     ) -> Result<Vec<SoulCandidate>, CandidateError> {
         let resolved = self.resolve(identity)?;
         let prefix = Self::candidate_key(&resolved, "");
-        // Namespaced read channel: ambient `list` structurally excludes
-        // the reserved Soul namespace, so the typed listing reads through
-        // `recall_namespaced` (the "*" recent-query lists rows by time,
-        // the same shape the ambient listing used to return).
-        let rows = match self
-            .backend
-            .recall_namespaced(crate::soul::SOUL_NAMESPACE, "*", 1000, None, None, None)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "error_key": "memory.soul_candidate_list_failed",
-                            "identity": resolved.as_str(),
-                            "err": e.to_string(),
-                        })),
-                    "soul candidate list failed through the memory backend"
-                );
-                return Err(CandidateError::Soul(SoulError::Backend(e.to_string())));
-            }
-        };
+        let _guard = CANDIDATE_WRITE_LOCK.lock().await;
+        let mut cursor: Option<String> = None;
         let mut candidates: Vec<SoulCandidate> = Vec::new();
-        for row in rows {
-            // Belt and braces: the key prefix already names the resolved
-            // identity; the row attribution filter additionally rejects
-            // any foreign-agent row that somehow shared the key.
-            if row.key.starts_with(&prefix) && row.agent_id.as_deref() == Some(resolved.as_str()) {
+
+        loop {
+            let page = match self
+                .backend
+                .list_prefix_page(
+                    crate::soul::SOUL_NAMESPACE,
+                    resolved.as_str(),
+                    &prefix,
+                    cursor.as_deref(),
+                    CANDIDATE_PAGE_SIZE,
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(e) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "error_key": "memory.soul_candidate_list_failed",
+                                "identity": resolved.as_str(),
+                                "err": e.to_string(),
+                            })),
+                        "soul candidate list failed through the memory backend"
+                    );
+                    return Err(CandidateError::Soul(SoulError::Backend(e.to_string())));
+                }
+            };
+
+            if page.entries.len() > CANDIDATE_PAGE_SIZE {
+                return Err(CandidateError::Soul(SoulError::Backend(
+                    "memory backend exceeded the requested candidate page size".to_string(),
+                )));
+            }
+            for row in page.entries {
+                // Fail closed if a backend violates the dedicated query
+                // contract. Post-filtering here would recreate the defect by
+                // making an incomplete page look complete.
+                if row.namespace != crate::soul::SOUL_NAMESPACE
+                    || row.agent_id.as_deref() != Some(resolved.as_str())
+                    || !row.key.starts_with(&prefix)
+                {
+                    return Err(CandidateError::Soul(SoulError::Backend(
+                        "memory backend returned a row outside the candidate query scope"
+                            .to_string(),
+                    )));
+                }
                 candidates.push(decode_candidate(&row.content)?);
+            }
+
+            match page.next_cursor {
+                Some(next) => {
+                    if !next.starts_with(&prefix)
+                        || cursor
+                            .as_deref()
+                            .is_some_and(|previous| next.as_str() <= previous)
+                    {
+                        return Err(CandidateError::Soul(SoulError::Backend(
+                            "memory backend returned a non-advancing candidate cursor".to_string(),
+                        )));
+                    }
+                    cursor = Some(next);
+                }
+                None => break,
             }
         }
         candidates.sort_by(|a, b| a.candidate_id.cmp(&b.candidate_id));
@@ -1124,6 +1166,102 @@ mod tests {
         assert_eq!(
             a_row.recurrence.supporting_observations, 1,
             "A's counts must not move from B's intake"
+        );
+        drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn candidate_listing_is_complete_across_pages_and_large_distractor_sets() {
+        let (tmp, backend) = fresh_backend();
+        let (registry, _soul, candidates) = services(&backend);
+        let owner = identity_for(&backend, "candidate-owner").await;
+        let sibling = identity_for(&backend, "candidate-sibling").await;
+        registry.admit(&owner, "local bootstrap").unwrap();
+        registry.admit(&sibling, "local bootstrap").unwrap();
+        let prefix = SoulCandidateService::candidate_key(&owner, "");
+        let now = "2026-09-20T00:00:00+00:00";
+
+        {
+            let conn = backend.connection().lock();
+            let tx = conn.unchecked_transaction().unwrap();
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO memories \
+                     (id, key, content, category, created_at, updated_at, namespace, agent_id) \
+                     VALUES (?1, ?2, ?3, 'soul', ?4, ?4, ?5, ?6)",
+                )
+                .unwrap();
+
+            // These rows are valid JSON so an accidentally admitted row is
+            // observable as a wrong candidate, not masked by a decode error.
+            for index in 0..1001 {
+                let candidate = SoulCandidate::from_intake(&intake(
+                    &format!("distractor-{index:04}"),
+                    &format!("distractor-evidence-{index:04}"),
+                ));
+                let encoded = serde_json::to_string(&candidate).unwrap();
+                insert
+                    .execute(rusqlite::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        format!("soul::{}::ordinary::{index:04}", owner.as_str()),
+                        encoded,
+                        now,
+                        crate::soul::SOUL_NAMESPACE,
+                        owner.as_str(),
+                    ])
+                    .unwrap();
+                insert
+                    .execute(rusqlite::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        format!("{prefix}sibling-{index:04}"),
+                        serde_json::to_string(&candidate).unwrap(),
+                        now,
+                        crate::soul::SOUL_NAMESPACE,
+                        sibling.as_str(),
+                    ])
+                    .unwrap();
+                insert
+                    .execute(rusqlite::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        format!("{prefix}ambient-{index:04}"),
+                        serde_json::to_string(&candidate).unwrap(),
+                        now,
+                        "default",
+                        owner.as_str(),
+                    ])
+                    .unwrap();
+            }
+
+            // 513 forces three backend pages at the production page size.
+            for index in 0..513 {
+                let candidate_id = format!("real-{index:04}");
+                let candidate = SoulCandidate::from_intake(&intake(
+                    &candidate_id,
+                    &format!("real-evidence-{index:04}"),
+                ));
+                insert
+                    .execute(rusqlite::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        SoulCandidateService::candidate_key(&owner, &candidate_id),
+                        serde_json::to_string(&candidate).unwrap(),
+                        now,
+                        crate::soul::SOUL_NAMESPACE,
+                        owner.as_str(),
+                    ])
+                    .unwrap();
+            }
+            drop(insert);
+            tx.commit().unwrap();
+        }
+
+        let listed = candidates.candidates(&owner).await.unwrap();
+        assert_eq!(listed.len(), 513);
+        assert_eq!(listed.first().unwrap().candidate_id, "real-0000");
+        assert_eq!(listed.last().unwrap().candidate_id, "real-0512");
+        assert!(
+            listed
+                .windows(2)
+                .all(|pair| { pair[0].candidate_id < pair[1].candidate_id })
         );
         drop(tmp);
     }

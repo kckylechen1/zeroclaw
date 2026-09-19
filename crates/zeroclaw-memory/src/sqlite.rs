@@ -1,6 +1,6 @@
 use super::embeddings::EmbeddingProvider;
 use super::traits::{
-    ExportFilter, Memory, MemoryCategory, MemoryEntry, MemoryStats, StoreOptions,
+    ExportFilter, Memory, MemoryCategory, MemoryEntry, MemoryPrefixPage, MemoryStats, StoreOptions,
     is_recent_recall_query,
 };
 use super::vector;
@@ -2208,6 +2208,96 @@ impl Memory for SqliteMemory {
             Some(namespace),
         )
         .await
+    }
+
+    async fn list_prefix_page(
+        &self,
+        namespace: &str,
+        agent_id: &str,
+        key_prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<MemoryPrefixPage> {
+        anyhow::ensure!(limit > 0, "prefix page limit must be greater than zero");
+        if let Some(cursor) = cursor {
+            anyhow::ensure!(
+                cursor.starts_with(key_prefix),
+                "prefix page cursor is outside the requested key prefix"
+            );
+        }
+
+        let conn = self.conn.clone();
+        let namespace = namespace.to_string();
+        let agent_id = agent_id.to_string();
+        let key_prefix = key_prefix.to_string();
+        let cursor = cursor.map(str::to_string);
+        let fetch_limit = limit
+            .checked_add(1)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| anyhow::anyhow!("prefix page limit is too large"))?;
+
+        tokio::task::spawn_blocking(move || -> anyhow::Result<MemoryPrefixPage> {
+            let conn = conn.lock();
+            let mut sql =
+                "SELECT m.id, m.key, m.content, m.category, m.created_at, m.session_id, m.namespace, m.importance, m.superseded_by, m.kind, m.pinned, a.alias, m.agent_id, m.tenant_id \
+                 FROM memories m LEFT JOIN agents a ON a.id = m.agent_id \
+                 WHERE m.superseded_by IS NULL \
+                   AND m.namespace = ?1 \
+                   AND m.agent_id = ?2 \
+                   AND substr(m.key, 1, length(?3)) = ?3"
+                    .to_string();
+            if cursor.is_some() {
+                sql.push_str(" AND m.key > ?4 ORDER BY m.key ASC LIMIT ?5");
+            } else {
+                sql.push_str(" ORDER BY m.key ASC LIMIT ?4");
+            }
+
+            let mut stmt = conn.prepare(&sql)?;
+            let map_row = |row: &rusqlite::Row<'_>| {
+                Ok(MemoryEntry {
+                    id: row.get(0)?,
+                    key: row.get(1)?,
+                    content: row.get(2)?,
+                    category: Self::str_to_category(&row.get::<_, String>(3)?),
+                    timestamp: row.get(4)?,
+                    session_id: row.get(5)?,
+                    score: None,
+                    namespace: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "default".into()),
+                    importance: row.get(7)?,
+                    superseded_by: row.get(8)?,
+                    kind: Self::decode_kind(row.get(9)?),
+                    pinned: row.get::<_, i64>(10)? != 0,
+                    tenant_id: row.get(13)?,
+                    agent_alias: row.get(11)?,
+                    agent_id: row.get(12)?,
+                })
+            };
+            let mut entries = if let Some(cursor) = cursor.as_deref() {
+                stmt.query_map(
+                    params![namespace, agent_id, key_prefix, cursor, fetch_limit],
+                    map_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+            } else {
+                stmt.query_map(
+                    params![namespace, agent_id, key_prefix, fetch_limit],
+                    map_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+            };
+
+            let next_cursor = if entries.len() > limit {
+                entries.truncate(limit);
+                entries.last().map(|entry| entry.key.clone())
+            } else {
+                None
+            };
+            Ok(MemoryPrefixPage {
+                entries,
+                next_cursor,
+            })
+        })
+        .await?
     }
 
     async fn store_with_metadata(

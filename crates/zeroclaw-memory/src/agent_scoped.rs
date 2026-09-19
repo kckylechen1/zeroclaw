@@ -1,5 +1,6 @@
 use super::traits::{
-    ExportFilter, Memory, MemoryCategory, MemoryEntry, ProceduralMessage, StoreOptions,
+    ExportFilter, Memory, MemoryCategory, MemoryEntry, MemoryPrefixPage, ProceduralMessage,
+    StoreOptions,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -513,6 +514,23 @@ impl Memory for AgentScopedMemory {
             .filter(|e| e.namespace == namespace)
             .take(limit)
             .collect())
+    }
+
+    async fn list_prefix_page(
+        &self,
+        namespace: &str,
+        agent_id: &str,
+        key_prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<MemoryPrefixPage> {
+        anyhow::ensure!(
+            agent_id == self.agent_id,
+            "AgentScopedMemory refuses exact prefix page for a foreign agent"
+        );
+        self.inner
+            .list_prefix_page(namespace, agent_id, key_prefix, cursor, limit)
+            .await
     }
 
     async fn export(&self, filter: &ExportFilter) -> Result<Vec<MemoryEntry>> {
