@@ -631,7 +631,9 @@ fn validate_disposition(disposition: &str, proposed_rule: &str) -> Result<(), Ca
 /// interleave their read-modify-write sequences and silently lose each
 /// other's evidence. Candidate write volume is low (intake events, not
 /// chat traffic) — cross-instance correctness beats per-instance
-/// latency. Reads (`get`/`candidates`) stay lock-free.
+/// latency. Point reads (`get`) stay lock-free; `candidates` takes this
+/// lock while walking pages to keep its view stable against candidate
+/// updates in this process.
 static CANDIDATE_WRITE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -657,8 +659,11 @@ impl SoulCandidateService {
     /// Construct the candidate service over one memory backend.
     /// Refuses backends that cannot round-trip raw-key JSON rows: the
     /// markdown backend synthesizes keys and wraps rows in scaffolding,
-    /// so candidate JSON written through it corrupts on read. The
-    /// sqlite-family and tachi backends are supported.
+    /// so candidate JSON written through it corrupts on read. Other
+    /// backends may be constructed, but complete listing additionally
+    /// requires exact-prefix pagination. Tachi currently uses the
+    /// trait's default refusal for that operation, so `candidates`
+    /// fails closed instead of returning an incomplete result.
     pub fn new(
         registry: Arc<IdentityRegistry>,
         backend: Arc<dyn Memory>,
