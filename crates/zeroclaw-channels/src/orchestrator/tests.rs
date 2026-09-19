@@ -17481,9 +17481,56 @@ async fn unowned_channel_drop_replays_through_valid_router_with_same_inbox() {
     assert_eq!(sent.lock().await.as_slice(), &["alice:ok".to_string()]);
 }
 
+#[tokio::test]
+async fn handled_stop_receipt_is_completed_durably() {
+    use super::inbox::Admission;
+
+    let seen_dir = tempfile::tempdir().unwrap();
+    let inbox = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
+    let sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let channel = Arc::new(StaticNameRecordingChannel {
+        name: "test-channel",
+        sent_messages: sent,
+    });
+    let provider = Arc::new(ModelCaptureModelProvider::default());
+    let mut config = zeroclaw_config::schema::Config::default();
+    config.channels.debounce_ms = 0;
+    let ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
+        channel,
+        provider.clone(),
+        config,
+        zeroclaw_config::schema::AliasedAgentConfig::default(),
+        "test-provider",
+        None,
+    );
+
+    dispatch_messages_through_router(
+        Some(Arc::clone(&inbox)),
+        AgentRouter::single(ctx),
+        "test-channel",
+        &[("handled-stop", "/stop")],
+    )
+    .await;
+
+    assert_eq!(provider.call_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        inbox.admit("test-channel", "handled-stop").unwrap(),
+        Admission::DuplicateCompleted,
+        "a handled stop must leave neither a live claim nor a received row"
+    );
+    drop(inbox);
+
+    let reopened = MessageInbox::open(seen_dir.path()).unwrap();
+    assert_eq!(
+        reopened.admit("test-channel", "handled-stop").unwrap(),
+        Admission::DuplicateCompleted,
+        "handled stop completion must survive a restart"
+    );
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn unowned_stop_replay_does_not_cancel_new_turn_with_same_inbox() {
+async fn unowned_and_handled_stop_replays_do_not_cancel_new_turn_with_same_inbox() {
     // This fixture emits unowned-channel warnings into the global log hook.
     let _writer_guard = zeroclaw_log::__private_test_writer_lock();
     let _hook_guard = zeroclaw_log::__private_test_hook_lock();
@@ -17566,6 +17613,31 @@ async fn unowned_stop_replay_does_not_cancel_new_turn_with_same_inbox() {
     });
     let mut config = zeroclaw_config::schema::Config::default();
     config.channels.debounce_ms = 0;
+    let settled_stop_sent = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let settled_stop_channel = Arc::new(StaticNameRecordingChannel {
+        name: "test-channel",
+        sent_messages: settled_stop_sent,
+    });
+    let settled_stop_ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
+        settled_stop_channel,
+        provider.clone(),
+        config.clone(),
+        zeroclaw_config::schema::AliasedAgentConfig::default(),
+        "test-provider",
+        None,
+    );
+    dispatch_messages_through_router(
+        Some(Arc::clone(&inbox)),
+        AgentRouter::single(settled_stop_ctx),
+        "test-channel",
+        &[("handled-stop", "/stop")],
+    )
+    .await;
+    assert_eq!(
+        inbox.admit("test-channel", "handled-stop").unwrap(),
+        Admission::DuplicateCompleted,
+        "a handled stop must be settled before its duplicate can reach control handling"
+    );
     let ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
         channel,
         provider.clone(),
@@ -17598,8 +17670,13 @@ async fn unowned_stop_replay_does_not_cancel_new_turn_with_same_inbox() {
     tx.send(message("old-stop", "alice", "/stop"))
         .await
         .unwrap();
+    tx.send(message("handled-stop", "alice", "/stop"))
+        .await
+        .unwrap();
     // FIFO dispatch of a different sender proves the replay was considered
-    // while Alice's new turn was still held inside its provider call.
+    // while Alice's new turn was still held inside its provider call. The
+    // unowned stop is protected by its live claim; the handled stop is
+    // protected by durable completion.
     tx.send(message("dispatch-fence", "bob", "hello"))
         .await
         .unwrap();
@@ -17628,6 +17705,10 @@ async fn unowned_stop_replay_does_not_cancel_new_turn_with_same_inbox() {
     assert_eq!(
         inbox.admit("test-channel", "old-stop").unwrap(),
         Admission::DuplicateInFlight
+    );
+    assert_eq!(
+        inbox.admit("test-channel", "handled-stop").unwrap(),
+        Admission::DuplicateCompleted
     );
 }
 
