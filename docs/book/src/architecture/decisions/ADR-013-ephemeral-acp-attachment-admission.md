@@ -2,7 +2,7 @@
 id: ADR-013
 title: Keep ephemeral ACP sessions free of WorkClaims until public admission is complete
 date: 2026-09-20
-status: proposed
+status: accepted
 relates-to:
   - docs/book/src/architecture/background-work-lifecycle.md
   - https://github.com/kckylechen1/zeroclaw/issues/266
@@ -14,9 +14,10 @@ relates-to:
 
 ## Status
 
-The owner selected the direction in this record on 2026-09-20. The ADR remains
-proposed until an independent reviewer accepts this exact documentation head.
-It records a disabled boundary, not production activation.
+The owner selected the direction in this record on 2026-09-20, and independent
+review of the exact documentation head is complete. The ADR is accepted. It
+records a disabled boundary, not production activation, and does not complete
+issue #270.
 
 ## Context
 
