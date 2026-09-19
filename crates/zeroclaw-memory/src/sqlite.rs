@@ -2234,7 +2234,19 @@ impl Memory for SqliteMemory {
         let fetch_limit = limit
             .checked_add(1)
             .and_then(|value| i64::try_from(value).ok())
-            .ok_or_else(|| anyhow::anyhow!("prefix page limit is too large"))?;
+            .ok_or_else(|| {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "error_key": "memory.prefix_page_limit_too_large",
+                            "limit": limit,
+                        })),
+                    "prefix page limit is too large"
+                );
+                anyhow::Error::msg("prefix page limit is too large")
+            })?;
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<MemoryPrefixPage> {
             let conn = conn.lock();

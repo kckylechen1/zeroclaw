@@ -3421,7 +3421,7 @@ async fn prefix_pages_apply_namespace_agent_and_key_before_the_limit() {
                 assert!(
                     cursor
                         .as_deref()
-                        .map_or(true, |previous| next.as_str() > previous)
+                        .is_none_or(|previous| next.as_str() > previous)
                 );
                 cursor = Some(next);
             }
