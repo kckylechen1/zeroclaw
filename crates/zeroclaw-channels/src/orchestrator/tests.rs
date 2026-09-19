@@ -7391,17 +7391,41 @@ async fn message_dispatch_does_not_dedup_session_counter_channels() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn message_dispatch_completes_every_id_in_a_debounced_turn() {
     let seen_dir = tempfile::tempdir().unwrap();
     let store = Arc::new(MessageInbox::open(seen_dir.path()).unwrap());
-    let replies = deliver_messages_through_loop(
+    let probe = Arc::new(DispatchLoopTestProbe::for_message_ids([
+        "rapid-1", "rapid-2",
+    ]));
+    let messages = [("rapid-1", "first"), ("rapid-2", "second")];
+    let replies = deliver_messages_through_loop_with_probe(
         Some(Arc::clone(&store)),
         "test-channel",
-        &[("rapid-1", "first"), ("rapid-2", "second")],
+        &messages,
         10,
-    )
-    .await;
+        Some(Arc::clone(&probe)),
+    );
+    tokio::pin!(replies);
+
+    // Inbox admission runs on the blocking pool. Keep virtual time frozen
+    // while both prequeued messages cross that boundary and reset the same
+    // debounce timer, then advance exactly one configured window.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while probe.debounce_submission_count() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "both queued messages must reach the debouncer"
+        );
+        tokio::select! {
+            early_replies = &mut replies => {
+                panic!("dispatch loop completed before both debounce submissions: {early_replies}");
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+    }
+    tokio::time::advance(Duration::from_millis(10)).await;
+    let replies = replies.await;
 
     assert_eq!(
         replies, 1,
@@ -7437,6 +7461,17 @@ async fn deliver_messages_through_loop(
     channel_name: &'static str,
     messages: &[(&str, &str)],
     debounce_ms: u64,
+) -> usize {
+    deliver_messages_through_loop_with_probe(seen_ids, channel_name, messages, debounce_ms, None)
+        .await
+}
+
+async fn deliver_messages_through_loop_with_probe(
+    seen_ids: Option<Arc<MessageInbox>>,
+    channel_name: &'static str,
+    messages: &[(&str, &str)],
+    debounce_ms: u64,
+    probe: Option<Arc<DispatchLoopTestProbe>>,
 ) -> usize {
     let sent_messages = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
     let channel: Arc<dyn Channel> = Arc::new(StaticNameRecordingChannel {
@@ -7551,7 +7586,21 @@ async fn deliver_messages_through_loop(
     }
     drop(tx);
 
-    run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 2, seen_ids).await;
+    match probe {
+        Some(probe) => {
+            run_message_dispatch_loop_with_probe(
+                rx,
+                AgentRouter::single(runtime_ctx),
+                2,
+                seen_ids,
+                probe,
+            )
+            .await;
+        }
+        None => {
+            run_message_dispatch_loop(rx, AgentRouter::single(runtime_ctx), 2, seen_ids).await;
+        }
+    }
 
     let sent = sent_messages.lock().await;
     sent.len()

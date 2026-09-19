@@ -288,4 +288,4 @@ image = { version = "0.25", default-features = false, features = [
 tempfile = "3.26"
 toml = "1.0"
 wiremock = "0.6"
-tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "test-util"] }

@@ -3112,11 +3112,70 @@ impl Default for UnownedChannelWarnGate {
     }
 }
 
+// Per-dispatch-loop synchronization for deterministic timing tests. Keeping
+// the probe on one loop prevents parallel tests from sharing state.
+#[cfg(all(test, feature = "heavy-tests"))]
+struct DispatchLoopTestProbe {
+    message_ids: HashSet<String>,
+    debounce_submissions: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(all(test, feature = "heavy-tests"))]
+impl DispatchLoopTestProbe {
+    fn for_message_ids(message_ids: impl IntoIterator<Item = &'static str>) -> Self {
+        Self {
+            message_ids: message_ids.into_iter().map(str::to_owned).collect(),
+            debounce_submissions: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn record_debounce_submission(&self, message_id: &str) {
+        if self.message_ids.contains(message_id) {
+            self.debounce_submissions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn debounce_submission_count(&self) -> usize {
+        self.debounce_submissions
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 async fn run_message_dispatch_loop(
+    rx: tokio::sync::mpsc::Receiver<zeroclaw_api::channel::ChannelMessage>,
+    router: AgentRouter,
+    max_in_flight_messages: usize,
+    inbox: Option<std::sync::Arc<MessageInbox>>,
+) {
+    run_message_dispatch_loop_inner(
+        rx,
+        router,
+        max_in_flight_messages,
+        inbox,
+        #[cfg(all(test, feature = "heavy-tests"))]
+        None,
+    )
+    .await;
+}
+
+#[cfg(all(test, feature = "heavy-tests"))]
+async fn run_message_dispatch_loop_with_probe(
+    rx: tokio::sync::mpsc::Receiver<zeroclaw_api::channel::ChannelMessage>,
+    router: AgentRouter,
+    max_in_flight_messages: usize,
+    inbox: Option<std::sync::Arc<MessageInbox>>,
+    probe: Arc<DispatchLoopTestProbe>,
+) {
+    run_message_dispatch_loop_inner(rx, router, max_in_flight_messages, inbox, Some(probe)).await;
+}
+
+async fn run_message_dispatch_loop_inner(
     mut rx: tokio::sync::mpsc::Receiver<zeroclaw_api::channel::ChannelMessage>,
     router: AgentRouter,
     max_in_flight_messages: usize,
     inbox: Option<std::sync::Arc<MessageInbox>>,
+    #[cfg(all(test, feature = "heavy-tests"))] probe: Option<Arc<DispatchLoopTestProbe>>,
 ) {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_in_flight_messages));
     let mut workers = tokio::task::JoinSet::new();
@@ -3275,11 +3334,17 @@ async fn run_message_dispatch_loop(
                 &ctx.prompt_config.channels.telegram,
             );
 
-            match ctx
+            let debounce_result = ctx
                 .debouncer
                 .debounce_with_window(&debounce_key, &msg.content, inbox_receipt, debounce_window)
-                .await
-            {
+                .await;
+
+            #[cfg(all(test, feature = "heavy-tests"))]
+            if let Some(probe) = &probe {
+                probe.record_debounce_submission(&msg.id);
+            }
+
+            match debounce_result {
                 zeroclaw_infra::debounce::DebounceResult::Pending(rx) => {
                     // Spawn a lightweight task that waits for the debounce window
                     // to expire, then feeds the combined message through the normal
