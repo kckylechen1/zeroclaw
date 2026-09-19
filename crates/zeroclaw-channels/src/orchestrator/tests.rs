@@ -17633,10 +17633,12 @@ async fn unowned_stop_replay_does_not_cancel_new_turn_with_same_inbox() {
 
 #[tokio::test]
 async fn user_model_current_time_and_session_scope_reach_actual_provider_prompt() {
-    use zeroclaw_memory::companion::{UserModelKind, UserModelStore};
+    use zeroclaw_api::user_model::UserModelKind;
+    use zeroclaw_memory::companion::{LegacySqliteBackend, UserModelService};
 
     let private = TempDir::new().unwrap();
-    let store = Arc::new(UserModelStore::open(private.path()).unwrap());
+    let store: Arc<dyn UserModelService> =
+        Arc::new(LegacySqliteBackend::open(private.path()).unwrap());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -17736,5 +17738,191 @@ async fn user_model_current_time_and_session_scope_reach_actual_provider_prompt(
         assert_eq!(system.contains("CLOCK_SESSION_A_MARKER"), index == 0);
         assert_eq!(system.contains("CLOCK_SESSION_B_MARKER"), index == 1);
         assert!(!system.contains("CLOCK_FUTURE_START_MARKER"));
+    }
+}
+
+#[derive(Default)]
+struct UnavailableUserModelService {
+    applicable_calls: AtomicUsize,
+}
+
+impl zeroclaw_memory::companion::UserModelService for UnavailableUserModelService {
+    fn record_owner_statement(
+        &self,
+        _kind: zeroclaw_api::user_model::UserModelKind,
+        _statement: &str,
+        _semantic_key: &str,
+        _scope: &str,
+        _now_unix: u64,
+    ) -> Result<zeroclaw_api::user_model::UserModelRevision, zeroclaw_api::user_model::UserModelError>
+    {
+        Err(zeroclaw_api::user_model::UserModelError::Unavailable(
+            "injected fake".into(),
+        ))
+    }
+
+    fn record_observation(
+        &self,
+        _kind: zeroclaw_api::user_model::UserModelKind,
+        _statement: &str,
+        _semantic_key: &str,
+        _evidence: &str,
+        _now_unix: u64,
+    ) -> Result<
+        zeroclaw_api::user_model::UserModelCandidate,
+        zeroclaw_api::user_model::UserModelError,
+    > {
+        Err(zeroclaw_api::user_model::UserModelError::Unavailable(
+            "injected fake".into(),
+        ))
+    }
+
+    fn review_candidate(
+        &self,
+        _candidate_id: &str,
+        _action: zeroclaw_api::user_model::ReviewAction,
+        _reviewer: &str,
+        _note: Option<&str>,
+        _narrowed_scope: Option<&str>,
+        _now_unix: u64,
+    ) -> Result<
+        zeroclaw_api::user_model::UserModelReviewReceipt,
+        zeroclaw_api::user_model::UserModelError,
+    > {
+        Err(zeroclaw_api::user_model::UserModelError::Unavailable(
+            "injected fake".into(),
+        ))
+    }
+
+    fn query_candidates(
+        &self,
+    ) -> Result<
+        Vec<zeroclaw_api::user_model::UserModelCandidate>,
+        zeroclaw_api::user_model::UserModelError,
+    > {
+        Err(zeroclaw_api::user_model::UserModelError::Unavailable(
+            "injected fake".into(),
+        ))
+    }
+
+    fn query_pending_review(
+        &self,
+    ) -> Result<
+        Vec<zeroclaw_api::user_model::UserModelCandidate>,
+        zeroclaw_api::user_model::UserModelError,
+    > {
+        Err(zeroclaw_api::user_model::UserModelError::Unavailable(
+            "injected fake".into(),
+        ))
+    }
+
+    fn query_candidate_history(
+        &self,
+        _candidate_id: &str,
+    ) -> Result<
+        zeroclaw_api::user_model::UserModelCandidateHistory,
+        zeroclaw_api::user_model::UserModelError,
+    > {
+        Err(zeroclaw_api::user_model::UserModelError::Unavailable(
+            "injected fake".into(),
+        ))
+    }
+
+    fn query_active_heads(
+        &self,
+        _as_of_unix: Option<u64>,
+    ) -> Result<
+        Vec<zeroclaw_api::user_model::UserModelRevision>,
+        zeroclaw_api::user_model::UserModelError,
+    > {
+        Err(zeroclaw_api::user_model::UserModelError::Unavailable(
+            "injected fake".into(),
+        ))
+    }
+
+    fn query_applicable_heads(
+        &self,
+        _context: &zeroclaw_api::user_model::UserModelQueryContext,
+        _as_of_unix: Option<u64>,
+    ) -> Result<
+        Vec<zeroclaw_api::user_model::UserModelRevision>,
+        zeroclaw_api::user_model::UserModelError,
+    > {
+        self.applicable_calls.fetch_add(1, Ordering::SeqCst);
+        Err(zeroclaw_api::user_model::UserModelError::Unavailable(
+            "injected fake".into(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn unavailable_user_model_preserves_task_overlay_without_fallback_open() {
+    let private = TempDir::new().unwrap();
+    let channel_impl = Arc::new(RecordingChannel::default());
+    let channel: Arc<dyn Channel> = channel_impl.clone();
+    let message = zeroclaw_api::channel::ChannelMessage {
+        id: "user-model-unavailable".into(),
+        sender: "private-session".into(),
+        reply_target: "private-session".into(),
+        content: "Please respond briefly.".into(),
+        channel: channel.name().into(),
+        timestamp: 1,
+        ..Default::default()
+    };
+    let session_key = conversation_history_key(&message);
+    let provider_impl = Arc::new(HistoryCaptureModelProvider::default());
+    let config = Config {
+        config_path: private.path().join("absent-config.toml"),
+        data_dir: private.path().to_path_buf(),
+        ..Config::default()
+    };
+    let mut ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
+        channel,
+        provider_impl.clone(),
+        config,
+        zeroclaw_config::schema::AliasedAgentConfig::default(),
+        "test-provider",
+        None,
+    );
+    let fake = Arc::new(UnavailableUserModelService::default());
+    let mutable = Arc::get_mut(&mut ctx).unwrap();
+    mutable.user_model = Some(fake.clone());
+    mutable.task_prefs.set(
+        &session_key,
+        "preference",
+        "model.choice",
+        "TASK_OVERLAY_SURVIVES_MARKER",
+    );
+    mutable.workspace_dir = Arc::new(private.path().to_path_buf());
+
+    assert!(process_channel_message(ctx, message, CancellationToken::new()).await);
+    let calls = provider_impl
+        .calls
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(calls.len(), 1);
+    assert_eq!(fake.applicable_calls.load(Ordering::SeqCst), 1);
+    let system_prompt = &calls[0][0].1;
+    assert!(system_prompt.contains("TASK_OVERLAY_SURVIVES_MARKER"));
+    assert!(!system_prompt.contains("## Owner profile (authoritative)"));
+    assert!(
+        !private.path().join("user_model.db").exists(),
+        "an injected service failure must not open a fallback database"
+    );
+}
+
+#[test]
+fn channel_user_model_path_has_no_legacy_persistence_knowledge() {
+    for (name, source) in [
+        ("orchestrator", include_str!("mod.rs")),
+        ("start_channels", include_str!("start_channels.rs")),
+        ("process_message", include_str!("process_message.rs")),
+    ] {
+        for forbidden in ["UserModelStore", "user_model.db", "rusqlite::Connection"] {
+            assert!(
+                !source.contains(forbidden),
+                "{name} reintroduced {forbidden}"
+            );
+        }
     }
 }

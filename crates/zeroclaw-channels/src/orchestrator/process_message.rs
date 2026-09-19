@@ -489,23 +489,21 @@ async fn process_channel_message_body(
     // Model store is unavailable or fails to open.
     let durable_section = match ctx.user_model().cloned() {
         Some(user_model) => {
-            let heads = tokio::task::spawn_blocking(move || user_model.active_heads(None))
-                .await
-                .ok()
-                .and_then(Result::ok);
+            let query_context = zeroclaw_api::user_model::UserModelQueryContext::new(
+                ctx.agent_alias.as_str(),
+                &channel_composite,
+                &history_key,
+            );
+            let heads = tokio::task::spawn_blocking(move || {
+                user_model.query_applicable_heads(&query_context, None)
+            })
+            .await
+            .ok()
+            .and_then(Result::ok);
             match heads {
                 Some(heads) => {
-                    let applicability = zeroclaw_memory::companion::ApplicabilityContext::new(
-                        ctx.agent_alias.as_str(),
-                        &channel_composite,
-                        &history_key,
-                    );
-                    let applicable: Vec<_> = heads
-                        .into_iter()
-                        .filter(|revision| applicability.applies_str(&revision.scope))
-                        .collect();
                     zeroclaw_memory::companion::project_active_heads(
-                        &applicable,
+                        &heads,
                         zeroclaw_memory::companion::USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS,
                     )
                     .prompt_section

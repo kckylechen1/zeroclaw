@@ -34,11 +34,25 @@ pub use outbox::{
     probe_companion_outbox_health,
 };
 pub use user_model::{
-    AuthorityClass, ReviewAction, USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS, UserModelCandidate,
-    UserModelKind, UserModelReviewReceipt, UserModelRevision, UserModelStateProjection,
-    UserModelStore, is_candidate_already_reviewed, project_active_heads,
+    AuthorityClass, LegacySqliteBackend, ReviewAction, USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS,
+    UserModelCandidate, UserModelCandidateHistory, UserModelError, UserModelKind,
+    UserModelQueryContext, UserModelReviewReceipt, UserModelRevision, UserModelService,
+    UserModelStateProjection, UserModelStore, is_candidate_already_reviewed, project_active_heads,
 };
 pub use user_model_scope::{ApplicabilityContext, Scope};
+
+/// Select and open the one User Model backend for a runtime generation.
+///
+/// # Errors
+/// Returns [`UserModelError::Unavailable`] when the transitional SQLite
+/// backend cannot be opened. Callers may then keep unrelated turn state live
+/// while honestly degrading User Model reads and writes.
+pub fn create_user_model_service(
+    data_dir: &std::path::Path,
+) -> Result<Arc<dyn UserModelService>, UserModelError> {
+    LegacySqliteBackend::open(data_dir)
+        .map(|backend| Arc::new(backend) as Arc<dyn UserModelService>)
+}
 
 /// Construct the companion store from config.
 ///

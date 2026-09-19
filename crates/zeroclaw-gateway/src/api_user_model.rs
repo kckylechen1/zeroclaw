@@ -3,39 +3,19 @@
 //! authoring is owner authority, exactly the surface the store's rules
 //! exist to govern.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use parking_lot::Mutex;
-use zeroclaw_memory::companion::{
-    ReviewAction, UserModelKind, UserModelReviewReceipt, UserModelRevision, UserModelStore,
-    is_candidate_already_reviewed,
+use zeroclaw_api::user_model::{
+    ReviewAction, UserModelError, UserModelKind, UserModelReviewReceipt, UserModelRevision,
 };
+use zeroclaw_memory::companion::UserModelService;
 
 use crate::AppState;
-
-/// One open store handle per data_dir. The sqlite file is the source of
-/// truth; these are views (WAL + busy_timeout support multi-connection).
-fn store_handles() -> &'static Mutex<HashMap<PathBuf, Arc<UserModelStore>>> {
-    static HANDLES: OnceLock<Mutex<HashMap<PathBuf, Arc<UserModelStore>>>> = OnceLock::new();
-    HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn cached_store(data_dir: &PathBuf) -> Result<Arc<UserModelStore>, String> {
-    let mut handles = store_handles().lock();
-    if let Some(store) = handles.get(data_dir) {
-        return Ok(Arc::clone(store));
-    }
-    let store = Arc::new(UserModelStore::open(data_dir).map_err(|err| err.to_string())?);
-    handles.insert(data_dir.clone(), Arc::clone(&store));
-    Ok(store)
-}
 
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -48,8 +28,28 @@ fn error_json(status: StatusCode, message: &str) -> Response {
     (status, axum::Json(serde_json::json!({ "error": message }))).into_response()
 }
 
-fn data_dir_of(state: &AppState) -> PathBuf {
-    state.config.read().data_dir.clone()
+fn service_of(state: &AppState) -> Result<Arc<dyn UserModelService>, UserModelError> {
+    state
+        .user_model
+        .clone()
+        .ok_or_else(|| UserModelError::Unavailable("service did not initialize".to_string()))
+}
+
+fn service_error(error: UserModelError) -> Response {
+    match error {
+        UserModelError::DomainNotFound { .. } => {
+            error_json(StatusCode::NOT_FOUND, "unknown candidate id")
+        }
+        UserModelError::CandidateAlreadyReviewed => (
+            StatusCode::CONFLICT,
+            axum::Json(serde_json::json!({
+                "code": "candidate_already_reviewed",
+                "error": "candidate already reviewed",
+            })),
+        )
+            .into_response(),
+        other => error_json(StatusCode::SERVICE_UNAVAILABLE, &other.to_string()),
+    }
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -73,15 +73,16 @@ pub async fn list_candidates(
         Ok(query) => query.0,
         Err(error) => return error_json(StatusCode::BAD_REQUEST, &error.to_string()),
     };
-    let data_dir = data_dir_of(&state);
+    let service = match service_of(&state) {
+        Ok(service) => service,
+        Err(error) => return service_error(error),
+    };
     let result = tokio::task::spawn_blocking(move || {
-        let store = cached_store(&data_dir)?;
         if query.pending {
-            store.list_pending_candidates()
+            service.query_pending_review()
         } else {
-            store.list_candidates()
+            service.query_candidates()
         }
-        .map_err(|err| err.to_string())
     })
     .await;
     match result {
@@ -90,8 +91,8 @@ pub async fn list_candidates(
             axum::Json(serde_json::json!({ "candidates": candidates })),
         )
             .into_response(),
-        Ok(Err(err)) => error_json(StatusCode::SERVICE_UNAVAILABLE, &err),
-        Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "store task failed"),
+        Ok(Err(error)) => service_error(error),
+        Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "service task failed"),
     }
 }
 
@@ -128,31 +129,28 @@ pub async fn candidate_history(
     if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
         return err;
     }
-    let data_dir = data_dir_of(&state);
-    let result = tokio::task::spawn_blocking(move || {
-        let store = cached_store(&data_dir)?;
-        store
-            .candidate_history(&candidate_id)
-            .map_err(|err| err.to_string())
-    })
-    .await;
+    let service = match service_of(&state) {
+        Ok(service) => service,
+        Err(error) => return service_error(error),
+    };
+    let result =
+        tokio::task::spawn_blocking(move || service.query_candidate_history(&candidate_id)).await;
     match result {
-        Ok(Ok(Some((candidate, review_receipts)))) => {
+        Ok(Ok(history)) => {
             let review_state =
-                CandidateReviewState::from(review_receipts.last().map(|receipt| receipt.action));
+                CandidateReviewState::from(history.review_receipts.last().map(|r| r.action));
             (
                 StatusCode::OK,
                 axum::Json(serde_json::json!({
-                    "candidate": candidate,
+                    "candidate": history.candidate,
                     "review_state": review_state,
-                    "review_receipts": review_receipts,
+                    "review_receipts": history.review_receipts,
                 })),
             )
                 .into_response()
         }
-        Ok(Ok(None)) => error_json(StatusCode::NOT_FOUND, "unknown candidate id"),
-        Ok(Err(err)) => error_json(StatusCode::SERVICE_UNAVAILABLE, &err),
-        Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "store task failed"),
+        Ok(Err(error)) => service_error(error),
+        Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "service task failed"),
     }
 }
 
@@ -165,20 +163,19 @@ pub async fn list_heads(
     if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
         return err;
     }
-    let data_dir = data_dir_of(&state);
-    let result = tokio::task::spawn_blocking(move || {
-        let store = cached_store(&data_dir)?;
-        store.active_heads(None).map_err(|err| err.to_string())
-    })
-    .await;
+    let service = match service_of(&state) {
+        Ok(service) => service,
+        Err(error) => return service_error(error),
+    };
+    let result = tokio::task::spawn_blocking(move || service.query_active_heads(None)).await;
     match result {
         Ok(Ok(heads)) => (
             StatusCode::OK,
             axum::Json(serde_json::json!({ "heads": heads })),
         )
             .into_response(),
-        Ok(Err(err)) => error_json(StatusCode::SERVICE_UNAVAILABLE, &err),
-        Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "store task failed"),
+        Ok(Err(error)) => service_error(error),
+        Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "service task failed"),
     }
 }
 
@@ -187,11 +184,6 @@ struct ReviewBody {
     action: String,
     note: Option<String>,
     narrowed_scope: Option<String>,
-}
-
-enum ReviewStoreError {
-    Open(String),
-    Review(rusqlite::Error),
 }
 
 /// POST /api/user-model/candidates/{id}/review — explicit owner action on
@@ -228,42 +220,28 @@ pub async fn review_candidate(
             "narrow requires a non-empty narrowed_scope",
         );
     }
-    let data_dir = data_dir_of(&state);
+    let service = match service_of(&state) {
+        Ok(service) => service,
+        Err(error) => return service_error(error),
+    };
     let candidate = candidate_id.clone();
     let note = body.note.clone();
     let narrowed = body.narrowed_scope.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let store = cached_store(&data_dir).map_err(ReviewStoreError::Open)?;
-        store
-            .review_candidate(
-                &candidate,
-                action,
-                "operator",
-                note.as_deref(),
-                narrowed.as_deref(),
-                now_unix(),
-            )
-            .map_err(ReviewStoreError::Review)
+        service.review_candidate(
+            &candidate,
+            action,
+            "operator",
+            note.as_deref(),
+            narrowed.as_deref(),
+            now_unix(),
+        )
     })
     .await;
     match result {
         Ok(Ok(receipt)) => review_response(action, &receipt),
-        Ok(Err(ReviewStoreError::Review(rusqlite::Error::QueryReturnedNoRows))) => {
-            error_json(StatusCode::NOT_FOUND, "unknown candidate id")
-        }
-        Ok(Err(ReviewStoreError::Review(ref error))) if is_candidate_already_reviewed(error) => (
-            StatusCode::CONFLICT,
-            axum::Json(serde_json::json!({
-                "code": "candidate_already_reviewed",
-                "error": "candidate already reviewed",
-            })),
-        )
-            .into_response(),
-        Ok(Err(ReviewStoreError::Review(err))) => {
-            error_json(StatusCode::SERVICE_UNAVAILABLE, &err.to_string())
-        }
-        Ok(Err(ReviewStoreError::Open(err))) => error_json(StatusCode::SERVICE_UNAVAILABLE, &err),
-        Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "store task failed"),
+        Ok(Err(error)) => service_error(error),
+        Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "service task failed"),
     }
 }
 
@@ -318,21 +296,21 @@ pub async fn create_statement(
             "statement and semantic_key are required",
         );
     }
-    let data_dir = data_dir_of(&state);
+    let service = match service_of(&state) {
+        Ok(service) => service,
+        Err(error) => return service_error(error),
+    };
     let statement = body.statement;
     let semantic_key = body.semantic_key;
     let scope = body.scope.unwrap_or_else(|| "global".to_string());
     let result = tokio::task::spawn_blocking(move || {
-        let store = cached_store(&data_dir)?;
-        store
-            .record_owner_statement(kind, &statement, &semantic_key, &scope, now_unix())
-            .map_err(|err| err.to_string())
+        service.record_owner_statement(kind, &statement, &semantic_key, &scope, now_unix())
     })
     .await;
     match result {
         Ok(Ok(revision)) => statement_response(&revision),
-        Ok(Err(err)) => error_json(StatusCode::SERVICE_UNAVAILABLE, &err),
-        Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "store task failed"),
+        Ok(Err(error)) => service_error(error),
+        Err(_) => error_json(StatusCode::INTERNAL_SERVER_ERROR, "service task failed"),
     }
 }
 
@@ -349,6 +327,7 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
     use http_body_util::BodyExt;
+    use zeroclaw_memory::companion::UserModelStore;
 
     fn loopback_peer() -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 9))
@@ -374,6 +353,10 @@ mod tests {
         config.nodes.auth_token = Some("secret".into());
         config.data_dir = dir.path().to_path_buf();
         let mut state = crate::api::test_state(config);
+        state.user_model = Some(
+            zeroclaw_memory::create_user_model_service(dir.path())
+                .expect("open injected User Model service"),
+        );
         state.pairing = Arc::new(zeroclaw_runtime::security::pairing::PairingGuard::new(
             true,
             &["op-token".into()],
@@ -391,6 +374,21 @@ mod tests {
 
     fn body<T: serde::Serialize>(value: &T) -> Bytes {
         Bytes::from(serde_json::to_vec(value).unwrap())
+    }
+
+    #[test]
+    fn production_gateway_user_model_api_has_no_legacy_persistence_knowledge() {
+        let source = include_str!("api_user_model.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source prefix");
+        for forbidden in ["UserModelStore", "user_model.db", "rusqlite::Connection"] {
+            assert!(
+                !production.contains(forbidden),
+                "gateway production code reintroduced {forbidden}"
+            );
+        }
     }
 
     async fn history_http(
@@ -602,12 +600,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn candidate_history_authorizes_before_store_and_unknown_is_not_found() {
+    async fn candidate_history_authorizes_before_service_and_unknown_is_not_found() {
         let (dir, state) = state_with_tempdir();
+        let before = review_scope_rows(dir.path());
         let (status, _) = history_http(&state, "absent", anon_headers()).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert!(!dir.path().join("user_model.db").exists());
-        assert!(!store_handles().lock().contains_key(dir.path()));
+        assert_eq!(review_scope_rows(dir.path()), before);
         let (status, detail) = history_http(&state, "absent", operator_headers()).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(detail["error"], "unknown candidate id");
@@ -653,10 +651,9 @@ mod tests {
         );
 
         // An observation candidate shows up for review, never as a head.
-        let seed_dir = state.config.read().data_dir.clone();
+        let service = service_of(&state).expect("injected service");
         tokio::task::spawn_blocking(move || {
-            let store = cached_store(&seed_dir).expect("seed store");
-            store
+            service
                 .record_observation(
                     UserModelKind::Habit,
                     "User keeps reformatting tables manually.",
@@ -773,7 +770,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_narrow_scope_over_http_leaves_no_receipt() {
         let (dir, state) = state_with_tempdir();
-        let store = cached_store(&dir.path().to_path_buf()).unwrap();
+        let store = UserModelStore::open(dir.path()).unwrap();
         let candidate = store
             .record_observation(
                 UserModelKind::Habit,
@@ -839,7 +836,7 @@ mod tests {
     #[tokio::test]
     async fn review_revision_insert_failure_over_http_rolls_back_receipt() {
         let (dir, state) = state_with_tempdir();
-        let store = cached_store(&dir.path().to_path_buf()).unwrap();
+        let store = UserModelStore::open(dir.path()).unwrap();
         let candidate = store
             .record_observation(UserModelKind::Habit, "private", "atomic.http", "[]", 100)
             .unwrap();
@@ -927,7 +924,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(empty["candidates"], serde_json::json!([]));
-        let store = cached_store(&dir.path().to_path_buf()).unwrap();
+        let store = UserModelStore::open(dir.path()).unwrap();
         let c = store
             .record_observation(UserModelKind::Habit, "C", "c", "[]", 100)
             .unwrap();
@@ -1001,8 +998,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_query_rejects_malformed_after_auth_without_store_open() {
+    async fn pending_query_rejects_malformed_after_auth_without_service_call() {
         let (dir, state) = state_with_tempdir();
+        let before = review_scope_rows(dir.path());
         for query in [
             "pending=",
             "pending=0",
@@ -1014,8 +1012,7 @@ mod tests {
             assert_eq!(status, StatusCode::UNAUTHORIZED);
             let (status, _) = pending_http(&state, &uri, operator_headers()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert!(!dir.path().join("user_model.db").exists());
-            assert!(!store_handles().lock().contains_key(dir.path()));
+            assert_eq!(review_scope_rows(dir.path()), before);
         }
     }
 }

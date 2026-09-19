@@ -461,7 +461,7 @@ struct ChannelRuntimeContext {
     companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
     /// Local User Model authority store (#51): owner values/goals/
     /// preferences projected into turn prompts. `None` disables projection.
-    user_model: Option<Arc<zeroclaw_memory::companion::UserModelStore>>,
+    user_model: Option<Arc<dyn zeroclaw_memory::companion::UserModelService>>,
     /// Session-scoped task preferences (#51 slice 4): overrides that
     /// expire with their session and never enter the durable store.
     task_prefs: Arc<TaskPreferenceOverlay>,
@@ -538,7 +538,9 @@ impl ChannelRuntimeContext {
         self.companion_store.as_ref()
     }
 
-    pub(crate) fn user_model(&self) -> Option<&Arc<zeroclaw_memory::companion::UserModelStore>> {
+    pub(crate) fn user_model(
+        &self,
+    ) -> Option<&Arc<dyn zeroclaw_memory::companion::UserModelService>> {
         self.user_model.as_ref()
     }
 

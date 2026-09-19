@@ -14,64 +14,16 @@
 use std::fmt;
 use std::fmt::Write as _;
 
-use super::user_model_scope::Scope;
+use super::user_model_scope::{ApplicabilityContext, Scope};
 use std::path::Path;
 
 use parking_lot::Mutex;
 use rusqlite::Connection;
+pub use zeroclaw_api::user_model::{
+    AuthorityClass, ReviewAction, UserModelCandidate, UserModelCandidateHistory, UserModelError,
+    UserModelKind, UserModelQueryContext, UserModelReviewReceipt, UserModelRevision,
+};
 use zeroclaw_infra::sqlite_perms::harden_sqlite_owner_only;
-
-/// What kind of statement this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UserModelKind {
-    Value,
-    Goal,
-    Preference,
-    Habit,
-    Constraint,
-}
-
-impl UserModelKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Value => "value",
-            Self::Goal => "goal",
-            Self::Preference => "preference",
-            Self::Habit => "habit",
-            Self::Constraint => "constraint",
-        }
-    }
-}
-
-/// How a revision earned authority. Frequency and confidence never appear
-/// here — evidence quality is not authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthorityClass {
-    OwnerAuthored,
-    OwnerRatified,
-}
-
-impl AuthorityClass {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::OwnerAuthored => "owner_authored",
-            Self::OwnerRatified => "owner_ratified",
-        }
-    }
-}
-
-/// The review actions an owner can take on a candidate. Each produces a
-/// distinct append-only history.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewAction {
-    Accept,
-    Reject,
-    Narrow,
-    Supersede,
-}
 
 /// A committed review already decides this candidate. The one supported
 /// follow-up is narrowing a rejected candidate.
@@ -89,60 +41,6 @@ impl std::error::Error for CandidateAlreadyReviewed {}
 /// Classify the store's typed review conflict without matching error text.
 pub fn is_candidate_already_reviewed(error: &rusqlite::Error) -> bool {
     matches!(error, rusqlite::Error::ToSqlConversionFailure(inner) if inner.is::<CandidateAlreadyReviewed>())
-}
-
-impl ReviewAction {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Accept => "accept",
-            Self::Reject => "reject",
-            Self::Narrow => "narrow",
-            Self::Supersede => "supersede",
-        }
-    }
-}
-
-/// An observation awaiting review. Never active on its own, regardless of
-/// how many times it (or its siblings) was observed.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct UserModelCandidate {
-    pub id: String,
-    pub kind: UserModelKind,
-    pub statement: String,
-    pub semantic_key: String,
-    pub scope: String,
-    pub evidence: String,
-    pub created_at_unix: u64,
-}
-
-/// An append-only revision. The active head for a semantic key is derived
-/// at read time (latest applicable revision), so supersession never edits
-/// history.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct UserModelRevision {
-    pub id: String,
-    pub semantic_key: String,
-    pub kind: UserModelKind,
-    pub statement: String,
-    pub scope: String,
-    pub authority: AuthorityClass,
-    pub supersedes: Option<String>,
-    pub valid_from_unix: u64,
-    pub valid_until_unix: Option<u64>,
-    pub source_candidate: Option<String>,
-    pub created_at_unix: u64,
-}
-
-/// Receipt for an explicit review decision. Even a rejection keeps the
-/// candidate and its evidence intact.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct UserModelReviewReceipt {
-    pub id: String,
-    pub candidate_id: String,
-    pub action: ReviewAction,
-    pub reviewer: String,
-    pub note: Option<String>,
-    pub at_unix: u64,
 }
 
 /// Append-only sqlite store for the User Model (`user_model.db` under the
@@ -585,6 +483,188 @@ impl UserModelStore {
     }
 }
 
+/// Canonical domain seam used by channels, gateway APIs, and prompt assembly.
+/// Implementations own persistence access; consumers never open a store or
+/// derive a database path.
+pub trait UserModelService: Send + Sync {
+    fn record_owner_statement(
+        &self,
+        kind: UserModelKind,
+        statement: &str,
+        semantic_key: &str,
+        scope: &str,
+        now_unix: u64,
+    ) -> Result<UserModelRevision, UserModelError>;
+
+    fn record_observation(
+        &self,
+        kind: UserModelKind,
+        statement: &str,
+        semantic_key: &str,
+        evidence: &str,
+        now_unix: u64,
+    ) -> Result<UserModelCandidate, UserModelError>;
+
+    fn review_candidate(
+        &self,
+        candidate_id: &str,
+        action: ReviewAction,
+        reviewer: &str,
+        note: Option<&str>,
+        narrowed_scope: Option<&str>,
+        now_unix: u64,
+    ) -> Result<UserModelReviewReceipt, UserModelError>;
+
+    fn query_candidates(&self) -> Result<Vec<UserModelCandidate>, UserModelError>;
+
+    fn query_pending_review(&self) -> Result<Vec<UserModelCandidate>, UserModelError>;
+
+    fn query_candidate_history(
+        &self,
+        candidate_id: &str,
+    ) -> Result<UserModelCandidateHistory, UserModelError>;
+
+    fn query_active_heads(
+        &self,
+        as_of_unix: Option<u64>,
+    ) -> Result<Vec<UserModelRevision>, UserModelError>;
+
+    fn query_applicable_heads(
+        &self,
+        context: &UserModelQueryContext,
+        as_of_unix: Option<u64>,
+    ) -> Result<Vec<UserModelRevision>, UserModelError>;
+}
+
+/// Transitional adapter over the #174 SQLite store. It introduces no new
+/// tables or lifecycle semantics and is the only production backend in this
+/// delivery.
+pub struct LegacySqliteBackend {
+    store: UserModelStore,
+}
+
+impl LegacySqliteBackend {
+    /// Open the compatibility store for one runtime generation.
+    pub fn open(data_dir: &Path) -> Result<Self, UserModelError> {
+        UserModelStore::open(data_dir)
+            .map(|store| Self { store })
+            .map_err(|error| UserModelError::Unavailable(error.to_string()))
+    }
+}
+
+impl UserModelService for LegacySqliteBackend {
+    fn record_owner_statement(
+        &self,
+        kind: UserModelKind,
+        statement: &str,
+        semantic_key: &str,
+        scope: &str,
+        now_unix: u64,
+    ) -> Result<UserModelRevision, UserModelError> {
+        self.store
+            .record_owner_statement(kind, statement, semantic_key, scope, now_unix)
+            .map_err(|error| UserModelError::Write(error.to_string()))
+    }
+
+    fn record_observation(
+        &self,
+        kind: UserModelKind,
+        statement: &str,
+        semantic_key: &str,
+        evidence: &str,
+        now_unix: u64,
+    ) -> Result<UserModelCandidate, UserModelError> {
+        self.store
+            .record_observation(kind, statement, semantic_key, evidence, now_unix)
+            .map_err(|error| UserModelError::Write(error.to_string()))
+    }
+
+    fn review_candidate(
+        &self,
+        candidate_id: &str,
+        action: ReviewAction,
+        reviewer: &str,
+        note: Option<&str>,
+        narrowed_scope: Option<&str>,
+        now_unix: u64,
+    ) -> Result<UserModelReviewReceipt, UserModelError> {
+        self.store
+            .review_candidate(
+                candidate_id,
+                action,
+                reviewer,
+                note,
+                narrowed_scope,
+                now_unix,
+            )
+            .map_err(|error| {
+                if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                    UserModelError::DomainNotFound {
+                        entity: "candidate id",
+                        id: candidate_id.to_string(),
+                    }
+                } else if is_candidate_already_reviewed(&error) {
+                    UserModelError::CandidateAlreadyReviewed
+                } else {
+                    UserModelError::Write(error.to_string())
+                }
+            })
+    }
+
+    fn query_candidates(&self) -> Result<Vec<UserModelCandidate>, UserModelError> {
+        self.store
+            .list_candidates()
+            .map_err(|error| UserModelError::Read(error.to_string()))
+    }
+
+    fn query_pending_review(&self) -> Result<Vec<UserModelCandidate>, UserModelError> {
+        self.store
+            .list_pending_candidates()
+            .map_err(|error| UserModelError::Read(error.to_string()))
+    }
+
+    fn query_candidate_history(
+        &self,
+        candidate_id: &str,
+    ) -> Result<UserModelCandidateHistory, UserModelError> {
+        self.store
+            .candidate_history(candidate_id)
+            .map_err(|error| UserModelError::Read(error.to_string()))?
+            .map(|(candidate, review_receipts)| UserModelCandidateHistory {
+                candidate,
+                review_receipts,
+            })
+            .ok_or_else(|| UserModelError::DomainNotFound {
+                entity: "candidate id",
+                id: candidate_id.to_string(),
+            })
+    }
+
+    fn query_active_heads(
+        &self,
+        as_of_unix: Option<u64>,
+    ) -> Result<Vec<UserModelRevision>, UserModelError> {
+        self.store
+            .active_heads(as_of_unix)
+            .map_err(|error| UserModelError::Read(error.to_string()))
+    }
+
+    fn query_applicable_heads(
+        &self,
+        context: &UserModelQueryContext,
+        as_of_unix: Option<u64>,
+    ) -> Result<Vec<UserModelRevision>, UserModelError> {
+        let applicability =
+            ApplicabilityContext::new(&context.agent_id, &context.channel_id, &context.session_id);
+        self.query_active_heads(as_of_unix).map(|heads| {
+            heads
+                .into_iter()
+                .filter(|revision| applicability.applies_str(&revision.scope))
+                .collect()
+        })
+    }
+}
+
 /// Default character budget for the projected prompt section. The
 /// projection is bounded so a large active set can never crowd out the
 /// rest of the system prompt.
@@ -706,6 +786,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = UserModelStore::open(dir.path()).unwrap();
         (dir, s)
+    }
+
+    #[test]
+    fn service_boundary_reports_typed_open_write_read_and_not_found_failures() {
+        let blocked = tempfile::tempdir().unwrap();
+        let file_path = blocked.path().join("not-a-directory");
+        std::fs::write(&file_path, b"occupied").unwrap();
+        assert!(matches!(
+            LegacySqliteBackend::open(&file_path),
+            Err(UserModelError::Unavailable(_))
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let service = LegacySqliteBackend::open(dir.path()).unwrap();
+        assert!(matches!(
+            service.record_owner_statement(
+                UserModelKind::Preference,
+                "brief",
+                "response.style",
+                "unsupported:scope",
+                100,
+            ),
+            Err(UserModelError::Write(_))
+        ));
+        assert_eq!(
+            service.query_candidate_history("missing"),
+            Err(UserModelError::DomainNotFound {
+                entity: "candidate id",
+                id: "missing".to_string(),
+            })
+        );
+
+        let fixture = rusqlite::Connection::open(dir.path().join("user_model.db")).unwrap();
+        fixture
+            .execute_batch("DROP TABLE user_model_candidates;")
+            .unwrap();
+        assert!(matches!(
+            service.query_candidates(),
+            Err(UserModelError::Read(_))
+        ));
     }
 
     /// Discrimination 1: an explicit owner statement becomes active

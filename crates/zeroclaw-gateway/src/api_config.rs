@@ -2647,6 +2647,7 @@ mod tests {
                 ),
             ),
             companion_store: None,
+            user_model: None,
             auto_save: false,
             webhook_secret_hash: None,
             pairing: Arc::new(PairingGuard::new(false, &[])),

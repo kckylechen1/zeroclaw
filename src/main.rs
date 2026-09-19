@@ -2588,6 +2588,10 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     zeroclaw_memory::reload_companion_store(companion_store, &current_config)?;
                 let (companion_for_gateway, companion_for_channels) =
                     zeroclaw_memory::clone_for_subsystems(&companion_store);
+                let user_model =
+                    create_user_model_service_for_generation(current_config.data_dir.clone()).await;
+                let user_model_for_gateway = user_model.clone();
+                let user_model_for_channels = user_model;
                 let companion_outbox_observer =
                     spawn_companion_outbox_observer(companion_store.clone());
                 if let Some(store) = companion_store.as_ref() {
@@ -2607,6 +2611,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     move |host, port, config, tx, reload_controls, tui_registry| {
                         let canvas_store = canvas_store_for_gateway.clone();
                         let companion_store = companion_for_gateway.clone();
+                        let user_model = user_model_for_gateway.clone();
                         Box::pin(async move {
                             Box::pin(zeroclaw_gateway::run_gateway(
                                 &host,
@@ -2617,6 +2622,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
                                 tui_registry,
                                 Some(canvas_store),
                                 companion_store,
+                                user_model,
                             ))
                             .await
                         })
@@ -2626,12 +2632,14 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 registry.register_channels(Box::new(move |config, cancel| {
                     let canvas_store = canvas_store_for_channels.clone();
                     let companion_store = companion_for_channels.clone();
+                    let user_model = user_model_for_channels.clone();
                     Box::pin(async move {
                         Box::pin(zeroclaw_channels::orchestrator::start_channels(
                             config,
                             Some(canvas_store),
                             cancel,
                             companion_store,
+                            user_model,
                         ))
                         .await
                     })
@@ -2882,6 +2890,8 @@ async fn async_main(command: clap::Command) -> Result<()> {
 
                 let cancel = tokio_util::sync::CancellationToken::new();
                 let companion_store = zeroclaw_memory::create_companion_store(&config)?;
+                let user_model =
+                    create_user_model_service_for_generation(config.data_dir.clone()).await;
                 let companion_outbox_observer =
                     spawn_companion_outbox_observer(companion_store.clone());
                 let result = Box::pin(channels::start_channels(
@@ -2889,6 +2899,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     None,
                     cancel,
                     companion_store,
+                    user_model,
                 ))
                 .await;
                 if let Some(handle) = companion_outbox_observer {
@@ -3487,6 +3498,36 @@ fn spawn_companion_outbox_observer(
     }))
 }
 
+async fn create_user_model_service_for_generation(
+    data_dir: std::path::PathBuf,
+) -> Option<std::sync::Arc<dyn zeroclaw_memory::companion::UserModelService>> {
+    match tokio::task::spawn_blocking(move || zeroclaw_memory::create_user_model_service(&data_dir))
+        .await
+    {
+        Ok(Ok(service)) => Some(service),
+        Ok(Err(error)) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({ "error": error.to_string() })),
+                "user model service unavailable for this runtime generation"
+            );
+            None
+        }
+        Err(error) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({ "error": error.to_string() })),
+                "user model service initialization task failed for this runtime generation"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(feature = "gateway")]
 async fn run_gateway_if_enabled(
     host: &str,
@@ -3506,6 +3547,7 @@ async fn run_gateway_if_enabled(
     // for canvas_store so the gateway falls back to its own default.
     // Companion store is constructed once here — run_gateway never opens it.
     let companion_store = zeroclaw_memory::create_companion_store(&config)?;
+    let user_model = create_user_model_service_for_generation(config.data_dir.clone()).await;
     let result = Box::pin(gateway::run_gateway(
         host,
         port,
@@ -3515,6 +3557,7 @@ async fn run_gateway_if_enabled(
         None,
         None,
         companion_store,
+        user_model,
     ))
     .await;
     // Self-respawn after the listener is released, if an in-app upgrade

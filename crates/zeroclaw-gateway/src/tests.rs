@@ -283,6 +283,7 @@ fn admin_paircode_state(
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(require_pairing, &[])),
@@ -709,7 +710,7 @@ async fn run_gateway_starts_with_zero_agents() {
     );
 
     let handle = zeroclaw_spawn::spawn!(async move {
-        run_gateway("127.0.0.1", 0, config, None, None, None, None, None).await
+        run_gateway("127.0.0.1", 0, config, None, None, None, None, None, None).await
     });
 
     match tokio::time::timeout(
@@ -765,7 +766,7 @@ async fn run_gateway_starts_with_unresolved_agent_risk_profile() {
     config.agents.insert("fake123".to_string(), agent);
 
     let handle = zeroclaw_spawn::spawn!(async move {
-        run_gateway("127.0.0.1", 0, config, None, None, None, None, None).await
+        run_gateway("127.0.0.1", 0, config, None, None, None, None, None, None).await
     });
 
     match tokio::time::timeout(
@@ -806,7 +807,7 @@ async fn run_gateway_starts_with_mismatched_provider_api_key() {
     );
 
     let handle = zeroclaw_spawn::spawn!(async move {
-        run_gateway("127.0.0.1", 0, config, None, None, None, None, None).await
+        run_gateway("127.0.0.1", 0, config, None, None, None, None, None, None).await
     });
 
     match tokio::time::timeout(
@@ -864,6 +865,7 @@ async fn run_gateway_uses_external_shutdown_sender() {
             None,
             None,
             None,
+            None,
         )
         .await
     });
@@ -909,6 +911,7 @@ async fn metrics_endpoint_returns_hint_when_prometheus_is_disabled() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -999,6 +1002,7 @@ async fn metrics_endpoint_renders_prometheus_output() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -1671,6 +1675,7 @@ async fn webhook_idempotency_skips_duplicate_provider_calls() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -1779,6 +1784,7 @@ async fn webhook_unknown_agent_rejected_before_dispatch() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -1902,6 +1908,7 @@ async fn webhook_explicit_agent_reports_model_without_owning_lifecycle() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -2005,6 +2012,7 @@ async fn webhook_autosave_stores_distinct_keys_per_request() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: true,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -2127,6 +2135,7 @@ async fn webhook_secret_hash_rejects_missing_header() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: Some(Arc::from(hash_webhook_secret(&secret))),
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -2215,6 +2224,7 @@ async fn webhook_secret_hash_rejects_invalid_header() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: Some(Arc::from(hash_webhook_secret(&valid_secret))),
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -2308,6 +2318,7 @@ async fn webhook_secret_hash_accepts_valid_header() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: Some(Arc::from(hash_webhook_secret(&secret))),
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -2408,6 +2419,7 @@ async fn nextcloud_talk_webhook_returns_not_found_when_not_configured() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -2506,6 +2518,7 @@ async fn nextcloud_talk_webhook_rejects_invalid_signature() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -2652,6 +2665,7 @@ async fn nextcloud_talk_webhook_returns_before_llm_call_completes() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -3475,6 +3489,7 @@ fn linq_test_state(alias: &str, signing_secret: Option<&str>) -> AppState {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -3564,6 +3579,7 @@ async fn linq_webhook_returns_not_found_when_no_channels_configured() {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),
@@ -3727,6 +3743,7 @@ fn webhook_baseline_state() -> AppState {
             std::path::PathBuf::new(),
         )),
         companion_store: None,
+        user_model: None,
         auto_save: false,
         webhook_secret_hash: None,
         pairing: Arc::new(PairingGuard::new(false, &[])),

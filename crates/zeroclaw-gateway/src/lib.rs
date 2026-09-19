@@ -484,6 +484,9 @@ pub struct AppState {
     /// Companion PortableKernel store. `None` when `tachi` is off or
     /// `[companion_memory].enable` is false.
     pub companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
+    /// Canonical User Model service for this runtime generation. `None`
+    /// means initialization failed and User Model routes degrade honestly.
+    pub user_model: Option<Arc<dyn zeroclaw_memory::companion::UserModelService>>,
     pub auto_save: bool,
     /// SHA-256 hash of `X-Webhook-Secret` (hex-encoded), never plaintext.
     pub webhook_secret_hash: Option<Arc<str>>,
@@ -598,6 +601,8 @@ pub async fn run_gateway(
     // constructs once and injects the same Arc into channels. Standalone
     // gateway constructs at `run_gateway_if_enabled`. Never opened here.
     companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
+    // User Model service follows the same composition-root ownership rule.
+    user_model: Option<Arc<dyn zeroclaw_memory::companion::UserModelService>>,
 ) -> Result<()> {
     // ── Security: warn on public bind without tunnel or explicit opt-in ──
     if is_public_bind(host)
@@ -1595,6 +1600,7 @@ pub async fn run_gateway(
         mem,
         memory_strategy,
         companion_store,
+        user_model,
         auto_save: config.memory.auto_save,
         webhook_secret_hash,
         pairing,

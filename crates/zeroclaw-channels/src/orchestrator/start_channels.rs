@@ -40,6 +40,7 @@ pub async fn start_channels(
     canvas_store: Option<zeroclaw_runtime::tools::CanvasStore>,
     cancel: tokio_util::sync::CancellationToken,
     companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
+    user_model: Option<Arc<dyn zeroclaw_memory::companion::UserModelService>>,
 ) -> Result<()> {
     let config_arc = Arc::new(RwLock::new(config));
     let config: Config = config_arc.read().clone();
@@ -147,37 +148,6 @@ pub async fn start_channels(
         None;
 
     let mut agent_ctxs: HashMap<String, Arc<ChannelRuntimeContext>> = HashMap::new();
-
-    let user_model_store = match tokio::task::spawn_blocking({
-        let data_dir = config.data_dir.clone();
-        move || zeroclaw_memory::companion::UserModelStore::open(&data_dir)
-    })
-    .await
-    {
-        Ok(Ok(store)) => Some(Arc::new(store)),
-        Ok(Err(err)) => {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({
-                        "data_dir": config.data_dir.display().to_string(),
-                        "err": err.to_string(),
-                    })),
-                "user model store open failed; owner-profile projection disabled"
-            );
-            None
-        }
-        Err(_) => {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "user model store open task failed; owner-profile projection disabled"
-            );
-            None
-        }
-    };
 
     let task_prefs = Arc::new(TaskPreferenceOverlay::new());
 
@@ -630,7 +600,7 @@ pub async fn start_channels(
             memory: Arc::clone(&mem),
             memory_strategy,
             companion_store: companion_store.clone(),
-            user_model: user_model_store.clone(),
+            user_model: user_model.clone(),
             task_prefs: Arc::clone(&task_prefs),
             tools_registry: Arc::clone(&tools_registry),
             observer: Arc::clone(&observer),
