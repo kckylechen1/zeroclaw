@@ -37,6 +37,12 @@ the existing UUID onto the new alias key before that alias is captured. If
 the map cannot be written, that turn skips the receipt rather than persisting
 a non-UUID.
 
+Reviewed AgentSoul is a separate protected domain. Its owner-selected minimum
+review and presentation contract is recorded in
+[ADR-014](./decisions/ADR-014-reviewed-agentsoul-projection.md). The ADR is
+accepted; candidate rows are not active Soul, and its documentation does not
+enable review writes or prompt projection.
+
 ## Long-term memory
 
 An agent receives its memory handle from the memory factory. Shared backends and
