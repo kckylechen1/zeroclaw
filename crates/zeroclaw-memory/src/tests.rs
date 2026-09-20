@@ -663,12 +663,12 @@ set -eu
 if [ "${{1:-}}" = "store" ]; then
   printf 'store-start:%s\n' "${{2:-}}" >> "{}"
   case "${{2:-}}" in
-fast_store:*)
-  printf 'fast-store-complete\n' >> "{}"
-  ;;
-slow_store:*)
-  printf 'slow-store-complete\n' >> "{}"
-  ;;
+    fast_store:*)
+      printf 'fast-store-complete\n' >> "{}"
+      ;;
+    slow_store:*)
+      printf 'slow-store-complete\n' >> "{}"
+      ;;
   esac
   exit 0
 fi
