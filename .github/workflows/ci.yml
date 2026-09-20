@@ -328,6 +328,23 @@ jobs:
         with:
           toolchain: 1.96.1
           targets: ${{ matrix.target }}
+      - name: Run durable-store path guard on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cratePath = Resolve-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'crates\zeroclaw-runtime')
+          $guardPath = Join-Path $cratePath.Path 'tests\no_durable_task_store.rs'
+          $guardBinary = Join-Path $env:RUNNER_TEMP 'no_durable_task_store.exe'
+          $env:CARGO_MANIFEST_DIR = $cratePath.Path
+
+          & rustc --edition 2024 --test $guardPath -o $guardBinary
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          & $guardBinary
+          exit $LASTEXITCODE
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         id: rust-cache
         with:
