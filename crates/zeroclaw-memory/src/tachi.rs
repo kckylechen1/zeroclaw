@@ -797,7 +797,7 @@ impl TachiMemory {
 #[async_trait]
 impl Memory for TachiMemory {
     fn name(&self) -> &str {
-        &self.alias
+        "tachi"
     }
 
     fn refresh_embedder(
@@ -942,7 +942,11 @@ impl Memory for TachiMemory {
         let entries = self.list_all().await?;
         let ids: Vec<String> = entries
             .into_iter()
-            .filter(|e| e.session_id.as_deref() == Some(session_id))
+            .filter(|e| {
+                e.session_id.as_deref() == Some(session_id)
+                    && e.namespace != crate::soul::SOUL_NAMESPACE
+                    && !e.key.starts_with(crate::soul::SOUL_KEY_PREFIX)
+            })
             .map(|e| e.id)
             .collect();
         self.delete_ids(ids).await
@@ -959,6 +963,8 @@ impl Memory for TachiMemory {
             .filter(|e| {
                 e.session_id.as_deref() == Some(session_id)
                     && e.agent_id.as_deref() == Some(agent_id)
+                    && e.namespace != crate::soul::SOUL_NAMESPACE
+                    && !e.key.starts_with(crate::soul::SOUL_KEY_PREFIX)
             })
             .map(|e| e.id)
             .collect();
@@ -1615,6 +1621,84 @@ mod tests {
         assert_eq!(purged, 1);
         assert!(mem.get("s1").await.unwrap().is_none());
         assert!(mem.get("s2").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn agent_session_purge_preserves_protected_soul_rows() {
+        let (_tmp, mem) = temp_tachi();
+        mem.store_with_agent(
+            "ordinary",
+            "delete me",
+            MemoryCategory::Core,
+            Some("target"),
+            None,
+            None,
+            Some("own"),
+        )
+        .await
+        .unwrap();
+        mem.store_with_agent(
+            "Soul::ordinary-case-variant",
+            "delete me too",
+            MemoryCategory::Core,
+            Some("target"),
+            None,
+            None,
+            Some("own"),
+        )
+        .await
+        .unwrap();
+        mem.store_with_agent(
+            "soul::own::candidate::legacy",
+            "protected candidate",
+            MemoryCategory::Custom("soul".to_string()),
+            Some("target"),
+            Some(crate::soul::SOUL_NAMESPACE),
+            None,
+            Some("own"),
+        )
+        .await
+        .unwrap();
+        mem.store_with_agent(
+            "sibling",
+            "keep foreign agent",
+            MemoryCategory::Core,
+            Some("target"),
+            None,
+            None,
+            Some("sibling"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            mem.purge_session_for_agent("target", "own").await.unwrap(),
+            2
+        );
+        assert!(
+            mem.get_for_agent("ordinary", "own")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            mem.get_for_agent("Soul::ordinary-case-variant", "own")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            mem.get_for_agent("soul::own::candidate::legacy", "own")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            mem.get_for_agent("sibling", "sibling")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

@@ -55,6 +55,85 @@ default. A PR that makes one of those surfaces persistent must name the memory
 category, session scope, agent scope, retention behavior, and operator-visible
 control.
 
+### Protected Soul access boundary
+
+Soul dispositions and Soul candidates share one canonical storage invariant:
+the namespace is `soul` and the key begins with the case-sensitive `soul::`
+prefix. SQLite and Tachi enforce both halves on every legal write. Their
+ambient operations exclude or refuse rows produced under that invariant;
+typed `SoulService` and `SoulCandidateService` operations are the explicit
+namespaced path. The constructors accept only those two backend identities.
+Markdown changes the row shape, Postgres and Qdrant do not preserve the
+namespace on write, and Lucid copies writes to an external store without the
+namespace/agent boundary, so typed Soul construction fails closed for them.
+The backend identity is selected by compiled memory wiring; it is not a model
+credential or an authorization substitute.
+
+The standard production model handle has this composition:
+
+```text
+agent/channel/gateway chat caller
+  -> create_memory_for_agent
+  -> RetrievalPipeline
+  -> AgentScopedMemory
+  -> optional policy/audit decorators
+  -> SQLite or Tachi backend
+```
+
+`memory_store`, `memory_recall`, `memory_forget`, `memory_export`, and
+`memory_purge` all receive that same handle. Prompt memory injection also uses
+it and rejects the `soul` namespace again before rendering. The concrete
+generic-path coverage is:
+
+There are two injectable seams, so this statement is deliberately narrower
+than "every `Arc<dyn Memory>`":
+
+- `agent::loop_::AgentRunOverrides.memory` can replace the factory handle.
+  Current production callers use `AgentRunOverrides::default()`, set another
+  override while leaving memory at its default `None`, or explicitly set
+  `memory: None` in cron. No non-test production caller passes `Some(memory)`;
+  arbitrary test or downstream-library injections are outside this wiring
+  proof.
+- The channel orchestrator carries `ctx.memory`, but `start_channels` creates
+  that value with `create_memory_for_agent` before the context is built. The
+  channel message path therefore retains the standard composition. Gateway
+  WebSocket/chat agent paths also call the same factory.
+
+| Generic path | Model-reachable route | Protected behavior for valid SQLite/Tachi rows |
+| --- | --- | --- |
+| Keyword, recent/time, and embedding recall | `memory_recall` and prompt injection -> `recall` -> agent allowlist-aware backend query | Backend ambient recall excludes `namespace = soul`; prompt injection repeats the namespace check. |
+| Shared-agent recall | Same route through `AgentScopedMemory::recall_for_agents` | The configured peer UUID allowlist is intersected before the backend query; protected rows remain excluded. |
+| Exact get | `AgentScopedMemory::get` | Refuses the case-sensitive `soul::` key before the exact agent lookup. SQLite/Tachi ambient get also excludes the protected namespace. |
+| List/export | `memory_export` -> `list`; gateway agent query -> `list` | Agent attribution is filtered and backend ambient list excludes the protected namespace. |
+| Store | `memory_store` -> scoped store methods | Refuses either protected marker; SQLite/Tachi also require the namespace and key prefix to appear together. |
+| Forget | `memory_forget` -> scoped forget | Refuses the protected key prefix; SQLite/Tachi ambient forget also excludes the protected namespace. |
+| Namespace purge | `memory_purge` -> `purge_namespace` | The scoped handle refuses every namespace purge because the trait has no agent-scoped form. |
+| Session purge | `memory_purge` -> scoped `purge_session` -> backend `purge_session_for_agent` | Deletes ordinary rows only for the bound agent and session. SQLite/Tachi exclude both protected markers, including defensive legacy/raw-authorized rows with an attached session. |
+
+The two-marker session-purge check is defense in depth for malformed legacy or
+raw-authorized data. It does not mean every generic API interprets arbitrary
+rows where namespace and key disagree. No legal SQLite/Tachi write path can
+create that mismatch, and this change adds no migration for speculative data.
+
+Other handles have different authority and must not be counted as model-path
+proof:
+
+| Caller | Handle | Status |
+| --- | --- | --- |
+| Gateway `/api/memory` with an `agent` query/body | `create_memory_for_agent` | Authenticated API caller using the same scoped handle; not an independent model path. |
+| Gateway `/api/memory` without `agent` | Install-wide `create_memory_from_config` handle | Authenticated operator surface; raw backend rules apply. |
+| Daemon `memory/list`, `search`, `get`, `store`, `delete` RPC | Install-wide `create_memory_from_config` handle | Operator/client UI surface; not passed to the model tool registry. |
+| `SoulService` / `SoulCandidateService` | Raw supported backend plus admitted identity registry | Dedicated access is covered by module tests, but no production constructor or external caller is wired yet. Treat it as unavailable, not production-safe by absence. |
+
+Candidate enumeration also needs exact backend-side prefix pagination. That is
+owned by [PR #356](https://github.com/kckylechen1/zeroclaw/pull/356); the
+agent-scoped wrapper must refuse that dedicated prefix method while the raw
+candidate service uses it. Until that dependency lands and is integrated, the
+protected-access slice is not complete. [PR #357](https://github.com/kckylechen1/zeroclaw/pull/357)
+owns evidence/sensitivity/bounds work and does not replace this access proof.
+Tachi's tested writer guarantee remains same-process serialization; any
+cross-process writer contract belongs to the separate writer-ownership slice.
+
 ## Prompt context and recall
 
 At turn start, the runtime can recall relevant memories and inject a bounded

@@ -3346,6 +3346,113 @@ async fn ambient_forget_cannot_delete_soul_rows() {
 }
 
 #[tokio::test]
+async fn agent_session_purge_excludes_each_protected_soul_marker() {
+    let (_tmp, mem) = temp_sqlite();
+    let own = mem.ensure_agent_uuid("own").await.unwrap();
+    let sibling = mem.ensure_agent_uuid("sibling").await.unwrap();
+
+    for key in [
+        "soul::own::candidate::key-only",
+        "soul::own::candidate::namespace-only",
+    ] {
+        mem.store_with_agent(
+            key,
+            "legacy protected row",
+            MemoryCategory::Custom("soul".to_string()),
+            Some("target"),
+            Some(crate::soul::SOUL_NAMESPACE),
+            None,
+            Some(&own),
+        )
+        .await
+        .unwrap();
+    }
+    for (key, session, agent) in [
+        ("own-target", "target", own.as_str()),
+        ("Soul::ordinary-case-variant", "target", own.as_str()),
+        ("own-other", "other", own.as_str()),
+        ("sibling-target", "target", sibling.as_str()),
+    ] {
+        mem.store_with_agent(
+            key,
+            "ambient row",
+            MemoryCategory::Core,
+            Some(session),
+            None,
+            None,
+            Some(agent),
+        )
+        .await
+        .unwrap();
+    }
+
+    // Production typed writers set both markers and omit session_id. These
+    // deliberate legacy/raw-authorized fixtures split the markers so each
+    // half of the deletion guard is independently discriminating.
+    {
+        let conn = mem.conn.lock();
+        assert_eq!(
+            conn.execute(
+                "UPDATE memories SET namespace = 'default' WHERE key = ?1 AND agent_id = ?2",
+                params!["soul::own::candidate::key-only", own]
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.execute(
+                "UPDATE memories SET key = 'legacy-namespace-only' WHERE key = ?1 AND agent_id = ?2",
+                params!["soul::own::candidate::namespace-only", own]
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    assert_eq!(
+        mem.purge_session_for_agent("target", &own).await.unwrap(),
+        2
+    );
+    assert!(
+        mem.get_for_agent("own-target", &own)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        mem.get_for_agent("Soul::ordinary-case-variant", &own)
+            .await
+            .unwrap()
+            .is_none(),
+        "reserved-prefix comparison is case-sensitive"
+    );
+    assert!(
+        mem.get_for_agent("own-other", &own)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        mem.get_for_agent("sibling-target", &sibling)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        mem.get_for_agent("soul::own::candidate::key-only", &own)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        mem.get_for_agent("legacy-namespace-only", &own)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn plain_stores_cannot_write_into_the_soul_key_space() {
     let (_tmp, mem) = temp_sqlite();
     let agent = mem.ensure_agent_uuid("default").await.unwrap();

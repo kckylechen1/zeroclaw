@@ -127,6 +127,22 @@ pub(crate) const SOUL_NAMESPACE: &str = "soul";
 /// enforced together with [`SOUL_NAMESPACE`] at the storage layer.
 pub(crate) const SOUL_KEY_PREFIX: &str = "soul::";
 
+/// Whether a compiled-in memory backend has the storage semantics required by
+/// both typed Soul services. This is a backend capability allowlist, not an
+/// authorization decision: the caller must still pass identity admission.
+/// The match uses [`Memory::name`]'s stable backend identity, never the
+/// caller-configurable attribution alias.
+///
+/// SQLite and Tachi preserve the reserved namespace and raw key, enforce their
+/// paired storage invariant, exclude valid protected rows from ambient
+/// surfaces, and retain a dedicated namespaced path. Markdown rewrites the row
+/// shape, Postgres and Qdrant do not preserve the namespace on writes, and
+/// Lucid also syncs writes to an external store without the namespace/agent
+/// boundary.
+pub(crate) fn backend_supports_protected_soul(backend: &dyn Memory) -> bool {
+    matches!(backend.name(), "sqlite" | "tachi")
+}
+
 pub(crate) fn validate_identity_token(id: &AgentIdentityId) -> Result<(), SoulError> {
     let token = id.as_str();
     if token.is_empty() {
@@ -318,16 +334,13 @@ pub struct SoulService {
 }
 
 impl SoulService {
-    /// Refuses backends that cannot honor Soul semantics: the markdown
-    /// backend drops the `soul` namespace on round-trip (reads come back
-    /// as `default`), which would leak disposition rows back into
-    /// ambient memory recall — the exact projection boundary this seam
-    /// exists to enforce. Sqlite-family and tachi backends are supported.
+    /// Refuses backends that cannot honor the complete protected-storage
+    /// contract. SQLite and Tachi are the only currently proven backends.
     pub fn new(
         registry: Arc<IdentityRegistry>,
         backend: Arc<dyn Memory>,
     ) -> Result<Self, SoulError> {
-        if backend.name().contains("markdown") {
+        if !backend_supports_protected_soul(backend.as_ref()) {
             return Err(SoulError::UnsupportedBackend(backend.name().to_string()));
         }
         Ok(Self { registry, backend })
@@ -482,6 +495,101 @@ mod tests {
     use super::*;
     use crate::sqlite::SqliteMemory;
 
+    struct NamedBackend(&'static str);
+
+    impl ::zeroclaw_api::attribution::Attributable for NamedBackend {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Memory(
+                ::zeroclaw_api::attribution::MemoryKind::Plugin,
+            )
+        }
+
+        fn alias(&self) -> &str {
+            self.0
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Memory for NamedBackend {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        async fn store(
+            &self,
+            _key: &str,
+            _content: &str,
+            _category: MemoryCategory,
+            _session_id: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn recall(
+            &self,
+            _query: &str,
+            _limit: usize,
+            _session_id: Option<&str>,
+            _since: Option<&str>,
+            _until: Option<&str>,
+        ) -> anyhow::Result<Vec<MemoryEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn get(&self, _key: &str) -> anyhow::Result<Option<MemoryEntry>> {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _category: Option<&MemoryCategory>,
+            _session_id: Option<&str>,
+        ) -> anyhow::Result<Vec<MemoryEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn forget(&self, _key: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        async fn forget_for_agent(&self, _key: &str, _agent_id: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        async fn count(&self) -> anyhow::Result<usize> {
+            Ok(0)
+        }
+
+        async fn health_check(&self) -> bool {
+            true
+        }
+
+        async fn store_with_agent(
+            &self,
+            _key: &str,
+            _content: &str,
+            _category: MemoryCategory,
+            _session_id: Option<&str>,
+            _namespace: Option<&str>,
+            _importance: Option<f64>,
+            _agent_id: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn recall_for_agents(
+            &self,
+            _allowed_agent_ids: &[&str],
+            _query: &str,
+            _limit: usize,
+            _session_id: Option<&str>,
+            _since: Option<&str>,
+            _until: Option<&str>,
+        ) -> anyhow::Result<Vec<MemoryEntry>> {
+            Ok(Vec::new())
+        }
+    }
+
     fn fresh_backend() -> (tempfile::TempDir, Arc<SqliteMemory>) {
         let tmp = tempfile::TempDir::new().unwrap();
         let mem = SqliteMemory::new("soul-test", tmp.path()).unwrap();
@@ -496,6 +604,47 @@ mod tests {
         )
         .expect("sqlite backend must be accepted");
         (registry, soul)
+    }
+
+    #[test]
+    fn typed_soul_constructors_accept_only_proven_backends() {
+        use crate::soul_candidate::{CandidateError, SoulCandidateService};
+
+        for name in ["markdown", "postgres", "qdrant", "lucid", "unknown"] {
+            let registry = Arc::new(IdentityRegistry::new());
+            let backend: Arc<dyn Memory> = Arc::new(NamedBackend(name));
+            assert!(matches!(
+                SoulService::new(Arc::clone(&registry), Arc::clone(&backend)),
+                Err(SoulError::UnsupportedBackend(rejected)) if rejected == name
+            ));
+            assert!(matches!(
+                SoulCandidateService::new(Arc::clone(&registry), backend),
+                Err(CandidateError::UnsupportedBackend(rejected)) if rejected == name
+            ));
+        }
+
+        let (tmp, sqlite) = fresh_backend();
+        let registry = Arc::new(IdentityRegistry::new());
+        assert!(SoulService::new(Arc::clone(&registry), sqlite.clone() as Arc<dyn Memory>).is_ok());
+        assert!(SoulCandidateService::new(registry, sqlite as Arc<dyn Memory>).is_ok());
+        drop(tmp);
+    }
+
+    #[cfg(feature = "tachi")]
+    #[test]
+    fn typed_soul_constructors_accept_tachi_backend() {
+        use crate::soul_candidate::SoulCandidateService;
+        use crate::tachi::TachiMemory;
+        use zeroclaw_api::attribution::Attributable;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let tachi = TachiMemory::new("custom-tachi-alias", tmp.path()).unwrap();
+        assert_eq!(tachi.name(), "tachi");
+        assert_eq!(tachi.alias(), "custom-tachi-alias");
+        let tachi: Arc<dyn Memory> = Arc::new(tachi);
+        let registry = Arc::new(IdentityRegistry::new());
+        assert!(SoulService::new(Arc::clone(&registry), Arc::clone(&tachi)).is_ok());
+        assert!(SoulCandidateService::new(registry, tachi).is_ok());
     }
 
     /// Admit-through-backend identities: SqliteMemory rejects rows

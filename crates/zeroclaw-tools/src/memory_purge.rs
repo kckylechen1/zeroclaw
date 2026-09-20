@@ -126,7 +126,7 @@ mod tests {
     use tempfile::TempDir;
     use zeroclaw_config::autonomy::AutonomyLevel;
     use zeroclaw_config::policy::SecurityPolicy;
-    use zeroclaw_memory::{MemoryCategory, MemoryEntry, SqliteMemory};
+    use zeroclaw_memory::{AgentScopedMemory, MemoryCategory, MemoryEntry, SqliteMemory};
 
     fn test_security() -> Arc<SecurityPolicy> {
         Arc::new(SecurityPolicy::default())
@@ -190,6 +190,103 @@ mod tests {
         assert!(result.output.contains("2 memories"));
 
         assert_eq!(mem.count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn scoped_purge_session_preserves_protected_and_foreign_rows() {
+        let tmp = TempDir::new().unwrap();
+        let raw = Arc::new(SqliteMemory::new("test", tmp.path()).unwrap());
+        let own = raw.ensure_agent_uuid("own").await.unwrap();
+        let sibling = raw.ensure_agent_uuid("sibling").await.unwrap();
+
+        for (key, content, session, agent) in [
+            ("own-target", "delete me", "target", own.as_str()),
+            (
+                "Soul::ordinary-case-variant",
+                "delete ordinary case variant",
+                "target",
+                own.as_str(),
+            ),
+            ("own-other", "keep other session", "other", own.as_str()),
+            (
+                "sibling-target",
+                "keep foreign agent",
+                "target",
+                sibling.as_str(),
+            ),
+        ] {
+            raw.store_with_agent(
+                key,
+                content,
+                MemoryCategory::Core,
+                Some(session),
+                None,
+                None,
+                Some(agent),
+            )
+            .await
+            .unwrap();
+        }
+
+        // Typed Soul writers intentionally use no session. This fixture models
+        // a legacy/raw-authorized row with a session attached and proves that
+        // the model-facing generic purge still cannot mutate protected data.
+        let protected_key = format!("soul::{own}::candidate::legacy");
+        raw.store_with_agent(
+            &protected_key,
+            "protected candidate",
+            MemoryCategory::Custom("soul".to_string()),
+            Some("target"),
+            Some("soul"),
+            None,
+            Some(&own),
+        )
+        .await
+        .unwrap();
+
+        let scoped: Arc<dyn Memory> = Arc::new(AgentScopedMemory::new(
+            raw.clone(),
+            &own,
+            vec![sibling.clone()],
+        ));
+        let result = MemoryPurgeTool::new(scoped, test_security())
+            .execute(json!({"session_id": "target"}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.output.contains("2 memories"));
+        assert!(
+            raw.get_for_agent("own-target", &own)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            raw.get_for_agent("Soul::ordinary-case-variant", &own)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            raw.get_for_agent("own-other", &own)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            raw.get_for_agent("sibling-target", &sibling)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            raw.get_for_agent(&protected_key, &own)
+                .await
+                .unwrap()
+                .is_some(),
+            "dedicated raw Soul read must still find the protected row"
+        );
     }
 
     #[tokio::test]

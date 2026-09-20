@@ -1889,8 +1889,15 @@ impl Memory for SqliteMemory {
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
             let conn = conn.lock();
             let affected = conn.execute(
-                "DELETE FROM memories WHERE session_id = ?1",
-                params![session_id],
+                "DELETE FROM memories
+                 WHERE session_id = ?1
+                   AND (namespace IS NULL OR namespace != ?2)
+                   AND substr(key, 1, length(?3)) != ?3",
+                params![
+                    session_id,
+                    crate::soul::SOUL_NAMESPACE,
+                    crate::soul::SOUL_KEY_PREFIX
+                ],
             )?;
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             Ok(affected)
@@ -1910,8 +1917,17 @@ impl Memory for SqliteMemory {
         tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
             let conn = conn.lock();
             let affected = conn.execute(
-                "DELETE FROM memories WHERE session_id = ?1 AND agent_id = ?2",
-                params![session_id, agent_id],
+                "DELETE FROM memories
+                 WHERE session_id = ?1
+                   AND agent_id = ?2
+                   AND (namespace IS NULL OR namespace != ?3)
+                   AND substr(key, 1, length(?4)) != ?4",
+                params![
+                    session_id,
+                    agent_id,
+                    crate::soul::SOUL_NAMESPACE,
+                    crate::soul::SOUL_KEY_PREFIX
+                ],
             )?;
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             Ok(affected)

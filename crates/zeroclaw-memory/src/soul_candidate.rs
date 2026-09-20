@@ -56,7 +56,7 @@
 
 use crate::soul::{
     CarrierContext, IdentityRegistry, NAMESPACE_DELIMITER, SoulError, SoulService,
-    classify_backend_error, validate_identity_token,
+    backend_supports_protected_soul, classify_backend_error, validate_identity_token,
 };
 use crate::traits::{Memory, MemoryCategory};
 use serde::{Deserialize, Serialize};
@@ -649,15 +649,14 @@ pub struct SoulCandidateService {
 
 impl SoulCandidateService {
     /// Construct the candidate service over one memory backend.
-    /// Refuses backends that cannot round-trip raw-key JSON rows: the
-    /// markdown backend synthesizes keys and wraps rows in scaffolding,
-    /// so candidate JSON written through it corrupts on read. The
-    /// sqlite-family and tachi backends are supported.
+    /// Refuses backends that cannot round-trip the reserved namespace and raw
+    /// key while keeping every ambient path outside that namespace. SQLite
+    /// and Tachi are the only currently proven backends.
     pub fn new(
         registry: Arc<IdentityRegistry>,
         backend: Arc<dyn Memory>,
     ) -> Result<Self, CandidateError> {
-        if backend.name().contains("markdown") {
+        if !backend_supports_protected_soul(backend.as_ref()) {
             return Err(CandidateError::UnsupportedBackend(
                 backend.name().to_string(),
             ));
