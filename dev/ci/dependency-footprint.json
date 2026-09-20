@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "root_package": "zeroclawlabs",
+  "profiles": [
+    {
+      "name": "kernel",
+      "description": "Root package with every default feature disabled.",
+      "no_default_features": true,
+      "features": []
+    },
+    {
+      "name": "minimal",
+      "description": "Lean companion agent: the agent runtime without default channels or optional integration families.",
+      "no_default_features": true,
+      "features": [
+        "agent-runtime"
+      ]
+    },
+    {
+      "name": "default",
+      "description": "The standard root package feature set.",
+      "no_default_features": false,
+      "features": []
+    },
+    {
+      "name": "full",
+      "description": "The repository CI feature profile; defaults remain enabled while ci-all adds opt-in surfaces.",
+      "no_default_features": false,
+      "features": [
+        "ci-all"
+      ]
+    },
+    {
+      "name": "email-explicit",
+      "description": "Discriminator proving that a lean agent can explicitly restore the email family.",
+      "no_default_features": true,
+      "features": [
+        "agent-runtime",
+        "channel-email"
+      ]
+    },
+    {
+      "name": "saas-explicit",
+      "description": "Discriminator for the existing SaaS tool-family compile boundary.",
+      "no_default_features": true,
+      "features": [
+        "agent-runtime",
+        "integrations-saas"
+      ]
+    },
+    {
+      "name": "hardware-tools-explicit",
+      "description": "Discriminator for hardware tool types without activating a hardware backend.",
+      "no_default_features": true,
+      "features": [
+        "agent-runtime",
+        "hardware-tools"
+      ]
+    },
+    {
+      "name": "discord-explicit",
+      "description": "Discriminator for the Discord channel implementation and its shared dependencies.",
+      "no_default_features": true,
+      "features": [
+        "agent-runtime",
+        "channel-discord"
+      ]
+    }
+  ],
+  "expectations": {
+    "kernel": {
+      "absent_packages": [
+        "async-imap",
+        "lettre",
+        "mail-parser"
+      ],
+      "package_features_absent": {
+        "zeroclawlabs": [
+          "agent-runtime",
+          "default"
+        ]
+      }
+    },
+    "minimal": {
+      "absent_packages": [
+        "async-imap",
+        "lettre",
+        "mail-parser"
+      ],
+      "package_features_present": {
+        "zeroclawlabs": [
+          "agent-runtime"
+        ]
+      },
+      "package_features_absent": {
+        "zeroclawlabs": [
+          "channel-email",
+          "default",
+          "hardware-tools",
+          "integrations-saas"
+        ],
+        "zeroclaw-channels": [
+          "channel-email"
+        ],
+        "zeroclaw-runtime": [
+          "email-tools"
+        ],
+        "zeroclaw-tools": [
+          "email-tools"
+        ]
+      }
+    },
+    "default": {
+      "present_packages": [
+        "async-imap",
+        "lettre",
+        "mail-parser"
+      ],
+      "package_features_present": {
+        "zeroclawlabs": [
+          "channel-email",
+          "default",
+          "hardware-tools",
+          "integrations-saas"
+        ],
+        "zeroclaw-channels": [
+          "channel-email"
+        ],
+        "zeroclaw-runtime": [
+          "email-tools"
+        ],
+        "zeroclaw-tools": [
+          "email-tools"
+        ]
+      }
+    },
+    "full": {
+      "present_packages": [
+        "async-imap",
+        "lettre",
+        "mail-parser"
+      ],
+      "package_features_present": {
+        "zeroclawlabs": [
+          "ci-all",
+          "default",
+          "hardware-tools",
+          "integrations-saas"
+        ]
+      }
+    },
+    "email-explicit": {
+      "present_packages": [
+        "async-imap",
+        "lettre",
+        "mail-parser"
+      ],
+      "package_features_present": {
+        "zeroclawlabs": [
+          "agent-runtime",
+          "channel-email"
+        ],
+        "zeroclaw-channels": [
+          "channel-email"
+        ],
+        "zeroclaw-runtime": [
+          "email-tools"
+        ],
+        "zeroclaw-tools": [
+          "email-tools"
+        ]
+      }
+    },
+    "saas-explicit": {
+      "same_package_set_as": "minimal",
+      "package_features_present": {
+        "zeroclawlabs": [
+          "agent-runtime",
+          "integrations-saas"
+        ],
+        "zeroclaw-runtime": [
+          "integrations-saas"
+        ],
+        "zeroclaw-tools": [
+          "integrations-saas"
+        ]
+      }
+    },
+    "hardware-tools-explicit": {
+      "same_package_set_as": "minimal",
+      "package_features_present": {
+        "zeroclawlabs": [
+          "agent-runtime",
+          "hardware-tools"
+        ],
+        "zeroclaw-runtime": [
+          "hardware-tools"
+        ],
+        "zeroclaw-tools": [
+          "hardware-tools"
+        ]
+      }
+    },
+    "discord-explicit": {
+      "same_package_set_as": "minimal",
+      "package_features_present": {
+        "zeroclawlabs": [
+          "agent-runtime",
+          "channel-discord"
+        ],
+        "zeroclaw-channels": [
+          "channel-discord"
+        ]
+      }
+    }
+  }
+}
