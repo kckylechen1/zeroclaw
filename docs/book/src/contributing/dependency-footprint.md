@@ -71,7 +71,7 @@ their code behind another feature would not reduce this dependency metric.
 ## Reference snapshot
 
 With `Cargo.lock` SHA-256
-`d8eb6032a5b7f054a1f4dd269c00f548f7649307797c588390000f4593853afc`,
+`c107dfcebc26b9fa38ded0ce95a4455f9f0cfbc7e77fa48315202f91f35a27d9`,
 the locked/offline measurement produced this target-specific snapshot:
 
 | Profile | Linux x86_64 packages | macOS arm64 packages | Package delta from target's minimal |
