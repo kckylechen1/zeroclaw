@@ -97,6 +97,27 @@ pub struct UserModelRevision {
     pub created_at_unix: u64,
 }
 
+/// Multiple applicable graph heads for one semantic key.
+///
+/// Revision ids are evidence for owner review. Their order carries no
+/// authority and must never be used to choose a winner.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UserModelConflict {
+    pub semantic_key: String,
+    pub revision_ids: Vec<String>,
+}
+
+/// Conflict-aware result of a User Model read for one turn context.
+///
+/// `heads` contains only non-conflicted revisions applicable under the
+/// supplied query context. Every semantic key in `conflicts` is withheld
+/// until an owner-reviewed revision resolves the branch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UserModelReadResult {
+    pub heads: Vec<UserModelRevision>,
+    pub conflicts: Vec<UserModelConflict>,
+}
+
 /// Receipt for an explicit review decision.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UserModelReviewReceipt {
@@ -142,6 +163,7 @@ pub enum UserModelError {
     Write(String),
     DomainNotFound { entity: &'static str, id: String },
     CandidateAlreadyReviewed,
+    UnresolvedConflict(UserModelConflict),
 }
 
 impl fmt::Display for UserModelError {
@@ -152,6 +174,12 @@ impl fmt::Display for UserModelError {
             Self::Write(message) => write!(formatter, "user model write failed: {message}"),
             Self::DomainNotFound { entity, id } => write!(formatter, "unknown {entity} '{id}'"),
             Self::CandidateAlreadyReviewed => formatter.write_str("candidate already reviewed"),
+            Self::UnresolvedConflict(conflict) => write!(
+                formatter,
+                "unresolved user model conflict for '{}' ({} active heads)",
+                conflict.semantic_key,
+                conflict.revision_ids.len()
+            ),
         }
     }
 }

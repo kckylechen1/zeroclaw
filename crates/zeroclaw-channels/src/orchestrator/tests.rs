@@ -17693,6 +17693,46 @@ async fn user_model_current_time_and_session_scope_reach_actual_provider_prompt(
             .record_owner_statement(UserModelKind::Preference, marker, key, scope, starts)
             .unwrap();
     }
+    // Build a real two-head branch through the public service: the later
+    // backdated write cannot see the already-recorded future child, so both
+    // children supersede the same root. Neither conflicting statement may
+    // reach the provider, while an unrelated head must keep projecting.
+    store
+        .record_owner_statement(
+            UserModelKind::Preference,
+            "CLOCK_CONFLICT_ROOT_MARKER",
+            "clock.conflict",
+            "global",
+            now - 7_200,
+        )
+        .unwrap();
+    store
+        .record_owner_statement(
+            UserModelKind::Preference,
+            "CLOCK_CONFLICT_A_MARKER",
+            "clock.conflict",
+            "global",
+            now - 3_600,
+        )
+        .unwrap();
+    store
+        .record_owner_statement(
+            UserModelKind::Preference,
+            "CLOCK_CONFLICT_B_MARKER",
+            "clock.conflict",
+            "global",
+            now - 5_400,
+        )
+        .unwrap();
+    store
+        .record_owner_statement(
+            UserModelKind::Preference,
+            "CLOCK_UNRELATED_SAFE_MARKER",
+            "clock.unrelated",
+            "global",
+            now - 3_600,
+        )
+        .unwrap();
     let provider_impl = Arc::new(HistoryCaptureModelProvider::default());
     let config = Config {
         config_path: private.path().join("absent-config.toml"),
@@ -17738,6 +17778,10 @@ async fn user_model_current_time_and_session_scope_reach_actual_provider_prompt(
         assert_eq!(system.contains("CLOCK_SESSION_A_MARKER"), index == 0);
         assert_eq!(system.contains("CLOCK_SESSION_B_MARKER"), index == 1);
         assert!(!system.contains("CLOCK_FUTURE_START_MARKER"));
+        assert!(!system.contains("CLOCK_CONFLICT_ROOT_MARKER"));
+        assert!(!system.contains("CLOCK_CONFLICT_A_MARKER"));
+        assert!(!system.contains("CLOCK_CONFLICT_B_MARKER"));
+        assert!(system.contains("CLOCK_UNRELATED_SAFE_MARKER"));
     }
 }
 
@@ -17845,7 +17889,7 @@ impl zeroclaw_memory::companion::UserModelService for UnavailableUserModelServic
         _context: &zeroclaw_api::user_model::UserModelQueryContext,
         _as_of_unix: Option<u64>,
     ) -> Result<
-        Vec<zeroclaw_api::user_model::UserModelRevision>,
+        zeroclaw_api::user_model::UserModelReadResult,
         zeroclaw_api::user_model::UserModelError,
     > {
         self.applicable_calls.fetch_add(1, Ordering::SeqCst);

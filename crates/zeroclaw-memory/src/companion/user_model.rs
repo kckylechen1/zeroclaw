@@ -20,8 +20,9 @@ use std::path::Path;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 pub use zeroclaw_api::user_model::{
-    AuthorityClass, ReviewAction, UserModelCandidate, UserModelCandidateHistory, UserModelError,
-    UserModelKind, UserModelQueryContext, UserModelReviewReceipt, UserModelRevision,
+    AuthorityClass, ReviewAction, UserModelCandidate, UserModelCandidateHistory, UserModelConflict,
+    UserModelError, UserModelKind, UserModelQueryContext, UserModelReadResult,
+    UserModelReviewReceipt, UserModelRevision,
 };
 use zeroclaw_infra::sqlite_perms::harden_sqlite_owner_only;
 
@@ -38,15 +39,126 @@ impl fmt::Display for CandidateAlreadyReviewed {
 
 impl std::error::Error for CandidateAlreadyReviewed {}
 
+#[derive(Debug)]
+struct UnresolvedUserModelConflict(UserModelConflict);
+
+impl fmt::Display for UnresolvedUserModelConflict {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unresolved user model conflict for '{}'",
+            self.0.semantic_key
+        )
+    }
+}
+
+impl std::error::Error for UnresolvedUserModelConflict {}
+
 /// Classify the store's typed review conflict without matching error text.
 pub fn is_candidate_already_reviewed(error: &rusqlite::Error) -> bool {
     matches!(error, rusqlite::Error::ToSqlConversionFailure(inner) if inner.is::<CandidateAlreadyReviewed>())
+}
+
+fn unresolved_user_model_conflict(error: &rusqlite::Error) -> Option<UserModelConflict> {
+    match error {
+        rusqlite::Error::ToSqlConversionFailure(inner) => inner
+            .downcast_ref::<UnresolvedUserModelConflict>()
+            .map(|conflict| conflict.0.clone()),
+        _ => None,
+    }
+}
+
+fn user_model_write_error(error: rusqlite::Error) -> UserModelError {
+    unresolved_user_model_conflict(&error)
+        .map(UserModelError::UnresolvedConflict)
+        .unwrap_or_else(|| UserModelError::Write(error.to_string()))
 }
 
 /// Append-only sqlite store for the User Model (`user_model.db` under the
 /// companion data dir; owner-only, WAL).
 pub struct UserModelStore {
     conn: Mutex<Connection>,
+}
+
+fn select_active_graph_heads(
+    revisions: Vec<UserModelRevision>,
+    as_of_unix: u64,
+) -> Vec<UserModelRevision> {
+    // A future child is not part of the graph snapshot and therefore cannot
+    // supersede an ancestor yet. Expiry is applied only after the started
+    // graph has established which revisions are superseded.
+    let revisions: Vec<UserModelRevision> = revisions
+        .into_iter()
+        .filter(|revision| revision.valid_from_unix <= as_of_unix)
+        .collect();
+    let superseded: std::collections::HashSet<String> = {
+        let semantic_key_by_id: std::collections::HashMap<&str, &str> = revisions
+            .iter()
+            .map(|revision| (revision.id.as_str(), revision.semantic_key.as_str()))
+            .collect();
+        revisions
+            .iter()
+            .filter_map(|revision| {
+                let parent = revision.supersedes.as_deref()?;
+                (semantic_key_by_id.get(parent).copied() == Some(revision.semantic_key.as_str()))
+                    .then(|| parent.to_string())
+            })
+            .collect()
+    };
+    let mut heads: Vec<UserModelRevision> = revisions
+        .into_iter()
+        .filter(|revision| {
+            !superseded.contains(revision.id.as_str())
+                && revision
+                    .valid_until_unix
+                    .is_none_or(|valid_until| valid_until > as_of_unix)
+        })
+        .collect();
+    // Stable response order is for callers and tests only. It never selects
+    // a winner: every graph head remains present here.
+    heads.sort_by(|a, b| a.semantic_key.cmp(&b.semantic_key).then(a.id.cmp(&b.id)));
+    heads
+}
+
+fn active_graph_heads_for_key(
+    conn: &Connection,
+    semantic_key: &str,
+    as_of_unix: u64,
+) -> Result<Vec<UserModelRevision>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id, semantic_key, kind, statement, scope, authority, supersedes,
+                valid_from_unix, valid_until_unix, source_candidate, created_at_unix
+         FROM user_model_revisions
+         WHERE semantic_key = ?1 AND valid_from_unix <= ?2
+         ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![semantic_key, as_of_unix],
+        revision_from_row,
+    )?;
+    let mut revisions = Vec::new();
+    for row in rows {
+        revisions.push(row?);
+    }
+    Ok(select_active_graph_heads(revisions, as_of_unix))
+}
+
+fn unique_graph_head_id(
+    heads: Vec<UserModelRevision>,
+    semantic_key: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    if heads.is_empty() {
+        return Ok(None);
+    }
+    if heads.len() == 1 {
+        return Ok(heads.into_iter().next().map(|head| head.id));
+    }
+    Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+        UnresolvedUserModelConflict(UserModelConflict {
+            semantic_key: semantic_key.to_string(),
+            revision_ids: heads.into_iter().map(|revision| revision.id).collect(),
+        }),
+    )))
 }
 
 impl UserModelStore {
@@ -99,12 +211,14 @@ impl UserModelStore {
         })
     }
 
-    /// Record an explicit owner-authored statement and make it the active
-    /// revision for its semantic key immediately (local-first; no review
-    /// round-trip required when the owner speaks directly).
+    /// Record an explicit owner-authored statement as a new root when no
+    /// active head exists, or extend the unique active graph head. Multiple
+    /// active heads are an unresolved conflict and refuse the write instead
+    /// of choosing a parent. A successful append is active immediately
+    /// (local-first; no review round-trip when the owner speaks directly).
     ///
-    /// Lookup and insert share ONE lock scope so two concurrent writers on
-    /// the same key cannot both supersede the same prior revision.
+    /// Graph-head lookup and insert share one `IMMEDIATE` transaction so two
+    /// service instances cannot both extend the same prior revision.
     pub fn record_owner_statement(
         &self,
         kind: UserModelKind,
@@ -118,20 +232,14 @@ impl UserModelStore {
                 "invalid scope '{scope}': global | agent:<id> | channel:<id> | session:<id>"
             )));
         }
-        let conn = self.conn.lock();
-        let supersedes: Option<String> = conn
-            .query_row(
-                "SELECT id FROM user_model_revisions
-                 WHERE semantic_key = ?1 AND valid_from_unix <= ?2
-                 ORDER BY created_at_unix DESC, id DESC LIMIT 1",
-                rusqlite::params![semantic_key, now_unix],
-                |row| row.get(0),
-            )
-            .map(Some)
-            .or_else(|err| match err {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })?;
+        let mut conn = self.conn.lock();
+        // The graph-head read and append share SQLite's write transaction so
+        // separate service instances cannot both extend the same parent.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let supersedes = unique_graph_head_id(
+            active_graph_heads_for_key(&tx, semantic_key, now_unix)?,
+            semantic_key,
+        )?;
         let revision = UserModelRevision {
             id: uuid::Uuid::new_v4().to_string(),
             semantic_key: semantic_key.to_string(),
@@ -145,7 +253,7 @@ impl UserModelStore {
             source_candidate: None,
             created_at_unix: now_unix,
         };
-        conn.execute(
+        tx.execute(
             "INSERT INTO user_model_revisions
                  (id, semantic_key, kind, statement, scope, authority, supersedes,
                   valid_from_unix, valid_until_unix, source_candidate, created_at_unix)
@@ -164,6 +272,7 @@ impl UserModelStore {
                 revision.created_at_unix,
             ],
         )?;
+        tx.commit()?;
         Ok(revision)
     }
 
@@ -378,6 +487,15 @@ impl UserModelStore {
                 "invalid narrowed scope '{scope}'"
             )));
         }
+        let supersedes = match action {
+            ReviewAction::Reject => None,
+            ReviewAction::Accept | ReviewAction::Narrow | ReviewAction::Supersede => {
+                unique_graph_head_id(
+                    active_graph_heads_for_key(&tx, &candidate.2, now_unix)?,
+                    &candidate.2,
+                )?
+            }
+        };
         let receipt = UserModelReviewReceipt {
             id: uuid::Uuid::new_v4().to_string(),
             candidate_id: candidate_id.to_string(),
@@ -407,13 +525,7 @@ impl UserModelStore {
                     "INSERT INTO user_model_revisions
                          (id, semantic_key, kind, statement, scope, authority, supersedes,
                           valid_from_unix, valid_until_unix, source_candidate, created_at_unix)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6,
-                             (SELECT id FROM user_model_revisions
-                              WHERE semantic_key = ?2
-                                AND valid_from_unix <= ?7
-                                AND (valid_until_unix IS NULL OR valid_until_unix > ?7)
-                              ORDER BY created_at_unix DESC, id DESC LIMIT 1),
-                             ?7, NULL, ?8, ?7)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?8)",
                     rusqlite::params![
                         uuid::Uuid::new_v4().to_string(),
                         candidate.2,
@@ -421,6 +533,7 @@ impl UserModelStore {
                         candidate.1,
                         scope,
                         AuthorityClass::OwnerRatified.as_str(),
+                        supersedes,
                         now_unix,
                         candidate_id,
                     ],
@@ -431,9 +544,11 @@ impl UserModelStore {
         Ok(receipt)
     }
 
-    /// Active, applicable revisions as of `as_of_unix` (`None` = now).
-    /// Per semantic key the latest revision valid at that instant wins;
-    /// superseded and expired revisions are simply older history.
+    /// Active graph heads as of `as_of_unix` (`None` = now).
+    ///
+    /// The persisted `supersedes` edges decide head status. A child that has
+    /// not started yet does not hide its ancestor; once it has started, it
+    /// keeps the ancestor superseded even if the child later expires.
     pub fn active_heads(
         &self,
         as_of_unix: Option<u64>,
@@ -452,34 +567,19 @@ impl UserModelStore {
             }
         };
         let conn = self.conn.lock();
-        // Per key: take the newest revision that had already started at the
-        // read instant, THEN gate it on its own validity window. A key whose
-        // newest revision expired goes inactive — an older superseded
-        // revision must never resurface through the gap.
         let mut stmt = conn.prepare(
             "SELECT id, semantic_key, kind, statement, scope, authority, supersedes,
                     valid_from_unix, valid_until_unix, source_candidate, created_at_unix
              FROM user_model_revisions r
              WHERE r.valid_from_unix <= ?1
-               AND r.created_at_unix = (
-                   SELECT MAX(r2.created_at_unix) FROM user_model_revisions r2
-                   WHERE r2.semantic_key = r.semantic_key
-                     AND r2.valid_from_unix <= ?1
-               )
-               AND (r.valid_until_unix IS NULL OR r.valid_until_unix > ?1)
-             ORDER BY r.created_at_unix DESC, r.id DESC",
+             ORDER BY r.semantic_key ASC, r.id ASC",
         )?;
         let rows = stmt.query_map(rusqlite::params![as_of], revision_from_row)?;
-        let mut seen = std::collections::HashSet::new();
-        let mut heads = Vec::new();
+        let mut revisions = Vec::new();
         for row in rows {
-            let revision = row?;
-            if seen.insert(revision.semantic_key.clone()) {
-                heads.push(revision);
-            }
+            revisions.push(row?);
         }
-        heads.sort_by(|a, b| a.semantic_key.cmp(&b.semantic_key));
-        Ok(heads)
+        Ok(select_active_graph_heads(revisions, as_of))
     }
 }
 
@@ -533,7 +633,7 @@ pub trait UserModelService: Send + Sync {
         &self,
         context: &UserModelQueryContext,
         as_of_unix: Option<u64>,
-    ) -> Result<Vec<UserModelRevision>, UserModelError>;
+    ) -> Result<UserModelReadResult, UserModelError>;
 }
 
 /// Transitional adapter over the existing SQLite User Model store. It introduces no new
@@ -563,7 +663,7 @@ impl UserModelService for LegacySqliteBackend {
     ) -> Result<UserModelRevision, UserModelError> {
         self.store
             .record_owner_statement(kind, statement, semantic_key, scope, now_unix)
-            .map_err(|error| UserModelError::Write(error.to_string()))
+            .map_err(user_model_write_error)
     }
 
     fn record_observation(
@@ -606,7 +706,7 @@ impl UserModelService for LegacySqliteBackend {
                 } else if is_candidate_already_reviewed(&error) {
                     UserModelError::CandidateAlreadyReviewed
                 } else {
-                    UserModelError::Write(error.to_string())
+                    user_model_write_error(error)
                 }
             })
     }
@@ -653,15 +753,35 @@ impl UserModelService for LegacySqliteBackend {
         &self,
         context: &UserModelQueryContext,
         as_of_unix: Option<u64>,
-    ) -> Result<Vec<UserModelRevision>, UserModelError> {
+    ) -> Result<UserModelReadResult, UserModelError> {
         let applicability =
             ApplicabilityContext::new(&context.agent_id, &context.channel_id, &context.session_id);
-        self.query_active_heads(as_of_unix).map(|heads| {
-            heads
-                .into_iter()
-                .filter(|revision| applicability.applies_str(&revision.scope))
-                .collect()
-        })
+        let mut applicable_by_key =
+            std::collections::BTreeMap::<String, Vec<UserModelRevision>>::new();
+        for revision in self.query_active_heads(as_of_unix)? {
+            if applicability.applies_str(&revision.scope) {
+                applicable_by_key
+                    .entry(revision.semantic_key.clone())
+                    .or_default()
+                    .push(revision);
+            }
+        }
+
+        let mut heads = Vec::new();
+        let mut conflicts = Vec::new();
+        for (semantic_key, revisions) in applicable_by_key {
+            if revisions.len() == 1 {
+                if let Some(revision) = revisions.into_iter().next() {
+                    heads.push(revision);
+                }
+            } else {
+                conflicts.push(UserModelConflict {
+                    semantic_key,
+                    revision_ids: revisions.into_iter().map(|revision| revision.id).collect(),
+                });
+            }
+        }
+        Ok(UserModelReadResult { heads, conflicts })
     }
 }
 
@@ -786,6 +906,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = UserModelStore::open(dir.path()).unwrap();
         (dir, s)
+    }
+
+    fn insert_revision_fixture(
+        store: &UserModelStore,
+        id: &str,
+        semantic_key: &str,
+        statement: &str,
+        scope: &str,
+        supersedes: Option<&str>,
+        valid_from_unix: u64,
+    ) {
+        store
+            .conn
+            .lock()
+            .execute(
+                "INSERT INTO user_model_revisions
+                 (id, semantic_key, kind, statement, scope, authority, supersedes,
+                  valid_from_unix, valid_until_unix, source_candidate, created_at_unix)
+                 VALUES (?1, ?2, 'preference', ?3, ?4, 'owner_authored', ?5, ?6, ?7, NULL, ?8)",
+                rusqlite::params![
+                    id,
+                    semantic_key,
+                    statement,
+                    scope,
+                    supersedes,
+                    valid_from_unix,
+                    Option::<u64>::None,
+                    valid_from_unix,
+                ],
+            )
+            .unwrap();
     }
 
     #[test]
@@ -1123,34 +1274,341 @@ mod tests {
         assert_eq!(s.active_heads(Some(2_500)).unwrap().len(), 1);
     }
 
-    /// Same-timestamp revisions for one key must resolve to exactly one
-    /// head, stably across reads (tie broken by id, deterministic).
+    /// A same-timestamp linear chain is decided by `supersedes`, never UUID
+    /// order. The ids deliberately make the ancestor sort after its child:
+    /// the former MAX(created_at)/id-DESC query therefore returned the wrong
+    /// row and made this test RED before graph-head derivation.
     #[test]
-    fn same_timestamp_tie_resolves_to_one_stable_head() {
+    fn same_timestamp_chain_selects_graph_descendant_not_uuid_winner() {
         let (_dir, s) = store();
-        s.record_owner_statement(
-            UserModelKind::Preference,
-            "First statement in the same second.",
-            "communication.tie",
+        insert_revision_fixture(
+            &s,
+            "zzzz-ancestor",
+            "communication.same-time",
+            "Ancestor statement.",
             "global",
+            None,
             5_000,
-        )
-        .unwrap();
-        s.record_owner_statement(
-            UserModelKind::Preference,
-            "Second statement in the same second.",
-            "communication.tie",
-            "global",
-            5_000,
-        )
-        .unwrap();
-        let first_read = s.active_heads(Some(5_000)).unwrap();
-        assert_eq!(first_read.len(), 1, "a tie must yield exactly one head");
-        let second_read = s.active_heads(Some(5_000)).unwrap();
-        assert_eq!(
-            first_read[0].id, second_read[0].id,
-            "the tie winner must be stable across reads"
         );
+        insert_revision_fixture(
+            &s,
+            "aaaa-descendant",
+            "communication.same-time",
+            "Descendant statement.",
+            "global",
+            Some("zzzz-ancestor"),
+            5_000,
+        );
+
+        let heads = s.active_heads(Some(5_000)).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].id, "aaaa-descendant");
+        assert_eq!(heads[0].statement, "Descendant statement.");
+    }
+
+    #[test]
+    fn owner_writer_extends_unique_graph_head_not_uuid_winner() {
+        let (_dir, store) = store();
+        insert_revision_fixture(
+            &store,
+            "zzzz-ancestor",
+            "communication.writer-chain",
+            "Ancestor statement.",
+            "global",
+            None,
+            5_000,
+        );
+        insert_revision_fixture(
+            &store,
+            "aaaa-descendant",
+            "communication.writer-chain",
+            "Descendant statement.",
+            "global",
+            Some("zzzz-ancestor"),
+            5_000,
+        );
+        let backend = LegacySqliteBackend { store };
+
+        let appended = backend
+            .record_owner_statement(
+                UserModelKind::Preference,
+                "Third statement.",
+                "communication.writer-chain",
+                "global",
+                5_000,
+            )
+            .unwrap();
+        assert_eq!(appended.supersedes.as_deref(), Some("aaaa-descendant"));
+        let heads = backend.query_active_heads(Some(5_000)).unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].id, appended.id);
+    }
+
+    #[test]
+    fn conflicted_owner_write_is_typed_and_has_no_side_effects() {
+        let (_dir, store) = store();
+        insert_revision_fixture(
+            &store,
+            "write-root",
+            "communication.write-conflict",
+            "Original statement.",
+            "global",
+            None,
+            100,
+        );
+        for (id, statement, starts) in [
+            ("write-a", "First branch.", 200),
+            ("write-b", "Second branch.", 150),
+        ] {
+            insert_revision_fixture(
+                &store,
+                id,
+                "communication.write-conflict",
+                statement,
+                "global",
+                Some("write-root"),
+                starts,
+            );
+        }
+        let backend = LegacySqliteBackend { store };
+        let before: i64 = backend
+            .store
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM user_model_revisions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        let error = backend
+            .record_owner_statement(
+                UserModelKind::Preference,
+                "Must not be appended.",
+                "communication.write-conflict",
+                "global",
+                300,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            UserModelError::UnresolvedConflict(UserModelConflict {
+                semantic_key: "communication.write-conflict".to_string(),
+                revision_ids: vec!["write-a".to_string(), "write-b".to_string()],
+            })
+        );
+        let after: i64 = backend
+            .store
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM user_model_revisions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn conflicted_review_write_has_no_receipt_or_revision_but_reject_still_works() {
+        let (_dir, store) = store();
+        let candidate = store
+            .record_observation(
+                UserModelKind::Preference,
+                "Candidate statement.",
+                "communication.review-conflict",
+                "[]",
+                250,
+            )
+            .unwrap();
+        insert_revision_fixture(
+            &store,
+            "review-root",
+            "communication.review-conflict",
+            "Original statement.",
+            "global",
+            None,
+            100,
+        );
+        for (id, statement, starts) in [
+            ("review-a", "First branch.", 200),
+            ("review-b", "Second branch.", 150),
+        ] {
+            insert_revision_fixture(
+                &store,
+                id,
+                "communication.review-conflict",
+                statement,
+                "global",
+                Some("review-root"),
+                starts,
+            );
+        }
+        let backend = LegacySqliteBackend { store };
+
+        let error = backend
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Accept,
+                "owner",
+                None,
+                None,
+                300,
+            )
+            .unwrap_err();
+        assert!(matches!(error, UserModelError::UnresolvedConflict(_)));
+        let (receipts, revisions): (i64, i64) = {
+            let conn = backend.store.conn.lock();
+            (
+                conn.query_row(
+                    "SELECT COUNT(*) FROM user_model_review_receipts WHERE candidate_id = ?1",
+                    rusqlite::params![&candidate.id],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+                conn.query_row("SELECT COUNT(*) FROM user_model_revisions", [], |row| {
+                    row.get(0)
+                })
+                .unwrap(),
+            )
+        };
+        assert_eq!((receipts, revisions), (0, 3));
+
+        let rejected = backend
+            .review_candidate(
+                &candidate.id,
+                ReviewAction::Reject,
+                "owner",
+                None,
+                None,
+                301,
+            )
+            .unwrap();
+        assert_eq!(rejected.action, ReviewAction::Reject);
+        let revisions_after_reject: i64 = backend
+            .store
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM user_model_revisions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(revisions_after_reject, 3);
+    }
+
+    #[test]
+    fn applicable_branch_is_typed_conflict_and_unrelated_head_survives() {
+        let (_dir, store) = store();
+        insert_revision_fixture(
+            &store,
+            "branch-root",
+            "communication.branch",
+            "Original statement.",
+            "global",
+            None,
+            100,
+        );
+        insert_revision_fixture(
+            &store,
+            "branch-a",
+            "communication.branch",
+            "First incompatible statement.",
+            "global",
+            Some("branch-root"),
+            200,
+        );
+        insert_revision_fixture(
+            &store,
+            "branch-b",
+            "communication.branch",
+            "Second incompatible statement.",
+            "global",
+            Some("branch-root"),
+            150,
+        );
+        insert_revision_fixture(
+            &store,
+            "unrelated-head",
+            "communication.safe",
+            "Unrelated statement.",
+            "global",
+            None,
+            100,
+        );
+        let backend = LegacySqliteBackend { store };
+
+        let read = backend
+            .query_applicable_heads(
+                &UserModelQueryContext::new("main", "telegram.work", "session-a"),
+                Some(300),
+            )
+            .unwrap();
+        assert_eq!(
+            read.heads
+                .iter()
+                .map(|revision| revision.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["unrelated-head"]
+        );
+        assert_eq!(
+            read.conflicts,
+            vec![UserModelConflict {
+                semantic_key: "communication.branch".to_string(),
+                revision_ids: vec!["branch-a".to_string(), "branch-b".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn branch_conflicts_only_when_multiple_graph_heads_apply_to_the_turn() {
+        let (_dir, store) = store();
+        insert_revision_fixture(
+            &store,
+            "scope-root",
+            "communication.scoped-branch",
+            "Original global statement.",
+            "global",
+            None,
+            100,
+        );
+        insert_revision_fixture(
+            &store,
+            "scope-a",
+            "communication.scoped-branch",
+            "Session A statement.",
+            "session:a",
+            Some("scope-root"),
+            200,
+        );
+        insert_revision_fixture(
+            &store,
+            "scope-b",
+            "communication.scoped-branch",
+            "Session B statement.",
+            "session:b",
+            Some("scope-root"),
+            150,
+        );
+        let backend = LegacySqliteBackend { store };
+
+        for (session, expected_id) in [("a", "scope-a"), ("b", "scope-b")] {
+            let read = backend
+                .query_applicable_heads(
+                    &UserModelQueryContext::new("main", "telegram.work", session),
+                    Some(300),
+                )
+                .unwrap();
+            assert!(read.conflicts.is_empty());
+            assert_eq!(read.heads.len(), 1);
+            assert_eq!(read.heads[0].id, expected_id);
+        }
+
+        let unrelated = backend
+            .query_applicable_heads(
+                &UserModelQueryContext::new("main", "telegram.work", "c"),
+                Some(300),
+            )
+            .unwrap();
+        assert!(unrelated.heads.is_empty());
+        assert!(unrelated.conflicts.is_empty());
     }
 
     /// Projection: empty heads render nothing; the section is bounded with

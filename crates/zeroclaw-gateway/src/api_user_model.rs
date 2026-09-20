@@ -48,6 +48,15 @@ fn service_error(error: UserModelError) -> Response {
             })),
         )
             .into_response(),
+        UserModelError::UnresolvedConflict(conflict) => (
+            StatusCode::CONFLICT,
+            axum::Json(serde_json::json!({
+                "code": "user_model_conflict",
+                "error": "unresolved user model conflict",
+                "conflict": conflict,
+            })),
+        )
+            .into_response(),
         other => error_json(StatusCode::SERVICE_UNAVAILABLE, &other.to_string()),
     }
 }
@@ -154,7 +163,11 @@ pub async fn candidate_history(
     }
 }
 
-/// GET /api/user-model/heads — active, applicable revisions right now.
+/// GET /api/user-model/heads — raw active graph heads right now.
+///
+/// This operator review surface may return multiple heads for one semantic
+/// key. Turn-context applicability and conflict withholding happen through
+/// `UserModelService::query_applicable_heads`, not this context-free listing.
 pub async fn list_heads(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -477,6 +490,95 @@ mod tests {
             review_http(&state, "unknown", "accept", None).await.0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn unresolved_statement_conflict_is_structured_409_without_append() {
+        let (_dir, state) = state_with_tempdir();
+        let service = service_of(&state).expect("injected service");
+        let now = now_unix();
+        service
+            .record_owner_statement(
+                UserModelKind::Preference,
+                "Original statement.",
+                "communication.http-conflict",
+                "global",
+                now - 300,
+            )
+            .unwrap();
+        let branch_a = service
+            .record_owner_statement(
+                UserModelKind::Preference,
+                "First branch.",
+                "communication.http-conflict",
+                "global",
+                now - 100,
+            )
+            .unwrap();
+        let branch_b = service
+            .record_owner_statement(
+                UserModelKind::Preference,
+                "Second branch.",
+                "communication.http-conflict",
+                "global",
+                now - 200,
+            )
+            .unwrap();
+        let (before_status, before) = json_of(
+            list_heads(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(before_status, StatusCode::OK);
+        assert_eq!(before["heads"].as_array().unwrap().len(), 2);
+
+        let (status, response) = json_of(
+            create_statement(
+                State(state.clone()),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+                body(&serde_json::json!({
+                    "kind": "preference",
+                    "statement": "Must not be appended.",
+                    "semantic_key": "communication.http-conflict",
+                })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(response["code"], "user_model_conflict");
+        assert_eq!(
+            response["conflict"]["semantic_key"],
+            "communication.http-conflict"
+        );
+        let mut actual_ids = response["conflict"]["revision_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        actual_ids.sort();
+        let mut expected_ids = vec![branch_a.id, branch_b.id];
+        expected_ids.sort();
+        assert_eq!(actual_ids, expected_ids);
+        assert!(response["conflict"].get("statement").is_none());
+
+        let (after_status, after) = json_of(
+            list_heads(
+                State(state),
+                ConnectInfo(loopback_peer()),
+                operator_headers(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(after_status, StatusCode::OK);
+        assert_eq!(after, before, "conflicted HTTP write must append no row");
     }
 
     #[tokio::test]

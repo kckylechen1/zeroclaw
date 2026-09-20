@@ -35,9 +35,10 @@ pub use outbox::{
 };
 pub use user_model::{
     AuthorityClass, LegacySqliteBackend, ReviewAction, USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS,
-    UserModelCandidate, UserModelCandidateHistory, UserModelError, UserModelKind,
-    UserModelQueryContext, UserModelReviewReceipt, UserModelRevision, UserModelService,
-    UserModelStateProjection, UserModelStore, is_candidate_already_reviewed, project_active_heads,
+    UserModelCandidate, UserModelCandidateHistory, UserModelConflict, UserModelError,
+    UserModelKind, UserModelQueryContext, UserModelReadResult, UserModelReviewReceipt,
+    UserModelRevision, UserModelService, UserModelStateProjection, UserModelStore,
+    is_candidate_already_reviewed, project_active_heads,
 };
 pub use user_model_scope::{ApplicabilityContext, Scope};
 

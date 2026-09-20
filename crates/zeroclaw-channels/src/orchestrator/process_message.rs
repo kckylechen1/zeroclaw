@@ -494,16 +494,30 @@ async fn process_channel_message_body(
                 &channel_composite,
                 &history_key,
             );
-            let heads = tokio::task::spawn_blocking(move || {
+            let read = tokio::task::spawn_blocking(move || {
                 user_model.query_applicable_heads(&query_context, None)
             })
             .await
             .ok()
             .and_then(Result::ok);
-            match heads {
-                Some(heads) => {
+            match read {
+                Some(read) => {
+                    if !read.conflicts.is_empty() {
+                        ::zeroclaw_log::record!(
+                            WARN,
+                            ::zeroclaw_log::Event::new(
+                                module_path!(),
+                                ::zeroclaw_log::Action::Note
+                            )
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({
+                                "conflict_count": read.conflicts.len()
+                            })),
+                            "user model conflicts withheld from owner-profile projection"
+                        );
+                    }
                     zeroclaw_memory::companion::project_active_heads(
-                        &heads,
+                        &read.heads,
                         zeroclaw_memory::companion::USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS,
                     )
                     .prompt_section
