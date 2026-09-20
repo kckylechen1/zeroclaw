@@ -96,6 +96,12 @@ run_gate pass
 [[ "$(grep -Fc -- "selected=3 passed=2 ignored=1" "$RUN_OUTPUT")" == "7" ]] \
     || fail "positive per-suite counts were not reported seven times"
 
+while IFS= read -r call; do
+    [[ "$call" == *"--quiet"* ]] || fail "cargo invocation omitted --quiet"
+    [[ "${call/--quiet/}" != *"--quiet"* ]] \
+        || fail "cargo invocation passed --quiet more than once"
+done < "$RUN_CALLS"
+
 for filter in "${filters[@]}"; do
     [[ "$(grep -Fc -- "$filter" "$RUN_CALLS")" == "1" ]] \
         || fail "$filter was not invoked exactly once"

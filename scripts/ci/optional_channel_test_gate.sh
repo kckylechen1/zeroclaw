@@ -40,8 +40,7 @@ for suite_entry in "${suites[@]}"; do
         -p zeroclaw-channels \
         --lib \
         --features "$features" \
-        "$filter" \
-        -- --quiet 2>&1 | tee "$log_file"
+        "$filter" 2>&1 | tee "$log_file"
     cargo_status=${PIPESTATUS[0]}
     set -e
 
