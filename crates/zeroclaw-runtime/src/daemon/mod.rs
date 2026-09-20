@@ -3164,15 +3164,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detect_gateway_bind_mode_starts_fresh_on_free_port() {
-        // Reserve an ephemeral port, then release it so the address is free.
+    async fn classify_gateway_bind_outcome_starts_fresh_after_successful_bind() {
+        // Keep the successful bind alive until the classifier consumes it.
+        // Releasing the listener and then rebinding the same port would leave
+        // a race where another parallel test can claim the port first.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
-            .expect("reserve port");
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("test listener address");
+        let competing_bind = tokio::net::TcpListener::bind(addr)
+            .await
+            .expect_err("live listener must keep its address occupied");
+        assert_eq!(competing_bind.kind(), std::io::ErrorKind::AddrInUse);
         assert_eq!(
-            detect_gateway_bind_mode(&Config::default(), "127.0.0.1", port).await,
+            classify_gateway_bind_outcome(
+                Ok(listener),
+                &Config::default(),
+                "127.0.0.1",
+                addr.port(),
+            )
+            .await,
             GatewayBindMode::StartFresh
         );
     }
