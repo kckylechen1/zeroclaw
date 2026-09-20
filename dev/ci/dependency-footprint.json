@@ -67,6 +67,24 @@
       ]
     }
   ],
+  "comparisons": [
+    {
+      "profile": "email-explicit",
+      "reference": "minimal"
+    },
+    {
+      "profile": "saas-explicit",
+      "reference": "minimal"
+    },
+    {
+      "profile": "hardware-tools-explicit",
+      "reference": "minimal"
+    },
+    {
+      "profile": "discord-explicit",
+      "reference": "minimal"
+    }
+  ],
   "expectations": {
     "kernel": {
       "absent_packages": [
@@ -172,7 +190,6 @@
       }
     },
     "saas-explicit": {
-      "same_package_set_as": "minimal",
       "package_features_present": {
         "zeroclawlabs": [
           "agent-runtime",
@@ -187,7 +204,6 @@
       }
     },
     "hardware-tools-explicit": {
-      "same_package_set_as": "minimal",
       "package_features_present": {
         "zeroclawlabs": [
           "agent-runtime",
@@ -202,7 +218,6 @@
       }
     },
     "discord-explicit": {
-      "same_package_set_as": "minimal",
       "package_features_present": {
         "zeroclawlabs": [
           "agent-runtime",

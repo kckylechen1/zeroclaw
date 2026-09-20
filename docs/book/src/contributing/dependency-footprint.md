@@ -35,6 +35,13 @@ Cargo/rustc versions record the measurement provenance.
 Run `scripts/ci/dependency_footprint.test.sh` to exercise the parser without
 invoking Cargo.
 
+The report's `package_differences` entries describe packages added to and
+removed from the named reference profile. They are measurements, not package
+budgets: a later legitimate removal from minimal does not fail because an
+explicit integration profile also loses that shared package. Enforced
+expectations cover existing feature propagation and the Email family's actual
+minimal/default/explicit package boundary.
+
 `cargo metadata` describes all workspace packages and can show features unified
 through a workspace member's dev dependency even when that dev edge is not in
 the root build. The measurement therefore takes package membership and resolved

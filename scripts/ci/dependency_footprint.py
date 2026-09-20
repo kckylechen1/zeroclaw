@@ -269,44 +269,57 @@ def check_expectations(
     return errors
 
 
-def check_cross_profile_expectations(
-    profiles: list[dict[str, Any]], expectations: dict[str, Any]
-) -> list[str]:
+def package_differences(
+    profiles: list[dict[str, Any]], comparisons: list[dict[str, str]]
+) -> list[dict[str, Any]]:
     by_name = {profile["name"]: profile for profile in profiles}
-    errors = []
-    for name, expectation in expectations.items():
-        reference_name = expectation.get("same_package_set_as")
-        if not reference_name:
-            continue
-        if name not in by_name:
-            continue
-        if reference_name not in by_name:
-            errors.append(
-                f"{name}: same-package comparison requires selected profile "
-                f"{reference_name!r}"
-            )
+    differences = []
+    for comparison in comparisons:
+        name = comparison["profile"]
+        reference_name = comparison["reference"]
+        if name not in by_name or reference_name not in by_name:
             continue
 
-        def identities(profile_name: str) -> set[tuple[Any, ...]]:
+        def identities(profile_name: str) -> dict[tuple[str, str, str], dict[str, str]]:
             return {
-                (
-                    package["name"],
-                    package["version"],
-                    package["source"],
-                )
+                (package["name"], package["version"], package["source"]): {
+                    "name": package["name"],
+                    "version": package["version"],
+                    "source": package["source"],
+                }
                 for package in by_name[profile_name]["packages"]
             }
 
         actual = identities(name)
         reference = identities(reference_name)
-        if actual != reference:
-            added = sorted(actual - reference, key=repr)
-            removed = sorted(reference - actual, key=repr)
-            errors.append(
-                f"{name}: package set differs from {reference_name}; "
-                f"added={added}, removed={removed}"
-            )
-    return errors
+        added = [actual[key] for key in sorted(actual.keys() - reference.keys())]
+        removed = [reference[key] for key in sorted(reference.keys() - actual.keys())]
+        differences.append(
+            {
+                "profile": name,
+                "reference": reference_name,
+                "added_count": len(added),
+                "removed_count": len(removed),
+                "added": added,
+                "removed": removed,
+            }
+        )
+    return differences
+
+
+def configured_profiles(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    profiles = config.get("profiles")
+    if not isinstance(profiles, list) or not profiles:
+        raise FootprintError("profile config must define at least one profile")
+    configured: dict[str, dict[str, Any]] = {}
+    for profile in profiles:
+        if not isinstance(profile, dict) or not isinstance(profile.get("name"), str):
+            raise FootprintError("every configured profile must have a string name")
+        name = profile["name"]
+        if not name or name in configured:
+            raise FootprintError(f"profile name is empty or duplicated: {name!r}")
+        configured[name] = profile
+    return configured
 
 
 def synthetic_metadata() -> dict[str, Any]:
@@ -407,11 +420,11 @@ leaf v1.0.0 (/repo/leaf)| (*)
         raise FootprintError("self-test expectations failed: " + "; ".join(errors))
     mirror = {**closure, "name": "mirror"}
     fixture = {**closure, "name": "fixture"}
-    errors = check_cross_profile_expectations(
-        [fixture, mirror], {"mirror": {"same_package_set_as": "fixture"}}
+    differences = package_differences(
+        [fixture, mirror], [{"profile": "mirror", "reference": "fixture"}]
     )
-    if errors:
-        raise FootprintError("self-test package comparison failed: " + "; ".join(errors))
+    if len(differences) != 1 or differences[0]["added_count"] != 0:
+        raise FootprintError(f"self-test package comparison failed: {differences}")
     polluted = {
         **mirror,
         "packages": mirror["packages"]
@@ -424,11 +437,18 @@ leaf v1.0.0 (/repo/leaf)| (*)
             }
         ],
     }
-    errors = check_cross_profile_expectations(
-        [fixture, polluted], {"mirror": {"same_package_set_as": "fixture"}}
+    differences = package_differences(
+        [fixture, polluted], [{"profile": "mirror", "reference": "fixture"}]
     )
-    if not errors:
-        raise FootprintError("self-test failed to detect package-set growth")
+    if differences[0]["added_count"] != 1 or differences[0]["removed_count"] != 0:
+        raise FootprintError(f"self-test package delta mismatch: {differences}")
+    try:
+        configured_profiles({"profiles": []})
+    except FootprintError as exc:
+        if "at least one profile" not in str(exc):
+            raise
+    else:
+        raise FootprintError("self-test accepted an empty profile config")
     outside = synthetic_metadata()
     outside_package = outside["packages"][1]
     outside_package["manifest_path"] = "/Users/example/private/normal/Cargo.toml"
@@ -467,7 +487,7 @@ def main() -> int:
 
     repo = Path.cwd().resolve()
     config = load_json(args.config)
-    configured = {profile["name"]: profile for profile in config.get("profiles", [])}
+    configured = configured_profiles(config)
     names = (
         args.profiles.split(",") if args.profiles else list(configured)
     )
@@ -499,12 +519,6 @@ def main() -> int:
             }
         )
 
-    failures.extend(
-        check_cross_profile_expectations(
-            report_profiles, config.get("expectations", {})
-        )
-    )
-
     report = {
         "schema_version": 1,
         "target": args.target,
@@ -517,6 +531,9 @@ def main() -> int:
             args.config.read_bytes()
         ).hexdigest(),
         "provenance": provenance(repo),
+        "package_differences": package_differences(
+            report_profiles, config.get("comparisons", [])
+        ),
         "profiles": report_profiles,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
