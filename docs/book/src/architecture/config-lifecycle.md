@@ -173,6 +173,32 @@ When reviewing a PR that touches a schema-visible but not yet runtime-consumed
 field, require the PR description to say whether runtime wiring is deferred, out
 of scope, or completed by the same change.
 
+### Retired OTP action-gating fields
+
+The four `[security.otp]` action-gating fields are a security-sensitive example:
+`gated_actions`, `gated_domains`, `gated_domain_categories`, and
+`challenge_max_attempts` are compatibility-only schema fields and have no
+action-execution consumer. Their removal follows the owner-ratified two-stage
+[compatibility policy](https://github.com/kckylechen1/zeroclaw/issues/220#issuecomment-5390041471)
+rather than an unannounced availability break:
+
+1. **Current compatibility window.** Non-default legacy values parse and emit a
+   structured `otp_action_gating_unsupported` warning that explicitly says the
+   value is not enforced. Defaults and absence are unaffected. Operators should
+   remove all four fields and configure the action's real authority boundary;
+   keeping the warning does not preserve any protection.
+2. **Next declared config-breaking/schema-removal window.** Release and migration
+   notes must announce the boundary before it ships. At that boundary, an
+   explicitly supplied legacy field becomes a hard config error or unsupported
+   field, while absence/default behavior remains unaffected. No release number
+   or date is assigned yet.
+
+After the announced window expires, remove the retired fields and their
+compatibility parser. Do not weaken the current warning, silently rewrite user
+config, or add OTP matching logic to keep the old names alive. The action-owner
+mapping and the distinction between authentication and authorization are in
+[The security model](../security/model.md#otp-scope-and-action-authority).
+
 ## Reviewer checklist
 
 For config-schema, env-var, default, or reload changes, ask:
