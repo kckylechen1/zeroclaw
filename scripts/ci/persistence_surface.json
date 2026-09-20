@@ -263,7 +263,7 @@
       "signals": 3
     },
     {
-      "path": "crates/zeroclaw-memory/src/lib.rs",
+      "path": "crates/zeroclaw-memory/src/tests.rs",
       "store": "memory/audit.db",
       "role": "test",
       "basis": "test-only direct connections",
