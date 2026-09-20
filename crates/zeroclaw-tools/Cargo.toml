@@ -73,6 +73,9 @@ probe = ["dep:probe-rs", "hardware-tools"]
 # daemon-side tests self-contained.
 test-helpers = []
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
+
 [dev-dependencies]
 zeroclaw-infra.workspace = true
 tempfile = "3.26"
