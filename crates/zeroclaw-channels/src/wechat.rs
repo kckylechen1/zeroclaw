@@ -3860,6 +3860,26 @@ mod tests {
         .unwrap()
     }
 
+    async fn wait_for_persisted_cursor(state_dir: &Path, expected: &str) {
+        let observed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let cursor = load_persisted_wechat(state_dir).cursor.lock().clone();
+                if cursor == expected {
+                    break cursor;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            let cursor = load_persisted_wechat(state_dir).cursor.lock().clone();
+            panic!(
+                "timed out waiting for persisted WeChat cursor {expected:?}; observed {cursor:?}"
+            )
+        });
+        assert_eq!(observed, expected, "persisted WeChat cursor mismatch");
+    }
+
     fn test_wechat_channel_for_listen(
         mock_uri: String,
         state_dir: &Path,
@@ -4290,6 +4310,8 @@ mod tests {
             delivered.content
         );
 
+        wait_for_persisted_cursor(&state_dir, "cursor_after_batch").await;
+
         handle.abort();
         let _ = handle.await;
 
@@ -4426,6 +4448,8 @@ mod tests {
             delivered.content
         );
 
+        wait_for_persisted_cursor(&state_dir, "cursor_after_batch").await;
+
         handle.abort();
         let _ = handle.await;
 
@@ -4533,6 +4557,8 @@ mod tests {
             "the recovered batch must deliver each message once"
         );
 
+        wait_for_persisted_cursor(&state_dir, "cursor_after_batch").await;
+
         handle.abort();
         let _ = handle.await;
 
@@ -4633,6 +4659,8 @@ mod tests {
             "recovered ciphertext must deliver the attachment, got: {}",
             delivered.content
         );
+
+        wait_for_persisted_cursor(&state_dir, "cursor_after_batch").await;
 
         handle.abort();
         let _ = handle.await;
