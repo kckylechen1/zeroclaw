@@ -129,12 +129,13 @@ this. Tracked under Workstream B3 (WeChat), upstream open PR zeroclaw-labs#9313.
 
 ### 6. Tachi memory backend — **carry (feature-gated)**
 
-Optional git dep `memcore` rev `7ae2c0a0` + feature `tachi = ["dep:memcore"]`
-(`crates/zeroclaw-memory/Cargo.toml:28,32`); workspace exposes
-`memory-tachi = ["zeroclaw-memory/tachi"]` (`Cargo.toml:379`). Four modules
-gated behind `#[cfg(feature = "tachi")]`: `tachi`, `tachi_enrichment`,
-`tachi_governance`, `tachi_scenarios` (`crates/zeroclaw-memory/src/lib.rs`).
-Costs nothing when the feature is off.
+Optional git dep `memcore` (public mirror `kckylechen1/memcore`, currently
+`eba0c486` mirroring Tachi #1962) + feature `tachi = ["dep:memcore"]`
+(`crates/zeroclaw-memory/Cargo.toml`); workspace exposes
+`memory-tachi = ["zeroclaw-memory/tachi"]`. Four modules gated behind
+`#[cfg(feature = "tachi")]`: `tachi`, `tachi_enrichment`, `tachi_governance`,
+`tachi_scenarios` (`crates/zeroclaw-memory/src/lib.rs`). Costs nothing when
+the feature is off.
 
 This is the fork's own agent-memory backend, **distinct from the Hyperion
 trading memory path** (which routes through typed hapi-edge facade actions per
@@ -230,18 +231,14 @@ These three fork leaves target upstream directly (clean branches off
 
 ## The memcore pin
 
-`crates/zeroclaw-memory/Cargo.toml` pins `memcore` to tachi rev `7ae2c0a0`.
-That rev is **diverged from tachi main, not behind it**: it is tachi's
-`dd1dc14a` plus one commit that was never merged there —
-`chore(memcore): align rusqlite to 0.37 for ZeroClaw workspace co-existence`.
-Bumping the pin naively drops that commit and the build stops resolving.
+`crates/zeroclaw-memory/Cargo.toml` pins `memcore` to the public mirror
+`https://github.com/kckylechen1/memcore.git` rev `eba0c486` (mirror of Tachi
+`ed992a36` / #1962: rusqlite 0.40 + libsimple ~0.9). Compare revs, not the
+`1.9.2` version string.
 
-Tachi main is 468 commits ahead, ≥100 of them touching `crates/memcore`
-(schema v23 migration, authorizer/guard boundaries, trigger inventory,
-evidence guards). Its `memcore` version string is still `1.9.0`, so the
-version number carries no signal — compare revs, not versions.
+### Historical `links = "sqlite3"` clash (resolved)
 
-### Why the pin is stuck
+Previously:
 
 ```
 memcore @ tachi main   → rusqlite 0.38 → libsqlite3-sys 0.36
@@ -249,22 +246,16 @@ matrix-sdk-sqlite 0.18 → rusqlite 0.37 → libsqlite3-sys 0.35
 ```
 
 Both link the native `sqlite3` library, and cargo permits exactly one package
-with a given `links` value. `matrix-sdk-sqlite 0.18` is the latest release on
-crates.io with no 0.38-based successor, and `channel-matrix` ships in
-`dist_extra_features` and `ci-all` — so ZeroClaw cannot simply move to 0.38
-without dropping the Matrix channel from distribution builds.
+with a given `links` value. The temporary workaround was
+`vendor/libsqlite3-sys` + `[patch.crates-io]` (SQLite 3.51.1 amalgamation to
+satisfy memcore's `SQLITE_VERSION_NUMBER >= 3.50.3` floor while staying on
+rusqlite 0.37 for matrix-sdk).
 
-### Unblock
-
-tachi PR [#1453](https://github.com/kckylechen1/tachi/pull/1453) widens that
-manifest to `rusqlite = ">=0.37, <0.39"`. Standalone tachi still resolves to
-0.38, so nothing changes there; a consumer holding 0.37 unifies instead of
-failing.
-
-**When #1453 merges:** point `memcore` at the merged `main` rev and delete the
-carried compatibility commit for good. Then verify the schema **v23** migration
-against real data before trusting it — the existing `.tachi/` store predates it,
-and that check must not run during market hours.
+**Resolved:** matrix-sdk 0.19 + workspace rusqlite 0.40 unify on
+libsqlite3-sys 0.38.2, which bundles SQLite 3.53.2 (`SQLITE_VERSION_NUMBER`
+3053002) — above the floor — so the vendor patch is deleted. Note: libsimple
+0.9 does not build on Windows (Tachi #1963); do not disable Windows CI to
+paper over that.
 
 ---
 
