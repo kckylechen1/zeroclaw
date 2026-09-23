@@ -135,7 +135,7 @@ constructor/object inventory and #270's operation matrix are filled and
 independently reviewed; (3) the amended clause text and exact revisions are
 recorded on #266, #261 and the relevant Tachi contract. That record updates
 this ADR's status and must name the exact Tachi revision; the forbidden list
-from Decision (b) still applies.
+in the Decision section still applies.
 
 ## References
 
