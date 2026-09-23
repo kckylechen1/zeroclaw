@@ -28,9 +28,13 @@ Accepted ADRs are immutable. If the architecture changes, write a new ADR and ma
 | [ADR-010](./ADR-010-memory-authority-boundaries.md) | proposed | Session history, curated memory, and enrichment have separate authority boundaries. |
 | [ADR-011](./ADR-011-multi-agent-runtime-boundaries.md) | accepted | Configured agents have explicit runtime boundaries under one daemon. |
 | [ADR-012](./ADR-012-generation-scoped-live-config-apply.md) | proposed | Live config application uses canonical generations and target-specific results. |
+| [ADR-014](./ADR-014-reviewed-agentsoul-projection.md) | accepted | Reviewed AgentSoul uses a closed presentation-only review and projection contract. |
 
 ADR-006 and ADR-007 are implementation-gated roadmap decisions from [FND-002](../../foundations/fnd-002-documentation-standards.md). Their target directions are recorded, but they remain proposed until the acceptance boundaries in each record ship.
 
 ADR-010 remains proposed until the acceptance gates in the record are met.
 
 ADR-012 remains proposed until canonical config publication, generation-scoped results, and the bounded security and channel live-apply consumers meet the acceptance gates in the record.
+
+ADR-014 records the accepted owner-selected minimum Slice A contract after
+independent documentation review and grants no #189/#190 activation.
