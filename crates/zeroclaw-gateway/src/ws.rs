@@ -301,20 +301,12 @@ async fn handle_socket(
             stored_messages = messages;
             resumed = true;
         }
-        // Set session name if provided (non-empty) on connect
-        if let Some(ref name) = session_name
-            && !name.is_empty()
-        {
-            let _ = backend.set_session_name(&session_key, name);
-            effective_name = Some(name.clone());
-        }
-        // If no name was provided via query param, load the stored name
-        if effective_name.is_none() {
-            effective_name = backend.get_session_name(&session_key).unwrap_or(None);
-        }
-        // Stamp the agent alias so future /api/sessions queries and
-        // per-agent filters can attribute this session to its agent.
-        let _ = backend.set_session_agent_alias(&session_key, &agent_alias);
+        effective_name = stamp_session(
+            backend.as_ref(),
+            &session_key,
+            &agent_alias,
+            session_name.as_deref(),
+        );
     }
 
     // Send session_start message to client
@@ -704,6 +696,27 @@ async fn handle_socket(
     }
 }
 
+/// Record the owning agent and optional name for a session on connect, and
+/// return the name to report to the client (the requested one, else the
+/// stored one).
+///
+/// The alias is written first because it upserts the metadata row; the name
+/// write only updates an existing row, so a new session's name would
+/// otherwise be dropped.
+fn stamp_session(
+    backend: &dyn zeroclaw_infra::session_backend::SessionBackend,
+    session_key: &str,
+    agent_alias: &str,
+    requested_name: Option<&str>,
+) -> Option<String> {
+    let _ = backend.set_session_agent_alias(session_key, agent_alias);
+    if let Some(name) = requested_name.filter(|name| !name.is_empty()) {
+        let _ = backend.set_session_name(session_key, name);
+        return Some(name.to_string());
+    }
+    backend.get_session_name(session_key).unwrap_or(None)
+}
+
 fn resolve_session_cwd(
     requested_cwd: Option<&str>,
     default_workspace: &Path,
@@ -988,6 +1001,12 @@ async fn process_chat_message(
                         Some(Ok(Message::Text(text))) => text,
                         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
                             cancel_token.cancel();
+                            // Nobody is left to answer: drop the pending
+                            // approval senders so the waiting turn resolves
+                            // as unreachable now instead of at its timeout
+                            // while it still holds the session lock.
+                            let drained: Vec<_> = pending_approvals.lock().drain().collect();
+                            drop(drained);
                             break;
                         }
                         _ => continue,
@@ -2054,5 +2073,21 @@ mod tests {
             "persist_conversation_messages must not resurrect a session whose \
              session_exists() returned false (see #7126)"
         );
+    }
+
+    #[test]
+    fn stamp_session_keeps_the_name_of_a_new_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = zeroclaw_infra::make_session_backend(dir.path(), "sqlite").unwrap();
+        let reported = stamp_session(backend.as_ref(), "gw_new1", "default", Some("Foo"));
+        assert_eq!(reported.as_deref(), Some("Foo"));
+        assert_eq!(
+            backend.get_session_name("gw_new1").unwrap().as_deref(),
+            Some("Foo"),
+            "the name of a session created on connect must be stored"
+        );
+        // Reconnecting without a name reports the stored one.
+        let reported = stamp_session(backend.as_ref(), "gw_new1", "default", None);
+        assert_eq!(reported.as_deref(), Some("Foo"));
     }
 }

@@ -1489,6 +1489,17 @@ impl Channel for SourcedDenyChannel {
 async fn tool_results_for_denying_channel(
     source: ::zeroclaw_api::channel::ApprovalSource,
 ) -> String {
+    tool_results_for_denying_channel_with_store(source, None)
+        .await
+        .0
+}
+
+/// Like [`tool_results_for_denying_channel`], optionally persisting approval
+/// audit rows under `data_dir`. Returns the tool results and the turn id.
+async fn tool_results_for_denying_channel_with_store(
+    source: ::zeroclaw_api::channel::ApprovalSource,
+    data_dir: Option<&std::path::Path>,
+) -> (String, String) {
     let turn_id = uuid::Uuid::new_v4().to_string();
     let write_call = r#"<tool_call>
 {"name":"file_write","arguments":{"path":"a.txt","content":"x"}}
@@ -1505,6 +1516,10 @@ async fn tool_results_for_denying_channel(
     let approval_mgr = ApprovalManager::for_non_interactive_backchannel(
         &zeroclaw_config::schema::RiskProfileConfig::default(),
     );
+    let approval_mgr = match data_dir {
+        Some(dir) => approval_mgr.with_store_at(dir),
+        None => approval_mgr,
+    };
     let mut history = vec![
         ChatMessage::system("test-system"),
         ChatMessage::user("write a file"),
@@ -1565,12 +1580,13 @@ async fn tool_results_for_denying_channel(
         "a denied tool must not execute"
     );
 
-    history
+    let content = history
         .iter()
         .find(|msg| msg.role == "user" && msg.content.starts_with("[Tool results]"))
         .expect("tool results message should be present")
         .content
-        .clone()
+        .clone();
+    (content, turn_id)
 }
 
 /// The gate-level half of the contract: an OPERATOR's deny still reads as a
@@ -1604,6 +1620,34 @@ async fn runtime_sourced_deny_is_not_reported_as_a_user_denial() {
         assert!(
             content.contains("no operator decision was available"),
             "{source:?} should state that no operator decided: {content}"
+        );
+    }
+}
+
+/// The durable audit trail must not record a runtime fail-closed denial as
+/// a human refusal: it is `timed_out` with no approver, while an operator's
+/// deny stays `denied`.
+#[tokio::test]
+async fn runtime_sourced_deny_is_audited_as_timed_out_not_denied() {
+    for (source, expected) in [
+        (::zeroclaw_api::channel::ApprovalSource::Operator, "denied"),
+        (
+            ::zeroclaw_api::channel::ApprovalSource::TimedOut,
+            "timed_out",
+        ),
+        (
+            ::zeroclaw_api::channel::ApprovalSource::Unreachable,
+            "timed_out",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, turn_id) =
+            tool_results_for_denying_channel_with_store(source, Some(dir.path())).await;
+        let store = crate::approval::store::ApprovalStore::open(dir.path(), "audit-read").unwrap();
+        let rows = store.audit_for_run(&turn_id).unwrap();
+        assert!(
+            rows.iter().any(|(_, _, decision)| decision == expected),
+            "{source:?} should be audited as {expected}: {rows:?}"
         );
     }
 }

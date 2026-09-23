@@ -579,6 +579,26 @@ pub struct AppState {
     pub tui_registry: Option<Arc<zeroclaw_runtime::rpc::tui_identity::TuiRegistry>>,
 }
 
+/// The gateway's per-session turn queue, with a background reaper that
+/// releases idle slots. Slots are keyed by client-chosen session ids, so
+/// without eviction every distinct session would stay in memory for the
+/// life of the process. The reaper stops once the queue is dropped.
+fn gateway_session_queue() -> Arc<session_queue::SessionActorQueue> {
+    const REAP_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+    let queue = Arc::new(session_queue::SessionActorQueue::new(8, 30, 600));
+    let weak = Arc::downgrade(&queue);
+    zeroclaw_spawn::spawn!(async move {
+        let mut interval = tokio::time::interval(REAP_EVERY);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Some(queue) = weak.upgrade() else { break };
+            queue.evict_idle().await;
+        }
+    });
+    queue
+}
+
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run_gateway(
@@ -1631,7 +1651,7 @@ pub async fn run_gateway(
         #[cfg(feature = "nodes")]
         mdns_peer_registry,
         session_backend,
-        session_queue: Arc::new(session_queue::SessionActorQueue::new(8, 30, 600)),
+        session_queue: gateway_session_queue(),
         device_registry,
         pending_pairings,
         path_prefix: path_prefix.unwrap_or("").to_string(),
