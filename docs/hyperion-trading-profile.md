@@ -119,6 +119,17 @@ letting an unattended agent anywhere near execution-tier tools.
 ## Still missing
 
 Local tool approvals persist in `data_dir/approvals.db` (boot + run + tool +
-args hash, 300s TTL, single-consume, durable audit). Node grant envelope/claim
-and Tachi projection are still missing; both remain tracked in
+args hash, 300s TTL, single-consume, durable audit). That store is limited to
+kernel-local tool approval. [TB-22 rev 3](https://github.com/kckylechen1/zeroclaw/issues/205#issuecomment-5406246277)
+forbids adding Node columns, consumers, or writer paths to it, so the
+[retired #194 `ApprovalStore` direction](https://github.com/kckylechen1/zeroclaw/issues/194#issuecomment-5657725317)
+is not a valid way to close the Node boundary.
+
+Node grant authority remains Tachi-owned. The Gateway may eventually carry an
+admitted proof to a Node, and the Node must revalidate its local capability and
+policy before execution. Today `GrantProof` is only a reserved wire shape:
+verification and the production Tachi-to-Gateway grant/claim interface are not
+wired, and the Tachi bridge itself has no production transport in ZeroClaw.
+Treat Node execution that requires those grants as blocked, not as protected by
+OTP or the local approval database. The remaining integration gap is tracked in
 [`hyperion-patch-census.md`](./hyperion-patch-census.md).

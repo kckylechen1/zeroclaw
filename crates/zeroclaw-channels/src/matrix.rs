@@ -5521,10 +5521,17 @@ mod tests {
         #[test]
         fn rejects_absolute_outside_workspace() {
             let workspace = TempDir::new().unwrap();
-            // `/etc/hostname` exists on every Linux host; we don't actually
-            // read it, just canonicalise.
-            let result = validate_marker_target("/etc/hostname", Some(workspace.path()));
-            assert!(result.is_err(), "expected Err for /etc target");
+            // Create a real file outside the workspace so canonicalize succeeds
+            // on both macOS and Linux (unlike `/etc/hostname`, which is Linux-only).
+            let outside = TempDir::new().unwrap();
+            let outside_file = outside.path().join("secret");
+            std::fs::write(&outside_file, b"x").unwrap();
+            let result =
+                validate_marker_target(outside_file.to_str().unwrap(), Some(workspace.path()));
+            assert!(
+                result.is_err(),
+                "expected Err for absolute path outside workspace"
+            );
             let msg = result.unwrap_err().to_string();
             assert!(
                 msg.contains("outside workspace_dir"),

@@ -2877,49 +2877,7 @@ async fn dispatch_worker(
         && !inbox_receipts.is_empty()
     {
         if processed {
-            match tokio::task::spawn_blocking(move || inbox.mark_completed_batch(&inbox_receipts))
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    // Bounded WARN — completion failure means at-least-once
-                    // re-processing on the next delivery, never a silent drop.
-                    // The error text rides along: this line is the only one
-                    // until restart, so it must distinguish the failure mode.
-                    if warn_inbox_failure_once("inbox_completion_failed") {
-                        ::zeroclaw_log::record!(
-                            WARN,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({
-                                "error_key": "channels.inbox_completion_failed",
-                                "err": err.to_string(),
-                            })),
-                            "inbox completion failed; redelivery remains eligible"
-                        );
-                    }
-                }
-                Err(err) => {
-                    if warn_inbox_failure_once("inbox_completion_task_failed") {
-                        ::zeroclaw_log::record!(
-                            WARN,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({
-                                "error_key": "channels.inbox_completion_task_failed",
-                                "err": err.to_string(),
-                            })),
-                            "inbox completion task failed; redelivery remains eligible"
-                        );
-                    }
-                }
-            }
+            complete_inbox_receipts(inbox, inbox_receipts).await;
         } else {
             inbox.release_claims(&inbox_receipts);
         }
@@ -2936,6 +2894,47 @@ async fn dispatch_worker(
     }
 
     completion.mark_done();
+}
+
+/// Complete receipts after their message's handling boundary. A completion
+/// write failure releases its claims inside `mark_completed_batch`, preserving
+/// at-least-once redelivery instead of silently dropping the message.
+async fn complete_inbox_receipts(inbox: Arc<MessageInbox>, inbox_receipts: Vec<InboxReceipt>) {
+    match tokio::task::spawn_blocking(move || inbox.mark_completed_batch(&inbox_receipts)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            // Bounded WARN — completion failure means at-least-once
+            // re-processing on the next delivery, never a silent drop.
+            // The error text rides along: this line is the only one
+            // until restart, so it must distinguish the failure mode.
+            if warn_inbox_failure_once("inbox_completion_failed") {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({
+                            "error_key": "channels.inbox_completion_failed",
+                            "err": err.to_string(),
+                        })),
+                    "inbox completion failed; redelivery remains eligible"
+                );
+            }
+        }
+        Err(err) => {
+            if warn_inbox_failure_once("inbox_completion_task_failed") {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({
+                            "error_key": "channels.inbox_completion_task_failed",
+                            "err": err.to_string(),
+                        })),
+                    "inbox completion task failed; redelivery remains eligible"
+                );
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3205,8 +3204,10 @@ async fn run_message_dispatch_loop(
                     "dropping inbound message: no agent owns this channel"
                 );
             }
-            // Ordinary messages remain replayable when routing recovers. A stop
-            // must not become fresh and cancel a later turn in the same scope.
+            // Ordinary messages remain replayable when routing recovers. An
+            // unowned stop did not reach its handling boundary, so deliberately
+            // retain its live claim: it must not become fresh and cancel a later
+            // turn in the same scope if routing recovers in this process.
             if !is_stop_command(&msg.content)
                 && let Some(seen_ids) = &inbox
                 && let Some(receipt) = inbox_receipt
@@ -3247,6 +3248,14 @@ async fn run_message_dispatch_loop(
                         .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
                     "stop command: no registered channel found for reply"
                 );
+            }
+            // Cancellation (or confirming there was no target) is the handled
+            // boundary for /stop. Complete its receipt so a replay is a durable
+            // duplicate, never a fresh command that could cancel a newer turn.
+            // The shared helper preserves the regular worker's fail-open
+            // completion behavior when the inbox store cannot be written.
+            if let (Some(inbox), Some(receipt)) = (&inbox, inbox_receipt) {
+                complete_inbox_receipts(Arc::clone(inbox), vec![receipt]).await;
             }
             continue;
         }

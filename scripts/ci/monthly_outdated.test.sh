@@ -3,7 +3,15 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 FIXTURE=$(mktemp -d)
-trap 'rm -rf "$FIXTURE"' EXIT
+cleanup() {
+  status=$?
+  if [[ "$status" != 0 && -n "${run:-}" && -f "$run/log" ]]; then
+    cat "$run/log" >&2
+  fi
+  rm -rf "$FIXTURE"
+  exit "$status"
+}
+trap cleanup EXIT
 mkdir "$FIXTURE/bin"
 ln -s /bin/cat "$FIXTURE/bin/cat"
 ln -s /bin/date "$FIXTURE/bin/date"
@@ -17,10 +25,14 @@ cat > "$FIXTURE/bin/cargo" <<'STUB'
 case "$*" in
   --version) echo 'cargo fixture-version' ;;
   'outdated --version') echo 'cargo-outdated 0.19.0' ;;
-  'outdated --workspace --exit-code 10')
+  'outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10')
     printf '%s\n' "$*" >> "$RUNNER_TEMP/cargo-calls"
     echo 'raw stdout canary'
     echo 'raw stderr resolver canary' >&2
+    if [[ "${FIXTURE_LARGE:-no}" == yes ]]; then
+      printf '%70000s\n' ''
+      echo 'large inventory tail canary'
+    fi
     exit "$FIXTURE_EXIT"
     ;;
   *) exit 99 ;;
@@ -32,37 +44,45 @@ printf '%s\n' "$*" >> "$RUNNER_TEMP/gh-calls"
 case "$1 $2" in
   'api repos/fixture/repo') echo "$FIXTURE_ISSUES" ;;
   'issue list') [[ "$FIXTURE_REUSE" != yes ]] || echo 'https://example.invalid/existing' ;;
-  'issue create') echo 'https://example.invalid/new' ;;
+  'issue create')
+    body=$(cat "$RUNNER_TEMP/issue-body.md")
+    (( ${#body} <= 65536 )) || { echo 'Body is too long' >&2; exit 1; }
+    echo 'https://example.invalid/new'
+    ;;
   *) exit 99 ;;
 esac
 STUB
-chmod +x "$FIXTURE/bin/"*
+chmod +x "$FIXTURE/bin/rustc" "$FIXTURE/bin/cargo" "$FIXTURE/bin/gh"
 
-for scenario in clean findings reuse disabled error other; do
+for scenario in clean findings reuse disabled error other large; do
   case "$scenario" in
-    clean) code=0 ;; findings|reuse|disabled) code=10 ;; error) code=1 ;; other) code=42 ;;
+    clean) code=0 ;; findings|reuse|disabled|large) code=10 ;; error) code=1 ;; other) code=42 ;;
   esac
   case "$code" in 0) result=clean ;; 10) result=inventory ;; *) result=scanner_failure ;; esac
   run="$FIXTURE/$scenario"
   mkdir "$run"
   : > "$run/outputs"
-  reuse=no; issues=true
+  reuse=no; issues=true; large=no
+  [[ "$scenario" != large ]] || large=yes
   [[ "$scenario" != reuse ]] || reuse=yes
   [[ "$scenario" != disabled ]] || issues=false
   environment=(env -i "PATH=$FIXTURE/bin" "RUNNER_TEMP=$run"
     "GITHUB_OUTPUT=$run/outputs" "GITHUB_SHA=fixture-head" "RUNNER_OS=fixture-os"
     "RUNNER_ARCH=fixture-arch" "ImageOS=fixture-image" "ImageVersion=fixture-version"
     "GITHUB_REPOSITORY=fixture/repo" "RUN_URL=https://example.invalid/run"
-    "FIXTURE_EXIT=$code" "FIXTURE_REUSE=$reuse" "FIXTURE_ISSUES=$issues")
+    "FIXTURE_EXIT=$code" "FIXTURE_REUSE=$reuse" "FIXTURE_ISSUES=$issues" "FIXTURE_LARGE=$large")
   status=0
   "${environment[@]}" /bin/bash "$ROOT/scripts/ci/monthly_outdated.sh" scan > "$run/log" 2>&1 || status=$?
   [[ "$status" == "$code" ]]
   [[ "$(cat "$run/outputs")" == "scan_exit_code=$code" ]]
-  [[ "$(cat "$run/cargo-calls")" == 'outdated --workspace --exit-code 10' ]]
+  [[ "$(cat "$run/cargo-calls")" == 'outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10' ]]
   report=$(cat "$run/outdated-output.txt")
   for expected in 'raw stdout canary' 'raw stderr resolver canary' 'Head: fixture-head' \
     'Runner: fixture-os fixture-arch' 'Image: fixture-image fixture-version' \
     'rustc fixture-version' 'cargo fixture-version' 'cargo-outdated 0.19.0' \
+    'Command: cargo outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10' \
+    'Coverage limit: cargo-outdated preserves direct rusqlite and matrix-sdk constraints in its hypothetical latest-version graph.' \
+    'This defers latest-version updates outside the declared rusqlite and matrix-sdk constraints: Matrix 0.18 uses rusqlite ^0.37, while Matrix 0.19 selects an incompatible SQLite links graph. The vendored libsqlite3-sys remains on the checked-in security floor (see vendor/libsqlite3-sys/VENDOR.md). Other dependencies remain eligible for hypothetical updates; transitive choices still obey this constrained graph.' \
     "Scan exit code: $code" "Result: $result"; do
     [[ "$report" == *"$expected"* ]]
   done
@@ -71,9 +91,18 @@ for scenario in clean findings reuse disabled error other; do
   if [[ "$code" != 10 ]]; then
     [[ ! -e "$run/gh-calls" && ! -e "$run/issue-body.md" ]]
     [[ "$(cat "$run/log")" != *'Outdated dependencies detected'* ]]
-  elif [[ "$scenario" == findings ]]; then
+  elif [[ "$scenario" == findings || "$scenario" == large ]]; then
     [[ "$(cat "$run/gh-calls")" == *'issue create '* ]]
-    [[ "$(cat "$run/issue-body.md")" == *"$report"* ]]
+    body=$(cat "$run/issue-body.md")
+    (( ${#body} <= 65536 ))
+    if [[ "$scenario" == large ]]; then
+      [[ "$report" == *'large inventory tail canary'* ]]
+      [[ "$body" == *'Report excerpt truncated'* ]]
+      [[ "$body" == *'https://example.invalid/run'* ]]
+      [[ "$body" != *'large inventory tail canary'* ]]
+    else
+      [[ "$body" == *"$report"* ]]
+    fi
     [[ "$(cat "$run/outputs")" == *'issue_url=https://example.invalid/new'* ]]
   else
     [[ "$(cat "$run/gh-calls")" != *'issue create '* ]]

@@ -1,6 +1,6 @@
 use crate::fs_guard::{
-    DirLink, FileId, file_id_of, guarded_copy, guarded_create_dir, guarded_remove_dir_all,
-    guarded_write, verify_chain,
+    DirLink, FileId, file_id_of, guarded_copy, guarded_copy_new, guarded_create_dir,
+    guarded_create_dir_new, guarded_remove_dir_all, guarded_write, verify_chain,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -81,7 +81,7 @@ impl BackupTool {
         let root_chain = vec![ws_link.clone(), root_link.clone()];
         let child_id = tokio::task::spawn_blocking({
             let dir = backup_dir.clone();
-            move || guarded_create_dir(root_chain, &dir)
+            move || guarded_create_dir_new(root_chain, &dir)
         })
         .await?
         .map_err(anyhow::Error::msg)?;
@@ -149,7 +149,7 @@ impl BackupTool {
                 && m.is_dir()
             {
                 let dst = backup_dir.join(sub);
-                copy_dir_recursive(&src, &dst, src_base, dst_base).await?;
+                copy_dir_recursive(&src, &dst, src_base, dst_base, true).await?;
             }
         }
         Ok(())
@@ -179,9 +179,10 @@ impl BackupTool {
     }
 
     /// Like [`Self::workspace_root_link`], but creates a missing workspace
-    /// root first (its own parents are operator-configured install paths,
-    /// outside any attacker-reachable jail) and refuses a symlinked one,
-    /// so copy chains always anchor on a real, existing directory.
+    /// root first and refuses a symlinked one. This initial bootstrap uses
+    /// operator-configured paths before a workspace identity is available;
+    /// it retains pathname races. The Unix FD guarantee starts only after
+    /// an existing workspace identity has been captured and bound.
     async fn ensure_workspace_root(&self) -> anyhow::Result<DirLink> {
         if let Some(link) = self.workspace_root_link().await? {
             return Ok(link);
@@ -246,7 +247,7 @@ impl BackupTool {
         }
         let chain = vec![ws_link.clone()];
         let dir = self.backups_dir();
-        let id = tokio::task::spawn_blocking(move || guarded_create_dir(chain, &dir))
+        let id = tokio::task::spawn_blocking(move || guarded_create_dir_new(chain, &dir))
             .await?
             .map_err(anyhow::Error::msg)?;
         Ok(DirLink {
@@ -275,8 +276,7 @@ impl BackupTool {
 
     /// Verify the freshly created backup child is a real directory that
     /// still has the identity the guarded creation observed, sits
-    /// directly under the real backups root (canonical containment, so
-    /// nothing on the path resolved through a symlink), and return the
+    /// directly under the resolved backups root, and return the
     /// verified root and child links for the mutation guards that follow.
     /// A pre-planted `backups/backup-*` symlink that `create_dir_all`
     /// would silently accept is caught here before anything is written
@@ -310,8 +310,9 @@ impl BackupTool {
             );
         }
         // Canonical containment: the resolved child must sit directly
-        // inside the resolved root. If any component resolved through a
-        // symlink, the canonical paths disagree with the parent check.
+        // inside the resolved root. This is a topology check, not proof
+        // against a shared-ancestor substitution. Unix create mutations
+        // separately bind opened directory FDs to the captured identities.
         let root_canon = fs::canonicalize(&root_link.path).await?;
         let child_canon = fs::canonicalize(&child_link.path).await?;
         if child_canon.parent() != Some(root_canon.as_path()) {
@@ -717,7 +718,7 @@ impl BackupTool {
             }
             let src = backup_dir.join(sub);
             let dst = self.workspace_dir.join(sub);
-            copy_dir_recursive(&src, &dst, &src_base, &dst_base).await?;
+            copy_dir_recursive(&src, &dst, &src_base, &dst_base, false).await?;
         }
         Ok(ToolResult {
             success: true,
@@ -862,16 +863,16 @@ async fn is_symlink(path: &Path) -> bool {
 /// ancestor chains of both the source and the destination (seeded from the
 /// caller's verified roots and extended as the walk descends), the source
 /// entry, and the destination entry, so a component anywhere above a
-/// mutation that was swapped for a symlink between the walk and the copy
-/// is refused instead of written through. The residual window between that
-/// re-check and the copy's own open is a single syscall wide — inherent to
-/// path-based APIs — and is the same discipline applied by the `fs_guard`
-/// helpers.
+/// mutation that was swapped for a symlink since observation is refused.
+/// Unix new-backup writes bind each captured destination directory to a held
+/// FD and exclusively create files relative to it. Restore overwrite and
+/// non-Unix paths retain the legacy check/use window in `fs_guard`.
 async fn copy_dir_recursive(
     src: &Path,
     dst: &Path,
     src_base: &[DirLink],
     dst_base: &[DirLink],
+    create_new: bool,
 ) -> anyhow::Result<()> {
     let src_meta = fs::symlink_metadata(src).await?;
     if src_meta.file_type().is_symlink() {
@@ -902,7 +903,7 @@ async fn copy_dir_recursive(
                 path: dst.to_path_buf(),
                 id: file_id_of(&m),
             });
-            recurse_entries(src, dst, src_chain, chain).await
+            recurse_entries(src, dst, src_chain, chain, create_new).await
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Create the destination inside a blocking step that first
@@ -911,15 +912,21 @@ async fn copy_dir_recursive(
             // create through wherever the swapped name points.
             let chain = dst_base.to_vec();
             let dst_owned = dst.to_path_buf();
-            let dst_id = tokio::task::spawn_blocking(move || guarded_create_dir(chain, &dst_owned))
-                .await?
-                .map_err(anyhow::Error::msg)?;
+            let dst_id = tokio::task::spawn_blocking(move || {
+                if create_new {
+                    guarded_create_dir_new(chain, &dst_owned)
+                } else {
+                    guarded_create_dir(chain, &dst_owned)
+                }
+            })
+            .await?
+            .map_err(anyhow::Error::msg)?;
             let mut chain = dst_base.to_vec();
             chain.push(DirLink {
                 path: dst.to_path_buf(),
                 id: dst_id,
             });
-            recurse_entries(src, dst, src_chain, chain).await
+            recurse_entries(src, dst, src_chain, chain, create_new).await
         }
         Err(e) => Err(e.into()),
     }
@@ -932,6 +939,7 @@ async fn recurse_entries(
     dst: &Path,
     src_chain: Vec<DirLink>,
     dst_chain: Vec<DirLink>,
+    create_new: bool,
 ) -> anyhow::Result<()> {
     let mut rd = fs::read_dir(src).await?;
     while let Some(entry) = rd.next_entry().await? {
@@ -943,7 +951,7 @@ async fn recurse_entries(
         let dst_path = dst.join(entry.file_name());
         if file_type.is_dir() {
             Box::pin(copy_dir_recursive(
-                &src_path, &dst_path, &src_chain, &dst_chain,
+                &src_path, &dst_path, &src_chain, &dst_chain, create_new,
             ))
             .await?;
         } else if file_type.is_file() {
@@ -954,9 +962,15 @@ async fn recurse_entries(
             let src_id = file_id_of(&entry_meta);
             let sc = src_chain.clone();
             let dc = dst_chain.clone();
-            tokio::task::spawn_blocking(move || guarded_copy(src_path, src_id, sc, dst_path, dc))
-                .await?
-                .map_err(anyhow::Error::msg)?;
+            tokio::task::spawn_blocking(move || {
+                if create_new {
+                    guarded_copy_new(src_path, src_id, sc, dst_path, dc)
+                } else {
+                    guarded_copy(src_path, src_id, sc, dst_path, dc)
+                }
+            })
+            .await?
+            .map_err(anyhow::Error::msg)?;
         }
         // Other entry kinds (sockets, devices) carry no file data and are
         // skipped: a copy that cannot be checksummed or restored has no
@@ -1417,57 +1431,45 @@ mod tests {
     }
 
     #[cfg(unix)]
+    static BACKUP_HOOK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn create_refuses_backup_child_swapped_after_verification() {
+        use crate::fs_guard::{BACKUP_DESTINATION_RACE_HOOK, BackupRacePoint};
+        let _hook_lease = BACKUP_HOOK_TEST_LOCK.lock().await;
+
         let tmp = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
-        // The first include dir holds a single trigger file; the second
-        // holds the long copy phase during which the swap must be caught.
+        // The first include dir completes normally. The hook then swaps the
+        // verified backup child at the exact check/use boundary for creation
+        // of the second include dir.
         let trigger_dir = tmp.path().join("0trigger");
         std::fs::create_dir_all(&trigger_dir).unwrap();
         std::fs::write(trigger_dir.join("a000"), "t").unwrap();
         let cfg = tmp.path().join("config");
         std::fs::create_dir_all(&cfg).unwrap();
-        for i in 0..300 {
-            std::fs::write(cfg.join(format!("c{i:03}")), "v1").unwrap();
-        }
+        std::fs::write(cfg.join("a.toml"), "v1").unwrap();
 
-        // Swapper: once the create has copied the trigger file into the
-        // fresh child (proof the child was created and verified), rename
-        // the child away and put a symlink in its place — after the
-        // create-time verification but while the copy phase is still
-        // running. A copy that only re-checks the final destination
-        // components happily writes through such a swapped ancestor.
-        let swapper = {
-            let backups = tmp.path().join("backups");
-            let target = outside.path().to_path_buf();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            std::thread::spawn(move || {
-                loop {
-                    if std::time::Instant::now() > deadline {
-                        // Never hang the suite: a swap that never triggers
-                        // fails the test via its landed-attack assertion.
-                        return;
-                    }
-                    let child = std::fs::read_dir(&backups).ok().and_then(|rd| {
-                        rd.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
-                            std::fs::symlink_metadata(p)
-                                .map(|m| m.is_dir())
-                                .unwrap_or(false)
-                        })
-                    });
-                    if let Some(child) = child
-                        && child.join("0trigger/a000").exists()
-                    {
-                        let staging = backups.join("staged-away");
-                        let _ = std::fs::rename(&child, &staging);
-                        let _ = std::os::unix::fs::symlink(&target, &child);
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_micros(20));
-                }
-            })
-        };
+        let backups = tmp.path().join("backups");
+        let target = outside.path().to_path_buf();
+        let swapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let swapped_by_hook = swapped.clone();
+        *BACKUP_DESTINATION_RACE_HOOK.lock().unwrap() = Some(Box::new(move |dst, point| {
+            if point != BackupRacePoint::ParentOpened
+                || dst.parent().and_then(Path::parent) != Some(backups.as_path())
+                || dst.file_name().and_then(|name| name.to_str()) != Some("config")
+                || swapped_by_hook.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            let child = dst.parent().expect("config has backup child parent");
+            std::fs::rename(child, backups.join("staged-away")).unwrap();
+            std::os::unix::fs::symlink(&target, child).unwrap();
+        }));
+        let reset_hook = scopeguard::guard((), |_| {
+            *BACKUP_DESTINATION_RACE_HOOK.lock().unwrap() = None;
+        });
 
         let tool = BackupTool::new(
             tmp.path().to_path_buf(),
@@ -1475,7 +1477,7 @@ mod tests {
             10,
         );
         let _ = tool.execute(json!({"command": "create"})).await;
-        let _ = swapper.join();
+        drop(reset_hook);
 
         // The attack must have landed: a symlink now sits where the
         // verified child was, and the real child was renamed away.
@@ -1490,8 +1492,8 @@ mod tests {
             })
             .unwrap_or(false);
         assert!(
-            attack_landed,
-            "swapper never replaced the created child; test setup failed"
+            attack_landed && swapped.load(std::sync::atomic::Ordering::SeqCst),
+            "race hook never replaced the created child; test setup failed"
         );
 
         let leaked: Vec<String> = std::fs::read_dir(outside.path())
@@ -1501,6 +1503,138 @@ mod tests {
         assert!(
             leaked.is_empty(),
             "create copied through the swapped child: {leaked:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_payload_cannot_be_redirected_after_parent_open() {
+        assert_create_write_uses_opened_parent("a.toml").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_manifest_cannot_be_redirected_after_parent_open() {
+        assert_create_write_uses_opened_parent("manifest.json").await;
+    }
+
+    #[cfg(unix)]
+    async fn assert_create_write_uses_opened_parent(file_name: &'static str) {
+        use crate::fs_guard::{BACKUP_DESTINATION_RACE_HOOK, BackupRacePoint};
+        let _hook_lease = BACKUP_HOOK_TEST_LOCK.lock().await;
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("config")).unwrap();
+        std::fs::write(tmp.path().join("config/a.toml"), "fixture payload").unwrap();
+        if file_name == "a.toml" {
+            std::fs::create_dir(outside.path().join("config")).unwrap();
+        }
+        let backups = tmp.path().join("backups");
+        let target = outside.path().to_path_buf();
+        let swapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = swapped.clone();
+        *BACKUP_DESTINATION_RACE_HOOK.lock().unwrap() = Some(Box::new(move |dst, point| {
+            let child = if file_name == "manifest.json" {
+                dst.parent()
+            } else {
+                dst.parent().and_then(Path::parent)
+            };
+            let Some(child) = child else { return };
+            if point != BackupRacePoint::ParentOpened
+                || child.parent() != Some(backups.as_path())
+                || dst.file_name().and_then(|name| name.to_str()) != Some(file_name)
+                || observed.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            std::fs::rename(child, backups.join("staged-away")).unwrap();
+            std::os::unix::fs::symlink(&target, child).unwrap();
+        }));
+        let reset_hook = scopeguard::guard((), |_| {
+            *BACKUP_DESTINATION_RACE_HOOK.lock().unwrap() = None;
+        });
+        let result = make_tool(&tmp).cmd_create().await;
+        drop(reset_hook);
+        assert!(swapped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(result.is_err(), "a namespace swap must not report success");
+        assert!(!outside.path().join("config/a.toml").exists());
+        assert!(!outside.path().join("manifest.json").exists());
+        let relative = if file_name == "manifest.json" {
+            "manifest.json"
+        } else {
+            "config/a.toml"
+        };
+        let original = tmp.path().join("backups/staged-away").join(relative);
+        let written = std::fs::read_to_string(original).unwrap();
+        if file_name == "a.toml" {
+            assert_eq!(written, "fixture payload");
+        } else {
+            assert!(written.contains("config/a.toml"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_rejects_payload_name_replaced_after_open() {
+        assert_create_rejects_replaced_entry("a.toml", false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_rejects_manifest_name_replaced_after_open() {
+        assert_create_rejects_replaced_entry("manifest.json", false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_rejects_directory_name_replaced_after_open() {
+        assert_create_rejects_replaced_entry("config", true).await;
+    }
+
+    #[cfg(unix)]
+    async fn assert_create_rejects_replaced_entry(file_name: &'static str, is_dir: bool) {
+        use crate::fs_guard::{BACKUP_DESTINATION_RACE_HOOK, BackupRacePoint};
+        let _hook_lease = BACKUP_HOOK_TEST_LOCK.lock().await;
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("config")).unwrap();
+        // An empty directory has no later payload mutation that could reject
+        // the replacement on behalf of the directory helper under test.
+        if !is_dir {
+            std::fs::write(tmp.path().join("config/a.toml"), "fixture payload").unwrap();
+        }
+        let backups = tmp.path().join("backups");
+        let swapped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = swapped.clone();
+        *BACKUP_DESTINATION_RACE_HOOK.lock().unwrap() = Some(Box::new(move |dst, point| {
+            let child = if file_name == "a.toml" {
+                dst.parent().and_then(Path::parent)
+            } else {
+                dst.parent()
+            };
+            if point != BackupRacePoint::EntryOpened
+                || child.and_then(Path::parent) != Some(backups.as_path())
+                || dst.file_name().and_then(|name| name.to_str()) != Some(file_name)
+                || observed.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                return;
+            }
+            std::fs::rename(dst, dst.with_extension("held-away")).unwrap();
+            if is_dir {
+                std::fs::create_dir(dst).unwrap();
+            } else {
+                std::fs::write(dst, "replacement").unwrap();
+            }
+        }));
+        let reset_hook = scopeguard::guard((), |_| {
+            *BACKUP_DESTINATION_RACE_HOOK.lock().unwrap() = None;
+        });
+        let result = make_tool(&tmp).cmd_create().await;
+        drop(reset_hook);
+        assert!(swapped.load(std::sync::atomic::Ordering::SeqCst));
+        let error = result.expect_err("a replaced entry must not report successful backup");
+        assert!(
+            error.to_string().contains("backup entry changed identity"),
+            "{error:#}"
         );
     }
 
@@ -1601,6 +1735,7 @@ mod tests {
             &child.join("config"),
             &[ws_link],
             &[root_link, child_link],
+            true,
         )
         .await;
         assert!(
