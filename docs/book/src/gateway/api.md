@@ -129,6 +129,8 @@ agent alias; an unknown alias returns 404 with `code: "unknown_agent"`.
 | `PUT /api/soul/identity` | Body `{ "agent", "expected_revision", "identity": { "name", "self_description"?, "primary_language"?, "pronouns"? } }`. |
 | `PUT /api/soul/principles` | Body `{ "agent", "expected_revision", "items": [ ... ] }`, at most 8 single-line items of up to 240 bytes. |
 | `POST /api/soul/rollback` | Body `{ "agent", "layer", "to_revision", "expected_revision" }`. Appends a copy of an earlier revision. |
+| `GET /api/soul/proposals?agent=<alias>[&pending=true]` | The agent's own proposals to change its principles or voice, oldest first. |
+| `POST /api/soul/proposals/{id}/resolve` | Body `{ "agent", "resolution": "accepted" \| "dismissed", "note"? }`. Each proposal resolves once; a repeat returns 409 with `code: "proposal_already_resolved"`. |
 
 Revisions are append-only. Seeded values have `source: "seed"`; owner writes
 and rollbacks have `source: "owner"`. Each write must name the revision it
@@ -140,6 +142,12 @@ workspace files stop being injected into the system prompt.
 
 Model file tools cannot write `SOUL.md`, `IDENTITY.md`, or `USER.md` at an
 agent workspace root.
+
+The model's only path into its own Soul is the `propose_soul_change` tool. It
+records a proposal (at most three pending per agent, identical pending
+proposals are not stored twice) and replies that nothing has changed.
+Accepting a proposal records the decision only; the owner applies the change
+in their own words with `PUT /api/soul/principles` or the persona config.
 
 ## Stable error codes
 

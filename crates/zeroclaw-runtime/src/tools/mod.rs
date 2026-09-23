@@ -95,6 +95,7 @@ pub use zeroclaw_tools::notion_tool::NotionTool;
 pub use zeroclaw_tools::pipeline::PipelineTool;
 pub use zeroclaw_tools::poll::PollTool;
 pub use zeroclaw_tools::project_intel::ProjectIntelTool;
+pub use zeroclaw_tools::propose_soul_change::ProposeSoulChangeTool;
 pub use zeroclaw_tools::proxy_config::ProxyConfigTool;
 #[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::pushover::PushoverTool;
@@ -705,6 +706,12 @@ pub fn all_tools_with_runtime(
         Arc::new(ScheduleTool::new(
             security.clone(),
             root_config.clone(),
+            agent_alias,
+        )),
+        // The model's only path into its own Soul: records a proposal for
+        // owner review and changes nothing (ADR-015 §3).
+        Arc::new(ProposeSoulChangeTool::new(
+            root_config.data_dir.clone(),
             agent_alias,
         )),
         Arc::new(reasoning_spawn_tool_for_registry(

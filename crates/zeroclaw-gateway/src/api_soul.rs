@@ -10,11 +10,12 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use axum::body::Bytes;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use zeroclaw_memory::companion::{
     SoulIdentity, SoulLayer, SoulPrinciples, SoulProfileError, SoulProfileStore,
+    SoulProposalResolution,
 };
 
 use crate::AppState;
@@ -56,6 +57,21 @@ fn soul_error(err: &SoulProfileError) -> Response {
         SoulProfileError::NotFound { .. } => error_json(
             StatusCode::NOT_FOUND,
             "revision_not_found",
+            &err.to_string(),
+        ),
+        SoulProfileError::ProposalNotFound { .. } => error_json(
+            StatusCode::NOT_FOUND,
+            "proposal_not_found",
+            &err.to_string(),
+        ),
+        SoulProfileError::ProposalAlreadyResolved { .. } => error_json(
+            StatusCode::CONFLICT,
+            "proposal_already_resolved",
+            &err.to_string(),
+        ),
+        SoulProfileError::TooManyOpenProposals { .. } => error_json(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_open_proposals",
             &err.to_string(),
         ),
         SoulProfileError::Storage(_) => error_json(
@@ -358,6 +374,97 @@ pub async fn post_rollback(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct ProposalsQuery {
+    #[serde(default)]
+    agent: String,
+    #[serde(default)]
+    pending: bool,
+}
+
+/// GET /api/soul/proposals?agent=<alias>[&pending=true] — the agent's own
+/// proposals to change its principles or voice, oldest first.
+pub async fn get_proposals(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
+        return err;
+    }
+    let query: ProposalsQuery = match parse_query(&uri) {
+        Ok(query) => query,
+        Err(err) => return *err,
+    };
+    let (agent, data_dir) = match configured_agent(&state, &query.agent) {
+        Ok(found) => found,
+        Err(err) => return *err,
+    };
+    let lookup = agent.clone();
+    let pending = query.pending;
+    match run_store(data_dir, move |store| store.proposals(&lookup, pending)).await {
+        Ok(proposals) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "agent": agent, "proposals": proposals })),
+        )
+            .into_response(),
+        Err(err) => err,
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveBody {
+    agent: String,
+    resolution: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// POST /api/soul/proposals/{id}/resolve — record the owner's decision
+/// (`accepted` | `dismissed`). Accepting records the decision only: the owner
+/// applies the change in their own words through `PUT /api/soul/principles`
+/// or the persona config, so proposal text never becomes Soul text by id.
+pub async fn post_resolve_proposal(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    body: Bytes,
+) -> Response {
+    if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
+        return err;
+    }
+    let body = match serde_json::from_slice::<ResolveBody>(&body) {
+        Ok(body) => body,
+        Err(err) => return error_json(StatusCode::BAD_REQUEST, "bad_body", &err.to_string()),
+    };
+    let Some(resolution) = SoulProposalResolution::parse(&body.resolution) else {
+        return error_json(
+            StatusCode::BAD_REQUEST,
+            "unknown_resolution",
+            "resolution must be accepted | dismissed",
+        );
+    };
+    let (agent, data_dir) = match configured_agent(&state, &body.agent) {
+        Ok(found) => found,
+        Err(err) => return *err,
+    };
+    match run_store(data_dir, move |store| {
+        store.resolve_proposal(&agent, id, resolution, body.note, now_unix())
+    })
+    .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "id": id, "resolution": resolution })),
+        )
+            .into_response(),
+        Err(err) => err,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,5 +673,72 @@ mod tests {
         assert_eq!(revisions.len(), 3);
         assert_eq!(revisions[0]["source"], "seed");
         assert_eq!(revisions[1]["value"]["items"][0], "Be brief.");
+    }
+
+    #[tokio::test]
+    async fn owner_lists_and_resolves_model_proposals_once() {
+        let (dir, state) = state_with_agent();
+        let store = SoulProfileStore::shared(dir.path()).unwrap();
+        let outcome = store
+            .submit_proposal(
+                "nova",
+                zeroclaw_memory::companion::NewSoulProposal {
+                    layer: zeroclaw_memory::companion::SoulProposalLayer::Principles,
+                    proposal: "Keep answers short.".into(),
+                    rationale: "Asked three times.".into(),
+                    trait_key: None,
+                    level: None,
+                    session_ref: None,
+                },
+                1,
+            )
+            .unwrap();
+        let zeroclaw_memory::companion::SoulProposalOutcome::Recorded { id } = outcome else {
+            panic!("{outcome:?}")
+        };
+        let list = |uri: &str| {
+            get_proposals(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                uri.parse().unwrap(),
+            )
+        };
+        let (status, json) =
+            json_of(list("/api/soul/proposals?agent=nova&pending=true").await).await;
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert_eq!(json["proposals"][0]["proposal"], "Keep answers short.");
+
+        let resolve = |resolution: &str| {
+            post_resolve_proposal(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                Path(id),
+                body(&serde_json::json!({"agent": "nova", "resolution": resolution})),
+            )
+        };
+        let (status, _) = json_of(resolve("accepted").await).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, json) = json_of(resolve("dismissed").await).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(json["code"], "proposal_already_resolved");
+
+        let (_, json) = json_of(list("/api/soul/proposals?agent=nova&pending=true").await).await;
+        assert_eq!(json["proposals"].as_array().unwrap().len(), 0);
+        let (_, json) = json_of(list("/api/soul/proposals?agent=nova").await).await;
+        assert_eq!(json["proposals"][0]["resolution"], "accepted");
+
+        // Accepting recorded a decision only; the Soul itself is unchanged.
+        assert!(store.profile("nova").unwrap().principles.is_none());
+        // Anonymous callers are refused.
+        let response = get_proposals(
+            State(state.clone()),
+            ConnectInfo(peer()),
+            HeaderMap::new(),
+            "/api/soul/proposals?agent=nova".parse().unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

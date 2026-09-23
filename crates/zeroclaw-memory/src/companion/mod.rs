@@ -35,9 +35,11 @@ pub use outbox::{
     probe_companion_outbox_health,
 };
 pub use soul_profile::{
-    DEFAULT_PRINCIPLES, SOUL_MAX_PRINCIPLES, SOUL_NAME_MAX_BYTES, SOUL_PRINCIPLE_MAX_BYTES,
-    SOUL_PROFILE_DB_FILE, SOUL_SELF_DESCRIPTION_MAX_BYTES, SOUL_SHORT_FIELD_MAX_BYTES,
-    SoulIdentity, SoulLayer, SoulPrinciples, SoulProfile, SoulProfileError, SoulProfileStore,
+    DEFAULT_PRINCIPLES, NewSoulProposal, SOUL_MAX_OPEN_PROPOSALS, SOUL_MAX_PRINCIPLES,
+    SOUL_NAME_MAX_BYTES, SOUL_PRINCIPLE_MAX_BYTES, SOUL_PROFILE_DB_FILE, SOUL_PROPOSAL_MAX_BYTES,
+    SOUL_RATIONALE_MAX_BYTES, SOUL_SELF_DESCRIPTION_MAX_BYTES, SOUL_SHORT_FIELD_MAX_BYTES,
+    SOUL_VOICE_TRAIT_KEYS, SoulIdentity, SoulLayer, SoulPrinciples, SoulProfile, SoulProfileError,
+    SoulProfileStore, SoulProposal, SoulProposalLayer, SoulProposalOutcome, SoulProposalResolution,
     SoulRevision, SoulSource, seed_name_for_agent,
 };
 pub use user_model::{

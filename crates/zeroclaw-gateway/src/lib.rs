@@ -1985,6 +1985,11 @@ pub async fn run_gateway(
         .route("/api/soul/identity", put(api_soul::put_identity))
         .route("/api/soul/principles", put(api_soul::put_principles))
         .route("/api/soul/rollback", post(api_soul::post_rollback))
+        .route("/api/soul/proposals", get(api_soul::get_proposals))
+        .route(
+            "/api/soul/proposals/{id}/resolve",
+            post(api_soul::post_resolve_proposal),
+        )
         // ── Backup / data-retention operator surface ──
         // Thin operator-bearer-gated entries over the same BackupTool /
         // DataManagementTool command methods the model-visible tools use;

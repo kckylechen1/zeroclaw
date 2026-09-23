@@ -57,6 +57,8 @@ pub const MINIMAL_TOOL_MEMBERSHIP: &[&str] = &[
     "reasoning_subagent",
     // attention/scheduling semantics
     "schedule",
+    // governed Soul: propose a change for owner review (ADR-015 §3)
+    "propose_soul_change",
 ];
 
 /// The documented values accepted for the root `composition` key, joined

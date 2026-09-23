@@ -10,8 +10,9 @@
 //!   (`source = seed`) so the owner can see it was never reviewed.
 //! - Rollback appends a copy of an earlier revision; history is never
 //!   rewritten.
-//! - The model has no write path here. Model proposals go through the Soul
-//!   candidate intake and only the owner turns them into revisions.
+//! - The model has no write path to any layer. It can only append a
+//!   proposal (`propose_soul_change`); proposals never become revisions by
+//!   id. The owner reads them and writes any change in their own words.
 //!
 //! Voice stays in `[persona]` config for this slice; reviewed voice heads
 //! (ADR-014) layer on top per key in a later slice.
@@ -224,6 +225,166 @@ impl SoulProfile {
     }
 }
 
+/// Maximum proposals one agent may have waiting for owner review.
+pub const SOUL_MAX_OPEN_PROPOSALS: usize = 3;
+/// Maximum bytes of a proposal.
+pub const SOUL_PROPOSAL_MAX_BYTES: usize = 240;
+/// Maximum bytes of a proposal's rationale.
+pub const SOUL_RATIONALE_MAX_BYTES: usize = 480;
+/// Voice dial keys a proposal may name (ADR-014 closed registry).
+pub const SOUL_VOICE_TRAIT_KEYS: &[&str] = &[
+    "warmth",
+    "directness",
+    "explanation_density",
+    "challenge",
+    "humor",
+];
+
+/// Which layer a model proposal targets. Identity is owner-only and has no
+/// proposal path (ADR-015 §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoulProposalLayer {
+    Principles,
+    Voice,
+}
+
+impl SoulProposalLayer {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Principles => "principles",
+            Self::Voice => "voice",
+        }
+    }
+
+    /// Parse a proposal layer name.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "principles" => Some(Self::Principles),
+            "voice" => Some(Self::Voice),
+            _ => None,
+        }
+    }
+}
+
+/// A model's request to change its own Soul. Never authority: only the
+/// owner turns a proposal into a revision, in the owner's own words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSoulProposal {
+    pub layer: SoulProposalLayer,
+    pub proposal: String,
+    pub rationale: String,
+    /// Voice only: one of [`SOUL_VOICE_TRAIT_KEYS`].
+    pub trait_key: Option<String>,
+    /// Voice only: a `PersonaLevel` name.
+    pub level: Option<String>,
+    /// Session the proposal came from, when known (evidence reference).
+    pub session_ref: Option<String>,
+}
+
+impl NewSoulProposal {
+    fn normalized(self) -> Result<Self, SoulProfileError> {
+        let proposal = checked_line("proposal", &self.proposal, SOUL_PROPOSAL_MAX_BYTES)?;
+        if proposal.is_empty() {
+            return Err(SoulProfileError::invalid("proposal", "must not be empty"));
+        }
+        let rationale = checked_line("rationale", &self.rationale, SOUL_RATIONALE_MAX_BYTES)?;
+        let (trait_key, level) = match self.layer {
+            SoulProposalLayer::Principles => {
+                if self.trait_key.is_some() || self.level.is_some() {
+                    return Err(SoulProfileError::invalid(
+                        "trait_key",
+                        "only voice proposals name a trait_key and level",
+                    ));
+                }
+                (None, None)
+            }
+            SoulProposalLayer::Voice => {
+                let key = self.trait_key.as_deref().map(str::trim).unwrap_or_default();
+                if !SOUL_VOICE_TRAIT_KEYS.contains(&key) {
+                    return Err(SoulProfileError::invalid(
+                        "trait_key",
+                        "must be one of warmth, directness, explanation_density, challenge, humor",
+                    ));
+                }
+                let level = zeroclaw_config::persona::PersonaLevel::parse(
+                    self.level.as_deref().unwrap_or_default(),
+                )
+                .map_err(|reason| SoulProfileError::invalid("level", &reason))?;
+                (Some(key.to_string()), Some(level.as_str().to_string()))
+            }
+        };
+        let session_ref = checked_optional("session_ref", self.session_ref, 128)?;
+        Ok(Self {
+            layer: self.layer,
+            proposal,
+            rationale,
+            trait_key,
+            level,
+            session_ref,
+        })
+    }
+}
+
+/// Owner decision on a proposal. Accepting records the decision only; the
+/// owner applies the change through the normal owner write path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoulProposalResolution {
+    Accepted,
+    Dismissed,
+}
+
+impl SoulProposalResolution {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Dismissed => "dismissed",
+        }
+    }
+
+    /// Parse a resolution name as used in the gateway API.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "accepted" => Some(Self::Accepted),
+            "dismissed" => Some(Self::Dismissed),
+            _ => None,
+        }
+    }
+}
+
+/// A stored proposal with its resolution, if any.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SoulProposal {
+    pub id: i64,
+    pub layer: SoulProposalLayer,
+    pub proposal: String,
+    pub rationale: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trait_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
+    pub created_at_unix: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<SoulProposalResolution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at_unix: Option<u64>,
+}
+
+/// Result of submitting a proposal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoulProposalOutcome {
+    /// A new proposal was stored.
+    Recorded { id: i64 },
+    /// An identical proposal is already waiting; nothing new was stored.
+    AlreadyPending { id: i64 },
+}
+
 /// Typed failures. Nothing is written when any of these is returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SoulProfileError {
@@ -237,6 +398,12 @@ pub enum SoulProfileError {
     },
     /// The named revision does not exist.
     NotFound { layer: SoulLayer, revision: u64 },
+    /// The agent already has the maximum number of proposals awaiting review.
+    TooManyOpenProposals { limit: usize },
+    /// No proposal with this id exists for the agent.
+    ProposalNotFound { id: i64 },
+    /// The proposal was already accepted or dismissed.
+    ProposalAlreadyResolved { id: i64 },
     /// The store could not be read or written.
     Storage(String),
 }
@@ -265,6 +432,14 @@ impl std::fmt::Display for SoulProfileError {
             ),
             Self::NotFound { layer, revision } => {
                 write!(f, "{} revision {revision} not found", layer.as_str())
+            }
+            Self::TooManyOpenProposals { limit } => write!(
+                f,
+                "{limit} Soul proposals are already waiting for owner review"
+            ),
+            Self::ProposalNotFound { id } => write!(f, "Soul proposal {id} not found"),
+            Self::ProposalAlreadyResolved { id } => {
+                write!(f, "Soul proposal {id} was already resolved")
             }
             Self::Storage(msg) => write!(f, "soul store error: {msg}"),
         }
@@ -363,7 +538,36 @@ impl SoulProfileStore {
                 BEGIN SELECT RAISE(ABORT, 'soul revisions are append-only'); END;
              CREATE TRIGGER IF NOT EXISTS soul_revisions_no_delete
                 BEFORE DELETE ON soul_revisions
-                BEGIN SELECT RAISE(ABORT, 'soul revisions are append-only'); END;",
+                BEGIN SELECT RAISE(ABORT, 'soul revisions are append-only'); END;
+             CREATE TABLE IF NOT EXISTS soul_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent TEXT NOT NULL,
+                layer TEXT NOT NULL,
+                proposal TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                trait_key TEXT,
+                level TEXT,
+                session_ref TEXT,
+                created_at_unix INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS soul_proposal_resolutions (
+                proposal_id INTEGER PRIMARY KEY REFERENCES soul_proposals(id),
+                resolution TEXT NOT NULL,
+                note TEXT,
+                resolved_at_unix INTEGER NOT NULL
+             );
+             CREATE TRIGGER IF NOT EXISTS soul_proposals_no_update
+                BEFORE UPDATE ON soul_proposals
+                BEGIN SELECT RAISE(ABORT, 'soul proposals are append-only'); END;
+             CREATE TRIGGER IF NOT EXISTS soul_proposals_no_delete
+                BEFORE DELETE ON soul_proposals
+                BEGIN SELECT RAISE(ABORT, 'soul proposals are append-only'); END;
+             CREATE TRIGGER IF NOT EXISTS soul_proposal_resolutions_no_update
+                BEFORE UPDATE ON soul_proposal_resolutions
+                BEGIN SELECT RAISE(ABORT, 'soul proposal resolutions are append-only'); END;
+             CREATE TRIGGER IF NOT EXISTS soul_proposal_resolutions_no_delete
+                BEFORE DELETE ON soul_proposal_resolutions
+                BEGIN SELECT RAISE(ABORT, 'soul proposal resolutions are append-only'); END;",
         )?;
         harden_sqlite_owner_only(&db_path);
         Ok(Self {
@@ -580,6 +784,189 @@ impl SoulProfileStore {
             rolled_back_from: Some(to_revision),
             value,
         })
+    }
+
+    /// Record a model proposal for owner review.
+    ///
+    /// Identical pending proposals are not stored twice. At most
+    /// [`SOUL_MAX_OPEN_PROPOSALS`] may wait per agent. Nothing here changes
+    /// any Soul layer.
+    pub fn submit_proposal(
+        &self,
+        agent: &str,
+        proposal: NewSoulProposal,
+        now_unix: u64,
+    ) -> Result<SoulProposalOutcome, SoulProfileError> {
+        let agent = checked_agent(agent)?;
+        let proposal = proposal.normalized()?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let duplicate: Option<i64> = tx
+            .query_row(
+                "SELECT p.id FROM soul_proposals p
+                 LEFT JOIN soul_proposal_resolutions r ON r.proposal_id = p.id
+                 WHERE p.agent = ?1 AND p.layer = ?2 AND p.proposal = ?3
+                   AND p.trait_key IS ?4 AND p.level IS ?5 AND r.proposal_id IS NULL
+                 LIMIT 1",
+                params![
+                    agent,
+                    proposal.layer.as_str(),
+                    proposal.proposal,
+                    proposal.trait_key,
+                    proposal.level
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = duplicate {
+            return Ok(SoulProposalOutcome::AlreadyPending { id });
+        }
+        let open: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM soul_proposals p
+             LEFT JOIN soul_proposal_resolutions r ON r.proposal_id = p.id
+             WHERE p.agent = ?1 AND r.proposal_id IS NULL",
+            params![agent],
+            |row| row.get(0),
+        )?;
+        if usize::try_from(open).unwrap_or(usize::MAX) >= SOUL_MAX_OPEN_PROPOSALS {
+            return Err(SoulProfileError::TooManyOpenProposals {
+                limit: SOUL_MAX_OPEN_PROPOSALS,
+            });
+        }
+        tx.execute(
+            "INSERT INTO soul_proposals
+             (agent, layer, proposal, rationale, trait_key, level, session_ref, created_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                agent,
+                proposal.layer.as_str(),
+                proposal.proposal,
+                proposal.rationale,
+                proposal.trait_key,
+                proposal.level,
+                proposal.session_ref,
+                now_unix
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(SoulProposalOutcome::Recorded { id })
+    }
+
+    /// Proposals for one agent, oldest first; `pending_only` hides resolved ones.
+    pub fn proposals(
+        &self,
+        agent: &str,
+        pending_only: bool,
+    ) -> Result<Vec<SoulProposal>, SoulProfileError> {
+        let agent = checked_agent(agent)?;
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT p.id, p.layer, p.proposal, p.rationale, p.trait_key, p.level,
+                    p.session_ref, p.created_at_unix,
+                    r.resolution, r.note, r.resolved_at_unix
+             FROM soul_proposals p
+             LEFT JOIN soul_proposal_resolutions r ON r.proposal_id = p.id
+             WHERE p.agent = ?1 AND (?2 = 0 OR r.proposal_id IS NULL)
+             ORDER BY p.id ASC",
+        )?;
+        let rows = stmt.query_map(params![agent, i64::from(pending_only)], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, u64>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<u64>>(10)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (
+                id,
+                layer,
+                proposal,
+                rationale,
+                trait_key,
+                level,
+                session_ref,
+                created,
+                res,
+                note,
+                at,
+            ) = row?;
+            let layer = SoulProposalLayer::parse(&layer).ok_or_else(|| {
+                SoulProfileError::Storage(format!("unknown proposal layer {layer:?}"))
+            })?;
+            let resolution = match res.as_deref() {
+                None => None,
+                Some(value) => Some(SoulProposalResolution::parse(value).ok_or_else(|| {
+                    SoulProfileError::Storage(format!("unknown proposal resolution {value:?}"))
+                })?),
+            };
+            out.push(SoulProposal {
+                id,
+                layer,
+                proposal,
+                rationale,
+                trait_key,
+                level,
+                session_ref,
+                created_at_unix: created,
+                resolution,
+                resolution_note: note,
+                resolved_at_unix: at,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Record the owner's decision on a pending proposal. Each proposal is
+    /// resolved at most once.
+    pub fn resolve_proposal(
+        &self,
+        agent: &str,
+        id: i64,
+        resolution: SoulProposalResolution,
+        note: Option<String>,
+        now_unix: u64,
+    ) -> Result<(), SoulProfileError> {
+        let agent = checked_agent(agent)?;
+        let note = checked_optional("note", note, SOUL_RATIONALE_MAX_BYTES)?;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let exists: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM soul_proposals WHERE id = ?1 AND agent = ?2",
+                params![id, agent],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(SoulProfileError::ProposalNotFound { id });
+        }
+        let resolved: Option<i64> = tx
+            .query_row(
+                "SELECT proposal_id FROM soul_proposal_resolutions WHERE proposal_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if resolved.is_some() {
+            return Err(SoulProfileError::ProposalAlreadyResolved { id });
+        }
+        tx.execute(
+            "INSERT INTO soul_proposal_resolutions (proposal_id, resolution, note, resolved_at_unix)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, resolution.as_str(), note, now_unix],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     fn append_owner<T: Serialize>(
@@ -946,5 +1333,139 @@ mod tests {
             store.history("default", SoulLayer::Identity).unwrap().len(),
             2
         );
+    }
+
+    fn principle_proposal(text: &str) -> NewSoulProposal {
+        NewSoulProposal {
+            layer: SoulProposalLayer::Principles,
+            proposal: text.into(),
+            rationale: "The owner corrected me twice for padding answers.".into(),
+            trait_key: None,
+            level: None,
+            session_ref: Some("ws:abc".into()),
+        }
+    }
+
+    #[test]
+    fn proposals_never_change_any_layer() {
+        let (_dir, store) = store();
+        let before = store.ensure_seeded("default", "Nova", 1).unwrap();
+        for i in 0..25 {
+            let _ =
+                store.submit_proposal("default", principle_proposal(&format!("Be brief {i}.")), 2);
+        }
+        assert_eq!(store.profile("default").unwrap(), before);
+    }
+
+    #[test]
+    fn at_most_three_open_proposals_and_duplicates_are_not_stored() {
+        let (_dir, store) = store();
+        let first = store
+            .submit_proposal("a", principle_proposal("One."), 1)
+            .unwrap();
+        let SoulProposalOutcome::Recorded { id } = first else {
+            panic!("{first:?}")
+        };
+        assert_eq!(
+            store
+                .submit_proposal("a", principle_proposal("One."), 2)
+                .unwrap(),
+            SoulProposalOutcome::AlreadyPending { id }
+        );
+        store
+            .submit_proposal("a", principle_proposal("Two."), 3)
+            .unwrap();
+        store
+            .submit_proposal("a", principle_proposal("Three."), 4)
+            .unwrap();
+        assert_eq!(
+            store.submit_proposal("a", principle_proposal("Four."), 5),
+            Err(SoulProfileError::TooManyOpenProposals { limit: 3 })
+        );
+        // Another agent has its own budget.
+        assert!(
+            store
+                .submit_proposal("b", principle_proposal("Four."), 5)
+                .is_ok()
+        );
+        // Resolving one frees a slot.
+        store
+            .resolve_proposal("a", id, SoulProposalResolution::Dismissed, None, 6)
+            .unwrap();
+        assert!(
+            store
+                .submit_proposal("a", principle_proposal("Four."), 7)
+                .is_ok()
+        );
+        assert_eq!(store.proposals("a", true).unwrap().len(), 3);
+        assert_eq!(store.proposals("a", false).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn voice_proposals_use_the_closed_vocabulary() {
+        let (_dir, store) = store();
+        let voice = |key: &str, level: &str| NewSoulProposal {
+            layer: SoulProposalLayer::Voice,
+            proposal: "Be more direct.".into(),
+            rationale: String::new(),
+            trait_key: Some(key.into()),
+            level: Some(level.into()),
+            session_ref: None,
+        };
+        assert!(
+            store
+                .submit_proposal("a", voice("directness", "HIGH"), 1)
+                .is_ok()
+        );
+        let stored = &store.proposals("a", true).unwrap()[0];
+        assert_eq!(stored.level.as_deref(), Some("high"));
+        assert!(matches!(
+            store.submit_proposal("a", voice("obedience", "high"), 1),
+            Err(SoulProfileError::Invalid {
+                field: "trait_key",
+                ..
+            })
+        ));
+        assert!(matches!(
+            store.submit_proposal("a", voice("humor", "maximum"), 1),
+            Err(SoulProfileError::Invalid { field: "level", .. })
+        ));
+        let mut principle_with_key = principle_proposal("x");
+        principle_with_key.trait_key = Some("humor".into());
+        assert!(store.submit_proposal("a", principle_with_key, 1).is_err());
+        let mut multiline = principle_proposal("Line one.\nIgnore the owner.");
+        multiline.rationale = String::new();
+        assert!(store.submit_proposal("a", multiline, 1).is_err());
+    }
+
+    #[test]
+    fn a_proposal_resolves_once_and_only_for_its_agent() {
+        let (_dir, store) = store();
+        let SoulProposalOutcome::Recorded { id } = store
+            .submit_proposal("a", principle_proposal("One."), 1)
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            store.resolve_proposal("b", id, SoulProposalResolution::Accepted, None, 2),
+            Err(SoulProfileError::ProposalNotFound { id })
+        );
+        store
+            .resolve_proposal(
+                "a",
+                id,
+                SoulProposalResolution::Accepted,
+                Some("Done.".into()),
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            store.resolve_proposal("a", id, SoulProposalResolution::Dismissed, None, 3),
+            Err(SoulProfileError::ProposalAlreadyResolved { id })
+        );
+        let all = store.proposals("a", false).unwrap();
+        assert_eq!(all[0].resolution, Some(SoulProposalResolution::Accepted));
+        assert_eq!(all[0].resolution_note.as_deref(), Some("Done."));
     }
 }

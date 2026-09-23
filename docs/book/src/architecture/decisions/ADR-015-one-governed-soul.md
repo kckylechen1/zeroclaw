@@ -93,11 +93,12 @@ That contract is sound, but on 2026-09-23 it governs almost nothing that reaches
 - The shipped templates drop "yours to evolve", "update it", and "yours to shape".
 - A new model tool **`propose_soul_change`** is the only model path into Soul:
   - input: `layer` (`principles` | `voice`), `proposal` (≤ 240 bytes), `rationale` (≤ 480 bytes), and, for voice, the proposed `trait_key` / `level`;
-  - it calls `SoulCandidateService::submit` with `CandidateOrigin::ModelSummary`, `DomainClassification::SoulDisposition`, and the current turn as the evidence ref;
+  - it appends a proposal to the Soul profile store (`soul.db`), recording the current session as the evidence reference. Proposals and their one-time owner resolutions are append-only tables next to the layer revisions;
   - it returns a fixed string: "Proposal recorded for owner review. Nothing about me has changed.";
-  - it keeps at most 3 open proposals per identity and refuses the rest with a typed error;
+  - it keeps at most 3 open proposals per agent, does not store an identical pending proposal twice, and refuses the rest with a typed error;
   - it is absent from ReasoningSubAgent and Supervisor profiles.
-- This gives the existing candidate intake its first production producer without adding any promotion path.
+- Accepting a proposal records the decision only. The owner applies any change in their own words through the owner write path, so proposal text never becomes Soul text by id.
+- Amended before merge (2026-09-23): an earlier draft routed proposals through `SoulCandidateService::submit`. That service requires an admitted `AgentIdentityId` (§4) and a memory backend with composite attribution. Proposals therefore live in the Soul profile store for now; when §4 lands they may be mirrored into the candidate intake, which stays the home for non-model evidence origins.
 
 ### 4. Identity is admitted at startup
 

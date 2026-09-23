@@ -217,8 +217,8 @@
       "path": "crates/zeroclaw-memory/src/companion/soul_profile.rs",
       "store": "soul.db",
       "role": "store",
-      "basis": "ADR-015 governed Soul profile: owner-authored Identity/Principles revisions (append-only, triggers refuse UPDATE/DELETE, CAS on owner writes). Not a task/attempt/workspace/eval/approval/delivery ledger; the only writers are the operator-gated /api/soul surface and first-read seeding.",
-      "signals": 11
+      "basis": "ADR-015 governed Soul profile: owner-authored Identity/Principles revisions (append-only, triggers refuse UPDATE/DELETE, CAS on owner writes). Not a task/attempt/workspace/eval/approval/delivery ledger; the only writers are the operator-gated /api/soul surface and first-read seeding. #380 S7 adds soul_proposals and soul_proposal_resolutions (11 to 15): append-only model proposals awaiting owner review plus one-time owner resolutions, with UPDATE/DELETE triggers. Proposals never become revisions by id; not a task/attempt/delivery ledger.",
+      "signals": 15
     },
     {
       "path": "crates/zeroclaw-memory/src/companion/store.rs",
