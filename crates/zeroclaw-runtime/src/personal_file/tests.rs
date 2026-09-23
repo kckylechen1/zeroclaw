@@ -74,15 +74,20 @@ fn unix_symlink(target: &Path, link: &Path) {
 }
 
 /// One-shot hook installation for the race discriminations: the attacker
-/// step runs exactly once, at the first safety-primitive boundary.
+/// step runs exactly once, at the selected safety-primitive boundary.
 #[cfg(unix)]
 fn install_one_shot_race_hook(step: impl Fn() + Send + Sync + 'static) {
+    install_race_hook_at(0, step);
+}
+
+#[cfg(unix)]
+fn install_race_hook_at(call: usize, step: impl Fn() + Send + Sync + 'static) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static CALLS: AtomicUsize = AtomicUsize::new(0);
     CALLS.store(0, Ordering::SeqCst);
     let counter = &CALLS;
     *super::safety::RACE_HOOK.lock().expect("hook mutex") = Some(Box::new(move || {
-        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+        if counter.fetch_add(1, Ordering::SeqCst) == call {
             step();
         }
     }));
@@ -601,6 +606,226 @@ async fn replace_requires_matching_expected_identity() {
             .await
             .expect("read"),
         "version two"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replace_conflicts_on_same_inode_content_change_before_publication() {
+    let _fs_serialized = fs_test_guard().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (service, root) = service_with_rw_root(tmp.path());
+    let path = PersonalRelativePath::parse("doc.txt").expect("path");
+    service
+        .create_text_no_clobber(&root, &path, "version A")
+        .await
+        .expect("create");
+    let expected = ExpectedContentIdentity::of_content(b"version A");
+
+    // std::fs::write truncates and rewrites this same path's existing
+    // inode. ObjectId therefore stays stable while the expected digest
+    // becomes stale.
+    let target = tmp.path().join("doc.txt");
+    install_one_shot_race_hook(move || {
+        std::fs::write(&target, "version B").expect("in-place competing write");
+    });
+    let result = service
+        .replace_text_if_expected(&root, &path, &expected, "version C")
+        .await;
+    clear_race_hook();
+
+    match result {
+        Err(PersonalFileError::Conflict {
+            expected: found,
+            actual,
+        }) => {
+            assert_eq!(found, expected.as_hex());
+            assert_eq!(
+                actual,
+                ExpectedContentIdentity::of_content(b"version B").as_hex()
+            );
+        }
+        other => panic!("same-inode competing write must conflict, got {other:?}"),
+    }
+    assert_eq!(
+        read_text_of(&service, &root, "doc.txt")
+            .await
+            .expect("competing content remains current"),
+        "version B"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replace_recovers_same_inode_update_racing_final_publication() {
+    let _fs_serialized = fs_test_guard().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (service, root) = service_with_rw_root(tmp.path());
+    let path = PersonalRelativePath::parse("doc.txt").expect("path");
+    service
+        .create_text_no_clobber(&root, &path, "version A")
+        .await
+        .expect("create");
+    let expected = ExpectedContentIdentity::of_content(b"version A");
+
+    // The second replacement hook runs after the final digest check and
+    // immediately before the atomic rename. The recovery hard link must
+    // retain this same-inode write when C becomes current.
+    let target = tmp.path().join("doc.txt");
+    install_race_hook_at(1, move || {
+        std::fs::write(&target, "version B").expect("in-place competing write");
+    });
+    let prior_in_trash = match service
+        .replace_text_if_expected(&root, &path, &expected, "version C")
+        .await
+        .expect("replace")
+    {
+        PersonalFileResult::Replaced { prior_in_trash, .. } => prior_in_trash,
+        other => panic!("expected replacement, got {}", other.operation().as_str()),
+    };
+    clear_race_hook();
+
+    assert_eq!(
+        read_text_of(&service, &root, "doc.txt")
+            .await
+            .expect("published content"),
+        "version C"
+    );
+    assert_eq!(
+        std::fs::read(tmp.path().join(prior_in_trash)).expect("recovered competing content"),
+        b"version B"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replace_refuses_recovery_namespace_substitution_before_publication() {
+    let _fs_serialized = fs_test_guard().await;
+    for attack in [
+        "rename-entry",
+        "replace-entry",
+        "rename-slot",
+        "rename-trash",
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (service, root) = service_with_rw_root(tmp.path());
+        let path = PersonalRelativePath::parse("doc.txt").expect("path");
+        service
+            .create_text_no_clobber(&root, &path, "version A")
+            .await
+            .unwrap();
+        let attack_root = tmp.path().to_path_buf();
+        install_one_shot_race_hook(move || {
+            let trash = attack_root.join(TRASH_NAMESPACE);
+            let slot = std::fs::read_dir(&trash)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let entry = std::fs::read_dir(&slot)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            match attack {
+                "rename-entry" | "replace-entry" => {
+                    std::fs::rename(&entry, slot.join("moved-prior")).unwrap();
+                    if attack == "replace-entry" {
+                        std::fs::write(&entry, "foreign replacement").unwrap();
+                    }
+                }
+                "rename-slot" => std::fs::rename(&slot, trash.join("moved-slot")).unwrap(),
+                "rename-trash" => std::fs::rename(&trash, attack_root.join("moved-trash")).unwrap(),
+                _ => unreachable!(),
+            }
+            // Renaming the recovery link or its ancestors preserves the
+            // target inode, digest, and nlink == 2. Those checks alone cannot
+            // prove that the returned recovery path remains reachable.
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(attack_root.join("doc.txt"))
+                    .unwrap()
+                    .nlink(),
+                2
+            );
+        });
+        let result = service
+            .replace_text_if_expected(
+                &root,
+                &path,
+                &ExpectedContentIdentity::of_content(b"version A"),
+                "version C",
+            )
+            .await;
+        clear_race_hook();
+        assert!(
+            matches!(
+                result,
+                Err(PersonalFileError::Refused(
+                    PersonalFileRefusal::ConcurrentModification { .. }
+                ))
+            ),
+            "{attack} must refuse before publication: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("doc.txt")).unwrap(),
+            b"version A"
+        );
+        if attack == "replace-entry" {
+            let slot = std::fs::read_dir(tmp.path().join(TRASH_NAMESPACE))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let foreign = slot.join(super::safety::recovery_name_for("doc.txt"));
+            assert_eq!(std::fs::read(foreign).unwrap(), b"foreign replacement");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn replace_recovery_retains_writes_through_a_prepublication_descriptor() {
+    use std::io::Write;
+
+    let _fs_serialized = fs_test_guard().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (service, root) = service_with_rw_root(tmp.path());
+    let path = PersonalRelativePath::parse("doc.txt").expect("path");
+    service
+        .create_text_no_clobber(&root, &path, "version A")
+        .await
+        .expect("create");
+    let mut concurrent_writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(tmp.path().join("doc.txt"))
+        .expect("open prior inode before replacement");
+    let expected = ExpectedContentIdentity::of_content(b"version A");
+    let prior_in_trash = match service
+        .replace_text_if_expected(&root, &path, &expected, "version C")
+        .await
+        .expect("replace")
+    {
+        PersonalFileResult::Replaced { prior_in_trash, .. } => prior_in_trash,
+        other => panic!("expected replacement, got {}", other.operation().as_str()),
+    };
+
+    // This descriptor still names the displaced inode after publication.
+    // A byte-copy recovery would silently lose this later write.
+    concurrent_writer
+        .write_all(b"version B")
+        .expect("write through the displaced inode");
+    concurrent_writer.sync_all().expect("flush competing write");
+    assert_eq!(
+        read_text_of(&service, &root, "doc.txt").await.unwrap(),
+        "version C"
+    );
+    assert_eq!(
+        std::fs::read(tmp.path().join(prior_in_trash)).unwrap(),
+        b"version B"
     );
 }
 

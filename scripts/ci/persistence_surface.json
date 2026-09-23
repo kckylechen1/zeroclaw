@@ -396,6 +396,13 @@
       "signals": 13
     },
     {
+      "path": "crates/zeroclaw-runtime/src/personal_file/tests.rs",
+      "store": "temporary personal-file fixture",
+      "role": "test",
+      "basis": "#271 TB-22 test-only detector reconciliation: one std::fs::OpenOptions write handle opens an existing tempdir fixture inode before replacement, then writes through that retained descriptor to prove recovery preserves the displaced inode; no production persistence path, durable store, annex table or writer is added",
+      "signals": 1
+    },
+    {
       "path": "crates/zeroclaw-runtime/src/security/audit.rs",
       "store": "audit-chain.jsonl",
       "role": "role",

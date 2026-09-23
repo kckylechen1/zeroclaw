@@ -96,7 +96,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fd::OwnedFd;
 use rustix::fs::{
-    AtFlags, CWD, FileType, Mode, OFlags, RenameFlags, Stat, fstat, fsync, mkdirat, openat,
+    AtFlags, CWD, FileType, Mode, OFlags, RenameFlags, Stat, fstat, fsync, linkat, mkdirat, openat,
     renameat, renameat_with, statat, unlinkat,
 };
 
@@ -332,6 +332,22 @@ pub(crate) fn require_unshared_inode(stat: &Stat, display: &str) -> SafetyResult
     let links = stat.st_nlink as u64;
     if links != 1 {
         return Err(PersonalFileRefusal::Hardlinked {
+            path: display.to_string(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Require exactly the source name and this operation's recovery link.
+/// Any other link-count change after the recovery fence is a concurrent
+/// modification, not a foreign hard link this operation may adopt.
+pub(crate) fn require_only_recovery_link(stat: &Stat, display: &str) -> SafetyResult<()> {
+    // st_nlink width differs per platform; see ObjectId::of.
+    #[allow(clippy::unnecessary_cast)]
+    let links = stat.st_nlink as u64;
+    if links != 2 {
+        return Err(PersonalFileRefusal::ConcurrentModification {
             path: display.to_string(),
         }
         .into());
@@ -634,20 +650,20 @@ fn identity_checked_remove(dir: &OwnedFd, name: &str, probe: &ObjectId, director
     }
 }
 
-/// A file this module wrote into a trash slot, named by the identity
-/// captured from its own held descriptor at write time.
+/// A recovery entry this module created in a trash slot, named by the
+/// identity captured when the entry was created.
 pub(crate) struct SlotFile {
-    /// The name the file was written under.
+    /// The recovery entry name.
     pub name: String,
-    /// The identity captured from the held descriptor after the write.
-    /// `None` means the write failed: the name is never removed.
+    /// The identity captured after the entry was created. `None` means
+    /// no entry was safely bound, so the name is never removed.
     pub identity: Option<ObjectId>,
 }
 
 /// Remove a trash slot that a failed operation left behind (best
-/// effort). A file name is unlinked ONLY while it still resolves to
-/// the identity this module captured when it wrote that file: content
-/// this module never wrote (e.g. planted after an adopted-slot
+/// effort). A recovery entry is unlinked ONLY while it still resolves
+/// to the identity captured when this module created it: content this
+/// module never created (e.g. planted after an adopted-slot
 /// substitution) has no captured identity and is never removed. The
 /// slot directory itself is then removed only while its name still
 /// resolves to the object bound at creation. The stat/unlink pairing
@@ -668,6 +684,98 @@ pub(crate) fn discard_trash_slot(trash: &OwnedFd, slot: &TrashSlot, files: &[Slo
         }
     }
     let _ = identity_checked_rmdir(trash, &slot.name, &slot.identity);
+}
+
+/// Link the current regular leaf into an already-bound recovery slot.
+///
+/// The link is the last recoverability fence before replace publication:
+/// writes through an existing descriptor continue to update this entry
+/// after the leaf name is atomically replaced. If the source name is
+/// substituted before the link, the caller's final identity check
+/// refuses publication; the recovery link is cleaned up by its captured
+/// identity on that failure path.
+pub(crate) fn link_leaf_into_trash_slot(
+    parent: &OwnedFd,
+    leaf: &str,
+    trash: &OwnedFd,
+    slot: &TrashSlot,
+    recovery_name: &str,
+    display: &str,
+) -> SafetyResult<ObjectId> {
+    let trash_id = identity_of(trash)?;
+    verify_parent_link(&slot.dir, trash_id).map_err(|_| PersonalFileRefusal::TrashUnavailable {
+        reason: "the trash slot moved".to_string(),
+    })?;
+    linkat(parent, leaf, &slot.dir, recovery_name, AtFlags::empty()).map_err(
+        |error| match error {
+            rustix::io::Errno::NOENT | rustix::io::Errno::LOOP => {
+                PersonalFileRefusal::ConcurrentModification {
+                    path: display.to_string(),
+                }
+                .into()
+            }
+            _ => errno_to_io(error),
+        },
+    )?;
+    let recovery_stat =
+        statat(&slot.dir, recovery_name, AtFlags::SYMLINK_NOFOLLOW).map_err(errno_to_io)?;
+    let identity = ObjectId::of(&recovery_stat);
+    if file_type_of(&recovery_stat) != FileType::RegularFile {
+        identity_checked_unlink(&slot.dir, recovery_name, &identity);
+        return Err(PersonalFileRefusal::ConcurrentModification {
+            path: display.to_string(),
+        }
+        .into());
+    }
+    Ok(identity)
+}
+
+/// Re-prove every recovery-path name before publication. A held descriptor
+/// and nlink == 2 alone do not prove the recovery name is still reachable:
+/// an in-root writer can rename the entry, slot, or trash directory.
+/// As with the other namespace checks, this is a pre-publication check;
+/// an independently authorized writer can still rename after the check.
+pub(crate) fn verify_recovery_path(
+    root: &RootInner,
+    trash: &OwnedFd,
+    slot: &TrashSlot,
+    recovery_name: &str,
+    expected: ObjectId,
+    display: &str,
+) -> SafetyResult<()> {
+    for (parent, name, identity, kind) in [
+        (
+            &root.dir,
+            TRASH_NAMESPACE,
+            identity_of(trash)?,
+            FileType::Directory,
+        ),
+        (
+            trash,
+            slot.name.as_str(),
+            slot.identity,
+            FileType::Directory,
+        ),
+        (&slot.dir, recovery_name, expected, FileType::RegularFile),
+    ] {
+        let stat =
+            statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|error| match error {
+                rustix::io::Errno::NOENT | rustix::io::Errno::LOOP => {
+                    PersonalFileRefusal::ConcurrentModification {
+                        path: display.to_string(),
+                    }
+                    .into()
+                }
+                _ => errno_to_io(error),
+            })?;
+        if ObjectId::of(&stat) != identity || file_type_of(&stat) != kind {
+            return Err(PersonalFileRefusal::ConcurrentModification {
+                path: display.to_string(),
+            }
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// Rename `leaf` (under `parent`) into the freshly minted empty `slot`.

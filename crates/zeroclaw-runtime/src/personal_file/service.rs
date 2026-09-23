@@ -414,68 +414,100 @@ impl PersonalFileService {
             }
             let new_identity = ExpectedContentIdentity::of_content(new_content.as_bytes());
 
-            // Prior content stays recoverable in the root-local trash
-            // before publication (D6). A freshly minted slot is
-            // collision-free and the recovery copy is written under an
-            // unpredictable name with its own unshared-inode check.
-            let trash = safety::open_trash(&root.inner)?;
-            let slot = safety::fresh_trash_slot(&trash)?;
-            let recovery_name = safety::recovery_name_for(path.leaf());
-            // Hold the recovery write's identity: cleanup may only
-            // remove a file whose name still resolves to what THIS
-            // module wrote. A failed write owns nothing in the slot, so
-            // no file is removed at all.
-            let recovery = safety::write_staged_file(&slot.dir, &recovery_name, &prior_bytes);
-            let recovery_identity = match &recovery {
-                Ok((_, identity)) => Some(*identity),
-                Err(_) => None,
+            // Stage first, before the final content verification. This
+            // leaves only the recovery link and publication between the
+            // verified digest and the atomic rename.
+            let staged_name = safety::staged_name_for(path.leaf());
+            let (staged, staged_id) =
+                safety::write_staged_file(&parent, &staged_name, new_content.as_bytes())?;
+            drop(staged);
+
+            // Prior content stays recoverable in the root-local trash.
+            // Link the current target, rather than copying the initial
+            // bytes: a same-inode writer that wins after the final digest
+            // check still updates the recovery entry when publication
+            // replaces the target name.
+            let trash = match safety::open_trash(&root.inner) {
+                Ok(trash) => trash,
+                Err(error) => {
+                    safety::remove_staged(&parent, &staged_name, &staged_id);
+                    return Err(error);
+                }
             };
-            if let Err(error) = recovery {
-                safety::discard_trash_slot(&trash, &slot, &[]);
-                return Err(error);
-            }
-            drop(recovery);
-            safety::fsync_dir_best_effort(&slot.dir);
-            let prior_in_trash = format!("{TRASH_NAMESPACE}/{}/{recovery_name}", slot.name);
+            let slot = match safety::fresh_trash_slot(&trash) {
+                Ok(slot) => slot,
+                Err(error) => {
+                    safety::remove_staged(&parent, &staged_name, &staged_id);
+                    return Err(error);
+                }
+            };
+            let recovery_name = safety::recovery_name_for(path.leaf());
+            let recovery_identity = match safety::link_leaf_into_trash_slot(
+                &parent,
+                path.leaf(),
+                &trash,
+                &slot,
+                &recovery_name,
+                &display,
+            ) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    safety::remove_staged(&parent, &staged_name, &staged_id);
+                    safety::discard_trash_slot(&trash, &slot, &[]);
+                    return Err(error);
+                }
+            };
             let recovery_file = safety::SlotFile {
                 name: recovery_name.clone(),
-                identity: recovery_identity,
+                identity: Some(recovery_identity),
             };
+            safety::fsync_dir_best_effort(&slot.dir);
+            let prior_in_trash = format!("{TRASH_NAMESPACE}/{}/{recovery_name}", slot.name);
 
-            // Test-only race window: an attacker step may now swap the leaf.
+            // Test-only race window: a same-inode writer here must cause
+            // a typed conflict rather than being silently overwritten.
             safety::run_race_hook();
-            // Re-verify immediately before publication: still a regular
-            // file, still the exact object whose identity matched, still
-            // unshared.
-            let recheck =
-                open_regular_verified(&parent, path.leaf(), &display).and_then(|(_, restat)| {
-                    safety::require_unshared_inode(&restat, &display)?;
-                    if ObjectId::of(&restat) != ObjectId::of(&stat) {
-                        return Err(PersonalFileRefusal::ConcurrentModification {
-                            path: display.clone(),
-                        }
-                        .into());
+            let recheck = (|| -> Result<(), PersonalFileError> {
+                let (file, restat) = open_regular_verified(&parent, path.leaf(), &display)?;
+                if ObjectId::of(&restat) != ObjectId::of(&stat)
+                    || recovery_identity != ObjectId::of(&stat)
+                {
+                    return Err(PersonalFileRefusal::ConcurrentModification {
+                        path: display.clone(),
                     }
-                    Ok(())
-                });
+                    .into());
+                }
+                safety::require_only_recovery_link(&restat, &display)?;
+                let actual = ExpectedContentIdentity::of_content(&safety::read_bounded(
+                    file,
+                    MAX_TEXT_BYTES,
+                )?);
+                if actual.as_hex() != expected.as_hex() {
+                    return Err(PersonalFileError::Conflict {
+                        expected: expected.as_hex().to_string(),
+                        actual: actual.as_hex().to_string(),
+                    });
+                }
+                safety::verify_recovery_path(
+                    &root.inner,
+                    &trash,
+                    &slot,
+                    &recovery_name,
+                    ObjectId::of(&stat),
+                    &display,
+                )?;
+                Ok(())
+            })();
             if let Err(error) = recheck {
+                safety::remove_staged(&parent, &staged_name, &staged_id);
                 safety::discard_trash_slot(&trash, &slot, &[recovery_file]);
                 return Err(error);
             }
 
-            // Stage the new content under a freshly minted name, then
-            // publish atomically. The staged write already fsynced and
-            // proved its inode unshared on the held descriptor.
-            let staged_name = safety::staged_name_for(path.leaf());
-            let (staged, staged_id) =
-                match safety::write_staged_file(&parent, &staged_name, new_content.as_bytes()) {
-                    Ok(pair) => pair,
-                    Err(error) => {
-                        safety::discard_trash_slot(&trash, &slot, &[recovery_file]);
-                        return Err(error);
-                    }
-                };
-            drop(staged);
+            // A writer with an already-open target descriptor can still
+            // change the inode during this final syscall-sized window.
+            // The recovery hard link above retains that exact content.
+            safety::run_race_hook();
             match safety::rename_publish(&parent, &staged_name, path.leaf()) {
                 Ok(()) => {
                     // The publication is complete; the directory-dirent
