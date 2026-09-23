@@ -51,6 +51,7 @@
     - [ADR-012: Generation-scoped live config apply](./architecture/decisions/ADR-012-generation-scoped-live-config-apply.md)
     - [ADR-013: Channels as gateway clients](./architecture/decisions/ADR-013-channels-as-gateway-clients.md)
     - [ADR-014: Reviewed AgentSoul projection](./architecture/decisions/ADR-014-reviewed-agentsoul-projection.md)
+    - [ADR-015: One governed Soul](./architecture/decisions/ADR-015-one-governed-soul.md)
   - [Logging](./architecture/logging.md)
   - [Runtime state and persistence](./architecture/runtime-state-and-persistence.md)
   - [Memory and payload lifecycle](./architecture/memory-payload-lifecycle.md)
