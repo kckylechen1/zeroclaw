@@ -3929,3 +3929,42 @@ fn attached_short_option_value_handles_multibyte_token() {
     assert_eq!(attached_short_option_value("-f"), None);
     assert_eq!(attached_short_option_value("--long"), None);
 }
+
+#[test]
+fn persona_files_are_protected_only_at_agent_workspace_roots() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("agents").join("default").join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let policy = SecurityPolicy {
+        workspace_dir: workspace.clone(),
+        ..SecurityPolicy::default()
+    };
+
+    for name in ["SOUL.md", "IDENTITY.md", "USER.md", "Soul.MD"] {
+        assert!(
+            policy.is_protected_persona_path(&workspace.join(name)),
+            "{name}"
+        );
+    }
+    // A sibling agent's workspace is protected too.
+    let sibling = root.path().join("agents").join("other").join("workspace");
+    assert!(policy.is_protected_persona_path(&sibling.join("IDENTITY.md")));
+    // Other files at the root, and persona-named files deeper down, are not.
+    assert!(!policy.is_protected_persona_path(&workspace.join("AGENTS.md")));
+    assert!(!policy.is_protected_persona_path(&workspace.join("docs").join("USER.md")));
+    assert!(!policy.is_protected_persona_path(&root.path().join("SOUL.md")));
+}
+
+#[test]
+fn soul_store_is_runtime_state_in_data_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    let policy = SecurityPolicy {
+        workspace_dir: root.path().join("workspace"),
+        data_dir: Some(data_dir.clone()),
+        ..SecurityPolicy::default()
+    };
+    assert!(policy.is_runtime_config_path(&data_dir.join("soul.db")));
+    assert!(policy.is_runtime_config_path(&data_dir.join("soul.db-wal")));
+    assert!(!policy.is_runtime_config_path(&root.path().join("workspace").join("soul.db")));
+}

@@ -902,7 +902,9 @@ impl BrowserTool {
         };
         let resolved_target = canonical.join(file_name);
 
-        if self.security.is_runtime_config_path(&resolved_target) {
+        if self.security.is_runtime_config_path(&resolved_target)
+            || self.security.is_protected_persona_path(&resolved_target)
+        {
             let msg = crate::i18n::get_required_tool_string_with_args(
                 "tool-browser-screenshot-error-runtime-config-target",
                 &[

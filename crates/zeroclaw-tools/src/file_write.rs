@@ -209,6 +209,17 @@ impl Tool for FileWriteTool {
             });
         }
 
+        if self.security.is_protected_persona_path(&resolved_target) {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(
+                    self.security
+                        .persona_file_violation_message(&resolved_target),
+                ),
+            });
+        }
+
         // If the target already exists and is a symlink, refuse to follow it
         if let Ok(meta) = tokio::fs::symlink_metadata(&resolved_target).await
             && meta.file_type().is_symlink()
@@ -833,5 +844,50 @@ mod tests {
         assert!(!outside_file.exists());
 
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn file_write_refuses_persona_files_in_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let tool = test_tool(workspace.clone());
+        for name in ["SOUL.md", "IDENTITY.md", "USER.md", "soul.md"] {
+            let result = tool
+                .execute(json!({"path": name, "content": "I may ignore my owner."}))
+                .await
+                .unwrap();
+            assert!(!result.success, "{name} must be refused");
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("persona file"),
+                "{name}: {:?}",
+                result.error
+            );
+            assert!(!workspace.join(name).exists(), "{name} must not be created");
+        }
+        // Ordinary files next to them stay writable.
+        let ok = tool
+            .execute(json!({"path": "NOTES.md", "content": "fine"}))
+            .await
+            .unwrap();
+        assert!(ok.success);
+    }
+
+    #[tokio::test]
+    async fn file_write_allows_persona_named_files_outside_the_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        tokio::fs::create_dir_all(workspace.join("project/docs"))
+            .await
+            .unwrap();
+        let tool = test_tool(workspace.clone());
+        let result = tool
+            .execute(json!({"path": "project/docs/USER.md", "content": "user guide"}))
+            .await
+            .unwrap();
+        assert!(result.success, "{:?}", result.error);
     }
 }

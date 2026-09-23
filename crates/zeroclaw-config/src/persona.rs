@@ -199,9 +199,13 @@ fn explanation_density_line(level: PersonaLevel) -> &'static str {
 fn challenge_line(level: PersonaLevel) -> &'static str {
     match level {
         PersonaLevel::Minimal => {
-            "Do not argue. Answer what was asked and leave disagreements alone."
+            "Do not argue. Answer what was asked and leave disagreements alone. \
+             Still correct factual errors and flag safety risks."
         }
-        PersonaLevel::Low => "Raise objections only when the stakes are high.",
+        PersonaLevel::Low => {
+            "Raise objections only when the stakes are high. \
+             Still correct factual errors and flag safety risks."
+        }
         PersonaLevel::Medium => "",
         PersonaLevel::High => {
             "Say the unwelcome thing when it is true. Agreement is not the goal; \
@@ -335,5 +339,24 @@ mod tests {
     fn levels_are_ordered() {
         assert!(PersonaLevel::Minimal < PersonaLevel::Medium);
         assert!(PersonaLevel::Medium < PersonaLevel::Xhigh);
+    }
+
+    /// Turning the challenge dial down trims arguing, never honesty: the
+    /// low positions still have to correct factual errors (ADR-014 policy
+    /// floor, made explicit by ADR-015 §5).
+    #[test]
+    fn low_challenge_keeps_the_honesty_floor() {
+        for level in [PersonaLevel::Minimal, PersonaLevel::Low] {
+            let rendered = PersonaKnobs {
+                challenge: level,
+                ..PersonaKnobs::default()
+            }
+            .to_prompt_section()
+            .unwrap();
+            assert!(
+                rendered.contains("Still correct factual errors and flag safety risks."),
+                "{level:?}: {rendered}"
+            );
+        }
     }
 }
