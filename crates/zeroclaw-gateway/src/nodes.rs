@@ -27,7 +27,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 use zeroclaw_api::node::{
     GatewayToNode, NodeErrorCode, NodeToGateway, WS_NODES_V2, is_v1_register_frame,
@@ -55,48 +54,6 @@ const MAX_AUTH_SIGNATURE_BYTES: usize = 256;
 const MAX_ADVERTISE_CAPS: usize = 16;
 const MAX_CAP_NAME_BYTES: usize = 256;
 
-/// A single capability advertised by a node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeCapability {
-    pub name: String,
-    pub description: String,
-    #[serde(default = "default_capability_parameters")]
-    pub parameters: serde_json::Value,
-}
-
-fn default_capability_parameters() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {}
-    })
-}
-
-/// Tracks a connected node and its capabilities.
-#[derive(Debug, Clone)]
-pub struct NodeInfo {
-    pub node_id: String,
-    pub capabilities: Vec<NodeCapability>,
-    /// Channel to send invocation requests to the node's WebSocket handler.
-    pub invoke_tx: mpsc::Sender<NodeInvocation>,
-}
-
-/// An invocation request sent to a node.
-#[derive(Debug)]
-pub struct NodeInvocation {
-    pub call_id: String,
-    pub capability: String,
-    pub args: serde_json::Value,
-    pub response_tx: oneshot::Sender<NodeInvocationResult>,
-}
-
-/// The result of a node invocation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeInvocationResult {
-    pub success: bool,
-    pub output: String,
-    pub error: Option<String>,
-}
-
 /// Per-socket identity minted at v2 HelloAck. Later slices tear down by this pair.
 ///
 /// `generation` is not durable: it is monotonic only inside this process and
@@ -120,7 +77,6 @@ struct LiveSocket {
 /// Registry of all connected nodes and their capabilities.
 #[derive(Clone)]
 pub struct NodeRegistry {
-    nodes: Arc<RwLock<HashMap<String, NodeInfo>>>,
     max_nodes: usize,
     next_generation: Arc<AtomicU64>,
     identities: Option<DeviceIdentityStore>,
@@ -143,7 +99,6 @@ impl NodeRegistry {
     /// in-memory store so existing unit paths stay self-contained.
     pub fn new(max_nodes: usize) -> Self {
         Self {
-            nodes: Arc::new(RwLock::new(HashMap::new())),
             max_nodes,
             next_generation: Arc::new(AtomicU64::new(0)),
             identities: {
@@ -185,58 +140,6 @@ impl NodeRegistry {
             connection_id: Uuid::new_v4().to_string(),
             generation,
         }
-    }
-
-    /// Register a node with its capabilities. Returns false if at capacity.
-    pub fn register(&self, info: NodeInfo) -> bool {
-        let mut nodes = self.nodes.write();
-        if nodes.len() >= self.max_nodes && !nodes.contains_key(&info.node_id) {
-            return false;
-        }
-        nodes.insert(info.node_id.clone(), info);
-        true
-    }
-
-    /// Remove a node from the registry.
-    pub fn unregister(&self, node_id: &str) {
-        self.nodes.write().remove(node_id);
-    }
-
-    /// List all registered node IDs.
-    pub fn node_ids(&self) -> Vec<String> {
-        self.nodes.read().keys().cloned().collect()
-    }
-
-    /// Get all capabilities across all nodes, keyed by prefixed tool name.
-    pub fn all_capabilities(&self) -> Vec<(String, String, NodeCapability)> {
-        let nodes = self.nodes.read();
-        let mut caps = Vec::new();
-        for info in nodes.values() {
-            for cap in &info.capabilities {
-                caps.push((info.node_id.clone(), cap.name.clone(), cap.clone()));
-            }
-        }
-        caps
-    }
-
-    /// Get the invocation sender for a specific node.
-    pub fn invoke_tx(&self, node_id: &str) -> Option<mpsc::Sender<NodeInvocation>> {
-        self.nodes.read().get(node_id).map(|n| n.invoke_tx.clone())
-    }
-
-    /// Check if a node is registered.
-    pub fn contains(&self, node_id: &str) -> bool {
-        self.nodes.read().contains_key(node_id)
-    }
-
-    /// Number of registered nodes.
-    pub fn len(&self) -> usize {
-        self.nodes.read().len()
-    }
-
-    /// Whether the registry is empty.
-    pub fn is_empty(&self) -> bool {
-        self.nodes.read().is_empty()
     }
 
     fn sweep_challenges(&self) {
@@ -358,6 +261,22 @@ impl NodeRegistry {
     #[must_use]
     pub fn live_connection_ids(&self) -> Vec<String> {
         self.live.read().keys().cloned().collect()
+    }
+
+    /// Device ids of live sockets that completed identity authentication,
+    /// sorted and deduplicated. Sockets still in the handshake are not
+    /// connected nodes and are left out.
+    #[must_use]
+    pub fn connected_device_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .live
+            .read()
+            .values()
+            .filter_map(|socket| socket.device_id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     #[must_use]
@@ -1211,150 +1130,6 @@ mod tests {
     }
 
     #[test]
-    fn node_registry_register_and_unregister() {
-        let registry = NodeRegistry::new(10);
-        let (tx, _rx) = mpsc::channel(1);
-
-        let info = NodeInfo {
-            node_id: "test-node".to_string(),
-            capabilities: vec![NodeCapability {
-                name: "ping".to_string(),
-                description: "Ping test".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {}}),
-            }],
-            invoke_tx: tx,
-        };
-
-        assert!(registry.register(info));
-        assert!(registry.contains("test-node"));
-        assert_eq!(registry.len(), 1);
-
-        registry.unregister("test-node");
-        assert!(!registry.contains("test-node"));
-        assert_eq!(registry.len(), 0);
-    }
-
-    #[test]
-    fn node_registry_capacity_limit() {
-        let registry = NodeRegistry::new(2);
-
-        for i in 0..2 {
-            let (tx, _rx) = mpsc::channel(1);
-            let info = NodeInfo {
-                node_id: format!("node-{i}"),
-                capabilities: vec![],
-                invoke_tx: tx,
-            };
-            assert!(registry.register(info));
-        }
-
-        let (tx, _rx) = mpsc::channel(1);
-        let info = NodeInfo {
-            node_id: "node-overflow".to_string(),
-            capabilities: vec![],
-            invoke_tx: tx,
-        };
-        assert!(!registry.register(info));
-        assert_eq!(registry.len(), 2);
-    }
-
-    #[test]
-    fn node_registry_re_register_same_id() {
-        let registry = NodeRegistry::new(2);
-        let (tx1, _rx1) = mpsc::channel(1);
-        let (tx2, _rx2) = mpsc::channel(1);
-
-        let info1 = NodeInfo {
-            node_id: "node-1".to_string(),
-            capabilities: vec![NodeCapability {
-                name: "old".to_string(),
-                description: "Old cap".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {}}),
-            }],
-            invoke_tx: tx1,
-        };
-        assert!(registry.register(info1));
-
-        let info2 = NodeInfo {
-            node_id: "node-1".to_string(),
-            capabilities: vec![NodeCapability {
-                name: "new".to_string(),
-                description: "New cap".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {}}),
-            }],
-            invoke_tx: tx2,
-        };
-        // Re-registering same node_id should succeed (update)
-        assert!(registry.register(info2));
-        assert_eq!(registry.len(), 1);
-
-        let caps = registry.all_capabilities();
-        assert_eq!(caps.len(), 1);
-        assert_eq!(caps[0].2.name, "new");
-    }
-
-    #[test]
-    fn node_registry_all_capabilities() {
-        let registry = NodeRegistry::new(10);
-        let (tx1, _rx1) = mpsc::channel(1);
-        let (tx2, _rx2) = mpsc::channel(1);
-
-        registry.register(NodeInfo {
-            node_id: "phone-1".to_string(),
-            capabilities: vec![
-                NodeCapability {
-                    name: "camera.snap".to_string(),
-                    description: "Take a photo".to_string(),
-                    parameters: serde_json::json!({"type": "object", "properties": {}}),
-                },
-                NodeCapability {
-                    name: "gps.location".to_string(),
-                    description: "Get GPS location".to_string(),
-                    parameters: serde_json::json!({"type": "object", "properties": {}}),
-                },
-            ],
-            invoke_tx: tx1,
-        });
-
-        registry.register(NodeInfo {
-            node_id: "sensor-1".to_string(),
-            capabilities: vec![NodeCapability {
-                name: "temp.read".to_string(),
-                description: "Read temperature".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {}}),
-            }],
-            invoke_tx: tx2,
-        });
-
-        let caps = registry.all_capabilities();
-        assert_eq!(caps.len(), 3);
-    }
-
-    #[test]
-    fn node_registry_is_empty() {
-        let registry = NodeRegistry::new(10);
-        assert!(registry.is_empty());
-
-        let (tx, _rx) = mpsc::channel(1);
-        registry.register(NodeInfo {
-            node_id: "n".to_string(),
-            capabilities: vec![],
-            invoke_tx: tx,
-        });
-        assert!(!registry.is_empty());
-    }
-
-    #[test]
-    fn node_capability_deserialize() {
-        let json = r#"{"name":"camera.snap","description":"Take a photo"}"#;
-        let cap: NodeCapability = serde_json::from_str(json).unwrap();
-        assert_eq!(cap.name, "camera.snap");
-        assert_eq!(cap.description, "Take a photo");
-        // Default parameters
-        assert_eq!(cap.parameters["type"], "object");
-    }
-
-    #[test]
     fn nodes_v2_offer_handshake_succeeds() {
         let conn = test_conn();
         let outcome =
@@ -1768,6 +1543,33 @@ mod tests {
             parse_auth_frame(r#"{"type":"hello","protocol_versions":["2.0"]}"#),
             Err(NodeErrorCode::IdentityRejected)
         );
+    }
+
+    #[test]
+    fn connected_device_ids_lists_only_authenticated_sockets_once() {
+        let registry = NodeRegistry::new(8);
+        let (_keys, identity) = enroll_test_device(&registry, Vec::new());
+        let (pending, _pending_rx) = registry.try_reserve().expect("reserve");
+        assert!(
+            registry.connected_device_ids().is_empty(),
+            "a socket still in the handshake is not a connected node"
+        );
+        for _ in 0..2 {
+            let (conn, _rx) = registry.try_reserve().expect("reserve");
+            registry
+                .bind_identity(
+                    &conn.connection_id,
+                    identity.device_id.clone(),
+                    identity.key_fingerprint.clone(),
+                )
+                .expect("test bind");
+        }
+        assert_eq!(
+            registry.connected_device_ids(),
+            vec![identity.device_id.clone()]
+        );
+        registry.detach_socket(&pending.connection_id);
+        assert_eq!(registry.connected_device_ids(), vec![identity.device_id]);
     }
 
     #[test]

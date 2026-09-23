@@ -306,7 +306,7 @@ pub async fn handle_api_status(
     // stable by emitting empty collections when the `nodes` feature is off.
     #[cfg(feature = "nodes")]
     let node_status = serde_json::json!({
-        "connected": state.node_registry.node_ids(),
+        "connected": state.node_registry.connected_device_ids(),
         "mdns_peers": state.mdns_peer_registry.snapshots(),
     });
     #[cfg(not(feature = "nodes"))]
@@ -2352,12 +2352,25 @@ pub(crate) mod tests {
     #[cfg(feature = "nodes")]
     async fn api_status_includes_connected_nodes_and_mdns_peers() {
         let state = test_state(zeroclaw_config::schema::Config::default());
-        let (invoke_tx, _invoke_rx) = tokio::sync::mpsc::channel(1);
-        assert!(state.node_registry.register(nodes::NodeInfo {
-            node_id: "connected-node".into(),
-            capabilities: Vec::new(),
-            invoke_tx,
-        }));
+        // One authenticated socket and one still in the handshake: only the
+        // authenticated device counts as connected.
+        let keys = crate::device_identity::DeviceKeyPair::generate().unwrap();
+        let store = state
+            .node_registry
+            .identities()
+            .expect("test identity store");
+        let code = store.issue_pairing_code(Vec::new()).unwrap();
+        let identity = store.enroll(&code, keys.public_key_hex()).unwrap();
+        let (conn, _close_rx) = state.node_registry.try_reserve().unwrap();
+        state
+            .node_registry
+            .bind_identity(
+                &conn.connection_id,
+                identity.device_id.clone(),
+                identity.key_fingerprint.clone(),
+            )
+            .expect("test bind");
+        let (_pending, _pending_rx) = state.node_registry.try_reserve().unwrap();
         state.mdns_peer_registry.insert(
             "peer-1".into(),
             nodes::mdns::MdnsPeer {
@@ -2382,7 +2395,7 @@ pub(crate) mod tests {
         let json = response_json(response).await;
         assert_eq!(
             json["nodes"]["connected"],
-            serde_json::json!(["connected-node"])
+            serde_json::json!([identity.device_id])
         );
         assert_eq!(
             json["nodes"]["mdns_peers"],

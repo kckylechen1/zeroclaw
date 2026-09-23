@@ -71,7 +71,7 @@ Nodes follow the #55 design:
 - a headless Node host first (#61);
 - an invocation lifecycle with heartbeat, pending-before-send, cancellation, and stale-capability refusal (#62).
 
-`crates/zeroclaw-gateway/src/nodes.rs` is kept as the starting point for that work, not deleted. `voice_duplex` is kept until the speaker Client is designed, and is deleted only if that design does not use it.
+`crates/zeroclaw-gateway/src/nodes.rs` already carries the v2 handshake and signed device identity, and it is kept as the starting point, not deleted. What is missing is invocation: a turn cannot yet call a Node capability. `voice_duplex` is kept until the speaker Client is designed, and is deleted only if that design does not use it.
 
 ### 3. Three levels of work; Tachi only for delegation
 
@@ -104,7 +104,7 @@ Delegation has one path. Short versus long, and ephemeral versus durable, become
 | `tachi_bridge/` | **Keep.** Give it a real transport: ZeroClaw's MCP client calling `tachi-server`. Adapt its port (submit / get / watch / collect) to `tachi_staff` start / status / cancel. The mapping is designed in its own leaf before any code is written. |
 | `execution_subagent/` (ZeroClaw's own ACP driver) | **Delete** after the Tachi transport passes an end-to-end run. Until then, keep it compiling and do not extend it. |
 | `subagent_v1/`, `supervisor_v1/`, `procedure_v1/` | Keep the parts that `reasoning_subagent` (L1) and the Tachi bridge use. The rest is reviewed for deletion in #382 S5. |
-| `gateway/src/nodes.rs` | **Keep.** Fix the two known races (#62), then build on it. |
+| `gateway/src/nodes.rs` | **Keep** the v2 handshake, signed device identity, and capability admission. The v1 invocation path (`NodeTool`, `NodeInfo`, `register`) was never reached in production and is removed. The invocation lifecycle is rebuilt on the v2 socket in #62. |
 | `gateway/src/voice_duplex` | **Keep** until the speaker Client is designed. |
 | Channels, extra providers, config surface, hardware crates unrelated to Nodes, vendor webhooks, admin surfaces | Cut as planned in #374. |
 

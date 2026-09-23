@@ -39,7 +39,6 @@ pub mod canvas;
 #[cfg(feature = "nodes")]
 pub mod device_identity;
 #[cfg(feature = "nodes")]
-pub mod node_tool;
 #[cfg(feature = "nodes")]
 pub mod nodes;
 pub mod openapi;
