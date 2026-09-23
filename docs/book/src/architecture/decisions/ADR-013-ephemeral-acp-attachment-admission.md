@@ -1,23 +1,30 @@
 ---
 id: ADR-013
-title: Keep ephemeral ACP sessions free of WorkClaims until public admission is complete
+title: Ephemeral ACP attachment admission: narrow WorkClaim amendment selected, gated on public Tachi interfaces
 date: 2026-09-20
 status: accepted
 relates-to:
   - docs/book/src/architecture/background-work-lifecycle.md
   - https://github.com/kckylechen1/zeroclaw/issues/266
   - https://github.com/kckylechen1/zeroclaw/issues/270
+  - https://github.com/kckylechen1/zeroclaw/issues/261
   - https://github.com/kckylechen1/tachi/issues/1678
+  - https://github.com/kckylechen1/Tachi/issues/1960
+  - https://github.com/kckylechen1/Tachi/issues/1961
 ---
 
-# ADR-013: Keep Ephemeral ACP Sessions Free Of WorkClaims Until Public Admission Is Complete
+# ADR-013: Ephemeral ACP Attachment Admission: Narrow WorkClaim Amendment Selected, Gated On Public Tachi Interfaces
 
 ## Status
 
-The owner selected the direction in this record on 2026-09-20, and independent
-review of the exact documentation head is complete. The ADR is accepted. It
-records a disabled boundary, not production activation, and does not complete
-issue #270.
+On 2026-09-23 the owner selected alternative A from [#270's decision
+packet](https://github.com/kckylechen1/zeroclaw/issues/270)
+([owner record on #270](https://github.com/kckylechen1/zeroclaw/issues/270#issuecomment-5788036565),
+[owner record on #266](https://github.com/kckylechen1/zeroclaw/issues/266#issuecomment-5788036771)).
+The amendment is not in effect. The current EPHEMERAL no-WorkClaim clause
+remains in force and the route stays disabled until the preconditions in
+"Acceptance and supersession" are met. The ADR records the boundary and does
+not complete #270.
 
 ## Context
 
@@ -61,8 +68,15 @@ possible, but it does not make the present public route usable.
 
 ## Decision
 
-Retain the EPHEMERAL no-WorkClaim clause. Keep the LAST-A attachment route
-disabled and #270 blocked.
+Until the preconditions are met, the current EPHEMERAL no-WorkClaim clause
+remains in force, the LAST-A attachment route stays disabled, and #270 stays
+blocked.
+
+Once in effect, the selected amendment permits at most one WorkClaim
+reference solely for attachment, receipt, replay and intervention admission,
+and continues to forbid TaskRef/AttemptRef creation, Tachi dispatch or
+redispatch, lifecycle transfer, raw-tool grants, and inferred completion,
+cancellation, collection, cleanup or delivery.
 
 Do not substitute a fabricated claim, invented receipt reference, fixture,
 direct database write, caller-asserted grant, or second receipt ledger. A
@@ -79,12 +93,14 @@ ZeroClaw remains the sole lifecycle owner for an EPHEMERAL ACP session:
 | Redispatch or restart | Performs no implicit EPHEMERAL redispatch. | Attachment admission is not dispatch. Durable recovery requires a separately selected DURABLE route. |
 | Collection and delivery | Reports actual collection; Parent owns user-facing presentation. | Does not infer collection, cleanup, semantic success, or delivery from receipt acceptance. |
 
-## Public Tachi interfaces required before reconsideration
+## Public Tachi interfaces required before the amendment takes effect
 
 Reconsidering a narrow WorkClaim exception requires an exact Tachi candidate
 head with both interfaces below. This ADR does not authorize or implement them.
 
 ### Authenticated ACP grant provisioning
+
+Tracked in [kckylechen1/Tachi#1960](https://github.com/kckylechen1/Tachi/issues/1960).
 
 Tachi must expose a public, authenticated operation that provisions or revises
 the closed ACP grant for one admitted worker identity. The request must accept
@@ -96,6 +112,8 @@ caller-selected issuer authority, stale revisions, and partial writes.
 
 ### Current Host admission receipt return
 
+Tracked in [kckylechen1/Tachi#1961](https://github.com/kckylechen1/Tachi/issues/1961).
+
 Tachi initialization, or one public read operation bound to that initialized
 connection, must return an opaque public-safe `admission_receipt_ref` for the
 exact current Host identity and connection. The client must not invent it or
@@ -103,7 +121,7 @@ discover it through database access. Reconnect must return a fresh reference;
 an old connection reference must not authorize new facts.
 
 Both interfaces need independent exact-head review, public protocol tests, and
-a live admission proof before #270 can reopen the clause decision.
+a live admission proof before the amendment can take effect.
 
 ## Acceptance and supersession
 
@@ -111,13 +129,13 @@ This record becomes accepted when an independent reviewer confirms that the
 document matches the pinned public contracts and does not weaken #266 D1-D7.
 Acceptance keeps LAST-A disabled.
 
-A later ADR may supersede this decision only after the two public interfaces
-exist and are independently accepted. That ADR must name the exact Tachi
-revision and may permit at most one WorkClaim reference solely for attachment,
-receipt, replay, and intervention admission. It must continue to forbid
-TaskRef/AttemptRef creation, Tachi dispatch or redispatch, lifecycle transfer,
-raw-tool grants, and inferred completion, cancellation, collection, cleanup,
-or delivery.
+The amendment takes effect only after (1) both interfaces exist and are
+independently accepted at an exact Tachi revision; (2) the public
+constructor/object inventory and #270's operation matrix are filled and
+independently reviewed; (3) the amended clause text and exact revisions are
+recorded on #266, #261 and the relevant Tachi contract. That record updates
+this ADR's status and must name the exact Tachi revision; the forbidden list
+from Decision (b) still applies.
 
 ## References
 
@@ -129,3 +147,5 @@ or delivery.
 - [Tachi Host, claim, and policy revalidation](https://github.com/kckylechen1/tachi/blob/817a673f45c8bcdef14c5ff8bf89d84ffc05aeba/crates/memcore/src/db/harness_session_attachments.rs#L753-L904)
 - [Tachi atomic attachment writer](https://github.com/kckylechen1/tachi/blob/817a673f45c8bcdef14c5ff8bf89d84ffc05aeba/crates/memcore/src/db/harness_session_attachments.rs#L997-L1095)
 - [Background work lifecycle](../background-work-lifecycle.md)
+- [Tachi#1960: ACP grant provisioning](https://github.com/kckylechen1/Tachi/issues/1960)
+- [Tachi#1961: Host admission receipt reference return](https://github.com/kckylechen1/Tachi/issues/1961)

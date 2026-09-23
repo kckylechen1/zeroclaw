@@ -41,8 +41,8 @@ The durable control plane itself (the coordinator child host with its admission,
 
 Host-owned EPHEMERAL ACP sessions stay outside Tachi WorkClaim ownership until
 the public attachment admission contract is complete. [ADR-013](./decisions/ADR-013-ephemeral-acp-attachment-admission.md)
-records the disabled boundary and the public Tachi interfaces required before
-that decision can be reconsidered.
+records the owner-selected narrow amendment, which stays out of effect until
+the public Tachi interfaces it names are accepted.
 
 ## Goal-mode target contract
 
