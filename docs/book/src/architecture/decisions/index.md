@@ -21,16 +21,17 @@ Accepted ADRs are immutable. If the architecture changes, write a new ADR and ma
 | [ADR-003](./ADR-003-wasm-plugin-model.md) | superseded by [ADR-009](./ADR-009-wit-wasmtime-plugin-execution.md) | WASM plugins initially used Extism as the execution bridge. |
 | [ADR-004](./ADR-004-tool-shared-state-ownership.md) | accepted | Tool-held shared state follows daemon-owned identity, handle ownership, isolation, and reload rules. |
 | [ADR-005](./ADR-005-pluggable-memory-backends.md) | accepted | Memory storage uses a backend-neutral contract with SQLite as the default. |
-| [ADR-006](./ADR-006-runtime-channel-plugins.md) | proposed | Runtime plugins are the target for optional channels, with explicit capability-based native exceptions during migration. |
-| [ADR-007](./ADR-007-gateway-extraction.md) | proposed | The gateway becomes a separate optional process over a supported local IPC contract. |
+| [ADR-006](./ADR-006-runtime-channel-plugins.md) | superseded by [ADR-013](./ADR-013-channels-as-gateway-clients.md) | Runtime plugins are the target for optional channels, with explicit capability-based native exceptions during migration. |
+| [ADR-007](./ADR-007-gateway-extraction.md) | superseded by [ADR-013](./ADR-013-channels-as-gateway-clients.md) | The gateway becomes a separate optional process over a supported local IPC contract. |
 | [ADR-008](./ADR-008-goal-mode-control-plane-and-usage-accounting.md) | superseded | Goal mode was to use the durable task control plane; that plane was deleted (control-plane migration wall) and durable task truth lives in Tachi through the task-intent bridge. |
 | [ADR-009](./ADR-009-wit-wasmtime-plugin-execution.md) | accepted | WIT components and direct `wasmtime` replace the Extism plugin bridge. |
 | [ADR-010](./ADR-010-memory-authority-boundaries.md) | proposed | Session history, curated memory, and enrichment have separate authority boundaries. |
 | [ADR-011](./ADR-011-multi-agent-runtime-boundaries.md) | accepted | Configured agents have explicit runtime boundaries under one daemon. |
 | [ADR-012](./ADR-012-generation-scoped-live-config-apply.md) | proposed | Live config application uses canonical generations and target-specific results. |
+| [ADR-013](./ADR-013-channels-as-gateway-clients.md) | accepted | Channels are out-of-process gateway clients (bridges); the gateway is the only external door and the runtime owns the turn lifecycle. |
 | [ADR-014](./ADR-014-reviewed-agentsoul-projection.md) | accepted | Reviewed AgentSoul uses a closed presentation-only review and projection contract. |
 
-ADR-006 and ADR-007 are implementation-gated roadmap decisions from [FND-002](../../foundations/fnd-002-documentation-standards.md). Their target directions are recorded, but they remain proposed until the acceptance boundaries in each record ship.
+ADR-006 and ADR-007 were implementation-gated roadmap decisions from [FND-002](../../foundations/fnd-002-documentation-standards.md). Neither acceptance boundary shipped; both are superseded by ADR-013 for this fork.
 
 ADR-010 remains proposed until the acceptance gates in the record are met.
 

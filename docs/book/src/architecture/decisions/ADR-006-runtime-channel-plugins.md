@@ -2,7 +2,7 @@
 id: ADR-006
 title: Make runtime plugins the target for optional channels
 date: 2026-07-18
-status: proposed
+status: superseded-by-ADR-013
 relates-to:
   - ADR-002
   - ADR-009
@@ -14,6 +14,8 @@ relates-to:
 ---
 
 # ADR-006: Make Runtime Plugins the Target for Optional Channels
+
+> Superseded by [ADR-013](./ADR-013-channels-as-gateway-clients.md) (2026-09-23). Kept as the historical record.
 
 ## Context
 

@@ -2,7 +2,7 @@
 id: ADR-007
 title: Extract the gateway into a separate optional process
 date: 2026-07-18
-status: proposed
+status: superseded-by-ADR-013
 relates-to:
   - ADR-002
   - docs/book/src/foundations/fnd-001-intentional-architecture.md
@@ -12,6 +12,8 @@ relates-to:
 ---
 
 # ADR-007: Extract the Gateway Into a Separate Optional Process
+
+> Superseded by [ADR-013](./ADR-013-channels-as-gateway-clients.md) (2026-09-23). Kept as the historical record.
 
 ## Context
 
