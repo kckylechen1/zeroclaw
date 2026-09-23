@@ -65,11 +65,48 @@ Docs: [Tool receipts](./tool-receipts.md).
 
 Beyond the six layers:
 
-- **OTP (authentication only)**: `[security.otp]` configures TOTP authentication (`enabled`, `token_ttl_secs`, `cache_valid_secs`) consumed by the e-stop resume challenge. The `gated_actions`, `gated_domains`, `gated_domain_categories`, and `challenge_max_attempts` knobs are deprecated and unsupported: they are parsed for compatibility but never enforced, because ZeroClaw has no OTP action-gating. Configuring them emits a deprecation warning; high-risk action authorization is owned by the approval/grant plane (Tachi approval/grant with Node-local enforcement).
-- **Emergency stop**: `zeroclaw estop` halts all in-flight tool calls. With `[security.estop] enabled = true`, resuming requires an OTP.
+- **OTP (authentication only)**: `[security.otp]` configures TOTP authentication for the e-stop resume challenge. It is not an action-authorization policy; see [OTP scope and action authority](#otp-scope-and-action-authority).
+- **Emergency stop**: `zeroclaw estop` halts all in-flight tool calls. Resuming requires an OTP when both `[security.estop] enabled = true` and `require_otp_to_resume = true`.
 - **Prompt injection guard**: scans model output for known injection patterns before tool calls are validated.
 - **Leak detector**: scans outbound channel responses for credentials and redacts matches before delivery. It covers deterministic credential patterns and can also run a standalone high-entropy-token heuristic.
 - **Pairing guard**: device pairing for channel auth; prevents stolen credentials from working on a new device.
+
+## OTP scope and action authority
+
+The live OTP fields have a narrow, inspectable purpose:
+
+| Field | Runtime consumer | Effect |
+|---|---|---|
+| `enabled` | CLI startup and `zeroclaw estop resume` | Initializes the TOTP secret when enabled. An e-stop resume that requires OTP is refused when this is false. |
+| `token_ttl_secs` | `OtpValidator` | Sets the TOTP time step and enrollment URI period. |
+| `cache_valid_secs` | `OtpValidator` | Sets the in-memory reuse window after a code validates. |
+| `security.estop.require_otp_to_resume` | `EstopManager::resume` and the CLI resume path | Requires the trusted operator to supply a valid code before clearing e-stop state. |
+
+`security.otp.method` is parsed for forward compatibility; only TOTP is
+implemented. It is not an action-policy selector.
+
+Four older fields are different: `gated_actions`, `gated_domains`,
+`gated_domain_categories`, and `challenge_max_attempts` have no action-execution
+consumer. During the compatibility window, a non-default value is still parsed
+and produces the structured `otp_action_gating_unsupported` warning, which says
+that the setting is not enforced. Defaults and absent fields do not warn. None
+of these fields can authorize, deny, or rate-limit an action.
+
+The names historically listed under `gated_actions` map to the real authority
+boundaries as follows:
+
+| Action category | Authority owner and required enforcement | Current production status |
+|---|---|---|
+| Direct local tools such as `shell`, `file_write`, `browser_open` / `browser`, and `memory_forget` | The selected risk profile owns tool admission and `SecurityPolicy` owns the relevant workspace, command, URL/domain, and autonomy checks. Calls that resolve to `Prompt` require a trusted operator through the CLI or an attributed channel approval. | These checks and approval surfaces are wired. For prompted calls, the kernel-local `ApprovalStore` binds a one-shot approval to the boot, run, tool, and exact arguments. Calls do not become Tachi-authorized merely because a deprecated OTP field names them. |
+| Tachi-managed durable or specialist work | Tachi owns admitted execution and grant truth. ZeroClaw may submit semantic `TaskIntentV1` content, but that content cannot mint authority. | No production Tachi bridge transport ships in ZeroClaw yet. Until the host interface and production wiring land, this path is unavailable rather than protected by OTP or a local fallback. |
+| Remote Node capability invocation | Tachi owns grant authority. The execution target must revalidate its local capability, permission, revision, arguments, expiry, and replay policy before the physical action; the Gateway may only carry admitted proof. | `GrantProof` is currently a reserved wire shape; verification and the production Tachi-to-Gateway grant/claim interface are not wired. Do not extend `approvals.db` for Node grants: that store is limited to kernel-local tool approvals. |
+| E-stop resume | The local operator-facing CLI challenge authenticates the person clearing e-stop state when OTP is required. | The challenge is wired. It does not approve any later tool, Tachi task, Node invocation, or domain access. |
+
+A model-provided `approved=true`, OTP-looking text, a matching tool/domain name,
+or an `approval_requirement` value in task content is not a grant. Until a
+production authority path exists for an action, keep that action unavailable or
+within its current local policy boundary; do not treat the retired OTP fields as
+a compatibility fallback.
 
 ## Leak detector configuration
 
@@ -111,4 +148,4 @@ Out of the box:
 - OTP: `false`
 - E-stop: `false`
 
-This is a reasonable middle ground, safe enough for a laptop, permissive enough to not frustrate. Crank it up for production (OTP, audit, restricted tools) or down to [YOLO](../getting-started/yolo.md) for a dev box.
+This is a reasonable middle ground, safe enough for a laptop, permissive enough to not frustrate. For production, enable audit, restrict tools, and enable OTP where e-stop recovery needs operator authentication. For a dev box, see [YOLO](../getting-started/yolo.md).
