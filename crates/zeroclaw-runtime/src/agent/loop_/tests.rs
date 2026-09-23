@@ -9346,6 +9346,7 @@ fn interactive_turn_system_prompt_uses_effective_dynamic_mcp_specs() {
         true,
         false,
         None,
+        crate::agent::persona_projection::LegacyPersonaFiles::Inject,
         None,
     )
     .expect("startup prompt should build");
@@ -9379,6 +9380,7 @@ fn interactive_turn_system_prompt_uses_effective_dynamic_mcp_specs() {
         true,
         false,
         None,
+        crate::agent::persona_projection::LegacyPersonaFiles::Inject,
         None,
     )
     .expect("no-tools turn prompt should build");
@@ -9415,6 +9417,7 @@ fn interactive_turn_system_prompt_uses_effective_dynamic_mcp_specs() {
         true,
         false,
         None,
+        crate::agent::persona_projection::LegacyPersonaFiles::Inject,
         None,
     )
     .expect("tools turn prompt should build");
@@ -9456,6 +9459,7 @@ fn build_system_prompt_for_turn_forwards_persona_section() {
         true,
         false,
         Some("## Voice\n\n- Be terse.\n"),
+        crate::agent::persona_projection::LegacyPersonaFiles::Inject,
         None,
     )
     .expect("prompt with persona section should build");
@@ -9484,6 +9488,7 @@ fn build_system_prompt_for_turn_forwards_persona_section() {
         true,
         false,
         None,
+        crate::agent::persona_projection::LegacyPersonaFiles::Inject,
         None,
     )
     .expect("prompt without persona section should build");

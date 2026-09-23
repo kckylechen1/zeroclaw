@@ -16,6 +16,7 @@ pub mod loop_;
 pub mod loop_detector;
 pub mod memory_inject;
 pub mod memory_strategy;
+pub mod persona_projection;
 pub mod personality;
 pub mod personality_templates;
 pub mod pricing_catalog;

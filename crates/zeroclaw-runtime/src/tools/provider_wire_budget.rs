@@ -411,6 +411,7 @@ async fn assemble_turn(req: TurnRequest<'_>) -> (ScopedAssembled, WireBudget) {
         req.inject_memory,
         false,
         None,
+        crate::agent::persona_projection::LegacyPersonaFiles::Inject,
     );
     let mcp_section = assembled.combined_mcp_prompt_section();
     if !mcp_section.is_empty() {

@@ -115,6 +115,32 @@ revision. A failed narrow leaves the rejection available for a later valid
 narrow. Unknown IDs still return 404. The decision and receipt write share one
 SQLite write transaction, including across independent store connections.
 
+## Governed Soul
+
+The agent's Identity and Principles are owner-governed
+([ADR-015](../architecture/decisions/ADR-015-one-governed-soul.md)). Every
+route below requires the operator identity. The `agent` must be a configured
+agent alias; an unknown alias returns 404 with `code: "unknown_agent"`.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/soul?agent=<alias>` | Current `identity` and `principles` heads (each with `revision`, `source`, and `value`), the configured `voice` dials, and `legacy_persona_files` (`injected` or `suppressed`). Seeds missing layers on first read. |
+| `GET /api/soul/history?agent=<alias>&layer=identity\|principles` | Every revision of one layer, oldest first. |
+| `PUT /api/soul/identity` | Body `{ "agent", "expected_revision", "identity": { "name", "self_description"?, "primary_language"?, "pronouns"? } }`. |
+| `PUT /api/soul/principles` | Body `{ "agent", "expected_revision", "items": [ ... ] }`, at most 8 single-line items of up to 240 bytes. |
+| `POST /api/soul/rollback` | Body `{ "agent", "layer", "to_revision", "expected_revision" }`. Appends a copy of an earlier revision. |
+
+Revisions are append-only. Seeded values have `source: "seed"`; owner writes
+and rollbacks have `source: "owner"`. Each write must name the revision it
+replaces as `expected_revision` (`0` when the layer has none). A stale value
+returns 409 with `code: "revision_conflict"` and `current_revision`. Invalid
+input returns 400 with `code: "invalid"` and the offending `field`. After the
+first owner-written Identity revision, the legacy `SOUL.md` and `IDENTITY.md`
+workspace files stop being injected into the system prompt.
+
+Model file tools cannot write `SOUL.md`, `IDENTITY.md`, or `USER.md` at an
+agent workspace root.
+
 ## Stable error codes
 
 Errors return JSON with a stable `code` field plus a human-readable `message`.

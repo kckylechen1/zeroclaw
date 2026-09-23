@@ -21,6 +21,7 @@ pub use stub::CompanionStore;
 mod capture;
 mod identity;
 mod outbox;
+mod soul_profile;
 mod user_model;
 mod user_model_scope;
 pub use capture::{
@@ -32,6 +33,12 @@ pub use identity::{
 pub use outbox::{
     OUTBOX_OBSERVE_INTERVAL_SECS, OUTBOX_PENDING_AGE_WARN_SECS, companion_outbox_health,
     probe_companion_outbox_health,
+};
+pub use soul_profile::{
+    DEFAULT_PRINCIPLES, SOUL_MAX_PRINCIPLES, SOUL_NAME_MAX_BYTES, SOUL_PRINCIPLE_MAX_BYTES,
+    SOUL_PROFILE_DB_FILE, SOUL_SELF_DESCRIPTION_MAX_BYTES, SOUL_SHORT_FIELD_MAX_BYTES,
+    SoulIdentity, SoulLayer, SoulPrinciples, SoulProfile, SoulProfileError, SoulProfileStore,
+    SoulRevision, SoulSource, seed_name_for_agent,
 };
 pub use user_model::{
     AuthorityClass, ReviewAction, USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS, UserModelCandidate,

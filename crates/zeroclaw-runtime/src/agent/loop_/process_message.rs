@@ -44,9 +44,8 @@ pub async fn process_message(
             )
         })?
         .clone();
-    let persona_section = config
-        .persona_for_agent(agent_alias)
-        .and_then(zeroclaw_config::persona::PersonaKnobs::to_prompt_section);
+    let persona = crate::agent::persona_projection::persona_projection(&config, agent_alias);
+    let persona_section = persona.section.clone();
     let memory_composite = {
         use zeroclaw_config::multi_agent::MemoryBackendKind;
         match agent.memory.backend {
@@ -389,6 +388,7 @@ pub async fn process_message(
             false,
             config.channels.show_tool_calls,
             persona_section.as_deref(),
+            persona.legacy_files,
         );
         if expose_text_tool_protocol {
             system_prompt.push_str(&build_tool_instructions_for_names(
