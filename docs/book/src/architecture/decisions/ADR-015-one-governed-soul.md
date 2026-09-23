@@ -2,7 +2,7 @@
 id: ADR-015
 title: One governed Soul with identity, principles, and voice
 date: 2026-09-23
-status: proposed
+status: accepted
 relates-to:
   - ADR-013
   - ADR-014
@@ -15,6 +15,10 @@ relates-to:
 ---
 
 # ADR-015: One Governed Soul With Identity, Principles, and Voice
+
+## Status
+
+Accepted by the owner on 2026-09-23, including the per-key Voice layering in Decision §2 that supersedes ADR-014's whole-section precedence rule. All other ADR-014 rules remain in force. Implementation is tracked in issue #380.
 
 ## Context
 
