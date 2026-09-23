@@ -1,6 +1,6 @@
 ---
 id: ADR-015
-title: One governed Soul — identity, principles, and voice
+title: One governed Soul with identity, principles, and voice
 date: 2026-09-23
 status: proposed
 relates-to:
@@ -14,7 +14,7 @@ relates-to:
   - crates/zeroclaw-runtime/src/agent/system_prompt.rs
 ---
 
-# ADR-015: One Governed Soul — Identity, Principles, and Voice
+# ADR-015: One Governed Soul With Identity, Principles, and Voice
 
 ## Context
 
