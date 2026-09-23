@@ -123,7 +123,7 @@ tool-linkedin = Manage LinkedIn: create posts, list your posts, comment, react, 
 
 tool-discord-search = Search Discord message history stored in discord.db. Use to find past messages, summarize channel activity, or look up what users said. Supports keyword search and optional filters: channel_id, since, until.
 
-tool-propose-soul-change = Propose a change to your own principles or voice for your owner to review. You cannot change your identity, principles, or voice yourself; this only records a suggestion and changes nothing now. Use it when the owner's feedback shows a lasting mismatch, not for one-off requests.
+tool-propose-soul-change = Propose how you would like to grow, for your owner to approve. Use layer "growth" to add a line about who you have become (growth_kind "self") or about something you and your owner share, such as a nickname or a running joke (growth_kind "bond"), or to retire an entry that no longer fits (retire_index). Use "voice" to change a dial and "principles" to add a principle. Nothing changes until your owner approves. Propose only what reflects a lasting pattern, not a one-off request. Your name and identity are your owner's to decide.
 tool-memory-forget = Remove a memory by key. Use to delete outdated facts or sensitive data. Returns whether the memory was found and removed.
 
 tool-memory-recall = Search long-term memory for relevant facts, preferences, or context. Returns scored results ranked by relevance. Omit the query or pass bare * to return recent memories.

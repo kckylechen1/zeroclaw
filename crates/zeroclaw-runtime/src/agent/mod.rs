@@ -24,6 +24,7 @@ pub mod prompt;
 pub mod prompt_helpers;
 mod routed_approval;
 mod session_model_provider;
+pub mod soul_reflection;
 pub mod system_prompt;
 pub mod text_tool_prompt;
 pub mod thinking;

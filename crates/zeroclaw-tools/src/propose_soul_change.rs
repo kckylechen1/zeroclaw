@@ -1,10 +1,11 @@
-//! `propose_soul_change`: the model's only path into its own Soul (ADR-015 §3).
+//! `propose_soul_change`: the model's only path into its own Soul
+//! (ADR-015 §3, ADR-016 §3).
 //!
-//! The agent cannot edit its identity, principles, or voice. When it thinks
-//! one of them should change, it records a proposal here and tells the user
-//! that nothing about it has changed. The owner reviews proposals through
-//! the operator-gated `/api/soul/proposals` surface and applies any change in
-//! their own words.
+//! The agent grows by proposing: a new Growth entry about itself or about
+//! what it shares with its owner, retiring an entry that no longer fits, a
+//! Voice change, or a new principle. Nothing changes until the owner approves
+//! the proposal through the operator-gated `/api/soul/proposals` surface. Its
+//! name and identity are never proposable.
 
 use std::path::PathBuf;
 
@@ -12,14 +13,14 @@ use async_trait::async_trait;
 use serde_json::json;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_memory::companion::{
-    NewSoulProposal, SOUL_MAX_OPEN_PROPOSALS, SOUL_PROPOSAL_MAX_BYTES, SOUL_RATIONALE_MAX_BYTES,
-    SOUL_VOICE_TRAIT_KEYS, SoulProfileError, SoulProfileStore, SoulProposalLayer,
+    GrowthKind, NewSoulProposal, SOUL_MAX_OPEN_PROPOSALS, SOUL_PROPOSAL_MAX_BYTES,
+    SOUL_RATIONALE_MAX_BYTES, SOUL_VOICE_TRAIT_KEYS, SoulProfileError, SoulProfileStore,
+    SoulProposalLayer,
 };
 
-/// Fixed reply on success. The model must never be told, or tell the user,
-/// that anything about it changed.
+/// Fixed reply on success. Nothing changes until the owner approves.
 pub const PROPOSAL_RECORDED_REPLY: &str =
-    "Proposal recorded for owner review. Nothing about me has changed.";
+    "Proposal recorded for owner review. Nothing about me has changed yet.";
 
 pub struct ProposeSoulChangeTool {
     data_dir: PathBuf,
@@ -69,10 +70,13 @@ impl Tool for ProposeSoulChangeTool {
     }
 
     fn description(&self) -> &str {
-        "Propose a change to your own principles or voice for your owner to review. \
-         You cannot change your identity, principles, or voice yourself; this only \
-         records a suggestion and changes nothing now. Use it when the owner's feedback \
-         shows a lasting mismatch, not for one-off requests."
+        "Propose how you would like to grow, for your owner to approve. Use layer \
+         \"growth\" to add a line about who you have become (growth_kind \"self\") or \
+         about something you and your owner share, such as a nickname or a running joke \
+         (growth_kind \"bond\"), or to retire an entry that no longer fits (retire_index). \
+         Use \"voice\" to change a dial and \"principles\" to add a principle. Nothing \
+         changes until your owner approves. Propose only what reflects a lasting pattern, \
+         not a one-off request. Your name and identity are your owner's to decide."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -81,13 +85,23 @@ impl Tool for ProposeSoulChangeTool {
             "properties": {
                 "layer": {
                     "type": "string",
-                    "enum": ["principles", "voice"],
+                    "enum": ["growth", "voice", "principles"],
                     "description": "Which part of yourself the proposal is about."
+                },
+                "growth_kind": {
+                    "type": "string",
+                    "enum": ["self", "bond"],
+                    "description": "Growth only, to add an entry: self (how you have changed) or bond (what you and your owner share)."
+                },
+                "retire_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Growth only, to retire the entry at this zero-based position in Who I've become."
                 },
                 "proposal": {
                     "type": "string",
                     "description": format!(
-                        "The change you suggest, in one sentence (at most {SOUL_PROPOSAL_MAX_BYTES} bytes)."
+                        "The change in one sentence (at most {SOUL_PROPOSAL_MAX_BYTES} bytes). For a growth entry or principle this is the exact line that would be added."
                     )
                 },
                 "rationale": {
@@ -117,11 +131,33 @@ impl Tool for ProposeSoulChangeTool {
             .and_then(SoulProposalLayer::parse)
         else {
             return Ok(Self::failure(
-                "layer must be \"principles\" or \"voice\"".to_string(),
+                "layer must be \"growth\", \"voice\" or \"principles\"".to_string(),
             ));
         };
         let Some(proposal) = str_arg(&args, "proposal") else {
             return Ok(Self::failure("Missing 'proposal' parameter".to_string()));
+        };
+        let growth_kind = match str_arg(&args, "growth_kind") {
+            None => None,
+            Some(kind) => match GrowthKind::parse(&kind) {
+                Some(kind) => Some(kind),
+                None => {
+                    return Ok(Self::failure(
+                        "growth_kind must be \"self\" or \"bond\"".to_string(),
+                    ));
+                }
+            },
+        };
+        let retire_index = match args.get("retire_index") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => match value.as_u64().and_then(|v| u32::try_from(v).ok()) {
+                Some(index) => Some(index),
+                None => {
+                    return Ok(Self::failure(
+                        "retire_index must be a non-negative integer".to_string(),
+                    ));
+                }
+            },
         };
         let proposal = NewSoulProposal {
             layer,
@@ -129,6 +165,8 @@ impl Tool for ProposeSoulChangeTool {
             rationale: str_arg(&args, "rationale").unwrap_or_default(),
             trait_key: str_arg(&args, "trait_key"),
             level: str_arg(&args, "level"),
+            growth_kind,
+            retire_index,
             session_ref: current_session_ref(),
         };
         if !self.data_dir.is_dir() {
@@ -273,5 +311,46 @@ mod tests {
         let result = tool.execute(principle("Anything.")).await.unwrap();
         assert!(!result.success);
         assert!(!absent.exists());
+    }
+
+    #[tokio::test]
+    async fn growth_proposals_are_recorded_and_apply_only_after_approval() {
+        let (dir, tool) = tool();
+        let result = tool
+            .execute(json!({
+                "layer": "growth",
+                "growth_kind": "bond",
+                "proposal": "We call a bad trade a paper cut.",
+                "rationale": "The owner has used the phrase for weeks."
+            }))
+            .await
+            .unwrap();
+        assert!(result.success, "{:?}", result.error);
+        let store = SoulProfileStore::open(dir.path()).unwrap();
+        assert!(store.profile("nova").unwrap().growth.is_none());
+        let pending = store.proposals("nova", true).unwrap();
+        assert_eq!(pending[0].growth_kind, Some(GrowthKind::Bond));
+
+        let bad_kind = tool
+            .execute(json!({
+                "layer": "growth",
+                "growth_kind": "secret",
+                "proposal": "x",
+                "rationale": ""
+            }))
+            .await
+            .unwrap();
+        assert!(!bad_kind.success);
+        let lower_challenge = tool
+            .execute(json!({
+                "layer": "voice",
+                "proposal": "Stop arguing.",
+                "rationale": "",
+                "trait_key": "challenge",
+                "level": "minimal"
+            }))
+            .await
+            .unwrap();
+        assert!(!lower_challenge.success);
     }
 }

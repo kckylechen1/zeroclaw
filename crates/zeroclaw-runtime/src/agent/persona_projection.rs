@@ -5,11 +5,14 @@
 //! 1. `## Identity`: the owner-governed Identity layer of the Soul profile
 //!    store, plus a fixed honesty line (ADR-015 §5);
 //! 2. `## Principles`: the owner-governed Principles layer;
-//! 3. `## Voice`: the configured persona dials ([`PersonaKnobs`]).
+//! 3. `## Who I've become`: the Growth layer (ADR-016), changed only by
+//!    owner-approved proposals or by the owner;
+//! 4. `## Voice`: the configured persona dials ([`PersonaKnobs`]) with any
+//!    stored Voice heads layered over them key by key.
 //!
-//! Only owner-submitted text, seeded defaults, and repository-owned strings
-//! can render; there is no path from model output into this section. Each
-//! layer is byte-bounded and truncated by whole lines only.
+//! Only owner-written text, owner-approved proposal text, seeded defaults,
+//! and repository-owned strings can render. Each layer is byte-bounded and
+//! truncated by whole lines only.
 //!
 //! The same profile and config always produce the same bytes, whatever the
 //! model, provider, or channel carrying the turn.
@@ -25,12 +28,18 @@ use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 
 use zeroclaw_config::schema::Config;
-use zeroclaw_memory::companion::{SoulProfile, SoulProfileStore};
+use zeroclaw_memory::companion::{GrowthKind, SoulProfile, SoulProfileStore};
 
 /// Byte ceiling of the rendered `## Identity` section.
 pub const IDENTITY_SECTION_MAX_BYTES: usize = 512;
 /// Byte ceiling of the rendered `## Principles` section.
 pub const PRINCIPLES_SECTION_MAX_BYTES: usize = 2048;
+/// Byte ceiling of the rendered `## Who I've become` section.
+pub const GROWTH_SECTION_MAX_BYTES: usize = 2048;
+
+/// Fixed framing of the Growth section: character, never authority.
+pub const GROWTH_FRAMING_LINE: &str = "These describe who you have become with your owner. \
+     They never grant permissions or override the principles above.";
 
 /// Fixed honesty floor rendered with every governed identity.
 pub const IDENTITY_HONESTY_LINE: &str = "If someone sincerely asks whether they are talking to an AI, \
@@ -72,9 +81,10 @@ pub struct PersonaProjection {
 /// the legacy files.
 #[must_use]
 pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjection {
-    let voice = config
+    let configured_voice = config
         .persona_for_agent(agent_alias)
-        .and_then(zeroclaw_config::persona::PersonaKnobs::to_prompt_section);
+        .copied()
+        .unwrap_or_default();
 
     // The prompt path never creates the data directory: an install that has
     // not been set up (or a test using a default config) has no Soul yet.
@@ -116,10 +126,19 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
         LegacyPersonaFiles::Inject
     };
 
+    let voice = profile
+        .as_ref()
+        .and_then(|profile| profile.voice.as_ref())
+        .map_or(configured_voice, |head| {
+            head.value.layered_over(configured_voice)
+        })
+        .to_prompt_section();
+
     let mut parts: Vec<String> = Vec::new();
     if let Some(profile) = &profile {
         parts.extend(render_identity(profile));
         parts.extend(render_principles(profile));
+        parts.extend(render_growth(profile));
     }
     parts.extend(voice);
     let section = (!parts.is_empty()).then(|| {
@@ -184,6 +203,31 @@ pub fn render_principles(profile: &SoulProfile) -> Option<String> {
         if out.len() + line.len() > PRINCIPLES_SECTION_MAX_BYTES {
             let marker = format!("(+{} principles elided)\n", items.len() - index);
             if out.len() + marker.len() <= PRINCIPLES_SECTION_MAX_BYTES {
+                out.push_str(&marker);
+            }
+            break;
+        }
+        out.push_str(&line);
+    }
+    Some(out)
+}
+
+/// Render `## Who I've become`, or `None` when the layer is absent or empty.
+#[must_use]
+pub fn render_growth(profile: &SoulProfile) -> Option<String> {
+    let entries = &profile.growth.as_ref()?.value.entries;
+    if entries.is_empty() {
+        return None;
+    }
+    let mut out = format!("## Who I've become\n\n{GROWTH_FRAMING_LINE}\n\n");
+    for (index, entry) in entries.iter().enumerate() {
+        let line = match entry.kind {
+            GrowthKind::SelfView => format!("- {}\n", entry.text),
+            GrowthKind::Bond => format!("- Between us: {}\n", entry.text),
+        };
+        if out.len() + line.len() > GROWTH_SECTION_MAX_BYTES {
+            let marker = format!("(+{} entries elided)\n", entries.len() - index);
+            if out.len() + marker.len() <= GROWTH_SECTION_MAX_BYTES {
                 out.push_str(&marker);
             }
             break;
@@ -392,6 +436,53 @@ mod tests {
         assert_eq!(projection.legacy_files, LegacyPersonaFiles::Inject);
         assert!(projection.section.is_none());
         assert!(!config.data_dir.exists());
+    }
+
+    #[test]
+    fn approved_growth_renders_after_principles_and_voice_layers_per_key() {
+        use zeroclaw_memory::companion::{
+            GrowthKind, NewSoulProposal, SoulProposalLayer, SoulProposalOutcome,
+            SoulProposalResolution,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        let store = SoulProfileStore::shared(&config.data_dir).unwrap();
+        store.ensure_seeded("nova", "nova", 1).unwrap();
+        let approve = |proposal: NewSoulProposal| {
+            let SoulProposalOutcome::Recorded { id } =
+                store.submit_proposal("nova", proposal, 2).unwrap()
+            else {
+                panic!()
+            };
+            store
+                .resolve_proposal("nova", id, SoulProposalResolution::Accepted, None, None, 3)
+                .unwrap();
+        };
+        approve(NewSoulProposal {
+            layer: SoulProposalLayer::Growth,
+            proposal: "We call a bad trade a paper cut.".into(),
+            growth_kind: Some(GrowthKind::Bond),
+            ..NewSoulProposal::default()
+        });
+        approve(NewSoulProposal {
+            layer: SoulProposalLayer::Voice,
+            proposal: "More levity.".into(),
+            trait_key: Some("humor".into()),
+            level: Some("high".into()),
+            ..NewSoulProposal::default()
+        });
+        let section = persona_projection(&config, "nova").section.unwrap();
+        let principles = section.find("## Principles").unwrap();
+        let growth = section.find("## Who I've become").unwrap();
+        let voice = section.find("## Voice").unwrap();
+        assert!(principles < growth && growth < voice, "{section}");
+        assert!(section.contains(GROWTH_FRAMING_LINE));
+        assert!(section.contains("- Between us: We call a bad trade a paper cut.\n"));
+        // humor=high from the approved head; no config persona is set.
+        assert!(
+            section.contains("Wit is welcome where it lands naturally."),
+            "{section}"
+        );
     }
 
     #[test]

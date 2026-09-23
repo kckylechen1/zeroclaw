@@ -1985,6 +1985,8 @@ pub async fn run_gateway(
         .route("/api/soul/identity", put(api_soul::put_identity))
         .route("/api/soul/principles", put(api_soul::put_principles))
         .route("/api/soul/rollback", post(api_soul::post_rollback))
+        .route("/api/soul/growth", put(api_soul::put_growth))
+        .route("/api/soul/voice", put(api_soul::put_voice))
         .route("/api/soul/proposals", get(api_soul::get_proposals))
         .route(
             "/api/soul/proposals/{id}/resolve",

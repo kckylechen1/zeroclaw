@@ -649,6 +649,23 @@ pub async fn run(
         );
     }
 
+    // Weekly Soul reflection (ADR-016 §4): proposes growth, applies nothing.
+    if !config.agents.is_empty() {
+        let reflection_cfg = config.clone();
+        let reflection_cancel = channels_cancel.clone();
+        handles.push(spawn_component_supervisor(
+            "soul_reflection",
+            initial_backoff,
+            max_backoff,
+            channels_cancel.clone(),
+            move || {
+                let cfg = reflection_cfg.clone();
+                let cancel = reflection_cancel.clone();
+                async move { crate::agent::soul_reflection::run_worker(cfg, cancel).await }
+            },
+        ));
+    }
+
     record_daemon_started(&config, &host, port);
 
     // Wait for shutdown (SIGINT/SIGTERM/Ctrl+C) or reload (in-process channel).

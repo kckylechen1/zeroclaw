@@ -14,8 +14,8 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use zeroclaw_memory::companion::{
-    SoulIdentity, SoulLayer, SoulPrinciples, SoulProfileError, SoulProfileStore,
-    SoulProposalResolution,
+    SoulGrowth, SoulIdentity, SoulLayer, SoulPrinciples, SoulProfileError, SoulProfileStore,
+    SoulProposalResolution, SoulVoice,
 };
 
 use crate::AppState;
@@ -183,17 +183,20 @@ pub async fn get_soul(
         Err(err) => return *err,
     };
     let voice = state.config.read().persona_for_agent(&agent).copied();
+    let last_reflection_agent = agent.clone();
     let seed_agent = agent.clone();
     match run_store(data_dir, move |store| {
-        store.ensure_seeded(
+        let profile = store.ensure_seeded(
             &seed_agent,
             zeroclaw_memory::companion::seed_name_for_agent(&seed_agent),
             now_unix(),
-        )
+        )?;
+        let last_reflection = store.last_reflection(&last_reflection_agent)?;
+        Ok((profile, last_reflection))
     })
     .await
     {
-        Ok(profile) => {
+        Ok((profile, last_reflection)) => {
             let legacy_files = if profile.identity_is_owner_authored() {
                 "suppressed"
             } else {
@@ -205,8 +208,13 @@ pub async fn get_soul(
                     "agent": agent,
                     "identity": profile.identity,
                     "principles": profile.principles,
-                    "voice": voice,
+                    "growth": profile.growth,
+                    "voice": {
+                        "configured": voice,
+                        "stored": profile.voice,
+                    },
                     "legacy_persona_files": legacy_files,
+                    "last_reflection": last_reflection,
                 })),
             )
                 .into_response()
@@ -375,6 +383,80 @@ pub async fn post_rollback(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrowthBody {
+    agent: String,
+    expected_revision: u64,
+    growth: SoulGrowth,
+}
+
+/// PUT /api/soul/growth — owner rewrite of the Growth layer (for example to
+/// retire several entries at once or correct the agent's wording).
+pub async fn put_growth(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
+        return err;
+    }
+    let body = match serde_json::from_slice::<GrowthBody>(&body) {
+        Ok(body) => body,
+        Err(err) => return error_json(StatusCode::BAD_REQUEST, "bad_body", &err.to_string()),
+    };
+    let (agent, data_dir) = match configured_agent(&state, &body.agent) {
+        Ok(found) => found,
+        Err(err) => return *err,
+    };
+    match run_store(data_dir, move |store| {
+        store.set_growth(&agent, body.growth, body.expected_revision, now_unix())
+    })
+    .await
+    {
+        Ok(revision) => (StatusCode::OK, axum::Json(revision)).into_response(),
+        Err(err) => err,
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VoiceBody {
+    agent: String,
+    expected_revision: u64,
+    voice: SoulVoice,
+}
+
+/// PUT /api/soul/voice — owner write of the stored Voice heads, which layer
+/// over the configured persona dials key by key. The owner may set any level.
+pub async fn put_voice(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Some(err) = crate::operator_auth::gate_operator_identity(&state, peer, &headers) {
+        return err;
+    }
+    let body = match serde_json::from_slice::<VoiceBody>(&body) {
+        Ok(body) => body,
+        Err(err) => return error_json(StatusCode::BAD_REQUEST, "bad_body", &err.to_string()),
+    };
+    let (agent, data_dir) = match configured_agent(&state, &body.agent) {
+        Ok(found) => found,
+        Err(err) => return *err,
+    };
+    match run_store(data_dir, move |store| {
+        store.set_voice(&agent, body.voice, body.expected_revision, now_unix())
+    })
+    .await
+    {
+        Ok(revision) => (StatusCode::OK, axum::Json(revision)).into_response(),
+        Err(err) => err,
+    }
+}
+
+#[derive(serde::Deserialize)]
 struct ProposalsQuery {
     #[serde(default)]
     agent: String,
@@ -420,12 +502,17 @@ struct ResolveBody {
     resolution: String,
     #[serde(default)]
     note: Option<String>,
+    /// Owner rewording of a principle or growth entry before it applies.
+    #[serde(default)]
+    final_text: Option<String>,
 }
 
-/// POST /api/soul/proposals/{id}/resolve — record the owner's decision
-/// (`accepted` | `dismissed`). Accepting records the decision only: the owner
-/// applies the change in their own words through `PUT /api/soul/principles`
-/// or the persona config, so proposal text never becomes Soul text by id.
+/// POST /api/soul/proposals/{id}/resolve — the owner's decision on one of
+/// the agent's proposals (ADR-016 §3). `accepted` applies the proposal to its
+/// layer in the same transaction (optionally reworded with `final_text`) and
+/// returns the applied revision; `dismissed` applies nothing. Each proposal
+/// resolves once. If the change can no longer apply, the proposal stays
+/// pending and the error names the field.
 pub async fn post_resolve_proposal(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -452,13 +539,24 @@ pub async fn post_resolve_proposal(
         Err(err) => return *err,
     };
     match run_store(data_dir, move |store| {
-        store.resolve_proposal(&agent, id, resolution, body.note, now_unix())
+        store.resolve_proposal(
+            &agent,
+            id,
+            resolution,
+            body.note,
+            body.final_text,
+            now_unix(),
+        )
     })
     .await
     {
-        Ok(()) => (
+        Ok(applied_revision) => (
             StatusCode::OK,
-            axum::Json(serde_json::json!({ "id": id, "resolution": resolution })),
+            axum::Json(serde_json::json!({
+                "id": id,
+                "resolution": resolution,
+                "applied_revision": applied_revision,
+            })),
         )
             .into_response(),
         Err(err) => err,
@@ -689,6 +787,7 @@ mod tests {
                     trait_key: None,
                     level: None,
                     session_ref: None,
+                    ..Default::default()
                 },
                 1,
             )
@@ -729,8 +828,12 @@ mod tests {
         let (_, json) = json_of(list("/api/soul/proposals?agent=nova").await).await;
         assert_eq!(json["proposals"][0]["resolution"], "accepted");
 
-        // Accepting recorded a decision only; the Soul itself is unchanged.
-        assert!(store.profile("nova").unwrap().principles.is_none());
+        // Accepting applied the proposal: seeded defaults plus the new line.
+        let principles = store.profile("nova").unwrap().principles.unwrap();
+        assert_eq!(
+            principles.value.items.last().map(String::as_str),
+            Some("Keep answers short.")
+        );
         // Anonymous callers are refused.
         let response = get_proposals(
             State(state.clone()),
