@@ -149,7 +149,9 @@ pub fn add_once_validated(
     approved: bool,
 ) -> Result<CronJob> {
     let duration = parse_delay(delay)?;
-    let at = chrono::Utc::now() + duration;
+    let at = chrono::Utc::now()
+        .checked_add_signed(duration)
+        .ok_or_else(|| anyhow::Error::msg(format!("delay '{delay}' is too far in the future")))?;
     add_once_at_validated(config, agent_alias, at, command, approved)
 }
 
@@ -237,14 +239,17 @@ pub fn parse_delay(input: &str) -> Result<chrono::Duration> {
     let (num, unit) = input.split_at(split);
     let amount: i64 = num.parse()?;
     let unit = if unit.is_empty() { "m" } else { unit };
+    // The `try_` constructors: the plain ones panic on overflow, and the
+    // release profile aborts on panic, so a model-supplied delay could take
+    // the whole daemon down.
     let duration = match unit {
-        "s" => chrono::Duration::seconds(amount),
-        "m" => chrono::Duration::minutes(amount),
-        "h" => chrono::Duration::hours(amount),
-        "d" => chrono::Duration::days(amount),
+        "s" => chrono::Duration::try_seconds(amount),
+        "m" => chrono::Duration::try_minutes(amount),
+        "h" => chrono::Duration::try_hours(amount),
+        "d" => chrono::Duration::try_days(amount),
         _ => anyhow::bail!("unsupported delay unit '{unit}', use s/m/h/d"),
     };
-    Ok(duration)
+    duration.ok_or_else(|| anyhow::Error::msg(format!("delay '{input}' is out of range")))
 }
 
 #[cfg(test)]
@@ -333,5 +338,31 @@ mod validate_delivery_tests {
             best_effort: true,
         };
         validate_delivery_config(Some(&delivery)).expect("webhook without thread_id must validate");
+    }
+}
+
+#[cfg(test)]
+mod delay_overflow_tests {
+    use super::*;
+
+    #[test]
+    fn parse_delay_rejects_out_of_range_values_instead_of_panicking() {
+        assert!(parse_delay("9999999999999999s").is_err());
+        assert!(parse_delay("9999999999999999d").is_err());
+        assert_eq!(parse_delay("30m").unwrap(), chrono::Duration::minutes(30));
+    }
+
+    #[test]
+    fn a_delay_past_the_representable_date_is_an_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            data_dir: tmp.path().join("data"),
+            config_path: tmp.path().join("config.toml"),
+            ..Config::default()
+        };
+        // In range for `Duration::days`, but now + delay overflows the date.
+        let err = add_once_validated(&config, "default", "99999999d", "echo hi", true)
+            .expect_err("an overflowing delay must be rejected");
+        assert!(err.to_string().contains("too far in the future"), "{err}");
     }
 }
