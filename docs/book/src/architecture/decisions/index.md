@@ -30,7 +30,8 @@ Accepted ADRs are immutable. If the architecture changes, write a new ADR and ma
 | [ADR-012](./ADR-012-generation-scoped-live-config-apply.md) | proposed | Live config application uses canonical generations and target-specific results. |
 | [ADR-013](./ADR-013-channels-as-gateway-clients.md) | accepted | Channels are out-of-process gateway clients (bridges); the gateway is the only external door and the runtime owns the turn lifecycle. |
 | [ADR-014](./ADR-014-reviewed-agentsoul-projection.md) | accepted (Voice precedence amended by [ADR-015](./ADR-015-one-governed-soul.md)) | Reviewed AgentSoul uses a closed presentation-only review and projection contract. |
-| [ADR-015](./ADR-015-one-governed-soul.md) | accepted | Soul has three owner-governed layers (identity, principles, voice); the model can only propose changes, and legacy personality files become seeds. |
+| [ADR-015](./ADR-015-one-governed-soul.md) | accepted (§1 and §3 amended by [ADR-016](./ADR-016-growth-proposed-by-agent-approved-by-owner.md)) | Soul has three owner-governed layers (identity, principles, voice); the model can only propose changes, and legacy personality files become seeds. |
+| [ADR-016](./ADR-016-growth-proposed-by-agent-approved-by-owner.md) | accepted | The agent grows through a bounded Growth layer and Voice changes that it proposes and the owner approves; it reflects once a week from the owner's own messages only. |
 
 ADR-006 and ADR-007 were implementation-gated roadmap decisions from [FND-002](../../foundations/fnd-002-documentation-standards.md). Neither acceptance boundary shipped; both are superseded by ADR-013 for this fork.
 
