@@ -291,11 +291,18 @@
       "signals": 10
     },
     {
+      "path": "crates/zeroclaw-memory/src/soul_candidate.rs",
+      "store": "memory/brain.db",
+      "role": "test",
+      "basis": "#188-A TB-22 test-only exemption: four rusqlite parameter-macro mentions bulk-seed existing memories rows in a temporary SQLite fixture to discriminate exact candidate pagination after 1,001 newer same-agent, sibling-agent and wrong-namespace rows; no production DDL, store, dependency or writer path",
+      "signals": 4
+    },
+    {
       "path": "crates/zeroclaw-memory/src/sqlite.rs",
       "store": "memory/brain.db",
       "role": "store",
-      "basis": "personal-memory main store (tachi#1630/#49 ZeroClaw-canonical side)",
-      "signals": 34
+      "basis": "personal-memory main store (tachi#1630/#49 ZeroClaw-canonical side). #188-A signals 34->35 add one rusqlite::Row mapping type reference for the read-only SELECT implementing exact namespace/agent/key-prefix pagination; same existing memories table and connection, no new DDL, store, dependency or writer path",
+      "signals": 35
     },
     {
       "path": "crates/zeroclaw-memory/src/sqlite/tests.rs",

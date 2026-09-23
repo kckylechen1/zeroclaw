@@ -3324,6 +3324,121 @@ async fn recall_namespaced_still_reads_soul_rows() {
 }
 
 #[tokio::test]
+async fn prefix_pages_apply_namespace_agent_and_key_before_the_limit() {
+    let (_tmp, mem) = temp_sqlite();
+    let owner = mem.ensure_agent_uuid("owner").await.unwrap();
+    let sibling = mem.ensure_agent_uuid("sibling").await.unwrap();
+    let prefix = format!("soul::{owner}::candidate::");
+    let candidate_time = "2026-09-19T00:00:00+00:00";
+    let distractor_time = "2026-09-20T00:00:00+00:00";
+
+    {
+        let conn = mem.connection().lock();
+        let tx = conn.unchecked_transaction().unwrap();
+        let mut insert = tx
+            .prepare(
+                "INSERT INTO memories \
+                 (id, key, content, category, created_at, updated_at, namespace, agent_id) \
+                 VALUES (?1, ?2, ?3, 'soul', ?4, ?4, ?5, ?6)",
+            )
+            .unwrap();
+
+        // Each distractor population is larger than the historical global
+        // cap. Any predicate applied after LIMIT can therefore starve every
+        // real row from a page.
+        for index in 0..1001 {
+            insert
+                .execute(params![
+                    Uuid::new_v4().to_string(),
+                    format!("soul::{owner}::ordinary::{index:04}"),
+                    "same-agent non-candidate",
+                    distractor_time,
+                    crate::soul::SOUL_NAMESPACE,
+                    owner,
+                ])
+                .unwrap();
+            insert
+                .execute(params![
+                    Uuid::new_v4().to_string(),
+                    format!("{prefix}sibling-{index:04}"),
+                    "sibling candidate-shaped row",
+                    distractor_time,
+                    crate::soul::SOUL_NAMESPACE,
+                    sibling,
+                ])
+                .unwrap();
+            insert
+                .execute(params![
+                    Uuid::new_v4().to_string(),
+                    format!("{prefix}ambient-{index:04}"),
+                    "wrong-namespace candidate-shaped row",
+                    distractor_time,
+                    "default",
+                    owner,
+                ])
+                .unwrap();
+        }
+        for index in 0..40 {
+            insert
+                .execute(params![
+                    Uuid::new_v4().to_string(),
+                    format!("{prefix}real-{index:04}"),
+                    "real candidate row",
+                    candidate_time,
+                    crate::soul::SOUL_NAMESPACE,
+                    owner,
+                ])
+                .unwrap();
+        }
+        drop(insert);
+        tx.commit().unwrap();
+    }
+
+    let mut cursor = None;
+    let mut keys = Vec::new();
+    let mut pages = 0;
+    loop {
+        let page = mem
+            .list_prefix_page(
+                crate::soul::SOUL_NAMESPACE,
+                &owner,
+                &prefix,
+                cursor.as_deref(),
+                17,
+            )
+            .await
+            .unwrap();
+        pages += 1;
+        assert!(page.entries.len() <= 17);
+        assert!(page.entries.iter().all(|row| {
+            row.namespace == crate::soul::SOUL_NAMESPACE
+                && row.agent_id.as_deref() == Some(owner.as_str())
+                && row.key.starts_with(&prefix)
+        }));
+        keys.extend(page.entries.into_iter().map(|row| row.key));
+        match page.next_cursor {
+            Some(next) => {
+                assert!(
+                    cursor
+                        .as_deref()
+                        .is_none_or(|previous| next.as_str() > previous)
+                );
+                cursor = Some(next);
+            }
+            None => break,
+        }
+    }
+
+    assert_eq!(pages, 3, "40 rows at 17 per page must cross two cursors");
+    assert_eq!(keys.len(), 40);
+    assert!(
+        keys.windows(2).all(|pair| pair[0] < pair[1]),
+        "keyset pages must compose into one stable ascending order"
+    );
+    assert!(keys.iter().all(|key| key.contains("::real-")));
+}
+
+#[tokio::test]
 async fn ambient_forget_cannot_delete_soul_rows() {
     let (_tmp, mem) = temp_sqlite();
     let agent = mem.ensure_agent_uuid("default").await.unwrap();

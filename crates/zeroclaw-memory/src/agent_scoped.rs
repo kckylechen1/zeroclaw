@@ -1,5 +1,6 @@
 use super::traits::{
-    ExportFilter, Memory, MemoryCategory, MemoryEntry, ProceduralMessage, StoreOptions,
+    ExportFilter, Memory, MemoryCategory, MemoryEntry, MemoryPrefixPage, ProceduralMessage,
+    StoreOptions,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -59,6 +60,28 @@ impl AgentScopedMemory {
     /// Ambient wrappers never operate in the reserved Soul namespace.
     fn refuses_soul_namespace(namespace: Option<&str>) -> bool {
         namespace == Some(crate::soul::SOUL_NAMESPACE)
+    }
+
+    /// Typed refusal for exact-prefix reads that target either half of the
+    /// reserved Soul storage contract. Agent attribution is insufficient:
+    /// protected rows intentionally carry the same agent UUID as ambient rows.
+    fn refuse_soul_read(key_prefix: &str, namespace: &str) -> Result<()> {
+        if Self::refuses_soul_key(key_prefix) || Self::refuses_soul_namespace(Some(namespace)) {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "key_prefix": key_prefix,
+                        "namespace": namespace,
+                    })),
+                "exact prefix read refused: Soul key space is not readable through AgentScopedMemory"
+            );
+            anyhow::bail!(
+                "AgentScopedMemory refuses exact prefix reads from the reserved Soul key space; use the typed Soul services on the raw backend"
+            );
+        }
+        Ok(())
     }
 
     /// Typed refusal for any store that would write into the Soul key
@@ -513,6 +536,24 @@ impl Memory for AgentScopedMemory {
             .filter(|e| e.namespace == namespace)
             .take(limit)
             .collect())
+    }
+
+    async fn list_prefix_page(
+        &self,
+        namespace: &str,
+        agent_id: &str,
+        key_prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<MemoryPrefixPage> {
+        Self::refuse_soul_read(key_prefix, namespace)?;
+        anyhow::ensure!(
+            agent_id == self.agent_id,
+            "AgentScopedMemory refuses exact prefix page for a foreign agent"
+        );
+        self.inner
+            .list_prefix_page(namespace, agent_id, key_prefix, cursor, limit)
+            .await
     }
 
     async fn export(&self, filter: &ExportFilter) -> Result<Vec<MemoryEntry>> {
@@ -1233,6 +1274,51 @@ mod tests {
                 .all(|e| e.namespace != crate::soul::SOUL_NAMESPACE),
             "wrapper recall must not leak Soul rows"
         );
+
+        // The exact-prefix capability is also ambient on this wrapper. Either
+        // half of the reserved storage shape is sufficient for refusal, so a
+        // caller cannot bypass protection by mixing a Soul namespace with an
+        // ambient key or a Soul key with an ambient namespace.
+        assert!(
+            wrapper
+                .list_prefix_page(
+                    crate::soul::SOUL_NAMESPACE,
+                    &agent,
+                    "soul::agent-a::",
+                    None,
+                    10,
+                )
+                .await
+                .is_err(),
+            "wrapper exact-prefix read must refuse the reserved Soul scope"
+        );
+        assert!(
+            wrapper
+                .list_prefix_page("default", &agent, "soul::agent-a::", None, 10)
+                .await
+                .is_err(),
+            "reserved Soul key prefix must be refused independently"
+        );
+        assert!(
+            wrapper
+                .list_prefix_page(crate::soul::SOUL_NAMESPACE, &agent, "ambient::", None, 10,)
+                .await
+                .is_err(),
+            "reserved Soul namespace must be refused independently"
+        );
+
+        let authorized = inner
+            .list_prefix_page(
+                crate::soul::SOUL_NAMESPACE,
+                &agent,
+                "soul::agent-a::",
+                None,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized.entries.len(), 1);
+        assert_eq!(authorized.entries[0].key, "soul::agent-a::disposition");
 
         // Ambient writes and deletes through the wrapper are refused.
         assert!(

@@ -28,7 +28,8 @@ use crate::policy::PolicyEnforcer;
 use crate::redact::{self, RedactCategory};
 use crate::threat::{self, Scope};
 use crate::traits::{
-    ExportFilter, Memory, MemoryCategory, MemoryEntry, MemoryStats, ProceduralMessage, StoreOptions,
+    ExportFilter, Memory, MemoryCategory, MemoryEntry, MemoryPrefixPage, MemoryStats,
+    ProceduralMessage, StoreOptions,
 };
 use async_trait::async_trait;
 use zeroclaw_config::schema::MemoryPolicyConfig;
@@ -479,6 +480,24 @@ impl<M: Memory> Memory for ScannedMemory<M> {
             )
             .await?;
         self.filter_recalled_limited(entries, limit)
+    }
+
+    async fn list_prefix_page(
+        &self,
+        namespace: &str,
+        agent_id: &str,
+        key_prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<MemoryPrefixPage> {
+        let page = self
+            .inner
+            .list_prefix_page(namespace, agent_id, key_prefix, cursor, limit)
+            .await?;
+        Ok(MemoryPrefixPage {
+            entries: self.filter_recalled_limited(page.entries, limit)?,
+            next_cursor: page.next_cursor,
+        })
     }
 
     async fn export(&self, filter: &ExportFilter) -> anyhow::Result<Vec<MemoryEntry>> {

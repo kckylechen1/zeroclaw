@@ -232,6 +232,18 @@ pub struct MemoryStats {
     pub bytes: u64,
 }
 
+/// One bounded page from an exact memory key-prefix scan.
+///
+/// The cursor is backend-owned and must only be passed back with the same
+/// namespace, agent, and key prefix. A backend returns `Some` only when a
+/// later page exists; callers can therefore walk pages to completion without
+/// treating a capped result as a complete listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryPrefixPage {
+    pub entries: Vec<MemoryEntry>,
+    pub next_cursor: Option<String>,
+}
+
 /// Shared memory policy decision substrate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "decision")]
@@ -514,6 +526,28 @@ pub trait Memory: Send + Sync + crate::attribution::Attributable {
             .take(limit)
             .collect();
         Ok(filtered)
+    }
+
+    /// List one stable, bounded page after applying all three storage
+    /// predicates: exact namespace, exact agent id, and key prefix.
+    ///
+    /// Results are ordered by key ascending. `cursor`, when present, must be a
+    /// cursor returned by the previous page for the same scope. Implementations
+    /// must apply every predicate before the page limit. The default refuses
+    /// the operation so a backend cannot report a post-filtered, incomplete
+    /// result as complete.
+    async fn list_prefix_page(
+        &self,
+        _namespace: &str,
+        _agent_id: &str,
+        _key_prefix: &str,
+        _cursor: Option<&str>,
+        _limit: usize,
+    ) -> anyhow::Result<MemoryPrefixPage> {
+        anyhow::bail!(
+            "memory backend '{}' does not support exact prefix pagination",
+            self.name()
+        )
     }
 
     /// Bulk-export memories matching the given filter criteria.

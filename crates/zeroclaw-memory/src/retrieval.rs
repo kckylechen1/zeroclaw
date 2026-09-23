@@ -24,7 +24,8 @@
 //! documented limitation of the opt-in cache.
 
 use super::traits::{
-    ExportFilter, Memory, MemoryCategory, MemoryEntry, MemoryStats, ProceduralMessage, StoreOptions,
+    ExportFilter, Memory, MemoryCategory, MemoryEntry, MemoryPrefixPage, MemoryStats,
+    ProceduralMessage, StoreOptions,
 };
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -497,6 +498,19 @@ impl Memory for RetrievalPipeline {
         until: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
         self.cached_recall(query, limit, session_id, Some(namespace), since, until)
+            .await
+    }
+
+    async fn list_prefix_page(
+        &self,
+        namespace: &str,
+        agent_id: &str,
+        key_prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<MemoryPrefixPage> {
+        self.memory
+            .list_prefix_page(namespace, agent_id, key_prefix, cursor, limit)
             .await
     }
 
