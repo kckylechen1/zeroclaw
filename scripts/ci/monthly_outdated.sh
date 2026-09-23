@@ -13,11 +13,14 @@ case "${1:-}" in
       rustc --version
       cargo --version
       cargo outdated --version
-      printf '\nCommand: cargo outdated --workspace --exit-code 10\n\n## Scanner output\n\n'
+      printf '\nCommand: cargo outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10\n'
+      printf '%s\n' 'Coverage limit: cargo-outdated preserves direct rusqlite and matrix-sdk constraints in its hypothetical latest-version graph.'
+      printf '%s\n' 'This defers latest-version updates outside the declared rusqlite and matrix-sdk constraints: Matrix 0.18 uses rusqlite ^0.37, while Matrix 0.19 selects an incompatible SQLite links graph. The vendored libsqlite3-sys remains on the checked-in security floor (see vendor/libsqlite3-sys/VENDOR.md). Other dependencies remain eligible for hypothetical updates; transitive choices still obey this constrained graph.'
+      printf '\n## Scanner output\n\n'
     } > "$OUTPUT_FILE" 2>&1
 
     exit_code=0
-    cargo outdated --workspace --exit-code 10 >> "$OUTPUT_FILE" 2>&1 || exit_code=$?
+    cargo outdated --workspace --exclude rusqlite,matrix-sdk --exit-code 10 >> "$OUTPUT_FILE" 2>&1 || exit_code=$?
     case "$exit_code" in
       0) result=clean ;;
       10) result=inventory ;;
@@ -56,12 +59,24 @@ case "${1:-}" in
 
     OUTPUT_FILE="$RUNNER_TEMP/outdated-output.txt"
     scan_output=$(cat "$OUTPUT_FILE")
+    # GitHub limits issue bodies to 65,536 characters. Keep ample room
+    # for report framing and preserve the complete report in the artifact.
+    issue_report_limit=48000
+    report_excerpt=$scan_output
+    report_truncated=false
+    if (( ${#scan_output} > issue_report_limit )); then
+      report_excerpt=${scan_output:0:issue_report_limit}
+      report_truncated=true
+    fi
 
     {
       printf '## Outdated dependencies found\n\n'
       printf 'Workflow run: %s\n\n' "${RUN_URL}"
       printf 'The following dependencies have newer versions available:\n\n'
-      printf '```\n%s\n```\n\n' "${scan_output}"
+      printf '```\n%s\n```\n\n' "${report_excerpt}"
+      if [[ "$report_truncated" == true ]]; then
+        printf 'Report excerpt truncated to %s characters. The complete outdated-output.txt report is retained in the artifact on the workflow run linked above.\n\n' "$issue_report_limit"
+      fi
       printf 'Review and update dependencies at your earliest convenience.\n'
       printf 'Breaking changes may require more attention than patch bumps.\n'
     } > "$RUNNER_TEMP/issue-body.md"
