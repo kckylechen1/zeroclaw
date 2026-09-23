@@ -407,7 +407,7 @@ pub async fn reflect(
             .map_or(voice, |head| head.value.layered_over(voice));
         let input = reflection_input(&profile, voice, &pending, messages);
         let (provider, model) = model()?;
-        match provider
+        match zeroclaw_providers::ProviderDispatch::from_ref(provider.as_ref())
             .chat_with_system(Some(REFLECTION_SYSTEM_PROMPT), &input, &model, None)
             .await
         {
