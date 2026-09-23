@@ -131,6 +131,8 @@ pub(crate) fn build_system_prompt_for_turn(
     // Rendered `## Voice` section for this agent's persona, or `None`. See
     // `system_prompt::build_system_prompt_with_persona` for placement rules.
     persona_section: Option<&str>,
+    // Whether legacy `SOUL.md` / `IDENTITY.md` still inject (ADR-015 §2).
+    legacy_persona_files: crate::agent::persona_projection::LegacyPersonaFiles,
     thinking_prefix: Option<&str>,
 ) -> Result<String> {
     let native_tools = model_provider.supports_native_tools();
@@ -170,6 +172,7 @@ pub(crate) fn build_system_prompt_for_turn(
         inject_memory,
         show_tool_calls,
         persona_section,
+        legacy_persona_files,
     );
 
     if expose_text_tool_protocol {

@@ -60,6 +60,7 @@ use crate::notion_tool::NotionTool;
 use crate::pipeline::PipelineTool;
 use crate::poll::PollTool;
 use crate::project_intel::ProjectIntelTool;
+use crate::propose_soul_change::ProposeSoulChangeTool;
 use crate::proxy_config::ProxyConfigTool;
 #[cfg(feature = "integrations-saas")]
 use crate::pushover::PushoverTool;
@@ -120,6 +121,7 @@ tool_attribution!(LlmTaskTool, ToolKind::Plugin);
 tool_attribution!(McpToolWrapper, ToolKind::Plugin);
 tool_attribution!(MemoryExportTool, ToolKind::Memory);
 tool_attribution!(MemoryForgetTool, ToolKind::Memory);
+tool_attribution!(ProposeSoulChangeTool, ToolKind::Memory);
 tool_attribution!(MemoryPurgeTool, ToolKind::Memory);
 tool_attribution!(MemoryRecallTool, ToolKind::Memory);
 tool_attribution!(MemoryStoreTool, ToolKind::Memory);

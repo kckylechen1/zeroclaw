@@ -23,6 +23,7 @@ pub mod api_quickstart;
 pub mod api_sections;
 pub mod api_skills;
 pub mod api_sop_author;
+pub mod api_soul;
 pub mod api_user_model;
 #[cfg(feature = "webauthn")]
 pub mod api_webauthn;
@@ -1978,6 +1979,19 @@ pub async fn run_gateway(
             post(api_user_model::review_candidate),
         )
         .route("/api/user-model/statements", post(api_user_model::create_statement))
+        // ── Governed Soul owner surface (ADR-015) ──
+        .route("/api/soul", get(api_soul::get_soul))
+        .route("/api/soul/history", get(api_soul::get_history))
+        .route("/api/soul/identity", put(api_soul::put_identity))
+        .route("/api/soul/principles", put(api_soul::put_principles))
+        .route("/api/soul/rollback", post(api_soul::post_rollback))
+        .route("/api/soul/growth", put(api_soul::put_growth))
+        .route("/api/soul/voice", put(api_soul::put_voice))
+        .route("/api/soul/proposals", get(api_soul::get_proposals))
+        .route(
+            "/api/soul/proposals/{id}/resolve",
+            post(api_soul::post_resolve_proposal),
+        )
         // ── Backup / data-retention operator surface ──
         // Thin operator-bearer-gated entries over the same BackupTool /
         // DataManagementTool command methods the model-visible tools use;

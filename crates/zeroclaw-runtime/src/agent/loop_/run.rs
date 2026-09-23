@@ -62,9 +62,8 @@ pub async fn run(
     // Rendered once and reused across every prompt build in this turn, same
     // as `risk_profile` above — the persona resolution is stable for the
     // whole call, only the tool/skill surface changes per rebuild.
-    let persona_section = config
-        .persona_for_agent(agent_alias)
-        .and_then(zeroclaw_config::persona::PersonaKnobs::to_prompt_section);
+    let persona = crate::agent::persona_projection::persona_projection(&config, agent_alias);
+    let persona_section = persona.section.clone();
     let memory_composite = {
         use zeroclaw_config::multi_agent::MemoryBackendKind;
         match agent.memory.backend {
@@ -571,6 +570,7 @@ pub async fn run(
             true,
             config.channels.show_tool_calls,
             persona_section.as_deref(),
+            persona.legacy_files,
             None,
         )?;
 
@@ -666,6 +666,7 @@ pub async fn run(
                 true,
                 config.channels.show_tool_calls,
                 persona_section.as_deref(),
+                persona.legacy_files,
                 thinking_params.system_prompt_prefix.as_deref(),
             )?;
 
@@ -788,6 +789,7 @@ pub async fn run(
                         true,
                         config.channels.show_tool_calls,
                         persona_section.as_deref(),
+                        persona.legacy_files,
                         thinking_params.system_prompt_prefix.as_deref(),
                     )?;
                 }
@@ -1339,6 +1341,7 @@ pub async fn run(
                             true,
                             config.channels.show_tool_calls,
                             persona_section.as_deref(),
+                            persona.legacy_files,
                             thinking_params.system_prompt_prefix.as_deref(),
                         )?;
                     }

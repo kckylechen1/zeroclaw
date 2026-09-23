@@ -115,6 +115,60 @@ revision. A failed narrow leaves the rejection available for a later valid
 narrow. Unknown IDs still return 404. The decision and receipt write share one
 SQLite write transaction, including across independent store connections.
 
+## Governed Soul
+
+The agent's Soul is owner-governed
+([ADR-015](../architecture/decisions/ADR-015-one-governed-soul.md),
+[ADR-016](../architecture/decisions/ADR-016-growth-proposed-by-agent-approved-by-owner.md)).
+Every route below requires the operator identity. The `agent` must be a
+configured agent alias; an unknown alias returns 404 with
+`code: "unknown_agent"`.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/soul?agent=<alias>` | Current `identity`, `principles`, and `growth` heads (each with `revision`, `source`, and `value`), `voice` (`configured` dials and `stored` per-key heads), `legacy_persona_files` (`injected` or `suppressed`), and `last_reflection`. Seeds missing layers on first read. |
+| `GET /api/soul/history?agent=<alias>&layer=identity\|principles\|growth\|voice` | Every revision of one layer, oldest first. |
+| `PUT /api/soul/identity` | Body `{ "agent", "expected_revision", "identity": { "name", "self_description"?, "primary_language"?, "pronouns"? } }`. |
+| `PUT /api/soul/principles` | Body `{ "agent", "expected_revision", "items": [ ... ] }`, at most 8 single-line items of up to 240 bytes. |
+| `PUT /api/soul/growth` | Body `{ "agent", "expected_revision", "growth": { "entries": [ { "kind": "self" \| "bond", "text" } ] } }`, at most 12 single-line entries of up to 200 bytes. |
+| `PUT /api/soul/voice` | Body `{ "agent", "expected_revision", "voice": { "heads": { "<key>": "<level>" } } }`. Keys are the five persona dials; a stored head wins over the configured dial for its key. |
+| `POST /api/soul/rollback` | Body `{ "agent", "layer", "to_revision", "expected_revision" }`. Appends a copy of an earlier revision. |
+| `GET /api/soul/proposals?agent=<alias>[&pending=true]` | The agent's own proposals to change its growth, voice, or principles, oldest first. |
+| `POST /api/soul/proposals/{id}/resolve` | Body `{ "agent", "resolution": "accepted" \| "dismissed", "note"?, "final_text"? }`. Accepting applies the proposal and returns `applied_revision`. Each proposal resolves once; a repeat returns 409 with `code: "proposal_already_resolved"`. |
+
+Revisions are append-only. Seeded values have `source: "seed"`; owner writes
+and rollbacks have `source: "owner"`; approved proposals have
+`source: "approved_proposal"` and carry the `proposal_id`. Each write must name
+the revision it replaces as `expected_revision` (`0` when the layer has none).
+A stale value returns 409 with `code: "revision_conflict"` and
+`current_revision`. Invalid input returns 400 with `code: "invalid"` and the
+offending `field`. After the first owner-written Identity revision, the legacy
+`SOUL.md` and `IDENTITY.md` workspace files stop being injected into the system
+prompt.
+
+Model file tools cannot write `SOUL.md`, `IDENTITY.md`, or `USER.md` at an
+agent workspace root.
+
+The model's only path into its own Soul is a proposal, either from the
+`propose_soul_change` tool mid-conversation or from the weekly reflection. At
+most three proposals wait per agent, and identical pending proposals are not
+stored twice. Identity is never proposable, and the agent cannot propose
+`challenge` below `low`. Accepting a proposal applies it in the same
+transaction; `final_text` lets the owner reword a growth entry or principle
+before it applies. If the apply fails validation or the layer changed
+underneath it, the proposal stays pending. Dismissing applies nothing.
+
+Once every 7 days per agent, the daemon reflects: it reads only the owner's
+own `user` messages since the previous reflection (at most the latest 32 KiB),
+makes one model call with no tools, and stores at most three validated
+proposals. Nothing is applied. The owner's messages are those from operator
+surfaces (gateway chat, CLI, TUI) plus channel sessions whose sender is listed
+in `[companion_memory.owner].identities`; tool results, injected memory, and
+link previews are removed first. The first check only starts the clock, a
+week with no owner messages makes no model call, and a failed call is retried
+after 6 hours. `last_reflection` reports the period, the number of messages
+read, the proposals created, and the outcome.
+
 ## Stable error codes
 
 Errors return JSON with a stable `code` field plus a human-readable `message`.

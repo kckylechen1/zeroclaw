@@ -31,6 +31,9 @@ pub struct ActionTracker {
 
 const ACTION_WINDOW: Duration = Duration::from_secs(3600);
 
+/// Legacy persona files that model file tools must never write (ADR-015 §3).
+pub const PROTECTED_PERSONA_FILES: &[&str] = &["SOUL.md", "IDENTITY.md", "USER.md"];
+
 fn retain_actions_after(actions: &mut Vec<Instant>, cutoff: Option<Instant>) {
     if let Some(cutoff) = cutoff {
         actions.retain(|timestamp| *timestamp > cutoff);
@@ -2087,7 +2090,10 @@ impl SecurityPolicy {
             || file_name.starts_with(".config.toml.tmp-")
             || file_name == "estop-state.json"
             || file_name == "otp-secret"
-            || file_name == "webauthn_credentials.json";
+            || file_name == "webauthn_credentials.json"
+            || file_name == "soul.db"
+            || file_name == "soul.db-wal"
+            || file_name == "soul.db-shm";
         if !is_protected_name {
             return false;
         }
@@ -2097,6 +2103,54 @@ impl SecurityPolicy {
         self.runtime_config_dirs()
             .iter()
             .any(|dir| parent == dir.as_path())
+    }
+
+    /// Whether `resolved` is one of the legacy persona files (`SOUL.md`,
+    /// `IDENTITY.md`, `USER.md`) at the root of an agent workspace.
+    ///
+    /// These files are injected into the system prompt, so a model that
+    /// could write them could rewrite its own identity with no review
+    /// (ADR-015 §3). Model file tools refuse them; the owner edits identity
+    /// and principles through the governed Soul endpoints instead. `shell`
+    /// cannot be guarded by path and stays behind the approval chain.
+    ///
+    /// Matches the policy's own workspace root and any
+    /// `<install>/agents/<alias>/workspace/` root, case-insensitively so a
+    /// case-insensitive filesystem cannot be used to slip past the check.
+    pub fn is_protected_persona_path(&self, resolved: &Path) -> bool {
+        let Some(file_name) = resolved.file_name().and_then(|value| value.to_str()) else {
+            return false;
+        };
+        if !PROTECTED_PERSONA_FILES
+            .iter()
+            .any(|name| file_name.eq_ignore_ascii_case(name))
+        {
+            return false;
+        }
+        let Some(parent) = resolved.parent() else {
+            return false;
+        };
+        let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        if canon(parent) == canon(&self.workspace_dir) {
+            return true;
+        }
+        // `<install>/agents/<alias>/workspace/<file>`
+        parent.file_name().and_then(|n| n.to_str()) == Some("workspace")
+            && parent
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .and_then(|n| n.to_str())
+                == Some("agents")
+    }
+
+    pub fn persona_file_violation_message(&self, resolved: &Path) -> String {
+        format!(
+            "Refusing to modify persona file: {}. Your identity and principles are owner-governed; \
+             the owner changes them through the Soul API (GET/PUT /api/soul). \
+             Nothing about you has changed.",
+            resolved.display()
+        )
     }
 
     pub fn runtime_config_violation_message(&self, resolved: &Path) -> String {

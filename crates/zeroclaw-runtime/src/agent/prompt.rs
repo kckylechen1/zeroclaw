@@ -60,10 +60,31 @@ impl SystemPromptBuilder {
     /// dial must never be able to soften a hard behavioural constraint, and
     /// voice should render before tools are listed.
     pub fn with_defaults(persona_section: Option<String>) -> Self {
+        Self::with_persona(crate::agent::persona_projection::PersonaProjection {
+            section: persona_section,
+            legacy_files: crate::agent::persona_projection::LegacyPersonaFiles::Inject,
+        })
+    }
+
+    /// Same pipeline as [`Self::with_defaults`], driven by a governed Soul
+    /// projection: its section renders where the Voice section sits, and the
+    /// legacy `SOUL.md` / `IDENTITY.md` files are left out of the workspace
+    /// file listing once the owner has written a governed Identity
+    /// (ADR-015 §2).
+    pub fn with_persona(persona: crate::agent::persona_projection::PersonaProjection) -> Self {
+        let identity: Box<dyn PromptSection> = match persona.legacy_files {
+            crate::agent::persona_projection::LegacyPersonaFiles::Inject => {
+                Box::new(IdentitySection)
+            }
+            crate::agent::persona_projection::LegacyPersonaFiles::Suppress => {
+                Box::new(GovernedIdentitySection)
+            }
+        };
+        let persona_section = persona.section;
         Self {
             sections: vec![
                 Box::new(DateTimeSection),
-                Box::new(IdentitySection),
+                identity,
                 Box::new(ToolHonestySection),
                 Box::new(VoiceSection(persona_section)),
                 Box::new(ToolsSection),
@@ -96,6 +117,9 @@ impl SystemPromptBuilder {
 }
 
 pub struct IdentitySection;
+/// [`IdentitySection`] without the legacy `SOUL.md` / `IDENTITY.md` files,
+/// used once the governed Soul identity is owner-authored.
+pub struct GovernedIdentitySection;
 pub struct ToolHonestySection;
 /// Pre-rendered `## Voice` persona section, captured at builder-construction
 /// time. Carries the already-rendered text rather than reading it off
@@ -140,6 +164,27 @@ impl PromptSection for IdentitySection {
         let profile = personality::load_personality(ctx.agent_workspace_dir);
         prompt.push_str(&profile.render());
 
+        Ok(prompt)
+    }
+}
+
+impl PromptSection for GovernedIdentitySection {
+    fn name(&self) -> &str {
+        "identity"
+    }
+
+    fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+        let files: Vec<&str> = personality::PERSONALITY_FILES
+            .iter()
+            .copied()
+            .filter(|name| {
+                !crate::agent::persona_projection::LegacyPersonaFiles::Suppress.skips(name)
+            })
+            .collect();
+        let mut prompt = String::from("## Project Context\n\n");
+        prompt.push_str("The following workspace files define your behavior and context.\n\n");
+        let profile = personality::load_personality_files(ctx.agent_workspace_dir, &files);
+        prompt.push_str(&profile.render());
         Ok(prompt)
     }
 }
@@ -415,6 +460,49 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn governed_identity_section_skips_only_legacy_persona_files() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(workspace.path().join("SOUL.md"), "LEGACY_SOUL_MARKER").unwrap();
+        std::fs::write(
+            workspace.path().join("IDENTITY.md"),
+            "LEGACY_IDENTITY_MARKER",
+        )
+        .unwrap();
+        std::fs::write(workspace.path().join("AGENTS.md"), "AGENTS_MARKER").unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![];
+        let ctx = PromptContext {
+            workspace_dir: workspace.path(),
+            agent_workspace_dir: workspace.path(),
+            model_name: "test-model",
+            tools: &tools,
+            skills: &[],
+            skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+            identity_config: None,
+            dispatcher_instructions: "",
+            sends_native_tool_specs: false,
+
+            security_summary: None,
+            autonomy_level: AutonomyLevel::Supervised,
+        };
+
+        let legacy = IdentitySection.build(&ctx).unwrap();
+        assert!(legacy.contains("LEGACY_SOUL_MARKER"));
+
+        let prompt = SystemPromptBuilder::with_persona(
+            crate::agent::persona_projection::PersonaProjection {
+                section: Some("## Identity\n\nYou are Nova.\n".into()),
+                legacy_files: crate::agent::persona_projection::LegacyPersonaFiles::Suppress,
+            },
+        )
+        .build(&ctx)
+        .unwrap();
+        assert!(!prompt.contains("LEGACY_SOUL_MARKER"), "{prompt}");
+        assert!(!prompt.contains("LEGACY_IDENTITY_MARKER"));
+        assert!(prompt.contains("AGENTS_MARKER"));
+        assert!(prompt.contains("You are Nova."));
     }
 
     #[test]

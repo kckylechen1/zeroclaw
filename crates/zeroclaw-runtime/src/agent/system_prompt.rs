@@ -18,6 +18,8 @@ pub const NATIVE_TOOLS_TASK_FRAMING: &str = "Use tools when the request requires
 /// Workspace files injected into the system prompt, in order. `doctor`
 /// scans the same list (plus the conditional `BOOTSTRAP.md` /
 /// `MEMORY.md`) so its report matches what the prompt builder caps.
+use crate::agent::persona_projection::LegacyPersonaFiles;
+
 pub const BOOTSTRAP_FILES: &[&str] =
     &["AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md", "USER.md"];
 
@@ -27,12 +29,16 @@ fn load_openclaw_bootstrap_files(
     max_chars_per_file: usize,
     inject_memory: bool,
     compact_context: bool,
+    legacy_persona_files: LegacyPersonaFiles,
 ) {
     prompt.push_str(
         "The following workspace files define your identity, behavior, and context. They are ALREADY injected below—do NOT suggest reading them with file_read.\n\n",
     );
 
     for filename in BOOTSTRAP_FILES {
+        if legacy_persona_files.skips(filename) {
+            continue;
+        }
         inject_workspace_file(
             prompt,
             workspace_dir,
@@ -185,6 +191,7 @@ pub fn build_system_prompt_with_mode_and_autonomy(
         inject_memory,
         show_tool_calls,
         None,
+        LegacyPersonaFiles::Inject,
     )
 }
 
@@ -218,6 +225,9 @@ pub fn build_system_prompt_with_persona(
     // function, which keeps the *top* of the prompt, cuts the tools list
     // before it ever cuts the agent's voice).
     persona_section: Option<&str>,
+    // Whether the legacy `SOUL.md` / `IDENTITY.md` files are still injected.
+    // `Suppress` once the owner has written a governed Identity (ADR-015 §2).
+    legacy_persona_files: LegacyPersonaFiles,
 ) -> String {
     use std::fmt::Write;
     let mut prompt = String::with_capacity(8192);
@@ -429,6 +439,7 @@ pub fn build_system_prompt_with_persona(
                         max_chars,
                         inject_memory,
                         compact_context,
+                        legacy_persona_files,
                     );
                 }
                 Err(e) => {
@@ -443,6 +454,7 @@ pub fn build_system_prompt_with_persona(
                         max_chars,
                         inject_memory,
                         compact_context,
+                        legacy_persona_files,
                     );
                 }
             }
@@ -455,6 +467,7 @@ pub fn build_system_prompt_with_persona(
                 max_chars,
                 inject_memory,
                 compact_context,
+                legacy_persona_files,
             );
         }
     } else {
@@ -466,6 +479,7 @@ pub fn build_system_prompt_with_persona(
             max_chars,
             inject_memory,
             compact_context,
+            legacy_persona_files,
         );
     }
 
@@ -922,7 +936,55 @@ mod tests {
             true,
             false,
             persona_section,
+            LegacyPersonaFiles::Inject,
         )
+    }
+
+    fn build_in(workspace: &std::path::Path, legacy: LegacyPersonaFiles) -> String {
+        let autonomy = zeroclaw_config::schema::RiskProfileConfig::default();
+        build_system_prompt_with_persona(
+            workspace,
+            "test-model",
+            &[],
+            &[],
+            None,
+            Some(4096),
+            Some(&autonomy),
+            false,
+            SkillsPromptInjectionMode::Full,
+            false,
+            0,
+            true,
+            false,
+            Some("## Identity\n\nYou are Nova.\n"),
+            legacy,
+        )
+    }
+
+    /// Once the owner has written a governed Identity, the legacy persona
+    /// files must not reach the prompt; every other workspace file still does.
+    #[test]
+    fn suppressed_legacy_persona_files_are_left_out_of_the_prompt() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(workspace.path().join("SOUL.md"), "LEGACY_SOUL_MARKER").unwrap();
+        std::fs::write(
+            workspace.path().join("IDENTITY.md"),
+            "LEGACY_IDENTITY_MARKER",
+        )
+        .unwrap();
+        std::fs::write(workspace.path().join("USER.md"), "USER_MARKER").unwrap();
+        std::fs::write(workspace.path().join("AGENTS.md"), "AGENTS_MARKER").unwrap();
+
+        let injected = build_in(workspace.path(), LegacyPersonaFiles::Inject);
+        assert!(injected.contains("LEGACY_SOUL_MARKER"));
+        assert!(injected.contains("LEGACY_IDENTITY_MARKER"));
+
+        let suppressed = build_in(workspace.path(), LegacyPersonaFiles::Suppress);
+        assert!(!suppressed.contains("LEGACY_SOUL_MARKER"), "{suppressed}");
+        assert!(!suppressed.contains("LEGACY_IDENTITY_MARKER"));
+        assert!(suppressed.contains("USER_MARKER"));
+        assert!(suppressed.contains("AGENTS_MARKER"));
+        assert!(suppressed.contains("You are Nova."));
     }
 
     /// `## Voice` must land after both hard behavioural blocks (anti-narration,
@@ -1005,6 +1067,7 @@ mod tests {
             true,
             false,
             None,
+            LegacyPersonaFiles::Inject,
         );
         assert_eq!(via_old_entry_point, via_new_entry_point_with_no_persona);
     }

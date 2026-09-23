@@ -88,6 +88,7 @@ pub mod node_capabilities;
 pub mod pipeline;
 pub mod poll;
 pub mod project_intel;
+pub mod propose_soul_change;
 pub mod proxy_config;
 pub mod reaction;
 pub mod report_template_tool;

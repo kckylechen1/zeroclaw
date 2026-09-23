@@ -684,7 +684,7 @@ fn revision_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserModelRevis
     })
 }
 
-fn create_owner_only_file(path: &Path) -> Result<(), rusqlite::Error> {
+pub(super) fn create_owner_only_file(path: &Path) -> Result<(), rusqlite::Error> {
     let mut opts = std::fs::OpenOptions::new();
     opts.create(true).read(true).write(true);
     #[cfg(unix)]

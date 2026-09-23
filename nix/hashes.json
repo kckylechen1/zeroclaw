@@ -1,5 +1,6 @@
 {
-  "memcore-1.9.2": "sha256-ukWZ9GTznbl6Nve3iv1z2as1qWV703XLgP0pUYTR+Ac=",
+  "memcore-1.9.2": "sha256-edPw8T3mQvFeF9mPxHsLhSfnVhZrvWD+y+94IB20OQM=",
+  "vault-kit-0.1.0": "sha256-edPw8T3mQvFeF9mPxHsLhSfnVhZrvWD+y+94IB20OQM=",
   "wacore-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
   "wacore-appstate-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
   "wacore-binary-0.6.0": "sha256-Zio0PnHVkXRhfqk/d0ezmhOqzcqQCm6VyuiiluKeAyM=",
