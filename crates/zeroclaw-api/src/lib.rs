@@ -27,7 +27,6 @@ pub mod session_keys;
 pub mod subagent_v1;
 pub mod taskintent;
 pub mod tool;
-pub mod vad;
 
 tokio::task_local! {
     /// Current thread/sender ID for per-sender rate limiting.

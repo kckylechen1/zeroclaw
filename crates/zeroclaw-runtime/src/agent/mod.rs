@@ -5,7 +5,6 @@ pub(crate) mod approval_bridge;
 pub mod capped_line;
 pub mod channel_factories;
 pub mod classifier;
-pub mod context_analyzer;
 pub mod cost;
 pub mod dispatcher;
 pub mod eval;

@@ -1,6 +1,4 @@
-pub mod dora;
 pub mod log;
-pub mod multi;
 pub mod noop;
 #[cfg(feature = "observability-otel")]
 pub mod otel;
@@ -15,7 +13,6 @@ pub mod verbose;
 #[allow(unused_imports)]
 pub use self::log::LogObserver;
 #[allow(unused_imports)]
-pub use self::multi::MultiObserver;
 #[cfg(feature = "observability-otel")]
 use self::otel_config::OtelContentConfig;
 pub use noop::NoopObserver;

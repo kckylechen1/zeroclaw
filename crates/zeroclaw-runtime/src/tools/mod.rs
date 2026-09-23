@@ -17,14 +17,12 @@ pub mod read_skill;
 mod runtime_command_error;
 pub mod schedule;
 pub mod scoped;
-pub mod security_ops;
 pub mod send_message_to_peer;
 pub mod shell;
 pub mod skill_http;
 pub mod skill_manage;
 pub mod skill_tool;
 pub mod todo_write;
-pub mod verifiable_intent;
 
 // Tool types from zeroclaw-tools (direct imports, no shims)
 pub use zeroclaw_tools::ask_user::AskUserTool;
@@ -89,14 +87,12 @@ pub use zeroclaw_tools::memory_recall::MemoryRecallTool;
 pub use zeroclaw_tools::memory_store::MemoryStoreTool;
 #[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::microsoft365::Microsoft365Tool;
-pub use zeroclaw_tools::model_routing_config::ModelRoutingConfigTool;
 #[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::notion_tool::NotionTool;
 pub use zeroclaw_tools::pipeline::PipelineTool;
 pub use zeroclaw_tools::poll::PollTool;
 pub use zeroclaw_tools::project_intel::ProjectIntelTool;
 pub use zeroclaw_tools::propose_soul_change::ProposeSoulChangeTool;
-pub use zeroclaw_tools::proxy_config::ProxyConfigTool;
 #[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::pushover::PushoverTool;
 pub use zeroclaw_tools::reaction::ReactionTool;
@@ -106,8 +102,7 @@ pub use zeroclaw_tools::send_via::{
     AgentPeerGroupResolver, SendViaTool, TURN_ROUTING, TurnRoutingHandle,
 };
 pub use zeroclaw_tools::sessions::{
-    SessionDeleteTool, SessionResetTool, SessionsCurrentTool, SessionsHistoryTool,
-    SessionsListTool, SessionsSendTool,
+    SessionsCurrentTool, SessionsHistoryTool, SessionsListTool, SessionsSendTool,
 };
 pub use zeroclaw_tools::text_browser::TextBrowserTool;
 pub use zeroclaw_tools::tool_search::ToolSearchTool;
@@ -131,13 +126,11 @@ pub use file_read::FileReadTool;
 pub use model_switch::ModelSwitchTool;
 pub use read_skill::ReadSkillTool;
 pub use schedule::ScheduleTool;
-pub use security_ops::SecurityOpsTool;
 pub use send_message_to_peer::SendMessageToPeerTool;
 pub use shell::ShellTool;
 pub use skill_http::SkillHttpTool;
 pub use skill_tool::{SkillBuiltinTool, SkillShellTool};
 pub use todo_write::TodoWriteTool;
-pub use verifiable_intent::VerifiableIntentTool;
 
 /// Re-entrant agent-spawning tools that must never be collapsed by the
 /// per-turn duplicate-call guard: launching several with the same prompt

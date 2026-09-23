@@ -1535,14 +1535,7 @@ fn resuming_a_paused_recurring_job_does_not_fire_a_stale_run() {
     .unwrap();
     crate::cron::pause_job(&config, &job.id).unwrap();
     // The job stays paused past its next run.
-    let stale = (Utc::now() - ChronoDuration::days(3)).to_rfc3339();
-    rusqlite::Connection::open(cron_db(&config))
-        .unwrap()
-        .execute(
-            "UPDATE cron_jobs SET next_run = ?1 WHERE id = ?2",
-            rusqlite::params![stale, job.id],
-        )
-        .unwrap();
+    force_due(&config, &job.id);
 
     let resumed = crate::cron::resume_job(&config, &job.id).unwrap();
     assert!(resumed.enabled);
