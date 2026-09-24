@@ -1299,22 +1299,6 @@ mod tests {
                 std::time::Duration::from_secs(300),
                 1000,
             )),
-            #[cfg(feature = "channel-whatsapp-cloud")]
-            whatsapp: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-whatsapp-cloud")]
-            whatsapp_app_secret: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-linq")]
-            linq: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-linq")]
-            linq_signing_secrets: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-nextcloud")]
-            nextcloud_talk: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-nextcloud")]
-            nextcloud_talk_webhook_secret: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-wati")]
-            wati: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-email")]
-            gmail_push: None,
             observer: std::sync::Arc::new(zeroclaw_runtime::observability::NoopObserver),
             tools_registry: std::sync::Arc::new(Vec::new()),
             tools_registry_by_agent: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1335,14 +1319,10 @@ mod tests {
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: zeroclaw_runtime::tools::CanvasStore::new(),
-            #[cfg(feature = "webauthn")]
-            webauthn: None,
             cancel_tokens: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             pending_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            tui_registry: None,
         }
     }
 

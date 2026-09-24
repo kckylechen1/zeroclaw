@@ -4,79 +4,37 @@
     clippy::collapsible_if
 )]
 
-#[cfg(feature = "a2a")]
-pub mod a2a;
-pub mod acp;
 pub mod agent_owned_state;
 pub mod api;
 pub mod api_backup_retention;
-pub mod api_browse;
 pub mod api_config;
 pub mod api_logs;
 #[cfg(feature = "nodes")]
 pub mod api_node_identity;
 pub mod api_pairing;
 pub mod api_personality;
-#[cfg(feature = "plugins-wasm")]
-pub mod api_plugins;
-pub mod api_quickstart;
 pub mod api_sections;
 pub mod api_skills;
-pub mod api_sop_author;
 pub mod api_soul;
 pub mod api_user_model;
-#[cfg(feature = "webauthn")]
-pub mod api_webauthn;
-#[cfg(any(
-    feature = "channel-linq",
-    feature = "channel-nextcloud",
-    feature = "channel-wati",
-    feature = "channel-whatsapp-cloud"
-))]
-pub mod api_webhook;
 pub mod auth_rate_limit;
-pub mod canvas;
 #[cfg(feature = "nodes")]
 pub mod device_identity;
 #[cfg(feature = "nodes")]
 #[cfg(feature = "nodes")]
 pub mod nodes;
-pub mod openapi;
 pub mod operator_auth;
 pub mod security_headers;
 pub mod session_queue;
 pub mod sse;
 pub mod static_files;
 pub mod tls;
-pub mod version;
 #[cfg(feature = "gateway-voice-duplex")]
 pub mod voice_duplex;
 pub mod ws;
 pub mod ws_approval;
 
 use anyhow::{Context, Result};
-#[cfg(any(
-    feature = "channel-email",
-    feature = "channel-linq",
-    feature = "channel-nextcloud",
-    feature = "channel-wati",
-    feature = "channel-whatsapp-cloud"
-))]
-use axum::body::Bytes;
-#[cfg(any(
-    feature = "channel-linq",
-    feature = "channel-nextcloud",
-    feature = "channel-wati",
-    feature = "channel-whatsapp-cloud"
-))]
-use axum::extract::Path;
-#[cfg(any(
-    feature = "channel-linq",
-    feature = "channel-nextcloud",
-    feature = "channel-wati",
-    feature = "channel-whatsapp-cloud"
-))]
-use axum::response::Response;
 use axum::{
     Router,
     extract::{ConnectInfo, Query, State},
@@ -118,25 +76,8 @@ fn is_recoverable_accept_error(e: &std::io::Error) -> bool {
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
-#[cfg(any(
-    feature = "channel-linq",
-    feature = "channel-nextcloud",
-    feature = "channel-wati",
-    feature = "channel-whatsapp-cloud"
-))]
-use zeroclaw_api::channel::{Channel, SendMessage};
 use zeroclaw_api::memory_traits::MemoryStrategy;
 use zeroclaw_api::tool::ToolSpec;
-#[cfg(feature = "channel-email")]
-use zeroclaw_channels::gmail_push::GmailPushChannel;
-#[cfg(feature = "channel-linq")]
-use zeroclaw_channels::linq::LinqChannel;
-#[cfg(feature = "channel-nextcloud")]
-use zeroclaw_channels::nextcloud_talk::NextcloudTalkChannel;
-#[cfg(feature = "channel-wati")]
-use zeroclaw_channels::wati::WatiChannel;
-#[cfg(feature = "channel-whatsapp-cloud")]
-use zeroclaw_channels::whatsapp::WhatsAppChannel;
 use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::Config;
 use zeroclaw_infra::session_backend::SessionBackend;
@@ -147,8 +88,8 @@ use zeroclaw_runtime::cost::CostTracker;
 use zeroclaw_runtime::i18n;
 use zeroclaw_runtime::platform;
 use zeroclaw_runtime::security::pairing::{PairingGuard, constant_time_eq, is_public_bind};
+
 use zeroclaw_runtime::tools;
-use zeroclaw_runtime::tools::CanvasStore;
 use zeroclaw_runtime::tools::scoped;
 
 /// Maximum request body size (64KB) — prevents memory exhaustion
@@ -181,39 +122,6 @@ pub const IDEMPOTENCY_MAX_KEYS_DEFAULT: usize = 10_000;
 
 fn webhook_memory_key() -> String {
     format!("webhook_msg_{}", Uuid::new_v4())
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-fn whatsapp_memory_key(msg: &zeroclaw_api::channel::ChannelMessage) -> String {
-    format!("whatsapp_{}_{}", msg.sender, msg.id)
-}
-
-#[cfg(feature = "channel-linq")]
-fn linq_memory_key(msg: &zeroclaw_api::channel::ChannelMessage) -> String {
-    format!("linq_{}_{}", msg.sender, msg.id)
-}
-
-#[cfg(feature = "channel-wati")]
-fn wati_memory_key(msg: &zeroclaw_api::channel::ChannelMessage) -> String {
-    format!("wati_{}_{}", msg.sender, msg.id)
-}
-
-#[cfg(feature = "channel-nextcloud")]
-fn nextcloud_talk_memory_key(msg: &zeroclaw_api::channel::ChannelMessage) -> String {
-    format!("nextcloud_talk_{}_{}", msg.sender, msg.id)
-}
-
-#[cfg(any(
-    feature = "channel-linq",
-    feature = "channel-nextcloud",
-    feature = "channel-wati",
-    feature = "channel-whatsapp-cloud"
-))]
-fn sender_session_id(channel: &str, msg: &zeroclaw_api::channel::ChannelMessage) -> String {
-    match &msg.thread_ts {
-        Some(thread_id) => format!("{channel}_{thread_id}_{}", msg.sender),
-        None => format!("{channel}_{}", msg.sender),
-    }
 }
 
 fn webhook_session_id(headers: &HeaderMap) -> Option<String> {
@@ -437,6 +345,9 @@ fn normalize_max_keys(configured: usize, fallback: usize) -> usize {
     }
 }
 
+/// Owned guard for [`AppState::config_write_lock`]. Owned (not borrowed) so
+/// a handler can release it explicitly at its commit point, or pass it by
+/// value into a delegated helper without lifetime coupling.
 fn default_agent_alias(config: &Config) -> Option<String> {
     config
         .agents
@@ -446,9 +357,6 @@ fn default_agent_alias(config: &Config) -> Option<String> {
         .min()
 }
 
-/// Owned guard for [`AppState::config_write_lock`]. Owned (not borrowed) so
-/// a handler can release it explicitly at its commit point, or pass it by
-/// value into a delegated helper without lifetime coupling.
 pub(crate) type ConfigWriteGuard = tokio::sync::OwnedMutexGuard<()>;
 
 /// Shared state for all axum handlers
@@ -492,32 +400,6 @@ pub struct AppState {
     pub rate_limiter: Arc<GatewayRateLimiter>,
     pub auth_limiter: Arc<auth_rate_limit::AuthRateLimiter>,
     pub idempotency_store: Arc<IdempotencyStore>,
-    /// `WhatsApp` channel instances keyed by config alias. Webhooks route by
-    /// `/whatsapp/{alias}`; the bare `/whatsapp` path falls back to the first
-    /// instance (see [`api_webhook`]).
-    #[cfg(feature = "channel-whatsapp-cloud")]
-    pub whatsapp: HashMap<String, Arc<WhatsAppChannel>>,
-    /// `WhatsApp` app secrets keyed by alias for webhook signature verification
-    /// (`X-Hub-Signature-256`).
-    #[cfg(feature = "channel-whatsapp-cloud")]
-    pub whatsapp_app_secret: HashMap<String, Arc<str>>,
-    #[cfg(feature = "channel-linq")]
-    pub linq: HashMap<String, Arc<LinqChannel>>,
-    /// Linq webhook signing secrets per alias
-    #[cfg(feature = "channel-linq")]
-    pub linq_signing_secrets: HashMap<String, Arc<str>>,
-    /// Nextcloud Talk channel instances keyed by config alias.
-    #[cfg(feature = "channel-nextcloud")]
-    pub nextcloud_talk: HashMap<String, Arc<NextcloudTalkChannel>>,
-    /// Nextcloud Talk webhook secrets keyed by alias for signature verification.
-    #[cfg(feature = "channel-nextcloud")]
-    pub nextcloud_talk_webhook_secret: HashMap<String, Arc<str>>,
-    /// WATI channel instances keyed by config alias.
-    #[cfg(feature = "channel-wati")]
-    pub wati: HashMap<String, Arc<WatiChannel>>,
-    /// Gmail Pub/Sub push notification channel
-    #[cfg(feature = "channel-email")]
-    pub gmail_push: Option<Arc<GmailPushChannel>>,
     /// Observability backend for metrics scraping
     pub observer: Arc<dyn zeroclaw_runtime::observability::Observer>,
     /// Registered tool specs (for web dashboard tools page). This is the
@@ -561,11 +443,6 @@ pub struct AppState {
     pub device_registry: Option<Arc<api_pairing::DeviceRegistry>>,
     /// Pending pairing request store
     pub pending_pairings: Option<Arc<api_pairing::PairingStore>>,
-    /// Shared canvas store for Live Canvas (A2UI) system
-    pub canvas_store: CanvasStore,
-    /// WebAuthn state for hardware key authentication (optional, requires `webauthn` feature)
-    #[cfg(feature = "webauthn")]
-    pub webauthn: Option<Arc<api_webauthn::WebAuthnState>>,
     /// Per-session cancellation tokens for aborting in-flight agent responses.
     /// Key is session_key (e.g. `gw_<session_id>`), value is the token for the
     /// current turn. Entries are inserted before each turn and removed after
@@ -574,9 +451,6 @@ pub struct AppState {
         std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>,
     >,
     pub pending_reload: Arc<std::sync::atomic::AtomicBool>,
-    /// TUI session registry from the daemon (for /api/tuis endpoint).
-    /// `None` when the gateway runs standalone without a daemon.
-    pub tui_registry: Option<Arc<zeroclaw_runtime::rpc::tui_identity::TuiRegistry>>,
 }
 
 /// The gateway's per-session turn queue, with a background reaper that
@@ -611,9 +485,6 @@ pub async fn run_gateway(
     // releases its socket before the replacement gateway binds. /admin/reload
     // writes to both controls directly. Standalone gateway passes `None`.
     reload_controls: Option<zeroclaw_runtime::daemon::GatewayReloadControls>,
-    // TUI session registry from the daemon for the /api/tuis endpoint.
-    tui_registry: Option<Arc<zeroclaw_runtime::rpc::tui_identity::TuiRegistry>>,
-    canvas_store: Option<CanvasStore>,
     // Companion PortableKernel handle from the composition root. Daemon
     // constructs once and injects the same Arc into channels. Standalone
     // gateway constructs at `run_gateway_if_enabled`. Never opened here.
@@ -704,7 +575,7 @@ pub async fn run_gateway(
                             "error": format!("{e}"),
                         })),
                     "Gateway: seed model_provider failed to construct; booting in \
-                     needs_quickstart mode so /quickstart and /admin/reload stay \
+                     needs_quickstart mode so /config and /admin/reload stay \
                      reachable. Fix the [providers.models.<type>.<alias>] entry \
                      and POST /admin/reload."
                 );
@@ -738,7 +609,7 @@ pub async fn run_gateway(
                             .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
                             .with_attrs(::serde_json::json!({"display_addr": display_addr})),
                         &format!(
-                            "Gateway booting without a configured model. Visit http://{display_addr}/quickstart to complete browser quickstart. Chat endpoints will return 503 needs_quickstart until at least one [providers.models.<type>.<alias>] model = \"...\" is set."
+                            "Gateway booting without a configured model. Run `zeroclaw quickstart` or configure a model at http://{display_addr}/config, then POST /admin/reload. Chat endpoints will return 503 needs_quickstart until at least one [providers.models.<type>.<alias>] model = \"...\" is set."
                         )
                     );
                     String::new()
@@ -807,7 +678,6 @@ pub async fn run_gateway(
             "gateway holding companion store"
         );
     }
-    let canvas_store = canvas_store.unwrap_or_default();
     let agent_alias_opt = default_agent_alias(&config);
 
     let (composio_key, composio_entity_id) = if config.composio.enabled {
@@ -824,14 +694,14 @@ pub async fn run_gateway(
         Arc<SecurityPolicy>,
     )> = agent_alias_opt.as_ref().and_then(|agent_alias| {
         let Some(risk_profile) = config.risk_profile_for_agent(agent_alias) else {
-            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"agent": agent_alias, "agent_alias": agent_alias})), "Gateway: agents..risk_profile does not name a configured risk_profiles entry; booting with empty tools registry. Fix via /admin/reload or /quickstart.");
+            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"agent": agent_alias, "agent_alias": agent_alias})), "Gateway: agents..risk_profile does not name a configured risk_profiles entry; booting with empty tools registry. Fix config.toml and POST /admin/reload.");
             return None;
         };
         let risk_profile = risk_profile.clone();
         let security = match SecurityPolicy::for_agent(&config, agent_alias) {
             Ok(s) => Arc::new(s),
             Err(e) => {
-                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"agent": agent_alias, "error": format!("{}", e), "agent_alias": agent_alias})), "Gateway: agent SecurityPolicy failed to build; booting with empty tools registry. Fix [agents.] via /admin/reload or /quickstart.");
+                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"agent": agent_alias, "error": format!("{}", e), "agent_alias": agent_alias})), "Gateway: agent SecurityPolicy failed to build; booting with empty tools registry. Fix [agents.] in config.toml and POST /admin/reload.");
                 return None;
             }
         };
@@ -858,7 +728,6 @@ pub async fn run_gateway(
                     .model_provider_for_agent(agent_alias)
                     .and_then(|e| e.api_key.as_deref()),
                 &config,
-                Some(canvas_store.clone()),
                 false,
                 None,
                 None,
@@ -925,7 +794,7 @@ pub async fn run_gateway(
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                     .with_attrs(::serde_json::json!({"display_addr": display_addr})),
                 &format!(
-                    "Gateway: no [agents.<alias>] configured — booting with empty tools registry. Visit http://{display_addr}/quickstart to add an agent."
+                    "Gateway: no [agents.<alias>] configured — booting with empty tools registry. Run `zeroclaw quickstart` or add one at http://{display_addr}/config."
                 )
             );
             Vec::new()
@@ -991,7 +860,6 @@ pub async fn run_gateway(
                 .model_provider_for_agent(&alias)
                 .and_then(|e| e.api_key.as_deref()),
             &config,
-            Some(canvas_store.clone()),
             false,
             None,
             None,
@@ -1057,191 +925,6 @@ pub async fn run_gateway(
                     .then(|| Arc::<str>::from(hash_webhook_secret(trimmed_secret)))
             })
         });
-
-    // WhatsApp channel instances (one per cloud-configured alias), keyed by
-    // alias so `/whatsapp/{alias}` webhooks reach the matching instance
-    #[cfg(feature = "channel-whatsapp-cloud")]
-    let whatsapp_channel: HashMap<String, Arc<WhatsAppChannel>> = config
-        .channels
-        .whatsapp
-        .iter()
-        .filter(|(_, wa)| wa.is_cloud_config())
-        .map(|(alias, wa)| {
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_state.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("whatsapp", &alias))
-            };
-            (
-                alias.clone(),
-                Arc::new(WhatsAppChannel::new(
-                    wa.access_token.clone().unwrap_or_default(),
-                    wa.phone_number_id.clone().unwrap_or_default(),
-                    wa.verify_token.clone().unwrap_or_default(),
-                    alias.clone(),
-                    peer_resolver,
-                )),
-            )
-        })
-        .collect();
-
-    // WhatsApp app secrets keyed by alias for webhook signature verification.
-    #[cfg(feature = "channel-whatsapp-cloud")]
-    let whatsapp_app_secret: HashMap<String, Arc<str>> = config
-        .channels
-        .whatsapp
-        .iter()
-        .filter_map(|(alias, wa)| {
-            let secret = wa
-                .app_secret
-                .as_deref()
-                .map(str::trim)
-                .filter(|secret| !secret.is_empty())
-                .map(ToOwned::to_owned)?;
-            Some((alias.clone(), Arc::from(secret)))
-        })
-        .collect();
-
-    // Linq channel instances (multi-tenant: one per alias)
-    #[cfg(feature = "channel-linq")]
-    let linq_channels: HashMap<String, Arc<LinqChannel>> = config
-        .channels
-        .linq
-        .iter()
-        .filter(|(_, lq)| lq.enabled)
-        .map(|(alias, lq)| {
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_state.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("linq", &alias))
-            };
-            (
-                alias.clone(),
-                Arc::new(LinqChannel::new(
-                    lq.api_token.clone(),
-                    lq.from_phone.clone(),
-                    alias.clone(),
-                    peer_resolver,
-                )),
-            )
-        })
-        .collect();
-
-    // Linq signing secrets per alias.
-    #[cfg(feature = "channel-linq")]
-    let linq_signing_secrets: HashMap<String, Arc<str>> = config
-        .channels
-        .linq
-        .iter()
-        .filter_map(|(alias, lq)| {
-            let secret = lq
-                .signing_secret
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned)?;
-            Some((alias.clone(), Arc::from(secret)))
-        })
-        .collect();
-
-    // WATI channel instances keyed by alias.
-    #[cfg(feature = "channel-wati")]
-    let wati_channel: HashMap<String, Arc<WatiChannel>> = config
-        .channels
-        .wati
-        .iter()
-        .map(|(alias, wati_cfg)| {
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_state.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("wati", &alias))
-            };
-            (
-                alias.clone(),
-                Arc::new(
-                    WatiChannel::new(
-                        wati_cfg.api_token.clone(),
-                        wati_cfg.api_url.clone(),
-                        wati_cfg.tenant_id.clone(),
-                        alias.clone(),
-                        peer_resolver,
-                    )
-                    .with_transcription(config.transcription.clone()),
-                ),
-            )
-        })
-        .collect();
-
-    // Nextcloud Talk channel instances keyed by alias.
-    #[cfg(feature = "channel-nextcloud")]
-    let nextcloud_talk_channel: HashMap<String, Arc<NextcloudTalkChannel>> = config
-        .channels
-        .nextcloud_talk
-        .iter()
-        .map(|(alias, nc)| {
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_state.clone();
-                let alias = alias.clone();
-                Arc::new(move || {
-                    cfg_arc
-                        .read()
-                        .channel_external_peers("nextcloud_talk", &alias)
-                })
-            };
-            (
-                alias.clone(),
-                Arc::new(NextcloudTalkChannel::new(
-                    nc.base_url.clone(),
-                    nc.app_token.clone(),
-                    nc.bot_name.clone().unwrap_or_default(),
-                    alias.clone(),
-                    peer_resolver,
-                )),
-            )
-        })
-        .collect();
-
-    // Nextcloud Talk webhook secrets keyed by alias for signature verification.
-    #[cfg(feature = "channel-nextcloud")]
-    let nextcloud_talk_webhook_secret: HashMap<String, Arc<str>> = config
-        .channels
-        .nextcloud_talk
-        .iter()
-        .filter_map(|(alias, nc)| {
-            let secret = nc
-                .webhook_secret
-                .as_deref()
-                .map(str::trim)
-                .filter(|secret| !secret.is_empty())
-                .map(ToOwned::to_owned)?;
-            Some((alias.clone(), Arc::from(secret)))
-        })
-        .collect();
-
-    // Gmail Push channel (if configured and referenced by an enabled agent)
-    #[cfg(feature = "channel-email")]
-    let gmail_push_channel: Option<Arc<GmailPushChannel>> = {
-        let active: std::collections::HashSet<String> = config
-            .agents
-            .values()
-            .filter(|a| a.enabled)
-            .flat_map(|a| a.channels.iter().map(|c| c.as_str().to_string()))
-            .collect();
-        config
-            .channels
-            .gmail_push
-            .iter()
-            .find(|(alias, _)| active.contains(&format!("gmail_push.{alias}")))
-            .map(|(alias, gp)| {
-                let alias = alias.clone();
-                let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                    let cfg_arc = config_state.clone();
-                    let alias = alias.clone();
-                    Arc::new(move || cfg_arc.read().channel_external_peers("gmail_push", &alias))
-                };
-                Arc::new(GmailPushChannel::new(gp.clone(), alias, peer_resolver))
-            })
-    };
 
     let session_backend: Option<Arc<dyn SessionBackend>> = if config.gateway.session_persistence {
         match zeroclaw_infra::make_session_backend(
@@ -1450,24 +1133,6 @@ pub async fn run_gateway(
     }
     println!("  POST {pfx}/pair      — pair a new client (X-Pairing-Code header)");
     println!("  POST {pfx}/webhook   — {{\"message\": \"your prompt\"}}");
-    #[cfg(feature = "channel-whatsapp-cloud")]
-    if !whatsapp_channel.is_empty() {
-        println!("  GET  {pfx}/whatsapp[/<alias>]  — Meta webhook verification");
-        println!("  POST {pfx}/whatsapp[/<alias>]  — WhatsApp message webhook");
-    }
-    #[cfg(feature = "channel-linq")]
-    if !linq_channels.is_empty() {
-        println!("  POST {pfx}/linq[/<alias>]      — Linq message webhook (iMessage/RCS/SMS)");
-    }
-    #[cfg(feature = "channel-wati")]
-    if !wati_channel.is_empty() {
-        println!("  GET  {pfx}/wati[/<alias>]      — WATI webhook verification");
-        println!("  POST {pfx}/wati[/<alias>]      — WATI message webhook");
-    }
-    #[cfg(feature = "channel-nextcloud")]
-    if !nextcloud_talk_channel.is_empty() {
-        println!("  POST {pfx}/nextcloud-talk[/<alias>] — Nextcloud Talk bot webhook");
-    }
     println!("  GET  {pfx}/api/*     — REST API (bearer token required)");
     println!("  GET  {pfx}/ws/chat   — WebSocket agent chat");
     #[cfg(feature = "nodes")]
@@ -1622,22 +1287,6 @@ pub async fn run_gateway(
         rate_limiter,
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store,
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: whatsapp_channel,
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret,
-        #[cfg(feature = "channel-linq")]
-        linq: linq_channels,
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets,
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: nextcloud_talk_channel,
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret,
-        #[cfg(feature = "channel-wati")]
-        wati: wati_channel,
-        #[cfg(feature = "channel-email")]
-        gmail_push: gmail_push_channel,
         observer: state_observer,
         tools_registry,
         tools_registry_by_agent,
@@ -1656,34 +1305,8 @@ pub async fn run_gateway(
         pending_pairings,
         path_prefix: path_prefix.unwrap_or("").to_string(),
         web_dist_dir,
-        canvas_store,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry,
-        #[cfg(feature = "webauthn")]
-        webauthn: if config.security.webauthn.enabled {
-            let secret_store = Arc::new(zeroclaw_runtime::security::SecretStore::new(
-                &config.data_dir,
-                true,
-            ));
-            let wa_config = zeroclaw_runtime::security::webauthn::WebAuthnConfig {
-                enabled: true,
-                rp_id: config.security.webauthn.rp_id.clone(),
-                rp_origin: config.security.webauthn.rp_origin.clone(),
-                rp_name: config.security.webauthn.rp_name.clone(),
-            };
-            Some(Arc::new(api_webauthn::WebAuthnState {
-                manager: zeroclaw_runtime::security::webauthn::WebAuthnManager::new(
-                    wa_config,
-                    secret_store,
-                    &config.data_dir,
-                ),
-                pending_registrations: parking_lot::Mutex::new(std::collections::HashMap::new()),
-                pending_authentications: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            }))
-        } else {
-            None
-        },
     };
 
     // Build router with middleware
@@ -1699,15 +1322,8 @@ pub async fn run_gateway(
         .route("/pair", post(handle_pair))
         .route("/pair/code", get(handle_pair_code))
         .route("/webhook", post(handle_webhook))
-        .merge(optional_channel_routes())
         // ── Web Dashboard API routes ──
         .route("/api/status", get(api::handle_api_status))
-        .route("/api/version/check", get(version::handle_version_check))
-        .route("/api/version/upgrade", post(version::handle_version_upgrade))
-        .route(
-            "/api/version/upgrade/status",
-            get(version::handle_version_upgrade_status),
-        )
         .route("/api/logs", get(api_logs::handle_api_logs))
         .route(
             "/api/config",
@@ -1723,42 +1339,6 @@ pub async fn run_gateway(
                 .options(api_config::handle_options_prop),
         )
         .route("/api/config/list", get(api_config::handle_list))
-        .route(
-            "/api/sops",
-            get(api_sop_author::handle_sops_list).post(api_sop_author::handle_sop_create),
-        )
-        .route(
-            "/api/sops/{name}",
-            put(api_sop_author::handle_sop_save).delete(api_sop_author::handle_sop_delete),
-        )
-        .route(
-            "/api/sops/{name}/graph",
-            get(api_sop_author::handle_sop_graph),
-        )
-        .route(
-            "/api/sops/{name}/full",
-            get(api_sop_author::handle_sop_full),
-        )
-        .route(
-            "/api/sops/wire-draft",
-            post(api_sop_author::handle_sop_wire_draft),
-        )
-        .route(
-            "/api/sops/graph-draft",
-            post(api_sop_author::handle_sop_graph_draft),
-        )
-        .route(
-            "/api/sops/trigger-sources",
-            get(api_sop_author::handle_sop_trigger_sources),
-        )
-        .route(
-            "/api/sops/graph-legend",
-            get(api_sop_author::handle_sop_graph_legend),
-        )
-        .route(
-            "/api/tools/param-options",
-            post(api_sop_author::handle_tools_param_options),
-        )
         .route("/api/config/drift", get(api_config::handle_drift))
         .route(
             "/api/config/reload-status",
@@ -1799,27 +1379,13 @@ pub async fn run_gateway(
             "/api/config/sections/{section}/items/{key}",
             post(api_sections::handle_section_select),
         )
+        .route("/api/config/init", post(api_config::handle_init))
+        .route("/api/config/migrate", post(api_config::handle_migrate))
+        .route(
+            "/api/channels/bind",
+            post(api_config::handle_api_channel_bind),
+        )
         .route("/api/personality", get(api_personality::handle_index))
-        .route(
-            "/api/quickstart/state",
-            get(api_quickstart::handle_state),
-        )
-        .route(
-            "/api/quickstart/fields",
-            post(api_quickstart::handle_fields),
-        )
-        .route(
-            "/api/quickstart/validate",
-            post(api_quickstart::handle_validate),
-        )
-        .route(
-            "/api/quickstart/apply",
-            post(api_quickstart::handle_apply),
-        )
-        .route(
-            "/api/quickstart/dismiss",
-            post(api_quickstart::handle_dismiss),
-        )
         .route(
             "/api/personality/templates",
             get(api_personality::handle_templates),
@@ -1827,29 +1393,6 @@ pub async fn run_gateway(
         .route(
             "/api/personality/{filename}",
             get(api_personality::handle_get).put(api_personality::handle_put),
-        )
-        .route("/api/browse", get(api_browse::handle_browse))
-        .route("/api/browse/mkdir", post(api_browse::handle_browse_mkdir))
-        .route("/api/browse/rmdir", delete(api_browse::handle_browse_rmdir))
-        .route(
-            "/api/agents/{alias}/workspace/list",
-            get(api_browse::handle_agent_workspace_list),
-        )
-        .route(
-            "/api/agents/{alias}/workspace/read",
-            get(api_browse::handle_agent_workspace_read),
-        )
-        .route(
-            "/api/agents/{alias}/workspace/path",
-            delete(api_browse::handle_agent_workspace_delete),
-        )
-        .route(
-            "/api/agents/{alias}/workspace/move",
-            post(api_browse::handle_agent_workspace_move),
-        )
-        .route(
-            "/api/agents/{alias}/workspace/mkdir",
-            post(api_browse::handle_agent_workspace_mkdir),
         )
         .route(
             "/api/agents/{alias}/skills",
@@ -1870,10 +1413,6 @@ pub async fn run_gateway(
                 .put(api_skills::handle_write_skill)
                 .delete(api_skills::handle_delete_skill),
         )
-        .route("/api/config/init", post(api_config::handle_init))
-        .route("/api/config/migrate", post(api_config::handle_migrate))
-        .route("/api/openapi.json", get(openapi::handle_openapi_json))
-        .route("/api/docs", get(openapi::handle_docs))
         .route("/api/tools", get(api::handle_api_tools))
         .route("/api/cron", get(api::handle_api_cron_list))
         .route("/api/cron", post(api::handle_api_cron_add))
@@ -1889,30 +1428,16 @@ pub async fn run_gateway(
         // Note: `/api/cron/{id}/run` is registered on a separate router below
         // with a longer TimeoutLayer — manual cron triggers run the job
         // synchronously and routinely exceed the 30s gateway-wide default.
-        .route("/api/integrations", get(api::handle_api_integrations))
-        .route(
-            "/api/integrations/settings",
-            get(api::handle_api_integrations_settings),
-        )
-        .route(
-            "/api/doctor",
-            get(api::handle_api_doctor).post(api::handle_api_doctor),
-        )
         .route("/api/memory", get(api::handle_api_memory_list))
         .route("/api/memory", post(api::handle_api_memory_store))
         .route("/api/memory/{key}", delete(api::handle_api_memory_delete))
         .route("/api/cost", get(api::handle_api_cost))
         .route("/api/channels", get(api::handle_api_channels))
         .route(
-            "/api/channels/bind",
-            post(api_config::handle_api_channel_bind),
-        )
-        .route(
             "/api/channels/{channel}/relink",
             post(api::handle_api_channel_relink),
         )
         .route("/api/health", get(api::handle_api_health))
-        .route("/api/tuis", get(api::handle_api_tuis))
         .route("/api/sessions", get(api::handle_api_sessions_list))
         .route("/api/sessions/running", get(api::handle_api_sessions_running))
         .route(
@@ -1934,59 +1459,7 @@ pub async fn run_gateway(
         .route(
             "/api/devices/{id}/token/rotate",
             post(api_pairing::rotate_token),
-        )
-        // ── Live Canvas (A2UI) routes ──
-        .route("/api/canvas", get(canvas::handle_canvas_list))
-        .route(
-            "/api/canvas/{id}",
-            get(canvas::handle_canvas_get)
-                .post(canvas::handle_canvas_post)
-                .delete(canvas::handle_canvas_clear),
-        )
-        .route(
-            "/api/canvas/{id}/history",
-            get(canvas::handle_canvas_history),
         );
-
-    #[cfg(feature = "a2a")]
-    let inner = inner.merge(a2a::a2a_routes_with_endpoint(Some(
-        a2a::AdvertisedGatewayEndpoint::new(host, actual_port),
-    )));
-
-    // ── WebAuthn hardware key authentication API (requires webauthn feature) ──
-    #[cfg(feature = "webauthn")]
-    let inner = inner
-        .route(
-            "/api/webauthn/register/start",
-            post(api_webauthn::handle_register_start),
-        )
-        .route(
-            "/api/webauthn/register/finish",
-            post(api_webauthn::handle_register_finish),
-        )
-        .route(
-            "/api/webauthn/auth/start",
-            post(api_webauthn::handle_auth_start),
-        )
-        .route(
-            "/api/webauthn/auth/finish",
-            post(api_webauthn::handle_auth_finish),
-        )
-        .route(
-            "/api/webauthn/credentials",
-            get(api_webauthn::handle_list_credentials),
-        )
-        .route(
-            "/api/webauthn/credentials/{id}",
-            delete(api_webauthn::handle_delete_credential),
-        );
-
-    // ── Plugin management API (requires plugins-wasm feature) ──
-    #[cfg(feature = "plugins-wasm")]
-    let inner = inner.route(
-        "/api/plugins",
-        get(api_plugins::plugin_routes::list_plugins),
-    );
 
     let inner = inner
         // ── User Model operator review surface ──
@@ -2020,12 +1493,8 @@ pub async fn run_gateway(
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
         .route("/api/events/history", get(sse::handle_events_history))
-        // ── ACP client bridge ──
-        .route("/acp", get(acp::handle_ws_acp))
         // ── WebSocket agent chat ──
-        .route("/ws/chat", get(ws::handle_ws_chat))
-        // ── WebSocket canvas updates ──
-        .route("/ws/canvas/{id}", get(canvas::handle_ws_canvas));
+        .route("/ws/chat", get(ws::handle_ws_chat));
     // ── WebSocket node discovery (nodes feature) ──
     #[cfg(feature = "nodes")]
     let inner = inner
@@ -2054,14 +1523,12 @@ pub async fn run_gateway(
             Duration::from_secs(gateway_request_timeout_secs(&config.gateway)),
         ));
 
-    // Manual cron-trigger and A2A task routes live on their own sub-router so
-    // they can opt out of the 30s gateway-wide TimeoutLayer. Both run a
+    // The manual cron-trigger route lives on its own sub-router so
+    // it can opt out of the 30s gateway-wide TimeoutLayer. It runs a
     // synchronous agent turn inline. Layers attached here travel with the
     // route through `merge`, so only these endpoints see the longer timeout.
     let long_running_router: Router<AppState> =
         Router::new().route("/api/cron/{id}/run", post(api::handle_api_cron_run));
-    #[cfg(feature = "a2a")]
-    let long_running_router = long_running_router.merge(a2a::a2a_task_route());
     let long_running_router: Router = long_running_router
         .with_state(state)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
@@ -2509,7 +1976,7 @@ impl ModelProvider for UnconfiguredModelProvider {
     ) -> anyhow::Result<String> {
         anyhow::bail!(
             "needs_quickstart: gateway booted without a working model_provider. \
-             Complete browser quickstart at /quickstart, or fix \
+             Run `zeroclaw quickstart`, or fix \
              [providers.models.<type>.<alias>] and POST /admin/reload."
         )
     }
@@ -2534,11 +2001,11 @@ fn needs_quickstart_for(model: &str) -> Option<anyhow::Error> {
             WARN,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
                 .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-            "gateway dispatch refused: no model configured (browser quickstart incomplete)"
+            "gateway dispatch refused: no model configured"
         );
         Some(anyhow::Error::msg(
-            "needs_quickstart: gateway has no model configured. Complete \
-             browser quickstart at /quickstart, or set [providers.models.<type>.<alias>] \
+            "needs_quickstart: gateway has no model configured. Run \
+             `zeroclaw quickstart`, or set [providers.models.<type>.<alias>] \
              model = \"...\" before sending messages.",
         ))
     } else {
@@ -2649,36 +2116,6 @@ fn require_gateway_chat_agent_alias(
         );
         anyhow::Error::msg("webhook chat requires at least one configured [agents.<alias>] entry")
     })
-}
-
-fn optional_channel_routes() -> Router<AppState> {
-    let router: Router<AppState> = Router::new();
-    #[cfg(feature = "channel-whatsapp-cloud")]
-    let router = router
-        .route("/whatsapp", get(handle_whatsapp_verify))
-        .route("/whatsapp", post(handle_whatsapp_message))
-        .route("/whatsapp/{alias}", get(handle_whatsapp_verify_alias))
-        .route("/whatsapp/{alias}", post(handle_whatsapp_message_alias));
-    #[cfg(feature = "channel-linq")]
-    let router = router
-        .route("/linq", post(handle_linq_webhook))
-        .route("/linq/{alias}", post(handle_linq_webhook_alias));
-    #[cfg(feature = "channel-wati")]
-    let router = router
-        .route("/wati", get(handle_wati_verify))
-        .route("/wati", post(handle_wati_webhook))
-        .route("/wati/{alias}", get(handle_wati_verify_alias))
-        .route("/wati/{alias}", post(handle_wati_webhook_alias));
-    #[cfg(feature = "channel-nextcloud")]
-    let router = router
-        .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
-        .route(
-            "/nextcloud-talk/{alias}",
-            post(handle_nextcloud_talk_webhook_alias),
-        );
-    #[cfg(feature = "channel-email")]
-    let router = router.route("/webhook/gmail", post(handle_gmail_push_webhook));
-    router
 }
 
 /// Webhook request body
@@ -2918,11 +2355,11 @@ async fn handle_webhook(
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                         .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
                     "Webhook chat refused: gateway has no model configured; \
-                     visit /quickstart"
+                     run `zeroclaw quickstart`"
                 );
                 let body = serde_json::json!({
                     "error": "needs_quickstart",
-                    "url": "/quickstart"
+                    "url": "/config"
                 });
                 (StatusCode::SERVICE_UNAVAILABLE, Json(body))
             } else {
@@ -2938,930 +2375,6 @@ async fn handle_webhook(
             }
         }
     }
-}
-
-/// `WhatsApp` verification query params
-#[derive(serde::Deserialize)]
-pub struct WhatsAppVerifyQuery {
-    #[serde(rename = "hub.mode")]
-    pub mode: Option<String>,
-    #[serde(rename = "hub.verify_token")]
-    pub verify_token: Option<String>,
-    #[serde(rename = "hub.challenge")]
-    pub challenge: Option<String>,
-}
-
-/// GET /whatsapp — Meta webhook verification (bare path, deprecated fallback).
-#[cfg(feature = "channel-whatsapp-cloud")]
-async fn handle_whatsapp_verify(
-    State(state): State<AppState>,
-    Query(params): Query<WhatsAppVerifyQuery>,
-) -> Response {
-    handle_whatsapp_verify_impl(state, None, params).await
-}
-
-/// GET /whatsapp/{alias} — Meta webhook verification for a specific instance.
-#[cfg(feature = "channel-whatsapp-cloud")]
-async fn handle_whatsapp_verify_alias(
-    State(state): State<AppState>,
-    Path(alias): Path<String>,
-    Query(params): Query<WhatsAppVerifyQuery>,
-) -> Response {
-    handle_whatsapp_verify_impl(state, Some(alias), params).await
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-async fn handle_whatsapp_verify_impl(
-    state: AppState,
-    alias: Option<String>,
-    params: WhatsAppVerifyQuery,
-) -> Response {
-    let resolved = api_webhook::resolve(&state.whatsapp, alias.as_deref());
-    let Some((_alias, wa)) = resolved.entry() else {
-        return api_webhook::not_found("whatsapp");
-    };
-
-    // Verify the token matches (constant-time comparison to prevent timing attacks)
-    let token_matches = params
-        .verify_token
-        .as_deref()
-        .is_some_and(|t| constant_time_eq(t, wa.verify_token()));
-    let resp = if params.mode.as_deref() == Some("subscribe") && token_matches {
-        if let Some(ch) = params.challenge {
-            ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_attrs(::serde_json::json!({"channel": "whatsapp"})),
-                "webhook verified successfully"
-            );
-            (StatusCode::OK, ch).into_response()
-        } else {
-            (StatusCode::BAD_REQUEST, "Missing hub.challenge".to_string()).into_response()
-        }
-    } else {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                .with_attrs(::serde_json::json!({"channel": "whatsapp"})),
-            "webhook verification failed — token mismatch"
-        );
-        (StatusCode::FORBIDDEN, "Forbidden".to_string()).into_response()
-    };
-    api_webhook::tag_deprecation(resp, resolved, "whatsapp")
-}
-
-/// Verify `WhatsApp` webhook signature (`X-Hub-Signature-256`).
-/// Returns true if the signature is valid, false otherwise.
-/// See: <https://developers.facebook.com/docs/graph-api/webhooks/getting-started#verification-requests>
-pub fn verify_whatsapp_signature(app_secret: &str, body: &[u8], signature_header: &str) -> bool {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
-    // Signature format: "sha256=<hex_signature>"
-    let Some(hex_sig) = signature_header.strip_prefix("sha256=") else {
-        return false;
-    };
-
-    // Decode hex signature
-    let Ok(expected) = hex::decode(hex_sig) else {
-        return false;
-    };
-
-    // Compute HMAC-SHA256
-    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(app_secret.as_bytes()) else {
-        return false;
-    };
-    mac.update(body);
-
-    // Constant-time comparison
-    mac.verify_slice(&expected).is_ok()
-}
-
-/// POST /whatsapp — incoming message webhook
-/// POST /whatsapp — incoming message webhook (bare path, deprecated fallback).
-#[cfg(feature = "channel-whatsapp-cloud")]
-async fn handle_whatsapp_message(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    handle_whatsapp_message_impl(state, None, headers, body).await
-}
-
-/// POST /whatsapp/{alias} — incoming message webhook for a specific instance.
-#[cfg(feature = "channel-whatsapp-cloud")]
-async fn handle_whatsapp_message_alias(
-    State(state): State<AppState>,
-    Path(alias): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    handle_whatsapp_message_impl(state, Some(alias), headers, body).await
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-async fn handle_whatsapp_message_impl(
-    state: AppState,
-    alias: Option<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let resolved = api_webhook::resolve(&state.whatsapp, alias.as_deref());
-    let Some((alias_key, wa)) = resolved.entry() else {
-        return api_webhook::not_found("whatsapp");
-    };
-    let app_secret = state.whatsapp_app_secret.get(alias_key).cloned();
-    let resp = process_whatsapp_message(&state, wa, app_secret.as_deref(), headers, body).await;
-    api_webhook::tag_deprecation(resp.into_response(), resolved, "whatsapp")
-}
-
-/// Verify, parse, and dispatch a WhatsApp webhook payload for one resolved
-/// instance. `app_secret` is that instance's `X-Hub-Signature-256` secret.
-#[cfg(feature = "channel-whatsapp-cloud")]
-async fn process_whatsapp_message(
-    state: &AppState,
-    wa: &Arc<WhatsAppChannel>,
-    app_secret: Option<&str>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> (StatusCode, Json<serde_json::Value>) {
-    // ── Security: Verify X-Hub-Signature-256 if app_secret is configured ──
-    if let Some(app_secret) = app_secret {
-        let signature = headers
-            .get("X-Hub-Signature-256")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        if !verify_whatsapp_signature(app_secret, &body, signature) {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"channel": "whatsapp"})),
-                &format!(
-                    "webhook signature verification failed (signature: {})",
-                    if signature.is_empty() {
-                        "missing"
-                    } else {
-                        "invalid"
-                    }
-                )
-            );
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Invalid signature"})),
-            );
-        }
-    }
-
-    // Parse JSON body
-    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid JSON payload"})),
-        );
-    };
-
-    // Parse messages from the webhook payload
-    let messages = wa.parse_webhook_payload(&payload);
-
-    if messages.is_empty() {
-        // Acknowledge the webhook even if no messages (could be status updates)
-        return (StatusCode::OK, Json(serde_json::json!({"status": "ok"})));
-    }
-
-    // Process each message
-    for msg in &messages {
-        ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"channel": "whatsapp", "sender": msg.sender, "content": msg.content})), "inbound webhook message");
-
-        // Route approval replies to pending approval requests before dispatching to agent
-        if let Some((token, response)) = zeroclaw_channels::util::parse_approval_reply(&msg.content)
-        {
-            let mut map = wa.pending_approvals().lock().await;
-            if let Some(sender) = map.remove(&token) {
-                let _ = sender.send(response);
-                continue;
-            }
-        }
-
-        let session_id = sender_session_id("whatsapp", msg);
-
-        // Auto-save to memory
-        if state.auto_save && !zeroclaw_memory::should_skip_autosave_content(&msg.content) {
-            let key = whatsapp_memory_key(msg);
-            let _ = state
-                .mem
-                .store(
-                    &key,
-                    &msg.content,
-                    MemoryCategory::Conversation,
-                    Some(&session_id),
-                )
-                .await;
-        }
-
-        match Box::pin(run_gateway_chat_with_tools(
-            state,
-            &msg.content,
-            Some(&session_id),
-            None,
-        ))
-        .await
-        {
-            Ok(GatewayChatOutcome { response, .. }) => {
-                // Send reply via WhatsApp
-                if let Err(e) = wa
-                    .send(&SendMessage::new(response, &msg.reply_target))
-                    .await
-                {
-                    ::zeroclaw_log::record!(
-                        ERROR,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                        "Failed to send WhatsApp reply"
-                    );
-                }
-            }
-            Err(e) => {
-                let reply = if is_needs_quickstart_err(&e) {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "WhatsApp chat refused: gateway has no model configured; \
-                         visit /quickstart"
-                    );
-                    needs_quickstart_channel_reply()
-                } else {
-                    ::zeroclaw_log::record!(
-                        ERROR,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(
-                                ::serde_json::json!({"channel": "whatsapp", "error": format!("{}", e)})
-                            ),
-                        "LLM error"
-                    );
-                    "Sorry, I couldn't process your message right now.".to_string()
-                };
-                let _ = wa.send(&SendMessage::new(reply, &msg.reply_target)).await;
-            }
-        }
-    }
-
-    // Acknowledge the webhook
-    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
-}
-
-/// POST /linq — incoming message webhook (bare path, deprecated fallback).
-#[cfg(feature = "channel-linq")]
-async fn handle_linq_webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    handle_linq_webhook_impl(state, None, headers, body).await
-}
-
-/// POST /linq/{alias} — incoming message webhook for a specific instance.
-#[cfg(feature = "channel-linq")]
-async fn handle_linq_webhook_alias(
-    State(state): State<AppState>,
-    Path(alias): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    handle_linq_webhook_impl(state, Some(alias), headers, body).await
-}
-
-#[cfg(feature = "channel-linq")]
-async fn handle_linq_webhook_impl(
-    state: AppState,
-    alias: Option<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let resolved = api_webhook::resolve(&state.linq, alias.as_deref());
-    let Some((alias_key, linq)) = resolved.entry() else {
-        return api_webhook::not_found("linq");
-    };
-    let signing_secret = state.linq_signing_secrets.get(alias_key).cloned();
-    let resp = process_linq_webhook(
-        &state,
-        alias_key,
-        linq,
-        signing_secret.as_deref(),
-        headers,
-        body,
-    )
-    .await;
-    api_webhook::tag_deprecation(resp.into_response(), resolved, "linq")
-}
-
-/// Verify, parse, and dispatch a Linq webhook payload for one resolved instance.
-/// `signing_secret` is that instance's `X-Webhook-Signature` secret.
-#[cfg(feature = "channel-linq")]
-async fn process_linq_webhook(
-    state: &AppState,
-    alias: &str,
-    linq: &Arc<LinqChannel>,
-    signing_secret: Option<&str>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let body_str = String::from_utf8_lossy(&body);
-
-    // ── Security: Verify X-Webhook-Signature if signing_secret is configured ──
-    if let Some(signing_secret) = signing_secret {
-        let timestamp = headers
-            .get("X-Webhook-Timestamp")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        let signature = headers
-            .get("X-Webhook-Signature")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        if !zeroclaw_channels::linq::verify_linq_signature(
-            signing_secret,
-            &body_str,
-            timestamp,
-            signature,
-        ) {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"channel": "linq", "alias": alias})),
-                &format!(
-                    "Linq webhook signature verification failed for alias '{alias}' (signature: {})",
-                    if signature.is_empty() {
-                        "missing"
-                    } else {
-                        "invalid"
-                    }
-                )
-            );
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Invalid signature"})),
-            );
-        }
-    }
-
-    // Parse JSON body
-    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid JSON payload"})),
-        );
-    };
-
-    // Parse messages from the webhook payload
-    let messages = linq.parse_webhook_payload(&payload);
-
-    if messages.is_empty() {
-        // Acknowledge the webhook even if no messages (could be status/delivery events)
-        return (StatusCode::OK, Json(serde_json::json!({"status": "ok"})));
-    }
-
-    // Process each message
-    for msg in &messages {
-        ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"channel": "linq", "alias": alias, "sender": msg.sender, "content": msg.content})), "inbound webhook message");
-        let session_id = sender_session_id("linq", msg);
-
-        // Auto-save to memory
-        if state.auto_save && !zeroclaw_memory::should_skip_autosave_content(&msg.content) {
-            let key = linq_memory_key(msg);
-            let _ = state
-                .mem
-                .store(
-                    &key,
-                    &msg.content,
-                    MemoryCategory::Conversation,
-                    Some(&session_id),
-                )
-                .await;
-        }
-
-        // Call the LLM
-        match Box::pin(run_gateway_chat_with_tools(
-            state,
-            &msg.content,
-            Some(&session_id),
-            None,
-        ))
-        .await
-        {
-            Ok(GatewayChatOutcome { response, .. }) => {
-                // Send reply via Linq
-                if let Err(e) = linq
-                    .send(&SendMessage::new(response, &msg.reply_target))
-                    .await
-                {
-                    ::zeroclaw_log::record!(
-                        ERROR,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                        "Failed to send Linq reply"
-                    );
-                }
-            }
-            Err(e) => {
-                let reply = if is_needs_quickstart_err(&e) {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "Linq chat refused: gateway has no model configured; \
-                         visit /quickstart"
-                    );
-                    needs_quickstart_channel_reply()
-                } else {
-                    ::zeroclaw_log::record!(
-                        ERROR,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(
-                                ::serde_json::json!({"channel": "linq", "error": format!("{}", e)})
-                            ),
-                        "LLM error"
-                    );
-                    "Sorry, I couldn't process your message right now.".to_string()
-                };
-                let _ = linq.send(&SendMessage::new(reply, &msg.reply_target)).await;
-            }
-        }
-    }
-
-    // Acknowledge the webhook
-    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
-}
-
-/// GET /wati — WATI webhook verification (bare path, deprecated fallback).
-#[cfg(feature = "channel-wati")]
-async fn handle_wati_verify(
-    State(state): State<AppState>,
-    Query(params): Query<WatiVerifyQuery>,
-) -> Response {
-    handle_wati_verify_impl(state, None, params)
-}
-
-/// GET /wati/{alias} — WATI webhook verification for a specific instance.
-#[cfg(feature = "channel-wati")]
-async fn handle_wati_verify_alias(
-    State(state): State<AppState>,
-    Path(alias): Path<String>,
-    Query(params): Query<WatiVerifyQuery>,
-) -> Response {
-    handle_wati_verify_impl(state, Some(alias), params)
-}
-
-#[cfg(feature = "channel-wati")]
-fn handle_wati_verify_impl(
-    state: AppState,
-    alias: Option<String>,
-    params: WatiVerifyQuery,
-) -> Response {
-    let resolved = api_webhook::resolve(&state.wati, alias.as_deref());
-    if resolved.entry().is_none() {
-        return api_webhook::not_found("wati");
-    }
-
-    // WATI may use Meta-style webhook verification; echo the challenge
-    let resp = if let Some(challenge) = params.challenge {
-        ::zeroclaw_log::record!(
-            INFO,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_attrs(::serde_json::json!({"channel": "wati"})),
-            "webhook verified successfully"
-        );
-        (StatusCode::OK, challenge).into_response()
-    } else {
-        (StatusCode::BAD_REQUEST, "Missing hub.challenge".to_string()).into_response()
-    };
-    api_webhook::tag_deprecation(resp, resolved, "wati")
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct WatiVerifyQuery {
-    #[serde(rename = "hub.challenge")]
-    pub challenge: Option<String>,
-}
-
-/// POST /wati — incoming WATI WhatsApp message webhook (bare path, deprecated).
-#[cfg(feature = "channel-wati")]
-async fn handle_wati_webhook(State(state): State<AppState>, body: Bytes) -> Response {
-    handle_wati_webhook_impl(state, None, body).await
-}
-
-/// POST /wati/{alias} — incoming WATI message webhook for a specific instance.
-#[cfg(feature = "channel-wati")]
-async fn handle_wati_webhook_alias(
-    State(state): State<AppState>,
-    Path(alias): Path<String>,
-    body: Bytes,
-) -> Response {
-    handle_wati_webhook_impl(state, Some(alias), body).await
-}
-
-#[cfg(feature = "channel-wati")]
-async fn handle_wati_webhook_impl(state: AppState, alias: Option<String>, body: Bytes) -> Response {
-    let resolved = api_webhook::resolve(&state.wati, alias.as_deref());
-    let Some((_alias, wati)) = resolved.entry() else {
-        return api_webhook::not_found("wati");
-    };
-    let resp = process_wati_webhook(&state, wati, body).await;
-    api_webhook::tag_deprecation(resp.into_response(), resolved, "wati")
-}
-
-/// Parse and dispatch a WATI webhook payload for one resolved instance.
-#[cfg(feature = "channel-wati")]
-async fn process_wati_webhook(
-    state: &AppState,
-    wati: &Arc<WatiChannel>,
-    body: Bytes,
-) -> (StatusCode, Json<serde_json::Value>) {
-    // Parse JSON body
-    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid JSON payload"})),
-        );
-    };
-
-    // Detect audio before the synchronous parse
-    let msg_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-    let messages = if matches!(msg_type, "audio" | "voice") {
-        // Build a synthetic ChannelMessage from the audio transcript
-        if let Some(transcript) = wati.try_transcribe_audio(&payload).await {
-            wati.parse_audio_as_message(&payload, transcript)
-        } else {
-            vec![]
-        }
-    } else {
-        wati.parse_webhook_payload(&payload)
-    };
-
-    if messages.is_empty() {
-        return (StatusCode::OK, Json(serde_json::json!({"status": "ok"})));
-    }
-
-    // Process each message
-    for msg in &messages {
-        ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"channel": "wati", "sender": msg.sender, "content": msg.content})), "inbound webhook message");
-        let session_id = sender_session_id("wati", msg);
-
-        // Auto-save to memory
-        if state.auto_save && !zeroclaw_memory::should_skip_autosave_content(&msg.content) {
-            let key = wati_memory_key(msg);
-            let _ = state
-                .mem
-                .store(
-                    &key,
-                    &msg.content,
-                    MemoryCategory::Conversation,
-                    Some(&session_id),
-                )
-                .await;
-        }
-
-        // Call the LLM
-        match Box::pin(run_gateway_chat_with_tools(
-            state,
-            &msg.content,
-            Some(&session_id),
-            None,
-        ))
-        .await
-        {
-            Ok(GatewayChatOutcome { response, .. }) => {
-                // Send reply via WATI
-                if let Err(e) = wati
-                    .send(&SendMessage::new(response, &msg.reply_target))
-                    .await
-                {
-                    ::zeroclaw_log::record!(
-                        ERROR,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                        "Failed to send WATI reply"
-                    );
-                }
-            }
-            Err(e) => {
-                let reply = if is_needs_quickstart_err(&e) {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "WATI chat refused: gateway has no model configured; \
-                         visit /quickstart"
-                    );
-                    needs_quickstart_channel_reply()
-                } else {
-                    ::zeroclaw_log::record!(
-                        ERROR,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(
-                                ::serde_json::json!({"channel": "wati", "error": format!("{}", e)})
-                            ),
-                        "LLM error"
-                    );
-                    "Sorry, I couldn't process your message right now.".to_string()
-                };
-                let _ = wati.send(&SendMessage::new(reply, &msg.reply_target)).await;
-            }
-        }
-    }
-
-    // Acknowledge the webhook
-    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
-}
-
-/// POST /nextcloud-talk — incoming message webhook (bare path, deprecated).
-#[cfg(feature = "channel-nextcloud")]
-async fn handle_nextcloud_talk_webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    handle_nextcloud_talk_webhook_impl(state, None, headers, body).await
-}
-
-/// POST /nextcloud-talk/{alias} — incoming message webhook for one instance.
-#[cfg(feature = "channel-nextcloud")]
-async fn handle_nextcloud_talk_webhook_alias(
-    State(state): State<AppState>,
-    Path(alias): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    handle_nextcloud_talk_webhook_impl(state, Some(alias), headers, body).await
-}
-
-#[cfg(feature = "channel-nextcloud")]
-async fn handle_nextcloud_talk_webhook_impl(
-    state: AppState,
-    alias: Option<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let resolved = api_webhook::resolve(&state.nextcloud_talk, alias.as_deref());
-    let Some((alias_key, nextcloud_talk)) = resolved.entry() else {
-        return api_webhook::not_found("nextcloud-talk");
-    };
-    let webhook_secret = state.nextcloud_talk_webhook_secret.get(alias_key).cloned();
-    let resp = process_nextcloud_talk_webhook(
-        &state,
-        nextcloud_talk,
-        webhook_secret.as_deref(),
-        headers,
-        body,
-    )
-    .await;
-    api_webhook::tag_deprecation(resp.into_response(), resolved, "nextcloud-talk")
-}
-
-/// Verify, parse, and dispatch a Nextcloud Talk webhook payload for one resolved
-/// instance. `webhook_secret` is that instance's HMAC signing secret.
-#[cfg(feature = "channel-nextcloud")]
-async fn process_nextcloud_talk_webhook(
-    state: &AppState,
-    nextcloud_talk: &Arc<NextcloudTalkChannel>,
-    webhook_secret: Option<&str>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let body_str = String::from_utf8_lossy(&body);
-
-    // ── Security: Verify Nextcloud Talk HMAC signature if secret is configured ──
-    if let Some(webhook_secret) = webhook_secret {
-        let random = headers
-            .get("X-Nextcloud-Talk-Random")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        let signature = headers
-            .get("X-Nextcloud-Talk-Signature")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        if !zeroclaw_channels::nextcloud_talk::verify_nextcloud_talk_signature(
-            webhook_secret,
-            random,
-            &body_str,
-            signature,
-        ) {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                &format!(
-                    "Nextcloud Talk webhook signature verification failed (signature: {})",
-                    if signature.is_empty() {
-                        "missing"
-                    } else {
-                        "invalid"
-                    }
-                )
-            );
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Invalid signature"})),
-            );
-        }
-    }
-
-    // Parse JSON body
-    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid JSON payload"})),
-        );
-    };
-
-    // Parse messages from webhook payload
-    let messages = nextcloud_talk.parse_webhook_payload(&payload);
-    if messages.is_empty() {
-        // Acknowledge webhook even if payload does not contain actionable user messages.
-        return (StatusCode::OK, Json(serde_json::json!({"status": "ok"})));
-    }
-
-    // Spawn per-message processing so the webhook returns 200 quickly.
-    // Nextcloud Talk cancels webhook requests that don't complete within ~5s;
-    // slow local models routinely exceed that. Each message gets
-    // its own task — the LLM call and reply are independent of the ack.
-    for msg in messages {
-        let state = state.clone();
-        let nextcloud_talk = Arc::clone(nextcloud_talk);
-        zeroclaw_spawn::spawn!(async move {
-            ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"channel": "nextcloud_talk", "sender": msg.sender, "content": msg.content})), "inbound webhook message");
-            let session_id = sender_session_id("nextcloud_talk", &msg);
-
-            if state.auto_save && !zeroclaw_memory::should_skip_autosave_content(&msg.content) {
-                let key = nextcloud_talk_memory_key(&msg);
-                let _ = state
-                    .mem
-                    .store(
-                        &key,
-                        &msg.content,
-                        MemoryCategory::Conversation,
-                        Some(&session_id),
-                    )
-                    .await;
-            }
-
-            match Box::pin(run_gateway_chat_with_tools(
-                &state,
-                &msg.content,
-                Some(&session_id),
-                None,
-            ))
-            .await
-            {
-                Ok(GatewayChatOutcome { response, .. }) => {
-                    if let Err(e) = nextcloud_talk
-                        .send(&SendMessage::new(response, &msg.reply_target))
-                        .await
-                    {
-                        ::zeroclaw_log::record!(
-                            ERROR,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Fail
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                            "Failed to send Nextcloud Talk reply"
-                        );
-                    }
-                }
-                Err(e) => {
-                    let reply = if is_needs_quickstart_err(&e) {
-                        ::zeroclaw_log::record!(
-                            WARN,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                            "Nextcloud Talk chat refused: gateway has no model configured; \
-                             visit /quickstart"
-                        );
-                        needs_quickstart_channel_reply()
-                    } else {
-                        ::zeroclaw_log::record!(ERROR, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail).with_outcome(::zeroclaw_log::EventOutcome::Failure).with_attrs(::serde_json::json!({"channel": "nextcloud_talk", "error": format!("{}", e)})), "LLM error");
-                        "Sorry, I couldn't process your message right now.".to_string()
-                    };
-                    let _ = nextcloud_talk
-                        .send(&SendMessage::new(reply, &msg.reply_target))
-                        .await;
-                }
-            }
-        });
-    }
-
-    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
-}
-
-/// Maximum request body size for the Gmail webhook endpoint (1 MB).
-/// Google Pub/Sub messages are typically under 10 KB.
-#[cfg(feature = "channel-email")]
-const GMAIL_WEBHOOK_MAX_BODY: usize = 1024 * 1024;
-
-/// POST /webhook/gmail — incoming Gmail Pub/Sub push notification
-#[cfg(feature = "channel-email")]
-async fn handle_gmail_push_webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    let Some(ref gmail_push) = state.gmail_push else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Gmail push not configured"})),
-        );
-    };
-
-    // Enforce body size limit.
-    if body.len() > GMAIL_WEBHOOK_MAX_BODY {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Request body too large"})),
-        );
-    }
-
-    // Authenticate the webhook request using a shared secret.
-    let secret = gmail_push.config.webhook_secret.clone();
-    if !secret.is_empty() {
-        let provided = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|auth| auth.strip_prefix("Bearer "))
-            .unwrap_or("");
-
-        if provided != secret {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"channel": "gmail_push"})),
-                "webhook: unauthorized request"
-            );
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Unauthorized"})),
-            );
-        }
-    }
-
-    let body_str = String::from_utf8_lossy(&body);
-    let envelope: zeroclaw_channels::gmail_push::PubSubEnvelope =
-        match serde_json::from_str(&body_str) {
-            Ok(e) => e,
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(
-                        ::serde_json::json!({"error": format!("{}", e), "channel": "gmail_push"})
-                    ),
-                "webhook: invalid payload"
-            );
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "Invalid Pub/Sub envelope"})),
-                );
-            }
-        };
-
-    // Process the notification asynchronously (non-blocking for the webhook response)
-    let channel = Arc::clone(gmail_push);
-    zeroclaw_spawn::spawn!(async move {
-        if let Err(e) = channel.handle_notification(&envelope).await {
-            ::zeroclaw_log::record!(
-                ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(
-                        ::serde_json::json!({"channel": "gmail_push", "error": format!("{}", e)})
-                    ),
-                "push notification processing failed"
-            );
-        }
-    });
-
-    // Acknowledge immediately — Google Pub/Sub requires a 2xx within ~10s
-    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

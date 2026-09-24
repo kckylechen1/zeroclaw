@@ -229,7 +229,6 @@ pub async fn run(
             &config.agents,
             agent_model_provider.and_then(|e| e.api_key.as_deref()),
             &config,
-            None,
             is_subagent_caller,
             None,
             None,

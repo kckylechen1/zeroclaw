@@ -19,7 +19,6 @@ Use this page when a change touches a schema, CLI flag, feature or hardware inve
 | Theme CSS and names | `web/src/contexts/themes.json` | `xtask/src/cmd/mdbook/themes.rs` during locale builds | Ignored CSS/name fragments plus the generated marker region in tracked `docs/book/theme/index.hbs` | Mixed: derived files are ignored; the template outside its marker remains authored | mdBook theme picker and zerocode theme reference |
 | Locale switcher | `locales.toml` and tracked `docs/book/theme/lang-switcher.js.tpl` | `inject_lang_switcher_locales` during locale builds | `docs/book/theme/lang-switcher.js` | Ignored derived file | Published language selector |
 | Authored chapters | `docs/book/src/**/*.md` and tracked snippets | mdBook preprocessors and renderers | Locale/version HTML under `docs/book/book/` | Tracked source, ignored output | Published documentation site |
-| Dashboard API types | `zeroclaw_gateway::openapi::build_spec()` and gateway runtime types | `cargo web gen-api` | `target/openapi.json`, `web/src/lib/api-generated.ts`, `web/src/lib/api-descriptions.ts`, and `web/src/lib/api-enums.ts` | Ignored derived files | TypeScript dashboard build |
 
 This matrix describes the current high-value surfaces, not every helper file produced during a build. The reusable rule is ownership: a generated value should have one canonical input and one deterministic materialization path.
 

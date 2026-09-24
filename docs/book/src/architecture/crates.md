@@ -158,6 +158,6 @@ The microkernel roadmap (RFC #5574) defines a feature-flag taxonomy. The practic
 - `ci-all`: everything on, for CI
 - `channel-<name>`: opt-in per channel (e.g. `channel-matrix`, `channel-discord`)
 - `hardware`: enable hardware subsystem
-- `gateway`, `acp-bridge`, `whatsapp-web`: opt-in capability groups
+- `gateway`, `whatsapp-web`: opt-in capability groups
 
 Providers are not feature-gated; they all compile in. Channel selection is the main per-build knob. Read the top-level `Cargo.toml` `[features]` table for the full list.

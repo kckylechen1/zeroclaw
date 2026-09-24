@@ -6,12 +6,12 @@ import {
   getCronJobs,
   getCronRuns,
   getCronSettings,
-  getQuickstartState,
   patchCronJob,
   patchCronSettings,
   triggerCronJob,
 } from '@/lib/api';
 import { agentBoundChannels, type AgentBoundChannel } from '@/lib/agentChannels';
+import { loadAgentPickerSummaries } from '@/lib/agents';
 import { t } from '@/lib/i18n';
 import { Badge, Button, Card, PageHeader } from '@/components/ui';
 import ToolPicker from '@/components/ToolPicker';
@@ -316,12 +316,13 @@ export default function Cron() {
   useEffect(() => {
     fetchJobs();
     fetchSettings();
-    void getQuickstartState()
-      .then((opts) => {
-        setAgentOptions(opts.agents);
+    void loadAgentPickerSummaries()
+      .then((summaries) => {
+        const aliases = summaries.filter((a) => a.enabled).map((a) => a.alias);
+        setAgentOptions(aliases);
         // Pre-seed the agent field with the first option so the
         // Add modal doesn't open with an empty required dropdown.
-        setFormAgent((current) => current || opts.agents[0] || '');
+        setFormAgent((current) => current || aliases[0] || '');
       })
       .catch(() => {
         /* swallow: form will show an empty agent list */

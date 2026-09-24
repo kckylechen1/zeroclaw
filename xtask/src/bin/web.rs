@@ -1,8 +1,8 @@
 //! `cargo xtask web` — drive the web dashboard build from cargo.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use xtask::util::{repo_root, require_tool, run_cmd};
 
@@ -15,16 +15,13 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Render the gateway's OpenAPI spec and regenerate the TS client.
-    GenApi,
     /// Run `npm install` in web/.
     Install,
-    /// Regenerate the TS client and run `npm run build`.
+    /// Run `npm run build` (installs dependencies first when needed).
     Build,
-    /// Regenerate the TS client and start `npm run dev`.
+    /// Start `npm run dev` (installs dependencies first when needed).
     Dev,
-    /// Regenerate the TS client and typecheck (`tsc -b`) without
-    /// producing a bundle.
+    /// Typecheck (`tsc -b`) without producing a bundle.
     Check,
 }
 
@@ -32,22 +29,14 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = repo_root();
     let web_dir = root.join("web");
-    let spec_path = root.join("target/openapi.json");
+    if matches!(cli.cmd, Cmd::Install) || node_modules_needs_install(&web_dir) {
+        npm_install(&web_dir)?;
+    }
     match cli.cmd {
-        Cmd::GenApi => gen_api(&web_dir, &spec_path),
-        Cmd::Install => npm_install(&web_dir),
-        Cmd::Build => {
-            gen_api(&web_dir, &spec_path)?;
-            npm_run(&web_dir, "build")
-        }
-        Cmd::Dev => {
-            gen_api(&web_dir, &spec_path)?;
-            npm_run(&web_dir, "dev")
-        }
-        Cmd::Check => {
-            gen_api(&web_dir, &spec_path)?;
-            npx(&web_dir, &["tsc", "-b"])
-        }
+        Cmd::Install => Ok(()),
+        Cmd::Build => npm_run(&web_dir, "build"),
+        Cmd::Dev => npm_run(&web_dir, "dev"),
+        Cmd::Check => npx(&web_dir, &["tsc", "-b"]),
     }
 }
 
@@ -91,218 +80,11 @@ fn npx(web_dir: &Path, args: &[&str]) -> Result<()> {
     run_cmd(&mut cmd)
 }
 
-fn gen_api(web_dir: &Path, spec_path: &Path) -> Result<()> {
-    require_tool("npm", "https://nodejs.org/ or `nvm install --lts`")?;
-    if node_modules_needs_install(web_dir) {
-        npm_install(web_dir)?;
-    }
-    let out_rel = PathBuf::from("src/lib/api-generated.ts");
-    let out_abs = web_dir.join(&out_rel);
-    if let Some(parent) = out_abs.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create parent directory {}", parent.display()))?;
-    }
-    if let Some(parent) = spec_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create parent directory {}", parent.display()))?;
-    }
-
-    let spec_value = zeroclaw_gateway::openapi::build_spec();
-    let spec = serde_json::to_string(&spec_value).context("serialize openapi spec to JSON")?;
-    std::fs::write(spec_path, &spec)
-        .with_context(|| format!("write openapi spec to {}", spec_path.display()))?;
-    println!("==> gen-api → {}", out_abs.display());
-
-    let desc_rel = PathBuf::from("src/lib/api-descriptions.ts");
-    let desc_abs = web_dir.join(&desc_rel);
-    let desc_ts = render_descriptions(&spec_value);
-    std::fs::write(&desc_abs, &desc_ts)
-        .with_context(|| format!("write field descriptions to {}", desc_abs.display()))?;
-    println!("==> gen-api → {}", desc_abs.display());
-
-    let enums_rel = PathBuf::from("src/lib/api-enums.ts");
-    let enums_abs = web_dir.join(&enums_rel);
-    let enums_ts = render_enum_values(&spec_value);
-    std::fs::write(&enums_abs, &enums_ts)
-        .with_context(|| format!("write enum values to {}", enums_abs.display()))?;
-    println!("==> gen-api → {}", enums_abs.display());
-
-    let spec_arg = spec_path
-        .to_str()
-        .context("openapi spec path is not valid utf-8")?;
-    let out_arg = out_rel
-        .to_str()
-        .context("api-generated.ts path is not valid utf-8")?;
-    run_cmd(Command::new(bin("npx")).current_dir(web_dir).args([
-        "--no-install",
-        "openapi-typescript",
-        spec_arg,
-        "-o",
-        out_arg,
-    ]))
-    .context("`npx openapi-typescript` failed (run `cargo web install` first?)")
-}
-
 fn bin(tool: &str) -> String {
     if cfg!(windows) {
         format!("{tool}.cmd")
     } else {
         tool.to_string()
-    }
-}
-
-/// Collect the string variants of a schema whether it uses top-level `enum`,
-/// `oneOf`/`anyOf` `const` strings, or `oneOf`/`anyOf` `enum` string arrays.
-/// Object variants (e.g. `StepFailure::Goto`) contribute nothing. Preserves
-/// spec order and drops duplicates so pickers render one row per variant.
-fn collect_string_enum_members(schema: &serde_json::Value) -> Vec<String> {
-    let mut members: Vec<String> = Vec::new();
-    let mut push = |value: &str| {
-        let owned = value.to_string();
-        if !members.contains(&owned) {
-            members.push(owned);
-        }
-    };
-
-    if schema.get("type").and_then(|t| t.as_str()) == Some("string")
-        && let Some(variants) = schema.get("enum").and_then(|e| e.as_array())
-    {
-        for value in variants.iter().filter_map(|v| v.as_str()) {
-            push(value);
-        }
-    }
-
-    for key in ["oneOf", "anyOf"] {
-        let Some(variants) = schema.get(key).and_then(|v| v.as_array()) else {
-            continue;
-        };
-        for variant in variants {
-            if variant.get("type").and_then(|t| t.as_str()) != Some("string") {
-                continue;
-            }
-            if let Some(value) = variant.get("const").and_then(|c| c.as_str()) {
-                push(value);
-            }
-            if let Some(inner) = variant.get("enum").and_then(|e| e.as_array()) {
-                for value in inner.iter().filter_map(|v| v.as_str()) {
-                    push(value);
-                }
-            }
-        }
-    }
-
-    members
-}
-
-/// Extract `{ SchemaName: [variant, ...] }` for every schema whose top-level
-/// shape is a string `enum`, so option pickers walk the spec instead of
-/// retyping variant lists. The Rust enums remain the single source of truth.
-fn render_enum_values(spec: &serde_json::Value) -> String {
-    use std::collections::BTreeMap;
-
-    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-
-    let schemas = spec
-        .get("components")
-        .and_then(|c| c.get("schemas"))
-        .and_then(|s| s.as_object());
-
-    if let Some(schemas) = schemas {
-        for (name, schema) in schemas {
-            let members = collect_string_enum_members(schema);
-            if !members.is_empty() {
-                out.insert(name.clone(), members);
-            }
-        }
-    }
-
-    let mut body = String::new();
-    body.push_str(
-        "// GENERATED by `cargo web gen-api` from the gateway OpenAPI spec.\n\
-         // Enum variant lists are sourced from Rust enums; do not edit by hand\n\
-         // and do not retype variant lists in components.\n\n\
-         export type EnumValues = Record<string, readonly string[]>;\n\n\
-         export const enumValues: EnumValues = ",
-    );
-    let json = serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string());
-    body.push_str(&json);
-    body.push_str(
-        ";\n\n\
-         /** Variant list for a generated string enum, or an empty array. */\n\
-         export function enumMembers(schema: string): readonly string[] {\n\
-         \x20 return enumValues[schema] ?? [];\n\
-         }\n",
-    );
-    body
-}
-
-/// Extract `{ SchemaName: { field: description } }` from the OpenAPI spec so the
-/// frontend renders tooltips from the Rust `///` docs at runtime. TypeScript
-/// `@description` JSDoc is erased at build time and unreadable at runtime; this
-/// projects the same spec into a real data module. The Rust doc comments remain
-/// the single source of truth, nothing is retyped on the frontend.
-fn render_descriptions(spec: &serde_json::Value) -> String {
-    use std::collections::BTreeMap;
-
-    let mut out: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-
-    let schemas = spec
-        .get("components")
-        .and_then(|c| c.get("schemas"))
-        .and_then(|s| s.as_object());
-
-    if let Some(schemas) = schemas {
-        for (name, schema) in schemas {
-            let mut fields: BTreeMap<String, String> = BTreeMap::new();
-            collect_property_descriptions(schema, &mut fields);
-            if !fields.is_empty() {
-                out.insert(name.clone(), fields);
-            }
-        }
-    }
-
-    let mut body = String::new();
-    body.push_str(
-        "// GENERATED by `cargo web gen-api` from the gateway OpenAPI spec.\n\
-         // Field help text is sourced from Rust `///` doc comments; do not edit\n\
-         // by hand and do not duplicate help text in components.\n\n\
-         export type FieldDescriptions = Record<string, Record<string, string>>;\n\n\
-         export const fieldDescriptions: FieldDescriptions = ",
-    );
-    let json = serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string());
-    body.push_str(&json);
-    body.push_str(
-        ";\n\n\
-         /** Help text for one field of a generated schema, or undefined. */\n\
-         export function fieldHelp(schema: string, field: string): string | undefined {\n\
-         \x20 return fieldDescriptions[schema]?.[field];\n\
-         }\n",
-    );
-    body
-}
-
-/// Merge every `properties.<field>.description` found in a schema (including its
-/// `oneOf` / `anyOf` variants, so serde-tagged enums like `SopTrigger` surface
-/// each variant's field docs) into `fields`.
-fn collect_property_descriptions(
-    schema: &serde_json::Value,
-    fields: &mut std::collections::BTreeMap<String, String>,
-) {
-    if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
-        for (field, prop) in props {
-            if let Some(desc) = prop.get("description").and_then(|d| d.as_str()) {
-                fields
-                    .entry(field.clone())
-                    .or_insert_with(|| desc.to_string());
-            }
-        }
-    }
-    for key in ["oneOf", "anyOf", "allOf"] {
-        if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
-            for variant in variants {
-                collect_property_descriptions(variant, fields);
-            }
-        }
     }
 }
 

@@ -8,15 +8,10 @@ import {
   FolderTree,
   LayoutDashboard,
   MessageSquare,
-  Monitor,
-  Puzzle,
   Search,
   Settings,
   SlidersHorizontal,
   Sparkles,
-  Stethoscope,
-  Terminal,
-  Wrench,
 } from 'lucide-react';
 import { t } from '@/lib/i18n';
 import { loadConfigSearchItems, type ConfigSearchItem } from '@/lib/configSearch';
@@ -37,14 +32,9 @@ const DESTINATIONS: Destination[] = [
   { to: '/agents', icon: MessageSquare, labelKey: 'nav.agents', groupKey: 'nav.group.chat' },
   { to: '/config', icon: Settings, labelKey: 'nav.config', groupKey: 'nav.group.configure' },
   { to: '/config/agents', icon: Bot, labelKey: 'nav.agent', groupKey: 'nav.group.configure' },
-  { to: '/tools', icon: Wrench, labelKey: 'nav.tools', groupKey: 'nav.group.configure' },
   { to: '/skills', icon: Sparkles, labelKey: 'nav.skills', groupKey: 'nav.group.configure' },
-  { to: '/integrations', icon: Puzzle, labelKey: 'nav.integrations', groupKey: 'nav.group.configure' },
   { to: '/cron', icon: Clock, labelKey: 'nav.cron', groupKey: 'nav.group.configure' },
   { to: '/logs', icon: Activity, labelKey: 'nav.logs', groupKey: 'nav.group.operations' },
-  { to: '/doctor', icon: Stethoscope, labelKey: 'nav.doctor', groupKey: 'nav.group.operations' },
-  { to: '/canvas', icon: Monitor, labelKey: 'nav.canvas', groupKey: 'nav.group.operations' },
-  { to: '/acp-console', icon: Terminal, labelKey: 'nav.acp', groupKey: 'nav.group.operations' },
 ];
 
 // The three result buckets, rendered in this order with their own headers.

@@ -696,15 +696,6 @@ export default function Config() {
               }
               actions={
                 <>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => navigate("/quickstart")}
-                    title={t("cfg.header.quickstart")}
-                  >
-                    <Sparkles className="h-3.5 w-3.5" />
-                    {t("cfg.header.quickstart")}
-                  </Button>
                   <ReloadDaemonButton
                     onReloaded={() => {
                       goToSection(activeSection.key);

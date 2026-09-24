@@ -93,7 +93,7 @@ The bundle lands in `web/dist/`. Point `web_dist_dir` at the absolute path of
 that directory, or run the daemon from the repo root and let auto-detect
 candidate 1 pick it up.
 
-The full set of `cargo web` subcommands (`dev`, `check`, `gen-api`, etc.) is
+The full set of `cargo web` subcommands (`dev`, `check`, etc.) is
 documented in [Building the web dashboard](../developing/web.md).
 
 ### B) Pre-built release artifact

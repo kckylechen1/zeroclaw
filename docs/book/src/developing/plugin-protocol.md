@@ -564,8 +564,6 @@ whichever fits the moment:
 - **The CLI** for plugin lifecycle. `zeroclaw plugin` provides `list`, `search`,
   `install`, `remove`, `info`, and `migrate`. `zeroclaw config set` adjusts
   individual plugin config fields.
-- **The web gateway** for a dashboard view. `GET /api/plugins` reports the
-  loaded plugins and whether the system is enabled.
 - **The plugin schema**, if you are the plugin author. Your config surface is
   defined by the schema, not by asking operators to write TOML. The host injects
   an author-defined config section into the plugin at call time (see Per-plugin

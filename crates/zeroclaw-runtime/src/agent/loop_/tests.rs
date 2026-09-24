@@ -11872,7 +11872,6 @@ async fn process_message_seam_narrows_safe_defaults_outside_allowed_tools() {
         &config.agents,
         None,
         &config,
-        None,
         false,
         None,
     );

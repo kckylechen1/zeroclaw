@@ -1015,33 +1015,6 @@ pub async fn handle(config_command: crate::ConfigCommands, config: &mut Config) 
             }
             Ok(())
         }
-        crate::ConfigCommands::Docs => {
-            let port = config.gateway.port;
-            let host = if config.gateway.host == "[::]" || config.gateway.host == "0.0.0.0" {
-                "127.0.0.1".to_string()
-            } else {
-                config.gateway.host.clone()
-            };
-            let url = format!("http://{host}:{port}/api/docs");
-
-            let health = format!("http://{host}:{port}/health");
-            let daemon_running = reqwest::Client::new()
-                .get(&health)
-                .timeout(std::time::Duration::from_secs(2))
-                .send()
-                .await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-
-            println!("{url}");
-            if !daemon_running {
-                eprintln!(
-                    "Note: gateway does not appear to be running at {host}:{port}. \
-                     Start it with `zeroclaw service start` (background) or `zeroclaw daemon` (foreground) to load the explorer."
-                );
-            }
-            Ok(())
-        }
         crate::ConfigCommands::Complete { partial } => {
             let prefix = partial.as_deref().unwrap_or("");
             for entry in config.prop_fields() {

@@ -3,17 +3,13 @@ import type {
   ToolSpec,
   CronJob,
   CronRun,
-  Integration,
-  DiagResult,
   MemoryEntry,
   CostSummary,
   HealthSnapshot,
   Session,
   ChannelDetail,
   SessionMessagesResponse,
-  TuiEntry,
 } from "../types/api";
-import type { components } from "./api-generated";
 import { clearToken, getToken, setToken } from "./auth";
 import { apiOrigin, basePath } from "./basePath";
 
@@ -51,12 +47,11 @@ export class ApiError extends Error {
 }
 
 /**
- * Stable config-API error codes, sourced from the generated OpenAPI schema
- * (`ConfigApiCode`). Branch on these constants, never a bare string literal, so
+ * Stable config-API error codes. Branch on these constants, never a bare string literal, so
  * a backend rename or a typo fails `tsc` here instead of silently regressing
  * the behaviour that depends on the code.
  */
-export type ConfigApiCode = components["schemas"]["ConfigApiCode"];
+export type ConfigApiCode = "config_changed_externally";
 export const ConfigApiCodes = {
   configChangedExternally: "config_changed_externally",
 } as const satisfies Record<string, ConfigApiCode>;
@@ -355,76 +350,6 @@ export function getHealth(): Promise<HealthSnapshot> {
   ).then((data) => unwrapField(data, "health"));
 }
 
-// ── Version check / self-upgrade (version.rs) ────────────────────────
-// Types are derived from the generated OpenAPI client (`components`) so the
-// dashboard contract stays in lock-step with `openapi::build_spec()`. Editing
-// a request/response shape in Rust and running `cargo web check` will fail the
-// typecheck here on drift, instead of silently disagreeing at runtime.
-
-export type VersionCheckResponse = components["schemas"]["VersionCheckResponse"];
-
-/**
- * GET /api/version/check — is a newer release available?
- *
- * Backed by `zeroclaw update --check --json`, cached server-side for 1h.
- * Pass `force` to bypass the cache, or `version` to check a specific tag.
- */
-export function checkVersion(opts?: {
-  force?: boolean;
-  version?: string;
-}): Promise<VersionCheckResponse> {
-  const params = new URLSearchParams();
-  if (opts?.force) params.set("force", "true");
-  if (opts?.version) params.set("version", opts.version);
-  const qs = params.toString();
-  return apiFetch<VersionCheckResponse>(
-    `/api/version/check${qs ? `?${qs}` : ""}`,
-  );
-}
-
-export type UpgradeState = components["schemas"]["UpgradeStatusState"];
-export type UpgradeStatusResponse =
-  components["schemas"]["UpgradeStatusResponse"];
-export type UpgradeRequest = components["schemas"]["UpgradeRequest"];
-export type UpgradeAcceptedResponse =
-  components["schemas"]["UpgradeAcceptedResponse"];
-
-/**
- * POST /api/version/upgrade — apply an upgrade via `zeroclaw update`.
- *
- * Returns a `handoff_id`; poll {@link getUpgradeStatus} for progress. Requires
- * `gateway.allow_self_upgrade`. `auto_restart` is only honoured under a
- * supervisor (systemd/launchd).
- */
-export function startUpgrade(
-  opts?: UpgradeRequest,
-): Promise<UpgradeAcceptedResponse> {
-  return apiFetch<UpgradeAcceptedResponse>("/api/version/upgrade", {
-    method: "POST",
-    body: JSON.stringify(opts ?? {}),
-  });
-}
-
-export function getUpgradeStatus(
-  handoffId?: string,
-): Promise<UpgradeStatusResponse> {
-  const qs = handoffId ? `?handoff_id=${encodeURIComponent(handoffId)}` : "";
-  return apiFetch<UpgradeStatusResponse>(`/api/version/upgrade/status${qs}`);
-}
-
-// ---------------------------------------------------------------------------
-// TUIs
-// ---------------------------------------------------------------------------
-
-export function getTuis(): Promise<TuiEntry[]> {
-  return apiFetch<TuiEntry[] | { tuis: TuiEntry[] }>("/api/tuis").then(
-    (data) => {
-      const result = unwrapField(data, "tuis");
-      return Array.isArray(result) ? result : [];
-    },
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Config — per-property CRUD (issue #6175). Whole-file getConfig/putConfig
 // removed; the gateway no longer exposes those endpoints.
@@ -610,9 +535,6 @@ export function getReloadStatus(): Promise<{ pending_reload: boolean }> {
   return apiFetch<{ pending_reload: boolean }>("/api/config/reload-status");
 }
 
-export function getOpenApiSchema(): Promise<unknown> {
-  return apiFetch<unknown>("/api/openapi.json");
-}
 
 // ── Personality files ────────────────────────────────────────────────
 
@@ -882,10 +804,13 @@ export function listSkillBundles(): Promise<{ bundles: SkillBundleEntry[] }> {
 
 /** One kind's capability row from the backend slash-option kind registry. The
  *  editor walks these rather than hardcoding the kind list or which constraints
- *  each kind carries. Sourced from the generated OpenAPI schema, which is built
- *  by walking the backend `SlashOptionKind` enum. */
-export type SlashOptionKindDescriptor =
-  components["schemas"]["SlashOptionKindDescriptor"];
+ *  each kind carries. Mirrors the backend `SlashOptionKindDescriptor`. */
+export interface SlashOptionKindDescriptor {
+  manifest_name: string;
+  supports_choices: boolean;
+  supports_numeric_bounds: boolean;
+  supports_length_bounds: boolean;
+}
 
 /** Fetch the canonical typed-slash-option kind registry (kind list + per-kind
  *  choice/numeric-bound/length-bound capabilities). */
@@ -1240,117 +1165,6 @@ export interface MapKeyResponse {
   created: boolean;
 }
 
-// ── Shared workspace browse ────────────────────────────────────────
-// Hard-scoped to `<install>/shared/`. The gateway adapter at
-// `crates/zeroclaw-gateway/src/api_browse.rs` defers all containment
-// checks and walking to `zeroclaw_runtime::browse::list_directory`,
-// so the path is interpreted relative to `shared/` here too.
-
-export interface BrowseEntry {
-  name: string;
-  /** `"dir"` or `"file"`. */
-  kind: "dir" | "file";
-  /** Bytes; absent for directories. */
-  size?: number;
-  /** True for top-level entries the runtime owns (e.g. `sessions/`,
-   *  `IDENTITY.md`). Server-side mutations on these are rejected; the
-   *  dashboard hides delete/rename affordances when this is set. */
-  protected?: boolean;
-}
-
-export interface BrowseResponse {
-  /** Echoed cleaned path relative to `<install>/shared/`. */
-  path: string;
-  entries: BrowseEntry[];
-}
-
-export function browseShared(path = ""): Promise<BrowseResponse> {
-  const q = path ? `?path=${encodeURIComponent(path)}` : "";
-  return apiFetch<BrowseResponse>(`/api/browse${q}`);
-}
-
-/** Create a new directory under `<install>/shared/`. Idempotent on success. */
-export function mkdirShared(path: string): Promise<{ created: string }> {
-  return apiFetch<{ created: string }>(`/api/browse/mkdir`, {
-    method: "POST",
-    body: JSON.stringify({ path }),
-  });
-}
-
-/** Recursively remove a directory under `<install>/shared/`. Backend refuses
- *  protected top-level entries (skills, skill-bundles, knowledge). */
-export function rmdirShared(path: string): Promise<{ removed: string }> {
-  return apiFetch<{ removed: string }>(`/api/browse/rmdir`, {
-    method: "DELETE",
-    body: JSON.stringify({ path }),
-  });
-}
-
-// ── Agent workspace explorer ────────────────────────────────────────────
-//
-// All four endpoints scope to `<install>/agents/{alias}/workspace/`. The
-// runtime enforces containment + protected-file refusal; the dashboard is
-// a viewer/editor on top.
-
-export interface AgentWorkspaceFileRead {
-  path: string;
-  size: number;
-  is_text: boolean;
-  /** UTF-8 text when `is_text` is true, base64 otherwise. */
-  content: string;
-  encoding: "utf8" | "base64";
-}
-
-export function listAgentWorkspace(
-  alias: string,
-  path = "",
-): Promise<BrowseResponse> {
-  const q = path ? `?path=${encodeURIComponent(path)}` : "";
-  return apiFetch<BrowseResponse>(
-    `/api/agents/${encodeURIComponent(alias)}/workspace/list${q}`,
-  );
-}
-
-export function readAgentWorkspaceFile(
-  alias: string,
-  path: string,
-): Promise<AgentWorkspaceFileRead> {
-  return apiFetch<AgentWorkspaceFileRead>(
-    `/api/agents/${encodeURIComponent(alias)}/workspace/read?path=${encodeURIComponent(path)}`,
-  );
-}
-
-export function deleteAgentWorkspacePath(
-  alias: string,
-  path: string,
-): Promise<{ removed: string }> {
-  return apiFetch<{ removed: string }>(
-    `/api/agents/${encodeURIComponent(alias)}/workspace/path`,
-    { method: "DELETE", body: JSON.stringify({ path }) },
-  );
-}
-
-export function moveAgentWorkspacePath(
-  alias: string,
-  from: string,
-  to: string,
-): Promise<{ from: string; to: string }> {
-  return apiFetch<{ from: string; to: string }>(
-    `/api/agents/${encodeURIComponent(alias)}/workspace/move`,
-    { method: "POST", body: JSON.stringify({ from, to }) },
-  );
-}
-
-export function createAgentWorkspaceDirectory(
-  alias: string,
-  path: string,
-): Promise<{ created: string }> {
-  return apiFetch<{ created: string }>(
-    `/api/agents/${encodeURIComponent(alias)}/workspace/mkdir`,
-    { method: "POST", body: JSON.stringify({ path }) },
-  );
-}
-
 /**
  * Create a new entry under a map-keyed or list-shaped section. For Map
  * kinds the `key` is the new HashMap key; for List kinds it's the new
@@ -1565,181 +1379,6 @@ export async function selectSectionItem(
   window.dispatchEvent(new Event("zeroclaw-config-mutated"));
   return result;
 }
-// ── Quickstart ───────────────────────────────────────────────────────
-
-export interface QuickstartTypeOption {
-  /** Canonical kebab-case kind written into config (e.g. "anthropic", "telegram"). */
-  kind: string;
-  /** Picker label. */
-  display_name: string;
-  /** True for local providers that need no credential; always false for channels. */
-  local: boolean;
-  /** Daemon-derived runtime preset to auto-select for this provider. */
-  default_runtime_profile?: string | null;
-}
-
-export interface QuickstartState {
-  quickstart_completed: boolean;
-  agents: string[];
-  risk_profiles: string[];
-  runtime_profiles: string[];
-  /** Canonical fallback when a provider has no runtime recommendation. */
-  default_runtime_profile?: string | null;
-  model_providers: string[];
-  channels: string[];
-  /**
-   * Subset of `channels` not yet bound to any agent — safe to reuse
-   * without breaking the one-channel-one-agent invariant.
-   */
-  unassigned_channels: string[];
-  storage: string[];
-  /**
-   * Picker rows for "Create new model provider", supplied by the
-   * daemon — sourced from `zeroclaw_providers::list_model_providers()`.
-   * Surfaces render this list as-is and never keep their own copy.
-   */
-  model_provider_types: QuickstartTypeOption[];
-  /**
-   * Picker rows for "Create new channel", supplied by the daemon —
-   * sourced from the schema-side `ChannelsConfig` inventory. Adding a
-   * channel family in the schema lights up here automatically.
-   */
-  channel_types: QuickstartTypeOption[];
-  /** Risk-profile presets from `RISK_PRESETS`. */
-  risk_presets: QuickstartPreset[];
-  /** Runtime-profile presets from `RUNTIME_PRESETS`. */
-  runtime_presets: QuickstartPreset[];
-  /** Memory backend snake-case keys from `MemoryBackendKind`. */
-  memory_kinds: string[];
-  /** Canonical personality filenames the Quickstart accepts. */
-  personality_files: string[];
-}
-
-/** One row in a closed-set preset table (risk / runtime). */
-export interface QuickstartPreset {
-  preset_name: string;
-  label: string;
-  help: string;
-}
-
-export function getQuickstartState(): Promise<QuickstartState> {
-  return apiFetch<QuickstartState>("/api/quickstart/state");
-}
-
-export interface QuickstartError {
-  step: string;
-  field: string;
-  message: string;
-}
-
-export type QuickstartValidateResult =
-  | { kind: "ok" }
-  | { kind: "errors"; errors: QuickstartError[] };
-
-export function quickstartValidate(submission: unknown): Promise<QuickstartValidateResult> {
-  return apiFetch<QuickstartValidateResult>("/api/quickstart/validate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(submission),
-  });
-}
-
-export interface AppliedAgent {
-  alias: string;
-  model_provider: string;
-  risk_profile: string;
-  runtime_profile: string;
-  channels: string[];
-  memory_backend: string;
-}
-
-export type QuickstartApplyResult =
-  | { kind: "applied"; agent: AppliedAgent; daemon_restarted: boolean }
-  | { kind: "errors"; errors: QuickstartError[] };
-
-export function quickstartApply(submission: unknown): Promise<QuickstartApplyResult> {
-  return apiFetch<QuickstartApplyResult>("/api/quickstart/apply", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(submission),
-  });
-}
-
-/** Schema field-kind tag mirroring `zeroclaw_config::traits::PropKind`. */
-export type QuickstartFieldKind =
-  | "string"
-  | "bool"
-  | "integer"
-  | "float"
-  | "enum"
-  | "string_array"
-  | "object_array"
-  | "object"
-  | "duration"
-  | "secret";
-
-export interface QuickstartFieldDescriptor {
-  key: string;
-  label: string;
-  help: string;
-  kind: QuickstartFieldKind;
-  is_secret: boolean;
-  enum_variants: string[] | null;
-  required: boolean;
-  default: string | null;
-}
-
-export interface QuickstartFieldsRequest {
-  section: "model_provider" | "channel";
-  type_key: string;
-}
-
-export interface QuickstartFieldsResult {
-  fields: QuickstartFieldDescriptor[];
-}
-
-export function quickstartFields(
-  req: QuickstartFieldsRequest,
-): Promise<QuickstartFieldsResult> {
-  return apiFetch<QuickstartFieldsResult>("/api/quickstart/fields", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(req),
-  });
-}
-
-export type QuickstartStep =
-  | "model_provider"
-  | "risk_profile"
-  | "runtime_profile"
-  | "memory"
-  | "channels"
-  | "agent";
-
-export interface QuickstartDismissRequest {
-  run_id: string;
-  surface: "web" | "tui" | "cli";
-  last_step?: QuickstartStep | null;
-}
-
-/// Beacon fired when the user closes the Quickstart page without
-/// submitting a Create. The runtime records this as a `Note` event in
-/// the same stream as the apply lifecycle so dashboard / SSE
-/// consumers can see drop-off rates. Best-effort: failures are
-/// swallowed.
-export function quickstartDismiss(req: QuickstartDismissRequest): void {
-  // `keepalive: true` lets the request survive the navigation that
-  // typically triggers this — same trick `navigator.sendBeacon` uses,
-  // but goes through the existing auth path.
-  void apiFetch<void>("/api/quickstart/dismiss", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(req),
-    keepalive: true,
-  } as RequestInit).catch(() => {});
-}
-
-
 // ── Map-keyed alias CRUD ─────────────────────────────────────────────
 
 export interface MapKeysResponse {
@@ -1986,33 +1625,6 @@ export function patchCronSettings(
     method: "PATCH",
     body: JSON.stringify(patch),
   });
-}
-
-// ---------------------------------------------------------------------------
-// Integrations
-// ---------------------------------------------------------------------------
-
-export function getIntegrations(): Promise<Integration[]> {
-  return apiFetch<Integration[] | { integrations: Integration[] }>(
-    "/api/integrations",
-  ).then((data) => {
-    const result = unwrapField(data, "integrations");
-    return Array.isArray(result) ? result : [];
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Doctor / Diagnostics
-// ---------------------------------------------------------------------------
-
-export function runDoctor(): Promise<DiagResult[]> {
-  return apiFetch<DiagResult[] | { results: DiagResult[]; summary?: unknown }>(
-    "/api/doctor",
-    {
-      method: "POST",
-      body: JSON.stringify({}),
-    },
-  ).then((data) => (Array.isArray(data) ? data : data.results));
 }
 
 // ---------------------------------------------------------------------------

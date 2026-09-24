@@ -36,14 +36,7 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Build web dashboard
-        # `cargo web build` is the xtask wrapper that:
-        # 1. renders the gateway's OpenAPI 3.1 spec in-process,
-        # 2. runs `npx openapi-typescript` to produce
-        #    `web/src/lib/api-generated.ts` (gitignored — never
-        #    committed since #4f60f4405),
-        # 3. runs `npm ci` + `npm run build` (tsc + vite).
-        # Plain `cd web && npm run build` skips step 1+2 and tsc
-        # fails on the missing import.
+        # `cargo web build` runs `npm install` when needed, then `npm run build`.
         run: cargo web build
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

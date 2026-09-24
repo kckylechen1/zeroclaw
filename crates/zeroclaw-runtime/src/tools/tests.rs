@@ -82,7 +82,6 @@ fn email_factory_respects_compile_feature_and_channel_activation() {
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -186,7 +185,6 @@ fn component_with_failed_metadata_probe_is_not_registered() {
         &HashMap::new(),
         None,
         &config,
-        None,
         false,
         None,
     )
@@ -237,7 +235,6 @@ fn sop_run_tools_stay_retired_from_the_registry() {
         &HashMap::new(),
         None,
         &cfg,
-        None,
         false,
         None,
     )
@@ -305,7 +302,6 @@ async fn retired_raw_launcher_tools_never_register_even_when_enabled() {
         &HashMap::new(),
         None,
         &cfg,
-        None,
         false,
         None,
         None,
@@ -388,7 +384,6 @@ fn shared_store_tools_open_data_dir_not_per_agent_workspace() {
         &HashMap::new(),
         None,
         &root_config,
-        None,
         false,
         None,
         None,
@@ -554,7 +549,6 @@ fn all_tools_excludes_browser_when_disabled() {
         &HashMap::new(),
         None,
         &cfg,
-        None,
         false,
         None,
     )
@@ -608,7 +602,6 @@ fn minimal_composition_cuts_registry_to_membership() {
         &HashMap::new(),
         None,
         &cfg,
-        None,
         false,
         None,
     )
@@ -693,7 +686,6 @@ fn absent_composition_keeps_full_assembly() {
         &HashMap::new(),
         None,
         &cfg,
-        None,
         false,
         None,
     )
@@ -754,7 +746,6 @@ fn all_tools_includes_browser_when_enabled() {
         &HashMap::new(),
         None,
         &cfg,
-        None,
         false,
         None,
     )
@@ -912,7 +903,6 @@ fn delegate_stays_absent_from_every_registry() {
             &agents,
             Some("delegate-test-credential"),
             &cfg,
-            None,
             false,
             None,
         )
@@ -1016,7 +1006,6 @@ async fn registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth() {
         &cfg.agents,
         None,
         &lineage_registry_config(),
-        None,
         true, // is_subagent_caller: registry belongs to a child run
         None,
         None,
@@ -1106,7 +1095,6 @@ fn all_tools_includes_read_skill_in_compact_mode() {
         &HashMap::new(),
         None,
         &cfg,
-        None,
         false,
         None,
     )
@@ -1146,7 +1134,6 @@ fn all_tools_excludes_read_skill_in_full_mode() {
         &HashMap::new(),
         None,
         &cfg,
-        None,
         false,
         None,
     )
@@ -1208,7 +1195,6 @@ fn retired_operator_tools_absent_from_every_assembly_path() {
             &HashMap::new(),
             None,
             &cfg,
-            None,
             is_subagent_caller,
             None,
         );
@@ -1307,7 +1293,6 @@ fn all_tools_registers_read_skill_for_compact_agent_override_over_global_full() 
         &HashMap::new(),
         None,
         &cfg,
-        None,
         false,
         None,
     )
@@ -1366,7 +1351,6 @@ fn all_tools_omits_read_skill_for_full_agent_override_over_global_compact() {
         &HashMap::new(),
         None,
         &cfg,
-        None,
         false,
         None,
     )
@@ -1411,7 +1395,6 @@ fn vi_verify_is_not_registered_even_when_verifiable_intent_is_enabled() {
         &HashMap::new(),
         None,
         &cfg,
-        None,
         false,
         None,
     )

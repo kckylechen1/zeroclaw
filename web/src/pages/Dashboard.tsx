@@ -23,7 +23,6 @@ import {
   MemoryStick,
   Brain,
   Search,
-  Monitor,
   ArrowRight,
 } from "lucide-react";
 import type {
@@ -34,7 +33,6 @@ import type {
   ChannelReadinessState,
   SessionMessageRow,
   ProcessStats,
-  TuiEntry,
 } from "@/types/api";
 import {
   getStatus,
@@ -47,8 +45,6 @@ import {
   storeMemory,
   deleteMemory,
   getMapKeys,
-  getQuickstartState,
-  getTuis,
   listProps,
 } from "@/lib/api";
 import { resolveModelToProviderType } from "@/lib/configuredModels";
@@ -427,13 +423,11 @@ const TABS: { id: TabId; labelKey: string; icon: typeof LayoutDashboard }[] = [
 function OverviewTab({
   status,
   cost,
-  tuis,
   showAllChannels,
   setShowAllChannels,
 }: {
   status: StatusResponse;
   cost: CostSummary;
-  tuis: TuiEntry[];
   showAllChannels: boolean;
   setShowAllChannels: (fn: (v: boolean) => boolean) => void;
 }) {
@@ -837,73 +831,6 @@ function OverviewTab({
         </div>
       </div>
 
-      {/* Connected TUIs */}
-      {tuis.length > 0 && (
-        <div className="card p-5 animate-slide-in-up">
-          <div className="flex items-center gap-2 mb-5">
-            <Monitor
-              className="h-5 w-5"
-              style={{ color: "var(--pc-accent)" }}
-            />
-            <h2
-              className="text-sm font-semibold uppercase tracking-wider"
-              style={{ color: "var(--pc-text-primary)" }}
-            >
-              {t("dashboard.connected_tuis")}
-            </h2>
-            <span
-              className="text-xs font-mono px-2 py-0.5 rounded-full"
-              style={{
-                background: "rgba(var(--pc-accent-rgb), 0.1)",
-                color: "var(--pc-accent)",
-              }}
-            >
-              {tuis.length}
-            </span>
-          </div>
-          <div className="space-y-2 overflow-y-auto max-h-48 pr-1">
-            {tuis.map((tui) => (
-              <div
-                key={tui.tui_id}
-                className="flex items-center justify-between py-2.5 px-3 rounded-xl"
-                style={{ background: "var(--pc-bg-elevated)" }}
-              >
-                <div className="flex items-center gap-2">
-                  <span
-                    className="status-dot flex-shrink-0"
-                    style={{
-                      background: "var(--color-status-success)",
-                      boxShadow: "0 0 6px var(--color-status-success)",
-                    }}
-                  />
-                  <span
-                    className="text-sm font-mono font-medium"
-                    style={{ color: "var(--pc-text-primary)" }}
-                  >
-                    {tui.tui_id}
-                  </span>
-                  <span
-                    className="text-xs font-mono px-1.5 py-0.5 rounded"
-                    style={{
-                      background: "rgba(var(--pc-accent-rgb), 0.08)",
-                      color: "var(--pc-text-muted)",
-                    }}
-                  >
-                    {tui.peer_label || tui.transport || t("dashboard.unknown")}
-                  </span>
-                </div>
-                <span
-                  className="text-xs"
-                  style={{ color: "var(--pc-text-muted)" }}
-                  title={tui.connected_at}
-                >
-                  {formatRelative(tui.connected_at)}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* Component Health "fix in place" modal — same editor as the Doctor page.
           Opens when an error row with a parseable config entity is actioned. */}
@@ -1736,7 +1663,6 @@ function parseTab(raw: string | null): TabId {
 export default function Dashboard() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [cost, setCost] = useState<CostSummary | null>(null);
-  const [tuis, setTuis] = useState<TuiEntry[]>([]);
   const [costWindow, setCostWindow] = useState<CostWindow>("today");
   const [error, setError] = useState<string | null>(null);
   const [showAllChannels, setShowAllChannels] = useState(false);
@@ -1771,12 +1697,11 @@ export default function Dashboard() {
   usePolling(
     (isStale) => {
       const { from, to } = costWindowBounds(costWindow);
-      Promise.all([getStatus(), getCost(from, to), getTuis()])
-        .then(([s, c, t]) => {
+      Promise.all([getStatus(), getCost(from, to)])
+        .then(([s, c]) => {
           if (isStale()) return;
           setStatus(s);
           setCost(c);
-          setTuis(t);
         })
         .catch((err) => {
           if (!isStale()) setError(err.message);
@@ -1871,7 +1796,6 @@ export default function Dashboard() {
         <OverviewTab
           status={status}
           cost={cost}
-          tuis={tuis}
           showAllChannels={showAllChannels}
           setShowAllChannels={setShowAllChannels}
         />
@@ -2897,9 +2821,6 @@ function DashboardMetrics({ agents }: { agents: AgentSummary[] }) {
 
 function AgentsSection() {
   const [agents, setAgents] = useState<AgentSummary[] | null>(null);
-  const [quickstartLabel, setQuickstartLabel] = useState(
-    t("dashboard.start_quickstart"),
-  );
   const [error, setError] = useState<string | null>(null);
   const [toggling, setToggling] = useState<Set<string>>(new Set());
   // Selecting a row sets the drawer's agent (by alias); closing clears it.
@@ -2914,18 +2835,6 @@ function AgentsSection() {
           err instanceof Error ? err.message : t("dashboard.load_agents_error"),
         ),
       );
-  }, []);
-
-  useEffect(() => {
-    getQuickstartState()
-      .then((state) => {
-        if (state.agents.length > 0) {
-          setQuickstartLabel(t("dashboard.create_another_agent"));
-        } else {
-          setQuickstartLabel(t("dashboard.start_quickstart"));
-        }
-      })
-      .catch(() => setQuickstartLabel(t("dashboard.start_quickstart")));
   }, []);
 
   const handleToggle = useCallback(async (agent: AgentSummary) => {
@@ -3053,13 +2962,6 @@ function AgentsSection() {
           >
             {t("dashboard.no_agents_configured")}
           </p>
-          <Link
-            to="/quickstart"
-            className="btn-electric inline-flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            {quickstartLabel}
-          </Link>
         </div>
       ) : (
         <div className="rounded-[var(--radius-lg)] border border-pc-border bg-pc-surface overflow-hidden">

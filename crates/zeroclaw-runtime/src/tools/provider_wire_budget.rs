@@ -314,7 +314,6 @@ async fn assemble_turn(req: TurnRequest<'_>) -> (ScopedAssembled, WireBudget) {
         &req.config.agents,
         None,
         req.config,
-        None,
         false,
         None,
         None,

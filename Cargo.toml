@@ -63,11 +63,6 @@ include = [
 name = "zeroclaw"
 path = "src/main.rs"
 
-[[bin]]
-name = "zeroclaw-acp-bridge"
-path = "src/bin/zeroclaw-acp-bridge.rs"
-required-features = ["acp-bridge"]
-
 [lib]
 name = "zeroclaw"
 path = "src/lib.rs"
@@ -278,7 +273,6 @@ armv7-unknown-linux-gnueabihf = ["observability-prometheus"]
 default = [
     "agent-runtime",
     "default-channels",
-    "acp-bridge",
     "gateway",
     "observability-prometheus",
     "schema-export",
@@ -340,10 +334,9 @@ gateway = [
     "dep:mime_guess",
 ]
 schema-export = ["zeroclaw-config/schema-export"]
-acp-bridge = ["dep:tokio-tungstenite"]
 
 # Channels — each forwards to zeroclaw-channels.
-channel-email = ["zeroclaw-channels/channel-email", "zeroclaw-runtime?/email-tools", "zeroclaw-gateway?/channel-email", "dep:lettre", "dep:mail-parser", "dep:async-imap"]
+channel-email = ["zeroclaw-channels/channel-email", "zeroclaw-runtime?/email-tools", "dep:lettre", "dep:mail-parser", "dep:async-imap"]
 channel-telegram = ["zeroclaw-channels/channel-telegram"]
 channel-lark = ["zeroclaw-channels/channel-lark"]
 channel-nostr = ["zeroclaw-channels/channel-nostr", "dep:nostr-sdk"]
@@ -365,23 +358,23 @@ channel-twitter = ["zeroclaw-channels/channel-twitter"]
 channel-reddit = ["zeroclaw-channels/channel-reddit"]
 channel-notion = ["zeroclaw-channels/channel-notion"]
 channel-amqp = ["zeroclaw-channels/channel-amqp"]
-channel-linq = ["zeroclaw-channels/channel-linq", "zeroclaw-gateway?/channel-linq"]
-channel-wati = ["zeroclaw-channels/channel-wati", "zeroclaw-gateway?/channel-wati"]
-channel-nextcloud = ["zeroclaw-channels/channel-nextcloud", "zeroclaw-gateway?/channel-nextcloud"]
+channel-linq = ["zeroclaw-channels/channel-linq"]
+channel-wati = ["zeroclaw-channels/channel-wati"]
+channel-nextcloud = ["zeroclaw-channels/channel-nextcloud"]
 channel-mochat = ["zeroclaw-channels/channel-mochat"]
 channel-wechat = ["zeroclaw-channels/channel-wechat", "zeroclaw-gateway?/channel-wechat"]
 channel-wecom = ["zeroclaw-channels/channel-wecom"]
 channel-wecom-ws = ["zeroclaw-channels/channel-wecom-ws"]
 channel-clawdtalk = ["zeroclaw-channels/channel-clawdtalk"]
 channel-webhook = ["zeroclaw-channels/channel-webhook"]
-channel-acp-server = ["zeroclaw-channels/channel-acp-server", "zeroclaw-gateway?/channel-acp-server"]
+channel-acp-server = ["zeroclaw-channels/channel-acp-server"]
 
 # Node discovery surface (gateway `/ws/nodes` registry + LAN mDNS peer hints).
 # Default-off, mirroring `zeroclaw-gateway`'s own `nodes` feature. The root
 # package needs this forward so targets that construct `gateway::AppState`
 # (e.g. the `component` test) can cfg-gate the node-only fields.
 nodes = ["zeroclaw-gateway?/nodes"]
-channel-whatsapp-cloud = ["zeroclaw-channels/channel-whatsapp-cloud", "zeroclaw-gateway?/channel-whatsapp-cloud"]
+channel-whatsapp-cloud = ["zeroclaw-channels/channel-whatsapp-cloud"]
 channel-voice-call = ["zeroclaw-channels/channel-voice-call"]
 channel-line = ["zeroclaw-channels/channel-line"]
 # Feishu uses the same channel implementation as Lark; `use_feishu = true`
@@ -409,7 +402,6 @@ sandbox-bubblewrap = ["zeroclaw-runtime/sandbox-bubblewrap"]
 browser-native = ["zeroclaw-tools/browser-native"]
 plugins-wasm = ["dep:zeroclaw-plugins", "zeroclaw-runtime/plugins-wasm"]
 probe = ["dep:zeroclaw-hardware", "zeroclaw-hardware/probe"]
-webauthn = ["zeroclaw-runtime/webauthn", "zeroclaw-gateway?/webauthn"]
 embedded-web = ["zeroclaw-gateway/embedded-web"]
 
 # Backward-compatible aliases
@@ -454,7 +446,7 @@ ci-all = [
     "sandbox-landlock", "sandbox-bubblewrap",
     "browser-native", "probe",
     "plugins-wasm", "plugins-wasm-cranelift",
-    "webauthn", "memory-postgres",
+    "memory-postgres",
     "zeroclaw-channels/heavy-tests",
     "zeroclaw-runtime/heavy-tests",
 ]

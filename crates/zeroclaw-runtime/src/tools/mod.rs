@@ -31,8 +31,6 @@ pub use zeroclaw_tools::backup_tool::BackupTool;
 pub use zeroclaw_tools::browser::{BrowserTool, ComputerUseConfig};
 pub use zeroclaw_tools::browser_open::BrowserOpenTool;
 pub use zeroclaw_tools::calculator::CalculatorTool;
-pub use zeroclaw_tools::canvas::{ALLOWED_CONTENT_TYPES, MAX_CONTENT_SIZE};
-pub use zeroclaw_tools::canvas::{CanvasStore, CanvasTool};
 pub use zeroclaw_tools::channel_room::ChannelRoomTool;
 pub use zeroclaw_tools::cloud_ops::CloudOpsTool;
 pub use zeroclaw_tools::cloud_patterns::CloudPatternsTool;
@@ -528,7 +526,6 @@ pub fn all_tools(
     _agents: &HashMap<String, AliasedAgentConfig>,
     _fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
-    canvas_store: Option<CanvasStore>,
     is_subagent_caller: bool,
     tui_env: Option<HashMap<String, String>>,
 ) -> AllToolsResult {
@@ -548,7 +545,6 @@ pub fn all_tools(
         _agents,
         _fallback_api_key,
         root_config,
-        canvas_store,
         is_subagent_caller,
         tui_env,
         // No runtime adapter / live-config here; and no lineage —
@@ -598,7 +594,6 @@ pub fn all_tools_with_runtime(
     _agents: &HashMap<String, AliasedAgentConfig>,
     _fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
-    canvas_store: Option<CanvasStore>,
     // Formerly the legacy `spawn_subagent` tool's depth-1 self-cap flag.
     // `spawn_subagent` is retired (spawn_subagent wall); the parameter
     // stays in the signature (underscored, intentionally unused) so call
@@ -744,7 +739,6 @@ pub fn all_tools_with_runtime(
 
     tool_arcs.push(Arc::new(CalculatorTool::new()));
     tool_arcs.push(Arc::new(WeatherTool::new()));
-    tool_arcs.push(Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())));
     tool_arcs.push(Arc::new(TodoWriteTool::new()));
 
     // Register discord_search if any configured Discord alias has

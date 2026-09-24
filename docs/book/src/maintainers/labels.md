@@ -147,7 +147,7 @@ Applied automatically by `pr-path-labeler.yml`. Globs live in `.github/labeler.y
 | `memory` | `src/memory/**`, `crates/zeroclaw-memory/src/**` |
 | `security` | `src/security/**`, `crates/zeroclaw-runtime/src/security/**` |
 | `runtime` | `src/runtime/**`, `crates/zeroclaw-runtime/src/**` |
-| `quickstart` | `crates/zeroclaw-runtime/src/quickstart/**`, `crates/zeroclaw-gateway/src/api_quickstart.rs`, `apps/zerocode/src/quickstart_pane.rs`, `web/src/pages/quickstart/**` |
+| `quickstart` | `crates/zeroclaw-runtime/src/quickstart/**`, `apps/zerocode/src/quickstart_pane.rs` |
 | `provider` | `src/providers/**`, `crates/zeroclaw-providers/src/**` |
 | `service` | `src/service/**`, `crates/zeroclaw-runtime/src/service/**` |
 | `skillforge` | `src/skillforge/**`, `crates/zeroclaw-runtime/src/skillforge/**` |
@@ -204,7 +204,7 @@ Each channel gets a `channel:<name>` label in addition to the base `channel` lab
 
 | Label | Matches |
 |---|---|
-| `channel:acp` | `acp_channel.rs`, `acp_server.rs`, `zeroclaw-acp-bridge.rs`, `acp_session_store.rs`, `channels/acp.md`, selected ACP gateway/app/web entrypoints |
+| `channel:acp` | `acp_channel.rs`, `acp_server.rs`, `acp_session_store.rs`, `channels/acp.md`, selected ACP app entrypoints |
 | `channel:core` | `crates/zeroclaw-api/src/channel.rs`, `crates/zeroclaw-channels/src/lib.rs`, `crates/zeroclaw-channels/src/orchestrator/**`, `src/channels/mod.rs` |
 | `channel:bluesky` | `bluesky.rs` |
 | `channel:clawdtalk` | `clawdtalk.rs` |
@@ -280,7 +280,7 @@ Tools are grouped by logical function rather than one label per file.
 | `tool:microsoft365` | `microsoft365/**` |
 | `tool:pushover` | `pushover.rs` |
 | `tool:security` | `src/tools/security_ops.rs`, `src/tools/verifiable_intent.rs`, `crates/zeroclaw-runtime/src/tools/security_ops.rs`, `crates/zeroclaw-runtime/src/tools/verifiable_intent.rs` |
-| `tool:shell` | `src/tools/shell.rs`, `src/tools/node_tool.rs`, `crates/zeroclaw-runtime/src/tools/shell.rs`, `crates/zeroclaw-gateway/src/node_tool.rs` |
+| `tool:shell` | `src/tools/shell.rs`, `crates/zeroclaw-runtime/src/tools/shell.rs` |
 | `tool:web` | `web_fetch.rs`, `web_search_tool.rs`, `web_search_provider_routing.rs`, `http_request.rs` |
 
 The `tool:sop` label group was removed: the SOP tool paths it matched were deleted with the SOP run side.

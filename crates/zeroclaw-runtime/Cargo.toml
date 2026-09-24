@@ -124,7 +124,6 @@ integrations-saas = ["zeroclaw-tools/integrations-saas"]
 hardware-tools = ["zeroclaw-tools/hardware-tools"]
 email-tools = ["zeroclaw-tools/email-tools"]
 plugins-wasm = ["dep:zeroclaw-plugins", "zeroclaw-plugins/plugins-wasmtime"]
-webauthn = []
 sandbox-bubblewrap = []
 # Heavy agent/SOP/RPC behavioral suites (~35k lines). Gated so lib-test
 # iteration does not compile them; CI runtime leg enables this feature.

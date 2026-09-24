@@ -19,19 +19,13 @@ const exactRouteTitles: Record<string, string> = {
 const sectionTitles: Record<string, string> = {
   agent: 'nav.agent',
   agents: 'nav.agents',
-  tools: 'nav.tools',
   skills: 'nav.skills',
   cron: 'nav.cron',
-  integrations: 'nav.integrations',
   config: 'nav.config',
   setup: 'nav.config',
   memory: 'nav.memory',
   logs: 'nav.logs',
-  doctor: 'nav.doctor',
   pairing: 'nav.pairing',
-  canvas: 'nav.canvas',
-  'acp-console': 'nav.acp',
-  quickstart: 'nav.quickstart',
 };
 
 // Derive the i18n title key from the matched route/section so every page —

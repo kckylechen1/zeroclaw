@@ -1,6 +1,6 @@
 # Building the web dashboard
 
-The web dashboard at `web/` is a Vite + React + TypeScript app. Its TypeScript API client is generated from the gateway's runtime OpenAPI spec, not hand-written.
+The web dashboard at `web/` is a Vite + React + TypeScript app. Its API client (`web/src/lib/api.ts`) is hand-written against the gateway routes in `crates/zeroclaw-gateway/src/lib.rs`.
 
 ## Quickstart
 
@@ -11,8 +11,7 @@ The web dashboard at `web/` is a Vite + React + TypeScript app. Its TypeScript A
 ```sh
 cargo web build         # production bundle into web/dist/
 cargo web dev           # vite dev server with HMR
-cargo web check         # typecheck only (gen-api + tsc -b)
-cargo web gen-api       # regenerate web/src/lib/api-generated.ts
+cargo web check         # typecheck only (tsc -b)
 cargo web install       # npm install in web/
 ```
 
@@ -20,22 +19,12 @@ cargo web install       # npm install in web/
 
 `cargo web` is an alias for `cargo run -p xtask --bin web --` (defined in the cargo config). Every subcommand auto-runs `npm install` if `web/node_modules/` is missing.
 
-## What gets generated
-
-| Path                            | Generator                | Tracked?   |
-| ------------------------------- | ------------------------ | ---------- |
-| `web/src/lib/api-generated.ts`  | `cargo web gen-api`      | gitignored |
-| `target/openapi.json`           | `cargo web gen-api`      | gitignored |
-| `web/dist/`                     | `cargo web build`        | gitignored |
-
-`cargo web gen-api` renders the OpenAPI spec in-process from `zeroclaw_gateway::openapi::build_spec()`, writes it to `target/openapi.json`, and feeds that file to `openapi-typescript`. The same `build_spec()` serves `/api/openapi.json` at runtime, so `build_spec()` is the single contract source and the generated files are rebuilt on demand.
-
 ## Editing flow
 
-1. Change a gateway handler or schema in `crates/zeroclaw-gateway/`.
-2. Run `cargo web check`: `gen-api` regenerates `api-generated.ts` from the new spec, then `tsc -b` typechecks the dashboard against it. Any consumer that relies on a now-removed field fails to compile.
-3. Update consumers in `web/src/` to match.
-4. `cargo web build` for the final bundle.
+1. Change a gateway handler in `crates/zeroclaw-gateway/`.
+2. Update the matching types and calls in `web/src/lib/api.ts` and `web/src/types/api.ts`.
+3. Run `cargo web check` to typecheck the dashboard.
+4. `cargo web build` for the final bundle into `web/dist/` (gitignored).
 
 ## CI and release builds
 

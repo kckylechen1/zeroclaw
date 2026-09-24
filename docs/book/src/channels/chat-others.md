@@ -23,9 +23,7 @@ Use case: paired-identity channels where sub-second replies are an AI-tell. Wire
 
 ## iMessage (macOS only)
 
-iMessage is bridged through the Linq Partner API (`[channels.linq.<alias>]`):
-
-**macOS-only** and requires either Linq as a third-party relay, or direct AppleScript automation (experimental, requires Full Disk Access and Accessibility grants).
+iMessage uses direct AppleScript automation: **macOS-only**, experimental, and it requires Full Disk Access and Accessibility grants. The Linq relay option received messages through a gateway webhook that was removed (#375).
 
 ## WeChat personal iLink Bot (微信个人号 iLink)
 
@@ -64,7 +62,6 @@ Channels with more intricate setup (OAuth flows, end-to-end encryption, multi-de
 - [Slack](./slack.md)
 - [Mattermost](./mattermost.md)
 - [LINE](./line.md)
-- [Nextcloud Talk](./nextcloud-talk.md)
 - [Signal](./signal.md)
 - [WhatsApp](./whatsapp.md)
 

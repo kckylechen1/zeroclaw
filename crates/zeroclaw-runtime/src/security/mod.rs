@@ -25,8 +25,6 @@ pub mod prompt_guard;
 pub mod seatbelt;
 pub mod secrets;
 pub mod traits;
-#[cfg(feature = "webauthn")]
-pub mod webauthn;
 
 #[allow(unused_imports)]
 pub use audit::{AuditEvent, AuditEventType, AuditLogger};

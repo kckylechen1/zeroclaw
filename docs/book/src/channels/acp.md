@@ -8,7 +8,7 @@ Think of it as "LSP for agents": the editor launches `zeroclaw acp`, sends promp
 
 - An editor extension that offers an "ask the agent about this file" command
 - A terminal multiplexer integration that opens a side pane with an agent session
-- A CI runner that drives the agent programmatically without a full gateway setup
+- A CI runner that drives the agent programmatically
 - Anything that wants agent sessions without HTTP and without binding a port
 
 ## Protocol shape: v1
@@ -57,17 +57,14 @@ Open an isolated agent session.
 
 **`agentAlias`** names which configured `[agents.<alias>]` entry to use. It is required when more than one agent is configured; when exactly one agent exists, it is auto-selected and the field may be omitted. The alias accepts the camelCase `agentAlias`, the snake_case `agent_alias`, or the short `agent` form.
 
-When connecting through the **gateway WebSocket** endpoint, the connection URL may also carry a **`?agent=<alias>`** query parameter. That value is a **connection-scoped default**, not a config change. Alias resolution for `session/new` follows this precedence:
+Alias resolution for `session/new` follows this precedence:
 
 1. explicit `agentAlias` / `agent_alias` / `agent` in the `session/new` params
-2. gateway `?agent=<alias>` on the WebSocket URL
-3. `[acp].default_agent`
-4. sole configured `[agents.<alias>]` entry when exactly one exists
-5. error when no alias can be resolved
+2. `[acp].default_agent`
+3. sole configured `[agents.<alias>]` entry when exactly one exists
+4. error when no alias can be resolved
 
-Every resolved alias, regardless of which step selected it, must name an **enabled, dispatchable** agent. Unknown aliases and configured-but-disabled agents fail `session/new` with `-32602 INVALID_PARAMS`. A blank or whitespace-only `?agent=` is treated as absent and falls through to the next step.
-
-Standalone **`zeroclaw acp`** (stdio subprocess) does not read `?agent=`; use an explicit `agentAlias` or `[acp].default_agent` there instead.
+Every resolved alias, regardless of which step selected it, must name an **enabled, dispatchable** agent. Unknown aliases and configured-but-disabled agents fail `session/new` with `-32602 INVALID_PARAMS`.
 
 The optional **`cwd`** parameter (aliases: `workspaceDir`, `workspace_dir`) pins the per-session file-access boundary, it becomes the `workspace_dir` inside the `SecurityPolicy` that all file tools enforce. The agent's persistent data directory (memory, identity, cron) remains the daemon-level `workspace_dir` from config.
 
@@ -221,7 +218,7 @@ ZeroClaw also accepts inbound `session/update` (and the legacy `session/event` a
 
 ## Session persistence
 
-ZeroClaw automatically persists ACP sessions to SQLite. No configuration is required, the store opens at `<workspace_dir>/sessions/acp-sessions.db` whenever `zeroclaw acp` starts or a gateway WebSocket ACP connection is accepted. If the file cannot be created (read-only filesystem, bad permissions), the server falls back to in-memory-only sessions and `loadSession` reports `false` in the `initialize` response.
+ZeroClaw automatically persists ACP sessions to SQLite. No configuration is required, the store opens at `<workspace_dir>/sessions/acp-sessions.db` whenever `zeroclaw acp` starts. If the file cannot be created (read-only filesystem, bad permissions), the server falls back to in-memory-only sessions and `loadSession` reports `false` in the `initialize` response.
 
 What is persisted:
 
@@ -248,7 +245,7 @@ Restore a previously persisted session with **full history replay**. The server 
 
 After `session/load` returns, the session is active and ready to accept `session/prompt` calls.
 
-When restoring a persisted session, the server reuses the stored owner alias only if that agent is still dispatchable. Otherwise it falls back through the operator-controlled `[acp].default_agent` → sole-agent chain, skipping any disabled aliases along the way. Gateway `?agent=` is a `session/new` default only and does not rebind restore.
+When restoring a persisted session, the server reuses the stored owner alias only if that agent is still dispatchable. Otherwise it falls back through the operator-controlled `[acp].default_agent` → sole-agent chain, skipping any disabled aliases along the way.
 
 `session_id` is accepted as a snake_case alias for `sessionId`.
 
@@ -295,11 +292,9 @@ Returns `SESSION_NOT_FOUND` (`-32000`) if the session is not currently active (i
 
 `default_agent` is consulted when `session/new` omits `agentAlias` and more than one agent is configured; if it is absent and exactly one `[agents.<alias>]` entry exists, that agent is auto-selected.
 
-When running `zeroclaw acp` as a subprocess, the command starts the server unconditionally. When running as a daemon, the gateway exposes ACP over WebSocket at `/acp` with no additional config required. Gateway clients may append `?agent=<alias>` to that URL so each configured agent can be addressed from a spec-vanilla one-agent-per-endpoint client; authentication (`Authorization`, `Sec-WebSocket-Protocol`, or `?token=`) is enforced before the connection is upgraded, and the query parameter grants no access beyond selecting among already-configured agents.
+`zeroclaw acp` starts the server unconditionally. The gateway does not expose ACP.
 
 ## Running
-
-**As a subprocess (typical IDE integration):**
 
 <div class="os-tabs-src">
 
@@ -312,36 +307,6 @@ zeroclaw acp
 </div>
 
 The binary reads stdin, writes stdout, exits on EOF.
-
-**Via the daemon gateway (remote or same-host):**
-
-Start the daemon normally. The gateway always exposes ACP over WebSocket at `/acp`, no extra config flag is required. Clients connect directly: for multi-agent installs, use a URL such as `ws://127.0.0.1:8080/acp?agent=myagent` so `session/new` can omit `agentAlias`, or through `zeroclaw-acp-bridge`, which bridges the stdio ACP protocol to the gateway WebSocket:
-
-<div class="os-tabs-src">
-
-#### sh
-
-```sh
-zeroclaw-acp-bridge
-```
-
-</div>
-
-The bridge reads the gateway address and auth token from the same config as the daemon. When the daemon runs with a non-default config directory (e.g. `--config-dir /tmp/zeroclaw`), point the bridge at the same directory:
-
-<div class="os-tabs-src">
-
-#### sh
-
-```sh
-zeroclaw-acp-bridge --config-dir /tmp/zeroclaw
-# or equivalently:
-zeroclaw-acp-bridge --config-dir=/tmp/zeroclaw
-```
-
-</div>
-
-You can also supply the bearer token directly via `ZEROCLAW_ACP_BRIDGE_TOKEN` if you prefer not to rely on the cached token file.
 
 ## Version compatibility
 
@@ -379,7 +344,6 @@ This separation ensures that ephemeral coding-assist conversations do not pollut
 - ACP server: `crates/zeroclaw-channels/src/orchestrator/acp_server.rs`
 - ACP back-channel: `crates/zeroclaw-channels/src/acp_channel.rs`
 - Session store (SQLite): `crates/zeroclaw-infra/src/acp_session_store.rs`
-- Gateway ACP-over-WebSocket endpoint: `crates/zeroclaw-gateway/src/acp.rs`
 - Per-session path enforcement: `crates/zeroclaw-config/src/policy.rs` (`SecurityPolicy::from_config`), `crates/zeroclaw-runtime/src/agent/agent.rs` (`from_config_with_session_cwd_and_mcp`)
 - OS-level sandbox detection/backends: `crates/zeroclaw-runtime/src/security/detect.rs`, `landlock.rs`, `bubblewrap.rs`, `seatbelt.rs`
 

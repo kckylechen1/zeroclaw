@@ -6,8 +6,6 @@ use axum::response::IntoResponse;
 use http_body_util::BodyExt;
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(feature = "channel-whatsapp-cloud")]
-use zeroclaw_api::channel::ChannelMessage;
 use zeroclaw_memory::{Memory, MemoryCategory, MemoryEntry};
 use zeroclaw_providers::ModelProvider;
 use zeroclaw_runtime::agent::loop_::{mcp_tool_access_policy, register_eager_mcp_tool_if_allowed};
@@ -290,22 +288,6 @@ fn admin_paircode_state(
         rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
         observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -326,12 +308,8 @@ fn admin_paircode_state(
         )),
         device_registry: registry,
         pending_pairings: None,
-        canvas_store: CanvasStore::new(),
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
     }
 }
 
@@ -584,16 +562,6 @@ fn webhook_body_requires_message_field() {
 }
 
 #[test]
-fn whatsapp_query_fields_are_optional() {
-    let q = WhatsAppVerifyQuery {
-        mode: None,
-        verify_token: None,
-        challenge: None,
-    };
-    assert!(q.mode.is_none());
-}
-
-#[test]
 fn app_state_is_clone() {
     fn assert_clone<T: Clone>() {}
     assert_clone::<AppState>();
@@ -709,7 +677,7 @@ async fn run_gateway_starts_with_zero_agents() {
     );
 
     let handle = zeroclaw_spawn::spawn!(async move {
-        run_gateway("127.0.0.1", 0, config, None, None, None, None, None).await
+        run_gateway("127.0.0.1", 0, config, None, None, None).await
     });
 
     match tokio::time::timeout(
@@ -734,7 +702,7 @@ async fn run_gateway_starts_with_zero_agents() {
     if handle.is_finished() {
         let result = handle.await.expect("task did not panic");
         panic!(
-            "gateway exited during boot with zero agents — must stay up for reload/quickstart: {:?}",
+            "gateway exited during boot with zero agents — must stay up for reload: {:?}",
             result
         );
     }
@@ -765,7 +733,7 @@ async fn run_gateway_starts_with_unresolved_agent_risk_profile() {
     config.agents.insert("fake123".to_string(), agent);
 
     let handle = zeroclaw_spawn::spawn!(async move {
-        run_gateway("127.0.0.1", 0, config, None, None, None, None, None).await
+        run_gateway("127.0.0.1", 0, config, None, None, None).await
     });
 
     match tokio::time::timeout(
@@ -784,7 +752,7 @@ async fn run_gateway_starts_with_unresolved_agent_risk_profile() {
         let result = handle.await.expect("task did not panic");
         panic!(
             "gateway exited during boot when agent.risk_profile was unresolved \
-             — must stay up so operator can fix via /admin/reload or /quickstart: {:?}",
+             — must stay up so operator can fix via /admin/reload: {:?}",
             result
         );
     }
@@ -806,7 +774,7 @@ async fn run_gateway_starts_with_mismatched_provider_api_key() {
     );
 
     let handle = zeroclaw_spawn::spawn!(async move {
-        run_gateway("127.0.0.1", 0, config, None, None, None, None, None).await
+        run_gateway("127.0.0.1", 0, config, None, None, None).await
     });
 
     match tokio::time::timeout(
@@ -825,8 +793,7 @@ async fn run_gateway_starts_with_mismatched_provider_api_key() {
         let result = handle.await.expect("task did not panic");
         panic!(
             "gateway exited during boot when seed provider API key was \
-             mismatched — must stay up so operator can fix via /admin/reload \
-             or /quickstart: {:?}",
+             mismatched — must stay up so operator can fix via /admin/reload: {:?}",
             result
         );
     }
@@ -855,17 +822,7 @@ async fn run_gateway_uses_external_shutdown_sender() {
     };
 
     let handle = zeroclaw_spawn::spawn!(async move {
-        run_gateway(
-            "127.0.0.1",
-            port,
-            config,
-            None,
-            Some(reload_controls),
-            None,
-            None,
-            None,
-        )
-        .await
+        run_gateway("127.0.0.1", port, config, None, Some(reload_controls), None).await
     });
 
     let addr = format!("127.0.0.1:{port}");
@@ -916,22 +873,6 @@ async fn metrics_endpoint_returns_hint_when_prometheus_is_disabled() {
         rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
         observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -952,12 +893,8 @@ async fn metrics_endpoint_returns_hint_when_prometheus_is_disabled() {
         )),
         device_registry: None,
         pending_pairings: None,
-        canvas_store: CanvasStore::new(),
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
     };
 
     let response = handle_metrics(State(state)).await.into_response();
@@ -1006,22 +943,6 @@ async fn metrics_endpoint_renders_prometheus_output() {
         rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
         observer,
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -1042,12 +963,8 @@ async fn metrics_endpoint_renders_prometheus_output() {
         )),
         device_registry: None,
         pending_pairings: None,
-        canvas_store: CanvasStore::new(),
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
     };
 
     let response = handle_metrics(State(state)).await.into_response();
@@ -1385,29 +1302,6 @@ fn webhook_session_id_rejects_invalid_chars() {
     }
 }
 
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_memory_key_includes_sender_and_message_id() {
-    let msg = ChannelMessage {
-        id: "wamid-123".into(),
-        sender: "+1234567890".into(),
-        reply_target: "+1234567890".into(),
-        content: "hello".into(),
-        channel: "whatsapp".into(),
-        channel_alias: None,
-        timestamp: 1,
-        thread_ts: None,
-        interruption_scope_id: None,
-        attachments: vec![],
-        subject: None,
-
-        ..Default::default()
-    };
-
-    let key = whatsapp_memory_key(&msg);
-    assert_eq!(key, "whatsapp_+1234567890_wamid-123");
-}
-
 #[derive(Default)]
 struct MockMemory;
 
@@ -1678,22 +1572,6 @@ async fn webhook_idempotency_skips_duplicate_provider_calls() {
         rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
         observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -1714,12 +1592,8 @@ async fn webhook_idempotency_skips_duplicate_provider_calls() {
         )),
         device_registry: None,
         pending_pairings: None,
-        canvas_store: CanvasStore::new(),
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
     };
 
     let mut headers = HeaderMap::new();
@@ -1786,22 +1660,6 @@ async fn webhook_unknown_agent_rejected_before_dispatch() {
         rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
         observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -1822,12 +1680,8 @@ async fn webhook_unknown_agent_rejected_before_dispatch() {
         )),
         device_registry: None,
         pending_pairings: None,
-        canvas_store: CanvasStore::new(),
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
     };
 
     // An idempotency key on a rejected request must NOT be consumed.
@@ -1909,22 +1763,6 @@ async fn webhook_explicit_agent_reports_model_without_owning_lifecycle() {
         rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
         observer,
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -1945,12 +1783,8 @@ async fn webhook_explicit_agent_reports_model_without_owning_lifecycle() {
         )),
         device_registry: None,
         pending_pairings: None,
-        canvas_store: CanvasStore::new(),
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
     };
 
     let response = handle_webhook(
@@ -2012,22 +1846,6 @@ async fn webhook_autosave_stores_distinct_keys_per_request() {
         rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
         observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -2048,12 +1866,8 @@ async fn webhook_autosave_stores_distinct_keys_per_request() {
         )),
         device_registry: None,
         pending_pairings: None,
-        canvas_store: CanvasStore::new(),
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
     };
 
     let headers = HeaderMap::new();
@@ -2134,22 +1948,6 @@ async fn webhook_secret_hash_rejects_missing_header() {
         rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
         observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -2170,12 +1968,8 @@ async fn webhook_secret_hash_rejects_missing_header() {
         )),
         device_registry: None,
         pending_pairings: None,
-        canvas_store: CanvasStore::new(),
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
     };
 
     let response = handle_webhook(
@@ -2222,22 +2016,6 @@ async fn webhook_secret_hash_rejects_invalid_header() {
         rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
         observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -2258,12 +2036,8 @@ async fn webhook_secret_hash_rejects_invalid_header() {
         )),
         device_registry: None,
         pending_pairings: None,
-        canvas_store: CanvasStore::new(),
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
     };
 
     let mut headers = HeaderMap::new();
@@ -2315,22 +2089,6 @@ async fn webhook_secret_hash_accepts_valid_header() {
         rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
         auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
         idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
         observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -2351,12 +2109,8 @@ async fn webhook_secret_hash_accepts_valid_header() {
         )),
         device_registry: None,
         pending_pairings: None,
-        canvas_store: CanvasStore::new(),
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
     };
 
     let mut headers = HeaderMap::new();
@@ -2378,565 +2132,13 @@ async fn webhook_secret_hash_accepts_valid_header() {
     assert_eq!(provider_impl.calls.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(feature = "channel-nextcloud")]
-fn compute_nextcloud_signature_hex(secret: &str, random: &str, body: &str) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
-    let payload = format!("{random}{body}");
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(payload.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
-}
-
-#[cfg(feature = "channel-nextcloud")]
-#[tokio::test]
-async fn nextcloud_talk_webhook_returns_not_found_when_not_configured() {
-    let model_provider: Arc<dyn ModelProvider> = Arc::new(MockModelProvider::default());
-    let memory: Arc<dyn Memory> = Arc::new(MockMemory);
-
-    let state = AppState {
-        config: Arc::new(RwLock::new(Config::default())),
-        config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-        model_provider,
-        model: "test-model".into(),
-        temperature: None,
-        mem: memory.clone(),
-        memory_strategy: Arc::new(DefaultMemoryStrategy::with_config(
-            Arc::clone(&memory),
-            zeroclaw_config::schema::MemoryConfig::default(),
-            std::path::PathBuf::new(),
-        )),
-        companion_store: None,
-        auto_save: false,
-        webhook_secret_hash: None,
-        pairing: Arc::new(PairingGuard::new(false, &[])),
-        trust_forwarded_headers: false,
-        rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
-        auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
-        idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
-        observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
-        tools_registry: Arc::new(Vec::new()),
-        tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
-        cost_tracker: None,
-        event_tx: tokio::sync::broadcast::channel(16).0,
-        event_buffer: Arc::new(sse::EventBuffer::new(16)),
-        shutdown_tx: tokio::sync::watch::channel(false).0,
-        reload_tx: None,
-        #[cfg(feature = "nodes")]
-        node_registry: Arc::new(nodes::NodeRegistry::new(16)),
-        #[cfg(feature = "nodes")]
-        mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
-        path_prefix: String::new(),
-        web_dist_dir: None,
-        session_backend: None,
-        session_queue: std::sync::Arc::new(crate::session_queue::SessionActorQueue::new(
-            8, 30, 600,
-        )),
-        device_registry: None,
-        pending_pairings: None,
-        canvas_store: CanvasStore::new(),
-        cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
-    };
-
-    let response = Box::pin(handle_nextcloud_talk_webhook(
-        State(state),
-        HeaderMap::new(),
-        Bytes::from_static(br#"{"type":"message"}"#),
-    ))
-    .await
-    .into_response();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[cfg(feature = "channel-nextcloud")]
-#[tokio::test]
-async fn nextcloud_talk_webhook_rejects_invalid_signature() {
-    let provider_impl = Arc::new(MockModelProvider::default());
-    let model_provider: Arc<dyn ModelProvider> = provider_impl.clone();
-    let memory: Arc<dyn Memory> = Arc::new(MockMemory);
-
-    let alias = "nextcloud_talk_test_alias";
-    let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-    let channel = Arc::new(NextcloudTalkChannel::new(
-        "https://cloud.example.com".into(),
-        "app-token".into(),
-        String::new(),
-        alias,
-        peer_resolver,
-    ));
-
-    let secret = "nextcloud-test-secret";
-    let random = "seed-value";
-    let body = r#"{"type":"message","object":{"token":"room-token"},"message":{"actorType":"users","actorId":"user_a","message":"hello"}}"#;
-    let _valid_signature = compute_nextcloud_signature_hex(secret, random, body);
-    let invalid_signature = "deadbeef";
-
-    let state = AppState {
-        config: Arc::new(RwLock::new(Config::default())),
-        config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-        model_provider,
-        model: "test-model".into(),
-        temperature: None,
-        mem: memory.clone(),
-        memory_strategy: Arc::new(DefaultMemoryStrategy::with_config(
-            Arc::clone(&memory),
-            zeroclaw_config::schema::MemoryConfig::default(),
-            std::path::PathBuf::new(),
-        )),
-        companion_store: None,
-        auto_save: false,
-        webhook_secret_hash: None,
-        pairing: Arc::new(PairingGuard::new(false, &[])),
-        trust_forwarded_headers: false,
-        rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
-        auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
-        idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        nextcloud_talk: HashMap::from([(alias.to_string(), channel)]),
-        nextcloud_talk_webhook_secret: HashMap::from([(alias.to_string(), Arc::from(secret))]),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
-        observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
-        tools_registry: Arc::new(Vec::new()),
-        tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
-        cost_tracker: None,
-        event_tx: tokio::sync::broadcast::channel(16).0,
-        event_buffer: Arc::new(sse::EventBuffer::new(16)),
-        shutdown_tx: tokio::sync::watch::channel(false).0,
-        reload_tx: None,
-        #[cfg(feature = "nodes")]
-        node_registry: Arc::new(nodes::NodeRegistry::new(16)),
-        #[cfg(feature = "nodes")]
-        mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
-        path_prefix: String::new(),
-        web_dist_dir: None,
-        session_backend: None,
-        session_queue: std::sync::Arc::new(crate::session_queue::SessionActorQueue::new(
-            8, 30, 600,
-        )),
-        device_registry: None,
-        pending_pairings: None,
-        canvas_store: CanvasStore::new(),
-        cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
-    };
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "X-Nextcloud-Talk-Random",
-        HeaderValue::from_str(random).unwrap(),
-    );
-    headers.insert(
-        "X-Nextcloud-Talk-Signature",
-        HeaderValue::from_str(invalid_signature).unwrap(),
-    );
-
-    let response = Box::pin(handle_nextcloud_talk_webhook(
-        State(state),
-        headers,
-        Bytes::from(body),
-    ))
-    .await
-    .into_response();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(provider_impl.calls.load(Ordering::SeqCst), 0);
-}
-
 // handler must return 200 OK before the (potentially
 // slow) LLM call completes, so Nextcloud Talk doesn't cancel the webhook
 // request at its ~5s timeout.
-#[cfg(feature = "channel-nextcloud")]
-#[derive(Default)]
-struct SlowProvider {
-    calls: AtomicUsize,
-    started_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-}
-
-#[cfg(feature = "channel-nextcloud")]
-#[async_trait]
-impl ModelProvider for SlowProvider {
-    async fn chat_with_system(
-        &self,
-        _system_prompt: Option<&str>,
-        _message: &str,
-        _model: &str,
-        _temperature: Option<f64>,
-    ) -> anyhow::Result<String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(tx) = self.started_tx.lock().take() {
-            let _ = tx.send(());
-        }
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        Ok("slow ok".into())
-    }
-}
-#[cfg(feature = "channel-nextcloud")]
-impl ::zeroclaw_api::attribution::Attributable for SlowProvider {
-    fn role(&self) -> ::zeroclaw_api::attribution::Role {
-        ::zeroclaw_api::attribution::Role::Provider(
-            ::zeroclaw_api::attribution::ProviderKind::Model(
-                ::zeroclaw_api::attribution::ModelProviderKind::Custom,
-            ),
-        )
-    }
-    fn alias(&self) -> &str {
-        "SlowProvider"
-    }
-}
-
-#[cfg(feature = "channel-nextcloud")]
-#[tokio::test]
-async fn nextcloud_talk_webhook_returns_before_llm_call_completes() {
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let provider_impl = Arc::new(SlowProvider {
-        calls: AtomicUsize::new(0),
-        started_tx: Mutex::new(Some(started_tx)),
-    });
-    let provider: Arc<dyn ModelProvider> = provider_impl.clone();
-    let memory: Arc<dyn Memory> = Arc::new(MockMemory);
-
-    let channel = Arc::new(NextcloudTalkChannel::new(
-        "https://cloud.example.com".into(),
-        "app-token".into(),
-        String::new(),
-        "default",
-        Arc::new(|| vec!["*".to_string()]),
-    ));
-
-    let body = r#"{"type":"message","object":{"token":"room-token"},"actor":{"id":"user_a","name":"User A"},"message":{"actorType":"users","actorId":"user_a","message":"hello"}}"#;
-
-    let state = AppState {
-        config: Arc::new(RwLock::new(Config::default())),
-        config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-        model_provider: provider,
-        model: "test-model".into(),
-        temperature: None,
-        mem: memory.clone(),
-        memory_strategy: Arc::new(DefaultMemoryStrategy::with_config(
-            Arc::clone(&memory),
-            zeroclaw_config::schema::MemoryConfig::default(),
-            std::path::PathBuf::new(),
-        )),
-        companion_store: None,
-        auto_save: false,
-        webhook_secret_hash: None,
-        pairing: Arc::new(PairingGuard::new(false, &[])),
-        trust_forwarded_headers: false,
-        rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
-        auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
-        idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        nextcloud_talk: HashMap::from([("default".to_string(), channel)]),
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
-        observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
-        tools_registry: Arc::new(Vec::new()),
-        tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
-        cost_tracker: None,
-        event_tx: tokio::sync::broadcast::channel(16).0,
-        event_buffer: Arc::new(sse::EventBuffer::new(16)),
-        shutdown_tx: tokio::sync::watch::channel(false).0,
-        reload_tx: None,
-        #[cfg(feature = "nodes")]
-        node_registry: Arc::new(nodes::NodeRegistry::new(16)),
-        #[cfg(feature = "nodes")]
-        mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
-        path_prefix: String::new(),
-        web_dist_dir: None,
-        session_backend: None,
-        session_queue: std::sync::Arc::new(crate::session_queue::SessionActorQueue::new(
-            8, 30, 600,
-        )),
-        device_registry: None,
-        pending_pairings: None,
-        canvas_store: CanvasStore::new(),
-        cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
-    };
-
-    let start = std::time::Instant::now();
-    let response = tokio::time::timeout(
-        Duration::from_secs(2),
-        Box::pin(handle_nextcloud_talk_webhook(
-            State(state),
-            HeaderMap::new(),
-            Bytes::from(body),
-        )),
-    )
-    .await
-    .expect("webhook must return before 2s deadline (regression #6156)")
-    .into_response();
-
-    let elapsed = start.elapsed();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "handler returned after {elapsed:?}; expected fast return for #6156"
-    );
-
-    // Confirm the spawned task actually started the LLM call (i.e., the
-    // ack didn't just skip processing). The 30s sleep is still in flight.
-    tokio::time::timeout(Duration::from_secs(2), started_rx)
-        .await
-        .expect("spawned LLM call did not start within 2s")
-        .expect("started_tx sender was dropped");
-    assert_eq!(provider_impl.calls.load(Ordering::SeqCst), 1);
-}
 
 // ══════════════════════════════════════════════════════════
 // WhatsApp Signature Verification Tests (CWE-345 Prevention)
 // ══════════════════════════════════════════════════════════
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-fn compute_whatsapp_signature_hex(secret: &str, body: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(body);
-    hex::encode(mac.finalize().into_bytes())
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-fn compute_whatsapp_signature_header(secret: &str, body: &[u8]) -> String {
-    format!("sha256={}", compute_whatsapp_signature_hex(secret, body))
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_valid() {
-    let app_secret = generate_test_secret();
-    let body = b"test body content";
-
-    let signature_header = compute_whatsapp_signature_header(&app_secret, body);
-
-    assert!(verify_whatsapp_signature(
-        &app_secret,
-        body,
-        &signature_header
-    ));
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_invalid_wrong_secret() {
-    let app_secret = generate_test_secret();
-    let wrong_secret = generate_test_secret();
-    let body = b"test body content";
-
-    let signature_header = compute_whatsapp_signature_header(&wrong_secret, body);
-
-    assert!(!verify_whatsapp_signature(
-        &app_secret,
-        body,
-        &signature_header
-    ));
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_invalid_wrong_body() {
-    let app_secret = generate_test_secret();
-    let original_body = b"original body";
-    let tampered_body = b"tampered body";
-
-    let signature_header = compute_whatsapp_signature_header(&app_secret, original_body);
-
-    // Verify with tampered body should fail
-    assert!(!verify_whatsapp_signature(
-        &app_secret,
-        tampered_body,
-        &signature_header
-    ));
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_missing_prefix() {
-    let app_secret = generate_test_secret();
-    let body = b"test body";
-
-    // Signature without "sha256=" prefix
-    let signature_header = "abc123def456";
-
-    assert!(!verify_whatsapp_signature(
-        &app_secret,
-        body,
-        signature_header
-    ));
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_empty_header() {
-    let app_secret = generate_test_secret();
-    let body = b"test body";
-
-    assert!(!verify_whatsapp_signature(&app_secret, body, ""));
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_invalid_hex() {
-    let app_secret = generate_test_secret();
-    let body = b"test body";
-
-    // Invalid hex characters
-    let signature_header = "sha256=not_valid_hex_zzz";
-
-    assert!(!verify_whatsapp_signature(
-        &app_secret,
-        body,
-        signature_header
-    ));
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_empty_body() {
-    let app_secret = generate_test_secret();
-    let body = b"";
-
-    let signature_header = compute_whatsapp_signature_header(&app_secret, body);
-
-    assert!(verify_whatsapp_signature(
-        &app_secret,
-        body,
-        &signature_header
-    ));
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_unicode_body() {
-    let app_secret = generate_test_secret();
-    let body = "Hello 🦀 World".as_bytes();
-
-    let signature_header = compute_whatsapp_signature_header(&app_secret, body);
-
-    assert!(verify_whatsapp_signature(
-        &app_secret,
-        body,
-        &signature_header
-    ));
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_json_payload() {
-    let app_secret = generate_test_secret();
-    let body = br#"{"entry":[{"changes":[{"value":{"messages":[{"from":"1234567890","text":{"body":"Hello"}}]}}]}]}"#;
-
-    let signature_header = compute_whatsapp_signature_header(&app_secret, body);
-
-    assert!(verify_whatsapp_signature(
-        &app_secret,
-        body,
-        &signature_header
-    ));
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_case_sensitive_prefix() {
-    let app_secret = generate_test_secret();
-    let body = b"test body";
-
-    let hex_sig = compute_whatsapp_signature_hex(&app_secret, body);
-
-    // Wrong case prefix should fail
-    let wrong_prefix = format!("SHA256={hex_sig}");
-    assert!(!verify_whatsapp_signature(&app_secret, body, &wrong_prefix));
-
-    // Correct prefix should pass
-    let correct_prefix = format!("sha256={hex_sig}");
-    assert!(verify_whatsapp_signature(
-        &app_secret,
-        body,
-        &correct_prefix
-    ));
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_truncated_hex() {
-    let app_secret = generate_test_secret();
-    let body = b"test body";
-
-    let hex_sig = compute_whatsapp_signature_hex(&app_secret, body);
-    let truncated = &hex_sig[..32]; // Only half the signature
-    let signature_header = format!("sha256={truncated}");
-
-    assert!(!verify_whatsapp_signature(
-        &app_secret,
-        body,
-        &signature_header
-    ));
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[test]
-fn whatsapp_signature_extra_bytes() {
-    let app_secret = generate_test_secret();
-    let body = b"test body";
-
-    let hex_sig = compute_whatsapp_signature_hex(&app_secret, body);
-    let extended = format!("{hex_sig}deadbeef");
-    let signature_header = format!("sha256={extended}");
-
-    assert!(!verify_whatsapp_signature(
-        &app_secret,
-        body,
-        &signature_header
-    ));
-}
 
 // ══════════════════════════════════════════════════════════
 // IdempotencyStore Edge-Case Tests
@@ -3333,8 +2535,8 @@ fn needs_quickstart_for_flags_empty_model() {
         "error must carry the needs_quickstart marker for callers to map to 503; got: {msg}"
     );
     assert!(
-        msg.contains("/quickstart"),
-        "error must point the user at /quickstart; got: {msg}"
+        msg.contains("zeroclaw quickstart"),
+        "error must point the user at `zeroclaw quickstart`; got: {msg}"
     );
 }
 
@@ -3408,529 +2610,7 @@ fn needs_quickstart_channel_reply_resolves_via_fluent() {
 // Linq Multi-Tenant Webhook Routing Tests
 // ══════════════════════════════════════════════════════════
 
-/// Helper: compute a valid Linq HMAC-SHA256 signature for the given
-/// secret, timestamp, and body.  Mirrors the verification logic in
-/// `zeroclaw_channels::linq::verify_linq_signature`.
-#[cfg(feature = "channel-linq")]
-fn compute_linq_signature_hex(secret: &str, timestamp: &str, body: &str) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
-    let message = format!("{timestamp}.{body}");
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(message.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
-}
-
-/// Helper: build a minimal Linq webhook payload that `parse_webhook_payload`
-/// recognises as a `message.received` event with one text part.
-#[cfg(feature = "channel-linq")]
-fn linq_webhook_body(sender: &str, text: &str) -> String {
-    serde_json::json!({
-        "event_type": "message.received",
-        "data": {
-            "sender": { "phone": sender },
-            "message": {
-                "parts": [{ "type": "text", "value": text }]
-            }
-        }
-    })
-    .to_string()
-}
-
-/// Helper: build an `AppState` with one Linq channel registered under the
-/// given alias, with an allow-any peer resolver and an optional signing
-/// secret.
-#[cfg(feature = "channel-linq")]
-fn linq_test_state(alias: &str, signing_secret: Option<&str>) -> AppState {
-    let model_provider: Arc<dyn ModelProvider> = Arc::new(MockModelProvider::default());
-    let memory: Arc<dyn Memory> = Arc::new(MockMemory);
-
-    let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
-        Arc::new(|| vec!["*".to_string()]);
-    let channel = Arc::new(LinqChannel::new(
-        "test-token".into(),
-        "+15550000000".into(),
-        alias,
-        peer_resolver,
-    ));
-    let mut linq = HashMap::new();
-    linq.insert(alias.to_string(), channel);
-
-    let mut linq_signing_secrets: HashMap<String, Arc<str>> = HashMap::new();
-    if let Some(secret) = signing_secret {
-        linq_signing_secrets.insert(alias.to_string(), Arc::from(secret));
-    }
-
-    AppState {
-        config: Arc::new(RwLock::new(Config::default())),
-        config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-        model_provider,
-        model: "test-model".into(),
-        temperature: None,
-        mem: memory,
-        memory_strategy: Arc::new(DefaultMemoryStrategy::with_config(
-            Arc::new(MockMemory),
-            zeroclaw_config::schema::MemoryConfig::default(),
-            std::path::PathBuf::new(),
-        )),
-        companion_store: None,
-        auto_save: false,
-        webhook_secret_hash: None,
-        pairing: Arc::new(PairingGuard::new(false, &[])),
-        trust_forwarded_headers: false,
-        rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
-        auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
-        idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq,
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets,
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
-        observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
-        tools_registry: Arc::new(Vec::new()),
-        tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
-        cost_tracker: None,
-        event_tx: tokio::sync::broadcast::channel(16).0,
-        event_buffer: Arc::new(sse::EventBuffer::new(16)),
-        shutdown_tx: tokio::sync::watch::channel(false).0,
-        reload_tx: None,
-        #[cfg(feature = "nodes")]
-        node_registry: Arc::new(nodes::NodeRegistry::new(16)),
-        #[cfg(feature = "nodes")]
-        mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
-        path_prefix: String::new(),
-        web_dist_dir: None,
-        session_backend: None,
-        session_queue: std::sync::Arc::new(crate::session_queue::SessionActorQueue::new(
-            8, 30, 600,
-        )),
-        device_registry: None,
-        pending_pairings: None,
-        canvas_store: CanvasStore::new(),
-        cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
-    }
-}
-
-#[cfg(feature = "channel-linq")]
-#[tokio::test]
-async fn linq_webhook_returns_not_found_for_unknown_alias() {
-    // No Linq channels configured at all.
-    let state = linq_test_state("production", None);
-
-    let response = Box::pin(handle_linq_webhook_alias(
-        State(state),
-        Path("staging".to_string()),
-        HeaderMap::new(),
-        Bytes::from_static(br#"{"event_type":"message.received"}"#),
-    ))
-    .await
-    .into_response();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[cfg(feature = "channel-linq")]
-#[tokio::test]
-async fn linq_webhook_returns_not_found_when_no_channels_configured() {
-    let model_provider: Arc<dyn ModelProvider> = Arc::new(MockModelProvider::default());
-    let memory: Arc<dyn Memory> = Arc::new(MockMemory);
-
-    let state = AppState {
-        config: Arc::new(RwLock::new(Config::default())),
-        config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-        model_provider,
-        model: "test-model".into(),
-        temperature: None,
-        mem: memory,
-        memory_strategy: Arc::new(DefaultMemoryStrategy::with_config(
-            Arc::new(MockMemory),
-            zeroclaw_config::schema::MemoryConfig::default(),
-            std::path::PathBuf::new(),
-        )),
-        companion_store: None,
-        auto_save: false,
-        webhook_secret_hash: None,
-        pairing: Arc::new(PairingGuard::new(false, &[])),
-        trust_forwarded_headers: false,
-        rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
-        auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
-        idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
-        observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
-        tools_registry: Arc::new(Vec::new()),
-        tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
-        cost_tracker: None,
-        event_tx: tokio::sync::broadcast::channel(16).0,
-        event_buffer: Arc::new(sse::EventBuffer::new(16)),
-        shutdown_tx: tokio::sync::watch::channel(false).0,
-        reload_tx: None,
-        #[cfg(feature = "nodes")]
-        node_registry: Arc::new(nodes::NodeRegistry::new(16)),
-        #[cfg(feature = "nodes")]
-        mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
-        path_prefix: String::new(),
-        web_dist_dir: None,
-        session_backend: None,
-        session_queue: std::sync::Arc::new(crate::session_queue::SessionActorQueue::new(
-            8, 30, 600,
-        )),
-        device_registry: None,
-        pending_pairings: None,
-        canvas_store: CanvasStore::new(),
-        cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
-    };
-
-    let response = Box::pin(handle_linq_webhook_alias(
-        State(state),
-        Path("default".to_string()),
-        HeaderMap::new(),
-        Bytes::from_static(br#"{"event_type":"message.received"}"#),
-    ))
-    .await
-    .into_response();
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[cfg(feature = "channel-linq")]
-#[tokio::test]
-async fn linq_webhook_accepts_valid_message_for_known_alias() {
-    let state = linq_test_state("default", None);
-    let body = linq_webhook_body("+15551234567", "hello from test");
-
-    let response = Box::pin(handle_linq_webhook_alias(
-        State(state),
-        Path("default".to_string()),
-        HeaderMap::new(),
-        Bytes::from(body),
-    ))
-    .await
-    .into_response();
-
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
-#[cfg(feature = "channel-linq")]
-#[tokio::test]
-async fn linq_webhook_rejects_invalid_signature_for_alias() {
-    let secret = generate_test_secret();
-    let state = linq_test_state("secure-alias", Some(&secret));
-
-    let body = linq_webhook_body("+15551234567", "hello from test");
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "X-Webhook-Signature",
-        HeaderValue::from_static("sha256=deadbeef"),
-    );
-    headers.insert(
-        "X-Webhook-Timestamp",
-        HeaderValue::from_static("9999999999"),
-    );
-
-    let response = Box::pin(handle_linq_webhook_alias(
-        State(state),
-        Path("secure-alias".to_string()),
-        headers,
-        Bytes::from(body),
-    ))
-    .await
-    .into_response();
-
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[cfg(feature = "channel-linq")]
-#[tokio::test]
-async fn linq_webhook_accepts_valid_signature_for_alias() {
-    let secret = generate_test_secret();
-    let state = linq_test_state("secure-alias", Some(&secret));
-
-    let body = linq_webhook_body("+15551234567", "hello from test");
-    let timestamp = chrono::Utc::now().timestamp().to_string();
-    let sig = compute_linq_signature_hex(&secret, &timestamp, &body);
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "X-Webhook-Signature",
-        HeaderValue::from_str(&format!("sha256={sig}")).unwrap(),
-    );
-    headers.insert(
-        "X-Webhook-Timestamp",
-        HeaderValue::from_str(&timestamp).unwrap(),
-    );
-
-    let response = Box::pin(handle_linq_webhook_alias(
-        State(state),
-        Path("secure-alias".to_string()),
-        headers,
-        Bytes::from(body),
-    ))
-    .await
-    .into_response();
-
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
 // ── Per-alias webhook routing───────────────────────────────────
-
-/// Baseline `AppState` with no channels configured, for the per-alias
-/// routing tests. Tests insert the WhatsApp instances they exercise.
-#[cfg(feature = "channel-whatsapp-cloud")]
-fn webhook_baseline_state() -> AppState {
-    let model_provider: Arc<dyn ModelProvider> = Arc::new(MockModelProvider::default());
-    let mem: Arc<dyn Memory> = Arc::new(MockMemory);
-    AppState {
-        config: Arc::new(RwLock::new(Config::default())),
-        config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-        model_provider,
-        model: "test-model".into(),
-        temperature: None,
-        mem,
-        memory_strategy: Arc::new(DefaultMemoryStrategy::with_config(
-            Arc::new(MockMemory),
-            zeroclaw_config::schema::MemoryConfig::default(),
-            std::path::PathBuf::new(),
-        )),
-        companion_store: None,
-        auto_save: false,
-        webhook_secret_hash: None,
-        pairing: Arc::new(PairingGuard::new(false, &[])),
-        trust_forwarded_headers: false,
-        rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
-        auth_limiter: Arc::new(auth_rate_limit::AuthRateLimiter::new()),
-        idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-wati")]
-        wati: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
-        observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
-        tools_registry: Arc::new(Vec::new()),
-        tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
-        cost_tracker: None,
-        event_tx: tokio::sync::broadcast::channel(16).0,
-        event_buffer: Arc::new(sse::EventBuffer::new(16)),
-        shutdown_tx: tokio::sync::watch::channel(false).0,
-        reload_tx: None,
-        #[cfg(feature = "nodes")]
-        node_registry: Arc::new(nodes::NodeRegistry::new(16)),
-        #[cfg(feature = "nodes")]
-        mdns_peer_registry: nodes::mdns::MdnsPeerRegistry::default(),
-        path_prefix: String::new(),
-        web_dist_dir: None,
-        session_backend: None,
-        session_queue: std::sync::Arc::new(crate::session_queue::SessionActorQueue::new(
-            8, 30, 600,
-        )),
-        device_registry: None,
-        pending_pairings: None,
-        canvas_store: CanvasStore::new(),
-        cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        tui_registry: None,
-        #[cfg(feature = "webauthn")]
-        webauthn: None,
-    }
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-fn whatsapp_instance(alias: &str, verify_token: &str) -> Arc<WhatsAppChannel> {
-    let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(Vec::new);
-    Arc::new(WhatsAppChannel::new(
-        "access-token".into(),
-        "phone-number-id".into(),
-        verify_token.into(),
-        alias.to_string(),
-        peer_resolver,
-    ))
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-fn whatsapp_signature(secret: &str, body: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(body);
-    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-fn verify_query(token: &str, challenge: &str) -> WhatsAppVerifyQuery {
-    WhatsAppVerifyQuery {
-        mode: Some("subscribe".to_string()),
-        verify_token: Some(token.to_string()),
-        challenge: Some(challenge.to_string()),
-    }
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[tokio::test]
-async fn webhook_alias_routes_to_the_matching_instance() {
-    let mut state = webhook_baseline_state();
-    state.whatsapp = HashMap::from([
-        ("work".to_string(), whatsapp_instance("work", "tok-work")),
-        (
-            "personal".to_string(),
-            whatsapp_instance("personal", "tok-personal"),
-        ),
-    ]);
-
-    let resp = handle_whatsapp_verify_alias(
-        State(state.clone()),
-        Path("work".to_string()),
-        Query(verify_query("tok-work", "challenge-work")),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    // Explicit alias path carries no deprecation header.
-    assert!(
-        resp.headers()
-            .get(api_webhook::DEPRECATION_HEADER)
-            .is_none()
-    );
-
-    // The other instance's token must NOT verify against `work`.
-    let resp = handle_whatsapp_verify_alias(
-        State(state.clone()),
-        Path("work".to_string()),
-        Query(verify_query("tok-personal", "challenge")),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-    let resp = handle_whatsapp_verify_alias(
-        State(state),
-        Path("personal".to_string()),
-        Query(verify_query("tok-personal", "challenge-personal")),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[tokio::test]
-async fn webhook_unknown_alias_is_404_not_500() {
-    let mut state = webhook_baseline_state();
-    state.whatsapp = HashMap::from([("work".to_string(), whatsapp_instance("work", "tok"))]);
-
-    let resp = handle_whatsapp_verify_alias(
-        State(state),
-        Path("nope".to_string()),
-        Query(verify_query("tok", "challenge")),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[tokio::test]
-async fn webhook_bare_path_is_back_compat_and_flags_deprecation() {
-    let mut state = webhook_baseline_state();
-    state.whatsapp = HashMap::from([("default".to_string(), whatsapp_instance("default", "tok"))]);
-
-    let resp = handle_whatsapp_verify(
-        State(state),
-        Query(verify_query("tok", "challenge-default")),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(
-        resp.headers()
-            .get(api_webhook::DEPRECATION_HEADER)
-            .is_some()
-    );
-}
-
-#[cfg(feature = "channel-whatsapp-cloud")]
-#[tokio::test]
-async fn webhook_alias_path_preserves_signature_auth() {
-    let mut state = webhook_baseline_state();
-    state.whatsapp = HashMap::from([("work".to_string(), whatsapp_instance("work", "tok"))]);
-    state.whatsapp_app_secret =
-        HashMap::from([("work".to_string(), Arc::<str>::from("app-secret"))]);
-
-    // Unknown alias → 404 before any processing.
-    let resp = Box::pin(handle_whatsapp_message_alias(
-        State(state.clone()),
-        Path("nope".to_string()),
-        HeaderMap::new(),
-        Bytes::from_static(b"{}"),
-    ))
-    .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-    // Configured alias, missing/invalid signature → 401.
-    let resp = Box::pin(handle_whatsapp_message_alias(
-        State(state.clone()),
-        Path("work".to_string()),
-        HeaderMap::new(),
-        Bytes::from_static(b"{}"),
-    ))
-    .await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-
-    // Configured alias, valid signature over an empty payload → 200 ack.
-    let body = br#"{"object":"whatsapp_business_account","entry":[]}"#;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "X-Hub-Signature-256",
-        HeaderValue::from_str(&whatsapp_signature("app-secret", body)).unwrap(),
-    );
-    let resp = Box::pin(handle_whatsapp_message_alias(
-        State(state),
-        Path("work".to_string()),
-        headers,
-        Bytes::from_static(body),
-    ))
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-}
 
 /// Build an `AppState` whose device registry points at a non-existent
 /// path so every SQLite write fails. Mirrors `unwriteable_registry_state`

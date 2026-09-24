@@ -1305,7 +1305,6 @@ fn v1_child_capability_set_is_disjoint_from_a_real_parent_registry() {
         &HashMap::new(),
         None,
         &zeroclaw_config::schema::Config::default(),
-        None,
         false,
         None,
         None,

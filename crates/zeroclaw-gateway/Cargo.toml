@@ -15,10 +15,9 @@ zeroclaw-infra.workspace = true
 zeroclaw-log.workspace = true
 zeroclaw-memory.workspace = true
 zeroclaw-providers.workspace = true
-zeroclaw-channels = { workspace = true, default-features = false, features = ["channel-acp-server"] }
+zeroclaw-channels = { workspace = true, default-features = false }
 zeroclaw-runtime.workspace = true
 zeroclaw-tools.workspace = true
-zeroclaw-plugins = { workspace = true, optional = true }
 
 # HTTP server
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws", "macros"] }
@@ -35,13 +34,9 @@ tokio-rustls = { version = "0.26.4", default-features = false, features = ["logg
 # Frontend asset MIME type detection (dashboard served from filesystem)
 mime_guess = "2"
 
-# Base64 encoding for binary file content in agent workspace `read` responses.
-base64 = "0.22"
 include_dir = { version = "0.7", optional = true }
-
-# Schemars JSON Schema generation for OPTIONS responses; matches the version
-# zeroclaw-config already pulls.
 schemars = { version = "1.2", optional = true }
+
 
 # Async runtime
 tokio = { version = "1.50", default-features = false, features = ["rt-multi-thread", "macros", "time", "net", "io-util", "sync", "signal", "process"] }
@@ -89,34 +84,19 @@ tokio = { version = "1.50", features = ["rt-multi-thread", "macros"] }
 wiremock = "0.6"
 
 [features]
-default = ["schema-export", "a2a"]
+default = ["schema-export"]
 # Node discovery surface (`/ws/nodes` WebSocket registry + LAN mDNS peer
 # hints + the node tool). Default-off; enable with `--features nodes`.
 # The `[nodes]` / `[nodes.mdns]` config types stay unconditional in
 # zeroclaw-config (schema.rs is a hot upstream file — not worth the churn).
 nodes = ["dep:ring"]
-# A2A (Agent2Agent) discovery surface: well-known catalog card + per-alias
-# agent cards. Default-on; the runtime surface stays default-closed via
-# [a2a.server] enabled = false. Pure-serde cards on the existing axum stack,
-# no a2a-rs/protobuf footprint.
-a2a = []
-plugins-wasm = ["dep:zeroclaw-plugins"]
-webauthn = ["zeroclaw-runtime/webauthn"]
 observability-prometheus = ["zeroclaw-runtime/observability-prometheus"]
-channel-acp-server = ["zeroclaw-channels/channel-acp-server"]
-channel-email = ["zeroclaw-channels/channel-email"]
-channel-linq = ["zeroclaw-channels/channel-linq"]
-channel-nextcloud = ["zeroclaw-channels/channel-nextcloud"]
 channel-nostr = ["zeroclaw-channels/channel-nostr"]
-channel-wati = ["zeroclaw-channels/channel-wati"]
 channel-wechat = ["zeroclaw-channels/channel-wechat"]
-channel-whatsapp-cloud = ["zeroclaw-channels/channel-whatsapp-cloud"]
 whatsapp-web = ["zeroclaw-channels/whatsapp-web"]
 gateway-voice-duplex = []
 # Enables OPTIONS /api/config* responses with the schemars-generated
-# JSON Schema body and the serde-side schemars derives transitively. Defaults
-# on; turning it off omits OPTIONS schema bodies (returns a small placeholder)
-# and saves a bit of build time. Mirrors zeroclaw-config's `schema-export`.
+# JSON Schema body. Turning it off returns a small placeholder instead.
 schema-export = ["zeroclaw-config/schema-export", "zeroclaw-runtime/schema-export", "dep:schemars"]
 embedded-web = ["dep:include_dir"]
 

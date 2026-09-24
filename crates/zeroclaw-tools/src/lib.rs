@@ -38,7 +38,6 @@ pub mod backup_tool;
 pub mod browser;
 pub mod browser_open;
 pub mod calculator;
-pub mod canvas;
 pub mod channel_room;
 pub mod cloud_ops;
 pub mod cloud_patterns;

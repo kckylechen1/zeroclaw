@@ -52,7 +52,6 @@
 # ---------------------------------------------------------------------------
 /src/main.rs              @WareWolf-MoonWall @Audacity88
 /src/lib.rs               @WareWolf-MoonWall @Audacity88
-/src/bin/**               @WareWolf-MoonWall @Audacity88
 /src/approval/**          @WareWolf-MoonWall @Audacity88
 /src/auth/**              @WareWolf-MoonWall @Audacity88
 /src/commands/**          @WareWolf-MoonWall @Audacity88
