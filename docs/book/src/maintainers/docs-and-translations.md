@@ -128,7 +128,6 @@ Maintainers should accept the routine English docs exception documented in [Buil
 
    </div>
 
-
 Everything else, `lang-switcher.js`, CI deploy target list, `cargo mdbook locales` output, reads from `locales.toml` automatically.
 
 ## Translation catalogue submodule
