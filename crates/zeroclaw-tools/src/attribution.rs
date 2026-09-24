@@ -54,14 +54,12 @@ use crate::memory_recall::MemoryRecallTool;
 use crate::memory_store::MemoryStoreTool;
 #[cfg(feature = "integrations-saas")]
 use crate::microsoft365::Microsoft365Tool;
-use crate::model_routing_config::ModelRoutingConfigTool;
 #[cfg(feature = "integrations-saas")]
 use crate::notion_tool::NotionTool;
 use crate::pipeline::PipelineTool;
 use crate::poll::PollTool;
 use crate::project_intel::ProjectIntelTool;
 use crate::propose_soul_change::ProposeSoulChangeTool;
-use crate::proxy_config::ProxyConfigTool;
 #[cfg(feature = "integrations-saas")]
 use crate::pushover::PushoverTool;
 use crate::reaction::ReactionTool;
@@ -69,8 +67,7 @@ use crate::report_template_tool::ReportTemplateTool;
 use crate::screenshot::ScreenshotTool;
 use crate::send_via::SendViaTool;
 use crate::sessions::{
-    SessionDeleteTool, SessionResetTool, SessionsCurrentTool, SessionsHistoryTool,
-    SessionsListTool, SessionsSendTool,
+    SessionsCurrentTool, SessionsHistoryTool, SessionsListTool, SessionsSendTool,
 };
 use crate::text_browser::TextBrowserTool;
 use crate::tool_search::ToolSearchTool;
@@ -127,21 +124,17 @@ tool_attribution!(MemoryRecallTool, ToolKind::Memory);
 tool_attribution!(MemoryStoreTool, ToolKind::Memory);
 #[cfg(feature = "integrations-saas")]
 tool_attribution!(Microsoft365Tool, ToolKind::Plugin);
-tool_attribution!(ModelRoutingConfigTool, ToolKind::Plugin);
 #[cfg(feature = "integrations-saas")]
 tool_attribution!(NotionTool, ToolKind::Plugin);
 tool_attribution!(PipelineTool, ToolKind::Plugin);
 tool_attribution!(PollTool, ToolKind::Wait);
 tool_attribution!(ProjectIntelTool, ToolKind::Plugin);
-tool_attribution!(ProxyConfigTool, ToolKind::Plugin);
 #[cfg(feature = "integrations-saas")]
 tool_attribution!(PushoverTool, ToolKind::Plugin);
 tool_attribution!(ReactionTool, ToolKind::Plugin);
 tool_attribution!(ReportTemplateTool, ToolKind::Plugin);
 tool_attribution!(ScreenshotTool, ToolKind::Plugin);
 tool_attribution!(SendViaTool, ToolKind::Plugin);
-tool_attribution!(SessionDeleteTool, ToolKind::Plugin);
-tool_attribution!(SessionResetTool, ToolKind::Plugin);
 tool_attribution!(SessionsCurrentTool, ToolKind::Plugin);
 tool_attribution!(SessionsHistoryTool, ToolKind::Plugin);
 tool_attribution!(SessionsListTool, ToolKind::Plugin);

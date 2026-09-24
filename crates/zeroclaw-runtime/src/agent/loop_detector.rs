@@ -158,7 +158,13 @@ pub struct LoopDetector {
 }
 
 impl LoopDetector {
-    pub fn new(config: LoopDetectorConfig) -> Self {
+    pub fn new(mut config: LoopDetectorConfig) -> Self {
+        // Keep the thresholds meaningful whatever the config says: a repeat
+        // needs at least two calls (0 or 1 would warn on or block every
+        // first call), and a window shorter than `max_repeats + 2` would make
+        // exact-repeat detection or its circuit breaker unreachable.
+        config.max_repeats = config.max_repeats.max(2);
+        config.window_size = config.window_size.max(config.max_repeats + 2);
         Self {
             window: VecDeque::with_capacity(config.window_size),
             config,
@@ -368,6 +374,27 @@ mod tests {
             window_size: 20,
             max_repeats,
         }
+    }
+
+    #[test]
+    fn a_max_repeats_below_two_does_not_flag_the_first_call() {
+        for max_repeats in [0, 1] {
+            let mut det = LoopDetector::new(config_with_repeats(max_repeats));
+            assert_eq!(det.record("t", &json!({}), "r"), LoopDetectionResult::Ok);
+        }
+    }
+
+    #[test]
+    fn a_window_shorter_than_max_repeats_still_breaks_a_loop() {
+        let mut det = LoopDetector::new(LoopDetectorConfig {
+            enabled: true,
+            window_size: 2,
+            max_repeats: 3,
+        });
+        let broke = (0..10)
+            .map(|_| det.record("t", &json!({"a": 1}), "same"))
+            .any(|result| matches!(result, LoopDetectionResult::Break(_)));
+        assert!(broke, "ten identical calls must reach the circuit breaker");
     }
 
     // ── Exact repeat tests ───────────────────────────────────────

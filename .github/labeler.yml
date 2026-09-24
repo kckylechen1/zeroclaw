@@ -339,7 +339,6 @@
   - changed-files:
       - any-glob-to-any-file:
           - "crates/zeroclaw-runtime/src/security/policy.rs"
-          - "crates/zeroclaw-runtime/src/security/iam_policy.rs"
           - "crates/zeroclaw-config/src/policy.rs"
 
 "security:secrets":
@@ -470,12 +469,6 @@
       - any-glob-to-any-file:
           - "src/service/**"
           - "crates/zeroclaw-runtime/src/service/**"
-
-"skillforge":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/skillforge/**"
-          - "crates/zeroclaw-runtime/src/skillforge/**"
 
 "skills":
   - changed-files:
@@ -609,14 +602,6 @@
           - "crates/zeroclaw-tools/src/web_search_tool.rs"
           - "crates/zeroclaw-tools/src/web_search_provider_routing.rs"
           - "crates/zeroclaw-tools/src/http_request.rs"
-
-"tool:security":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/tools/security_ops.rs"
-          - "src/tools/verifiable_intent.rs"
-          - "crates/zeroclaw-runtime/src/tools/security_ops.rs"
-          - "crates/zeroclaw-runtime/src/tools/verifiable_intent.rs"
 
 "tool:cloud":
   - changed-files:

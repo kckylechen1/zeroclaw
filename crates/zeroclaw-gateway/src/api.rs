@@ -306,7 +306,7 @@ pub async fn handle_api_status(
     // stable by emitting empty collections when the `nodes` feature is off.
     #[cfg(feature = "nodes")]
     let node_status = serde_json::json!({
-        "connected": state.node_registry.node_ids(),
+        "connected": state.node_registry.connected_device_ids(),
         "mdns_peers": state.mdns_peer_registry.snapshots(),
     });
     #[cfg(not(feature = "nodes"))]
@@ -1651,6 +1651,28 @@ pub async fn handle_api_sessions_list(
     Json(serde_json::json!({ "sessions": sessions })).into_response()
 }
 
+/// Map a session id from the API to its storage key.
+///
+/// Gateway WebSocket sessions are stored as `gw_{id}`, and ids may contain
+/// `_` (for example `my_chat`). Channel-driven sessions are stored under their
+/// full key (for example `discord.clamps_…`). Prefer the gateway key when that
+/// session exists; otherwise use the id as given if it already looks like a
+/// full key, and fall back to the gateway form.
+fn resolve_session_key(
+    backend: &dyn zeroclaw_infra::session_backend::SessionBackend,
+    id: &str,
+) -> String {
+    if id.starts_with("gw_") {
+        return id.to_string();
+    }
+    let gateway_key = format!("gw_{id}");
+    if backend.session_exists(&gateway_key) || !id.contains('_') {
+        gateway_key
+    } else {
+        id.to_string()
+    }
+}
+
 /// GET /api/sessions/{id}/messages — load persisted gateway WebSocket chat transcript
 pub async fn handle_api_session_messages(
     State(state): State<AppState>,
@@ -1670,14 +1692,7 @@ pub async fn handle_api_session_messages(
         .into_response();
     };
 
-    // Accept either the full DB key (channel-driven sessions like
-    // `discord.clamps_…`) or the stripped form (legacy callers that pass
-    // just the UUID for gateway sessions).
-    let session_key = if id.starts_with("gw_") || id.contains('_') {
-        id.clone()
-    } else {
-        format!("gw_{id}")
-    };
+    let session_key = resolve_session_key(backend.as_ref(), &id);
     let msgs = backend.load_with_timestamps(&session_key);
     let messages: Vec<serde_json::Value> = msgs
         .into_iter()
@@ -1807,11 +1822,7 @@ pub async fn handle_api_session_delete(
             .into_response();
     };
 
-    let session_key = if id.starts_with("gw_") || id.contains('_') {
-        id.clone()
-    } else {
-        format!("gw_{id}")
-    };
+    let session_key = resolve_session_key(backend.as_ref(), &id);
 
     let token = state
         .cancel_tokens
@@ -2352,12 +2363,25 @@ pub(crate) mod tests {
     #[cfg(feature = "nodes")]
     async fn api_status_includes_connected_nodes_and_mdns_peers() {
         let state = test_state(zeroclaw_config::schema::Config::default());
-        let (invoke_tx, _invoke_rx) = tokio::sync::mpsc::channel(1);
-        assert!(state.node_registry.register(nodes::NodeInfo {
-            node_id: "connected-node".into(),
-            capabilities: Vec::new(),
-            invoke_tx,
-        }));
+        // One authenticated socket and one still in the handshake: only the
+        // authenticated device counts as connected.
+        let keys = crate::device_identity::DeviceKeyPair::generate().unwrap();
+        let store = state
+            .node_registry
+            .identities()
+            .expect("test identity store");
+        let code = store.issue_pairing_code(Vec::new()).unwrap();
+        let identity = store.enroll(&code, keys.public_key_hex()).unwrap();
+        let (conn, _close_rx) = state.node_registry.try_reserve().unwrap();
+        state
+            .node_registry
+            .bind_identity(
+                &conn.connection_id,
+                identity.device_id.clone(),
+                identity.key_fingerprint.clone(),
+            )
+            .expect("test bind");
+        let (_pending, _pending_rx) = state.node_registry.try_reserve().unwrap();
         state.mdns_peer_registry.insert(
             "peer-1".into(),
             nodes::mdns::MdnsPeer {
@@ -2382,7 +2406,7 @@ pub(crate) mod tests {
         let json = response_json(response).await;
         assert_eq!(
             json["nodes"]["connected"],
-            serde_json::json!(["connected-node"])
+            serde_json::json!([identity.device_id])
         );
         assert_eq!(
             json["nodes"]["mdns_peers"],
@@ -4770,5 +4794,32 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(status_of(router, req).await, StatusCode::OK);
         }
+    }
+
+    #[test]
+    fn resolve_session_key_prefers_existing_gateway_sessions() {
+        use zeroclaw_api::model_provider::ChatMessage;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = zeroclaw_infra::make_session_backend(dir.path(), "sqlite").unwrap();
+        backend
+            .append("gw_my_chat", &ChatMessage::user("hi"))
+            .unwrap();
+        backend
+            .append("discord.clamps_room_user", &ChatMessage::user("hi"))
+            .unwrap();
+
+        // A gateway id containing `_` resolves to its `gw_` key.
+        assert_eq!(
+            resolve_session_key(backend.as_ref(), "my_chat"),
+            "gw_my_chat"
+        );
+        // A full channel key is used as given.
+        assert_eq!(
+            resolve_session_key(backend.as_ref(), "discord.clamps_room_user"),
+            "discord.clamps_room_user"
+        );
+        // An already-prefixed id and a plain id both map to the gateway key.
+        assert_eq!(resolve_session_key(backend.as_ref(), "gw_abc"), "gw_abc");
+        assert_eq!(resolve_session_key(backend.as_ref(), "abc"), "gw_abc");
     }
 }

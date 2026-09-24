@@ -1473,3 +1473,74 @@ fn resolve_job_id_or_name_cannot_reach_another_agents_job_by_name() {
         "another agent's job must be unresolvable by name; got: {err}"
     );
 }
+
+#[test]
+fn a_recurring_job_with_no_future_occurrence_is_disabled_not_refired() {
+    let tmp = TempDir::new().unwrap();
+    let config = test_config(&tmp);
+    let job = add_shell_job(
+        &config,
+        "default",
+        None,
+        Schedule::Cron {
+            expr: "0 0 9 1 1 * 2030".into(),
+            tz: Some("UTC".into()),
+        },
+        "echo new year",
+        None,
+    )
+    .unwrap();
+
+    // The run on its only date finishes; there is no later occurrence.
+    let ran_at = DateTime::parse_from_rfc3339("2030-01-01T09:00:05Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    persist_run_result(
+        &config,
+        &job,
+        ran_at,
+        ran_at,
+        ran_at,
+        "ok",
+        Some("done"),
+        5,
+        None,
+        None,
+        RunCompletionAction::Reschedule,
+    )
+    .expect("an unschedulable recurring job settles instead of failing");
+
+    let after = get_job(&config, &job.id).unwrap();
+    assert!(
+        !after.enabled,
+        "it must stop instead of staying due forever"
+    );
+    assert_eq!(after.last_status.as_deref(), Some("ok"));
+}
+
+#[test]
+fn resuming_a_paused_recurring_job_does_not_fire_a_stale_run() {
+    let tmp = TempDir::new().unwrap();
+    let config = test_config(&tmp);
+    let job = add_shell_job(
+        &config,
+        "default",
+        None,
+        Schedule::Every {
+            every_ms: 3_600_000,
+        },
+        "echo hourly",
+        None,
+    )
+    .unwrap();
+    crate::cron::pause_job(&config, &job.id).unwrap();
+    // The job stays paused past its next run.
+    force_due(&config, &job.id);
+
+    let resumed = crate::cron::resume_job(&config, &job.id).unwrap();
+    assert!(resumed.enabled);
+    assert!(
+        resumed.next_run > Utc::now(),
+        "a resumed job must wait for its next occurrence, not run at once"
+    );
+}

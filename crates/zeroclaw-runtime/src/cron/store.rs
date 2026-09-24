@@ -407,7 +407,9 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
     if let Some(name) = patch.name {
         job.name = Some(name);
     }
+    let mut resumed = false;
     if let Some(enabled) = patch.enabled {
+        resumed = enabled && !job.enabled;
         job.enabled = enabled;
     }
     if let Some(delivery) = patch.delivery {
@@ -435,7 +437,12 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
         job.uses_memory = uses_memory;
     }
 
-    if schedule_changed {
+    // Resuming a recurring job whose next run passed while it was paused
+    // would otherwise fire it at once, at the wrong time. One-shot `At`
+    // jobs keep their time.
+    let stale_on_resume =
+        resumed && job.next_run < Utc::now() && !matches!(job.schedule, Schedule::At { .. });
+    if schedule_changed || stale_on_resume {
         job.next_run = next_run_for_schedule(&job.schedule, Utc::now())?;
     }
 
@@ -565,7 +572,14 @@ pub fn skip_missed_run(config: &Config, job: &CronJob, now: DateTime<Utc>) -> Re
         })
     } else {
         // Recurring job — advance next_run to the next future occurrence.
-        let next_run = next_run_for_schedule(&job.schedule, now)?;
+        let next_run = match next_run_for_schedule(&job.schedule, now) {
+            Ok(next_run) => next_run,
+            Err(err) => {
+                return with_initialized_connection(config, |conn| {
+                    disable_unschedulable(conn, job, now, "skipped", &err)
+                });
+            }
+        };
         with_initialized_connection(config, |conn| {
             conn.execute(
                 "UPDATE cron_jobs SET next_run = ?1 WHERE id = ?2",
@@ -1434,6 +1448,37 @@ fn with_initialized_connection<T>(
     f(&conn)
 }
 
+/// Disable a recurring job whose schedule has no future occurrence, keeping
+/// the run's status and recording why it stopped.
+fn disable_unschedulable(
+    conn: &Connection,
+    job: &CronJob,
+    at: DateTime<Utc>,
+    status: &str,
+    err: &anyhow::Error,
+) -> Result<()> {
+    ::zeroclaw_log::record!(
+        WARN,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+            .with_attrs(::serde_json::json!({"job_id": job.id, "error": err.to_string()})),
+        "cron job has no future occurrence; disabling it"
+    );
+    let note = truncate_cron_output(&format!("disabled: {err}"));
+    let changed = conn
+        .execute(
+            "UPDATE cron_jobs
+             SET enabled = 0, last_run = ?1, last_status = ?2, last_output = ?3
+             WHERE id = ?4",
+            params![at.to_rfc3339(), status, note, job.id],
+        )
+        .context("Failed to disable unschedulable cron job")?;
+    if changed == 0 {
+        anyhow::bail!("Cron job '{}' not found", job.id);
+    }
+    Ok(())
+}
+
 fn apply_run_completion_state(
     conn: &Connection,
     job: &CronJob,
@@ -1446,7 +1491,16 @@ fn apply_run_completion_state(
 
     match action {
         RunCompletionAction::Reschedule => {
-            let next_run = next_run_for_schedule(&job.schedule, job_state_at)?;
+            // A schedule with no future occurrence (for example a cron
+            // expression pinned to a past year) must stop, not stay due:
+            // leaving `next_run` in the past re-fires it on every poll.
+            let next_run = match next_run_for_schedule(&job.schedule, job_state_at) {
+                Ok(next_run) => next_run,
+                Err(err) => {
+                    disable_unschedulable(conn, job, job_state_at, status, &err)?;
+                    return Ok(());
+                }
+            };
             let changed = conn
                 .execute(
                     "UPDATE cron_jobs

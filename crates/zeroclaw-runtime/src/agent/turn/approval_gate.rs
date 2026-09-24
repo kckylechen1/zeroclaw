@@ -139,8 +139,11 @@ pub(crate) async fn gate_tool_approval(
         // The durable counterpart of `record_decision`, which only writes to
         // an in-memory Vec. A denial is evidence too, so it lands here before
         // the early return below.
+        // A runtime fail-closed denial (timeout, unreachable, no approver) is
+        // not a human decision: record it as timed out with no approver.
         let audited = match &decision {
             ApprovalResponse::Yes | ApprovalResponse::Always => AuditDecision::Granted,
+            ApprovalResponse::No if unanswerable => AuditDecision::TimedOut,
             ApprovalResponse::No => AuditDecision::Denied,
             ApprovalResponse::ReplaceWith(_) => AuditDecision::Denied,
         };
@@ -150,7 +153,7 @@ pub(crate) async fn gate_tool_approval(
             tool_name,
             tool_args,
             audited,
-            Some(&decision_channel),
+            (!unanswerable).then_some(decision_channel.as_str()),
             Some(ctx.channel_name),
         );
 

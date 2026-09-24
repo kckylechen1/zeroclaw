@@ -53,6 +53,7 @@
     - [ADR-014: Reviewed AgentSoul projection](./architecture/decisions/ADR-014-reviewed-agentsoul-projection.md)
     - [ADR-015: One governed Soul](./architecture/decisions/ADR-015-one-governed-soul.md)
     - [ADR-016: Growth proposed by the agent, approved by the owner](./architecture/decisions/ADR-016-growth-proposed-by-agent-approved-by-owner.md)
+    - [ADR-017: Personal agent body, edge devices, and delegation](./architecture/decisions/ADR-017-personal-agent-body-edges-and-delegation.md)
   - [Logging](./architecture/logging.md)
   - [Runtime state and persistence](./architecture/runtime-state-and-persistence.md)
   - [Memory and payload lifecycle](./architecture/memory-payload-lifecycle.md)

@@ -263,13 +263,6 @@
       "signals": 5
     },
     {
-      "path": "crates/zeroclaw-memory/src/knowledge_graph_pg.rs",
-      "store": "knowledge graph (postgres)",
-      "role": "store",
-      "basis": "personal-memory domain (external postgres backend)",
-      "signals": 3
-    },
-    {
       "path": "crates/zeroclaw-memory/src/tests.rs",
       "store": "memory/audit.db",
       "role": "test",

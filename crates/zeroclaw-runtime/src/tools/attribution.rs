@@ -13,13 +13,11 @@ use crate::tools::file_read::FileReadTool;
 use crate::tools::model_switch::ModelSwitchTool;
 use crate::tools::read_skill::ReadSkillTool;
 use crate::tools::schedule::ScheduleTool;
-use crate::tools::security_ops::SecurityOpsTool;
 use crate::tools::send_message_to_peer::SendMessageToPeerTool;
 use crate::tools::shell::ShellTool;
 use crate::tools::skill_http::SkillHttpTool;
 use crate::tools::skill_manage::{SkillManageTool, SkillViewTool, SkillsListTool};
 use crate::tools::skill_tool::{SkillBuiltinTool, SkillShellTool};
-use crate::tools::verifiable_intent::VerifiableIntentTool;
 
 tool_attribution!(CronAddTool, ToolKind::Plugin);
 tool_attribution!(CronListTool, ToolKind::Plugin);
@@ -31,7 +29,6 @@ tool_attribution!(FileReadTool, ToolKind::Plugin);
 tool_attribution!(ModelSwitchTool, ToolKind::Plugin);
 tool_attribution!(ReadSkillTool, ToolKind::Plugin);
 tool_attribution!(ScheduleTool, ToolKind::Plugin);
-tool_attribution!(SecurityOpsTool, ToolKind::Plugin);
 tool_attribution!(SendMessageToPeerTool, ToolKind::Plugin);
 tool_attribution!(ShellTool, ToolKind::Shell);
 tool_attribution!(SkillHttpTool, ToolKind::Plugin);
@@ -41,7 +38,6 @@ tool_attribution!(SkillManageTool, ToolKind::Plugin);
 tool_attribution!(SkillBuiltinTool, ToolKind::Plugin);
 tool_attribution!(SkillShellTool, ToolKind::Plugin);
 tool_attribution!(ReasoningSubagentTool, ToolKind::SpawnSubagent);
-tool_attribution!(VerifiableIntentTool, ToolKind::Plugin);
 
 impl Attributable for ArcToolRef {
     fn role(&self) -> Role {

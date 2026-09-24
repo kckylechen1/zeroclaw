@@ -66,10 +66,8 @@
 /src/peripherals/**       @WareWolf-MoonWall @Audacity88
 /src/platform/**          @WareWolf-MoonWall @Audacity88
 /src/rag/**               @WareWolf-MoonWall @Audacity88
-/src/routines/**          @WareWolf-MoonWall @Audacity88
 /src/service/**           @WareWolf-MoonWall @Audacity88
 /src/sop/**               @WareWolf-MoonWall @Audacity88
-/src/trust/**             @WareWolf-MoonWall @Audacity88
 /src/tunnel/**            @WareWolf-MoonWall @Audacity88
 /src/verifiable_intent/** @WareWolf-MoonWall @Audacity88
 /src/config/**            @Audacity88 @JordanTheJet
@@ -114,11 +112,9 @@
 # ---------------------------------------------------------------------------
 /crates/zeroclaw-plugins/**                @JordanTheJet @WareWolf-MoonWall @Audacity88
 /crates/zeroclaw-runtime/src/skills/**     @JordanTheJet @WareWolf-MoonWall @Audacity88
-/crates/zeroclaw-runtime/src/skillforge/** @JordanTheJet @WareWolf-MoonWall @Audacity88
 /plugins/**                                @JordanTheJet @WareWolf-MoonWall @Audacity88
 /src/plugins/**                            @JordanTheJet @WareWolf-MoonWall @Audacity88
 /src/skills/**                             @JordanTheJet @WareWolf-MoonWall @Audacity88
-/src/skillforge/**                         @JordanTheJet @WareWolf-MoonWall @Audacity88
 /.claude/skills/**                         @JordanTheJet @WareWolf-MoonWall @Audacity88
 
 # ---------------------------------------------------------------------------
