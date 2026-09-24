@@ -59,7 +59,7 @@ Bump `workspace.package.version` in the workspace `Cargo.toml`, then run the two
 
 </div>
 
-This updates README badges, the Tauri config, and workflow description
+This updates README badges and workflow description
 examples, then regenerates every spec-driven install surface via
 `cargo generate installers`: setup.bat, `dist/aur/PKGBUILD`,
 `dist/scoop/zeroclaw.json`, `flake.nix`, the Dockerfile/Containerfile feature

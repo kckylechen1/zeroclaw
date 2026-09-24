@@ -54,7 +54,7 @@ pub enum SectionGroup {
 impl SectionGroup {
     /// UI label. These exact strings are what `ConfigSectionEntry.group`
     /// carries on the wire and what the dashboard's `GROUP_ORDER`
-    /// (web/src/pages/Config.tsx) and the zerocode Config pane group
+    /// (web/src/pages/Config.tsx) groups
     /// by — change one, change all of them together.
     #[must_use]
     pub const fn label(self) -> &'static str {

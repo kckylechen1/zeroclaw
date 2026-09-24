@@ -203,10 +203,7 @@ pub fn run_cmd(cmd: &mut Command) -> anyhow::Result<()> {
 }
 
 pub fn fluent_catalog_roots_named(root: &Path) -> Vec<(&'static str, PathBuf)> {
-    vec![
-        ("runtime", root.join("crates/zeroclaw-runtime/locales")),
-        ("zerocode", root.join("apps/zerocode/locales")),
-    ]
+    vec![("runtime", root.join("crates/zeroclaw-runtime/locales"))]
 }
 
 /// Catalogue roots filtered by an optional `--catalog` name. `None` returns all

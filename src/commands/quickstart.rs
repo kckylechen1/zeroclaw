@@ -1230,9 +1230,6 @@ pub async fn run_quickstart_cli(
                     &[("alias", &applied.alias)]
                 )
             );
-            if which_zerocode_on_path() {
-                println!("  zerocode                   # launch the TUI"); // i18n-exempt: literal command/identifier example
-            }
             Ok(())
         }
         Err(errs) => {
@@ -1407,11 +1404,4 @@ fn pick_preset(
         return Ok(None);
     };
     Ok(Some(Ok(presets[i].0)))
-}
-
-#[cfg(feature = "agent-runtime")]
-fn which_zerocode_on_path() -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|p| p.join("zerocode").is_file()))
-        .unwrap_or(false)
 }

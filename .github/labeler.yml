@@ -54,7 +54,6 @@
   - changed-files:
       - any-glob-to-any-file:
           - "docs/book/src/channels/acp.md"
-          - "apps/zerocode/src/acp.rs"
           - "crates/zeroclaw-channels/src/acp_channel.rs"
           - "crates/zeroclaw-channels/src/orchestrator/acp_server.rs"
           - "crates/zeroclaw-infra/src/acp_session_store.rs"
@@ -328,7 +327,6 @@
       - any-glob-to-any-file:
           - "crates/zeroclaw-runtime/src/security/pairing.rs"
           - "crates/zeroclaw-gateway/src/api_pairing.rs"
-          - "apps/tauri/src/commands/pairing.rs"
           - "web/src/pages/Pairing.tsx"
 
 "security:policy":
@@ -364,7 +362,6 @@
   - changed-files:
       - any-glob-to-any-file:
           - "crates/zeroclaw-runtime/src/quickstart/**"
-          - "apps/zerocode/src/quickstart_pane.rs"
 
 "provider":
   - changed-files:

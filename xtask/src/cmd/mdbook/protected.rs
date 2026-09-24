@@ -10,7 +10,6 @@ pub struct ProtectedLiteral {
 const DOC_LOCAL_TERMS: &[&str] = &[
     "ZeroClaw",
     "ZeroClaw Maturity Framework",
-    "zerocode",
     "ACP",
     "MCP",
     "TOML",
@@ -26,7 +25,6 @@ const COMMAND_PREFIXES: &[&str] = &[
     "bash",
     "cd",
     "zeroclaw",
-    "zerocode",
     "cargo",
     "git",
     "gh",

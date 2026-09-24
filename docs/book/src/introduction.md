@@ -11,7 +11,6 @@ This site is the documentation. Everything under **Reference → CLI** and **Ref
 Where to start:
 
 - New to ZeroClaw? → [Quickstart](./getting-started/quickstart.md)
-- Prefer a terminal UI? → [zerocode](./zerocode/overview.md)
 - Just want it running fast without safety prompts? → [YOLO mode](./getting-started/yolo.md)
 - Controlling what the agent is allowed to do? → [Security & Autonomy](./security/overview.md)
 - Installing on a specific platform? → [Linux](./setup/linux.md) · [macOS](./setup/macos.md) · [Windows](./setup/windows.md) · [Docker](./setup/container.md)

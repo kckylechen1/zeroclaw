@@ -23,7 +23,6 @@ body:
         - config/onboarding
         - gateway/api
         - web dashboard
-        - zerocode/tui
         - tools
         - plugins
         - hardware/peripherals

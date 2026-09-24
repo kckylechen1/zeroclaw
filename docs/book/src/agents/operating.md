@@ -38,20 +38,6 @@ When an agent needs a one-off helper instead of an existing peer, it spawns an
 ephemeral [SubAgent](./delegation.md) that inherits its identity and
 security policy for a single task, then disappears.
 
-## Agents in zerocode
-
-[zerocode](../zerocode/overview.md) is the terminal UI for driving agents. Two
-panes put an agent in front of you:
-
-- The **Code** pane runs an agent against your working tree for coding tasks.
-- The **Chat** pane is a conversational view of an agent.
-
-Both panes drive a specific agent, and zerocode can give each agent its own
-colour palette so you can tell them apart at a glance, see
-[Per-agent themes](../zerocode/themes.md#per-agent-themes-code--chat-panes). The
-**Config** pane is the preferred place to add and wire agents without editing
-files by hand.
-
 ## Operating multiple agents at once
 
 `zeroclaw daemon` brings up every enabled agent together, each answering on its

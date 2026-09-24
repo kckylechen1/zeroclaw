@@ -1,7 +1,6 @@
 # Language & translations
 
-ZeroClaw's interface strings (CLI messages, command help, and the `zerocode`
-TUI) can be shown in languages other than English. English is always built in;
+ZeroClaw's interface strings (CLI messages and command help) can be shown in languages other than English. English is always built in;
 other languages are downloaded on demand.
 
 ## Set your language
@@ -28,7 +27,7 @@ zeroclaw locales fetch ja
 
 This downloads the Japanese translation files from the ZeroClaw project and
 installs them under `~/.zeroclaw/data/ftl/ja/`, where ZeroClaw looks for them
-at startup. Restart ZeroClaw (and `zerocode`) afterward to pick them up.
+at startup. Restart ZeroClaw afterward to pick them up.
 
 Fetch any locale the same way:
 
@@ -52,15 +51,13 @@ some, pass `--catalog` with a comma-separated list:
 |---|---|
 | `cli` | CLI messages and command help |
 | `tools` | Built-in tool descriptions |
-| `zerocode` | The `zerocode` terminal UI |
 
 <div class="os-tabs-src">
 
 #### sh
 
 ```sh
-zeroclaw locales fetch ja --catalog cli            # just CLI strings
-zeroclaw locales fetch ja --catalog cli,zerocode   # CLI + the TUI
+zeroclaw locales fetch ja --catalog cli   # just CLI strings
 ```
 
 </div>
@@ -74,7 +71,6 @@ and tells you: the catalogues that do exist are still installed.
 |---|---|
 | `~/.zeroclaw/data/ftl/<locale>/cli.ftl` | CLI message translations |
 | `~/.zeroclaw/data/ftl/<locale>/tools.ftl` | Tool description translations |
-| `~/.zeroclaw/data/ftl/<locale>/zerocode.ftl` | `zerocode` TUI translations |
 
 If you run ZeroClaw with a custom config directory (`--config-dir` or
 `ZEROCLAW_CONFIG_DIR`), the files install under that directory's `data/ftl/`

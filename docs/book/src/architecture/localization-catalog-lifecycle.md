@@ -1,6 +1,6 @@
 # Localization catalog lifecycle
 
-ZeroClaw has two localization branches with different formats and consumers. Mozilla Fluent catalogs provide application strings for the runtime and zerocode. gettext catalogs translate the mdBook documentation after English source and generated references have been assembled.
+ZeroClaw has two localization branches with different formats and consumers. Mozilla Fluent catalogs provide application strings for the runtime. gettext catalogs translate the mdBook documentation after English source and generated references have been assembled.
 
 The branches share a locale registry and provider-backed fill philosophy, but they are not interchangeable. A translated file being tracked in the repository also does not prove that a particular binary embeds or loads it. Use this page to follow each catalog from English source through generation, validation, runtime or site consumption, and release.
 
@@ -9,7 +9,6 @@ The branches share a locale registry and provider-backed fill philosophy, but th
 | Branch | English source | Translated catalogs | Materializer | Consumer |
 | --- | --- | --- | --- | --- |
 | Runtime and tool Fluent | `crates/zeroclaw-runtime/locales/en/cli.ftl` and `tools.ftl` | `crates/zeroclaw-runtime/locales/<locale>/*.ftl` in the main repository | `cargo fluent fill`, with `check`, `scan`, and `stats` for validation and coverage | Runtime CLI and prompt strings through `zeroclaw-runtime/src/i18n.rs`; tool-owned schema and result strings through `zeroclaw-tools/src/i18n.rs` |
-| zerocode Fluent | `apps/zerocode/locales/en/zerocode.ftl` | `apps/zerocode/locales/<locale>/zerocode.ftl` in the main repository | The same `cargo fluent` command surface, optionally scoped to the zerocode catalog | zerocode strings loaded over the embedded English catalog from the shared disk locale directory |
 | Documentation gettext | English `docs/book/src/` after generated references and preprocessors supply source text | `docs/book/po/<locale>.po` in the translation-catalog submodule | `cargo mdbook sync` plus `tools/fill-translations` | `mdbook-gettext` during each locale build |
 
 `locales.toml` is the shared registry for locale codes and display labels. It drives docs locale builds and the generated language switcher, and is embedded by the runtime for locale discovery. It does not by itself make every catalog available to every consumer; each loader still defines how its files are embedded or found on disk.
@@ -18,17 +17,16 @@ The branches share a locale registry and provider-backed fill philosophy, but th
 
 English Fluent files are authored sources. Keys identify messages, while values contain the English text and any Fluent variables. Product names, command literals, identifiers, and placeholders remain literal where the message contract requires them.
 
-`cargo fluent` walks the runtime and zerocode catalog roots. `fill` compares each English file with the selected locale, translates missing keys through the configured model provider, writes progress after each batch, and modifies tracked `.ftl` files. `check` parses catalog syntax, `scan` compares source references with catalogs, and `stats` reports coverage without changing catalogs. Fluent diffs belong in a deliberate localization change rather than incidental application work.
+`cargo fluent` walks the runtime catalog root. `fill` compares each English file with the selected locale, translates missing keys through the configured model provider, writes progress after each batch, and modifies tracked `.ftl` files. `check` parses catalog syntax, `scan` compares source references with catalogs, and `stats` reports coverage without changing catalogs. Fluent diffs belong in a deliberate localization change rather than incidental application work.
 
 Storage and loading are separate concerns:
 
 - Runtime CLI strings always have embedded English. The loader can also use translated CLI catalogs embedded by `builtin_cli_ftl_source`, then applies a disk catalog as the highest-priority locale source.
 - Runtime prompt-facing tool descriptions always have embedded English and overlay translated `tools.ftl` values from disk; optional missing lookups return no value.
 - `zeroclaw-tools` independently embeds English and loads disk `tools.ftl` for tool-owned schema and result strings because its crate cannot depend on runtime; required missing lookups render a visible `{key}` marker.
-- zerocode embeds its English catalog and overlays a translated `zerocode.ftl` from disk. `ZEROCODE_LOCALE_DIR` is an explicit test override; the normal shared location is `<config-dir>/data/ftl/<locale>/zerocode.ftl`.
-- `zeroclaw locales fetch` downloads selected runtime and zerocode catalogs into that shared disk locale directory using the catalog paths declared by `zeroclaw-config`.
+- `zeroclaw locales fetch` downloads selected runtime catalogs into that shared disk locale directory using the catalog paths declared by `zeroclaw-config`.
 
-For runtime, tools, and zerocode, English remains the base map. A translated disk or built-in catalog replaces keys it contains; absent translated keys keep their English value. Required lookups report a key absent from every available source and render a visible `{key}` marker rather than silently inventing text; optional runtime tool-description lookups return no value.
+For runtime and tools, English remains the base map. A translated disk or built-in catalog replaces keys it contains; absent translated keys keep their English value. Required lookups report a key absent from every available source and render a visible `{key}` marker rather than silently inventing text; optional runtime tool-description lookups return no value.
 
 ## gettext documentation strings
 
@@ -81,8 +79,6 @@ For detailed commands, provider configuration, batching, adding a locale, and re
 - Runtime Fluent loader: `crates/zeroclaw-runtime/src/i18n.rs`
 - Tool-owned Fluent loader: `crates/zeroclaw-tools/src/i18n.rs`
 - Runtime Fluent catalogs: `crates/zeroclaw-runtime/locales/`
-- zerocode Fluent loader: `apps/zerocode/src/i18n.rs`
-- zerocode Fluent catalogs: `apps/zerocode/locales/`
 - Fluent tooling: `xtask/src/cmd/fluent/`
 - Catalog download map: `zeroclaw_config::schema::FTL_CATALOGS`
 - gettext extraction and merge: `xtask/src/cmd/mdbook/sync.rs`

@@ -109,7 +109,6 @@ impl SourceIndex {
         let mut paths = Vec::new();
         collect_rs_files(&root.join("crates"), &mut paths)?;
         collect_rs_files(&root.join("src"), &mut paths)?;
-        collect_rs_files(&root.join("apps"), &mut paths)?;
 
         let files = paths
             .into_iter()

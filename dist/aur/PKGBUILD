@@ -11,8 +11,8 @@ url="https://github.com/zeroclaw-labs/zeroclaw"
 license=('MIT' 'Apache-2.0')
 depends=('gcc-libs' 'openssl')
 makedepends=('cargo' 'git' 'nodejs' 'npm')
-provides=('zeroclaw' 'zerocode')
-conflicts=('zeroclaw' 'zerocode')
+provides=('zeroclaw')
+conflicts=('zeroclaw')
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/zeroclaw-labs/zeroclaw/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
@@ -35,13 +35,11 @@ build() {
   # >>> generated:pkgbuild-build by `cargo generate installers` - do not edit <<<
   cargo build --frozen --profile dist --features agent-runtime,channel-acp-server,channel-discord,channel-email,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,hardware-tools,integrations-saas,observability-prometheus,schema-export,whatsapp-web
 # >>> end generated:pkgbuild-build <<<
-  cargo build --frozen --profile dist -p zerocode
 }
 
 package() {
   cd "${_reponame}-${pkgver}"
   install -Dm0755 -t "${pkgdir}/usr/bin/" "target/dist/zeroclaw"
-  install -Dm0755 -t "${pkgdir}/usr/bin/" "target/dist/zerocode"
 
   # Install web dashboard assets (served from filesystem at runtime)
   install -dm0755 "${pkgdir}/usr/share/${pkgname}/web/dist"

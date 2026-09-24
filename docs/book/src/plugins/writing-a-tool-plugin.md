@@ -298,7 +298,7 @@ into the `execute` arguments under the reserved `__config` key. The mechanics
   `#[serde(default)]` on the field and the defaults-from-empty-map design in
   step 2 are load-bearing, not defensive fluff.
 - Values arrive already decrypted. Operators set them per plugin name through
-  zerocode, the gateway, or the CLI (`zeroclaw config set`), and they encrypt
+  the gateway or the CLI (`zeroclaw config set`), and they encrypt
   at rest under the config's secret key. Which keys exist is entirely your
   contract; document them in your plugin's README.
 
