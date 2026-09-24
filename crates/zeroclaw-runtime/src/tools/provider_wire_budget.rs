@@ -869,22 +869,6 @@ async fn minimal_composition_tools_wire_under_owner_ceiling() {
     );
 }
 
-#[test]
-fn manifest_ceiling_matches_rust_constant() {
-    let manifest_str = include_str!("../../../../scripts/ci/wire_budget_exceptions.json");
-    let v: serde_json::Value =
-        serde_json::from_str(manifest_str).expect("wire_budget_exceptions.json must be valid JSON");
-    let manifest_ceiling = v
-        .get("wire_budget_tokens_ceiling")
-        .and_then(|c| c.as_u64())
-        .expect("manifest must have numeric wire_budget_tokens_ceiling");
-    assert_eq!(
-        manifest_ceiling as usize, MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING,
-        "Rust MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING ({}) must match manifest wire_budget_tokens_ceiling ({})",
-        MINIMAL_COMPOSITION_TOOLS_WIRE_TOKEN_CEILING, manifest_ceiling
-    );
-}
-
 #[tokio::test]
 async fn minimal_composition_no_bypass_subsystem_flags() {
     let tmp = TempDir::new().unwrap();

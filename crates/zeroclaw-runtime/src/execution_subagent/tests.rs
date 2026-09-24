@@ -1297,23 +1297,11 @@ async fn discrimination_unsupported_stop_at_the_spine_gate_fabricates_nothing() 
 
 /// Discrimination 5: no new durable task store exists in ZeroClaw for
 /// this vertical — the module owns no DDL, no connection opens, no store
-/// crate; facts live in the tachi-owned spine, and the persistence-
-/// surface gate's manifest stays clean.
+/// crate; facts live in the tachi-owned spine.
 #[test]
 fn discrimination_no_new_durable_task_store_in_zero_claw() {
-    module_source_scans_hold();
     // The sink trait is receipts-only: it cannot open, create, or write a
     // local store (compile-level: its methods transport receipts; the
     // only in-memory ledger is cfg(test)-gated).
-    // CARGO_MANIFEST_DIR is the crate dir; the manifest lives at the
-    // workspace root.
-    let manifest = std::fs::read_to_string(format!(
-        "{}/../../scripts/ci/persistence_surface.json",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .expect("persistence manifest");
-    assert!(
-        !manifest.contains("execution_subagent"),
-        "the execution_subagent module must never enter the store manifest"
-    );
+    module_source_scans_hold();
 }

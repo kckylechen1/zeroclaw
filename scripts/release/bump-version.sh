@@ -131,14 +131,6 @@ bump "marketplace/easypanel/meta.yaml" \
   'ghcr\.io/zeroclaw-labs/zeroclaw:[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?' \
   "ghcr.io/zeroclaw-labs/zeroclaw:${VERSION}"
 
-# ── Workflow description examples ──────────────────────────────────
-echo "Workflow descriptions..."
-for wf in \
-  .github/workflows/discord-release.yml; do
-  bump "$wf" \
-    '\(e\.g\. v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?\)' \
-    "(e.g. v${VERSION})"
-done
 
 # ── Docs book examples + matching i18n catalogs ────────────────────
 # Two surgical patterns, both anchored enough to skip release-runbook

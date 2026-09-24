@@ -10,8 +10,6 @@
       "pr-workflow.md#project-board-contract"
     ],
     "automation": {
-      "dry_run_workflow": ".github/workflows/project-dashboard-plan.yml",
-      "dry_run_script": "scripts/github/project_dashboard_plan.py",
       "live_project_writes": "disabled_until_project_scoped_credential_and_field_mapping_are_approved"
     }
   },

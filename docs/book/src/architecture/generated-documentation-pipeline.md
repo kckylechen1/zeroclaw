@@ -82,7 +82,6 @@ Required PR CI runs the docs quality and added-link gates, but it does not run t
 - mdBook preprocessor configuration: `docs/book/book.toml`
 - Locale registry: `locales.toml`
 - Docs quality and link gates: `scripts/ci/docs_quality_gate.sh`, `scripts/ci/docs_links_gate.sh`
-- Translation pin validation: `.github/workflows/validate-translations-pin.yml`
 - Docs deployment: `.github/workflows/docs-deploy.yml`
 - Dashboard OpenAPI generation: [Building the web dashboard](../developing/web.md)
 - Local build commands: [Building the docs locally](../developing/building-docs.md)

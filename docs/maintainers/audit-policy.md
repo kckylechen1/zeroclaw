@@ -66,7 +66,7 @@ Resolved groups:
 **Process for this category:**
 
 - For advisories detected across both tools, add the entry in `deny.toml` as an inline table: `{ id = "RUSTSEC-...", reason = "..." }`, and the corresponding entry in `.cargo/audit.toml` with a matching inline comment: `"RUSTSEC-...",  # ...`.
-- Shared entries across both configurations must have matching lifecycle metadata, enforced by `scripts/ci/advisory_exceptions_gate.sh`.
+- Shared entries across both configurations must have matching lifecycle metadata; reviewers check this.
 - Tool-specific exceptions: `cargo-audit` scans the entire workspace `Cargo.lock` flatly, whereas `cargo-deny` checks the build graph for active targets. Tool-specific entries (e.g. `RUSTSEC-2024-0384` in `.cargo/audit.toml` only, or `RUSTSEC-2026-0253` in `deny.toml` only) are scoped to the detecting tool rather than duplicated into unaffected configurations. Every exception, whether shared or tool-specific, must satisfy all lifecycle requirements below.
 - Every entry's reason and inline comment must include:
   1. **Accountable owner**: e.g. `owner: @<handle>`, `maintainer: @<handle>`, or bare `@<handle>`. Provenance and tracking notes such as `tracking #<issue>`, `tracking <repo>#<issue>`, or `transitive via <crate>` are encouraged for context but do not substitute for an accountable owner.
@@ -115,7 +115,7 @@ Resolved groups:
 **Process for this category:**
 
 - Add the entry to both `deny.toml` and `.cargo/audit.toml` with explicit role, accountable owner (`owner: @<handle>`), tracking reference (`tracking zeroclaw-labs/zeroclaw#8519`), and review condition (e.g. `awaiting upstream migration`).
-- Bare strings in `deny.toml` or missing inline comments in `.cargo/audit.toml` are rejected by `advisory_exceptions_gate.sh`.
+- Bare strings in `deny.toml` or missing inline comments in `.cargo/audit.toml` are rejected in review.
 - When a replacement lands upstream and the dep gets bumped, remove
   the entry from both files.
 
