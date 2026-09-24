@@ -237,10 +237,32 @@ impl Default for ActivatedToolSet {
 
 // ── System prompt helper ─────────────────────────────────────────────────
 
+/// Character budget for one tool's summary in the deferred index.
+const SUMMARY_MAX_CHARS: usize = 160;
+
+/// The index summary for a tool description: its first non-blank line,
+/// trimmed, cut to [`SUMMARY_MAX_CHARS`] characters with a trailing `…`.
+///
+/// MCP servers often ship docstrings with `Args:` / `Returns:` blocks. The
+/// index only has to say which tools exist, so the body stays out of the
+/// prompt; `tool_search` still matches against the full description.
+fn summary_line(description: &str) -> std::borrow::Cow<'_, str> {
+    let line = description
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    match line.char_indices().nth(SUMMARY_MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", line[..cut].trim_end()).into(),
+        None => line.into(),
+    }
+}
+
 /// Build the `<available-deferred-tools>` section for the system prompt.
-/// Lists only tool names so the LLM knows what is available without
-/// consuming context window on full schemas. Includes an instruction
-/// block that tells the LLM to call `tool_search` to activate them.
+/// Lists each tool name with a one-line summary so the LLM knows what is
+/// available without spending context on full schemas or docstrings.
+/// Includes an instruction block that tells the LLM to call `tool_search`
+/// to activate them.
 pub fn build_deferred_tools_section(deferred: &DeferredMcpToolSet) -> String {
     build_deferred_tools_section_filtered(deferred, None)
 }
@@ -282,7 +304,7 @@ pub fn build_deferred_tools_section_excluding(
         }
         out.push_str(&stub.prefixed_name);
         out.push_str(" - ");
-        out.push_str(&stub.description);
+        out.push_str(&summary_line(&stub.description));
         out.push('\n');
         count += 1;
     }
@@ -468,6 +490,49 @@ mod tests {
             ),
         };
         assert!(build_deferred_tools_section(&set).is_empty());
+    }
+
+    #[test]
+    fn summary_line_keeps_first_non_blank_line_only() {
+        let doc = "\n   Fetch the diary for a day.  \n\n    Args:\n        date: YYYY-MM-DD\n";
+        assert_eq!(summary_line(doc), "Fetch the diary for a day.");
+        assert_eq!(summary_line("Read a file"), "Read a file");
+        assert_eq!(summary_line("  \n \n"), "");
+    }
+
+    #[test]
+    fn summary_line_caps_long_lines_on_char_boundary() {
+        let exact = "é".repeat(SUMMARY_MAX_CHARS);
+        assert_eq!(summary_line(&exact), exact);
+
+        let long = "é".repeat(SUMMARY_MAX_CHARS + 1);
+        let summary = summary_line(&long);
+        assert!(summary.ends_with('…'));
+        assert_eq!(summary.chars().count(), SUMMARY_MAX_CHARS + 1);
+    }
+
+    #[test]
+    fn build_deferred_section_omits_description_body_but_search_matches_it() {
+        let stubs = vec![make_stub(
+            "diary__get",
+            "Fetch the diary for a day.\n\nReturns:\n    target_kcal for the day.",
+        )];
+        let set = DeferredMcpToolSet {
+            stubs,
+            registry: std::sync::Arc::new(
+                tokio::runtime::Runtime::new()
+                    .unwrap()
+                    .block_on(McpRegistry::connect_all(&[]))
+                    .unwrap(),
+            ),
+        };
+        let section = build_deferred_tools_section(&set);
+        assert!(section.contains("diary__get - Fetch the diary for a day.\n"));
+        assert!(!section.contains("target_kcal"));
+
+        let hits = set.search("target_kcal", 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].prefixed_name, "diary__get");
     }
 
     #[test]
