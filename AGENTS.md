@@ -1,193 +1,61 @@
 # AGENTS.md - ZeroClaw
 
-Core instructions for AI coding assistants working in this repository. Use `docs/book/src/contributing/architecture-map.md` to load only the references needed for a non-trivial task.
+Instructions for AI coding agents in this repository. `CLAUDE.md` points here.
 
-## Single Source Of Truth
+## Direction
 
-Do not duplicate state. Before adding a struct field, config entry, schema field, runtime cache, or parallel lookup table, identify the canonical source:
+This fork turns upstream ZeroClaw into a small **personal agent**:
 
-1. If the new field creates the fact, state that explicitly.
-2. If the fact already exists, resolve it from that source at use time.
+- one always-on body on the owner's computer;
+- edge devices (speaker, phone) join through the gateway as Clients and Nodes;
+- the body answers directly, reasons, or hands work to CLI agents only through Tachi.
 
-Prefer borrowed config, getters, resolver closures over live config, on-demand materialized views, or generated surfaces from one input. Do not snapshot live policy into long-lived handles. A restart-only snapshot is not a substitute for resolving canonical state.
+Read [ADR-013](docs/book/src/architecture/decisions/ADR-013-channels-as-gateway-clients.md) and [ADR-017](docs/book/src/architecture/decisions/ADR-017-personal-agent-body-edges-and-delegation.md). The single execution plan is epic **#374**: take the next unchecked step.
 
-## Safety And Privacy
+Protected (never weaken; stop and ask if a change seems to need it):
 
-- Never commit secrets, tokens, credentials, personal data, or real identities.
-- Do not weaken permissions, allowlists, sandboxing, approvals, or other trust boundaries without making the behavior and risk explicit.
-- New external surfaces default closed. Prefer allowlists to blocklists.
-- Do not hide behavior changes inside refactors or bypass failing checks.
-- Production paths must propagate errors. Avoid `unwrap()` and `expect()` unless a documented invariant makes panic impossible.
-- Do not suppress unused production code with underscore names or `#[allow(dead_code)]`; remove it, connect it, or track it. Underscore names remain valid for required but intentionally unused API, trait, or callback parameters.
+- Soul and User Model authority (ADR-014/015/016);
+- approvals and safety boundaries;
+- the `/ws/chat` contract;
+- the Node path;
+- the Tachi bridge.
 
-## Working Rules
+Fork-specific facts (type placement, upstream divergences, known gaps) are in [`docs/book/src/contributing/fork-notes.md`](docs/book/src/contributing/fork-notes.md).
 
-1. Read the owning module, factory wiring, adjacent tests, and relevant docs before editing.
-2. For architecture, config, security, workflow, governance, CI, release, or agent-assisted changes, start with `docs/book/src/contributing/architecture-map.md`.
-3. Name the source of truth before introducing state.
-4. Keep one concern per PR. Avoid unrelated cleanup and do not mix broad formatting changes with functional changes.
-5. Do not add heavy dependencies for minor convenience, speculative abstractions, or config keys and feature flags without a concrete use case.
-6. Add the smallest useful implementation and tests at the real behavior boundary.
-7. Validate at the change's risk level, report commands actually run, and document behavior, risk, side effects, and rollback.
-8. Use a non-`master` branch, open a PR to `master`, and never push directly to `master`.
-9. Use conventional commits and the full PR template. Prefer small PRs and do not add bot or AI attribution footers.
-10. Declare stacked work with `Depends on #...` and replacement work with `Supersedes #...`.
+## Rules
 
-Subagents must set their working directory to the repository root before shell or filesystem work. Do not assume an inherited working directory.
-
-## User-Facing Text
-
-- User-facing runtime CLI, tool, and onboarding text uses Fluent `fl!()` keys rather than bare literals.
-- Zerocode uses its independent Fluent catalogue through its documented `crate::i18n` helpers. Web dashboard text follows the TypeScript `web/src/lib/i18n.ts` contract, not Rust `fl!()`.
-- Logs, tracing fields, and panic text remain English and use stable error keys where the logging contract requires them.
-- English Markdown is the documentation source of truth. Follow the documented localization workflow instead of editing generated translations by hand.
+1. **One issue slice = one PR.** Touch only what the slice names; no drive-by refactors or reformatting.
+2. **Delete, don't feature-gate.** Removed code takes its tests, docs, config keys, features, and dependencies with it.
+3. **No new durable store without naming its owner** in the PR and the issue.
+4. **One source of truth.** Before adding a field, cache, or table, name where the fact already lives and resolve it from there.
+5. **Safety.**
+   - Never commit secrets or personal data.
+   - New external surfaces default closed.
+   - Production paths propagate errors instead of `unwrap()`/`expect()`.
+   - Remove unused code rather than silencing it.
+6. **User-facing text** uses Fluent `fl!()` keys; logs stay English.
+7. **Git.** Work on a non-`master` branch and open a PR to `master`.
+   - PR titles are conventional commits with a scope, `type(scope): summary`; CI rejects others.
+   - Use the PR template.
+   - Do not add bot or AI attribution footers.
 
 ## Validation
 
-Choose checks that match the changed surface. Common code checks are:
+Run what matches the change, and paste the commands and results in the PR:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --workspace --exclude zeroclaw-desktop --all-targets --features ci-all -- -D warnings
+cargo test -p <changed crates>          # a full `cargo test` before an issue's last slice
+bash scripts/ci/provider_dispatch_gate.sh   # model calls go through ProviderDispatch
+bash scripts/ci/docs_quality_gate.sh && bash scripts/ci/docs_links_gate.sh   # docs changes
+(cd web && npm ci && npm run build)     # gateway routes or web/ changed
 ```
 
-Use `./dev/ci.sh all` for full pre-PR validation when the scope warrants it. Docs-only changes use `scripts/ci/docs_quality_gate.sh` and `scripts/ci/docs_links_gate.sh`. Bootstrap script changes add `bash -n install.sh`.
+`scripts/ci/toolchain_gate.sh` checks that the active toolchain matches `rust-toolchain.toml`. Tests that rely on a `chmod`-read-only directory fail when run as root; CI runs unprivileged.
 
-Host-side cargo work runs under the `rust-toolchain.toml` pin: `scripts/ci/toolchain_gate.sh` (wired into `scripts/ci/rust_quality_gate.sh` and `just ci`) fails fast when the active cargo/rustc do not match it — consume that guard instead of rediscovering toolchain drift per harness. Shell gate changes add `bash -n` on the touched scripts plus the gate's fixture self-test (e.g. `bash scripts/ci/toolchain_gate.test.sh`).
+Stop and ask the owner on the issue when:
 
-## Task References
-
-The architecture map routes task-specific documentation. Consult `docs/book/src/contributing/agent-guidelines.md` only for detailed agent examples, risk and stability policy, skill discovery, and protected operational documents. Do not skip a required contract because it is no longer embedded in this bootstrap file.
-
----
-
-## Where New Types Go
-
-Measured, not stylistic: `crates/zeroclaw-config/src/schema.rs` is ~37k lines
-holding 252 config structs and ~390 derive macros. One debug rlib of that crate
-is **254 MB**, and it sits on `agent-runtime`'s mandatory path — so every
-consumer pays for every subsystem's config whether or not the feature is on.
-Upstream's own manifest states the cause: "All channel schema types compile
-unconditionally."
-
-The release binary is fine — 21 MB, because LTO discards what is never
-instantiated. The cost lands on build time and disk, and it compounds: turning
-off 30 of 36 channels changes the dependency graph by 3.5%.
-
-2026-09 update: the inline `#[cfg(test)]` unit-test block moved to
-`zeroclaw-config/src/schema/tests.rs`, leaving `schema.rs` at ~22.5k
-production lines. The rules below still govern the struct body; port
-upstream schema tests into the extracted tests module, not back inline.
-
-So the rule for anything new:
-
-1. **Shared wire/domain types go in `zeroclaw-api`.** It is already the types
-   crate — 7.9k lines, deps limited to serde, tokio and small utilities. A type
-   two crates both name belongs here, not in whichever crate happened to define
-   it first.
-2. **Logic stays where it runs.** `zeroclaw-api` holds the shape; the crate
-   that owns the behaviour holds the behaviour. A consumer that only needs to
-   *read* a result must not have to link the runtime that produces it.
-3. **New config sections get their own module** under `zeroclaw-config/src/`,
-   not another block in `schema.rs`. See `persona.rs` and `card.rs`.
-4. **Do not restructure `schema.rs` to fix this.** Restructuring is no longer
-   rebase-constrained (own-project mode), but the ceiling on the win is
-   small — removing an entire derive (`JsonSchema`) cuts the rlib by 16% —
-   and it still churns ~6k lines a month upstream, so any future port that
-   touches it pays for the difference.
-
-The rule is "new things follow the new shape", not "go fix the old shape".
-New files cost nothing to maintain against upstream; edits inside upstream's
-hot files cost whatever upstream churns them at whenever we port nearby
-changes.
-
-## Hyperion Integration Context
-
-This repo is the primary agent harness for the **Hyperion** quantitative trading
-system (`~/Projects/Quant_Analyzer_2026`), replacing Python Hermes-Agent.
-
-### Architecture
-
-```
-ZeroClaw (this repo)
-  └── WeChat iLink / WeCom gateway
-  └── LLM agent loop
-  └── MCP client → hapi-edge (Go)
-      ├─ trading facades: snapshot / batch_snapshot / history_klines / portfolio_*
-      └─ memory facades: typed actions only (Tool Authority Catalog §1/§10)
-         — NO direct connection to any memory backend (#2389 / #2432)
-```
-
-### Upstream relationship (own-project mode)
-
-This repository is maintained as an independent project (decision: 2026-08-16).
-Upstream (`zeroclaw-labs/zeroclaw`) is a reference to port from deliberately,
-not a stream to track: no scheduled rebases, no wholesale merges of upstream
-master. Wholesale rebases silently import unreviewed changes — the
-provider-dispatch violation from upstream #8979 arrived that way and no
-required CI check caught it.
-
-- **Baseline:** history contains upstream work through PR #9356; `master`
-  `40cc158e8` (2026-08-16) is the last wholesale-aligned point. When porting
-  or comparing against upstream, diff from this baseline.
-- **Port-on-demand protocol:** when a specific upstream fix or feature is
-  needed, read the upstream diff, port/adapt it deliberately, validate at the
-  touched surface's risk level, and record provenance in the commit message
-  ("ported from upstream #NNNN").
-- **Dependency CVEs** stay covered by `cargo audit` (CI and local
-  validation); upstream's own code fixes do not arrive automatically.
-
-The table below records intentional behavioral divergences from upstream —
-no longer a rebase-carrying ledger, it remains the map of where our behavior
-deliberately differs when porting nearby code.
-
-| Divergence | Upstream today | Status |
-|---|---|---|
-| `always_ask` outranks Full autonomy | `approval/mod.rs` returns `Approved` for Full **before** consulting `always_ask` — fail-open | ✅ deliberate |
-| risk-profile `allowed_tools`: absent ≠ empty | maps `[]` → `None` → unrestricted | ✅ deliberate |
-| cron `allowed_tools = []` means deny-all | ships a test asserting the opposite (`empty_allowed_tools_stored_as_none`) | ✅ deliberate |
-| `ModelProvider::set_credential` + real 429 rotation | logs "cannot apply … Retrying with original key" in 4 places | ✅ deliberate |
-| WeChat atomic / non-blocking state persistence | `write_private` still does blocking `std::fs::write`, non-atomic truncate, chmod after write | ✅ deliberate — atomic tmp+chmod+rename with best-effort fsync (process-crash safe, not a power-loss guarantee); `save_account_data` is `async` via `spawn_blocking` |
-| Tachi memory backend | absent | ✅ deliberate, feature-gated behind `tachi` — the fork's own agent-memory backend, distinct from the Hyperion trading memory path |
-| HyperMemory custom CRUD backend | absent | ❌ retired (#634 option C) — never re-add |
-
-### Known gaps neither side has fixed
-
-- **MCP `__` auto-admit is opt-in, not the default.** The default
-  `mcp_discovered_tool_policy` is `explicit_only` (`autonomy.rs`:
-  `McpDiscoveredToolPolicy::ExplicitOnly`; `tool_search.rs` `is_tool_allowed`;
-  `tools/scoped.rs` deferred `filter_by_policy`). A non-empty `allowed_tools`
-  list does **not** admit unlisted `<server>__<tool>` names unless the risk
-  profile sets `mcp_discovered_tool_policy = "auto_admit"`. That escape hatch
-  still restores the old bypass (`admits_unlisted` is `AutoAdmit && name
-  contains "__"`), so a trading agent that flips it is back to "whatever the
-  server offers next." The first line of defence stays server-side: expose no
-  trading write tools on the hapi-edge profile the agent connects to.
-- **Approvals.** Local-tool grants persist in `data_dir/approvals.db` (boot +
-  run + tool + args hash, 300s TTL, single-consume redeem) with an
-  `approval_audit` trail. Production constructors attach the store via
-  `with_store_at`; open failure keeps in-memory proceed (WARN); grant or
-  redeem write failure denies. The remaining gap is the Node grant/receipt
-  contract (#58 follow-up slice).
-
-### Memory Contract (#634 option C; direct-leg mandate superseded by #2389 / #2432)
-
-The custom HyperMemory CRUD backend was protocol-mismatched with the live memory backend (wrong transport AND wrong tool API) and has been retired. Do NOT reintroduce a `hypermemory` memory backend.
-
-**SUPERSEDED (#2389 / #2432):** ZeroClaw V1 is forbidden from connecting directly to any memory backend. All supported memory access goes through typed hapi-edge facade actions governed by the **Tool Authority Catalog** (`docs/Spec/TOOL_AUTHORITY_CATALOG.md` §1 / §10, in the Hyperion-Quant-SRC repo). The earlier mandate to register the local HTTP memory port as a `[[mcp.servers]]` entry is withdrawn; do not re-add it.
-
-**Companion-memcore exception (#49):** The prohibition above is the Hyperion trading-memory rule. #49 authorizes one narrow companion-side carve-out: in-process memcore `PortableKernel` stores (feature-gated). Those stores must not share a live DB, must not connect to any network memory service, and must not use a Tachi daemon as local durability. The exception is mutually exclusive with the Hyperion path, which remains hapi-edge typed facade only; do not touch `data/hapi.db`; do not reintroduce HyperMemory.
-
-- Memory facade: `hapi_memory`. Allowed and denied actions are governed by the Tool Authority Catalog (§1/§10). ZeroClaw does not depend on backend endpoints or backend-native tool names — earlier references to `hapi_save` / `hapi_search` as independent tools were the old direct-connect contract and are withdrawn.
-- Namespace: `hyperion` / project `hyperion` / domain `equity_trading`
-- Path prefix: `/trading/equity/...`
-- **Route through hapi-edge facade actions only — never host tachi MCP directly, never write Tachi DBs directly, never connect to a memory backend directly.**
-
-### Key Rules
-
-1. Memory → typed hapi-edge facade actions only (Tool Authority Catalog §1/§10); never connect to a memory backend directly, never touch `data/hapi.db` directly
-2. Trading tools → hapi-edge MCP only, never direct Longbridge/Tushare calls
-3. Real position writes require human OTP confirmation (Trading Harness P1)
-4. Timezone: `Asia/Shanghai`
-5. A-share lot: 100 shares (STAR: min 200 then 1-share increments)
+- a deletion would break CLI chat, `/ws/chat`, cron, memory, approvals, the Node path, or the Tachi bridge;
+- a step needs an endpoint, store, or config key the issue did not name;
+- CI fails for a reason you cannot explain from the log.

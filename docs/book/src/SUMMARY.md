@@ -173,6 +173,7 @@
 - [Contributing](./contributing/index.md)
   - [How to contribute](./contributing/how-to.md)
   - [Coding agent guidelines](./contributing/agent-guidelines.md)
+  - [Fork notes](./contributing/fork-notes.md)
   - [Architecture and contribution map](./contributing/architecture-map.md)
   - [RFC process](./contributing/rfcs.md)
   - [Communication](./contributing/communication.md)
