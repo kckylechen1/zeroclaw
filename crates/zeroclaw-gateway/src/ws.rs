@@ -393,7 +393,6 @@ async fn handle_socket(
             Some(&session_cwd),
             true,
             false,
-            Some(state.canvas_store.clone()),
         )
         .await
         {

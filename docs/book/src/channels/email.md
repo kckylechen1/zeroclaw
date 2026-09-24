@@ -20,7 +20,6 @@ The general-purpose email channel. Polls IMAP for new messages, sends via SMTP. 
 
 - **App passwords required** if 2FA is on. Regular account password is rejected.
 - **"Less secure app access" is gone**: app password is the only path.
-- Consider the Gmail Push channel below for real-time delivery instead of polling.
 
 ### Outlook / Office 365
 
@@ -30,22 +29,7 @@ The general-purpose email channel. Polls IMAP for new messages, sends via SMTP. 
 
 ## Gmail Push (`gmail_push`)
 
-Real-time delivery via Google Cloud Pub/Sub, no polling.
-
-{{#config-fields channels.gmail_push}}
-
-`oauth_token` and `webhook_secret` are secrets:
-
-{{#secret-config channels.gmail_push.<alias>.oauth_token}}
-
-### Setup
-
-1. Create a Google Cloud project, enable Gmail API and Pub/Sub API
-2. Create a Pub/Sub topic the Gmail service can publish to, set it as `topic`
-3. Authorize the agent's Gmail access and store the resulting token via the secret path above
-4. The agent watches for new-mail notifications and routes them to the bound agent
-
-Outbound sends still go via SMTP: configure an IMAP+SMTP `[channels.email.<alias>]` block.
+Gmail Push depended on the gateway's `/webhook/gmail` Pub/Sub endpoint, which was removed (#375). Use the IMAP/SMTP channel above instead.
 
 ---
 

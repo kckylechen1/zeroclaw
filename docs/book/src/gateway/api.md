@@ -1,23 +1,36 @@
 # Gateway HTTP API
 
-The gateway exposes a REST surface alongside the local CLI. Anything that can
-be set with `zeroclaw config get/set/list/init/migrate` is also reachable via
-HTTP, so the dashboard, third-party tooling, and the CLI all drive the same
-underlying `Config` mutation core.
+The gateway is the one external door to the body (ADR-013, ADR-017). This page
+lists the routes it registers and describes the config and review surfaces in
+detail. The router in `crates/zeroclaw-gateway/src/lib.rs` is the authority for
+the live surface.
 
-This page is a high-level overview. Field-level definitions, request and response shapes, and "Try it out" forms for the currently documented OpenAPI subset live at `/api/docs` on a running gateway. Those schemas come from runtime types, but the route inventory is assembled separately and does not yet cover every route registered by the gateway. The router in `crates/zeroclaw-gateway/src/lib.rs` remains the authority for the full live surface.
+## Routes
 
-> Tracked under issue #6175.
+| Area | Routes |
+|---|---|
+| Liveness | `GET /health`, `GET /api/health`, `GET /api/status`, `GET /metrics` |
+| Local ops (loopback only) | `POST /admin/shutdown`, `POST /admin/reload`, `GET /admin/paircode`, `POST /admin/paircode/new` |
+| Client pairing | `POST /pair`, `GET /pair/code`, `POST /api/pairing/initiate`, `POST /api/pair`, `GET /api/devices`, `POST /api/devices/me/capabilities`, `DELETE /api/devices/{id}`, `POST /api/devices/{id}/token/rotate` |
+| Chat | `GET /ws/chat` (WebSocket), `POST /webhook` |
+| Events | `GET /api/events` (SSE), `GET /api/events/history` |
+| Sessions | `GET /api/sessions`, `GET /api/sessions/running`, `GET/POST /api/sessions/{id}/messages`, `PUT/DELETE /api/sessions/{id}`, `GET /api/sessions/{id}/state`, `POST /api/sessions/{id}/abort` |
+| Scheduling | `GET/POST /api/cron`, `GET/PATCH /api/cron/settings`, `PATCH/DELETE /api/cron/{id}`, `GET /api/cron/{id}/runs`, `POST /api/cron/{id}/run` |
+| Memory and review | `GET/POST /api/memory`, `DELETE /api/memory/{key}`, `/api/user-model/*`, `/api/soul*` |
+| Personality and skills | `/api/personality*`, `/api/skills/*`, `GET /api/agents/{alias}/skills` |
+| Diagnostics | `GET /api/logs`, `GET /api/cost`, `GET /api/tools` |
+| Channels | `GET /api/channels`, `POST /api/channels/{channel}/relink` (until #378) |
+| Config (dashboard editor, until #379) | `/api/config*`, `POST /api/channels/bind` |
+| Edge devices (`nodes` feature) | `GET /ws/nodes` (WebSocket), `POST /api/node-identities/pairing`, `POST /api/node-identities`, `DELETE /api/node-identities/{id}` |
+| Dashboard assets | `GET /_app/{*path}`, SPA fallback |
 
 ## Authentication
 
 The configuration value reads and mutations described on this page are gated
-by the existing pairing and bearer authentication. Shape discovery through `/api/docs`,
-`/api/openapi.json`, and config `OPTIONS` is public. A first-run pairing code is
-printed when the daemon starts; subsequent authenticated calls send the derived
-bearer token in the `Authorization` header. The Scalar explorer at `/api/docs`
-exposes an "Authentication" panel where you paste the token before issuing
-authenticated calls.
+by the existing pairing and bearer authentication. Config `OPTIONS` shape
+discovery is public. A first-run pairing code is printed when the daemon
+starts; subsequent authenticated calls send the derived bearer token in the
+`Authorization` header.
 
 Local-bound by default. Over-the-network access requires TLS termination at
 the gateway or in front of it; the per-property and PATCH endpoints are not
@@ -185,19 +198,6 @@ Frontends and scripts match against the code; UI matches against the path.
 | `config_changed_externally` | 409 | The on-disk config drifted from the in-memory copy. (See drift detection.) |
 | `reload_failed` | 500 | The save succeeded but daemon reload could not pick up the new state; on-disk reverted. |
 | `internal_error` | 500 | Unclassified server-side failure. |
-
-## Live exploration
-
-Once a gateway is running, browse to `http://<gateway-host>:<port>/api/docs` for the Scalar API explorer. The raw specification is available at `/api/openapi.json` for other compatible viewers.
-
-The explorer's authentication panel binds to the `bearerAuth` scheme declared
-in the spec, paste your pairing-derived bearer token there before issuing
-live calls. The CLI shortcut for the URL is `zeroclaw config docs`.
-
-If the Scalar bundle can't load from the CDN (offline / air-gapped install),
-the page degrades gracefully and points you at the raw spec at
-`/api/openapi.json` so you can use any compatible viewer
-(Insomnia, Postman, Swagger UI, etc.).
 
 ## Event stream contract
 

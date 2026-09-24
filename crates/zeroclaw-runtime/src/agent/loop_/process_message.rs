@@ -147,7 +147,6 @@ pub async fn process_message(
                 .as_ref()
                 .and_then(|e| e.api_key.as_deref()),
             &config,
-            None,
             false,
             None,
             None,

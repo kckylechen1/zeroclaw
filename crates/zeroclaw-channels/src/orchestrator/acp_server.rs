@@ -21,7 +21,6 @@ use zeroclaw_api::plan::PlanEntry;
 use zeroclaw_config::schema::Config;
 use zeroclaw_infra::acp_session_store::AcpSessionStore;
 use zeroclaw_runtime::agent::agent::{Agent, TurnEvent};
-use zeroclaw_runtime::tools::CanvasStore;
 
 use crate::acp_channel::AcpChannel;
 
@@ -85,11 +84,6 @@ pub struct AcpServer {
     /// against `max_sessions`.
     loading_sessions: Arc<tokio::sync::Mutex<HashSet<String>>>,
     store: Option<Arc<AcpSessionStore>>,
-    /// Shared canvas store from the gateway / daemon supervisor.  When set,
-    /// agents created by this server write canvas frames to the same store
-    /// that `/ws/canvas/:id` WebSocket subscribers read from.  `None` in
-    /// standalone `zeroclaw acp` mode where no gateway is running.
-    canvas_store: Option<CanvasStore>,
     /// Connection-scoped default agent alias (`?agent=` on the gateway ACP
     /// endpoint). Slots into the `session/new` alias precedence chain between
     /// an explicit `agentAlias` and `[acp].default_agent`. Not a config
@@ -208,7 +202,6 @@ impl AcpServer {
             cancel_tokens: Arc::new(std::sync::Mutex::new(HashMap::new())),
             loading_sessions: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             store,
-            canvas_store: None,
             connection_default_agent: None,
             client_elicitation_caps: std::sync::RwLock::new(ElicitationCapabilities::default()),
         }
@@ -235,7 +228,6 @@ impl AcpServer {
                 Some(workspace_dir),
                 enable_mcp,
                 true,
-                self.canvas_store.clone(),
             )
             .await
         } else {
@@ -245,7 +237,6 @@ impl AcpServer {
                 Some(workspace_dir),
                 enable_mcp,
                 true,
-                self.canvas_store.clone(),
             )
             .await
         }
@@ -261,14 +252,6 @@ impl AcpServer {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        self
-    }
-
-    /// Attach the shared gateway [`CanvasStore`] so that agents created by
-    /// this server write canvas frames to the same store that the
-    /// `/ws/canvas/:id` WebSocket endpoint serves.
-    pub fn with_canvas_store(mut self, canvas_store: CanvasStore) -> Self {
-        self.canvas_store = Some(canvas_store);
         self
     }
 
@@ -2069,8 +2052,8 @@ fn map_tool_kind(name: &str) -> &'static str {
         "ask_user" | "calculator" | "composio" | "delegate" | "escalate_to_human"
         | "execute_pipeline" | "jira" | "llm_task" | "schedule" | "security_ops" | "shell"
         | "vi_verify" => "execute",
-        "backup" | "browser_open" | "canvas" | "cloud_ops" | "file_edit" | "file_write"
-        | "memory_export" | "memory_store" | "report_template" => "edit",
+        "backup" | "browser_open" | "cloud_ops" | "file_edit" | "file_write" | "memory_export"
+        | "memory_store" | "report_template" => "edit",
         "cron_add" | "poll" | "reaction" => "edit",
         "memory_forget" | "memory_purge" => "delete",
         // ACP clients often treat `read`/`search`/`fetch` calls as noisy

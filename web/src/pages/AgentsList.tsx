@@ -134,10 +134,10 @@ function EmptyState() {
       <p className="text-sm mb-4 text-pc-text-muted">
         {t('agents_list.empty_hint')}
       </p>
-      <Link to="/quickstart" className="inline-block">
+      <Link to="/config/agents" className="inline-block">
         <Button variant="primary" size="md">
           <Plus className="h-4 w-4" />
-          {t('agents_list.start_quickstart')}
+          {t('agents_list.open_config')}
         </Button>
       </Link>
     </div>

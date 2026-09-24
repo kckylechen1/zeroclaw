@@ -53,7 +53,7 @@ FROM --platform=$BUILDPLATFORM ${ZEROCLAW_BASE_RUST_SLIM} AS builder
 WORKDIR /app
 ARG TARGETARCH
 # >>> generated:docker-features-arg by `cargo generate installers` - do not edit <<<
-ARG ZEROCLAW_CARGO_FLAGS="--no-default-features --features acp-bridge,agent-runtime,channel-acp-server,channel-discord,channel-email,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,hardware-tools,integrations-saas,observability-prometheus,schema-export,whatsapp-web"
+ARG ZEROCLAW_CARGO_FLAGS="--no-default-features --features agent-runtime,channel-acp-server,channel-discord,channel-email,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,hardware-tools,integrations-saas,observability-prometheus,schema-export,whatsapp-web"
 # >>> end generated:docker-features-arg <<<
 
 # Install build dependencies. g++ is required by inkjet (zerocode's syntax
@@ -102,13 +102,9 @@ COPY apps/zerocode/Cargo.toml apps/zerocode/Cargo.toml
 COPY tools/fill-translations/Cargo.toml tools/fill-translations/Cargo.toml
 COPY xtask/Cargo.toml xtask/Cargo.toml
 # Create dummy targets for all workspace members so manifest parsing succeeds.
-# `src/bin/zeroclaw-acp-bridge.rs` is required because the `acp-bridge` feature
-# is in the root crate's default set; cargo selects the bin target during the
-# pre-fetch build even with only the workspace lib stubbed.
-RUN mkdir -p src src/bin benches apps/tauri/src apps/zerocode/src tools/fill-translations/src xtask/src/bin \
+RUN mkdir -p src benches apps/tauri/src apps/zerocode/src tools/fill-translations/src xtask/src/bin \
     && echo "fn main() {}" > src/main.rs \
     && echo "" > src/lib.rs \
-    && echo "fn main() {}" > src/bin/zeroclaw-acp-bridge.rs \
     && echo "fn main() {}" > benches/agent_benchmarks.rs \
     && echo "fn main() {}" > apps/tauri/src/main.rs \
     && echo "fn main() {}" > apps/tauri/build.rs \

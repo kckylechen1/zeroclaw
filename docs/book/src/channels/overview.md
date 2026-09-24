@@ -31,7 +31,6 @@ Real-time messaging where the agent can hold a conversation, get notified of new
 | Matrix | `channel-matrix` | [Matrix](./matrix.md) |
 | Mattermost | `channel-mattermost` | [Mattermost](./mattermost.md) |
 | LINE | `channel-line` | [LINE](./line.md) |
-| Nextcloud Talk | `channel-nextcloud` | [Nextcloud Talk](./nextcloud-talk.md) |
 | Signal | `channel-signal` | [Signal](./signal.md) |
 | Twitch | `channel-twitch` | No dedicated guide |
 | WhatsApp Cloud API | `channel-whatsapp-cloud` | [WhatsApp](./whatsapp.md) |
@@ -64,7 +63,6 @@ See [Git](./git.md).
 | Channel | Feature flag | Notes |
 |---|---|---|
 | IMAP / SMTP | `channel-email` | Classic poll-based inbox |
-| Gmail Push | `channel-email` | Google Pub/Sub push notifications: real-time, no polling |
 
 See [Email](./email.md).
 

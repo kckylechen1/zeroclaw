@@ -112,16 +112,8 @@ zeroclaw daemon
 the scheduler, and the heartbeat monitor. (`zeroclaw gateway` starts only the
 HTTP gateway if that is all you need.)
 
-Then visit `http://127.0.0.1:42617/quickstart`. A fresh install with no agents
-configured redirects there automatically; afterward you can always reach it
-from the dashboard navigation.
-
-The web form presents the same steps as cards. On submit it applies your
-submission through the daemon (`POST /api/quickstart/apply`), which returns a
-structured error list if anything is invalid, then reloads the daemon in place
-so the new agent is live without a restart. A separate
-`POST /api/quickstart/validate` endpoint runs the same checks without applying,
-for clients that want to validate first.
+Then open `http://127.0.0.1:42617/`. Agents, providers, and channels are edited
+under **Config** in the dashboard or directly in `config.toml`.
 
 ## After Quickstart
 

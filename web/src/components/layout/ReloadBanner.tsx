@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { useLocation } from 'react-router-dom';
 import { AlertTriangle, X } from 'lucide-react';
 import { getDrift, getReloadStatus, type DriftEntry } from '@/lib/api';
 import ReloadDaemonButton from '@/components/sections/ReloadDaemonButton';
@@ -33,7 +32,6 @@ export default function ReloadBanner() {
   // re-appears when the underlying signal changes (new drift paths, or
   // pending flips back on) because the recomputed signature won't match.
   const [dismissedSig, setDismissedSig] = useState<string | null>(null);
-  const location = useLocation();
   // Whether the in-UI reload action can actually succeed from this origin.
   // When false (remote host, pairing off) we drop the dead button and reword
   // the notice to point the operator at the CLI / a loopback session.
@@ -64,18 +62,6 @@ export default function ReloadBanner() {
 
   const { pendingReload, drifted } = state;
   const driftedCount = drifted.length;
-  const isQuickstart = location.pathname.startsWith('/quickstart');
-  if (isQuickstart && pendingReload && driftedCount === 0) {
-    return (
-      <div className="px-4 py-3 border-b border-status-info/20 bg-status-info/[0.06] flex items-start gap-3">
-        <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5 text-status-info" />
-        <p className="text-sm font-medium text-pc-text">
-          {t('reload_banner.quickstart_saved')}
-        </p>
-      </div>
-    );
-  }
-
   // Content signature for the warning banner. Dismissal is keyed to this so
   // a fresh change (different pending/drift state) surfaces the banner again.
   const sig = `${pendingReload ? 1 : 0}|${drifted

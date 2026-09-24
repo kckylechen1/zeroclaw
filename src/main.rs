@@ -1216,8 +1216,6 @@ enum ConfigCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Print the API explorer URL (plus a hint if the daemon isn't running).
-    Docs,
     Generate {
         /// Target schema version (e.g. 1, 2, 3). Defaults to current.
         version: Option<u32>,
@@ -2527,10 +2525,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
             // Cron delivery is registered earlier (before the command match)
             // so it works for both `daemon` and `gateway start`.
 
-            let canvas_store = zeroclaw_runtime::tools::CanvasStore::new();
-            let canvas_store_for_gateway = canvas_store.clone();
-            let canvas_store_for_channels = canvas_store.clone();
-
             // Capture the launch command now, before any in-app upgrade can
             // swap the binary on disk (after which `current_exe()` resolves to a
             // "(deleted)" path on Linux). Used by the post-loop self-respawn.
@@ -2573,11 +2567,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
             let mut degraded_nag: Option<tokio::task::JoinHandle<()>> =
                 gate_security_posture(&current_config, allow_degraded_security)?;
             loop {
-                // Per-iteration clones so the subsystem closures (which
-                // `move`-capture) don't consume the outer bindings on the
-                // first iteration; reload would otherwise see a moved value.
-                let canvas_store_for_gateway = canvas_store_for_gateway.clone();
-                let canvas_store_for_channels = canvas_store_for_channels.clone();
                 companion_store =
                     zeroclaw_memory::reload_companion_store(companion_store, &current_config)?;
                 let (companion_for_gateway, companion_for_channels) =
@@ -2598,8 +2587,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
 
                 #[cfg(feature = "gateway")]
                 registry.register_gateway(Box::new(
-                    move |host, port, config, tx, reload_controls, tui_registry| {
-                        let canvas_store = canvas_store_for_gateway.clone();
+                    move |host, port, config, tx, reload_controls, _tui_registry| {
                         let companion_store = companion_for_gateway.clone();
                         Box::pin(async move {
                             Box::pin(zeroclaw_gateway::run_gateway(
@@ -2608,8 +2596,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                                 config,
                                 tx,
                                 reload_controls,
-                                tui_registry,
-                                Some(canvas_store),
                                 companion_store,
                             ))
                             .await
@@ -2618,12 +2604,10 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 ));
 
                 registry.register_channels(Box::new(move |config, cancel| {
-                    let canvas_store = canvas_store_for_channels.clone();
                     let companion_store = companion_for_channels.clone();
                     Box::pin(async move {
                         Box::pin(zeroclaw_channels::orchestrator::start_channels(
                             config,
-                            Some(canvas_store),
                             cancel,
                             companion_store,
                         ))
@@ -2878,13 +2862,8 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 let companion_store = zeroclaw_memory::create_companion_store(&config)?;
                 let companion_outbox_observer =
                     spawn_companion_outbox_observer(companion_store.clone());
-                let result = Box::pin(channels::start_channels(
-                    config,
-                    None,
-                    cancel,
-                    companion_store,
-                ))
-                .await;
+                let result =
+                    Box::pin(channels::start_channels(config, cancel, companion_store)).await;
                 if let Some(handle) = companion_outbox_observer {
                     handle.abort();
                 }
@@ -3496,8 +3475,7 @@ async fn run_gateway_if_enabled(
     zeroclaw_runtime::restart::record_launch();
     // Standalone gateway (no daemon supervisor): pass None for reload_tx so
     // /admin/reload returns 503 with a clear "no supervisor; restart
-    // manually" message, None for tui_registry (no TUI socket), and None
-    // for canvas_store so the gateway falls back to its own default.
+    // manually" message.
     // Companion store is constructed once here — run_gateway never opens it.
     let companion_store = zeroclaw_memory::create_companion_store(&config)?;
     let result = Box::pin(gateway::run_gateway(
@@ -3505,8 +3483,6 @@ async fn run_gateway_if_enabled(
         port,
         config,
         tx,
-        None,
-        None,
         None,
         companion_store,
     ))

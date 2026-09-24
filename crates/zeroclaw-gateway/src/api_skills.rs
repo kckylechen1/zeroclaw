@@ -24,7 +24,6 @@ use super::api::require_auth;
 /// Response for `GET /api/skills/slash-option-kinds`: the canonical registry,
 /// built by walking `SlashOptionKind::ALL`.
 #[derive(Debug, Serialize)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct SlashOptionKindsResult {
     pub kinds: Vec<SlashOptionKindDescriptor>,
 }

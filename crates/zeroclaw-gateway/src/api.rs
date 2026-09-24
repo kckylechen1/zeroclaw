@@ -13,18 +13,6 @@ use zeroclaw_memory::MemoryEntry;
 
 const MEMORY_API_CONTENT_MAX_CHARS: usize = 4096;
 
-fn integration_entry_json(
-    entry: &zeroclaw_runtime::integrations::IntegrationEntry,
-) -> serde_json::Value {
-    serde_json::json!({
-        "name": &entry.name,
-        "description": &entry.description,
-        "category": entry.category,
-        "category_label": entry.category.label(),
-        "status": entry.status,
-    })
-}
-
 // ── Bearer token auth extractor ─────────────────────────────────
 
 /// Extract and validate bearer token from Authorization header.
@@ -298,10 +286,6 @@ pub async fn handle_api_status(
 
     let process = zeroclaw_runtime::process_stats::sample();
 
-    // Upgrade affordance: whether the dashboard should poll for updates / offer
-    // the upgrade button, and which restart command to show afterwards.
-    let restart = crate::version::detect_restart();
-
     // Node discovery surface is feature-gated; keep the status payload shape
     // stable by emitting empty collections when the `nodes` feature is off.
     #[cfg(feature = "nodes")]
@@ -331,10 +315,6 @@ pub async fn handle_api_status(
         "health": health,
         "agent_alias": agent_alias,
         "process": process,
-        "check_updates": config.gateway.check_updates,
-        "allow_self_upgrade": config.gateway.allow_self_upgrade,
-        "restart_mode": restart.mode.as_str(),
-        "restart_hint": restart.hint,
     });
 
     Json(body).into_response()
@@ -825,90 +805,6 @@ pub async fn handle_api_cron_settings_patch(
     .into_response()
 }
 
-/// GET /api/integrations — list all integrations with status
-pub async fn handle_api_integrations(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    let config = state.config.read().clone();
-    let entries = zeroclaw_runtime::integrations::registry::all_integrations(&config);
-
-    let integrations: Vec<serde_json::Value> = entries.iter().map(integration_entry_json).collect();
-
-    Json(serde_json::json!({"integrations": integrations})).into_response()
-}
-
-/// GET /api/integrations/settings — return per-integration settings (enabled + category)
-pub async fn handle_api_integrations_settings(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    let config = state.config.read().clone();
-    let entries = zeroclaw_runtime::integrations::registry::all_integrations(&config);
-
-    let mut settings = serde_json::Map::new();
-    for entry in &entries {
-        let enabled = matches!(
-            entry.status,
-            zeroclaw_runtime::integrations::IntegrationStatus::Active
-        );
-        settings.insert(
-            entry.name.clone(),
-            serde_json::json!({
-                "enabled": enabled,
-                "category": entry.category,
-                "status": entry.status,
-            }),
-        );
-    }
-
-    Json(serde_json::json!({"settings": settings})).into_response()
-}
-
-/// POST /api/doctor — run diagnostics
-pub async fn handle_api_doctor(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    let config = state.config.read().clone();
-    let results = zeroclaw_runtime::doctor::diagnose(&config);
-
-    let ok_count = results
-        .iter()
-        .filter(|r| r.severity == zeroclaw_runtime::doctor::Severity::Ok)
-        .count();
-    let warn_count = results
-        .iter()
-        .filter(|r| r.severity == zeroclaw_runtime::doctor::Severity::Warn)
-        .count();
-    let error_count = results
-        .iter()
-        .filter(|r| r.severity == zeroclaw_runtime::doctor::Severity::Error)
-        .count();
-
-    Json(serde_json::json!({
-        "results": results,
-        "summary": {
-            "ok": ok_count,
-            "warnings": warn_count,
-            "errors": error_count,
-        }
-    }))
-    .into_response()
-}
-
 async fn resolve_memory_handle(
     state: &AppState,
     agent_alias: Option<&str>,
@@ -1307,36 +1203,6 @@ pub async fn handle_api_channel_relink(
         )
             .into_response(),
     }
-}
-
-/// GET /api/tuis — list connected TUI sessions
-pub async fn handle_api_tuis(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    let tuis: Vec<serde_json::Value> = state
-        .tui_registry
-        .as_ref()
-        .map(|r| {
-            r.list()
-                .into_iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "tui_id": e.tui_id,
-                        "connected_at": e.connected_at.to_rfc3339(),
-                        "peer_label": e.peer_label,
-                        "transport": e.transport,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Json(serde_json::json!({ "tuis": tuis })).into_response()
 }
 
 fn compiled_readiness_key_for_alias<'a>(config: &'a Config, info: &'a ChannelAliasInfo) -> &'a str {
@@ -2036,8 +1902,6 @@ pub(crate) mod tests {
     use axum::response::IntoResponse;
     use http_body_util::BodyExt;
     use parking_lot::RwLock;
-    #[cfg(feature = "channel-linq")]
-    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
     #[cfg(feature = "nodes")]
@@ -2222,22 +2086,6 @@ pub(crate) mod tests {
             rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
             auth_limiter: Arc::new(crate::auth_rate_limit::AuthRateLimiter::new()),
             idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-            #[cfg(feature = "channel-whatsapp-cloud")]
-            whatsapp: HashMap::new(),
-            #[cfg(feature = "channel-whatsapp-cloud")]
-            whatsapp_app_secret: HashMap::new(),
-            #[cfg(feature = "channel-linq")]
-            linq: HashMap::new(),
-            #[cfg(feature = "channel-linq")]
-            linq_signing_secrets: HashMap::new(),
-            #[cfg(feature = "channel-nextcloud")]
-            nextcloud_talk: HashMap::new(),
-            #[cfg(feature = "channel-nextcloud")]
-            nextcloud_talk_webhook_secret: HashMap::new(),
-            #[cfg(feature = "channel-wati")]
-            wati: HashMap::new(),
-            #[cfg(feature = "channel-email")]
-            gmail_push: None,
             observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -2255,13 +2103,9 @@ pub(crate) mod tests {
             pending_pairings: None,
             path_prefix: String::new(),
             web_dist_dir: None,
-            canvas_store: zeroclaw_runtime::tools::CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            tui_registry: None,
             reload_tx: None,
-            #[cfg(feature = "webauthn")]
-            webauthn: None,
         }
     }
 
@@ -2295,6 +2139,68 @@ pub(crate) mod tests {
         );
         assert_eq!(health.pending_count, 0);
         assert_eq!(health.oldest_pending_age_secs, None);
+    }
+
+    #[tokio::test]
+    async fn handle_api_tools_scopes_listing_by_agent_query() {
+        use zeroclaw_api::tool::ToolSpec;
+
+        let mut config = zeroclaw_config::schema::Config::default();
+        config.gateway.require_pairing = false;
+        let mut state = test_state(config);
+
+        let spec = |name: &str| {
+            ToolSpec::new(
+                name.to_string(),
+                format!("{name} desc"),
+                serde_json::json!({}),
+            )
+        };
+        state.tools_registry = Arc::new(vec![spec("default_tool")]);
+        let mut by_agent: std::collections::HashMap<String, Arc<Vec<ToolSpec>>> =
+            std::collections::HashMap::new();
+        by_agent.insert("alpha".to_string(), Arc::new(vec![spec("alpha_tool")]));
+        by_agent.insert("beta".to_string(), Arc::new(vec![spec("beta_tool")]));
+        state.tools_registry_by_agent = Arc::new(by_agent);
+
+        async fn tool_names(state: AppState, agent: Option<&str>) -> Vec<String> {
+            let response = handle_api_tools(
+                State(state),
+                HeaderMap::new(),
+                Query(ToolsQuery {
+                    agent: agent.map(str::to_string),
+                }),
+            )
+            .await
+            .into_response();
+            response_json(response).await["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        // A known agent gets its own scoped listing.
+        assert_eq!(
+            tool_names(state.clone(), Some("beta")).await,
+            vec!["beta_tool".to_string()]
+        );
+        // Omitted agent falls back to the default seed listing.
+        assert_eq!(
+            tool_names(state.clone(), None).await,
+            vec!["default_tool".to_string()]
+        );
+        // Unknown and blank aliases fall back to the default rather than error,
+        // so a stale UI selection still renders something.
+        assert_eq!(
+            tool_names(state.clone(), Some("ghost")).await,
+            vec!["default_tool".to_string()]
+        );
+        assert_eq!(
+            tool_names(state.clone(), Some("   ")).await,
+            vec!["default_tool".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -2422,22 +2328,6 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn integration_entry_json_derives_category_label_from_category() {
-        let entry = zeroclaw_runtime::integrations::IntegrationEntry {
-            name: "Browser".into(),
-            description: "Run browser automation".into(),
-            category: zeroclaw_runtime::integrations::IntegrationCategory::ToolsAutomation,
-            status: zeroclaw_runtime::integrations::IntegrationStatus::Active,
-        };
-
-        let json = integration_entry_json(&entry);
-
-        assert_eq!(json["category"], "ToolsAutomation");
-        assert_eq!(json["category_label"], "Tools & Automation");
-        assert_eq!(json["status"], "Active");
-    }
-
     fn memory_entry_with_content(content: String) -> MemoryEntry {
         MemoryEntry {
             id: "entry-1".into(),
@@ -2539,68 +2429,6 @@ pub(crate) mod tests {
         assert_ne!(content, huge);
     }
 
-    #[tokio::test]
-    async fn handle_api_tools_scopes_listing_by_agent_query() {
-        use zeroclaw_api::tool::ToolSpec;
-
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.gateway.require_pairing = false;
-        let mut state = test_state(config);
-
-        let spec = |name: &str| {
-            ToolSpec::new(
-                name.to_string(),
-                format!("{name} desc"),
-                serde_json::json!({}),
-            )
-        };
-        state.tools_registry = Arc::new(vec![spec("default_tool")]);
-        let mut by_agent: std::collections::HashMap<String, Arc<Vec<ToolSpec>>> =
-            std::collections::HashMap::new();
-        by_agent.insert("alpha".to_string(), Arc::new(vec![spec("alpha_tool")]));
-        by_agent.insert("beta".to_string(), Arc::new(vec![spec("beta_tool")]));
-        state.tools_registry_by_agent = Arc::new(by_agent);
-
-        async fn tool_names(state: AppState, agent: Option<&str>) -> Vec<String> {
-            let response = handle_api_tools(
-                State(state),
-                HeaderMap::new(),
-                Query(ToolsQuery {
-                    agent: agent.map(str::to_string),
-                }),
-            )
-            .await
-            .into_response();
-            response_json(response).await["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|t| t["name"].as_str().unwrap().to_string())
-                .collect()
-        }
-
-        // A known agent gets its own scoped listing.
-        assert_eq!(
-            tool_names(state.clone(), Some("beta")).await,
-            vec!["beta_tool".to_string()]
-        );
-        // Omitted agent falls back to the default seed listing.
-        assert_eq!(
-            tool_names(state.clone(), None).await,
-            vec!["default_tool".to_string()]
-        );
-        // Unknown and blank aliases fall back to the default rather than error,
-        // so a stale UI selection still renders something.
-        assert_eq!(
-            tool_names(state.clone(), Some("ghost")).await,
-            vec!["default_tool".to_string()]
-        );
-        assert_eq!(
-            tool_names(state.clone(), Some("   ")).await,
-            vec!["default_tool".to_string()]
-        );
-    }
-
     #[test]
     fn api_channels_readiness_key_tracks_whatsapp_backend_type() {
         let mut config = zeroclaw_config::schema::Config::default();
@@ -2678,7 +2506,6 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(not(feature = "channel-nextcloud"))]
     #[tokio::test]
     async fn api_channels_marks_configured_uncompiled_channel_unavailable() {
         let mut config = zeroclaw_config::schema::Config::default();
@@ -4715,85 +4542,6 @@ pub(crate) mod tests {
             "exactly one of two racing rotates must win the pairing slot, \
              got {codes_issued} (j1={j1}, j2={j2})"
         );
-    }
-
-    #[cfg(feature = "a2a")]
-    mod a2a_auth {
-        use super::*;
-        use tower::ServiceExt;
-
-        const TOKEN: &str = "a2a-test-token";
-
-        fn paired_state() -> AppState {
-            let mut config = zeroclaw_config::schema::Config::default();
-            config.a2a.server.enabled = true;
-            let agent = zeroclaw_config::schema::AliasedAgentConfig {
-                a2a: zeroclaw_config::multi_agent::AgentA2aConfig {
-                    published: true,
-                    exposed_skills: Vec::new(),
-                },
-                ..Default::default()
-            };
-            config.agents.insert("maker".to_string(), agent);
-            let mut state = test_state(config);
-            state.pairing = Arc::new(PairingGuard::new(true, &[TOKEN.to_string()]));
-            state
-        }
-
-        async fn status_of(
-            router: axum::Router,
-            req: axum::http::Request<axum::body::Body>,
-        ) -> StatusCode {
-            router.oneshot(req).await.expect("router response").status()
-        }
-
-        #[tokio::test]
-        async fn task_endpoint_rejects_unauthenticated_request() {
-            let router = crate::a2a::a2a_task_route().with_state(paired_state());
-            let req = axum::http::Request::builder()
-                .method("POST")
-                .uri("/a2a/maker")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"parts":[{"kind":"text","text":"hi"}]}}}"#,
-                ))
-                .unwrap();
-            assert_eq!(status_of(router, req).await, StatusCode::UNAUTHORIZED);
-        }
-
-        #[tokio::test]
-        async fn catalog_card_serves_unauthenticated_request() {
-            let router = crate::a2a::a2a_routes().with_state(paired_state());
-            let req = axum::http::Request::builder()
-                .method("GET")
-                .uri("/.well-known/agents-card.json")
-                .body(axum::body::Body::empty())
-                .unwrap();
-            assert_eq!(status_of(router, req).await, StatusCode::OK);
-        }
-
-        #[tokio::test]
-        async fn alias_card_serves_unauthenticated_request() {
-            let router = crate::a2a::a2a_routes().with_state(paired_state());
-            let req = axum::http::Request::builder()
-                .method("GET")
-                .uri("/a2a/maker/.well-known/agent-card.json")
-                .body(axum::body::Body::empty())
-                .unwrap();
-            assert_eq!(status_of(router, req).await, StatusCode::OK);
-        }
-
-        #[tokio::test]
-        async fn alias_card_serves_with_valid_token() {
-            let router = crate::a2a::a2a_routes().with_state(paired_state());
-            let req = axum::http::Request::builder()
-                .method("GET")
-                .uri("/a2a/maker/.well-known/agent-card.json")
-                .header("authorization", format!("Bearer {TOKEN}"))
-                .body(axum::body::Body::empty())
-                .unwrap();
-            assert_eq!(status_of(router, req).await, StatusCode::OK);
-        }
     }
 
     #[test]

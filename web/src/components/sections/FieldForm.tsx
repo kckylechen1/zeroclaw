@@ -31,7 +31,7 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
-  FolderOpen,
+
   List as ListIcon,
   MessageSquarePlus,
   Plus,
@@ -40,7 +40,6 @@ import {
   Type as TypeIcon,
   X,
 } from "lucide-react";
-import DirectoryPicker from "./DirectoryPicker";
 import ToolPicker from "@/components/ToolPicker";
 import ToolPermissionGrid, {
   type ToolPermissionGridValue,
@@ -1714,7 +1713,6 @@ function FieldRow({
     );
   })();
   const showPicker = skillBundleAlias !== null || isDirectoryField;
-  const [pickerOpen, setPickerOpen] = useState(false);
 
   // Tool-list enrichment — mirrors the per-alias `…model` field hook above.
   // Any `string-array` field whose dotted-path leaf is `allowed_tools`
@@ -2140,45 +2138,18 @@ function FieldRow({
             className="input-electric w-full px-3 py-2 text-sm"
           />
         ) : showPicker ? (
-          <div className="relative">
-            <div className="flex items-center gap-2">
-              <input
-                id={entry.path}
-                type="text"
-                value={value}
-                onChange={(e) => onChange(e.target.value)}
-                className="input-electric flex-1 px-3 py-2 text-sm"
-                placeholder={
-                  skillBundleAlias
-                    ? `shared/skills/${skillBundleAlias}/ ${t("fieldform.dir_default_leave_empty")}`
-                    : t("fieldform.dir_shared_placeholder")
-                }
-              />
-              <button
-                type="button"
-                data-dirpicker-trigger
-                onClick={() => setPickerOpen((open) => !open)}
-                className="btn-secondary inline-flex items-center gap-1.5 text-sm px-3 py-2 flex-shrink-0"
-                title={t("fieldform.browse_shared_title")}
-                aria-expanded={pickerOpen}
-              >
-                <FolderOpen className="h-4 w-4" />
-                {t("fieldform.browse")}
-              </button>
-            </div>
-            {pickerOpen && (
-              <div className="absolute z-20 right-0 mt-2 w-[min(28rem,calc(100vw-3rem))]">
-                <DirectoryPicker
-                  value={value}
-                  onSelect={(path) => {
-                    onChange(path);
-                    setPickerOpen(false);
-                  }}
-                  onClose={() => setPickerOpen(false)}
-                />
-              </div>
-            )}
-          </div>
+          <input
+            id={entry.path}
+            type="text"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            className="input-electric w-full px-3 py-2 text-sm"
+            placeholder={
+              skillBundleAlias
+                ? `shared/skills/${skillBundleAlias}/ ${t("fieldform.dir_default_leave_empty")}`
+                : t("fieldform.dir_shared_placeholder")
+            }
+          />
         ) : renderer === "secret" ? (
           <SecretField
             inputId={entry.path}

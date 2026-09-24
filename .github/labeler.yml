@@ -53,14 +53,10 @@
 "channel:acp":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/bin/zeroclaw-acp-bridge.rs"
           - "docs/book/src/channels/acp.md"
           - "apps/zerocode/src/acp.rs"
-          - "web/src/lib/acp.ts"
-          - "web/src/pages/AcpConsole.tsx"
           - "crates/zeroclaw-channels/src/acp_channel.rs"
           - "crates/zeroclaw-channels/src/orchestrator/acp_server.rs"
-          - "crates/zeroclaw-gateway/src/acp.rs"
           - "crates/zeroclaw-infra/src/acp_session_store.rs"
 
 "channel:bluesky":
@@ -368,9 +364,7 @@
   - changed-files:
       - any-glob-to-any-file:
           - "crates/zeroclaw-runtime/src/quickstart/**"
-          - "crates/zeroclaw-gateway/src/api_quickstart.rs"
           - "apps/zerocode/src/quickstart_pane.rs"
-          - "web/src/pages/quickstart/**"
 
 "provider":
   - changed-files:
@@ -584,10 +578,8 @@
   - changed-files:
       - any-glob-to-any-file:
           - "src/tools/shell.rs"
-          - "src/tools/node_tool.rs"
           - "src/tools/cli_discovery.rs"
           - "crates/zeroclaw-runtime/src/tools/shell.rs"
-          - "crates/zeroclaw-gateway/src/node_tool.rs"
           - "crates/zeroclaw-tools/src/cli_discovery.rs"
 
 

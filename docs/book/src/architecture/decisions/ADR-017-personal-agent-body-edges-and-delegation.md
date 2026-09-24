@@ -65,6 +65,8 @@ A speaker, a phone, a watch, or another computer connects to the body **through 
 
 A Node capability call is an ordinary tool call inside a turn. It is not delegation. The Node enforces its own local permissions, and high-risk capabilities go through the approval chain.
 
+A small robot is a Node too. It runs a Node host on board (for example a Raspberry Pi, or a microcontroller behind a bridge) and advertises capabilities such as `drive`, `look`, `sense`, `speak`, and `emote`. Safety stays on the robot: emergency stop, speed limits, and collision checks run locally and still hold when the link to the body drops. The body never drives serial ports or GPIO in its own process; the in-process hardware crates are deleted (#382 S2), and their `robot-kit` capability set and `safety.rs` are the reference for the future robot Node.
+
 Nodes follow the #55 design:
 
 - signed device identity and pairing (#60);

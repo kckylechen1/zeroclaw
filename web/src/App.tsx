@@ -7,13 +7,12 @@ import {
   type ErrorInfo,
   type ReactNode,
 } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
 import { ThemeProvider } from "./contexts/ThemeContext";
 
 import { loadLocale, saveLocale } from "./contexts/ThemeContext";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import { DraftContext, useDraftStore } from "./hooks/useDraft";
-import { getAdminPairCode, generatePairCode, PairCodeForbiddenError, getQuickstartState } from "./lib/api";
+import { getAdminPairCode, generatePairCode, PairCodeForbiddenError } from "./lib/api";
 import { basePath } from "./lib/basePath";
 import { ConfigDraftProvider } from "./lib/draftStore";
 import { setLocale, type Locale } from "./lib/i18n";
@@ -412,45 +411,11 @@ function AppContent() {
     <DraftContext.Provider value={draftStore}>
       <ConfigDraftProvider>
         <LocaleContext.Provider value={{ locale, setAppLocale }}>
-          <FreshInstallRedirect />
           <Router />
         </LocaleContext.Provider>
       </ConfigDraftProvider>
     </DraftContext.Provider>
   );
-}
-
-// Redirects fresh installs (no agents yet, Quickstart never completed)
-// from `/` to `/quickstart`. The daemon always writes a default
-// config.toml on init, so file existence isn't the right signal —
-// we ask the gateway via /api/quickstart/state which reports
-// quickstart_completed plus the live agents list.
-//
-// Fires once per session. Only redirects when the user lands at `/` —
-// manual navigation to other routes is left alone, so returning users
-// who already have agents can always reach Quickstart from the nav.
-function FreshInstallRedirect() {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const [checked, setChecked] = useState(false);
-
-  useEffect(() => {
-    if (checked) return;
-    setChecked(true);
-    if (location.pathname !== "/") return;
-    void getQuickstartState()
-      .then((state) => {
-        if (!state.quickstart_completed && state.agents.length === 0) {
-          navigate("/quickstart", { replace: true });
-        }
-      })
-      .catch(() => {
-        // Status check failed (network blip, gateway hiccup); the
-        // dashboard renders normally as the safe default.
-      });
-  }, [checked, location.pathname, navigate]);
-
-  return null;
 }
 
 export default function App() {

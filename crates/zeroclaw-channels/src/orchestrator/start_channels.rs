@@ -37,7 +37,6 @@ use super::ActiveChannelAliases;
 
 pub async fn start_channels(
     config: Config,
-    canvas_store: Option<zeroclaw_runtime::tools::CanvasStore>,
     cancel: tokio_util::sync::CancellationToken,
     companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
 ) -> Result<()> {
@@ -270,7 +269,6 @@ pub async fn start_channels(
             &config.agents,
             provider_api_key.as_deref(),
             &config,
-            canvas_store.clone(),
             false,
             None,
             Some(Arc::clone(&config_arc)),

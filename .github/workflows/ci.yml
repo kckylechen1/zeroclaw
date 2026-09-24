@@ -377,7 +377,7 @@ jobs:
           # Root default minus the compile-time integration families
           # (integrations-saas, hardware-tools): the slim companion graph.
           - name: minimal companion
-            args: --no-default-features --features agent-runtime,default-channels,acp-bridge,gateway,observability-prometheus,schema-export
+            args: --no-default-features --features agent-runtime,default-channels,gateway,observability-prometheus,schema-export
             sys_deps: ""
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

@@ -41,7 +41,6 @@ impl Agent {
             false,
             None,
             None,
-            None,
         )
         .await
     }
@@ -52,7 +51,6 @@ impl Agent {
         session_cwd: Option<&Path>,
         initialize_mcp: bool,
         exclude_memory: bool,
-        canvas_store: Option<tools::CanvasStore>,
     ) -> Result<Self> {
         Self::from_config_with_session_cwd_and_mcp_approval_mode(
             config,
@@ -62,7 +60,6 @@ impl Agent {
             true,
             exclude_memory,
             None,
-            canvas_store,
             None,
         )
         .await
@@ -76,7 +73,6 @@ impl Agent {
         session_cwd: Option<&Path>,
         initialize_mcp: bool,
         exclude_memory: bool,
-        canvas_store: Option<tools::CanvasStore>,
     ) -> Result<Self> {
         let config = live_config.read().clone();
         Self::from_config_with_session_cwd_and_mcp_approval_mode(
@@ -87,7 +83,6 @@ impl Agent {
             true,
             exclude_memory,
             None,
-            canvas_store,
             Some(live_config),
         )
         .await
@@ -114,7 +109,6 @@ impl Agent {
             exclude_memory,
             tui_env,
             None,
-            None,
         )
         .await
     }
@@ -138,7 +132,6 @@ impl Agent {
             true,
             exclude_memory,
             tui_env,
-            None,
             Some(live_config),
         )
         .await
@@ -153,7 +146,6 @@ impl Agent {
         approval_backchannel: bool,
         exclude_memory: bool,
         tui_env: Option<std::collections::HashMap<String, String>>,
-        canvas_store: Option<tools::CanvasStore>,
         live_config: Option<Arc<parking_lot::RwLock<Config>>>,
     ) -> Result<Self> {
         let agent_cfg = config
@@ -259,7 +251,6 @@ impl Agent {
             &config.agents,
             agent_model_provider.and_then(|e| e.api_key.as_deref()),
             config,
-            canvas_store,
             false,
             tui_env,
             None,
