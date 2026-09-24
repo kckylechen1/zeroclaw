@@ -106,7 +106,9 @@ RUN mkdir -p src src/bin benches apps/tauri/src apps/zerocode/src tools/fill-tra
     && echo "fn main() {}" > crates/zeroclaw-hardware/examples/esp32_sim.rs \
     && for d in crates/*/; do mkdir -p "${d}src" && printf '' > "${d}src/lib.rs"; done \
     && mkdir -p crates/zeroclaw-plugins/tests/fixtures/channel-fixture/src \
-    && printf '' > crates/zeroclaw-plugins/tests/fixtures/channel-fixture/src/lib.rs
+    && printf '' > crates/zeroclaw-plugins/tests/fixtures/channel-fixture/src/lib.rs \
+    && mkdir -p crates/zeroclaw-gateway/tests \
+    && printf '' > crates/zeroclaw-gateway/tests/nodes_mdns.rs
 RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-target,target=/app/target,sharing=locked \
