@@ -30,14 +30,14 @@ Comparable personal agents (Meta Muse, and the OpenMuse and nanoMuse community p
 
 1. **The gateway is the only external door to the agent.** The kernel ships two ingress surfaces: the local CLI and the gateway (REST plus the `/ws/chat` event stream). The gateway owns only realtime coordination: sockets, streaming, pairing and authentication, bounded reconnect state, and approval relay. This matches #180 §5. It does not own durable task, memory, or identity truth.
 2. **A channel is a bridge: a client of the gateway API.** A bridge translates one messaging platform to and from `/ws/chat` frames. It does not link `zeroclaw-runtime`, `zeroclaw-memory`, or `zeroclaw-tools`. It depends only on a small gateway client library and its platform SDK. For deployment convenience a bridge may ship as a subcommand of the main binary (for example `zeroclaw bridge telegram`). It still runs as a separate task with its own connection and never calls runtime internals.
-3. **The agent turn lifecycle belongs to the runtime.** The dispatch loop, turn processing, approvals, cancellation, and delivery move out of `zeroclaw-channels/src/orchestrator`. After that move, `zeroclaw-channels` holds only platform adapters, and it is deleted once the first bridge reaches parity.
+3. **The agent turn lifecycle belongs to the runtime.** The dispatch loop, turn processing, approvals, cancellation, and delivery move out of `zeroclaw-channels/src/orchestrator`. After that move, `zeroclaw-channels` holds only platform adapters. It is deleted after the shared conversation service (#376) carries its general behavior and the first bridge passes a real end-to-end run with acceptance, recovery, and approvals (#377, #378).
 4. **Supersession.**
    - This ADR supersedes [ADR-006](./ADR-006-runtime-channel-plugins.md) for channels. WASM plugins under [ADR-009](./ADR-009-wit-wasmtime-plugin-execution.md) remain the extension model for tools.
    - It also supersedes [ADR-007](./ADR-007-gateway-extraction.md). The personal agent runs as one process, and bridges are the process boundary that matters.
 5. **Owner rulings recorded with this decision.**
-   - **Approvals:** until Tachi integration resumes, the local approval path (`approval`, `ws_approval`) is the canonical approval authority. This is a declared #180 §8 transitional exception. Its owner is the repository owner, its migration target is the parked Tachi integration issue, and new work must not add a second approval store.
-   - **Nodes:** the Node role from #55 is kept as a concept, but implementation is deferred. `zeroclaw-gateway/src/nodes.rs` and `/ws/nodes` were never connected to a production invocation bridge. Deleting them removes no working capability.
-   - **Shell:** `shell`, `file_write`, and `file_edit` stay in the minimal composition behind the existing approval chain. The LAST-A D3 retirement (#266) is not executed while Tachi is parked.
+   - **Approvals:** the local approval path (`approval`, `ws_approval`) is the approval authority for the body's own work. Delegated work runs under Tachi's grant and surfaces its approval requests in the same owner inbox (ADR-017 §4). New work must not add a second approval store.
+   - **Nodes:** amended by ADR-017 §2. The Node role is active, and `nodes.rs` and `/ws/nodes` are kept as the base for production invocation (#61, #62).
+   - **Shell:** `shell`, `file_write`, and `file_edit` stay in the minimal composition behind the existing approval chain. They must not become a hidden second path for launching external harnesses; that path is Tachi (ADR-017 §3).
 
 ## Consequences
 
@@ -61,7 +61,7 @@ This ADR is implemented when:
 
 - `zeroclaw-gateway` no longer depends on `zeroclaw-channels`;
 - the turn lifecycle formerly in `zeroclaw-channels/src/orchestrator` runs from `zeroclaw-runtime`;
-- a Telegram bridge built only on the gateway client library supports conversation, streaming, approvals, and `cron_result` delivery; and
+- a Telegram bridge built only on the gateway client library supports conversation, streaming, approvals, and `cron_result` delivery, and advances its platform offset only after an application-level acceptance ACK (#377); and
 - `zeroclaw-channels` is removed from the workspace.
 
 ## References
