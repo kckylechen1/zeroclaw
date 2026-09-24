@@ -45,7 +45,7 @@ Run what matches the change, and paste the commands and results in the PR:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --exclude zeroclaw-desktop --all-targets --features ci-all -- -D warnings
+cargo clippy --workspace --all-targets --features ci-all -- -D warnings
 cargo test -p <changed crates>          # a full `cargo test` before an issue's last slice
 bash scripts/ci/provider_dispatch_gate.sh   # model calls go through ProviderDispatch
 bash scripts/ci/docs_quality_gate.sh && bash scripts/ci/docs_links_gate.sh   # docs changes

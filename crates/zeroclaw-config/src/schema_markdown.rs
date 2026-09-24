@@ -290,8 +290,6 @@ pub fn field_table(
                 "<div class=\"os-tabs-src\">\n\n",
                 "#### Gateway dashboard\n\n",
                 "Open [`/config/{section}`](http://127.0.0.1:42617/config/{section}) and set the `{full_path}` field.\n\n",
-                "#### zerocode\n\n",
-                "In the **Config** pane, set the `{full_path}` field.\n\n",
                 "#### zeroclaw config\n\n",
                 "```sh\n{set_cmd}\n```\n\n",
                 "#### Environment variable\n\n",

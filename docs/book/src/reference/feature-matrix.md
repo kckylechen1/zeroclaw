@@ -22,7 +22,6 @@ The generated **ZeroClaw** sections below each reflect a specific source: the cu
 | Local CLI (`zeroclaw agent`) | ✅ | [Quickstart](../getting-started/quickstart.md) |
 | Daemon / OS service | ✅ | [Service](../ops/service.md) |
 | Gateway HTTP + web dashboard | ✅ | [Gateway HTTP API](../gateway/api.md), [Web dashboard](../gateway/web-dashboard.md) |
-| ZeroCode terminal UI | ✅ | [ZeroCode](../getting-started/zerocode.md) |
 | Container | ✅ | [Container](../setup/container.md) |
 | Linux / macOS / Windows | ✅ | [Linux](../setup/linux.md), [macOS](../setup/macos.md), [Windows](../setup/windows.md) |
 | FreeBSD / NixOS | ✅ | [FreeBSD](../setup/freebsd.md), [NixOS](../setup/nixos.md) |

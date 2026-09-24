@@ -41,7 +41,7 @@ flowchart TB
 
 | Crate | Role |
 |---|---|
-| `zeroclaw-runtime` | Agent loop, security policy enforcement, SOP definition loading (the run engine was removed with the run side), cron scheduler, SubAgents, RPC layer for zerocode |
+| `zeroclaw-runtime` | Agent loop, security policy enforcement, SOP definition loading (the run engine was removed with the run side), cron scheduler, SubAgents, local RPC socket |
 | `zeroclaw-config` | TOML schema, secrets encryption, autonomy levels, workspace resolution |
 | `zeroclaw-api` | Public traits: `ModelProvider`, `Channel`, `Tool`, `Memory`, `Observer`, `RuntimeAdapter`, and `Peripheral`. The kernel ABI |
 | `zeroclaw-providers` | All LLM client impls (Anthropic, OpenAI, Ollama, …) plus the hint-based router and same-provider retry wrapper |
@@ -56,7 +56,6 @@ flowchart TB
 | `zeroclaw-log` | The single log-emission surface: JSONL schema, attribution, `record!`/`scope!` macros, `/api/logs` reader, `Observer` bridge |
 | `zeroclaw-spawn` | Sanctioned `tokio::spawn` wrapper (`spawn!` macro) that propagates attribution |
 | `zeroclaw-macros` | Derive macros for config, tool registration |
-| `zerocode` | Terminal UI |
 | `aardvark-sys`, `robot-kit` | Specialised hardware support |
 
 The microkernel roadmap (RFC #5574) is actively splitting `zeroclaw-runtime` further: the kernel layer will shrink to the agent loop and policy enforcement, with everything else moving behind feature flags.

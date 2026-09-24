@@ -9,7 +9,6 @@
     ],
     "app": [
       "zeroclawlabs",
-      "zerocode",
       "zeroclaw-config",
       "zeroclaw-tools"
     ],
@@ -34,7 +33,5 @@
       "zeroclaw-tool-call-parser"
     ]
   },
-  "excluded": [
-    "zeroclaw-desktop"
-  ]
+  "excluded": []
 }

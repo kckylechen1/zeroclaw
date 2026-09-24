@@ -97,7 +97,7 @@ This creates `~/.zeroclaw/` with a starter config and walks you through provider
 
 ## Provider authentication
 
-Provider auth is not FreeBSD-specific. API-key providers just need the key set through the gateway, zerocode, `zeroclaw config set`, or the environment. OAuth and subscription providers (e.g. an OpenAI/Codex ChatGPT subscription, Anthropic Claude Pro/Team) get their token from the vendor's own dashboard or login flow, which you then configure the same way you would an API key.
+Provider auth is not FreeBSD-specific. API-key providers just need the key set through the gateway, `zeroclaw config set`, or the environment. OAuth and subscription providers (e.g. an OpenAI/Codex ChatGPT subscription, Anthropic Claude Pro/Team) get their token from the vendor's own dashboard or login flow, which you then configure the same way you would an API key.
 
 For the full credential model (API keys, OAuth/subscription tokens, env overrides, and the secrets store), see [Provider Configuration → Credentials](../providers/configuration.md#credentials) and [OAuth and subscription auth](../providers/configuration.md#oauth-and-subscription-auth). That page is the source of truth for every platform.
 

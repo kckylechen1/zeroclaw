@@ -77,7 +77,7 @@ jobs:
           languages: rust
           config-file: .github/codeql/codeql-config.yml
       - name: Build
-        run: cargo build --locked --workspace --exclude zeroclaw-desktop --features ci-all
+        run: cargo build --locked --workspace --features ci-all
         env:
           CARGO_TERM_COLOR: always
       - name: Perform CodeQL Analysis

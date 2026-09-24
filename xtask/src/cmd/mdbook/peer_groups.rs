@@ -181,11 +181,11 @@ fn render_config_where(path: &str, depth: usize) -> anyhow::Result<String> {
     // Arg is `<section>` or `<section> <type>`. With a type, build the
     // dashboard's `/config/<section>/<type>` route (e.g. `channels matrix` ->
     // `/config/channels/matrix`); without one, `/config/<section>` with no
-    // trailing slash. The label is resolved from the section.
+    // trailing slash. The section must name a known config section.
     let mut parts = path.split_whitespace();
     let section = parts.next().unwrap_or(path);
     let type_seg = parts.next();
-    let label = config_section_label(section)?;
+    config_section_label(section)?;
     let route = match type_seg {
         Some(ty) => format!("{section}/{ty}"),
         None => section.to_string(),
@@ -197,13 +197,8 @@ fn render_config_where(path: &str, depth: usize) -> anyhow::Result<String> {
 
 Open [`/config/{route}`](http://127.0.0.1:42617/config/{route}) in the web dashboard.
 
-#### zerocode
-
-In the **Config** pane, under **{label}**.
-
 </div>"#,
         route = route,
-        label = label,
     ))
 }
 
@@ -377,7 +372,7 @@ fn config_section_label(path: &str) -> anyhow::Result<String> {
 
 /// Render a secret-field setter widget. Secrets are stored encrypted; they must
 /// never be hand-written into `config.toml`. Tabs cover only the surfaces that
-/// encrypt on write: the gateway dashboard, zerocode, and `zeroclaw config set`
+/// encrypt on write: the gateway dashboard and `zeroclaw config set`
 /// (masked input). The arg is the full dotted path to the secret field.
 fn render_secret_config(path: &str) -> String {
     let path = path.trim();
@@ -395,10 +390,6 @@ fn render_secret_config(path: &str) -> String {
 
 Open [`/config/{section}`](http://127.0.0.1:42617/config/{section}) and set the `{display_path}` field there.
 
-#### zerocode
-
-In the **Config** pane, set the `{display_path}` field (input is masked).
-
 #### zeroclaw config
 
 ```sh
@@ -410,8 +401,7 @@ zeroclaw config set {path}    # prompts for masked input, stores encrypted
 }
 
 /// Render a set-it-any-surface widget for a single non-secret config field.
-/// Same three-surface tabs as `secret-config` (gateway dashboard, zerocode,
-/// `zeroclaw config set`) minus the masked-secret framing. The arg is the full
+/// Same tabs as `secret-config` (gateway dashboard, `zeroclaw config set`) minus the masked-secret framing. The arg is the full
 /// dotted path to the field, e.g. `channels.git.<alias>.app_id`. Used by setup
 /// guides that walk each required field individually.
 fn render_config_set(path: &str) -> String {
@@ -424,10 +414,6 @@ fn render_config_set(path: &str) -> String {
 #### Gateway dashboard
 
 Open [`/config/{section}`](http://127.0.0.1:42617/config/{section}) and set the `{display_path}` field there.
-
-#### zerocode
-
-In the **Config** pane, set the `{display_path}` field.
 
 #### zeroclaw config
 
@@ -505,10 +491,6 @@ Set the thread behavior on any surface:
 #### Gateway dashboard
 
 Open [`/config/{section}`](http://127.0.0.1:42617/config/{section}) and toggle the `{display_path}` field.
-
-#### zerocode
-
-In the **Config** pane, set the `{display_path}` field.
 
 #### zeroclaw config
 
@@ -593,10 +575,6 @@ Set it on any surface:
 #### Gateway dashboard
 
 Open [`/config/{section}`](http://127.0.0.1:42617/config/{section}) and set the `{display_path}` field.
-
-#### zerocode
-
-In the **Config** pane, set the `{display_path}` field.
 
 #### zeroclaw config
 
@@ -683,7 +661,7 @@ fn render_example(p: &PeerParams) -> String {
     format!(
         "A {key} peer group named e.g. `my_{key}_group` sets `channel = \"{key}\"`, \
 allows `{example}` in `external_peers`, names {agents}{ignore}. Set it through \
-the gateway dashboard, zerocode, or `zeroclaw config set`.",
+the gateway dashboard or `zeroclaw config set`.",
         key = p.key,
         agents = agents,
         example = p.sender_example,

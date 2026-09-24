@@ -203,9 +203,6 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo   %GREEN%OK%RESET% Binary installed to %USERPROFILE%\.zeroclaw\bin\zeroclaw.exe
-if exist "%USERPROFILE%\.zeroclaw\bin\zerocode.exe" (
-    echo   %GREEN%OK%RESET% TUI installed to %USERPROFILE%\.zeroclaw\bin\zerocode.exe
-)
 goto verify
 
 :: ---- Source build presets ----
@@ -239,7 +236,6 @@ echo   Target: %TARGET%
 
 if "%DRY_RUN%"=="true" (
     echo   [dry-run] Would run: cargo build --release --locked %FEATURES% --target %TARGET%
-    echo   [dry-run] Would run: cargo build --release --locked -p zerocode --target %TARGET%
     echo   [dry-run] Would install to %USERPROFILE%\.zeroclaw\bin
     echo   [dry-run] Would build web dashboard ^(cargo web build^) and install to %LOCALAPPDATA%\zeroclaw\web\dist
     echo   [dry-run] Would add %USERPROFILE%\.zeroclaw\bin to PATH
@@ -276,25 +272,11 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo   %GREEN%OK%RESET% Build succeeded.
 
-echo   Command: cargo build --release --locked -p zerocode --target %TARGET%
-cargo build --release --locked -p zerocode --target %TARGET%
-if %ERRORLEVEL% NEQ 0 (
-    echo.
-    echo   %RED%ERROR: zerocode TUI build failed.%RESET%
-    echo   zerocode ships with every install; a partial install is not produced.
-    echo   Fix the build error above and re-run setup.bat.
-    goto :error_exit
-)
-
 :: Copy binary to a convenient location
 echo.
 echo %BOLD%[4/5] Installing binary...%RESET%
 mkdir "%USERPROFILE%\.zeroclaw\bin" 2>nul
 copy /Y "target\%TARGET%\release\zeroclaw.exe" "%USERPROFILE%\.zeroclaw\bin\zeroclaw.exe" >nul
-if exist "target\%TARGET%\release\zerocode.exe" (
-    copy /Y "target\%TARGET%\release\zerocode.exe" "%USERPROFILE%\.zeroclaw\bin\zerocode.exe" >nul
-    echo   %GREEN%OK%RESET% TUI installed to %USERPROFILE%\.zeroclaw\bin\zerocode.exe
-)
 set "BIN_PATH=%USERPROFILE%\.zeroclaw\bin\zeroclaw.exe"
 for /f %%S in ('powershell -NoProfile -Command "[math]::Round(((Get-Item -LiteralPath ''%BIN_PATH%'').Length / 1MB), 2)"') do (
     set "BINARY_MB=%%S"
@@ -374,7 +356,7 @@ echo     4. Use reduced CLI path: zeroclaw agent --message "Hello"
 ) else (
 echo     2. Run: zeroclaw quickstart
 echo     3. Configure your API key in %%USERPROFILE%%\.zeroclaw\config.toml
-echo     4. Launch the TUI: zerocode
+echo     4. Start chatting: zeroclaw agent
 )
 echo.
 echo   Alternative install via Scoop:

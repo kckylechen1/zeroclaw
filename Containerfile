@@ -122,18 +122,11 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     touch web/dist/.gitkeep
     cargo fmt --all -- --check
     # --features ci-all matches CI's Lint job — validates all feature-gated code.
-    # --exclude zeroclaw-desktop: needs GTK/WebKit (not in StageX).
-    # --exclude zerocode: inkjet/tree-sitter needs C++ compiler (not in StageX).
-    cargo clippy --workspace --exclude zeroclaw-desktop --exclude zerocode --all-targets --features ci-all --locked -- -D warnings
+    cargo clippy --workspace --all-targets --features ci-all --locked -- -D warnings
 EOF
 
 # Test (needs loopback for wiremock — no --network=none)
 # --offline prevents cargo from fetching even if network is available.
-# --exclude zeroclaw-desktop: requires GTK/GLib (tauri + tray-icon), not in StageX.
-# --exclude zerocode: tree-sitter/inkjet inject -lstdc++ and need real C++ runtime
-#   symbols (operator new/delete, __cxa_throw, etc.) for YAML scanner code.
-#   The build stage succeeds because it uses -static + libstdc++.a stub, but test
-#   (dynamic) linking needs a real libstdc++.so that pallet-rust doesn't ship.
 # --exclude xtask: its doc-gen gates read docs/ and .github/ paths that
 #   .dockerignore keeps out of the build context; those gates run in the
 #   standard CI Test job against the full tree.
@@ -149,10 +142,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     <<-EOF
     set -e
     export RUSTFLAGS="-C target-feature=-crt-static"
-    cargo test --workspace --lib --bins --tests --exclude zeroclaw-desktop --exclude zerocode --exclude xtask --exclude zeroclaw-tools --offline --locked
+    cargo test --workspace --lib --bins --tests --exclude xtask --exclude zeroclaw-tools --offline --locked
 EOF
 
-# ── Stage: build (zeroclaw + zerocode, default channels) ────
+# ── Stage: build (zeroclaw, default channels) ────
 FROM docker.io/stagex/pallet-rust@sha256:2d90b9552412ee2c4fa2a13b489c2f28c044be7fb5d6a942bfd5a480a5c288fd AS build
 
 WORKDIR /src
@@ -196,17 +189,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
         --features "${ZEROCLAW_FEATURES}" \
         -p zeroclawlabs
 
-    # Release build — zerocode (TUI config manager)
-    CARGO_TARGET_DIR=/target \
-    cargo build \
-        --frozen \
-        --release \
-        --target "$TARGET" \
-        -p zerocode
-
     mkdir -p /rootfs/usr/bin /rootfs/usr/share/zeroclawlabs/web/dist
     cp /target/${TARGET}/release/zeroclaw /rootfs/usr/bin/zeroclaw
-    cp /target/${TARGET}/release/zerocode /rootfs/usr/bin/zerocode
 EOF
 
 # Copy default config template into rootfs (consumed by package stage)
@@ -237,7 +221,7 @@ HEALTHCHECK --interval=60s --timeout=10s --retries=3 --start-period=10s \
 ENTRYPOINT ["/usr/bin/zeroclaw"]
 CMD ["daemon"]
 
-# ── Stage: build-fat (zeroclaw + zerocode, all channels) ────
+# ── Stage: build-fat (zeroclaw, all channels) ────
 FROM docker.io/stagex/pallet-rust@sha256:2d90b9552412ee2c4fa2a13b489c2f28c044be7fb5d6a942bfd5a480a5c288fd AS build-fat
 
 WORKDIR /src
@@ -282,17 +266,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
         --features "${ZEROCLAW_FEATURES}" \
         -p zeroclawlabs
 
-    # Release build — zerocode (TUI config manager)
-    CARGO_TARGET_DIR=/target \
-    cargo build \
-        --frozen \
-        --release \
-        --target "$TARGET" \
-        -p zerocode
-
     mkdir -p /rootfs/usr/bin /rootfs/usr/share/zeroclawlabs/web/dist
     cp /target/${TARGET}/release/zeroclaw /rootfs/usr/bin/zeroclaw
-    cp /target/${TARGET}/release/zerocode /rootfs/usr/bin/zerocode
 EOF
 
 # Copy default config template into rootfs (consumed by package-fat stage)

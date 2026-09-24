@@ -49,21 +49,6 @@ for readme in README.md docs/i18n/*/README.md; do
     "version-v${VERSION}-blue\" alt=\"Version v${VERSION}\""
 done
 
-# ── Tauri desktop app config ───────────────────────────────────────
-echo "Tauri config..."
-TAURI_CONF="$REPO_ROOT/apps/tauri/tauri.conf.json"
-if [[ -f "$TAURI_CONF" ]]; then
-  if command -v jq >/dev/null 2>&1; then
-    jq --arg v "$VERSION" '.version = $v' "$TAURI_CONF" > "$TAURI_CONF.tmp" \
-      && mv "$TAURI_CONF.tmp" "$TAURI_CONF"
-  else
-    sed -i '' -E "s|\"version\": \"[^\"]+\"|\"version\": \"$VERSION\"|" "$TAURI_CONF" 2>/dev/null \
-      || sed -i -E "s|\"version\": \"[^\"]+\"|\"version\": \"$VERSION\"|" "$TAURI_CONF"
-  fi
-  echo "  updated: apps/tauri/tauri.conf.json"
-  changed=$((changed + 1))
-fi
-
 # ── Windows installer (setup.bat) ──────────────────────────────────
 echo "Windows setup.bat..."
 bump "setup.bat" \
@@ -82,13 +67,11 @@ if [[ -f "$ROOT_CARGO" ]]; then
   # [workspace.package] version, first bare `version = "..."` line in the file
   sed -i -E '0,/^version = "[^"]+"/s||version = "'"$VERSION"'"|' "$ROOT_CARGO" 2>/dev/null \
     || sed -i '' -E '/^version = "[^"]+"/{s//version = "'"$VERSION"'"/;:a;n;ba;}' "$ROOT_CARGO"
-  # [workspace.dependencies] path-dep version pins, skipping aardvark*. Covers
-  # both crates/ and apps/ path deps (e.g. apps/zerocode) so every in-tree
-  # member tracks the workspace version; a missed apps/ pin leaves the lockfile
-  # unresolvable and breaks `cargo metadata` mid-bump. Uses '#' as the sed
-  # delimiter so the (crates|apps) alternation pipe is not read as a delimiter.
-  sed -i -E '/path = "crates\/aardvark/!s#(path = "(crates|apps)/[^"]+", version = ")[^"]+(")#\1'"$VERSION"'\3#' "$ROOT_CARGO" 2>/dev/null \
-    || sed -i '' -E '/path = "crates\/aardvark/!s#(path = "(crates|apps)/[^"]+", version = ")[^"]+(")#\1'"$VERSION"'\3#' "$ROOT_CARGO"
+  # [workspace.dependencies] path-dep version pins, skipping aardvark*, so every
+  # in-tree member tracks the workspace version; a missed pin leaves the
+  # lockfile unresolvable and breaks `cargo metadata` mid-bump.
+  sed -i -E '/path = "crates\/aardvark/!s#(path = "crates/[^"]+", version = ")[^"]+(")#\1'"$VERSION"'\2#' "$ROOT_CARGO" 2>/dev/null \
+    || sed -i '' -E '/path = "crates\/aardvark/!s#(path = "crates/[^"]+", version = ")[^"]+(")#\1'"$VERSION"'\2#' "$ROOT_CARGO"
   after="$(sha256sum "$ROOT_CARGO" | awk '{print $1}')"
   if [[ "$before" != "$after" ]]; then
     echo "  updated: Cargo.toml ([workspace.package] + [workspace.dependencies])"

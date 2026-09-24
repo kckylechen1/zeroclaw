@@ -102,7 +102,7 @@ When `[transcription]` is configured and an inbound post has an audio attachment
 1. In Mattermost: **System Console → Integrations → Bot Accounts → Add Bot Account**. Set a username (e.g. `zeroclaw`), enable the scopes you want.
 2. Copy the access token. Store it in your ZeroClaw secrets backend.
 3. Invite the bot to whichever teams you want it active in. For DM auto-discovery, no extra invites needed: any user can DM the bot.
-4. Create the `mattermost.<alias>` channel referencing the token through the gateway, zerocode, or `zeroclaw config set`.
+4. Create the `mattermost.<alias>` channel referencing the token through the gateway or `zeroclaw config set`.
 5. Bind the channel to an agent in `[agents.<alias>]` via `channels = ["mattermost.<alias>"]`.
 
 ## Operational notes

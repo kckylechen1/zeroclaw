@@ -67,7 +67,6 @@ The stability-tier definitions and versioning policy live in [FND-001](../founda
 | `zeroclaw-tools` | Experimental | Plugin migration at v1.0.0 |
 | `zeroclaw-runtime` | Experimental | Agent runtime: agent loop, security, cron, SOP, skills, and observability |
 | `zeroclaw-gateway` | Experimental | Separate binary at v0.9.0 |
-| `zerocode` | Experimental | TUI onboarding wizard |
 | `zeroclaw-plugins` | Experimental | WASM plugin system and foundation for the v1.0.0 plugin ecosystem |
 | `zeroclaw-hardware` | Experimental | USB discovery, peripherals, and serial support |
 | `zeroclaw-macros` | Beta | Tightly coupled to the config schema |

@@ -48,8 +48,6 @@ App strings live in `crates/zeroclaw-runtime/locales/`. English is the source of
 > - **Embedded sources:** English `cli.ftl` and `tools.ftl` are embedded. `builtin_cli_ftl_source()` enumerates the non-English CLI catalogs embedded by the runtime; `zeroclaw-tools` separately embeds English tool strings to preserve crate dependency direction.
 > - **Disk overlay:** A catalog at `<config-dir>/data/ftl/<locale>/` overrides an embedded CLI value and supplies translated runtime/tool values. `zeroclaw locales fetch` populates this shared directory.
 > - **Consumption caveat:** Filling and committing an `.ftl` file updates tracked catalog source, but a consumer uses it only when its loader embeds that catalog or the file is installed where that loader reads it.
->
-> The `apps/zerocode` TUI maintains an independent Fluent catalogue (`apps/zerocode/locales/`), see [zerocode strings](#zerocode-strings-fluent-independent) below. `cargo fluent` walks **both** catalogue roots (runtime + zerocode), so every subcommand below covers both by default.
 
 <div class="os-tabs-src">
 
@@ -57,7 +55,7 @@ App strings live in `crates/zeroclaw-runtime/locales/`. English is the source of
 
 ```sh
 cargo fluent stats                                                   # coverage per locale, per catalogue
-cargo fluent check                                                   # validate .ftl syntax across both catalogues
+cargo fluent check                                                   # validate .ftl syntax
 cargo fluent fill --locale ja --model-provider anthropic.<alias>             # fill missing keys (default batch 50)
 cargo fluent fill --locale ja --model-provider anthropic.<alias> --batch 10  # smaller batches: fewer entries per request (eases rate limits / truncation)
 cargo fluent fill --locale ja --model-provider anthropic.<alias> --force     # retranslate everything
@@ -66,63 +64,11 @@ cargo fluent scan                                                    # find stal
 
 </div>
 
-**Scoping to one catalogue**: every subcommand takes `--catalog <runtime|zerocode>` (default: both). To translate only the TUI:
-
-<div class="os-tabs-src">
-
-#### sh
-
-```sh
-cargo fluent fill --locale ja --model-provider anthropic.<alias> --catalog zerocode
-cargo fluent check --catalog zerocode                                # syntax-check only zerocode
-```
-
-</div>
-
-An unknown `--catalog` value errors with the valid choices.
-
-`fill` generates `<locale>/<domain>.ftl` for every selected catalogue root that has an `en/` directory: the runtime's `cli.ftl`/`tools.ftl` and zerocode's `zerocode.ftl`.
+`fill` generates `<locale>/cli.ftl` and `<locale>/tools.ftl` under `crates/zeroclaw-runtime/locales/`.
 
 **Provider resolution is shared with the runtime.** `--model-provider` accepts any alias configured under `[providers.models.<kind>.<alias>]`: a bare alias (`<alias>`) or a `kind.alias` qualifier (`anthropic.<alias>`) when ambiguous. The tool builds the actual runtime provider, so the endpoint, auth header, and wire protocol are resolved per family (Anthropic `/v1/messages` + `x-api-key`, OpenAI-compatible `/v1/chat/completions` + `Bearer`, etc.): nothing is assumed. Encrypted `api_key` values are decrypted through the canonical `SecretStore`. Use `--config-dir <dir>` (mirrors `zeroclaw --config-dir`) to read config + `.secret-key` from a non-default location; defaults to `~/.zeroclaw` then `~/.config/zeroclaw`.
 
 **Batching:** `fill` sends one request per batch (all N entries as a single JSON object); `--batch` lowers N to ease provider rate limits or response truncation on long entries. Each batch is written to disk before the next request, so a mid-run failure only loses the in-flight batch. Re-running skips keys that already exist in the target `.ftl`, so resume is automatic: no `--force` needed.
-
-## zerocode strings (Fluent, independent)
-
-`apps/zerocode` carries its own self-contained Fluent setup, separate from the runtime catalogues above. The TUI is intentionally decoupled from the rest of the workspace: it has no `zeroclaw-*` crate dependency, and its strings live next to its source rather than under `zeroclaw-runtime/locales/`.
-
-| Where | What |
-|---|---|
-| `apps/zerocode/locales/en/zerocode.ftl` | Source of truth, embedded at compile time |
-| `apps/zerocode/locales/<locale>/zerocode.ftl` | Tracked translated catalog source used by fill/fetch and release workflows; not embedded automatically |
-| `$ZEROCODE_LOCALE_DIR/<locale>/zerocode.ftl` | Explicit override, useful for testing translations |
-| `<config-dir>/data/ftl/<locale>/zerocode.ftl` | Shared per-user catalog written by `zeroclaw locales fetch` and loaded by zerocode |
-
-### Key namespace
-
-All zerocode keys are prefixed `zc-` and never collide with the runtime's `cli-`, `channel-`, or `tool-` namespaces. The convention inside `zc-` is `zc-<pane>-<purpose>`:
-
-- `zc-pane-<name>`: top-level mode bar labels
-- `zc-app-<purpose>`: strings owned by `app.rs` (dialogs, help, status)
-- `zc-<pane>-<purpose>`: strings local to a specific pane (`zc-dashboard-*`, `zc-chat-*`, …)
-
-### Chord literals are not translated
-
-Chord glyphs like `Ctrl+C`, `Esc`, `Shift+Up` are protocol, not language. The `HelpEntry` and `HelpNode` constructors take the chord vector as `&'static str` and the description as `String`, so chord literals stay hard-coded while descriptions flow through `t()`. When prose embeds a chord inline, use a `{ $keys }` Fluent slot and pass the chord at render time rather than concatenating translated text around a literal.
-
-### Locale resolution
-
-Locale comes from a top-level `locale` field in zerocode's config. When unset, `i18n::detect_locale()` reads the config dir resolved as `--config-dir`, then `ZEROCLAW_CONFIG_DIR`, then `~/.zeroclaw`, and otherwise falls back to `en`. zerocode resolves its locale independently from its own config; it does not share the daemon's lookup.
-
-### Adding strings
-
-1. Add the key + English value to `apps/zerocode/locales/en/zerocode.ftl`. Group keys by source file with a section comment so the catalogue stays scannable.
-2. Replace the literal in the source with `crate::i18n::t("zc-…")`. For enum→label `match` arms, return the key constant (`&'static str`) from a `fluent_key()` method and call `t()` at the render site, never `match` on a string.
-3. `cargo check -p zerocode` and the `i18n` unit tests (`cargo test -p zerocode i18n`) catch missing keys at compile/test time. Missing keys at runtime render as `{zc-key-name}` and emit a one-shot stderr warning.
-
-### Filling translations
-
-`cargo fluent` walks the zerocode catalogue alongside the runtime one, so no separate fill command is needed. Running `cargo fluent fill --locale <code> --model-provider <alias>` generates `apps/zerocode/locales/<code>/zerocode.ftl` in the same pass that fills the runtime catalogue. `cargo fluent check` and `cargo fluent stats` likewise report zerocode; `scan` indexes `apps/` so `zc-` key references resolve against zerocode's source. To exercise the translation in zerocode, install it through `zeroclaw locales fetch` or place it under one of the two disk-search roots above.
 
 ## Filling doc translations (gettext)
 
@@ -182,7 +128,6 @@ Maintainers should accept the routine English docs exception documented in [Buil
 
    </div>
 
-4. The `cargo fluent fill` run in step 2 already generates `apps/zerocode/locales/<code>/zerocode.ftl` in the same pass, since `cargo fluent` walks both the runtime and zerocode catalogues. No manual zerocode step is needed; verify coverage with `cargo fluent stats`.
 
 Everything else, `lang-switcher.js`, CI deploy target list, `cargo mdbook locales` output, reads from `locales.toml` automatically.
 

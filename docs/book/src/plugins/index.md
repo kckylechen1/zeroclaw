@@ -152,7 +152,7 @@ not yet reachable from a running daemon:
 ## Configuration
 
 The plugin system is configured through the same schema mirror as everything
-else, via zerocode, the gateway, or the CLI. Prefer these surfaces over
+else, via the gateway or the CLI. Prefer these surfaces over
 hand-editing: a syntax slip in a hand-edited section (for example
 `[plugins.entries]` where `[[plugins.entries]]` is meant) currently makes the
 whole `[plugins]` section fail deserialization and silently fall back to

@@ -1,16 +1,12 @@
 # Quickstart
 
 Quickstart is the guided setup that takes you from a fresh install to a working
-agent in one pass. It runs on three surfaces: the **CLI**, the **zerocode**
-terminal interface, and the **web gateway**. All three drive the same
-underlying flow, so the config they produce is identical. Use whichever fits
-where you are.
+agent in one pass. It runs in the CLI (`zeroclaw quickstart`); the web
+dashboard's Config page edits the same config afterward.
 
 ## Install
 
 {{#include ../_snippets/install.md}}
-
-Every installation includes `zeroclaw`. A release archive or selected source apps may also include the `zerocode` terminal interface. For a source install, pass `--apps zerocode` when it is not already selected. Without `zerocode`, use the CLI or web Quickstart paths below.
 
 ## The steps
 
@@ -75,25 +71,6 @@ may use `--model-provider claude` as an alias. Quickstart still writes the
 canonical `[providers.models.anthropic.<alias>]` entry; the token is stored
 through the same credential path as `api_key`.
 
-## zerocode
-
-In the [zerocode](./zerocode.md) terminal interface, the Quickstart pane is one of
-the tabs. Drive it with the keyboard:
-
-Switch to the **Quickstart** pane:
-
-{{#include ../_snippets/zerocode-pane-nav-keys.md}}
-
-Inside the pane:
-
-{{#include ../_snippets/zerocode-quickstart-pane-keys.md}}
-
-Mouse works too: click a tab in the mode bar to switch panes, click a step to
-select and open it, and scroll to move through the list.
-
-Each step opens a modal that mirrors the checklist above, with a "Use existing"
-option that lists the matching aliases already in your config.
-
 ## Web gateway
 
 With the daemon running, open the dashboard in a browser:
@@ -117,9 +94,6 @@ under **Config** in the dashboard or directly in `config.toml`.
 
 ## After Quickstart
 
-- **Drive it from [zerocode](./zerocode.md):** the terminal interface is the best
-  way to chat, watch live logs, manage config, and monitor the daemon, all in
-  one place. Just run `zerocode`.
 - **Quick one-off from the shell:** `zeroclaw agent -a <alias> -m "your message"`.
 - **Run always-on:** `zeroclaw service install && zeroclaw service start`.
 - **Add channels later:** [Channels → Overview](../channels/overview.md).

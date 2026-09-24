@@ -4,7 +4,7 @@ Every model provider lives at `[providers.models.<type>.<alias>]`. `<type>` is a
 
 ## Minimal working example
 
-The smallest config that loads clean has four section headers: a provider entry, an agent that references it, and a risk profile the agent gates against. Configure them through the gateway, zerocode, or `zeroclaw config set`; the [config reference](../reference/config.md#providers) has the full field index.
+The smallest config that loads clean has four section headers: a provider entry, an agent that references it, and a risk profile the agent gates against. Configure them through the gateway or `zeroclaw config set`; the [config reference](../reference/config.md#providers) has the full field index.
 
 ## Field reference: provider entry
 

@@ -293,11 +293,11 @@ pub async fn run(target_version: Option<&str>, force: bool) -> Result<()> {
         Ok(()) => {
             // Cleanup backup on success
             let _ = tokio::fs::remove_file(&backup_path).await;
-            // Install everything else the archive shipped (the `zerocode`
-            // companion, the `web/dist` dashboard bundle, …). Best-effort:
+            // Install the `web/dist` dashboard bundle if the archive shipped
+            // one. Best-effort:
             // the validated main binary is already in place and must not be
             // rolled back if these fail.
-            install_companion_artifacts(&staging, &current_exe).await;
+            install_bundled_web_dist(&staging, &current_exe).await;
             println!("{}", update_success_message(&update_info.latest_version));
             println!("{}", prebuilt_channel_note_message());
             Ok(())
@@ -590,27 +590,6 @@ fn main_binary_name() -> &'static str {
     }
 }
 
-/// Names of top-level *file* artifacts (not directories) the release archive is
-/// allowed to install next to the running binary, beyond the main `zeroclaw`
-/// executable itself. Anything else in the archive's top level is warned about
-/// and skipped — symmetric with how unknown top-level *directories* are
-/// handled, and defense-in-depth for the browser-triggered self-upgrade path:
-/// a compromised or forged release cannot introduce an arbitrarily-named file
-/// beside the running binary just by naming it in its own archive.
-///
-/// Grow this list — and its `.exe` twin on Windows — deliberately when a new
-/// companion ships. The CI release-artifact list is the source of truth this
-/// mirrors (currently: `zerocode` next to `zeroclaw`, plus the `web/dist`
-/// directory that's handled by the whole-directory swap above).
-#[cfg(windows)]
-const KNOWN_COMPANION_FILES: &[&str] = &["zerocode.exe"];
-#[cfg(not(windows))]
-const KNOWN_COMPANION_FILES: &[&str] = &["zerocode"];
-
-fn is_known_companion(name: &str) -> bool {
-    KNOWN_COMPANION_FILES.contains(&name)
-}
-
 /// Wholesale-unpack a `.tar.gz` release archive into `staging`.
 ///
 /// Delegates to `tar::Archive::unpack`, which:
@@ -671,7 +650,7 @@ fn locate_main_binary(staging: &Path) -> Result<PathBuf> {
 
 /// Collect all **regular file** paths under `root`, skipping directories and
 /// symlinks. Used by `locate_main_binary` so it sees the same view of the
-/// staged tree as `install_companion_artifacts`.
+/// staged tree as `install_bundled_web_dist`.
 fn walk_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -936,7 +915,7 @@ async fn sweep_stale_sidecars(target: &Path) {
 
 /// Best-effort sweep of `.<base>.update-*` and `.<base>.update-old-*` residue
 /// left in `parent` by an earlier interrupted or partially-locked update of
-/// `base`. Used by `swap_file` and `install_web_dist`, which both name their
+/// `base`. Used by `install_web_dist`, which names its
 /// staging / sidelined entries with that pattern; matches both files (locked
 /// sibling executables) and directories (a sidelined `web/dist` whose contents
 /// were still open when the previous run tried to delete them).
@@ -985,14 +964,13 @@ async fn smoke_test(binary: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Install every artifact in `staging` other than the main binary onto the
-/// running install: the `web/dist` dashboard bundle and any other top-level
-/// files (e.g. the `zerocode` companion).
+/// Install the `web/dist` dashboard bundle from `staging` onto the running
+/// install, when the release archive ships one.
 ///
 /// Best-effort by design — the `zeroclaw` binary has already been swapped and
 /// smoke-tested. A failure here (e.g. an unwritable data directory) is logged
 /// and swallowed rather than failing or rolling back an otherwise-good update.
-async fn install_companion_artifacts(staging: &Path, current_exe: &Path) {
+async fn install_bundled_web_dist(staging: &Path, current_exe: &Path) {
     // 1. Dashboard bundle, if present: swap the whole `web/dist` directory so a
     //    stale file removed in a release is *gone*, not orphaned in place.
     let staged_web_dist = staging.join("web").join("dist");
@@ -1014,189 +992,6 @@ async fn install_companion_artifacts(staging: &Path, current_exe: &Path) {
             ),
         }
     }
-
-    // 2. Every *other* top-level file in the archive that is on the explicit
-    //    companion allowlist (see `KNOWN_COMPANION_FILES`), swapped into place
-    //    next to the running binary. Unknown top-level files are warned and
-    //    skipped — symmetric with how unknown top-level *directories* are
-    //    handled below, and narrows the browser-triggered self-upgrade blast
-    //    radius so a compromised or forged release cannot install an
-    //    arbitrarily-named file beside the running binary.
-    let Some(install_dir) = current_exe.parent() else {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "Cannot determine install directory; sibling files not refreshed"
-        );
-        return;
-    };
-    let main_name = main_binary_name();
-    let staged_top = match std::fs::read_dir(staging) {
-        Ok(it) => it,
-        Err(_) => return,
-    };
-    for entry in staged_top.flatten() {
-        let Ok(ft) = entry.file_type() else { continue };
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        // `web/` is handled above as a whole-directory swap. Any *other* top-
-        // level directory in the archive is a layout the updater does not yet
-        // know how to install (a new `themes/`, `plugins/`, …): warn loudly so
-        // a future archive change does not silently fail to take effect, but
-        // skip the entry rather than guessing where it should go.
-        if ft.is_dir() {
-            if name_str != "web" {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"name": name_str})),
-                    "Release archive contains a top-level directory the updater \
-                     doesn't know how to install — skipping. Teach \
-                     install_companion_artifacts about it or remove it from \
-                     the release packaging."
-                );
-            }
-            continue;
-        }
-        // Symlinks are dropped — same posture as `walk_files`.
-        if !ft.is_file() {
-            continue;
-        }
-        if name_str == main_name {
-            // Already swapped + smoke-tested via the transactional path.
-            continue;
-        }
-        // Everything else must appear on `KNOWN_COMPANION_FILES` explicitly.
-        // Bare-name check: mirrors the file-type gate above and matches how
-        // `install_dir.join(&name)` composes the target path — no traversal
-        // is possible because `read_dir(staging)` only yields staged names.
-        if !is_known_companion(name_str) {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"name": name_str})),
-                "Release archive contains a top-level file that is not on the \
-                 companion allowlist — skipping. Add it to KNOWN_COMPANION_FILES \
-                 (and its `.exe` twin on Windows) if it should be installed \
-                 next to the running binary."
-            );
-            continue;
-        }
-        let staged_path = entry.path();
-        let target = install_dir.join(&name);
-        match swap_file(&staged_path, &target).await {
-            Ok(()) => ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Success)
-                    .with_attrs(::serde_json::json!({
-                        "name": name_str,
-                        "path": target.display().to_string()
-                    })),
-                "Updated sibling file from release archive"
-            ),
-            Err(e) => ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({
-                        "name": name_str,
-                        "error": format!("{e}")
-                    })),
-                "Sibling file not updated; the main update still succeeded"
-            ),
-        }
-    }
-}
-
-/// Stage `new` into a process-unique temp sibling and parse the target
-/// path into `(dir, base)` used by both platform variants of `swap_file`.
-async fn stage_swap_file(new: &Path, target: &Path) -> Result<(PathBuf, String, PathBuf)> {
-    let dir = target
-        .parent()
-        .context("cannot determine target directory")?
-        .to_path_buf();
-    let base = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .context("invalid target file name")?
-        .to_string();
-    let tmp = dir.join(format!(".{base}.update-{}", std::process::id()));
-    tokio::fs::copy(new, &tmp)
-        .await
-        .with_context(|| format!("failed to stage {base}"))?;
-    Ok((dir, base, tmp))
-}
-
-/// Atomically replace `target` with `new` on Unix.
-///
-/// Copies `new` into a process-unique temp sibling, mirrors the source's
-/// mode bits, then renames the temp over `target` (atomic — even if `target`
-/// is a running executable, the kernel keeps the old inode alive for the
-/// process while the new file takes the path).
-///
-/// On success, sweeps `.<base>.update-*` residue left by previous runs.
-#[cfg(not(windows))]
-async fn swap_file(new: &Path, target: &Path) -> Result<()> {
-    let (dir, base, tmp) = stage_swap_file(new, target).await?;
-    // Mirror the source's mode bits so an executable companion stays
-    // executable. tar/zip both restore mode on extraction.
-    if let Ok(src_meta) = tokio::fs::metadata(new).await {
-        let _ = tokio::fs::set_permissions(&tmp, src_meta.permissions()).await;
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, target).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(e).with_context(|| format!("failed to install {base} to {}", target.display()));
-    }
-    sweep_update_residue(&dir, &base).await;
-    Ok(())
-}
-
-/// Atomically(-ish) replace `target` with `new` on Windows.
-///
-/// If the direct rename fails (the destination is locked because the file
-/// is currently executing — e.g. the user has the `zerocode` TUI open), we
-/// rename the existing `target` aside under a process-unique `.update-old`
-/// name and then rename the staged file into its place — the same idiom
-/// `swap_binary` uses for the main executable.
-///
-/// On success, sweeps `.<base>.update-*` residue left by previous runs
-/// whose sidelined file was still locked at cleanup time.
-#[cfg(windows)]
-async fn swap_file(new: &Path, target: &Path) -> Result<()> {
-    let (dir, base, tmp) = stage_swap_file(new, target).await?;
-    if tokio::fs::rename(&tmp, target).await.is_ok() {
-        sweep_update_residue(&dir, &base).await;
-        return Ok(());
-    }
-    // rename failed — target is likely locked by a running process.
-    // Move the old aside, then rename the staged file in.
-    let sidelined = dir.join(format!(".{base}.update-old-{}", std::process::id()));
-    match tokio::fs::rename(target, &sidelined).await {
-        Ok(()) => {
-            if let Err(e) = tokio::fs::rename(&tmp, target).await {
-                let _ = tokio::fs::rename(&sidelined, target).await;
-                let _ = tokio::fs::remove_file(&tmp).await;
-                return Err(e)
-                    .with_context(|| format!("failed to install {base} to {}", target.display()));
-            }
-            // The old sidelined file is still mapped by the running process
-            // and usually cannot be removed until it exits; the post-success
-            // sweep picks up leftovers from previous runs.
-            let _ = tokio::fs::remove_file(&sidelined).await;
-        }
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(e).with_context(|| format!("failed to move old {base} aside"));
-        }
-    }
-    sweep_update_residue(&dir, &base).await;
-    Ok(())
 }
 
 /// Install the new `web/dist` dashboard bundle where the gateway will serve it
@@ -1695,7 +1490,7 @@ mod tests {
 
         assert_eq!(std::fs::read(&binary).unwrap(), asset);
         // Bare (non-archive) download path — no siblings should appear.
-        assert!(!staging.join("zerocode").exists());
+        assert!(!staging.join("extra-tool").exists());
         assert!(!staging.join("web").exists());
     }
 
@@ -1909,12 +1704,12 @@ mod tests {
     #[test]
     fn unpack_tar_gz_extracts_full_tree() {
         let zeroclaw = b"#!/bin/sh\necho zeroclaw";
-        let zerocode = b"#!/bin/sh\necho zerocode";
+        let extra_tool = b"#!/bin/sh\necho extra-tool";
         let index = b"<!doctype html><title>dash</title>";
         let asset = b"console.log('app')";
         let gz_buf = make_tar_gz(&[
             ("zeroclaw", zeroclaw),
-            ("zerocode", zerocode),
+            ("extra-tool", extra_tool),
             ("web/dist/index.html", index),
             ("web/dist/assets/app.js", asset),
         ]);
@@ -1926,7 +1721,10 @@ mod tests {
 
         let binary = locate_main_binary(&staging).unwrap();
         assert_eq!(std::fs::read(&binary).unwrap(), zeroclaw);
-        assert_eq!(std::fs::read(staging.join("zerocode")).unwrap(), zerocode);
+        assert_eq!(
+            std::fs::read(staging.join("extra-tool")).unwrap(),
+            extra_tool
+        );
         assert_eq!(
             std::fs::read(staging.join("web").join("dist").join("index.html")).unwrap(),
             index
@@ -2047,11 +1845,11 @@ mod tests {
     #[test]
     fn unpack_zip_extracts_full_tree() {
         let zeroclaw = b"fake zeroclaw.exe";
-        let zerocode = b"fake zerocode.exe";
+        let extra_tool = b"fake extra-tool.exe";
         let index = b"<!doctype html>";
         let zip_buf = make_zip(&[
             ("zeroclaw.exe", zeroclaw),
-            ("zerocode.exe", zerocode),
+            ("extra-tool.exe", extra_tool),
             ("web/dist/index.html", index),
         ]);
 
@@ -2065,8 +1863,8 @@ mod tests {
             zeroclaw
         );
         assert_eq!(
-            std::fs::read(staging.join("zerocode.exe")).unwrap(),
-            zerocode
+            std::fs::read(staging.join("extra-tool.exe")).unwrap(),
+            extra_tool
         );
         assert_eq!(
             std::fs::read(staging.join("web").join("dist").join("index.html")).unwrap(),
@@ -2203,173 +2001,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn swap_file_replaces_target() {
-        let tmp = tempfile::tempdir().unwrap();
-        let target = tmp.path().join("zerocode");
-        std::fs::write(&target, b"old zerocode").unwrap();
-        let new = tmp.path().join("staging").join("zerocode");
-        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
-        std::fs::write(&new, b"new zerocode").unwrap();
-
-        swap_file(&new, &target).await.unwrap();
-
-        assert_eq!(std::fs::read(&target).unwrap(), b"new zerocode");
-    }
-
-    #[tokio::test]
-    async fn install_companion_artifacts_swaps_top_level_siblings() {
-        // The companion-artifact loop swaps every top-level file that is on
-        // the explicit `KNOWN_COMPANION_FILES` allowlist (currently
-        // `zerocode` / `zerocode.exe`) — and only those. The main binary is
-        // handled earlier by the transactional `swap_binary` path; unknown
-        // top-level files are covered by the sibling test below.
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let exe = bin_dir.join("zeroclaw");
-        std::fs::write(&exe, b"zeroclaw").unwrap();
-        std::fs::write(bin_dir.join("zerocode"), b"old zerocode").unwrap();
-
-        let staging = tmp.path().join("staging");
-        std::fs::create_dir_all(&staging).unwrap();
-        // Main binary lives in the staged tree but must NOT be re-swapped here
-        // (it was already handled by the transactional `swap_binary` path).
-        std::fs::write(staging.join("zeroclaw"), b"new zeroclaw").unwrap();
-        std::fs::write(staging.join("zerocode"), b"new zerocode").unwrap();
-
-        install_companion_artifacts(&staging, &exe).await;
-
-        // zerocode swapped in.
-        let expected_zerocode = bin_dir.join("zerocode");
-        assert_eq!(std::fs::read(&expected_zerocode).unwrap(), b"new zerocode");
-        // Main binary must be unchanged by the companion pass.
-        assert_eq!(std::fs::read(&exe).unwrap(), b"zeroclaw");
-    }
-
-    /// An unknown top-level *file* in the archive (anything not on
-    /// `KNOWN_COMPANION_FILES`) must be skipped — the updater warns rather
-    /// than blindly installing it — so a compromised or forged release cannot
-    /// use the browser-triggered self-upgrade path to introduce an
-    /// arbitrarily-named file next to the running binary. This is symmetric
-    /// with `install_companion_artifacts_skips_unknown_top_level_directories`.
-    #[tokio::test]
-    async fn install_companion_artifacts_skips_unknown_top_level_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let exe = bin_dir.join("zeroclaw");
-        std::fs::write(&exe, b"zeroclaw").unwrap();
-
-        let staging = tmp.path().join("staging");
-        std::fs::create_dir_all(&staging).unwrap();
-        // Known companion — must be installed.
-        std::fs::write(staging.join("zerocode"), b"new zerocode").unwrap();
-        // Unknown top-level file — must NOT be installed. This is the
-        // defense-in-depth surface: a forged release cannot smuggle a
-        // `zerodash`, `.bashrc`, `evil.so`, etc. next to `zeroclaw` just by
-        // naming it in its own archive.
-        std::fs::write(staging.join("zerodash"), b"unknown artifact").unwrap();
-
-        install_companion_artifacts(&staging, &exe).await;
-
-        // Known companion installed.
-        assert_eq!(
-            std::fs::read(bin_dir.join("zerocode")).unwrap(),
-            b"new zerocode"
-        );
-        // Unknown sibling NOT installed.
-        assert!(
-            !bin_dir.join("zerodash").exists(),
-            "unknown top-level file must not be installed; got it under {}",
-            bin_dir.display()
-        );
-    }
-
-    /// An unknown top-level directory in the archive (anything other than
-    /// `web/`) must be skipped — the updater warns rather than guessing where
-    /// to install it — while sibling files and the `web/dist` swap continue
-    /// to work normally.
-    #[tokio::test]
-    async fn install_companion_artifacts_skips_unknown_top_level_directories() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bin_dir = tmp.path().join("bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let exe = bin_dir.join("zeroclaw");
-        std::fs::write(&exe, b"zeroclaw").unwrap();
-
-        let staging = tmp.path().join("staging");
-        std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join("zerocode"), b"new zerocode").unwrap();
-        // An unknown directory (a future layout, a mispackaged release, …).
-        std::fs::create_dir_all(staging.join("themes").join("dark")).unwrap();
-        std::fs::write(staging.join("themes/dark/index.css"), b"body{}").unwrap();
-        // And the known `web/dist` tree, to confirm the rest of the pipeline
-        // still runs after the unknown-directory branch.
-        std::fs::create_dir_all(staging.join("web").join("dist")).unwrap();
-        std::fs::write(staging.join("web/dist/index.html"), b"NEW INDEX").unwrap();
-
-        install_companion_artifacts(&staging, &exe).await;
-
-        // Known artifacts installed.
-        assert_eq!(
-            std::fs::read(bin_dir.join("zerocode")).unwrap(),
-            b"new zerocode"
-        );
-        assert_eq!(
-            std::fs::read(bin_dir.join("web/dist/index.html")).unwrap(),
-            b"NEW INDEX"
-        );
-        // Unknown directory NOT silently materialized next to the binary.
-        assert!(
-            !bin_dir.join("themes").exists(),
-            "unknown top-level directory must not be installed; got it under {}",
-            bin_dir.display()
-        );
-    }
-
-    #[tokio::test]
     async fn sweep_update_residue_cleans_files_and_directories() {
         let tmp = tempfile::tempdir().unwrap();
         let parent = tmp.path();
         // Simulate residue left by previous PIDs.
-        std::fs::write(parent.join(".zerocode.update-99998"), b"stale tmp").unwrap();
-        std::fs::write(parent.join(".zerocode.update-old-99997"), b"stale old").unwrap();
+        std::fs::write(parent.join(".extra-tool.update-99998"), b"stale tmp").unwrap();
+        std::fs::write(parent.join(".extra-tool.update-old-99997"), b"stale old").unwrap();
         let stale_dir = parent.join(".dist.update-old-99996");
         std::fs::create_dir_all(stale_dir.join("assets")).unwrap();
         std::fs::write(stale_dir.join("index.html"), b"old").unwrap();
         std::fs::write(stale_dir.join("assets/app.js"), b"old").unwrap();
         // A file that does NOT match the prefix — must survive.
-        std::fs::write(parent.join("zerocode"), b"live").unwrap();
+        std::fs::write(parent.join("extra-tool"), b"live").unwrap();
 
-        sweep_update_residue(parent, "zerocode").await;
+        sweep_update_residue(parent, "extra-tool").await;
         sweep_update_residue(parent, "dist").await;
 
-        assert!(!parent.join(".zerocode.update-99998").exists());
-        assert!(!parent.join(".zerocode.update-old-99997").exists());
+        assert!(!parent.join(".extra-tool.update-99998").exists());
+        assert!(!parent.join(".extra-tool.update-old-99997").exists());
         assert!(!stale_dir.exists());
-        assert_eq!(std::fs::read(parent.join("zerocode")).unwrap(), b"live");
-    }
-
-    #[tokio::test]
-    async fn swap_file_cleans_up_residue_from_earlier_runs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        let target = dir.join("zerocode");
-        std::fs::write(&target, b"old").unwrap();
-        // Pretend a previous update left a sidelined file (e.g. because the
-        // old process was still running and the file was locked).
-        std::fs::write(dir.join(".zerocode.update-old-99999"), b"stale").unwrap();
-
-        let new = dir.join("new-zerocode");
-        std::fs::write(&new, b"new").unwrap();
-        swap_file(&new, &target).await.unwrap();
-
-        assert_eq!(std::fs::read(&target).unwrap(), b"new");
-        // The stale sidelined file from the previous run must be swept.
-        assert!(
-            !dir.join(".zerocode.update-old-99999").exists(),
-            "swap_file must sweep residue from previous runs"
-        );
+        assert_eq!(std::fs::read(parent.join("extra-tool")).unwrap(), b"live");
     }
 
     #[tokio::test]

@@ -406,7 +406,7 @@ reserved `__config` key, but only when the manifest grants `config_read`:
 `runtime.rs` strips any caller-supplied `__config` before injecting the resolved
 section, so the section cannot be spoofed, and withholds it entirely when the
 permission is absent. Operators populate this section through the configuration
-surfaces above (zerocode, the CLI, the gateway) rather than hand-editing a
+surfaces above (the CLI, the gateway) rather than hand-editing a
 file, with one current exception: a freshly installed plugin has no
 `plugins.entries` entry yet, and `config set` cannot materialize a missing
 natural-key entry, so the first entry must be added to the file by hand
@@ -559,8 +559,6 @@ state through the schema mirror (the one current exception: seeding a fresh
 plugin's `plugins.entries` entry, per the note under Per-plugin config). Pick
 whichever fits the moment:
 
-- **zerocode** the interactive config editor. Walk to the plugins section and
-  set fields with validation and inline help.
 - **The CLI** for plugin lifecycle. `zeroclaw plugin` provides `list`, `search`,
   `install`, `remove`, `info`, and `migrate`. `zeroclaw config set` adjusts
   individual plugin config fields.

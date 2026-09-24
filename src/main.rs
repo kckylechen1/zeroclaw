@@ -980,26 +980,6 @@ Examples (Windows PowerShell):
     #[command(hide = true)]
     MarkdownSchema,
 
-    /// Launch or install the companion desktop app
-    // i18n-exempt: clap derive help — framework requires a compile-time literal
-    #[command(long_about = "\
-Launch the ZeroClaw companion desktop app.
-
-The companion app is a lightweight menu bar / system tray application \
-that connects to the same gateway as the CLI. It provides quick access \
-to the dashboard, status monitoring, and device pairing.
-
-Use --install to download the pre-built companion app for your platform.
-
-Examples:
-  zeroclaw desktop              # launch the companion app
-  zeroclaw desktop --install    # download and install it")]
-    Desktop {
-        /// Download and install the companion app
-        #[arg(long)]
-        install: bool,
-    },
-
     /// Deprecated: use `zeroclaw config` instead
     #[command(hide = true)]
     Props {
@@ -1019,15 +999,14 @@ Examples:
     #[command(long_about = "\
 Fetch translated Fluent (.ftl) catalogues for a locale from the upstream \
 repository and install them under `<config-dir>/data/ftl/<locale>/`, where the \
-runtime and zerocode loaders read them.
+runtime loader reads them.
 
 Pass a single locale. By default every catalogue is fetched; restrict with \
---catalog (comma-separated): cli, tools, zerocode.
+--catalog (comma-separated): cli, tools.
 
 Examples:
   zeroclaw locales fetch ja
-  zeroclaw locales fetch fr --catalog cli,tools
-  zeroclaw locales fetch zh-CN --catalog zerocode")]
+  zeroclaw locales fetch fr --catalog cli,tools")]
     Locales {
         #[command(subcommand)]
         locales_command: LocalesCommands,
@@ -1041,7 +1020,7 @@ enum LocalesCommands {
     Fetch {
         /// Locale code to fetch (e.g. `ja`, `fr`, `zh-CN`).
         locale: String,
-        /// Comma-separated catalogues to fetch: cli, tools, zerocode.
+        /// Comma-separated catalogues to fetch: cli, tools.
         /// Omit to fetch all of them.
         #[arg(long)]
         catalog: Option<String>,
@@ -2913,10 +2892,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
             ))
             .await
         }
-
-        Commands::Desktop {
-            install: do_install,
-        } => commands::desktop::handle(do_install),
 
         Commands::Locales { locales_command } => {
             let LocalesCommands::Fetch { locale, catalog } = locales_command;

@@ -3,7 +3,6 @@ pub mod auth;
 #[cfg(feature = "agent-runtime")]
 pub mod config;
 #[cfg(feature = "agent-runtime")]
-pub mod desktop;
 #[cfg(feature = "agent-runtime")]
 pub mod eval;
 #[cfg(feature = "plugins-wasm")]

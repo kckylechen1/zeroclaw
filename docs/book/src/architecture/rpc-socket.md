@@ -1,9 +1,8 @@
 # RPC Socket Transport
 
 The daemon exposes a JSON-RPC 2.0 interface over a local IPC stream, a Unix
-domain socket on Unix and a named pipe on Windows. This is the primary
-transport for local clients like zerocode. The HTTP/WS gateway remains for
-webhooks, the web dashboard, and remote REST consumers.
+domain socket on Unix and a named pipe on Windows. The HTTP/WS gateway is
+the transport for webhooks, the web dashboard, bridges, and remote clients.
 
 ## Endpoint resolution
 
@@ -150,7 +149,7 @@ Paste lines one at a time:
 ```
 
 On Windows, use any named-pipe client (PowerShell `[System.IO.Pipes.NamedPipeClientStream]`,
-`nc` via WSL, or just run `zerocode`).
+or `nc` via WSL).
 
 ## Internals
 

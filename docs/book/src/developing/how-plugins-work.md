@@ -100,7 +100,7 @@ page covers the signature-policy boundary.
 ## Configuration reference
 
 All settings live under the `plugins.*` config paths and are set through any
-config surface (zerocode, the gateway, or the CLI):
+config surface (the gateway or the CLI):
 
 ```bash
 # Master switch. Nothing loads while this is false.

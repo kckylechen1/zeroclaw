@@ -4,7 +4,7 @@ ZeroClaw is an MCP client: it connects to external [Model Context Protocol](http
 
 ## Configure MCP
 
-MCP support is enabled by default, but no external MCP tools are exposed until at least one server is configured under `mcp.servers` and an agent is granted that server through its `mcp_bundles` (see Per-agent server scoping below). Configure through the gateway, zerocode, or `zeroclaw config set`:
+MCP support is enabled by default, but no external MCP tools are exposed until at least one server is configured under `mcp.servers` and an agent is granted that server through its `mcp_bundles` (see Per-agent server scoping below). Configure through the gateway or `zeroclaw config set`:
 
 ```sh
 zeroclaw config set mcp.servers.filesystem.command npx
@@ -48,15 +48,14 @@ A server is reached over one of three transports (the `transport` field):
 
 `env` (stdio) and `headers` (http/sse) are stored as secrets; `headers` commonly carries the `Authorization: Bearer …` token for the upstream server.
 
-Add a server through the gateway, zerocode, or `zeroclaw config set` (for example `zeroclaw config set mcp.servers.filesystem.command npx`). A stdio server needs `command` plus optional `args`/`env`; an http/sse server needs `url` plus optional `headers`. The per-field commands are in the field table below.
+Add a server through the gateway or `zeroclaw config set` (for example `zeroclaw config set mcp.servers.filesystem.command npx`). A stdio server needs `command` plus optional `args`/`env`; an http/sse server needs `url` plus optional `headers`. The per-field commands are in the field table below.
 
 ## Editing servers
 
-Three surfaces edit the same `[[mcp.servers]]` table:
+Two surfaces edit the same `[[mcp.servers]]` table:
 
 - **`config.toml`**: hand-edit the keys documented below. The full table is round-tripped on save.
-- **zerocode TUI** (`/config` -> `mcp.servers`): first-class per-field editor. The section shows one row per server, labeled with the server's `name`; enter a row to edit `transport`, `command` / `url`, `headers`, `env`, and `tool_timeout_secs` as individual fields. `+ Add` creates a new entry seeded with the name you supply; deleting from the alias list removes the entry. The `name` field is not edited inline because renaming the natural key mid-edit would invalidate in-flight references; use the dashboard or hand-edit `config.toml` to rename for now.
-- **Web dashboard**: currently renders `mcp.servers` through a JSON-array editor. A migration to the same per-field surface the TUI uses is planned; until then the dashboard remains a usable but coarser editor.
+- **Web dashboard**: currently renders `mcp.servers` through a JSON-array editor.
 
 ## Server fields
 
@@ -149,7 +148,7 @@ against them return a clear "does not support" error.
 
 Each MCP server entry accepts an optional `pinned_resources` field: a list of
 resource URIs to read once at startup and inject into the system prompt. Set it
-through the same config surfaces used to define the server (the gateway, zerocode,
+through the same config surfaces used to define the server (the gateway,
 or `zeroclaw config set`, as shown under [Configure MCP](#configure-mcp)), naming
 the resources you want the agent to always have on hand. The field defaults to
 empty, so servers without it are unaffected.

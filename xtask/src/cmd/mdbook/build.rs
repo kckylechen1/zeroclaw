@@ -68,7 +68,6 @@ pub fn prepare_generated_book_inputs(root: &Path, entries: &[LocaleEntry]) -> an
     build_refs(root)?;
     inject_lang_switcher_locales(&book_dir(root), entries)?;
     crate::cmd::mdbook::themes::run(root)?;
-    crate::cmd::mdbook::keymap::run(root)?;
     crate::cmd::mdbook::hardware::run(root)?;
     crate::cmd::mdbook::feature_matrix::run(root)?;
     crate::cmd::mdbook::plugins::run(root)?;

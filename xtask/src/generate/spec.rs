@@ -40,14 +40,10 @@ pub enum Action {
     DownloadPrebuilt,
     /// Install the main binary into BinDir.
     InstallBinary,
-    /// Install a named app binary (e.g. zerocode) into BinDir.
-    InstallApp { app: String },
     /// Bootstrap the Rust toolchain via rustup.
     InstallToolchain,
     /// `cargo install --path . --locked --force <CargoFlags>`.
     CargoInstallSelf,
-    /// `cargo install --path <dir> --locked --force`.
-    CargoInstallApp { path: Value },
     /// Build the web dashboard (`cargo web build`).
     BuildWebDashboard,
     /// Copy built web/dist into WebDataDir.
@@ -1059,13 +1055,6 @@ mod tests {
         assert!(manual.contains("--selection \"${{ inputs.distribution }}\""));
         assert!(manual.contains("echo \"- Binary bytes: $bytes\""));
         assert!(manual.contains("echo \"- Resolved features: \\`$FEATURES\\`\""));
-        assert_eq!(
-            manual
-                .matches("if: matrix.target != 'aarch64-linux-android'")
-                .count(),
-            2,
-            "both the ZeroCode build and upload must skip Android"
-        );
         assert!(!manual.contains("excluded_features"));
 
         let target_env = manual.find("- name: Configure target environment").unwrap();
@@ -1073,18 +1062,13 @@ mod tests {
         let zeroclaw_upload = manual
             .find("name: zeroclaw-manual-${{ inputs.distribution }}-${{ matrix.target }}")
             .unwrap();
-        let companion = manual.find("- name: Build ZeroCode companion").unwrap();
-        assert!(
-            target_env < release_step
-                && release_step < zeroclaw_upload
-                && zeroclaw_upload < companion
-        );
+        assert!(target_env < release_step && release_step < zeroclaw_upload);
         assert!(
             manual[target_env..release_step]
                 .contains("echo \"${{ matrix.linker_env }}=${{ matrix.linker }}\"")
         );
         assert!(manual[target_env..release_step].contains(">> \"$GITHUB_ENV\""));
-        assert!(!manual[release_step..companion].contains("matrix.linker_env"));
+        assert!(!manual[release_step..].contains("matrix.linker_env"));
 
         for feature in exclusions.values().flatten() {
             assert!(!release.contains(feature));

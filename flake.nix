@@ -66,7 +66,6 @@
         # >>> end generated:flake-packages <<<
       in {
         packages.zeroclaw = buildZeroclaw { pname = "zeroclaw"; cargoPkg = "zeroclawlabs"; };
-        packages.zerocode = buildZeroclaw { pname = "zerocode"; cargoPkg = "zerocode"; };
         packages.default = buildZeroclaw { pname = "zeroclaw"; cargoPkg = "zeroclawlabs"; };
         checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
           nixos-module-eval = pkgs.writeText "zeroclaw-nixos-module-eval" (

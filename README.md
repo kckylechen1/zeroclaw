@@ -66,8 +66,6 @@ Flags:
 ./install.sh --preset minimal        # kernel-only source preset (~6.6 MB)
 ./install.sh --minimal               # alias for --preset minimal
 ./install.sh --source --features agent-runtime,channel-discord  # custom feature set
-./install.sh --apps zerocode         # select apps to install; use "none" to skip all
-./install.sh --without-tui           # skip building zerocode
 ./install.sh --with-gateway          # force gateway support on
 ./install.sh --without-gateway       # force gateway support off
 ./install.sh --prefix /tmp/zc-test   # install under a custom prefix

@@ -10,7 +10,7 @@ For the architecture behind generated references, build-only outputs, gettext ex
 
 ## Translations
 
-English is the source language for authored chapters and generated references. Translations live in `docs/book/po/<locale>.po` files that act as a cache, and `cargo mdbook sync` keeps them current. Routine English docs PRs do not need to carry the generated `.po` churn: leave it for a dedicated translation-cache PR. For the full translation pipeline (app strings, docs, zerocode, adding a locale, release passes), see [Docs & Translations](../maintainers/docs-and-translations.md).
+English is the source language for authored chapters and generated references. Translations live in `docs/book/po/<locale>.po` files that act as a cache, and `cargo mdbook sync` keeps them current. Routine English docs PRs do not need to carry the generated `.po` churn: leave it for a dedicated translation-cache PR. For the full translation pipeline (app strings, docs, adding a locale, release passes), see [Docs & Translations](../maintainers/docs-and-translations.md).
 
 ## Tips
 

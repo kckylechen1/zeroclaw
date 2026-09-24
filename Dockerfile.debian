@@ -25,9 +25,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 COPY web/package.json web/package-lock.json web/
 RUN cd web && npm ci --ignore-scripts
 COPY . .
-RUN mkdir -p apps/tauri/src \
-    && echo "fn main() {}" > apps/tauri/src/main.rs \
-    && echo "fn main() {}" > apps/tauri/build.rs
 RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-web-target,target=/app/target,sharing=locked \
@@ -72,27 +69,16 @@ COPY Cargo.toml Cargo.lock ./
 COPY --parents crates/*/Cargo.toml ./
 # The plugin test fixture is a nested workspace member the glob above misses.
 COPY --parents crates/zeroclaw-plugins/tests/fixtures/channel-fixture/Cargo.toml ./
-# apps/tauri: .dockerignore whitelists only Cargo.toml; src and build.rs are stubbed below.
-COPY apps/tauri/Cargo.toml apps/tauri/Cargo.toml
-# apps/zerocode: TUI app not shipped in the server image; copy only its manifest
-# so Cargo can resolve the workspace, then stub its src/main.rs and build.rs
-# below. Its real build.rs reads web/src/contexts/themes.json and would panic in
-# this pre-fetch stage, so it is stubbed exactly like apps/tauri.
-COPY apps/zerocode/Cargo.toml apps/zerocode/Cargo.toml
 # tools/fill-translations and xtask are dev/build tools; copy manifests only so
 # Cargo can resolve the workspace, then stub their entry points so the
 # dependency pre-fetch step succeeds without building them into the image.
 COPY tools/fill-translations/Cargo.toml tools/fill-translations/Cargo.toml
 COPY xtask/Cargo.toml xtask/Cargo.toml
 # Create dummy targets for all workspace members so manifest parsing succeeds.
-RUN mkdir -p src benches apps/tauri/src apps/zerocode/src tools/fill-translations/src xtask/src/bin \
+RUN mkdir -p src benches tools/fill-translations/src xtask/src/bin \
     && echo "fn main() {}" > src/main.rs \
     && echo "" > src/lib.rs \
     && echo "fn main() {}" > benches/agent_benchmarks.rs \
-    && echo "fn main() {}" > apps/tauri/src/main.rs \
-    && echo "fn main() {}" > apps/tauri/build.rs \
-    && echo "fn main() {}" > apps/zerocode/src/main.rs \
-    && echo "fn main() {}" > apps/zerocode/build.rs \
     && echo "fn main() {}" > tools/fill-translations/src/main.rs \
     && echo "" > xtask/src/lib.rs \
     && echo "fn main() {}" > xtask/src/bin/mdbook.rs \
@@ -109,9 +95,9 @@ RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/regist
     --mount=type=cache,id=zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-target,target=/app/target,sharing=locked \
     if [ -n "$ZEROCLAW_CARGO_FLAGS" ]; then \
-      cargo build --release --locked -p zeroclawlabs -p zerocode $ZEROCLAW_CARGO_FLAGS; \
+      cargo build --release --locked -p zeroclawlabs $ZEROCLAW_CARGO_FLAGS; \
     else \
-      cargo build --release --locked -p zeroclawlabs -p zerocode; \
+      cargo build --release --locked -p zeroclawlabs; \
     fi
 RUN rm -rf src benches crates xtask tools/fill-translations
 
@@ -121,15 +107,11 @@ COPY benches/ benches/
 COPY crates/ crates/
 COPY xtask/ xtask/
 COPY tools/fill-translations/ tools/fill-translations/
-# apps/zerocode ships in the image; copy its real source. Its build.rs reads the
-# dashboard theme registry under web/src/contexts, so that path must be present.
-COPY apps/zerocode/ apps/zerocode/
-COPY web/src/ web/src/
 # locales.toml lives at repo root and is embedded by zeroclaw-runtime via
 # include_str!("../../../locales.toml"); the real build needs it present.
 COPY locales.toml .
 COPY --from=web-builder /app/web/dist web/dist
-RUN touch src/main.rs src/lib.rs apps/zerocode/src/main.rs
+RUN touch src/main.rs src/lib.rs
 RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-target,target=/app/target,sharing=locked \
@@ -142,22 +124,16 @@ RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/regist
            target/release/.fingerprint/xtask-* \
            target/release/deps/xtask-* \
            target/release/.fingerprint/fill-translations-* \
-           target/release/deps/fill_translations-* \
-           target/release/.fingerprint/zerocode-* \
-           target/release/deps/zerocode-* \
-           target/release/incremental/zerocode-* && \
+           target/release/deps/fill_translations-* && \
     if [ -n "$ZEROCLAW_CARGO_FLAGS" ]; then \
-      cargo build --release --locked -p zeroclawlabs -p zerocode $ZEROCLAW_CARGO_FLAGS; \
+      cargo build --release --locked -p zeroclawlabs $ZEROCLAW_CARGO_FLAGS; \
     else \
-      cargo build --release --locked -p zeroclawlabs -p zerocode; \
+      cargo build --release --locked -p zeroclawlabs; \
     fi && \
     cp target/release/zeroclaw /app/zeroclaw && \
-    cp target/release/zerocode /app/zerocode && \
-    strip /app/zeroclaw /app/zerocode
-RUN for b in zeroclaw zerocode; do \
-      size=$(stat -c%s "/app/$b") && \
-      if [ "$size" -lt 1000000 ]; then echo "ERROR: $b too small (${size} bytes), likely dummy build artifact" && exit 1; fi; \
-    done
+    strip /app/zeroclaw
+RUN size=$(stat -c%s /app/zeroclaw) && \
+    if [ "$size" -lt 1000000 ]; then echo "ERROR: zeroclaw too small (${size} bytes), likely dummy build artifact" && exit 1; fi
 
 # Prepare runtime directory structure and default config inline (no extra stage).
 # The web dashboard bundle is installed in the runtime stage at
@@ -196,7 +172,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/zeroclaw /usr/local/bin/zeroclaw
-COPY --from=builder /app/zerocode /usr/local/bin/zerocode
 COPY --from=builder /zeroclaw-data /zeroclaw-data
 # Install the dashboard at /usr/share/zeroclawlabs/web/dist (outside the
 # documented /zeroclaw-data mount) so user volumes do not shadow it (#6400).

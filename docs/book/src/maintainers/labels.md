@@ -147,7 +147,7 @@ Applied automatically by `pr-path-labeler.yml`. Globs live in `.github/labeler.y
 | `memory` | `src/memory/**`, `crates/zeroclaw-memory/src/**` |
 | `security` | `src/security/**`, `crates/zeroclaw-runtime/src/security/**` |
 | `runtime` | `src/runtime/**`, `crates/zeroclaw-runtime/src/**` |
-| `quickstart` | `crates/zeroclaw-runtime/src/quickstart/**`, `apps/zerocode/src/quickstart_pane.rs` |
+| `quickstart` | `crates/zeroclaw-runtime/src/quickstart/**` |
 | `provider` | `src/providers/**`, `crates/zeroclaw-providers/src/**` |
 | `service` | `src/service/**`, `crates/zeroclaw-runtime/src/service/**` |
 | `skillforge` | `src/skillforge/**`, `crates/zeroclaw-runtime/src/skillforge/**` |
@@ -176,7 +176,7 @@ Scoped path labels do not guarantee a same-prefix base label. Because `pr-path-l
 | `security:bubblewrap` | `bubblewrap.rs` |
 | `security:docker` | `docker.rs` |
 | `security:leak-detector` | LeakDetector redaction and sensitive-output scanning |
-| `security:pairing` | pairing security, gateway pairing API, Tauri pairing command, and web pairing page |
+| `security:pairing` | pairing security, gateway pairing API and web pairing page |
 | `security:policy` | runtime security policy, IAM policy, and config policy files |
 | `security:secrets` | runtime and config secrets handling |
 | `security:traits` | shared security trait and interface definitions |

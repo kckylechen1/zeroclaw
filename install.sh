@@ -24,14 +24,6 @@ die() {
 }
 bold() { printf "${BOLD}%s${RESET}" "$*"; }
 
-TUI_BIN_NAME="zerocode"
-
-# Apps installed by default (the rest are discovered and listed but off
-# until selected via --apps or the interactive picker). Intentionally a
-# fixed list: zeroclaw-desktop needs the Tauri toolchain + webview deps,
-# so it ships off-by-default.
-DEFAULT_APPS="zerocode"
-
 # ── Parse Cargo.toml (source of truth) ────────────────────────────
 
 parse_cargo_toml() {
@@ -84,45 +76,6 @@ expand_default_features() {
     fi
   done
   printf '%s' "$leaf"
-}
-
-# ── App registry ──────────────────────────────────────────────────
-#
-# Apps are standalone binaries under `apps/<dir>` installed via
-# `cargo install --path apps/<dir>` — they are NOT cargo features of the
-# main binary. The installable set is discovered from `apps/*/Cargo.toml`
-# so adding an app surfaces here without editing this script. `zerocode`
-# (the TUI) is the default app. Tauri-based apps (e.g. zeroclaw-desktop)
-# need the Tauri toolchain + system webview deps and are excluded from the
-# simple `cargo install` path.
-discover_apps() {
-  APPS=""
-  for dir in apps/*/; do
-    [ -f "${dir}Cargo.toml" ] || continue
-    name=$(awk -F'"' '/^name *=/{print $2; exit}' "${dir}Cargo.toml")
-    [ -n "$name" ] || continue
-    APPS="${APPS:+$APPS }$name"
-  done
-}
-
-# Resolve the app directory for a given app/bin name.
-app_dir_for() {
-  for dir in apps/*/; do
-    [ -f "${dir}Cargo.toml" ] || continue
-    name=$(awk -F'"' '/^name *=/{print $2; exit}' "${dir}Cargo.toml")
-    if [ "$name" = "$1" ]; then
-      printf '%s' "${dir%/}"
-      return 0
-    fi
-  done
-  return 1
-}
-
-validate_app() {
-  case " $APPS " in
-  *" $1 "*) return 0 ;;
-  *) die "Unknown app '$1'. Installable apps: $APPS" ;;
-  esac
 }
 
 # ── Feature validation ────────────────────────────────────────────
@@ -312,7 +265,6 @@ install_prebuilt() {
   if [ "$DRY_RUN" = true ]; then
     info "[dry-run] Would download $asset_url"
     info "[dry-run] Would install to $CARGO_HOME/bin/zeroclaw"
-    info "[dry-run] Would install $TUI_BIN_NAME to $CARGO_HOME/bin/$TUI_BIN_NAME (if in tarball)"
     info "[dry-run] Would install web dashboard to $web_data_dir"
     return 0
   fi
@@ -363,9 +315,6 @@ install_prebuilt() {
   tar -xzf "$tmp_dir/$asset_name" -C "$tmp_dir"
   mkdir -p "$CARGO_HOME/bin"
   install -m 755 "$tmp_dir/zeroclaw" "$CARGO_HOME/bin/zeroclaw"
-  if [ -f "$tmp_dir/$TUI_BIN_NAME" ]; then
-    install -m 755 "$tmp_dir/$TUI_BIN_NAME" "$CARGO_HOME/bin/$TUI_BIN_NAME"
-  fi
 
   # Install web dashboard assets bundled in the release tarball
   if [ -d "$tmp_dir/web/dist" ]; then
@@ -393,14 +342,11 @@ Options:
   --preset NAME        Named feature preset: 'minimal' (kernel only, ~6.6MB) or
                        'full' (every channel plus heavyweight extras such as
                        whatsapp-web and channel-matrix). Source builds only.
-  --full               Install everything: the 'full' feature preset plus every
-                       installable app (implies --source)
+  --full               Alias for --preset full (implies --source)
   --minimal            Alias for --preset minimal
   --features X,Y       Select specific features — source only (comma-separated)
-  --apps X,Y           Select apps to install (e.g. zerocode); "none" to skip all
   --with-gateway       Force the gateway feature on (overrides preset/feature default)
   --without-gateway    Force the gateway feature off (overrides preset/feature default)
-  --without-tui        Skip building the TUI ($TUI_BIN_NAME) [alias for --apps without it]
   --list-features      Print all available features and exit
   --prefix PATH        Install everything under PATH (default: \$HOME)
                        Sets CARGO_HOME, RUSTUP_HOME, source checkout, config
@@ -419,7 +365,7 @@ Examples:
   $0 --source --minimal                        # smallest possible binary
   $0 --source --features agent-runtime,channel-discord  # custom feature set
   $0 --source --preset full                   # every channel plus heavyweight extras
-  $0 --full                                    # everything: full preset + every app
+  $0 --full                                    # same as --preset full
   $0 --skip-quickstart                            # install only, configure later
   $0 --prefix /tmp/zc-test --skip-quickstart      # isolated test install
   $0 --dry-run --prebuilt                      # preview without installing
@@ -447,12 +393,6 @@ do_uninstall() {
     info "Removed $bin"
   else
     warn "Binary not found at $bin"
-  fi
-
-  local tui_bin="$CARGO_HOME/bin/$TUI_BIN_NAME"
-  if [ -f "$tui_bin" ]; then
-    rm -f "$tui_bin"
-    info "Removed $tui_bin"
   fi
 
   local config_dir="$PREFIX/.zeroclaw"
@@ -534,7 +474,6 @@ quickstart_needed() {
 interactive_feature_picker() {
   toml="$1"
   parse_cargo_toml "$toml"
-  discover_apps
 
   # Split features into channels (channel-*) and everything else. Skip
   # aggregate/meta features (see $NON_ROW_FEATURES) — they are internal
@@ -553,23 +492,19 @@ interactive_feature_picker() {
     esac
   done
 
-  # Apps default-on set (zerocode); features pre-checked from the crate's
-  # `default = [...]` list, expanded transitively so aggregate defaults like
-  # `default-channels` pre-check their leaf channel-* rows.
-  selected_apps="$DEFAULT_APPS"
+  # Features pre-checked from the crate's `default = [...]` list, expanded
+  # transitively so aggregate defaults like `default-channels` pre-check
+  # their leaf channel-* rows.
   selected_features=$(expand_default_features "$toml")
 
-  # Flat entry list, in display order: apps, then features, then channels.
-  # Each entry is tagged "app:" or "feat:" so toggling routes to the right
-  # selection set.
+  # Flat entry list, in display order: features, then channels.
   entries=""
-  for a in $APPS; do entries="${entries:+$entries }app:$a"; done
-  for f in $other_features; do entries="${entries:+$entries }feat:$f"; done
-  for c in $channel_features; do entries="${entries:+$entries }feat:$c"; done
+  for f in $other_features; do entries="${entries:+$entries }$f"; done
+  for c in $channel_features; do entries="${entries:+$entries }$c"; done
 
   # Prompt-side output goes to stderr; the result is returned via globals.
   echo >&2
-  printf "  %s\n" "$(bold "Select apps and optional features:")" >&2
+  printf "  %s\n" "$(bold "Select optional features:")" >&2
   printf "  %s\n" "Type the numbers to toggle, blank line to confirm." >&2
   printf "  %s\n" "Checked (✓) items are on by default — uncheck to drop them." >&2
   echo >&2
@@ -577,14 +512,11 @@ interactive_feature_picker() {
   while :; do
     i=1
     last_section=""
-    for entry in $entries; do
-      kind=${entry%%:*}
-      name=${entry#*:}
+    for name in $entries; do
       # Section header when the group changes.
-      section=""
-      case "$kind" in
-      app) section="Apps (--apps)" ;;
-      feat) case "$name" in channel-*) section="Channels (--features)" ;; *) section="Features (--features)" ;; esac ;;
+      case "$name" in
+      channel-*) section="Channels (--features)" ;;
+      *) section="Features (--features)" ;;
       esac
       if [ "$section" != "$last_section" ]; then
         [ -n "$last_section" ] && echo >&2
@@ -592,10 +524,7 @@ interactive_feature_picker() {
         last_section="$section"
       fi
       mark=" "
-      case "$kind" in
-      app) case " $selected_apps " in *" $name "*) mark="✓" ;; esac ;;
-      feat) case " $selected_features " in *" $name "*) mark="✓" ;; esac ;;
-      esac
+      case " $selected_features " in *" $name "*) mark="✓" ;; esac
       printf "    [%2d] %s %s\n" "$i" "$mark" "$name" >&2
       i=$((i + 1))
     done
@@ -608,21 +537,12 @@ interactive_feature_picker() {
       '' | *[!0-9]*) continue ;;
       esac
       idx=1
-      for entry in $entries; do
+      for name in $entries; do
         if [ "$idx" -eq "$n" ]; then
-          kind=${entry%%:*}
-          name=${entry#*:}
-          if [ "$kind" = app ]; then
-            case " $selected_apps " in
-            *" $name "*) selected_apps=$(printf '%s' "$selected_apps" | tr ' ' '\n' | grep -vx "$name" | paste -sd' ' -) ;;
-            *) selected_apps="${selected_apps:+$selected_apps }$name" ;;
-            esac
-          else
-            case " $selected_features " in
-            *" $name "*) selected_features=$(printf '%s' "$selected_features" | tr ' ' '\n' | grep -vx "$name" | paste -sd' ' -) ;;
-            *) selected_features="${selected_features:+$selected_features }$name" ;;
-            esac
-          fi
+          case " $selected_features " in
+          *" $name "*) selected_features=$(printf '%s' "$selected_features" | tr ' ' '\n' | grep -vx "$name" | paste -sd' ' -) ;;
+          *) selected_features="${selected_features:+$selected_features }$name" ;;
+          esac
           break
         fi
         idx=$((idx + 1))
@@ -631,7 +551,6 @@ interactive_feature_picker() {
   done
 
   PICKED_FEATURES=$(printf '%s' "$selected_features" | tr ' ' ',')
-  PICKED_APPS=$(printf '%s' "$selected_apps" | tr ' ' ',')
 }
 
 # Resolve the platform data directory the gateway auto-detects for the
@@ -760,9 +679,6 @@ PREFIX="$HOME"
 INSTALL_MODE="" # ""=ask, "prebuilt"=force prebuilt, "source"=force source
 PRESET=""       # ""=unset, "minimal"=alias for --minimal, "full"=default-features
 WITH_GATEWAY="" # ""=unset (preset/feature default applies), "true"/"false"=explicit toggle
-WITHOUT_TUI=""  # ""=unset (default: install TUI), "true"=skip TUI
-USER_APPS=""    # ""=unset (default apps), "none"=skip all, or comma list (e.g. "zerocode")
-FULL_APPS=false # true when --full: install every discovered app, not just the defaults
 
 # Support legacy env var
 if [ -n "${ZEROCLAW_CARGO_FEATURES:-}" ]; then
@@ -786,11 +702,7 @@ while [ $# -gt 0 ]; do
     *) die "Unknown preset '$1'. Expected: minimal or full" ;;
     esac
     ;;
-  --full)
-    # Everything: the 'full' feature preset plus every installable app.
-    PRESET="full"
-    FULL_APPS=true
-    ;;
+  --full) PRESET="full" ;;
   --features)
     if [ $# -lt 2 ]; then
       die "Missing value for --features. Expected: --features X,Y"
@@ -798,16 +710,8 @@ while [ $# -gt 0 ]; do
     shift
     USER_FEATURES="${USER_FEATURES:+$USER_FEATURES,}$1"
     ;;
-  --apps)
-    if [ $# -lt 2 ]; then
-      die "Missing value for --apps. Expected: --apps zerocode[,...] or --apps none"
-    fi
-    shift
-    USER_APPS="${USER_APPS:+$USER_APPS,}$1"
-    ;;
   --with-gateway) WITH_GATEWAY="true" ;;
   --without-gateway) WITH_GATEWAY="false" ;;
-  --without-tui) WITHOUT_TUI=true ;;
   --list-features) LIST_FEATURES=true ;;
   --prefix)
     if [ $# -lt 2 ]; then
@@ -866,11 +770,10 @@ fi
 
 # ── Decide: pre-built or source ───────────────────────────────────
 
-# --minimal, --features, --apps, --without-gateway, or --preset full imply
-# source. Prebuilt binaries always ship with default features and no apps,
-# so any flag that changes the feature set or selects apps must force a
-# source build.
-if [ "$MINIMAL" = true ] || [ -n "$USER_FEATURES" ] || [ -n "$USER_APPS" ] ||
+# --minimal, --features, --without-gateway, or --preset full imply source.
+# Prebuilt binaries always ship with default features, so any flag that
+# changes the feature set must force a source build.
+if [ "$MINIMAL" = true ] || [ -n "$USER_FEATURES" ] ||
   [ "$WITH_GATEWAY" = "false" ] || [ "$PRESET" = "full" ]; then
   INSTALL_MODE="source"
 fi
@@ -915,11 +818,6 @@ fi
     SIZE=$(du -h "$BIN" | awk '{print $1}')
     echo
     info "Installed: $BIN (v$NEW_VERSION, $SIZE)"
-  fi
-  TUI_BIN="$CARGO_HOME/bin/$TUI_BIN_NAME"
-  if [ -f "$TUI_BIN" ]; then
-    TUI_SIZE=$(du -h "$TUI_BIN" | awk '{print $1}')
-    info "Installed: $TUI_BIN ($TUI_SIZE)"
   fi
 }
 
@@ -1051,17 +949,15 @@ See all available features:
     fi
   fi
 
-  # Interactive picker — only when the operator did not pin features or
-  # apps via the CLI and is running under a TTY. Skipped on `--minimal`,
-  # `--preset`, `--features`, `--apps`, `--with-gateway` /
+  # Interactive picker — only when the operator did not pin features via
+  # the CLI and is running under a TTY. Skipped on `--minimal`,
+  # `--preset`, `--features`, `--with-gateway` /
   # `--without-gateway`, and any non-interactive run (curl | bash).
   if [ -t 0 ] &&
     [ "$MINIMAL" != true ] &&
     [ -z "$USER_FEATURES" ] &&
-    [ -z "$USER_APPS" ] &&
     [ -z "$PRESET" ] &&
     [ -z "$WITH_GATEWAY" ]; then
-    discover_apps
     interactive_feature_picker "Cargo.toml"
     # The picker pre-checks the crate defaults and lets the operator add or
     # remove any of them, so its result is the authoritative, complete
@@ -1071,9 +967,6 @@ See all available features:
     CARGO_FLAGS="--no-default-features"
     USER_FEATURES="$PICKED_FEATURES"
     info "Picked features: ${USER_FEATURES:-<none>}"
-    # Picker always resolves the app set explicitly (selected or none).
-    USER_APPS="${PICKED_APPS:-none}"
-    info "Picked apps: $USER_APPS"
   fi
 
   if [ -n "$USER_FEATURES" ]; then
@@ -1190,66 +1083,6 @@ See all available features:
     fi
   fi
 
-  # ── Apps (standalone binaries under apps/<dir>) ──────────────────
-  # Apps connect to zeroclaw-runtime's RPC server, so they need the
-  # agent-runtime feature. Without it there's no daemon — skip apps.
-  discover_apps
-
-  # Resolve the app set: explicit --apps list, "none" to skip, or the
-  # full installable set by default. --without-tui is back-compat for
-  # dropping the TUI app from the default set.
-  if [ "$FULL_APPS" = true ] && [ -z "$USER_APPS" ]; then
-    # --full installs every discovered app (an explicit --apps still wins) —
-    # except Tauri-based apps (tauri.conf.json present): they need the Tauri
-    # toolchain + system webview deps (webkit2gtk/GTK on Linux), which most
-    # machines don't have. Request them explicitly via --apps to opt in.
-    WANT_APPS=""
-    for app in $APPS; do
-      app_path=$(app_dir_for "$app") || continue
-      if [ -f "$app_path/tauri.conf.json" ]; then
-        info "Skipping $app: Tauri app needs system webview deps — install explicitly with --apps $app"
-        continue
-      fi
-      WANT_APPS="${WANT_APPS:+$WANT_APPS }$app"
-    done
-  elif [ "$USER_APPS" = "none" ]; then
-    WANT_APPS=""
-  elif [ -n "$USER_APPS" ]; then
-    WANT_APPS=$(printf '%s' "$USER_APPS" | tr ',[:space:]' '\n' | grep -v '^$' | sort -u | paste -sd' ' -)
-    for app in $WANT_APPS; do validate_app "$app"; done
-  else
-    WANT_APPS="$DEFAULT_APPS"
-  fi
-
-  # --without-tui drops the TUI app from the resolved default or --full
-  # set (an explicit --apps list is honored as-is).
-  if [ "$WITHOUT_TUI" = true ] && [ -z "$USER_APPS" ]; then
-    WANT_APPS=$(printf '%s' "$WANT_APPS" | tr ' ' '\n' | grep -vx "$TUI_BIN_NAME" | paste -sd' ' -)
-  fi
-
-  # agent-runtime is a default feature; if defaults are stripped and it
-  # wasn't re-added, no daemon exists to back the apps.
-  case "$CARGO_FLAGS" in
-  *--no-default-features*)
-    case ",$USER_FEATURES," in
-    *,agent-runtime,*) ;;
-    *) WANT_APPS="" ;;
-    esac
-    ;;
-  esac
-
-  for app in $WANT_APPS; do
-    app_path=$(app_dir_for "$app") || continue
-    if [ "$DRY_RUN" = true ]; then
-      info "[dry-run] Would run: cargo install --path $app_path --locked --force"
-    else
-      echo
-      printf "%s\n" "$(bold "Building $app")"
-      echo
-      cargo install --path "$app_path" --locked --force
-    fi
-  done
-
   # ── Summary ───────────────────────────────────────────────────────
 
   if [ "$DRY_RUN" != true ]; then
@@ -1270,11 +1103,6 @@ See all available features:
       fi
     else
       warn "Binary not found at expected path: $BIN"
-    fi
-    TUI_BIN="$CARGO_HOME/bin/$TUI_BIN_NAME"
-    if [ -f "$TUI_BIN" ]; then
-      TUI_SIZE=$(du -h "$TUI_BIN" | awk '{print $1}')
-      info "Installed: $TUI_BIN ($TUI_SIZE)"
     fi
   fi
 
@@ -1374,12 +1202,9 @@ if [ "$SKIP_QUICKSTART" = false ] && [ "$DRY_RUN" != true ] && [ -f "$BIN" ]; th
 fi
 
 echo
-# Next-step hint, smartest-first: if zerocode (the TUI) was installed, that's
-# the best place to start; otherwise point at the daemon + web dashboard, then
-# fall back to a one-off CLI agent run.
-if [ -f "$CARGO_HOME/bin/$TUI_BIN_NAME" ]; then
-  info "Done. Run $(bold "$TUI_BIN_NAME") to launch the terminal UI and start working."
-elif [ -f "$CARGO_HOME/bin/zeroclaw" ] && "$CARGO_HOME/bin/zeroclaw" --help 2>/dev/null | grep -q '\bdaemon\b'; then
+# Next-step hint: point at the daemon + web dashboard when the binary has
+# one, otherwise fall back to a one-off CLI agent run.
+if [ -f "$CARGO_HOME/bin/zeroclaw" ] && "$CARGO_HOME/bin/zeroclaw" --help 2>/dev/null | grep -q '\bdaemon\b'; then
   info "Done. Run $(bold "zeroclaw daemon") for the always-on daemon + web dashboard,"
   info "or $(bold "zeroclaw agent") for a one-off CLI chat."
 else
