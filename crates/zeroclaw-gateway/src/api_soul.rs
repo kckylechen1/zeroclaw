@@ -69,6 +69,9 @@ fn soul_error(err: &SoulProfileError) -> Response {
             "proposal_already_resolved",
             &err.to_string(),
         ),
+        SoulProfileError::ProposalStale { .. } => {
+            error_json(StatusCode::CONFLICT, "proposal_stale", &err.to_string())
+        }
         SoulProfileError::TooManyOpenProposals { .. } => error_json(
             StatusCode::TOO_MANY_REQUESTS,
             "too_many_open_proposals",
@@ -511,8 +514,9 @@ struct ResolveBody {
 /// the agent's proposals (ADR-016 §3). `accepted` applies the proposal to its
 /// layer in the same transaction (optionally reworded with `final_text`) and
 /// returns the applied revision; `dismissed` applies nothing. Each proposal
-/// resolves once. If the change can no longer apply, the proposal stays
-/// pending and the error names the field.
+/// resolves once. If the change can no longer apply (an invalid field, or a
+/// Growth retirement whose entry the owner has since removed or reworded),
+/// the proposal stays pending and nothing is applied.
 pub async fn post_resolve_proposal(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -771,6 +775,90 @@ mod tests {
         assert_eq!(revisions.len(), 3);
         assert_eq!(revisions[0]["source"], "seed");
         assert_eq!(revisions[1]["value"]["items"][0], "Be brief.");
+    }
+
+    /// #380 S12: an owner edit between proposal and approval makes a Growth
+    /// retirement stale instead of retiring whatever now sits at its index.
+    #[tokio::test]
+    async fn stale_growth_retirement_is_refused_and_stays_pending() {
+        use zeroclaw_memory::companion::{
+            GrowthEntry, GrowthKind, NewSoulProposal, SoulGrowth, SoulProposalLayer,
+            SoulProposalOutcome,
+        };
+        let (dir, state) = state_with_agent();
+        let store = SoulProfileStore::shared(dir.path()).unwrap();
+        let entry = |text: &str| GrowthEntry {
+            kind: GrowthKind::SelfView,
+            text: text.into(),
+        };
+        let rev = store
+            .set_growth(
+                "nova",
+                SoulGrowth {
+                    entries: vec![entry("A."), entry("B."), entry("C.")],
+                },
+                0,
+                1,
+            )
+            .unwrap()
+            .revision;
+        let outcome = store
+            .submit_proposal(
+                "nova",
+                NewSoulProposal {
+                    layer: SoulProposalLayer::Growth,
+                    proposal: "No longer true.".into(),
+                    retire_index: Some(1),
+                    ..Default::default()
+                },
+                2,
+            )
+            .unwrap();
+        let SoulProposalOutcome::Recorded { id } = outcome else {
+            panic!("{outcome:?}")
+        };
+        let (_, json) = json_of(
+            get_proposals(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                "/api/soul/proposals?agent=nova&pending=true"
+                    .parse()
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(json["proposals"][0]["retire_target"]["text"], "B.");
+        assert_eq!(json["proposals"][0]["target_revision"], rev);
+
+        // The owner removes B before reviewing.
+        store
+            .set_growth(
+                "nova",
+                SoulGrowth {
+                    entries: vec![entry("A."), entry("C.")],
+                },
+                rev,
+                3,
+            )
+            .unwrap();
+        let (status, json) = json_of(
+            post_resolve_proposal(
+                State(state.clone()),
+                ConnectInfo(peer()),
+                operator(),
+                Path(id),
+                body(&serde_json::json!({"agent": "nova", "resolution": "accepted"})),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{json}");
+        assert_eq!(json["code"], "proposal_stale");
+        let growth = store.profile("nova").unwrap().growth.unwrap().value;
+        assert_eq!(growth.entries, vec![entry("A."), entry("C.")]);
+        assert_eq!(store.proposals("nova", true).unwrap().len(), 1);
     }
 
     #[tokio::test]
