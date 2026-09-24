@@ -6,10 +6,7 @@
 //! bridge (E-annex rows 1 and 6). This test pins the absence structurally: no
 //! ZeroClaw runtime source may reference the retired store type, its DB, or
 //! the retired coordinator crate, so a second task ledger cannot quietly
-//! regrow under the old names. New durable stores are also caught
-//! independently by the TB-22 persistence-surface manifest gate
-//! (`scripts/ci/persistence_surface_gate.sh`), which any replacement store
-//! must be added to — this scan is the belt to that gate's braces.
+//! regrow under the old names.
 
 use std::path::Path;
 

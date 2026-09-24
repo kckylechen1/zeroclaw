@@ -31,16 +31,7 @@ Every new default capability must evaluate all 6 extension planes:
 
 ## Minimal Profile Exception Invariants
 
-A legitimate exception to the 5,000-token provider-wire ceiling or minimal membership table must be recorded in `scripts/ci/wire_budget_exceptions.json` with all 8 required fields:
-
-- `owner`: GitHub handle of the authorizing maintainer.
-- `tool_name`: Exact tool identifier receiving the exception.
-- `rationale`: Verifiable proof why the capability must reside in the kernel.
-- `wire_tokens`: Measured delta in provider-wire token cost.
-- `sunset_decision`: Permanent retention or scheduled deprecation date.
-- `security_privacy_impact`: Security and privacy boundary evaluation.
-- `dependency_cost_rationale`: Analysis of dependency overhead and build footprint impact.
-- `pr`: Associated pull request number establishing the exception.
+A legitimate exception to the 5,000-token provider-wire ceiling or minimal membership table needs an explicit owner decision recorded in the PR that raises it, naming the owner, the tool, why it must be in the kernel, its measured provider-wire token cost, and whether the exception is permanent or has a sunset date. The ceiling constant in `provider_wire_budget.rs` changes only with that decision.
 
 ## Email tool compile boundary
 

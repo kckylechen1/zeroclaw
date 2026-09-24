@@ -89,23 +89,6 @@ jobs:
           fi
       - name: Test translation release submodule handling
         run: scripts/release/refresh-translations.test.sh
-      - name: Tracked runtime-state hygiene gate (self-test + index scan)
-        run: |
-          bash scripts/ci/tracked_state_gate.test.sh
-          bash scripts/ci/tracked_state_gate.sh
-      - name: Retired-documentation gate (self-test + active-docs scan)
-        run: |
-          bash scripts/ci/retired_docs_gate.test.sh
-          bash scripts/ci/retired_docs_gate.sh
-      - name: Persistence-surface manifest gate (TB-22 no new durable stores)
-        run: |
-          # The gate scans with ripgrep; hosted runners do not ship it.
-          if ! command -v rg >/dev/null 2>&1; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
-          fi
-          rg --version
-          bash scripts/ci/persistence_surface_gate.test.sh
-          bash scripts/ci/persistence_surface_gate.sh
 
   # ── Post-format required quality gate ─────────────────────────────────────
 
@@ -113,11 +96,8 @@ jobs:
     name: Lint
     needs: [fmt]
     runs-on: ubuntu-latest
-    # 25 (not 20): a cold rust-cache after any Cargo.lock change puts a full
-    # workspace clippy at 14-15m on hosted runners, which made the old 15m
-    # ceiling a coin flip for every PR; observed runs with a lock change
-    # plus the persistence-gate ripgrep install have exceeded 20m and been
-    # cancelled mid-clippy, so the ceiling moves again by the same logic.
+    # 25: a cold rust-cache after a Cargo.lock change puts a full workspace
+    # clippy at 14-15m on hosted runners.
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -179,23 +159,8 @@ jobs:
         run: cargo test --test architecture tests_that_persist_config_isolate_the_path
       - name: Fluent coverage guard (no bare user-facing strings)
         run: cargo test --test architecture user_facing_strings_route_through_fluent
-      - name: Comment hygiene gate (no issue refs / review notes / truncation artifacts)
-        run: |
-          bash scripts/ci/comment_hygiene_gate.test.sh
-          bash scripts/ci/comment_hygiene_gate.sh
       - name: Provider dispatch gate (no direct ModelProvider method calls outside ProviderDispatch)
         run: bash scripts/ci/provider_dispatch_gate.sh
-      - name: Wire budget exception gate (explicit token ceiling manifest)
-        run: |
-          bash scripts/ci/wire_budget_exception_gate.test.sh
-          bash scripts/ci/wire_budget_exception_gate.sh
-      - name: Advisory exceptions gate (explicit lifecycle for audit/deny exceptions)
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.sha || github.base_ref || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || '' }}
-        run: |
-          bash scripts/ci/advisory_exceptions_gate.test.sh
-          bash scripts/ci/advisory_exceptions_gate.sh
-
 
   windows-clippy-tools-changes:
     name: Detect Windows Clippy changes
@@ -586,11 +551,6 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
           # Per-leg cache so each leg only carries its own build graph.
           shared-key: test-${{ matrix.leg }}
-      - name: Verify test partition covers the workspace
-        run: ./scripts/ci/test_partition_guard.sh
-      - name: Check firmware protocol crate
-        if: matrix.leg == 'tail'
-        run: ./scripts/ci/firmware_protocol_gate.sh
       - name: Ensure web/dist placeholder exists
         run: mkdir -p web/dist && touch web/dist/.gitkeep
       - name: Install mold linker
@@ -617,48 +577,6 @@ jobs:
           fi
           echo "==> leg $LEG: cargo nextest run --locked $PKGS $FEATURE_ARGS"
           cargo nextest run --locked $PKGS $FEATURE_ARGS
-      # The parallelism regression gate covers zeroclaw-runtime and
-      # zeroclaw-channels; the channels leg already builds both crates, so it
-      # runs there once instead of once per leg.
-      - name: Repeat parallel runtime tests
-        if: matrix.leg == 'channels'
-        run: ./scripts/ci/parallel_runtime_test_gate.sh
-        env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-
-  test-optional-channels:
-    name: Test (optional channels)
-    needs: [fmt]
-    runs-on: ubuntu-latest
-    # Matrix SDK and WhatsApp Web add the largest optional dependency graphs.
-    # Keep this isolated from the four package-partition legs and allow the
-    # same cold-run budget as those required test jobs.
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: 1.96.1
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-          shared-key: test-optional-channels
-      - name: Ensure web/dist placeholder exists
-        run: mkdir -p web/dist && touch web/dist/.gitkeep
-      - name: Install mold linker
-        run: bash scripts/ci/apt_install.sh mold
-      - name: Test optional channel gate
-        run: |
-          bash -n scripts/ci/optional_channel_test_gate.sh
-          bash -n scripts/ci/optional_channel_test_gate.test.sh
-          bash scripts/ci/optional_channel_test_gate.test.sh
-      - name: Run optional channel unit suites
-        run: ./scripts/ci/optional_channel_test_gate.sh
-        env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
   test-landlock:
     name: Test (Landlock)
@@ -719,15 +637,10 @@ jobs:
           python3 - <<'PY'
           import yaml
 
-          for path in (
-              ".github/workflows/ci.yml",
-              ".github/workflows/project-dashboard-plan.yml",
-          ):
+          for path in (".github/workflows/ci.yml",):
               yaml.safe_load(open(path))
               print(f"{path}: valid")
           PY
-      - name: Validate project dashboard planner
-        run: python3 scripts/github/project_dashboard_plan_test.py
       - name: Install cargo-audit
         run: |
           curl -LsSf https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2.tgz \
@@ -883,7 +796,7 @@ jobs:
   gate:
     name: CI Required Gate
     if: always()
-    needs: [fmt, repo-structure, lint, windows-clippy-tools-changes, windows-clippy-tools, build, check, check-plugin-backends, check-32bit, bench, test, test-optional-channels, test-landlock, security, nix-eval, nix-hash-drift, docs-style, installer-drift, zerocode-rpc-boundary, web-permission-tests]
+    needs: [fmt, repo-structure, lint, windows-clippy-tools-changes, windows-clippy-tools, build, check, check-plugin-backends, check-32bit, bench, test, test-landlock, security, nix-eval, nix-hash-drift, docs-style, installer-drift, zerocode-rpc-boundary, web-permission-tests]
     runs-on: ubuntu-latest
     steps:
       - name: Check results

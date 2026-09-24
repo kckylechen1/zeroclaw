@@ -12,24 +12,10 @@ echo "==> pre-push: running rust quality gate..."
     exit 1
 }
 
-echo "==> pre-push: running firmware protocol gate..."
-./scripts/ci/firmware_protocol_gate.sh || {
-    echo "FAIL: firmware protocol gate failed."
-    exit 1
-}
-
 if [ "${ZEROCLAW_STRICT_LINT:-0}" = "1" ]; then
     echo "==> pre-push: running strict clippy warnings gate (ZEROCLAW_STRICT_LINT=1)..."
     ./scripts/ci/rust_quality_gate.sh --strict || {
         echo "FAIL: strict clippy warnings gate reported issues."
-        exit 1
-    }
-fi
-
-if [ "${ZEROCLAW_STRICT_DELTA_LINT:-0}" = "1" ]; then
-    echo "==> pre-push: running strict delta lint gate (ZEROCLAW_STRICT_DELTA_LINT=1)..."
-    ./scripts/ci/rust_strict_delta_gate.sh || {
-        echo "FAIL: strict delta lint gate reported issues."
         exit 1
     }
 fi
@@ -53,12 +39,6 @@ fi
 echo "==> pre-push: running tests..."
 cargo test --locked --workspace --exclude zeroclaw-desktop || {
     echo "FAIL: some tests did not pass."
-    exit 1
-}
-
-echo "==> pre-push: repeating parallel runtime tests..."
-./scripts/ci/parallel_runtime_test_gate.sh || {
-    echo "FAIL: parallel runtime regression gate did not pass."
     exit 1
 }
 

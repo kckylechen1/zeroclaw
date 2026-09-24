@@ -89,6 +89,5 @@ For detailed commands, provider configuration, batching, adding a locale, and re
 - gettext safety checks: `xtask/src/cmd/mdbook/check.rs`
 - gettext fill and repair: `tools/fill-translations/`
 - Locale build and search behavior: `xtask/src/cmd/mdbook/build.rs`
-- Translation pin validation: `.github/workflows/validate-translations-pin.yml`
 - Release catalog refresh: `scripts/release/refresh-translations.sh`
 - Docs deployment: `.github/workflows/docs-deploy.yml`

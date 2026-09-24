@@ -22,8 +22,8 @@ Last verified against the `v0.8.2` release cycle.
 6. [Verify the release exists and assets are downloadable](#step-6-verify-the-release)
 7. [Versioned documentation deployment](#step-7-versioned-documentation-deployment)
 
-That is the entire process. Everything else (Docker, website redeploy, Scoop,
-AUR, Discord, tweet) runs automatically as downstream jobs. Homebrew Core
+That is the entire process. Everything else (Docker and the website redeploy)
+runs automatically as downstream jobs. Homebrew Core
 detects the stable GitHub release through its own autobump service. You do not
 need to do anything for those unless a job explicitly fails or Homebrew's
 external bump remains stale.
@@ -257,8 +257,7 @@ the maintainer's real `GITHUB_TOKEN` threaded into the run, a
 successful local invocation of a job that writes to GitHub (a `publish`
 that calls `gh release create`, a `docker` job that pushes to GHCR, a
 `docs-deploy` that force-pushes `gh-pages`, a `daily-audit` that opens
-an issue, a `tweet-release` or `discord-release` that posts to a
-webhook) could perform the real-world side effect on first try.
+an issue) could perform the real-world side effect on first try.
 
 `--all` therefore enforces a hardcoded allowlist of jobs proven safe
 to run locally; currently the artifact-only build steps in
@@ -272,7 +271,6 @@ Everything else is skipped with a logged reason:
 ==> skip release-stable-manual:redeploy-website (not on dry-run-safe allowlist)
 ==> skip docs-deploy:deploy (not on dry-run-safe allowlist)
 ==> skip daily-audit:advisories (not on dry-run-safe allowlist)
-==> skip tweet-release:tweet (not on dry-run-safe allowlist)
 ```
 
 The allowlist is **fail-closed**: a new workflow added to the repo is

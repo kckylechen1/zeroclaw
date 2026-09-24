@@ -182,7 +182,6 @@
   - [Agent-policy parity](./contributing/agent-policy-parity-harness.md)
   - [PR review protocol](./contributing/pr-review-protocol.md)
   - [Core-residency rationale](./contributing/core-residency-rationale.md)
-  - [Dependency footprint measurement](./contributing/dependency-footprint.md)
   - [Multi-agent setup](./contributing/multi-agent-setup.md)
   - [Contributor License Agreement](./contributing/cla.md)
 - [Maintainers](./maintainers/index.md)
