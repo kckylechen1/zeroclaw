@@ -928,6 +928,15 @@ pub struct ModelProviderConfig {
     #[tab(Advanced)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<serde_json::Value>,
+    /// Send the runtime `reasoning_effort` to every model on this
+    /// OpenAI-compatible provider. By default it is sent only to OpenAI
+    /// reasoning models (o1/o3/o4/gpt-5, gpt-*codex*), because some backends
+    /// reject unknown request fields with HTTP 400. Turn this on only for a
+    /// backend known to accept `reasoning_effort`, such as GLM, Kimi,
+    /// DeepSeek, or Qwen reasoners behind an OpenAI-compatible gateway.
+    #[tab(Advanced)]
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reasoning_effort_passthrough: bool,
     /// Context window size (max input tokens) for this model.
     /// Auto-populated on setup from provider's /models endpoint if available.
     /// Override manually for custom endpoints or when auto-detection fails.
