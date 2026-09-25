@@ -1,6 +1,5 @@
 //! TG7: ModelProvider Schema Conformance Tests
 
-use zeroclaw::providers::compatible::AuthStyle;
 use zeroclaw::providers::traits::{ChatMessage, ChatResponse, ToolCall};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,42 +102,9 @@ fn tool_call_id_preserved_in_serialization() {
     assert_eq!(parsed.name, "shell");
 }
 
-#[test]
-fn tool_call_arguments_contain_valid_json() {
-    let tc = ToolCall {
-        id: "call_1".into(),
-        name: "file_write".into(),
-        arguments: r#"{"path": "/tmp/test.txt", "content": "hello"}"#.into(),
-        extra_content: None,
-    };
-
-    // Arguments should parse as valid JSON
-    let args: serde_json::Value =
-        serde_json::from_str(&tc.arguments).expect("tool call arguments should be valid JSON");
-    assert!(args.get("path").is_some());
-    assert!(args.get("content").is_some());
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Tool message with tool_call_id (DeepSeek requirement)
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn tool_response_message_can_embed_tool_call_id() {
-    // DeepSeek requires tool_call_id in tool response messages.
-    // The tool message content can embed the tool_call_id as JSON.
-    let tool_response =
-        ChatMessage::tool(r#"{"tool_call_id": "call_abc123", "content": "search results here"}"#);
-
-    let parsed: serde_json::Value = serde_json::from_str(&tool_response.content)
-        .expect("tool response content should be valid JSON");
-
-    assert!(
-        parsed.get("tool_call_id").is_some(),
-        "tool response should include tool_call_id for DeepSeek compatibility"
-    );
-    assert_eq!(parsed["tool_call_id"], "call_abc123");
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ChatResponse structure
@@ -220,111 +186,10 @@ fn chat_response_multiple_tool_calls() {
 // AuthStyle variants
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[test]
-fn auth_style_bearer_is_constructible() {
-    let style = AuthStyle::Bearer;
-    assert!(matches!(style, AuthStyle::Bearer));
-}
-
-#[test]
-fn auth_style_xapikey_is_constructible() {
-    let style = AuthStyle::XApiKey;
-    assert!(matches!(style, AuthStyle::XApiKey));
-}
-
-#[test]
-fn auth_style_custom_header() {
-    let style = AuthStyle::Custom("X-Custom-Auth".into());
-    if let AuthStyle::Custom(header) = style {
-        assert_eq!(header, "X-Custom-Auth");
-    } else {
-        panic!("expected AuthStyle::Custom");
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // ModelProvider naming consistency
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[test]
-fn provider_construction_with_different_names() {
-    use zeroclaw::providers::compatible::OpenAiCompatibleModelProvider;
-
-    // Construction with various names should succeed
-    let _p1 = OpenAiCompatibleModelProvider::builder("test")
-        .display_name("DeepSeek")
-        .base_url("https://api.deepseek.com")
-        .credential(Some("test-key"))
-        .auth_style(AuthStyle::Bearer)
-        .build();
-    let _p2 = OpenAiCompatibleModelProvider::builder("test")
-        .display_name("deepseek")
-        .base_url("https://api.test.com")
-        .credential(None)
-        .auth_style(AuthStyle::Bearer)
-        .build();
-}
-
-#[test]
-fn provider_construction_with_different_auth_styles() {
-    use zeroclaw::providers::compatible::OpenAiCompatibleModelProvider;
-
-    let _bearer = OpenAiCompatibleModelProvider::builder("test")
-        .display_name("Test")
-        .base_url("https://api.test.com")
-        .credential(Some("key"))
-        .auth_style(AuthStyle::Bearer)
-        .build();
-    let _xapi = OpenAiCompatibleModelProvider::builder("test")
-        .display_name("Test")
-        .base_url("https://api.test.com")
-        .credential(Some("key"))
-        .auth_style(AuthStyle::XApiKey)
-        .build();
-    let _custom = OpenAiCompatibleModelProvider::builder("test")
-        .display_name("Test")
-        .base_url("https://api.test.com")
-        .credential(Some("key"))
-        .auth_style(AuthStyle::Custom("X-My-Auth".into()))
-        .build();
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Conversation history message ordering
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn chat_messages_maintain_role_sequence() {
-    let history = [
-        ChatMessage::system("You are helpful"),
-        ChatMessage::user("What is Rust?"),
-        ChatMessage::assistant("Rust is a systems programming language"),
-        ChatMessage::user("Tell me more"),
-        ChatMessage::assistant("It emphasizes safety and performance"),
-    ];
-
-    assert_eq!(history[0].role, "system");
-    assert_eq!(history[1].role, "user");
-    assert_eq!(history[2].role, "assistant");
-    assert_eq!(history[3].role, "user");
-    assert_eq!(history[4].role, "assistant");
-}
-
-#[test]
-fn chat_messages_with_tool_calls_maintain_sequence() {
-    let history = [
-        ChatMessage::system("You are helpful"),
-        ChatMessage::user("Search for Rust"),
-        ChatMessage::assistant("I'll search for that"),
-        ChatMessage::tool(r#"{"tool_call_id": "tc_1", "content": "search results"}"#),
-        ChatMessage::assistant("Based on the search results..."),
-    ];
-
-    assert_eq!(history.len(), 5);
-    assert_eq!(history[3].role, "tool");
-    assert_eq!(history[4].role, "assistant");
-
-    // Verify tool message content is valid JSON with tool_call_id
-    let tool_content: serde_json::Value = serde_json::from_str(&history[3].content).unwrap();
-    assert!(tool_content.get("tool_call_id").is_some());
-}

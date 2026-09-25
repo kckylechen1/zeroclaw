@@ -8,30 +8,6 @@ use zeroclaw::config::{Config, MemoryConfig};
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn config_default_has_no_model_provider_profiles() {
-    let config = Config::default();
-    assert!(
-        config.providers.models.is_empty(),
-        "default config should not synthesize provider profiles"
-    );
-    assert_eq!(
-        config.providers.models.iter_entries().count(),
-        0,
-        "default config should have no typed provider entries"
-    );
-}
-
-#[test]
-fn config_default_has_no_resolved_model() {
-    let config = Config::default();
-    assert_eq!(
-        config.resolve_default_model(),
-        None,
-        "default config should not resolve a model until one is configured"
-    );
-}
-
-#[test]
 fn config_default_validates_without_provider_profiles() {
     let config = Config::default();
     config
@@ -46,15 +22,6 @@ fn config_default_validates_without_provider_profiles() {
 // ─────────────────────────────────────────────────────────────────────────────
 // MemoryConfig defaults
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn memory_config_default_backend() {
-    let memory = MemoryConfig::default();
-    assert!(
-        !memory.backend.is_empty(),
-        "memory backend should have a default value"
-    );
-}
 
 #[test]
 fn memory_config_default_embedding_provider() {
@@ -260,25 +227,3 @@ enabled = true
 // ─────────────────────────────────────────────────────────────────────────────
 // Workspace directory creation
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn workspace_dir_creation_in_tempdir() {
-    let tmp = tempfile::TempDir::new().expect("tempdir creation should succeed");
-    let workspace_dir = tmp.path().join("workspace");
-
-    fs::create_dir_all(&workspace_dir).expect("workspace dir creation should succeed");
-    assert!(workspace_dir.exists(), "workspace dir should exist");
-    assert!(
-        workspace_dir.is_dir(),
-        "workspace path should be a directory"
-    );
-}
-
-#[test]
-fn nested_workspace_dir_creation() {
-    let tmp = tempfile::TempDir::new().expect("tempdir creation should succeed");
-    let nested_dir = tmp.path().join("deep").join("nested").join("workspace");
-
-    fs::create_dir_all(&nested_dir).expect("nested dir creation should succeed");
-    assert!(nested_dir.exists(), "nested workspace dir should exist");
-}

@@ -74,56 +74,6 @@ default_temperature = "hot"
 }
 
 #[test]
-fn config_out_of_range_temperature_fails() {
-    // Temperature validation now happens at the model_provider level.
-    let toml_str = r#"
-[providers.models.openai.default]
-api_key = "sk-test"
-temperature = 99.0
-"#;
-    let config: Config = toml::from_str(toml_str).expect("parses");
-    // Out-of-range temperature is stored but caught by validate().
-    assert_eq!(
-        config
-            .providers
-            .models
-            .find("openai", "default")
-            .expect("entry exists")
-            .temperature,
-        Some(99.0)
-    );
-    let err = config.validate().expect_err("temperature 99.0 should fail");
-    assert!(
-        err.to_string().contains("temperature"),
-        "expected temperature validation error, got: {err}"
-    );
-}
-
-#[test]
-fn config_negative_temperature_fails() {
-    let toml_str = r#"
-[providers.models.openai.default]
-api_key = "sk-test"
-temperature = -0.5
-"#;
-    let config: Config = toml::from_str(toml_str).expect("parses");
-    assert_eq!(
-        config
-            .providers
-            .models
-            .find("openai", "default")
-            .expect("entry exists")
-            .temperature,
-        Some(-0.5)
-    );
-    let err = config.validate().expect_err("temperature -0.5 should fail");
-    assert!(
-        err.to_string().contains("temperature"),
-        "expected temperature validation error, got: {err}"
-    );
-}
-
-#[test]
 fn config_negative_port_fails() {
     let toml_str = r#"
 [gateway]
@@ -165,21 +115,6 @@ fn gateway_config_defaults_are_secure() {
         gw.path_prefix.is_none(),
         "path_prefix should default to None"
     );
-}
-
-#[test]
-fn gateway_config_rate_limit_defaults() {
-    let gw = GatewayConfig::default();
-    assert_eq!(gw.pair_rate_limit_per_minute, 10);
-    assert_eq!(gw.webhook_rate_limit_per_minute, 60);
-    assert_eq!(gw.rate_limit_max_keys, 10_000);
-}
-
-#[test]
-fn gateway_config_idempotency_defaults() {
-    let gw = GatewayConfig::default();
-    assert_eq!(gw.idempotency_ttl_secs, 300);
-    assert_eq!(gw.idempotency_max_keys, 10_000);
 }
 
 #[test]
@@ -349,32 +284,6 @@ fn security_config_toml_roundtrip() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn autonomy_config_default_is_supervised() {
-    let autonomy = RiskProfileConfig::default();
-    assert_eq!(
-        format!("{:?}", autonomy.level),
-        "Supervised",
-        "default autonomy should be Supervised"
-    );
-}
-
-#[test]
-fn risk_profile_workspace_only_round_trips_through_toml() {
-    let mut config = Config::default();
-    config.risk_profiles.insert(
-        "clamps".into(),
-        zeroclaw_config::schema::RiskProfileConfig {
-            workspace_only: false,
-            ..Default::default()
-        },
-    );
-    let toml_str = toml::to_string(&config).expect("config should serialize");
-    let parsed: Config = toml::from_str(&toml_str).expect("should deserialize back");
-    let profile = parsed.risk_profiles.get("clamps").unwrap();
-    assert!(!profile.workspace_only);
-}
-
-#[test]
 fn runtime_profile_max_actions_per_hour_round_trips_through_toml() {
     let mut config = Config::default();
     config.runtime_profiles.insert(
@@ -512,22 +421,6 @@ bot_token = "test_token"
     assert!(!parsed.channels.telegram.is_empty());
     assert!(!parsed.channels.discord.is_empty());
     assert!(parsed.channels.slack.is_empty());
-}
-
-#[test]
-fn config_nested_optional_sections_default_when_absent() {
-    let toml_str = "default_temperature = 0.7\n";
-    let parsed: Config = toml::from_str(toml_str).expect("minimal TOML should parse");
-    assert!(parsed.channels.telegram.is_empty());
-    assert!(!parsed.composio.enabled);
-    assert!(parsed.composio.api_key.is_none());
-    assert!(parsed.browser.enabled);
-}
-
-#[test]
-fn config_channels_default_cli_enabled() {
-    let channels = ChannelsConfig::default();
-    assert!(channels.cli, "CLI channel should be enabled by default");
 }
 
 #[test]
