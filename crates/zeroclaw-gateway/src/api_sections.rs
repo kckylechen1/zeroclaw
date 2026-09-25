@@ -1323,6 +1323,7 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             pending_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ws_conversations: Default::default(),
         }
     }
 

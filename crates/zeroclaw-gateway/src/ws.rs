@@ -5,7 +5,8 @@
 //! transport forwards the summary without rebuilding it from raw arguments.
 
 use super::AppState;
-use crate::ws_approval::{PendingApprovals, WsApprovalChannel, new_pending_approvals};
+use crate::ws_approval::{PendingApprovals, WsApprovalChannel};
+use crate::ws_conversation::{Conversation, FrameSink, Seed, Submitted, TurnClaim};
 use axum::{
     extract::{
         Query, State, WebSocketUpgrade,
@@ -274,22 +275,6 @@ async fn handle_socket(
     // construction is deferred until after the optional `connect` frame so the
     // client can provide a per-session cwd for the security sandbox root.
     let config = state.config.read().clone();
-    let ws_memory = match resolve_ws_memory_handle(&config, &agent_alias).await {
-        Ok(memory) => memory,
-        Err(e) => {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({
-                        "agent": &agent_alias,
-                        "error": format!("{e:#}"),
-                    })),
-                "WS per-agent memory resolution failed; consolidation disabled for connection"
-            );
-            None
-        }
-    };
     let mut resumed = false;
     let mut message_count: usize = 0;
     let mut effective_name: Option<String> = None;
@@ -386,42 +371,210 @@ async fn handle_socket(
         return;
     }
 
+    // Every socket that opens this session with this agent shares one
+    // conversation: one agent, one history, one running turn (#376).
+    let conversation_key = format!("{session_key}\u{1f}{agent_alias}");
+    let mut restore_trim_event = None;
+    let attached = state
+        .ws_conversations
+        .attach(&conversation_key, |seed| {
+            build_ws_session(
+                &config,
+                &state,
+                &agent_alias,
+                &session_key,
+                &session_cwd,
+                memory_session_id,
+                &stored_messages,
+                seed,
+                &mut restore_trim_event,
+            )
+        })
+        .await;
+    let (mut subscription, created) = match attached {
+        Ok(attached) => attached,
+        Err(e) => {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                "Agent initialization failed"
+            );
+            let err = serde_json::json!({
+                "type": "error",
+                "message": format!("Failed to initialise agent: {e}"),
+                "code": "AGENT_INIT_FAILED"
+            });
+            let _ = sender.send(Message::Text(err.to_string().into())).await;
+            let _ = sender
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: axum::extract::ws::Utf8Bytes::from_static(
+                        "Agent initialization failed",
+                    ),
+                })))
+                .await;
+            return;
+        }
+    };
+
+    // Restoring history trims it at most once, when the conversation is
+    // built. Only the socket that built it is told; later sockets join a
+    // conversation whose history is already live.
+    if created
+        && let Some(zeroclaw_api::agent::TurnEvent::HistoryTrimmed {
+            dropped_messages,
+            kept_turns,
+            reason,
+        }) = restore_trim_event
+    {
+        let frame = history_trimmed_ws_frame(dropped_messages, kept_turns, &reason);
+        let _ = sender.send(Message::Text(frame.to_string().into())).await;
+    }
+
+    let scope = WsTurnScope {
+        session_key,
+        session_id,
+        auth_subject,
+    };
+
+    // Subscribe to the shared broadcast channel so cron/heartbeat events
+    // are forwarded to this WebSocket client, during turns as well.
+    let mut broadcast_rx = state.event_tx.subscribe();
+    let mut next_text = first_msg_fallback;
+
+    loop {
+        let text = match next_text.take() {
+            Some(text) => text,
+            None => tokio::select! {
+                // ── Client message ────────────────────────────────────
+                client_msg = receiver.next() => match client_msg {
+                    Some(Ok(Message::Text(text))) => text.to_string(),
+                    // Closing a socket only unsubscribes; a running turn
+                    // keeps going for the other sockets and the history.
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(_)) => continue,
+                },
+
+                // ── Conversation frame (turn output, approvals) ───────
+                frame = subscription.frames.recv() => {
+                    match frame {
+                        Ok(frame) => {
+                            if sender.send(Message::Text(frame.to_string().into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            ::zeroclaw_log::record!(
+                                WARN,
+                                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                                    .with_attrs(::serde_json::json!({
+                                        "session_key": scope.session_key,
+                                        "skipped": skipped,
+                                    })),
+                                "WS subscriber fell behind; frames skipped"
+                            );
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                    continue;
+                }
+
+                // ── Broadcast event (cron/heartbeat results) ──────────
+                event = broadcast_rx.recv() => {
+                    if let Ok(event) = event
+                        && event_matches_session(&event, &scope.session_id)
+                        && !is_observability_telemetry(&event)
+                    {
+                        let _ = sender.send(Message::Text(event.to_string().into())).await;
+                    }
+                    continue;
+                }
+            },
+        };
+
+        // ── Voice duplex event dispatch (gated by feature flag + runtime config) ──
+        #[cfg(feature = "gateway-voice-duplex")]
+        {
+            // Multi-instance shape: presence in the map = enabled.
+            let duplex_enabled = !state.config.read().channels.voice_duplex.is_empty();
+            if duplex_enabled {
+                if let Some(voice_event) = crate::voice_duplex::try_parse_voice_event(&text) {
+                    if let Some(error_frame) = crate::voice_duplex::handle_voice_event(voice_event)
+                    {
+                        let _ = sender
+                            .send(Message::Text(error_frame.to_string().into()))
+                            .await;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        if let Some(reply) = handle_client_text(&state, &subscription.conversation, &scope, &text) {
+            let _ = sender.send(Message::Text(reply.to_string().into())).await;
+        }
+    }
+}
+
+/// The agent state one shared WS conversation holds.
+pub(crate) struct WsSession {
+    agent: zeroclaw_runtime::agent::Agent,
+    /// Per-agent memory for turn-end consolidation; `None` disables it.
+    ws_memory: Option<Arc<dyn zeroclaw_memory::Memory>>,
+}
+
+/// Identifies the session a turn runs for. Cloned into each turn task.
+#[derive(Clone)]
+struct WsTurnScope {
+    session_key: String,
+    session_id: String,
+    // The transport-authenticated approval subject (paired-token hash) of
+    // the socket that opened the conversation, if it was authenticated.
+    auth_subject: Option<String>,
+}
+
+/// Build the agent for a new shared conversation and wire its approval
+/// prompts to the conversation's subscribers.
+#[allow(clippy::too_many_arguments)]
+async fn build_ws_session(
+    config: &zeroclaw_config::schema::Config,
+    state: &AppState,
+    agent_alias: &str,
+    session_key: &str,
+    session_cwd: &Path,
+    memory_session_id: String,
+    stored_messages: &[zeroclaw_providers::ChatMessage],
+    seed: Seed,
+    restore_trim_event: &mut Option<zeroclaw_api::agent::TurnEvent>,
+) -> anyhow::Result<WsSession> {
+    let ws_memory = match resolve_ws_memory_handle(config, agent_alias).await {
+        Ok(memory) => memory,
+        Err(e) => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "agent": agent_alias,
+                        "error": format!("{e:#}"),
+                    })),
+                "WS per-agent memory resolution failed; consolidation disabled for session"
+            );
+            None
+        }
+    };
+
     let mut agent =
-        match zeroclaw_runtime::agent::Agent::from_live_config_with_session_cwd_and_mcp_backchannel(
+        zeroclaw_runtime::agent::Agent::from_live_config_with_session_cwd_and_mcp_backchannel(
             Arc::clone(&state.config),
-            &agent_alias,
-            Some(&session_cwd),
+            agent_alias,
+            Some(session_cwd),
             true,
             false,
         )
-        .await
-        {
-            Ok(a) => a,
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    ERROR,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                    "Agent initialization failed"
-                );
-                let err = serde_json::json!({
-                    "type": "error",
-                    "message": format!("Failed to initialise agent: {e}"),
-                    "code": "AGENT_INIT_FAILED"
-                });
-                let _ = sender.send(Message::Text(err.to_string().into())).await;
-                let _ = sender
-                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                        code: 1011,
-                        reason: axum::extract::ws::Utf8Bytes::from_static(
-                            "Agent initialization failed",
-                        ),
-                    })))
-                    .await;
-                return;
-            }
-        };
+        .await?;
     // Keep ONE ingress identity for the WebSocket turn: the turn span records
     // `channel = "wss"`, and observer events derive from `Agent.channel_name`,
     // so this must stay `wss` or a single turn is split across two names.
@@ -429,27 +582,34 @@ async fn handle_socket(
     // what lets ask_user/poll/escalate_to_human default to this conversation.
     agent.set_channel_name(WS_CHANNEL_KEY.to_string());
     agent.set_memory_session_id(Some(memory_session_id));
-    let restore_trim_event = if stored_messages.is_empty() {
-        None
-    } else {
-        agent.seed_history_with_event(&stored_messages)
-    };
+    if !stored_messages.is_empty() {
+        *restore_trim_event = agent.seed_history_with_event(stored_messages);
+    }
 
-    let (approval_event_tx, mut approval_event_rx) =
+    let Seed {
+        pending_approvals,
+        frames,
+    } = seed;
+    let (approval_event_tx, approval_event_rx) =
         tokio::sync::mpsc::channel::<zeroclaw_api::agent::TurnEvent>(8);
-    let pending_approvals: PendingApprovals = new_pending_approvals();
     let approval_channel = Arc::new(WsApprovalChannel::new(
-        approval_event_tx.clone(),
+        approval_event_tx,
         pending_approvals.clone(),
         Duration::from_secs(WS_APPROVAL_TIMEOUT_SECS),
     ));
     agent
         .channel_handles()
-        .register_channel(WS_CHANNEL_KEY, approval_channel.clone());
+        .register_channel(WS_CHANNEL_KEY, approval_channel);
+    // Ends when the agent, and with it the approval channel, is dropped.
+    zeroclaw_spawn::spawn!(relay_approval_requests(
+        approval_event_rx,
+        frames,
+        pending_approvals
+    ));
 
     let ch = agent.channel_handles();
     let channel_names = zeroclaw_channels::orchestrator::register_channels_for_tools(
-        &config,
+        config,
         &ch.ask_user,
         &ch.channel_room,
         &Some(ch.reaction.clone()),
@@ -466,233 +626,204 @@ async fn handle_socket(
         );
     }
 
-    // Seeding happens before the connection's agent setup is complete. Forward
-    // its one-shot trim outcome only after channels are registered, so restore
-    // notifications cannot race setup or be emitted twice.
-    if let Some(zeroclaw_api::agent::TurnEvent::HistoryTrimmed {
-        dropped_messages,
-        kept_turns,
-        reason,
-    }) = restore_trim_event
-    {
-        let frame = history_trimmed_ws_frame(dropped_messages, kept_turns, &reason);
-        let _ = sender.send(Message::Text(frame.to_string().into())).await;
-    }
+    Ok(WsSession { agent, ws_memory })
+}
 
-    // Process the first message if it was not a connect frame
-    if let Some(ref text) = first_msg_fallback {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(text) {
-            if parsed["type"].as_str() == Some("message") {
-                let content = parsed["content"].as_str().unwrap_or("").to_string();
-                if !content.is_empty() {
-                    let _session_guard = match state.session_queue.acquire(&session_key).await {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            let err = serde_json::json!({
-                                "type": "error",
-                                "message": e.to_string(),
-                                "code": session_queue_ws_error_code(&e)
-                            });
-                            let _ = sender.send(Message::Text(err.to_string().into())).await;
-                            return;
-                        }
-                    };
-                    process_chat_message(
-                        &state,
-                        &mut agent,
-                        &mut sender,
-                        &mut receiver,
-                        &mut approval_event_rx,
-                        &pending_approvals,
-                        &ws_memory,
-                        &content,
-                        &session_key,
-                        &session_id,
-                        auth_subject.as_deref(),
-                    )
-                    .await;
-                }
-            } else {
-                let unknown_type = parsed["type"].as_str().unwrap_or("unknown");
-                let err = serde_json::json!({
-                    "type": "error",
-                    "message": format!(
-                        "Unsupported message type \"{unknown_type}\". Send {{\"type\":\"message\",\"content\":\"your text\"}}"
-                    )
-                });
-                let _ = sender.send(Message::Text(err.to_string().into())).await;
-            }
-        } else {
-            let err = serde_json::json!({
-                "type": "error",
-                "message": "Invalid JSON. Send {\"type\":\"message\",\"content\":\"your text\"}"
-            });
-            let _ = sender.send(Message::Text(err.to_string().into())).await;
+/// Publish the approval channel's prompts to every subscriber. With no
+/// socket attached nobody can answer, so the prompt resolves as unreachable
+/// at once instead of holding the turn until its timeout.
+async fn relay_approval_requests(
+    mut events: tokio::sync::mpsc::Receiver<zeroclaw_api::agent::TurnEvent>,
+    frames: FrameSink,
+    pending_approvals: PendingApprovals,
+) {
+    while let Some(event) = events.recv().await {
+        // Forward the runtime-produced summary without inspecting or
+        // reconstructing it from the raw argument object.
+        let zeroclaw_api::agent::TurnEvent::ApprovalRequest {
+            request_id,
+            tool_name,
+            arguments_summary,
+            timeout_secs,
+        } = event
+        else {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"kind": format!("{:?}", event)})),
+                "non-ApprovalRequest event leaked into approval channel"
+            );
+            continue;
+        };
+        if !frames.has_subscribers() {
+            pending_approvals.lock().remove(&request_id);
+            continue;
         }
+        frames.publish(&approval_request_ws_frame(
+            &request_id,
+            &tool_name,
+            &arguments_summary,
+            timeout_secs,
+        ));
     }
+}
 
-    // Subscribe to the shared broadcast channel so cron/heartbeat events
-    // are forwarded to this WebSocket client.
-    let mut broadcast_rx = state.event_tx.subscribe();
+fn approval_request_ws_frame(
+    request_id: &str,
+    tool_name: &str,
+    arguments_summary: &str,
+    timeout_secs: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "approval_request",
+        "request_id": request_id,
+        "tool": tool_name,
+        "arguments_summary": arguments_summary,
+        "timeout_secs": timeout_secs,
+    })
+}
 
-    loop {
-        tokio::select! {
-            // ── Client message ────────────────────────────────────────
-            client_msg = receiver.next() => {
-                let Some(msg) = client_msg else { break };
-                let msg = match msg {
-                    Ok(Message::Text(text)) => text,
-                    Ok(Message::Close(_)) | Err(_) => break,
-                    _ => continue,
-                };
-
-                // Parse incoming message
-                let parsed: serde_json::Value = match serde_json::from_str(&msg) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let err = serde_json::json!({
-                            "type": "error",
-                            "message": format!("Invalid JSON: {}", e),
-                            "code": "INVALID_JSON"
-                        });
-                        let _ = sender.send(Message::Text(err.to_string().into())).await;
-                        continue;
-                    }
-                };
-
-                let msg_type = parsed["type"].as_str().unwrap_or("");
-
-                // ── Voice duplex event dispatch (gated by feature flag + runtime config) ──
-                #[cfg(feature = "gateway-voice-duplex")]
-                {
-                    // Multi-instance shape: presence in the map = enabled.
-                    let duplex_enabled = !state.config.read().channels.voice_duplex.is_empty();
-                    if duplex_enabled {
-                        if let Some(voice_event) = crate::voice_duplex::try_parse_voice_event(&msg) {
-                            if let Some(error_frame) = crate::voice_duplex::handle_voice_event(voice_event) {
-                                let _ = sender.send(Message::Text(error_frame.to_string().into())).await;
-                            }
-                            continue;
-                        }
-                    }
+/// Act on one client text frame. Returns an error frame for this socket
+/// only; everything else reaches the client through the conversation.
+fn handle_client_text(
+    state: &AppState,
+    conversation: &Arc<Conversation<WsSession>>,
+    scope: &WsTurnScope,
+    text: &str,
+) -> Option<serde_json::Value> {
+    let error = |message: String, code: &str| {
+        Some(serde_json::json!({ "type": "error", "message": message, "code": code }))
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => return error(format!("Invalid JSON: {e}"), "INVALID_JSON"),
+    };
+    match parsed["type"].as_str().unwrap_or("") {
+        // ── approval_response (operator answered a tool prompt) ──
+        "approval_response" => {
+            let request_id = parsed["request_id"].as_str().unwrap_or("");
+            let decision = match parsed["decision"].as_str().unwrap_or("") {
+                "approve" => ChannelApprovalResponse::Approve,
+                "always" => ChannelApprovalResponse::AlwaysApprove,
+                "deny" => ChannelApprovalResponse::Deny,
+                _ => {
+                    return error(
+                        "approval_response requires request_id and decision in {approve,deny,always}".into(),
+                        "INVALID_APPROVAL_RESPONSE",
+                    );
                 }
-
-                // ── approval_response (operator answered a tool prompt) ──
-                if msg_type == "approval_response" {
-                    let request_id = parsed["request_id"].as_str().unwrap_or("");
-                    let decision_str = parsed["decision"].as_str().unwrap_or("");
-                    let decision = match decision_str {
-                        "approve" => Some(ChannelApprovalResponse::Approve),
-                        "always" => Some(ChannelApprovalResponse::AlwaysApprove),
-                        "deny" => Some(ChannelApprovalResponse::Deny),
-                        _ => None,
-                    };
-                    if request_id.is_empty() || decision.is_none() {
-                        let err = serde_json::json!({
-                            "type": "error",
-                            "message": "approval_response requires request_id and decision in {approve,deny,always}",
-                            "code": "INVALID_APPROVAL_RESPONSE"
-                        });
-                        let _ = sender.send(Message::Text(err.to_string().into())).await;
-                        continue;
-                    }
-                    if let Some(tx) = pending_approvals.lock().remove(request_id) {
-                        let _ = tx.send(decision.expect("checked above"));
-                    } else {
-                        ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"request_id": request_id})), "approval_response with no matching pending request");
-                    }
-                    continue;
+            };
+            if request_id.is_empty() {
+                return error(
+                    "approval_response requires request_id and decision in {approve,deny,always}"
+                        .into(),
+                    "INVALID_APPROVAL_RESPONSE",
+                );
+            }
+            // Any subscriber may answer; only the first answer counts.
+            if !conversation.resolve_approval(request_id, decision) {
+                ::zeroclaw_log::record!(
+                    DEBUG,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        .with_attrs(::serde_json::json!({"request_id": request_id})),
+                    "approval_response with no matching pending request"
+                );
+            }
+            None
+        }
+        // ── cancel (stop the running turn for every subscriber) ──
+        "cancel" => {
+            if conversation.cancel_current() {
+                None
+            } else {
+                error("No turn is running".into(), "NO_ACTIVE_TURN")
+            }
+        }
+        "message" => {
+            let content = parsed["content"].as_str().unwrap_or("").to_string();
+            if content.is_empty() {
+                return error("Message content cannot be empty".into(), "EMPTY_CONTENT");
+            }
+            match conversation.submit(content) {
+                Submitted::Start(claim) => {
+                    let turns = run_ws_turns(
+                        state.clone(),
+                        Arc::clone(conversation),
+                        scope.clone(),
+                        claim,
+                    );
+                    zeroclaw_spawn::spawn!(turns);
+                    None
                 }
+                Submitted::Steered => None,
+                Submitted::SteeringFull => error(
+                    "Steering queue is full for the running turn".into(),
+                    "STEERING_QUEUE_FULL",
+                ),
+                Submitted::SteeringClosed => error(
+                    "Running turn is no longer accepting steering messages".into(),
+                    "STEERING_CLOSED",
+                ),
+            }
+        }
+        other => error(
+            format!(
+                "Unsupported message type \"{other}\". Send {{\"type\":\"message\",\"content\":\"your text\"}}"
+            ),
+            "UNKNOWN_MESSAGE_TYPE",
+        ),
+    }
+}
 
-                if msg_type != "message" {
-                    let err = serde_json::json!({
-                        "type": "error",
-                        "message": format!(
-                            "Unsupported message type \"{msg_type}\". Send {{\"type\":\"message\",\"content\":\"your text\"}}"
-                        ),
-                        "code": "UNKNOWN_MESSAGE_TYPE"
-                    });
-                    let _ = sender.send(Message::Text(err.to_string().into())).await;
-                    continue;
-                }
-
-                let content = parsed["content"].as_str().unwrap_or("").to_string();
-                if content.is_empty() {
-                    let err = serde_json::json!({
-                        "type": "error",
-                        "message": "Message content cannot be empty",
-                        "code": "EMPTY_CONTENT"
-                    });
-                    let _ = sender.send(Message::Text(err.to_string().into())).await;
-                    continue;
-                }
-
-                // Acquire session lock to serialize concurrent turns
-                let _session_guard = match state.session_queue.acquire(&session_key).await {
-                    Ok(guard) => guard,
-                    Err(e) => {
-                        let err = serde_json::json!({
-                            "type": "error",
-                            "message": e.to_string(),
-                            "code": session_queue_ws_error_code(&e)
-                        });
-                        let _ = sender.send(Message::Text(err.to_string().into())).await;
-                        continue;
-                    }
-                };
-
+/// Run a claimed turn to completion, then any messages that arrived as
+/// steering too late for it to read, as one follow-up turn.
+async fn run_ws_turns(
+    state: AppState,
+    conversation: Arc<Conversation<WsSession>>,
+    scope: WsTurnScope,
+    claim: TurnClaim,
+) {
+    let mut next = Some(claim);
+    while let Some(TurnClaim {
+        input,
+        generation,
+        cancel,
+        mut steering,
+    }) = next.take()
+    {
+        let late = match state.session_queue.acquire(&scope.session_key).await {
+            Ok(_session_guard) => {
+                let mut session = conversation.agent.lock().await;
                 process_chat_message(
                     &state,
-                    &mut agent,
-                    &mut sender,
-                    &mut receiver,
-                    &mut approval_event_rx,
-                    &pending_approvals,
-                    &ws_memory,
-                    &content,
-                    &session_key,
-                    &session_id,
-                        auth_subject.as_deref(),
+                    &conversation,
+                    &mut session,
+                    &scope,
+                    &input,
+                    generation,
+                    cancel,
+                    &mut steering,
                 )
-                .await;
+                .await
             }
-
-            // ── Broadcast event (cron/heartbeat results) ──────────────
-            event = broadcast_rx.recv() => {
-                if let Ok(event) = event
-                    && event_matches_session(&event, &session_id)
-                    && !is_observability_telemetry(&event)
-                {
-                    let _ = sender.send(Message::Text(event.to_string().into())).await;
-                }
+            Err(e) => {
+                conversation.finish_turn(generation);
+                conversation.publish(&serde_json::json!({
+                    "type": "error",
+                    "message": e.to_string(),
+                    "code": session_queue_ws_error_code(&e)
+                }));
+                Vec::new()
             }
-
-            approval_event = approval_event_rx.recv() => {
-                let Some(event) = approval_event else { break };
-                // Forward the runtime-produced summary without inspecting or
-                // reconstructing it from the raw argument object.
-                let frame = match event {
-                    zeroclaw_api::agent::TurnEvent::ApprovalRequest {
-                        request_id,
-                        tool_name,
-                        arguments_summary,
-                        timeout_secs,
-                    } => serde_json::json!({
-                        "type": "approval_request",
-                        "request_id": request_id,
-                        "tool": tool_name,
-                        "arguments_summary": arguments_summary,
-                        "timeout_secs": timeout_secs,
-                    }),
-                    other => {
-                        ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"kind": format!("{:?}", other)})), "non-ApprovalRequest event leaked into approval channel");
-                        continue;
-                    }
-                };
-                let _ = sender.send(Message::Text(frame.to_string().into())).await;
-            }
+        };
+        if !late.is_empty()
+            && let Submitted::Start(claim) = conversation.submit(late.join("\n\n"))
+        {
+            next = Some(claim);
         }
     }
+    state.ws_conversations.release_if_unused(&conversation);
 }
 
 /// Record the owning agent and optional name for a session on connect, and
@@ -883,27 +1014,28 @@ fn ws_consolidation_model(
     Some((provider, model, temperature))
 }
 
-/// Process a single chat message through the agent and send the response.
-/// Uses [`Agent::turn_streamed`] so that intermediate text chunks, tool calls,
-/// and tool results are forwarded to the WebSocket client in real time.
+/// Run one chat turn through the conversation's agent and publish its
+/// frames to every subscriber. Uses [`Agent::turn_streamed`] so that
+/// intermediate text chunks, tool calls, and tool results reach the clients
+/// in real time. Returns steering messages that arrived after the agent
+/// stopped reading them; the caller runs those as the next turn.
 #[allow(clippy::too_many_arguments)]
 async fn process_chat_message(
     state: &AppState,
-    agent: &mut zeroclaw_runtime::agent::Agent,
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    receiver: &mut futures_util::stream::SplitStream<WebSocket>,
-    approval_event_rx: &mut tokio::sync::mpsc::Receiver<zeroclaw_api::agent::TurnEvent>,
-    pending_approvals: &PendingApprovals,
-    ws_memory: &Option<Arc<dyn zeroclaw_memory::Memory>>,
+    conversation: &Conversation<WsSession>,
+    session: &mut WsSession,
+    scope: &WsTurnScope,
     content: &str,
-    session_key: &str,
-    session_id: &str,
-    // Transport-authenticated approval subject (paired-token hash), threaded so a
-    // mid-turn SOP approval frame carries the same identity as the top-level path.
-    auth_subject: Option<&str>,
-) {
-    use futures_util::StreamExt as _;
+    generation: u64,
+    cancel_token: tokio_util::sync::CancellationToken,
+    steering_rx: &mut tokio::sync::mpsc::Receiver<String>,
+) -> Vec<String> {
     use zeroclaw_runtime::agent::TurnEvent;
+
+    let WsSession { agent, ws_memory } = session;
+    let session_key = scope.session_key.as_str();
+    let session_id = scope.session_id.as_str();
+    let auth_subject = scope.auth_subject.as_deref();
 
     let (turn_alias, turn_provider, turn_model) = agent.attribution_fields();
     let provider_label = turn_provider.clone();
@@ -945,10 +1077,9 @@ async fn process_chat_message(
     }
 
     // ── Cancellation token lifecycle ─────────────────────────────
-    // Create a token before the turn starts so the abort endpoint
-    // can cancel it. Remove it after the turn completes regardless
-    // of outcome (normal, error, or cancelled).
-    let cancel_token = tokio_util::sync::CancellationToken::new();
+    // Register the turn's token so the abort endpoint can cancel it.
+    // Remove it after the turn completes regardless of outcome
+    // (normal, error, or cancelled).
     {
         state
             .cancel_tokens
@@ -959,7 +1090,6 @@ async fn process_chat_message(
 
     // Channel for streaming turn events from the agent.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TurnEvent>(64);
-    let (steering_tx, mut steering_rx) = tokio::sync::mpsc::channel::<String>(32);
 
     let content_owned = content.to_string();
     let session_key_owned = session_key.to_string();
@@ -985,7 +1115,7 @@ async fn process_chat_message(
                             &content_owned,
                             event_tx,
                             Some(cancel_token.clone()),
-                            Some(&mut steering_rx),
+                            Some(&mut *steering_rx),
                         )
                         .instrument(span),
                 ),
@@ -1016,109 +1146,14 @@ async fn process_chat_message(
             tokio::select! {
                 biased;
                 _ = cancel_token.cancelled(), if !cancel_drained => {
-                    let drained: Vec<_> = pending_approvals.lock().drain().collect();
-                    drop(drained);
+                    conversation.drain_approvals();
                     cancel_drained = true;
                     // Fall through; the agent loop will now wake from the
                     // approval await, see the cancel token, and propagate
                     // a ToolLoopCancelled error which closes event_rx and
                     // breaks this loop on the `event_rx.recv()` arm below.
                 }
-                client_msg = receiver.next() => {
-                    let text = match client_msg {
-                        Some(Ok(Message::Text(text))) => text,
-                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
-                            cancel_token.cancel();
-                            // Nobody is left to answer: drop the pending
-                            // approval senders so the waiting turn resolves
-                            // as unreachable now instead of at its timeout
-                            // while it still holds the session lock.
-                            let drained: Vec<_> = pending_approvals.lock().drain().collect();
-                            drop(drained);
-                            break;
-                        }
-                        _ => continue,
-                    };
-                    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
-                        let err = serde_json::json!({
-                            "type": "error",
-                            "message": "Invalid JSON. Send {\"type\":\"message\",\"content\":\"your text\"}",
-                            "code": "INVALID_JSON"
-                        });
-                        let _ = sender.send(Message::Text(err.to_string().into())).await;
-                        continue;
-                    };
-                    match parsed["type"].as_str() {
-                        Some("approval_response") => {
-                            let request_id = parsed["request_id"].as_str().unwrap_or("");
-                            let decision = match parsed["decision"].as_str().unwrap_or("") {
-                                "approve" => Some(ChannelApprovalResponse::Approve),
-                                "always" => Some(ChannelApprovalResponse::AlwaysApprove),
-                                "deny" => Some(ChannelApprovalResponse::Deny),
-                                _ => None,
-                            };
-                            if request_id.is_empty() || decision.is_none() {
-                                continue;
-                            }
-                            if let Some(tx) = pending_approvals.lock().remove(request_id) {
-                                let _ = tx.send(decision.expect("checked above"));
-                            } else {
-                                ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"request_id": request_id})), "approval_response with no matching pending request (mid-turn)");
-                            }
-                        }
-                        Some("message") => {
-                            let content = parsed["content"].as_str().unwrap_or("").to_string();
-                            if content.is_empty() {
-                                let err = serde_json::json!({
-                                    "type": "error",
-                                    "message": "Message content cannot be empty",
-                                    "code": "EMPTY_CONTENT"
-                                });
-                                let _ = sender.send(Message::Text(err.to_string().into())).await;
-                                continue;
-                            }
-                            match steering_tx.try_send(content) {
-                                Ok(()) => {}
-                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                    let err = serde_json::json!({
-                                        "type": "error",
-                                        "message": "Steering queue is full for the running turn",
-                                        "code": "STEERING_QUEUE_FULL"
-                                    });
-                                    let _ = sender.send(Message::Text(err.to_string().into())).await;
-                                }
-                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                    let err = serde_json::json!({
-                                        "type": "error",
-                                        "message": "Running turn is no longer accepting steering messages",
-                                        "code": "STEERING_CLOSED"
-                                    });
-                                    let _ = sender.send(Message::Text(err.to_string().into())).await;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                approval = approval_event_rx.recv() => {
-                    let Some(event) = approval else { continue };
-                    if let TurnEvent::ApprovalRequest {
-                        request_id,
-                        tool_name,
-                        arguments_summary,
-                        timeout_secs,
-                    } = event {
-                        let frame = serde_json::json!({
-                            "type": "approval_request",
-                            "request_id": request_id,
-                            "tool": tool_name,
-                            "arguments_summary": arguments_summary,
-                            "timeout_secs": timeout_secs,
-                        });
-                        let _ = sender.send(Message::Text(frame.to_string().into())).await;
-                    }
-                }
-                    event_opt = event_rx.recv() => {
+                event_opt = event_rx.recv() => {
                     let Some(event) = event_opt else { break };
                     let ws_msg = match event {
                         TurnEvent::Usage {
@@ -1154,13 +1189,12 @@ async fn process_chat_message(
                             tool_name,
                             arguments_summary,
                             timeout_secs,
-                        } => serde_json::json!({
-                            "type": "approval_request",
-                            "request_id": request_id,
-                            "tool": tool_name,
-                            "arguments_summary": arguments_summary,
-                            "timeout_secs": timeout_secs,
-                        }),
+                        } => approval_request_ws_frame(
+                            &request_id,
+                            &tool_name,
+                            &arguments_summary,
+                            timeout_secs,
+                        ),
                         TurnEvent::HistoryTrimmed {
                             dropped_messages,
                             kept_turns,
@@ -1171,7 +1205,7 @@ async fn process_chat_message(
                             "entries": entries,
                         }),
                     };
-                    let _ = sender.send(Message::Text(ws_msg.to_string().into())).await;
+                    conversation.publish(&ws_msg);
                 }
             }
         }
@@ -1186,6 +1220,16 @@ async fn process_chat_message(
             .lock()
             .expect("cancel_tokens lock poisoned")
             .remove(session_key);
+    }
+
+    // The agent no longer reads steering. Free the turn slot first, so a
+    // message sent from here on starts a new turn instead of steering this
+    // one, then collect what was queued but never read.
+    conversation.finish_turn(generation);
+    steering_rx.close();
+    let mut late = Vec::new();
+    while let Ok(message) = steering_rx.try_recv() {
+        late.push(message);
     }
 
     // Check if this turn was cancelled. `turn_streamed` propagates
@@ -1247,8 +1291,7 @@ async fn process_chat_message(
         persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
 
         // Inform the client the turn was aborted
-        let aborted = serde_json::json!({ "type": "aborted" });
-        let _ = sender.send(Message::Text(aborted.to_string().into())).await;
+        conversation.publish(&serde_json::json!({ "type": "aborted" }));
 
         if let Some(ref backend) = state.session_backend
             && backend.session_exists(session_key)
@@ -1280,7 +1323,8 @@ async fn process_chat_message(
             "gateway_ws_turn"
         );
 
-        return;
+        // A cancel stops the conversation's work, queued steering included.
+        return Vec::new();
     }
 
     match result {
@@ -1375,7 +1419,7 @@ async fn process_chat_message(
                 "max_context_tokens": max_context_tokens,
                 "last_input_tokens": last_input_tokens,
             });
-            let _ = sender.send(Message::Text(done.to_string().into())).await;
+            conversation.publish(&done);
 
             // Set session state to idle
             if let Some(ref backend) = state.session_backend {
@@ -1449,7 +1493,7 @@ async fn process_chat_message(
                 "message": sanitized,
                 "code": error_code,
             });
-            let _ = sender.send(Message::Text(err.to_string().into())).await;
+            conversation.publish(&err);
 
             // Broadcast error event
             let _ = state.event_tx.send(serde_json::json!({
@@ -1477,6 +1521,7 @@ async fn process_chat_message(
             );
         }
     }
+    late
 }
 
 #[cfg(test)]
@@ -1628,7 +1673,7 @@ mod tests {
         // and WS_CHANNEL_KEY ever diverge, that lookup misses and the tools
         // silently fall back to an arbitrary seeded channel — the original bug.
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        let pending = new_pending_approvals();
+        let pending = crate::ws_approval::new_pending_approvals();
         let approval_channel = Arc::new(WsApprovalChannel::new(
             tx,
             pending,
@@ -2052,60 +2097,254 @@ mod tests {
         );
     }
 
-    // The mid-turn `client_msg` arm in `forward_fut`
-    // must (a) classify stream-end / close / error frames as "client gone"
-    // and (b) cancel the turn token so `tokio::join!(turn_fut, forward_fut)`
-    // can return — a bare `continue` hot-loops the select forever.
-    #[derive(Debug, PartialEq, Eq)]
-    enum DisconnectAction {
-        Break,
-        Continue,
-        ProcessText,
+    /// Answers every call with `reply N`, recording how many messages the
+    /// request carried. Holds each call until `gate` has a permit.
+    struct ScriptedProvider {
+        gate: Arc<tokio::sync::Semaphore>,
+        seen: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
     }
 
-    fn classify_client_msg(
-        msg: Option<Result<axum::extract::ws::Message, &'static str>>,
-    ) -> DisconnectAction {
-        use axum::extract::ws::Message;
-        match msg {
-            Some(Ok(Message::Text(_))) => DisconnectAction::ProcessText,
-            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => DisconnectAction::Break,
-            _ => DisconnectAction::Continue,
+    #[async_trait::async_trait]
+    impl zeroclaw_api::model_provider::ModelProvider for ScriptedProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            Ok("ok".into())
+        }
+
+        async fn chat(
+            &self,
+            request: zeroclaw_providers::ChatRequest<'_>,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<zeroclaw_providers::ChatResponse> {
+            self.gate.acquire().await?.forget();
+            let mut seen = self.seen.lock();
+            seen.push(
+                request
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == "user")
+                    .map(|m| m.content.clone())
+                    .collect(),
+            );
+            Ok(zeroclaw_providers::ChatResponse {
+                text: Some(format!("reply {}", seen.len())),
+                tool_calls: vec![],
+                usage: None,
+                reasoning_content: None,
+            })
         }
     }
 
-    #[test]
-    fn mid_turn_client_msg_breaks_on_stream_end_close_or_err() {
-        use axum::extract::ws::Message;
-        assert_eq!(classify_client_msg(None), DisconnectAction::Break);
-        assert_eq!(
-            classify_client_msg(Some(Ok(Message::Close(None)))),
-            DisconnectAction::Break,
-        );
-        assert_eq!(
-            classify_client_msg(Some(Err("io"))),
-            DisconnectAction::Break,
-        );
-        assert_eq!(
-            classify_client_msg(Some(Ok(Message::Ping(Default::default())))),
-            DisconnectAction::Continue,
-        );
-        assert_eq!(
-            classify_client_msg(Some(Ok(Message::Text("{}".into())))),
-            DisconnectAction::ProcessText,
-        );
+    impl ::zeroclaw_api::attribution::Attributable for ScriptedProvider {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Provider(
+                ::zeroclaw_api::attribution::ProviderKind::Model(
+                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+                ),
+            )
+        }
+        fn alias(&self) -> &str {
+            "scripted"
+        }
     }
 
-    #[test]
-    fn mid_turn_disconnect_cancel_unblocks_joined_turn() {
-        let token = tokio_util::sync::CancellationToken::new();
-        let clone_for_turn = token.clone();
-        assert!(!clone_for_turn.is_cancelled());
-        token.cancel();
+    struct SharedChat {
+        state: AppState,
+        scope: WsTurnScope,
+        gate: Arc<tokio::sync::Semaphore>,
+        seen: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
+        _tmp: tempfile::TempDir,
+    }
+
+    impl SharedChat {
+        fn new() -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let state = crate::tests::admin_paircode_state(&tmp, false, false);
+            Self {
+                state,
+                scope: WsTurnScope {
+                    session_key: "gw_shared".into(),
+                    session_id: "shared".into(),
+                    auth_subject: None,
+                },
+                gate: Arc::new(tokio::sync::Semaphore::new(0)),
+                seen: Arc::default(),
+                _tmp: tmp,
+            }
+        }
+
+        async fn attach(&self) -> crate::ws_conversation::Subscription<WsSession> {
+            let provider = ScriptedProvider {
+                gate: Arc::clone(&self.gate),
+                seen: Arc::clone(&self.seen),
+            };
+            let workspace = self._tmp.path().to_path_buf();
+            let (subscription, _) = self
+                .state
+                .ws_conversations
+                .attach(&self.scope.session_key, |_seed| async move {
+                    let memory_cfg = zeroclaw_config::schema::MemoryConfig {
+                        backend: "none".into(),
+                        ..Default::default()
+                    };
+                    let mem: Arc<dyn zeroclaw_memory::Memory> = Arc::from(
+                        zeroclaw_memory::create_memory(&memory_cfg, &workspace, None).unwrap(),
+                    );
+                    let agent = zeroclaw_runtime::agent::Agent::builder()
+                        .model_provider(Box::new(provider))
+                        .tools(vec![])
+                        .memory(mem)
+                        .observer(Arc::new(zeroclaw_runtime::observability::NoopObserver))
+                        .tool_dispatcher(Box::new(
+                            zeroclaw_runtime::agent::dispatcher::NativeToolDispatcher,
+                        ))
+                        .workspace_dir(workspace)
+                        .model_name("test-model".into())
+                        .model_provider_name("scripted".into())
+                        .agent_alias("web".into())
+                        .build()?;
+                    Ok::<_, anyhow::Error>(WsSession {
+                        agent,
+                        ws_memory: None,
+                    })
+                })
+                .await
+                .unwrap();
+            subscription
+        }
+
+        fn send(
+            &self,
+            from: &crate::ws_conversation::Subscription<WsSession>,
+            frame: serde_json::Value,
+        ) -> Option<serde_json::Value> {
+            handle_client_text(
+                &self.state,
+                &from.conversation,
+                &self.scope,
+                &frame.to_string(),
+            )
+        }
+    }
+
+    /// Frames up to and including the first terminal one.
+    async fn frames_until_end(
+        sub: &mut crate::ws_conversation::Subscription<WsSession>,
+    ) -> Vec<serde_json::Value> {
+        let mut frames = Vec::new();
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(10), sub.frames.recv())
+                .await
+                .expect("turn must settle")
+                .expect("frame");
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            let end = matches!(frame["type"].as_str(), Some("done" | "aborted" | "error"));
+            frames.push(frame);
+            if end {
+                return frames;
+            }
+        }
+    }
+
+    fn message(content: &str) -> serde_json::Value {
+        serde_json::json!({ "type": "message", "content": content })
+    }
+
+    #[tokio::test]
+    async fn sockets_on_one_session_share_its_turns_and_history() {
+        let chat = SharedChat::new();
+        let mut a = chat.attach().await;
+        let mut b = chat.attach().await;
+        chat.gate.add_permits(2);
+
+        assert!(chat.send(&a, message("first")).is_none());
+        for sub in [&mut a, &mut b] {
+            let done = frames_until_end(sub).await.pop().unwrap();
+            assert_eq!(done["type"], "done");
+            assert_eq!(done["full_response"], "reply 1");
+        }
+
+        // The other socket continues the same history instead of a fork.
+        assert!(chat.send(&b, message("second")).is_none());
+        for sub in [&mut a, &mut b] {
+            let done = frames_until_end(sub).await.pop().unwrap();
+            assert_eq!(done["full_response"], "reply 2");
+        }
+        let history = chat.seen.lock()[1].clone();
+        assert_eq!(history.len(), 2, "{history:?}");
+        assert!(history[0].ends_with("first") && history[1].ends_with("second"));
+    }
+
+    #[tokio::test]
+    async fn closing_a_socket_does_not_cancel_the_turn() {
+        let chat = SharedChat::new();
+        let a = chat.attach().await;
+        let mut b = chat.attach().await;
+
+        assert!(chat.send(&a, message("keep going")).is_none());
+        drop(a);
+        chat.gate.add_permits(1);
+
+        let done = frames_until_end(&mut b).await.pop().unwrap();
+        assert_eq!(done["type"], "done");
+        assert_eq!(done["full_response"], "reply 1");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_frame_aborts_the_turn_for_every_socket() {
+        let chat = SharedChat::new();
+        let mut a = chat.attach().await;
+        let mut b = chat.attach().await;
+
+        assert!(chat.send(&a, message("long job")).is_none());
+        while !a.conversation.is_running() {
+            tokio::task::yield_now().await;
+        }
         assert!(
-            clone_for_turn.is_cancelled(),
-            "cloned token (held by turn_fut via agent.turn_streamed) must observe cancellation"
+            chat.send(&b, serde_json::json!({ "type": "cancel" }))
+                .is_none()
         );
+        chat.gate.add_permits(1);
+
+        for sub in [&mut a, &mut b] {
+            let end = frames_until_end(sub).await.pop().unwrap();
+            assert_eq!(end["type"], "aborted");
+        }
+        let reply = chat
+            .send(&a, serde_json::json!({ "type": "cancel" }))
+            .unwrap();
+        assert_eq!(reply["code"], "NO_ACTIVE_TURN");
+    }
+
+    #[tokio::test]
+    async fn invalid_client_frames_are_answered_on_that_socket_only() {
+        let chat = SharedChat::new();
+        let a = chat.attach().await;
+        for (frame, code) in [
+            (
+                serde_json::json!({ "type": "message", "content": "" }),
+                "EMPTY_CONTENT",
+            ),
+            (
+                serde_json::json!({ "type": "nope" }),
+                "UNKNOWN_MESSAGE_TYPE",
+            ),
+            (
+                serde_json::json!({ "type": "approval_response", "request_id": "r" }),
+                "INVALID_APPROVAL_RESPONSE",
+            ),
+        ] {
+            assert_eq!(chat.send(&a, frame).unwrap()["code"], code);
+        }
+        let reply = handle_client_text(&chat.state, &a.conversation, &chat.scope, "{");
+        assert_eq!(reply.unwrap()["code"], "INVALID_JSON");
+        assert!(!a.conversation.is_running());
     }
 
     #[test]

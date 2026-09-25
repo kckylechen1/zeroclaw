@@ -36,6 +36,30 @@ Local-bound by default. Over-the-network access requires TLS termination at
 the gateway or in front of it; the per-property and PATCH endpoints are not
 safe to expose unauthenticated regardless of TLS posture.
 
+## WebSocket chat sessions
+
+`GET /ws/chat?agent=<alias>&session_id=<id>` opens a chat socket. All sockets
+that open the same session with the same agent share one conversation: one
+agent, one history, one running turn.
+
+- A turn's frames (`chunk`, `thinking`, `tool_call`, `tool_result`, `plan`,
+  `approval_request`, `done`, `aborted`, `error`) go to every socket on the
+  session, not only the one that sent the message.
+- A `message` sent while a turn runs steers that turn. If the turn has
+  stopped reading steering by the time it arrives, it runs as the next turn.
+- Any socket may answer an `approval_request`; the first answer counts.
+- Closing a socket does not stop the turn. It keeps running and its result
+  is saved to the session. When no socket is left, a tool approval it asks
+  for is denied at once, because nobody can answer it.
+- To stop a turn, send `{"type":"cancel"}` or call
+  `POST /api/sessions/{id}/abort`. Every socket then gets `aborted`. A
+  `cancel` with no running turn is answered with the `NO_ACTIVE_TURN` error.
+- The history and working directory are set up by the first socket to open
+  the session. Later sockets join as they are; their `connect` frame's `cwd`
+  is ignored while the conversation is live.
+- A socket that falls far behind skips frames; the `done` frame still
+  carries the full response.
+
 ## Discovering the surface
 
 Two endpoints answer the question "what can I do here?":
