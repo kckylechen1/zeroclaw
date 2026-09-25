@@ -70,25 +70,9 @@ hermes = "supported"
 openclaw = "supported"
 hermes = "supported"
 
-[channels.linq]
-openclaw = "none"
-hermes = "none"
-
-[channels.wati]
-openclaw = "none"
-hermes = "none"
-
-[channels.nextcloud]
-openclaw = "supported"
-hermes = "none"
-
 [channels.email]
 openclaw = "none"
 hermes = "supported"
-
-[channels.gmail-push]
-openclaw = "none"
-hermes = "none"
 
 [channels.twitch]
 openclaw = "supported"

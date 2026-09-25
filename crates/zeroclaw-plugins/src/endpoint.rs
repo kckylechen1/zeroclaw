@@ -92,11 +92,11 @@ mod tests {
     #[test]
     fn endpoint_uses_the_scope_binding_as_its_only_alias() {
         let scope = crate::instance::test_scope(PluginCapability::Channel, "operations", []);
-        let endpoint = PluginChannelEndpoint::new(scope.clone(), "nextcloud_talk")
+        let endpoint = PluginChannelEndpoint::new(scope.clone(), "voice_call")
             .expect("valid channel endpoint");
         let clone = endpoint.clone();
 
-        assert_eq!(endpoint.channel_type(), "nextcloud_talk");
+        assert_eq!(endpoint.channel_type(), "voice_call");
         assert_eq!(endpoint.alias(), "operations");
         assert!(std::ptr::eq(endpoint.instance_id(), scope.id()));
         assert!(std::ptr::eq(endpoint.channel_type(), clone.channel_type()));
@@ -113,14 +113,14 @@ mod tests {
             "bad type",
             "bad\nkey",
             "-bad",
-            "nextcloud-talk",
+            "voice-call",
             "1channel",
         ] {
             let scope = crate::instance::test_scope(PluginCapability::Channel, "main", []);
             assert!(PluginChannelEndpoint::new(scope, channel_type).is_err());
         }
 
-        for channel_type in ["telegram", "gmail_push", "nextcloud_talk"] {
+        for channel_type in ["telegram", "wecom_ws", "voice_call"] {
             let scope = crate::instance::test_scope(PluginCapability::Channel, "main", []);
             assert!(PluginChannelEndpoint::new(scope, channel_type).is_ok());
         }

@@ -64,28 +64,8 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
         compiled: cfg!(feature = "whatsapp-web"),
     },
     ChannelCompileSpec {
-        schema_name: Some("Linq"),
-        type_keys: &["linq"],
-        compiled: cfg!(feature = "channel-linq"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("WATI"),
-        type_keys: &["wati"],
-        compiled: cfg!(feature = "channel-wati"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("NextCloud Talk"),
-        type_keys: &["nextcloud", "nextcloud-talk", "nextcloud_talk"],
-        compiled: cfg!(feature = "channel-nextcloud"),
-    },
-    ChannelCompileSpec {
         schema_name: Some("Email"),
         type_keys: &["email"],
-        compiled: cfg!(feature = "channel-email"),
-    },
-    ChannelCompileSpec {
-        schema_name: Some("Gmail Push"),
-        type_keys: &["gmail-push", "gmail_push"],
         compiled: cfg!(feature = "channel-email"),
     },
     ChannelCompileSpec {
@@ -282,14 +262,11 @@ mod tests {
         assert!(is_channel_type_compiled("webhook"));
         assert!(is_channel_type_compiled("acp-server"));
         assert!(is_channel_type_compiled("discord"));
-        assert_eq!(
-            is_channel_type_compiled("nextcloud-talk"),
-            cfg!(feature = "channel-nextcloud")
-        );
-        assert_eq!(
-            is_channel_type_compiled("linq"),
-            cfg!(feature = "channel-linq")
-        );
+        // Retired channel types (inbound webhook routes removed) resolve
+        // as unknown, never as compiled.
+        for retired in ["linq", "wati", "nextcloud_talk", "gmail_push"] {
+            assert!(!is_channel_type_compiled(retired), "{retired}");
+        }
     }
 
     #[test]

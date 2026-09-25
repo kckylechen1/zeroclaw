@@ -91,8 +91,6 @@ pub use crate::discord::DiscordChannel;
 pub use crate::email_channel::EmailChannel;
 #[cfg(feature = "channel-git")]
 pub use crate::git::GitChannel;
-#[cfg(feature = "channel-email")]
-pub use crate::gmail_push::GmailPushChannel;
 #[cfg(feature = "channel-imessage")]
 pub use crate::imessage::IMessageChannel;
 #[cfg(feature = "channel-irc")]
@@ -101,14 +99,10 @@ pub use crate::irc::IrcChannel;
 pub use crate::lark::LarkChannel;
 #[cfg(feature = "channel-line")]
 pub use crate::line::LineChannel;
-#[cfg(feature = "channel-linq")]
-pub use crate::linq::LinqChannel;
 #[cfg(feature = "channel-mattermost")]
 pub use crate::mattermost::MattermostChannel;
 #[cfg(feature = "channel-mochat")]
 pub use crate::mochat::MochatChannel;
-#[cfg(feature = "channel-nextcloud")]
-pub use crate::nextcloud_talk::NextcloudTalkChannel;
 #[cfg(feature = "channel-nostr")]
 pub use crate::nostr::NostrChannel;
 #[cfg(feature = "channel-notion")]
@@ -131,8 +125,6 @@ pub use crate::twitter::TwitterChannel;
 pub use crate::voice_call::VoiceCallChannel;
 #[cfg(feature = "voice-wake")]
 pub use crate::voice_wake::VoiceWakeChannel;
-#[cfg(feature = "channel-wati")]
-pub use crate::wati::WatiChannel;
 #[cfg(feature = "channel-webhook")]
 pub use crate::webhook::WebhookChannel;
 #[cfg(feature = "channel-wechat")]

@@ -480,26 +480,6 @@ fn detects_qq_as_supervised_channel() {
 }
 
 #[test]
-fn detects_nextcloud_talk_as_supervised_channel() {
-    let mut config = Config::default();
-    config.channels.nextcloud_talk.insert(
-        "default".to_string(),
-        zeroclaw_config::schema::NextcloudTalkConfig {
-            enabled: true,
-            base_url: "https://cloud.example.com".into(),
-            app_token: "app-token".into(),
-            webhook_secret: None,
-            proxy_url: None,
-            bot_name: None,
-            excluded_tools: vec![],
-            stream_mode: zeroclaw_config::schema::StreamMode::default(),
-            draft_update_interval_ms: 1000,
-        },
-    );
-    assert!(has_supervised_channels(&config));
-}
-
-#[test]
 fn webhook_only_config_is_supervised() {
     let mut config = Config::default();
     config.channels.webhook.insert(

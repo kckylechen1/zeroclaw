@@ -35,12 +35,10 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "channel.lark",
     "channel.matrix",
     "channel.mattermost",
-    "channel.nextcloud_talk",
     "channel.qq",
     "channel.signal",
     "channel.slack",
     "channel.telegram",
-    "channel.wati",
     "channel.wechat",
     "channel.whatsapp",
     "tool.browser",
@@ -52,6 +50,11 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "tunnel.custom",
     "transcription.groq",
 ];
+
+/// Service keys of retired channels (inbound webhook routes removed). Still
+/// accepted by `ProxyConfig::validate` so a leftover `proxy.services` entry
+/// does not fail config load, but no longer advertised: nothing consumes them.
+const RETIRED_PROXY_SERVICE_KEYS: &[&str] = &["channel.nextcloud_talk", "channel.wati"];
 
 const SUPPORTED_PROXY_SERVICE_SELECTORS: &[&str] = &[
     "model_provider.*",
@@ -3629,7 +3632,7 @@ impl Default for AliasedAgentConfig {
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ChannelAliasInfo {
     /// Channel type as the schema emits it (kebab; e.g. `"discord"`,
-    /// `"nextcloud-talk"`).
+    /// `"wecom-ws"`).
     pub channel_type: String,
     /// Per-alias HashMap key (e.g. `"loneliness"`).
     pub alias: String,
@@ -9118,6 +9121,7 @@ fn normalize_comma_values(values: Vec<String>) -> Vec<String> {
 fn is_supported_proxy_service_selector(selector: &str) -> bool {
     if SUPPORTED_PROXY_SERVICE_KEYS
         .iter()
+        .chain(RETIRED_PROXY_SERVICE_KEYS)
         .any(|known| known.eq_ignore_ascii_case(selector))
     {
         return true;
@@ -12636,26 +12640,10 @@ pub struct ChannelsConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub whatsapp: HashMap<String, WhatsAppConfig>,
-    /// Linq Partner API channel instances (`[channels.linq.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub linq: HashMap<String, LinqConfig>,
-    /// WATI WhatsApp Business API channel instances (`[channels.wati.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub wati: HashMap<String, WatiConfig>,
-    /// Nextcloud Talk bot channel instances (`[channels.nextcloud_talk.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub nextcloud_talk: HashMap<String, NextcloudTalkConfig>,
     /// Email channel instances (`[channels.email.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub email: HashMap<String, crate::scattered_types::EmailConfig>,
-    /// Gmail Pub/Sub push notification channel instances (`[channels.gmail_push.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub gmail_push: HashMap<String, crate::scattered_types::GmailPushConfig>,
     /// IRC channel instances (`[channels.irc.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -12899,34 +12887,10 @@ impl ChannelsConfig {
                 configured: self.whatsapp.values().any(|c| c.is_web_config()),
             },
             ChannelInfo {
-                kind: "linq",
-                name: "Linq",
-                desc: "iMessage/RCS/SMS via Linq API",
-                configured: !self.linq.is_empty(),
-            },
-            ChannelInfo {
-                kind: "wati",
-                name: "WATI",
-                desc: "WhatsApp via WATI Business API",
-                configured: !self.wati.is_empty(),
-            },
-            ChannelInfo {
-                kind: "nextcloud",
-                name: "NextCloud Talk",
-                desc: "NextCloud Talk platform",
-                configured: !self.nextcloud_talk.is_empty(),
-            },
-            ChannelInfo {
                 kind: "email",
                 name: "Email",
                 desc: "Email over IMAP/SMTP",
                 configured: !self.email.is_empty(),
-            },
-            ChannelInfo {
-                kind: "gmail-push",
-                name: "Gmail Push",
-                desc: "Gmail Pub/Sub push notifications",
-                configured: !self.gmail_push.is_empty(),
             },
             ChannelInfo {
                 kind: "twitch",
@@ -13066,11 +13030,7 @@ impl ChannelsConfig {
             || self.matrix.values().any(|c| c.enabled)
             || self.signal.values().any(|c| c.enabled)
             || self.whatsapp.values().any(|c| c.enabled)
-            || self.linq.values().any(|c| c.enabled)
-            || self.wati.values().any(|c| c.enabled)
-            || self.nextcloud_talk.values().any(|c| c.enabled)
             || self.email.values().any(|c| c.enabled)
-            || self.gmail_push.values().any(|c| c.enabled)
             || self.irc.values().any(|c| c.enabled)
             || self.twitch.values().any(|c| c.enabled)
             || self.lark.values().any(|c| c.enabled)
@@ -13100,7 +13060,7 @@ impl ChannelsConfig {
     /// fan-in consumer; voice_wake and voice_duplex are input-only), so a name-addressed
     /// outbound surface such as `heartbeat.target` can refuse them at validation
     /// instead of accepting a target the delivery layer silently drops.
-    pub fn channel_presence(&self) -> [(&'static str, bool, bool); 34] {
+    pub fn channel_presence(&self) -> [(&'static str, bool, bool); 30] {
         [
             ("telegram", !self.telegram.is_empty(), true),
             ("discord", !self.discord.is_empty(), true),
@@ -13111,11 +13071,7 @@ impl ChannelsConfig {
             ("matrix", !self.matrix.is_empty(), true),
             ("signal", !self.signal.is_empty(), true),
             ("whatsapp", !self.whatsapp.is_empty(), true),
-            ("linq", !self.linq.is_empty(), true),
-            ("wati", !self.wati.is_empty(), true),
-            ("nextcloud_talk", !self.nextcloud_talk.is_empty(), true),
             ("email", !self.email.is_empty(), true),
-            ("gmail_push", !self.gmail_push.is_empty(), true),
             ("irc", !self.irc.is_empty(), true),
             ("twitch", !self.twitch.is_empty(), true),
             ("lark", !self.lark.is_empty(), true),
@@ -13195,11 +13151,7 @@ impl Default for ChannelsConfig {
             matrix: HashMap::new(),
             signal: HashMap::new(),
             whatsapp: HashMap::new(),
-            linq: HashMap::new(),
-            wati: HashMap::new(),
-            nextcloud_talk: HashMap::new(),
             email: HashMap::new(),
-            gmail_push: HashMap::new(),
             irc: HashMap::new(),
             twitch: HashMap::new(),
             lark: HashMap::new(),
@@ -14439,167 +14391,6 @@ impl_reply_pacing!(
     SignalConfig,
     WhatsAppConfig,
 );
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.linq"]
-pub struct LinqConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Linq Partner API token (Bearer auth)
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub api_token: String,
-    /// Phone number to send from (E.164 format)
-    #[tab(Advanced)]
-    pub from_phone: String,
-    /// Webhook signing secret for signature verification
-    #[serde(default)]
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub signing_secret: Option<String>,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl ChannelConfig for LinqConfig {
-    fn name() -> &'static str {
-        "Linq"
-    }
-    fn desc() -> &'static str {
-        "iMessage/RCS/SMS via Linq API"
-    }
-}
-
-/// WATI WhatsApp Business API channel configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.wati"]
-pub struct WatiConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// WATI API token (Bearer auth).
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub api_token: String,
-    /// WATI API base URL (default: <https://live-mt-server.wati.io>).
-    #[tab(Advanced)]
-    #[serde(default = "default_wati_api_url")]
-    pub api_url: String,
-    /// Tenant ID for multi-channel setups (optional).
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub tenant_id: Option<String>,
-    /// Per-channel proxy URL (http, https, socks5, socks5h).
-    /// Overrides the global `[proxy]` setting for this channel only.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub proxy_url: Option<String>,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-fn default_wati_api_url() -> String {
-    "https://live-mt-server.wati.io".to_string()
-}
-
-impl ChannelConfig for WatiConfig {
-    fn name() -> &'static str {
-        "WATI"
-    }
-    fn desc() -> &'static str {
-        "WhatsApp via WATI Business API"
-    }
-}
-
-/// Nextcloud Talk bot configuration (webhook receive + OCS send API).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.nextcloud_talk"]
-pub struct NextcloudTalkConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub enabled: bool,
-    /// Nextcloud base URL (e.g. `"https://cloud.example.com"`).
-    #[tab(Connection)]
-    pub base_url: String,
-    /// Bot app token used for OCS API bearer auth.
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub app_token: String,
-    /// Shared secret for webhook signature verification.
-    ///
-    /// Can also be set via `ZEROCLAW_NEXTCLOUD_TALK_WEBHOOK_SECRET`.
-    #[serde(default)]
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub webhook_secret: Option<String>,
-    /// Per-channel proxy URL (http, https, socks5, socks5h).
-    /// Overrides the global `[proxy]` setting for this channel only.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub proxy_url: Option<String>,
-    /// Display name of the bot in Nextcloud Talk (e.g. "zeroclaw").
-    /// Used to filter out the bot's own messages and prevent feedback loops.
-    /// If not set, defaults to an empty string (no self-message filtering by name).
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub bot_name: Option<String>,
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-    /// Controls whether and how streaming draft updates are delivered.
-    ///
-    /// - `"off"` (default): responses are sent as a single final message.
-    /// - `"partial"`: a placeholder is posted first and edited incrementally
-    ///   as tokens arrive, making long responses visible in real time.
-    #[tab(Behavior)]
-    #[serde(default)]
-    pub stream_mode: StreamMode,
-    /// Minimum interval in milliseconds between consecutive OCS edit calls per
-    /// room when `stream_mode = "partial"`. Default: 1000 ms.
-    #[tab(Behavior)]
-    #[serde(default = "default_draft_update_interval_ms")]
-    pub draft_update_interval_ms: u64,
-}
-
-impl ChannelConfig for NextcloudTalkConfig {
-    fn name() -> &'static str {
-        "NextCloud Talk"
-    }
-    fn desc() -> &'static str {
-        "NextCloud Talk platform"
-    }
-}
 
 impl WhatsAppConfig {
     /// Detect which backend to use based on config fields.
@@ -20481,11 +20272,15 @@ impl Config {
             for (i, ch) in agent.channels.iter().enumerate() {
                 let trimmed = ch.trim();
                 match trimmed.split_once('.') {
+                    // Retired channel type: the section tombstone reports it;
+                    // the leftover binding has nothing to resolve and must not
+                    // fail config load.
+                    Some((ty, _)) if crate::validation_warnings::is_retired_channel_type(ty) => {}
                     Some((ty, inner)) if !ty.is_empty() && !inner.is_empty() => {
                         // `get_map_keys` stores section names using the raw
                         // field ident (snake), the same dotted form the
-                        // operator sees in TOML (`gmail_push`, `voice_call`,
-                        // `nextcloud_talk`). Look up verbatim.
+                        // operator sees in TOML (`voice_call`, `wecom_ws`).
+                        // Look up verbatim.
                         let exists = self
                             .get_map_keys(&format!("channels.{ty}"))
                             .is_some_and(|keys| keys.iter().any(|k| k == inner));
@@ -20729,6 +20524,11 @@ impl Config {
                 Some((ty, al)) => (ty, Some(al)),
                 None => (group_channel, None),
             };
+            // Retired channel type: the section tombstone reports it; a
+            // leftover group on it has nothing to resolve against.
+            if crate::validation_warnings::is_retired_channel_type(group_channel_type) {
+                continue;
+            }
             let channel_aliases = self.get_map_keys(&format!("channels.{group_channel_type}"));
             if channel_aliases.is_none() {
                 validation_bail!(

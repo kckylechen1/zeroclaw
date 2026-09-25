@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn by_email_domain_class() {
-        // Mirrors email_channel / gmail_push: "@host" / bare "host" match the
+        // Mirrors email_channel: "@host" / bare "host" match the
         // whole domain; "user@host" is a full case-insensitive address.
         let matcher = |allowed: &str, email: &str| -> bool {
             let email_lower = email.to_lowercase();

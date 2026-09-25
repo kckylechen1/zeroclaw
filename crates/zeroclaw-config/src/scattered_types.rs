@@ -549,60 +549,6 @@ impl Default for EmailConfig {
     }
 }
 
-fn default_label_filter() -> Vec<String> {
-    vec!["INBOX".into()]
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, zeroclaw_macros::Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "channels.gmail"]
-pub struct GmailPushConfig {
-    /// Whether this channel is active. The runtime only loads channels whose
-    /// `enabled = true`. Default: `false` so an operator who pastes a partial
-    /// `[channels.<type>.<alias>]` block doesn't accidentally bring a channel
-    /// live before the rest of its config is filled in.
-    #[serde(default)]
-    pub enabled: bool,
-    pub topic: String,
-    #[serde(default = "default_label_filter")]
-    pub label_filter: Vec<String>,
-    #[serde(default)]
-    #[secret]
-    pub oauth_token: String,
-    #[serde(default)]
-    pub webhook_url: String,
-    #[serde(default)]
-    pub webhook_secret: String,
-
-    /// Tools excluded from this channel's tool spec. When set, these tools
-    /// are not exposed to the model when responding via this channel.
-    #[serde(default)]
-    pub excluded_tools: Vec<String>,
-}
-
-impl ChannelConfig for GmailPushConfig {
-    fn name() -> &'static str {
-        "Gmail Push"
-    }
-    fn desc() -> &'static str {
-        "Gmail Pub/Sub push notifications"
-    }
-}
-
-impl Default for GmailPushConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            topic: String::new(),
-            label_filter: default_label_filter(),
-            oauth_token: String::new(),
-            webhook_url: String::new(),
-            webhook_secret: String::new(),
-            excluded_tools: Vec::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, zeroclaw_macros::Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "channels.clawdtalk"]

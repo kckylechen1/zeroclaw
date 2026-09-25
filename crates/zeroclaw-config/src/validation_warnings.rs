@@ -33,6 +33,11 @@ use serde::{Deserialize, Serialize};
 ///   this warning (see `RETIRED_CONFIG_SURFACES` below, consumed by the
 ///   env-override tombstone and `retired_section_tombstones`). The
 ///   compatibility shims will be removed in a later announced window.
+/// - `inbound_webhook_channel_removed`: a `[channels.linq]`, `[channels.wati]`,
+///   `[channels.nextcloud_talk]` or `[channels.gmail_push]` section is still
+///   present. These channels received messages only through gateway webhook
+///   routes that were removed, so the channel types were deleted; the section
+///   is ignored (see `RETIRED_CONFIG_SURFACES`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ValidationWarning {
@@ -84,7 +89,24 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("opencode_cli", "raw_launcher_config_removed"),
     ("browser_delegate", "raw_launcher_config_removed"),
     ("subagents", "subagents_config_removed"),
+    ("channels.linq", "inbound_webhook_channel_removed"),
+    ("channels.wati", "inbound_webhook_channel_removed"),
+    ("channels.nextcloud_talk", "inbound_webhook_channel_removed"),
+    ("channels.gmail_push", "inbound_webhook_channel_removed"),
 ];
+
+/// True when `channel_type` names a channel whose `[channels.<type>]`
+/// section is registered in [`RETIRED_CONFIG_SURFACES`]. Load-time
+/// validation uses this to tolerate leftover `agents.<a>.channels` entries
+/// and `peer_groups.<g>.channel` references to a retired channel type: the
+/// section tombstone already reports the retirement, and the reference has
+/// nothing left to resolve against, so it must not fail config load.
+#[must_use]
+pub fn is_retired_channel_type(channel_type: &str) -> bool {
+    RETIRED_CONFIG_SURFACES
+        .iter()
+        .any(|(path, _)| path.strip_prefix("channels.") == Some(channel_type))
+}
 
 /// Retired config FIELDS: dotted path (one `*` wildcard segment allowed for
 /// map-keyed aliases, e.g. `[agents.<alias>]`) + stable warning code. Same

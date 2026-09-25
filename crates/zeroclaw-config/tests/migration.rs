@@ -1679,12 +1679,6 @@ access_token = "tok"
 verify_token = "v"
 allowed_numbers = ["+15551234567"]
 
-[channels.linq]
-enabled = true
-api_token = "linq-tok"
-from_phone = "+15555550100"
-allowed_senders = ["+15551234567"]
-
 [channels.nostr]
 enabled = true
 relay_url = "wss://relay.example"
@@ -1721,7 +1715,6 @@ allowed_senders = ["ops@example"]
         ("imessage", "allowed_contacts", "+15551234567"),
         ("signal", "allowed_from", "+15551234567"),
         ("whatsapp", "allowed_numbers", "+15551234567"),
-        ("linq", "allowed_senders", "+15551234567"),
         ("nostr", "allowed_pubkeys", "npub1abc"),
         ("email", "allowed_senders", "ops@example"),
     ] {
@@ -1750,6 +1743,125 @@ allowed_senders = ["ops@example"]
             "channels.{channel_type}.default.{field_name} must be stripped after fold"
         );
     }
+}
+
+#[test]
+fn v2_retired_inbound_webhook_channels_are_dropped_not_ported() {
+    // Linq, WATI, Nextcloud Talk and Gmail Push lost their gateway webhook
+    // routes and were deleted. V2 → V3 must drop their tables (and must not
+    // synthesize peer groups from their allowlists) while live siblings keep
+    // migrating.
+    let v3 = migrate_v2(
+        r#"
+[channels.linq]
+enabled = true
+api_token = "linq-tok"
+from_phone = "+15555550100"
+allowed_senders = ["+15551234567"]
+
+[channels.wati]
+enabled = true
+api_token = "wati-tok"
+allowed_numbers = ["+15551234567"]
+
+[channels.nextcloud_talk]
+enabled = true
+base_url = "https://cloud.example.com"
+app_token = "nc-tok"
+allowed_users = ["alice"]
+
+[channels.gmail_push]
+enabled = true
+topic = "projects/p/topics/t"
+allowed_senders = ["ops@example"]
+
+[channels.imessage]
+enabled = true
+allowed_contacts = ["+15551234567"]
+"#,
+    );
+
+    let channels = v3
+        .get("channels")
+        .and_then(toml::Value::as_table)
+        .expect("channels exists");
+    let peer_groups = v3.get("peer_groups").and_then(toml::Value::as_table);
+    for retired in ["linq", "wati", "nextcloud_talk", "gmail_push"] {
+        assert!(
+            !channels.contains_key(retired),
+            "channels.{retired} must be dropped during V2 → V3 migration"
+        );
+        assert!(
+            peer_groups.is_none_or(|pg| !pg.contains_key(&format!("{retired}_default"))),
+            "no peer group may be synthesized for retired channel {retired}"
+        );
+    }
+    assert!(
+        channels
+            .get("imessage")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|t| t.contains_key("default")),
+        "live sibling channel must still migrate"
+    );
+}
+
+#[test]
+fn v3_retired_inbound_webhook_channel_loads_with_tombstone_warning() {
+    // A V3 config still carrying a retired channel section, an agent binding
+    // to it and a peer group on it must keep loading: the section is ignored
+    // and reported as a structured tombstone warning, not a hard error.
+    let mut value: toml::Value = toml::from_str(
+        &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
+            .expect("generate current succeeds"),
+    )
+    .expect("generated V3 parses");
+    let root = value.as_table_mut().unwrap();
+    let linq: toml::Value = toml::from_str(
+        r#"
+[default]
+enabled = true
+api_token = "linq-tok"
+from_phone = "+15555550100"
+"#,
+    )
+    .unwrap();
+    root.get_mut("channels")
+        .and_then(toml::Value::as_table_mut)
+        .expect("generated V3 has channels")
+        .insert("linq".into(), linq);
+    let (agent_alias, agent) = root
+        .get_mut("agents")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|agents| agents.iter_mut().next())
+        .expect("generated V3 has an agent");
+    let agent_alias = agent_alias.clone();
+    agent
+        .as_table_mut()
+        .unwrap()
+        .entry("channels")
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .unwrap()
+        .push("linq.default".into());
+    let group: toml::Value = toml::from_str(&format!(
+        "channel = \"linq\"\nagents = [\"{agent_alias}\"]\nexternal_peers = [\"+15551234567\"]\n"
+    ))
+    .unwrap();
+    root.entry("peer_groups")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .unwrap()
+        .insert("linq_default".into(), group);
+    let raw = toml::to_string(&value).unwrap();
+
+    let cfg = migrate_to_current(&raw).expect("retired channel section must not fail load");
+    cfg.validate()
+        .expect("leftover bindings to a retired channel type must not fail validation");
+
+    let warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, "inbound_webhook_channel_removed");
+    assert_eq!(warnings[0].path, "channels.linq");
 }
 
 #[test]
@@ -2211,8 +2323,10 @@ fn generate_v3_covers_every_v3_top_level_section() {
 fn generate_v3_channel_breadth_lower_bound() {
     // The V1 fixture covers a wide channel surface. Lower-bound count
     // catches accidental loss of a whole channel during migration.
-    // Raise the bound only when adding more channels to the fixture.
-    const MIN_CHANNEL_ALIASES: usize = 25;
+    // Raise the bound only when adding more channels to the fixture. The
+    // fixture's Linq, WATI, Nextcloud Talk and Gmail Push blocks are dropped
+    // by design (retired channel types), so they do not count.
+    const MIN_CHANNEL_ALIASES: usize = 22;
 
     let cfg = migrate_to_current(
         &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
@@ -2229,9 +2343,6 @@ fn generate_v3_channel_breadth_lower_bound() {
         + cfg.channels.matrix.len()
         + cfg.channels.signal.len()
         + cfg.channels.whatsapp.len()
-        + cfg.channels.linq.len()
-        + cfg.channels.wati.len()
-        + cfg.channels.nextcloud_talk.len()
         + cfg.channels.mqtt.len()
         + cfg.channels.irc.len()
         + cfg.channels.lark.len()
@@ -2245,7 +2356,6 @@ fn generate_v3_channel_breadth_lower_bound() {
         + cfg.channels.reddit.len()
         + cfg.channels.bluesky.len()
         + cfg.channels.email.len()
-        + cfg.channels.gmail_push.len()
         + cfg.channels.clawdtalk.len()
         + cfg.channels.voice_call.len();
 

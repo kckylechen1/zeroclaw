@@ -820,7 +820,7 @@ mod tests {
         for (channel_type, alias, guest_alias) in [
             ("plugin", "acme.chat", Some("guest-selected-alias")),
             ("telegram", "work", None),
-            ("gmail_push", "main", Some("")),
+            ("wecom_ws", "main", Some("")),
         ] {
             let scope = crate::instance::test_scope(PluginCapability::Channel, alias, []);
             let endpoint = PluginChannelEndpoint::new(scope, channel_type).unwrap();

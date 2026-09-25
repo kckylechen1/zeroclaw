@@ -23,7 +23,7 @@ Use case: paired-identity channels where sub-second replies are an AI-tell. Wire
 
 ## iMessage (macOS only)
 
-iMessage uses direct AppleScript automation: **macOS-only**, experimental, and it requires Full Disk Access and Accessibility grants. The Linq relay option received messages through a gateway webhook that was removed (#375).
+iMessage uses direct AppleScript automation: **macOS-only**, experimental, and it requires Full Disk Access and Accessibility grants. The Linq relay channel received messages through a gateway webhook that was removed (#375), and the channel type has since been deleted.
 
 ## WeChat personal iLink Bot (微信个人号 iLink)
 

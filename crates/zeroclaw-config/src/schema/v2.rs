@@ -76,11 +76,7 @@ pub const V3_CHANNEL_TYPES: &[&str] = &[
     "matrix",
     "signal",
     "whatsapp",
-    "linq",
-    "wati",
-    "nextcloud_talk",
     "email",
-    "gmail_push",
     "irc",
     "twitch",
     "lark",
@@ -1011,6 +1007,24 @@ fn alias_wrap_channels(channels_value: toml::Value, peer_groups: &mut toml::Tabl
         }
     }
 
+    // Retired inbound-webhook channels: Linq, WATI, Nextcloud Talk and Gmail
+    // Push received messages only through gateway webhook routes that were
+    // removed, so the channel types were deleted. Drop their tables during
+    // migration (loudly) instead of porting them into V3, where the section
+    // would only surface as a retired-section tombstone.
+    for retired in ["linq", "wati", "nextcloud_talk", "gmail_push"] {
+        if channels_table.remove(retired).is_some() {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Skip),
+                &format!(
+                    "[channels.{retired}] dropped during migration: the channel's inbound \
+                     webhook route was removed and the channel type was deleted"
+                )
+            );
+        }
+    }
+
     // Per-channel-type: singular→plural fold, peer-auth lift into
     // [peer_groups.<type>_default], then alias-wrap as <type>.default.
     for ct in V3_CHANNEL_TYPES {
@@ -1264,13 +1278,14 @@ fn fold_channel_peer_auth_into_peer_groups(
     peer_groups: &mut toml::Table,
 ) {
     let Some(field_name) = (match channel_type {
-        "telegram" | "discord" | "slack" | "mattermost" | "matrix" | "nextcloud_talk" | "irc"
-        | "lark" | "line" | "feishu" | "dingtalk" | "wecom" | "wechat" | "qq" | "twitter"
-        | "mochat" => Some("allowed_users"),
+        "telegram" | "discord" | "slack" | "mattermost" | "matrix" | "irc" | "lark" | "line"
+        | "feishu" | "dingtalk" | "wecom" | "wechat" | "qq" | "twitter" | "mochat" => {
+            Some("allowed_users")
+        }
         "imessage" => Some("allowed_contacts"),
         "signal" => Some("allowed_from"),
-        "whatsapp" | "wati" => Some("allowed_numbers"),
-        "linq" | "email" | "gmail_push" => Some("allowed_senders"),
+        "whatsapp" => Some("allowed_numbers"),
+        "email" => Some("allowed_senders"),
         "nostr" => Some("allowed_pubkeys"),
         _ => None,
     }) else {

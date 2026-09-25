@@ -69,18 +69,15 @@ pub enum ChannelKind {
     Email,
     Filesystem,
     Git,
-    GmailPush,
     #[strum(serialize = "imessage")]
     IMessage,
     Irc,
     Lark,
     Line,
-    Linq,
     Matrix,
     Mattermost,
     #[strum(serialize = "mochat")]
     MoChat,
-    NextcloudTalk,
     Nostr,
     Notion,
     Qq,
@@ -92,7 +89,6 @@ pub enum ChannelKind {
     Twitter,
     VoiceCall,
     VoiceWake,
-    Wati,
     #[strum(serialize = "wecom")]
     WeCom,
     #[strum(serialize = "wecom_ws")]
