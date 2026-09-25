@@ -2432,11 +2432,7 @@ async fn config_toml_roundtrip() {
             matrix: HashMap::new(),
             signal: HashMap::new(),
             whatsapp: HashMap::new(),
-            linq: HashMap::new(),
-            wati: HashMap::new(),
-            nextcloud_talk: HashMap::new(),
             email: HashMap::new(),
-            gmail_push: HashMap::new(),
             irc: HashMap::new(),
             twitch: HashMap::new(),
             lark: HashMap::new(),
@@ -4175,11 +4171,7 @@ async fn channels_with_imessage_and_matrix() {
         )]),
         signal: HashMap::new(),
         whatsapp: HashMap::new(),
-        linq: HashMap::new(),
-        wati: HashMap::new(),
-        nextcloud_talk: HashMap::new(),
         email: HashMap::new(),
-        gmail_push: HashMap::new(),
         irc: HashMap::new(),
         twitch: HashMap::new(),
         lark: HashMap::new(),
@@ -4697,11 +4689,7 @@ async fn channels_with_whatsapp() {
                 reply_queue_depth_max: 0,
             },
         )]),
-        linq: HashMap::new(),
-        wati: HashMap::new(),
-        nextcloud_talk: HashMap::new(),
         email: HashMap::new(),
-        gmail_push: HashMap::new(),
         irc: HashMap::new(),
         twitch: HashMap::new(),
         lark: HashMap::new(),
@@ -4744,12 +4732,6 @@ async fn channels_with_whatsapp() {
 async fn channels_default_has_no_whatsapp() {
     let c = ChannelsConfig::default();
     assert!(c.whatsapp.is_empty());
-}
-
-#[test]
-async fn channels_default_has_no_nextcloud_talk() {
-    let c = ChannelsConfig::default();
-    assert!(c.nextcloud_talk.is_empty());
 }
 
 // ══════════════════════════════════════════════════════════
@@ -7303,34 +7285,6 @@ group_policy = "disabled"
     let config: Config = toml::from_str(toml).unwrap();
     let ln = config.channels.line.get("default").unwrap();
     assert_eq!(ln.group_policy, LineGroupPolicy::Disabled);
-}
-
-#[test]
-async fn nextcloud_talk_config_serde() {
-    let nc = NextcloudTalkConfig {
-        enabled: true,
-        base_url: "https://cloud.example.com".into(),
-        app_token: "app-token".into(),
-        webhook_secret: Some("webhook-secret".into()),
-        proxy_url: None,
-        bot_name: None,
-        excluded_tools: vec![],
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1000,
-    };
-
-    let json = serde_json::to_string(&nc).unwrap();
-    let parsed: NextcloudTalkConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.base_url, "https://cloud.example.com");
-    assert_eq!(parsed.app_token, "app-token");
-    assert_eq!(parsed.webhook_secret.as_deref(), Some("webhook-secret"));
-}
-
-#[test]
-async fn nextcloud_talk_config_defaults_optional_fields() {
-    let json = r#"{"base_url":"https://cloud.example.com","app_token":"app-token"}"#;
-    let parsed: NextcloudTalkConfig = serde_json::from_str(json).unwrap();
-    assert!(parsed.webhook_secret.is_none());
 }
 
 // ── Config file permission hardening (Unix only) ───────────────

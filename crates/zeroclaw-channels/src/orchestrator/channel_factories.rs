@@ -28,8 +28,6 @@ use super::DiscordChannel;
 use super::EmailChannel;
 #[cfg(feature = "channel-git")]
 use super::GitChannel;
-#[cfg(feature = "channel-email")]
-use super::GmailPushChannel;
 #[cfg(feature = "channel-imessage")]
 use super::IMessageChannel;
 #[cfg(feature = "channel-irc")]
@@ -38,16 +36,12 @@ use super::IrcChannel;
 use super::LarkChannel;
 #[cfg(feature = "channel-line")]
 use super::LineChannel;
-#[cfg(feature = "channel-linq")]
-use super::LinqChannel;
 #[cfg(feature = "channel-matrix")]
 use super::MatrixChannel;
 #[cfg(feature = "channel-mattermost")]
 use super::MattermostChannel;
 #[cfg(feature = "channel-mochat")]
 use super::MochatChannel;
-#[cfg(feature = "channel-nextcloud")]
-use super::NextcloudTalkChannel;
 #[cfg(feature = "channel-notion")]
 use super::NotionChannel;
 #[cfg(feature = "channel-qq")]
@@ -68,8 +62,6 @@ use super::TwitterChannel;
 use super::VoiceCallChannel;
 #[cfg(feature = "voice-wake")]
 use super::VoiceWakeChannel;
-#[cfg(feature = "channel-wati")]
-use super::WatiChannel;
 #[cfg(feature = "channel-wechat")]
 use super::WeChatChannel;
 #[cfg(feature = "channel-wecom")]
@@ -811,124 +803,6 @@ pub(crate) fn collect_configured_channels(
         }
     }
 
-    #[cfg(feature = "channel-linq")]
-    for (alias, lq) in &config.channels.linq {
-        if !active_channel_aliases.contains(&format!("linq.{alias}")) {
-            continue;
-        }
-        if !lq.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("linq", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "Linq",
-            alias: Some(alias.clone()),
-            channel: Arc::new(LinqChannel::new(
-                lq.api_token.clone(),
-                lq.from_phone.clone(),
-                alias.clone(),
-                peer_resolver,
-            )),
-        });
-    }
-
-    #[cfg(not(feature = "channel-linq"))]
-    if !config.channels.linq.is_empty() {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "Linq channel is configured but this build was compiled without \
-             `channel-linq`; skipping Linq."
-        );
-    }
-
-    #[cfg(feature = "channel-wati")]
-    for (alias, wati_cfg) in &config.channels.wati {
-        if !active_channel_aliases.contains(&format!("wati.{alias}")) {
-            continue;
-        }
-        if !wati_cfg.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("wati", &alias))
-        };
-        let wati_channel = WatiChannel::new_with_proxy(
-            wati_cfg.api_token.clone(),
-            wati_cfg.api_url.clone(),
-            wati_cfg.tenant_id.clone(),
-            alias.clone(),
-            peer_resolver,
-            wati_cfg.proxy_url.clone(),
-        )
-        .with_transcription(config.transcription.clone());
-        channels.push(ConfiguredChannel {
-            display_name: "WATI",
-            alias: Some(alias.clone()),
-            channel: Arc::new(wati_channel),
-        });
-    }
-
-    #[cfg(not(feature = "channel-wati"))]
-    if !config.channels.wati.is_empty() {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "WATI channel is configured but this build was compiled without \
-             `channel-wati`; skipping WATI."
-        );
-    }
-
-    #[cfg(feature = "channel-nextcloud")]
-    for (alias, nc) in &config.channels.nextcloud_talk {
-        if !active_channel_aliases.contains(&format!("nextcloud_talk.{alias}")) {
-            continue;
-        }
-        if !nc.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || {
-                cfg_arc
-                    .read()
-                    .channel_external_peers("nextcloud_talk", &alias)
-            })
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "Nextcloud Talk",
-            alias: Some(alias.clone()),
-            channel: Arc::new(NextcloudTalkChannel::new_with_proxy(
-                nc.base_url.clone(),
-                nc.app_token.clone(),
-                nc.bot_name.clone().unwrap_or_default(),
-                alias.clone(),
-                peer_resolver,
-                nc.proxy_url.clone(),
-            )),
-        });
-    }
-
-    #[cfg(not(feature = "channel-nextcloud"))]
-    if !config.channels.nextcloud_talk.is_empty() {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "Nextcloud Talk channel is configured but this build was compiled without \
-             `channel-nextcloud`; skipping Nextcloud Talk."
-        );
-    }
-
     #[cfg(feature = "channel-email")]
     {
         // Construct once and share across all email channel instances.
@@ -958,38 +832,14 @@ pub(crate) fn collect_configured_channels(
         }
     }
 
-    #[cfg(feature = "channel-email")]
-    for (alias, gp_cfg) in &config.channels.gmail_push {
-        if !active_channel_aliases.contains(&format!("gmail_push.{alias}")) {
-            continue;
-        }
-        if !gp_cfg.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("gmail_push", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "Gmail Push",
-            alias: Some(alias.clone()),
-            channel: Arc::new(GmailPushChannel::new(
-                gp_cfg.clone(),
-                alias.clone(),
-                peer_resolver,
-            )),
-        });
-    }
-
     #[cfg(not(feature = "channel-email"))]
-    if !config.channels.email.is_empty() || !config.channels.gmail_push.is_empty() {
+    if !config.channels.email.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                 .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "Email/Gmail Push channel is configured but this build was compiled without \
-             `channel-email`; skipping Email and Gmail Push."
+            "Email channel is configured but this build was compiled without \
+             `channel-email`; skipping Email."
         );
     }
 

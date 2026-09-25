@@ -21,11 +21,9 @@ use std::sync::Arc;
     feature = "channel-irc",
     feature = "channel-lark",
     feature = "channel-line",
-    feature = "channel-linq",
     feature = "channel-matrix",
     feature = "channel-mattermost",
     feature = "channel-mochat",
-    feature = "channel-nextcloud",
     feature = "channel-qq",
     feature = "channel-signal",
     feature = "channel-slack",
@@ -33,7 +31,6 @@ use std::sync::Arc;
     feature = "channel-twitch",
     feature = "channel-twitter",
     feature = "channel-voice-call",
-    feature = "channel-wati",
     feature = "channel-wechat",
     feature = "channel-wecom",
     feature = "whatsapp-web",
@@ -54,11 +51,9 @@ use zeroclaw_config::schema::Config;
     feature = "channel-irc",
     feature = "channel-lark",
     feature = "channel-line",
-    feature = "channel-linq",
     feature = "channel-matrix",
     feature = "channel-mattermost",
     feature = "channel-mochat",
-    feature = "channel-nextcloud",
     feature = "channel-qq",
     feature = "channel-signal",
     feature = "channel-slack",
@@ -66,7 +61,6 @@ use zeroclaw_config::schema::Config;
     feature = "channel-twitch",
     feature = "channel-twitter",
     feature = "channel-voice-call",
-    feature = "channel-wati",
     feature = "channel-wechat",
     feature = "channel-wecom",
     feature = "channel-wecom-ws",
@@ -546,109 +540,6 @@ pub(super) fn build_channel_by_id(
         "wechat" => {
             anyhow::bail!("WeChat channel requires the `channel-wechat` feature");
         }
-        #[cfg(feature = "channel-nextcloud")]
-        "nextcloud_talk" | "nextcloud-talk" => {
-            let nc = config
-                .channels
-                .nextcloud_talk
-                .get("default")
-                .context("Nextcloud Talk channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || {
-                    cfg_arc
-                        .read()
-                        .channel_external_peers("nextcloud_talk", &alias)
-                })
-            };
-            Ok(Arc::new(
-                NextcloudTalkChannel::new_with_proxy(
-                    nc.base_url.clone(),
-                    nc.app_token.clone(),
-                    nc.bot_name.clone().unwrap_or_default(),
-                    alias,
-                    peer_resolver,
-                    nc.proxy_url.clone(),
-                )
-                .with_streaming(nc.stream_mode, nc.draft_update_interval_ms),
-            ))
-        }
-        #[cfg(not(feature = "channel-nextcloud"))]
-        "nextcloud_talk" | "nextcloud-talk" => {
-            anyhow::bail!("Nextcloud Talk channel requires the `channel-nextcloud` feature");
-        }
-        #[cfg(feature = "channel-wati")]
-        "wati" => {
-            let wati_cfg = config
-                .channels
-                .wati
-                .get("default")
-                .context("WATI channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("wati", &alias))
-            };
-            Ok(Arc::new(WatiChannel::new_with_proxy(
-                wati_cfg.api_token.clone(),
-                wati_cfg.api_url.clone(),
-                wati_cfg.tenant_id.clone(),
-                alias,
-                peer_resolver,
-                wati_cfg.proxy_url.clone(),
-            )))
-        }
-        #[cfg(not(feature = "channel-wati"))]
-        "wati" => {
-            anyhow::bail!("WATI channel requires the `channel-wati` feature");
-        }
-        #[cfg(feature = "channel-linq")]
-        "linq" => {
-            let lq = config
-                .channels
-                .linq
-                .get("default")
-                .context("Linq channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("linq", &alias))
-            };
-            Ok(Arc::new(LinqChannel::new(
-                lq.api_token.clone(),
-                lq.from_phone.clone(),
-                alias,
-                peer_resolver,
-            )))
-        }
-        #[cfg(feature = "channel-linq")]
-        x if x.starts_with("linq.") => {
-            let alias = x.strip_prefix("linq.").context("invalid linq channel id")?;
-            let lq = config
-                .channels
-                .linq
-                .get(alias)
-                .with_context(|| format!("Linq alias '{alias}' not configured"))?;
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.to_string();
-                Arc::new(move || cfg_arc.read().channel_external_peers("linq", &alias))
-            };
-            Ok(Arc::new(LinqChannel::new(
-                lq.api_token.clone(),
-                lq.from_phone.clone(),
-                alias.to_string(),
-                peer_resolver,
-            )))
-        }
-        #[cfg(not(feature = "channel-linq"))]
-        x if x.starts_with("linq") => {
-            anyhow::bail!("Linq channel requires the `channel-linq` feature");
-        }
         #[cfg(feature = "channel-email")]
         "email" => {
             let em = config
@@ -671,29 +562,6 @@ pub(super) fn build_channel_by_id(
         #[cfg(not(feature = "channel-email"))]
         "email" => {
             anyhow::bail!("Email channel requires the `channel-email` feature");
-        }
-        #[cfg(feature = "channel-email")]
-        "gmail_push" | "gmail-push" => {
-            let gp = config
-                .channels
-                .gmail_push
-                .get("default")
-                .context("Gmail Push channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("gmail_push", &alias))
-            };
-            Ok(Arc::new(GmailPushChannel::new(
-                gp.clone(),
-                alias,
-                peer_resolver,
-            )))
-        }
-        #[cfg(not(feature = "channel-email"))]
-        "gmail_push" | "gmail-push" => {
-            anyhow::bail!("Gmail Push channel requires the `channel-email` feature");
         }
         #[cfg(feature = "channel-irc")]
         "irc" => {
@@ -892,8 +760,8 @@ pub(super) fn build_channel_by_id(
         }
         other => anyhow::bail!(
             "Unknown channel '{other}'. Supported: telegram, discord, slack, mattermost, signal, \
-            matrix, whatsapp, qq, lark, feishu, dingtalk, wecom, wecom_ws, nextcloud_talk, wati, linq, \
-            email, gmail_push, git, irc, twitter, mochat, imessage, line, voice-call"
+            matrix, whatsapp, qq, lark, feishu, dingtalk, wecom, wecom_ws, email, \
+            git, irc, twitter, mochat, imessage, line, voice-call"
         ),
     }
 }

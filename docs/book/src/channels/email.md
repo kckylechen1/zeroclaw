@@ -1,6 +1,6 @@
 # Email
 
-Two email channels depending on how you want inbound messages delivered.
+The email channel polls IMAP for inbound messages and sends replies over SMTP.
 
 ## Who can talk to the agent
 
@@ -27,15 +27,15 @@ The general-purpose email channel. Polls IMAP for new messages, sends via SMTP. 
 
 {{#secret-config channels.email.<alias>.password}}
 
-## Gmail Push (`gmail_push`)
+## Gmail Push (removed)
 
-Gmail Push depended on the gateway's `/webhook/gmail` Pub/Sub endpoint, which was removed (#375). Use the IMAP/SMTP channel above instead.
+The `gmail_push` channel depended on the gateway's `/webhook/gmail` Pub/Sub endpoint, which was removed (#375), and the channel type has since been deleted. A leftover `[channels.gmail_push]` section is ignored and reported with the `inbound_webhook_channel_removed` config warning. Use the IMAP/SMTP channel above instead.
 
 ---
 
 ## Reply threading
 
-Both email channels thread replies using `In-Reply-To` and `References` headers so conversations stay grouped in whatever client the sender uses.
+The email channel threads replies using `In-Reply-To` and `References` headers so conversations stay grouped in whatever client the sender uses.
 
 ## Outbound body format
 

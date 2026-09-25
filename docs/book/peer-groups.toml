@@ -37,11 +37,6 @@ sender_desc = "the LINE user ID"
 sender_example = "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 [[channel]]
-key = "nextcloud"
-sender_desc = "the Nextcloud actor ID"
-sender_example = "alice"
-
-[[channel]]
 key = "discord"
 sender_desc = "the Discord user ID (snowflake)"
 sender_example = "111111111111111111"

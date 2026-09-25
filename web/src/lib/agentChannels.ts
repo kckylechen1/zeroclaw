@@ -49,11 +49,7 @@ const CHANNEL_IDENTITY: Record<string, IdentityField> = {
   imessage: { field: 'user_id', label: 'user' },
   whatsapp: { field: 'user_id', label: 'user' },
   email: { field: 'address', label: '' },
-  gmail_push: { field: 'address', label: '' },
-  'gmail-push': { field: 'address', label: '' },
   irc: { field: 'nickname', label: 'nick' },
-  nextcloud_talk: { field: 'user_id', label: 'user' },
-  'nextcloud-talk': { field: 'user_id', label: 'user' },
 };
 
 /** Parse a config-encoded value into a short identity string. The

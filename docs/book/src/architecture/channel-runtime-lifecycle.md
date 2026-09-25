@@ -100,9 +100,8 @@ capability metadata.
 ## Gateway webhooks
 
 Gateway webhooks have one legitimate special requirement: the HTTP request may
-need to return quickly even when the agent turn is slow. Nextcloud Talk is the
-clearest example because slow local models can exceed provider webhook
-timeouts.
+need to return quickly even when the agent turn is slow, because slow local
+models can exceed provider webhook timeouts.
 
 That fast acknowledgement requirement should not make the gateway own a
 separate agent lifecycle. Some current gateway-backed handlers still carry

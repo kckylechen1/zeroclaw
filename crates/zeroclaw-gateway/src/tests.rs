@@ -2142,10 +2142,6 @@ async fn webhook_secret_hash_accepts_valid_header() {
     assert_eq!(provider_impl.calls.load(Ordering::SeqCst), 1);
 }
 
-// handler must return 200 OK before the (potentially
-// slow) LLM call completes, so Nextcloud Talk doesn't cancel the webhook
-// request at its ~5s timeout.
-
 // ══════════════════════════════════════════════════════════
 // WhatsApp Signature Verification Tests (CWE-345 Prevention)
 // ══════════════════════════════════════════════════════════
@@ -2615,12 +2611,6 @@ fn needs_quickstart_channel_reply_resolves_via_fluent() {
         "channel reply must mention Quickstart so users know what's missing: {reply:?}"
     );
 }
-
-// ══════════════════════════════════════════════════════════
-// Linq Multi-Tenant Webhook Routing Tests
-// ══════════════════════════════════════════════════════════
-
-// ── Per-alias webhook routing───────────────────────────────────
 
 /// Build an `AppState` whose device registry points at a non-existent
 /// path so every SQLite write fails. Mirrors `unwriteable_registry_state`

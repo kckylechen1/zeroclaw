@@ -94,9 +94,7 @@
   - changed-files:
       - any-glob-to-any-file:
           - "src/channels/email_channel.rs"
-          - "src/channels/gmail_push.rs"
           - "crates/zeroclaw-channels/src/email_channel.rs"
-          - "crates/zeroclaw-channels/src/gmail_push.rs"
 
 "channel:imessage":
   - changed-files:
@@ -122,12 +120,6 @@
           - "crates/zeroclaw-channels/src/line.rs"
           - "docs/book/src/channels/line.md"
 
-"channel:linq":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/channels/linq.rs"
-          - "crates/zeroclaw-channels/src/linq.rs"
-
 "channel:matrix":
   - changed-files:
       - any-glob-to-any-file:
@@ -150,12 +142,6 @@
   - changed-files:
       - any-glob-to-any-file:
           - "src/channels/mqtt.rs"
-
-"channel:nextcloud-talk":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/channels/nextcloud_talk.rs"
-          - "crates/zeroclaw-channels/src/nextcloud_talk.rs"
 
 "channel:nostr":
   - changed-files:
@@ -204,12 +190,6 @@
       - any-glob-to-any-file:
           - "src/channels/twitter.rs"
           - "crates/zeroclaw-channels/src/twitter.rs"
-
-"channel:wati":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/channels/wati.rs"
-          - "crates/zeroclaw-channels/src/wati.rs"
 
 "channel:webhook":
   - changed-files:

@@ -44,8 +44,6 @@ pub mod discord_slash_state;
 pub mod email_channel;
 #[cfg(feature = "channel-git")]
 pub mod git;
-#[cfg(feature = "channel-email")]
-pub mod gmail_push;
 #[cfg(feature = "channel-imessage")]
 pub mod imessage;
 #[cfg(feature = "channel-irc")]
@@ -54,16 +52,12 @@ pub mod irc;
 pub mod lark;
 #[cfg(feature = "channel-line")]
 pub mod line;
-#[cfg(feature = "channel-linq")]
-pub mod linq;
 #[cfg(feature = "channel-matrix")]
 pub mod matrix;
 #[cfg(feature = "channel-mattermost")]
 pub mod mattermost;
 #[cfg(feature = "channel-mochat")]
 pub mod mochat;
-#[cfg(feature = "channel-nextcloud")]
-pub mod nextcloud_talk;
 #[cfg(feature = "channel-nostr")]
 pub mod nostr;
 #[cfg(feature = "channel-notion")]
@@ -86,8 +80,6 @@ pub mod twitter;
 pub mod voice_call;
 #[cfg(feature = "voice-wake")]
 pub mod voice_wake;
-#[cfg(feature = "channel-wati")]
-pub mod wati;
 #[cfg(feature = "channel-webhook")]
 pub mod webhook;
 #[cfg(feature = "channel-wechat")]

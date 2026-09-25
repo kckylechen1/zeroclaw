@@ -211,17 +211,15 @@ Each channel gets a `channel:<name>` label in addition to the base `channel` lab
 | `channel:cli` | `cli.rs` |
 | `channel:dingtalk` | `dingtalk.rs` |
 | `channel:discord` | `discord.rs`, `discord_history.rs` |
-| `channel:email` | `email_channel.rs`, `gmail_push.rs` |
+| `channel:email` | `email_channel.rs` |
 | `channel:imessage` | `imessage.rs` |
 | `channel:irc` | `irc.rs` |
 | `channel:lark` | `lark.rs` |
 | `channel:line` | `line.rs`, `channels/line.md` |
-| `channel:linq` | `linq.rs` |
 | `channel:matrix` | `matrix.rs` |
 | `channel:mattermost` | `mattermost.rs` |
 | `channel:mochat` | `mochat.rs` |
 | `channel:mqtt` | `mqtt.rs` |
-| `channel:nextcloud-talk` | `nextcloud_talk.rs` |
 | `channel:nostr` | `nostr.rs` |
 | `channel:notion` | `notion.rs` |
 | `channel:qq` | `qq.rs` |
@@ -230,7 +228,6 @@ Each channel gets a `channel:<name>` label in addition to the base `channel` lab
 | `channel:slack` | `slack.rs` |
 | `channel:telegram` | `telegram.rs` |
 | `channel:twitter` | `twitter.rs` |
-| `channel:wati` | `wati.rs` |
 | `channel:webhook` | `webhook.rs` |
 | `channel:wecom` | `wecom.rs`, `wecom_ws.rs` |
 | `channel:whatsapp` | `whatsapp.rs`, `whatsapp_storage.rs`, `whatsapp_web.rs` |

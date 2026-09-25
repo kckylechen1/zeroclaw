@@ -2509,13 +2509,15 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn api_channels_marks_configured_uncompiled_channel_unavailable() {
+        // Mochat is behind `channel-mochat`, which the gateway test build
+        // never enables; its configured alias must list as not compiled.
         let mut config = zeroclaw_config::schema::Config::default();
-        config.channels.nextcloud_talk.insert(
+        config.channels.mochat.insert(
             "default".to_string(),
-            zeroclaw_config::schema::NextcloudTalkConfig {
+            zeroclaw_config::schema::MochatConfig {
                 enabled: true,
-                base_url: "https://cloud.example.com".to_string(),
-                app_token: "test-token".to_string(),
+                api_url: "https://mochat.example.com".to_string(),
+                api_token: "test-token".to_string(),
                 ..Default::default()
             },
         );
@@ -2525,23 +2527,16 @@ pub(crate) mod tests {
             .into_response();
         let json = response_json(response).await;
         let channels = json["channels"].as_array().expect("channels array");
-        let nextcloud = channels
+        let mochat = channels
             .iter()
             .find(|channel| channel["alias"] == "default")
             .expect("configured channel is listed");
 
-        assert!(
-            matches!(
-                nextcloud["type"].as_str(),
-                Some("nextcloud-talk" | "nextcloud_talk")
-            ),
-            "unexpected channel type: {}",
-            nextcloud["type"]
-        );
-        assert_eq!(nextcloud["enabled"], true);
-        assert_eq!(nextcloud["compiled"], false);
-        assert_eq!(nextcloud["status"], "not_compiled");
-        assert_eq!(nextcloud["health"], "unavailable");
+        assert_eq!(mochat["type"].as_str(), Some("mochat"));
+        assert_eq!(mochat["enabled"], true);
+        assert_eq!(mochat["compiled"], false);
+        assert_eq!(mochat["status"], "not_compiled");
+        assert_eq!(mochat["health"], "unavailable");
     }
 
     /// Bind `channel_ref` (e.g. `"wechat.admin"`) to an enabled agent so
