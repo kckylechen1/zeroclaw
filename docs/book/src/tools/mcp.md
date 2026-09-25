@@ -71,7 +71,11 @@ Per-server fields (`[[mcp.servers]]`), generated from the schema:
 
 ## Deferred loading
 
-`mcp.deferred_loading` is `false` by default, so configured MCP tools are included in the model context eagerly. Set it to `true` to place only MCP tool **names** in the system prompt; the LLM calls the built-in `tool_search` tool to fetch a tool's full schema before invoking it. This keeps the initial context window small when a server exposes many tools.
+`mcp.deferred_loading` is `false` by default, so configured MCP tools are included in the model context eagerly. Set it to `true` to place only MCP tool **names**, each with a one-line summary of its description, in the system prompt; the LLM calls the built-in `tool_search` tool to fetch a tool's full schema before invoking it. This keeps the initial context window small when a server exposes many tools.
+
+## Binary tool results
+
+When a tool result contains an `image` or `audio` item, or an embedded `resource` with a base64 `blob`, ZeroClaw replaces the base64 payload with a one-line note such as `[image attachment omitted: image/png, about 18 bytes]` before the result reaches the model. Text content and other fields are kept. The model does not see the binary data itself; images from MCP tools are not yet passed to vision-capable models.
 
 ## Security and approval
 
