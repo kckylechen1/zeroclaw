@@ -202,7 +202,7 @@ impl<A> Conversation<A> {
 type Slot<A> = Arc<OnceCell<Arc<Conversation<A>>>>;
 
 /// Live conversations keyed by session key.
-pub(crate) struct ConversationHub<A> {
+pub struct ConversationHub<A> {
     slots: parking_lot::Mutex<HashMap<String, Slot<A>>>,
 }
 

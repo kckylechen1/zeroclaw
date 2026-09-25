@@ -33,7 +33,7 @@ pub mod tls;
 pub mod voice_duplex;
 pub mod ws;
 pub mod ws_approval;
-pub(crate) mod ws_conversation;
+pub mod ws_conversation;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -453,7 +453,7 @@ pub struct AppState {
     >,
     pub pending_reload: Arc<std::sync::atomic::AtomicBool>,
     /// Live `/ws/chat` conversations, shared by every socket on a session.
-    pub(crate) ws_conversations: Arc<ws_conversation::ConversationHub<ws::WsSession>>,
+    pub ws_conversations: Arc<ws_conversation::ConversationHub<ws::WsSession>>,
 }
 
 /// The gateway's per-session turn queue, with a background reaper that

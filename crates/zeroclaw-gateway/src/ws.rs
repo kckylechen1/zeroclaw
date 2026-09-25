@@ -516,7 +516,7 @@ async fn handle_socket(
 }
 
 /// The agent state one shared WS conversation holds.
-pub(crate) struct WsSession {
+pub struct WsSession {
     agent: zeroclaw_runtime::agent::Agent,
     /// Per-agent memory for turn-end consolidation; `None` disables it.
     ws_memory: Option<Arc<dyn zeroclaw_memory::Memory>>,
