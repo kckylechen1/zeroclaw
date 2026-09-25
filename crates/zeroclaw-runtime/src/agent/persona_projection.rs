@@ -425,12 +425,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // A read-only data dir: first-run creation of soul.db fails.
         let config = config_in(dir.path());
-        let mut perms = std::fs::metadata(&config.data_dir).unwrap().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&config.data_dir, perms.clone()).unwrap();
+        let original = std::fs::metadata(&config.data_dir).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&config.data_dir, readonly).unwrap();
         let projection = persona_projection(&config, "nova");
-        perms.set_readonly(false);
-        std::fs::set_permissions(&config.data_dir, perms).unwrap();
+        std::fs::set_permissions(&config.data_dir, original).unwrap();
         if config.data_dir.join(SOUL_PROFILE_DB_FILE).exists() {
             // Running as root: permissions do not stop creation.
             return;
