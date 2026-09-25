@@ -60,6 +60,38 @@ agent, one history, one running turn.
 - A socket that falls far behind skips frames; the `done` frame still
   carries the full response.
 
+### Request IDs and acceptance
+
+A `message` frame may carry an `id`: a client-chosen string of 1 to 128
+characters without control characters, unique within the session. An invalid
+`id` is refused with `INVALID_REQUEST_ID` and nothing runs.
+
+With an `id`, the gateway records the request before running it and answers
+the sending socket first:
+
+```json
+{"type":"ack","id":"r-42","status":"accepted","turn":"started","durable":true}
+```
+
+- `turn` is `started` for a new turn, or `steered` when the message joined
+  the running one.
+- `durable` is `true` when the receipt is in the session store (the default
+  SQLite backend) and survives a restart. It is `false` with the JSONL
+  backend or with persistence off; the receipt then lasts only while the
+  conversation is live.
+- The ACK means accepted for processing, not finished. The turn's `done`,
+  `aborted` or `error` frame carries the same `id`.
+- Sending an `id` again, for example after a lost ACK, runs nothing and
+  answers `{"type":"ack","id":"r-42","status":"duplicate","state":"done"}`.
+  `state` is the last recorded one: `accepted`, `steered`, `done`,
+  `aborted`, `error` or `rejected`. `accepted` after a restart means the
+  outcome is unknown; the request is not replayed.
+- If the receipt cannot be recorded, the message is refused with
+  `REQUEST_NOT_RECORDED` and nothing runs.
+- Each session keeps its most recent 256 receipts.
+
+Messages without an `id` behave as before: no ACK and no deduplication.
+
 ## Discovering the surface
 
 Two endpoints answer the question "what can I do here?":

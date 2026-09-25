@@ -245,6 +245,37 @@ pub trait SessionBackend: Send + Sync {
     fn list_stuck_sessions(&self, _threshold_secs: u64) -> Vec<SessionMetadata> {
         Vec::new()
     }
+
+    /// Durably record a client request as accepted for `session_key`, in
+    /// state `state`. Returns `None` when this backend does not keep request
+    /// receipts, so callers must not claim the acceptance is durable.
+    fn record_request(
+        &self,
+        _session_key: &str,
+        _request_id: &str,
+        _state: &str,
+    ) -> std::io::Result<Option<RequestReceipt>> {
+        Ok(None)
+    }
+
+    /// Update the state of a recorded request. Unknown requests are ignored.
+    fn set_request_state(
+        &self,
+        _session_key: &str,
+        _request_id: &str,
+        _state: &str,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The result of [`SessionBackend::record_request`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestReceipt {
+    /// First time this request was seen; it is now recorded.
+    Recorded,
+    /// Already recorded; carries its last recorded state.
+    Duplicate { state: String },
 }
 
 /// Session state information.
