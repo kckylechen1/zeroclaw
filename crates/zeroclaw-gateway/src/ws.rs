@@ -854,6 +854,35 @@ fn is_observability_telemetry(event: &serde_json::Value) -> bool {
     event.get("source").and_then(serde_json::Value::as_str) == Some("observability")
 }
 
+/// Provider, model, and temperature for turn-end memory consolidation,
+/// built from the agent's live `<family>.<alias>` reference and model as
+/// they stand after the turn. A mid-session model switch changes the agent's
+/// provider and model together, so consolidation follows that pair instead of
+/// the gateway's boot default: the turn's content only goes to the provider
+/// that already saw it. An empty model falls back to the entry's configured
+/// model. `None` when the reference no longer resolves (for example after a
+/// config reload removed the entry); consolidation is then skipped, never
+/// routed to another provider.
+fn ws_consolidation_model(
+    config: &zeroclaw_config::schema::Config,
+    provider_ref: &str,
+    model: &str,
+) -> Option<(
+    Box<dyn zeroclaw_api::model_provider::ModelProvider>,
+    String,
+    Option<f64>,
+)> {
+    let (family, alias) = provider_ref.split_once('.')?;
+    let temperature = config.providers.models.find(family, alias)?.temperature;
+    let (provider, _, model) = zeroclaw_runtime::agent::agent::build_session_model_provider(
+        config,
+        provider_ref,
+        Some(model),
+    )
+    .ok()?;
+    Some((provider, model, temperature))
+}
+
 /// Process a single chat message through the agent and send the response.
 /// Uses [`Agent::turn_streamed`] so that intermediate text chunks, tool calls,
 /// and tool results are forwarded to the WebSocket client in real time.
@@ -1266,13 +1295,31 @@ async fn process_chat_message(
             // Companion capture is a separate seam and already ran above.
             if state.auto_save {
                 if let Some(mem) = ws_memory.clone() {
-                    let model_provider = state.model_provider.clone();
-                    let model = state.model.clone();
-                    let temperature = state.temperature;
+                    // The agent's provider/model after the turn, not the
+                    // gateway-wide boot default (upstream #10637).
+                    let (_, live_provider_ref, live_model) = agent.attribution_fields();
+                    let live_config = Arc::clone(&state.config);
                     let memory_config = state.config.read().memory.clone();
                     let user_msg = content.to_string();
                     let assistant_resp = outcome.response.clone();
                     zeroclaw_spawn::spawn!(async move {
+                        let config = live_config.read().clone();
+                        let Some((model_provider, model, temperature)) =
+                            ws_consolidation_model(&config, &live_provider_ref, &live_model)
+                        else {
+                            ::zeroclaw_log::record!(
+                                DEBUG,
+                                ::zeroclaw_log::Event::new(
+                                    module_path!(),
+                                    ::zeroclaw_log::Action::Note
+                                )
+                                .with_attrs(::serde_json::json!({
+                                    "model_provider": &live_provider_ref,
+                                })),
+                                "WS memory consolidation skipped: provider no longer resolves"
+                            );
+                            return;
+                        };
                         if let Err(e) = zeroclaw_memory::consolidation::consolidate_turn(
                             model_provider.as_ref(),
                             &model,
@@ -1436,6 +1483,63 @@ async fn process_chat_message(
 mod tests {
     use super::*;
     use axum::http::HeaderMap;
+
+    /// Consolidation follows the agent's live provider reference, with that
+    /// entry's model and temperature, not the install-wide default.
+    #[test]
+    fn ws_consolidation_model_follows_the_live_provider_reference() {
+        use zeroclaw_api::attribution::Attributable as _;
+        use zeroclaw_config::schema::{
+            ModelProviderConfig, OllamaModelProviderConfig, OpenAIModelProviderConfig,
+        };
+        let mut config = zeroclaw_config::schema::Config::default();
+        config.providers.models.openai.insert(
+            "install".to_string(),
+            OpenAIModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("install-model".to_string()),
+                    temperature: Some(0.9),
+                    ..Default::default()
+                },
+            },
+        );
+        config.providers.models.ollama.insert(
+            "local".to_string(),
+            OllamaModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("local-model".to_string()),
+                    temperature: Some(0.3),
+                    ..Default::default()
+                },
+                ..OllamaModelProviderConfig::default()
+            },
+        );
+
+        let (provider, model, temperature) =
+            ws_consolidation_model(&config, "ollama.local", "llama3").unwrap();
+        assert_eq!(provider.alias(), "local");
+        assert_eq!(model, "llama3");
+        assert_eq!(temperature, Some(0.3));
+
+        let (provider, model, temperature) =
+            ws_consolidation_model(&config, "ollama.local", "").unwrap();
+        assert_eq!(provider.alias(), "local");
+        assert_eq!(model, "local-model");
+        assert_eq!(temperature, Some(0.3));
+
+        // A reference that no longer resolves is skipped, not rerouted.
+        assert!(ws_consolidation_model(&config, "ollama.removed", "llama3").is_none());
+        assert!(ws_consolidation_model(&config, "not-dotted", "llama3").is_none());
+    }
+
+    #[test]
+    fn consolidation_does_not_use_the_gateway_boot_provider() {
+        let src = process_chat_message_src();
+        let consolidation = src.find("consolidate_turn").expect("consolidation call");
+        let block = &src[src[..consolidation].rfind("if state.auto_save").unwrap()..consolidation];
+        assert!(!block.contains("state.model_provider"), "{block}");
+        assert!(block.contains("ws_consolidation_model"), "{block}");
+    }
 
     fn process_chat_message_src() -> &'static str {
         let src = include_str!("ws.rs");
