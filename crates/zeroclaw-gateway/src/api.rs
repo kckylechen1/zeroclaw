@@ -1211,7 +1211,7 @@ fn compiled_readiness_key_for_alias<'a>(config: &'a Config, info: &'a ChannelAli
             .channels
             .whatsapp
             .get(&info.alias)
-            .is_some_and(|whatsapp| whatsapp.backend_type() == "web")
+            .is_some_and(|whatsapp| whatsapp.is_web_config())
     {
         "whatsapp-web"
     } else {
@@ -2431,7 +2431,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn api_channels_readiness_key_tracks_whatsapp_backend_type() {
+    fn api_channels_readiness_key_tracks_whatsapp_web_selector() {
         let mut config = zeroclaw_config::schema::Config::default();
         config.channels.whatsapp.insert(
             "web".to_string(),
@@ -2441,24 +2441,13 @@ pub(crate) mod tests {
                 ..Default::default()
             },
         );
+        // No Web selector (e.g. a leftover Cloud API alias whose retired
+        // fields were dropped): the runtime skips it, and it keeps the bare
+        // config type key, which has no QR-pairing session.
         config.channels.whatsapp.insert(
-            "cloud".to_string(),
+            "bare".to_string(),
             zeroclaw_config::schema::WhatsAppConfig {
                 enabled: true,
-                access_token: Some("token".into()),
-                phone_number_id: Some("phone-id".into()),
-                verify_token: Some("verify".into()),
-                ..Default::default()
-            },
-        );
-        config.channels.whatsapp.insert(
-            "ambiguous".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                enabled: true,
-                access_token: Some("token".into()),
-                phone_number_id: Some("phone-id".into()),
-                verify_token: Some("verify".into()),
-                session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
                 ..Default::default()
             },
         );
@@ -2469,15 +2458,9 @@ pub(crate) mod tests {
             owning_agent: None,
             enabled: true,
         };
-        let cloud = zeroclaw_config::schema::ChannelAliasInfo {
+        let bare = zeroclaw_config::schema::ChannelAliasInfo {
             channel_type: "whatsapp".to_string(),
-            alias: "cloud".to_string(),
-            owning_agent: None,
-            enabled: true,
-        };
-        let ambiguous = zeroclaw_config::schema::ChannelAliasInfo {
-            channel_type: "whatsapp".to_string(),
-            alias: "ambiguous".to_string(),
+            alias: "bare".to_string(),
             owning_agent: None,
             enabled: true,
         };
@@ -2492,15 +2475,7 @@ pub(crate) mod tests {
             compiled_readiness_key_for_alias(&config, &web),
             "whatsapp-web"
         );
-        assert_eq!(
-            compiled_readiness_key_for_alias(&config, &cloud),
-            "whatsapp"
-        );
-        assert_eq!(
-            compiled_readiness_key_for_alias(&config, &ambiguous),
-            "whatsapp",
-            "ambiguous WhatsApp configs follow runtime Cloud precedence"
-        );
+        assert_eq!(compiled_readiness_key_for_alias(&config, &bare), "whatsapp");
         assert_eq!(
             compiled_readiness_key_for_alias(&config, &discord),
             "discord"

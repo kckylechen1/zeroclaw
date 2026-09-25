@@ -253,9 +253,9 @@ pub(crate) fn parse_attachment_markers_of_kinds(
     (cleaned.trim().to_string(), attachments)
 }
 
-/// A native location pin parsed from a `[LOCATION:...]` marker. Shared by
-/// both WhatsApp backends (web protobuf send and Cloud API JSON send).
-#[cfg(any(feature = "whatsapp-web", feature = "channel-whatsapp-cloud", test))]
+/// A native location pin parsed from a `[LOCATION:...]` marker, sent by the
+/// WhatsApp Web backend as a protobuf location message.
+#[cfg(any(feature = "whatsapp-web", test))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WhatsAppLocation {
     pub(crate) lat: f64,
@@ -264,7 +264,7 @@ pub(crate) struct WhatsAppLocation {
     pub(crate) address: Option<String>,
 }
 
-#[cfg(any(feature = "whatsapp-web", feature = "channel-whatsapp-cloud", test))]
+#[cfg(any(feature = "whatsapp-web", test))]
 impl WhatsAppLocation {
     pub(crate) fn parse(target: &str) -> Option<Self> {
         // Extract the next field.  If the trimmed input starts with `"` the
@@ -317,9 +317,9 @@ impl WhatsAppLocation {
 }
 
 /// Render an inbound static location as chat text, e.g.
-/// `[Location: 40.712800, -74.006000 — NYC]`. Shared by both WhatsApp
-/// backends so inbound pins read identically regardless of transport.
-#[cfg(any(feature = "whatsapp-web", feature = "channel-whatsapp-cloud", test))]
+/// `[Location: 40.712800, -74.006000 — NYC]`, used by the WhatsApp Web
+/// backend for inbound pins.
+#[cfg(any(feature = "whatsapp-web", test))]
 pub(crate) fn format_location_content(lat: f64, lng: f64, name: Option<&str>) -> String {
     match name.filter(|n| !n.is_empty()) {
         Some(name) => format!("[Location: {lat:.6}, {lng:.6} — {name}]"),
@@ -331,8 +331,6 @@ pub(crate) fn format_location_content(lat: f64, lng: f64, name: Option<&str>) ->
     feature = "channel-discord",
     feature = "channel-signal",
     feature = "channel-slack",
-    feature = "channel-whatsapp-cloud",
-    feature = "whatsapp-web",
     test
 ))]
 pub(crate) fn new_approval_token() -> String {

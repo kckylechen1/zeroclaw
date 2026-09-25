@@ -198,7 +198,6 @@ channels-full = [
   "channel-voice-call",
   "channel-wecom",
   "channel-wecom-ws",
-  "channel-whatsapp-cloud",
   "default-channels",
 ]
 # Channels with optional deps
@@ -259,7 +258,6 @@ channel-wecom = []
 channel-wecom-ws = ["dep:aes", "dep:cbc"]
 channel-clawdtalk = []
 channel-webhook = ["dep:axum"]
-channel-whatsapp-cloud = []
 channel-voice-call = ["dep:axum"]
 channel-acp-server = []
 channel-matrix = ["dep:matrix-sdk", "dep:mime_guess"]

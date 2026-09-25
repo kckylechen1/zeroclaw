@@ -208,10 +208,8 @@
 "channel:whatsapp":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/channels/whatsapp.rs"
           - "src/channels/whatsapp_storage.rs"
           - "src/channels/whatsapp_web.rs"
-          - "crates/zeroclaw-channels/src/whatsapp.rs"
           - "crates/zeroclaw-channels/src/whatsapp_storage.rs"
           - "crates/zeroclaw-channels/src/whatsapp_web.rs"
 

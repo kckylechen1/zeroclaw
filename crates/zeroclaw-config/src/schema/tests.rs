@@ -4448,12 +4448,8 @@ async fn webhook_config_retry_fields_roundtrip() {
 async fn whatsapp_config_serde() {
     let wc = WhatsAppConfig {
         enabled: true,
-        access_token: Some("EAABx...".into()),
-        phone_number_id: Some("123456789".into()),
-        verify_token: Some("my-verify-token".into()),
-        app_secret: None,
-        session_path: None,
-        pair_phone: None,
+        session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
+        pair_phone: Some("15551234567".into()),
         pair_code: None,
         ws_url: None,
         mention_only: false,
@@ -4466,7 +4462,6 @@ async fn whatsapp_config_serde() {
         dm_mention_patterns: vec![],
         group_mention_patterns: vec![],
         allowed_groups: vec![],
-        proxy_url: None,
         approval_timeout_secs: 300,
         excluded_tools: vec![],
         reply_min_interval_secs: 0,
@@ -4474,42 +4469,61 @@ async fn whatsapp_config_serde() {
     };
     let json = serde_json::to_string(&wc).unwrap();
     let parsed: WhatsAppConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.access_token, Some("EAABx...".into()));
-    assert_eq!(parsed.phone_number_id, Some("123456789".into()));
-    assert_eq!(parsed.verify_token, Some("my-verify-token".into()));
+    assert_eq!(
+        parsed.session_path.as_deref(),
+        Some("~/.zeroclaw/state/whatsapp-web/session.db")
+    );
+    assert_eq!(parsed.pair_phone.as_deref(), Some("15551234567"));
 }
 
 #[test]
 async fn whatsapp_config_toml_roundtrip() {
     let wc = WhatsAppConfig {
         enabled: true,
-        access_token: Some("tok".into()),
-        phone_number_id: Some("12345".into()),
-        verify_token: Some("verify".into()),
-        app_secret: Some("secret123".into()),
-        session_path: None,
-        pair_phone: None,
-        pair_code: None,
-        ws_url: None,
-        mention_only: false,
-        passive_group_context: false,
-        interrupt_on_new_message: false,
-        mode: WhatsAppWebMode::default(),
-        dm_policy: WhatsAppChatPolicy::default(),
-        group_policy: WhatsAppChatPolicy::default(),
-        self_chat_mode: false,
-        dm_mention_patterns: vec![],
-        group_mention_patterns: vec![],
-        allowed_groups: vec![],
-        proxy_url: None,
-        approval_timeout_secs: 300,
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
+        mode: WhatsAppWebMode::Personal,
+        pair_code: Some("ABCD1234".into()),
+        allowed_groups: vec!["123456789012345@g.us".into()],
+        ..Default::default()
     };
     let toml_str = toml::to_string(&wc).unwrap();
     let parsed: WhatsAppConfig = toml::from_str(&toml_str).unwrap();
-    assert_eq!(parsed.phone_number_id, Some("12345".into()));
+    assert_eq!(parsed.mode, WhatsAppWebMode::Personal);
+    assert_eq!(parsed.pair_code.as_deref(), Some("ABCD1234"));
+    assert_eq!(parsed.allowed_groups, vec!["123456789012345@g.us"]);
+}
+
+#[test]
+async fn whatsapp_config_ignores_retired_cloud_fields() {
+    // The Cloud API backend was deleted; its fields are no longer in the
+    // schema. A leftover Cloud-only alias must still deserialize (serde
+    // drops the unknown keys; the field tombstone reports them) and must
+    // not look like a Web config.
+    let parsed: WhatsAppConfig = toml::from_str(
+        r#"
+enabled = true
+access_token = "tok"
+phone_number_id = "123"
+verify_token = "ver"
+app_secret = "sec"
+proxy_url = "socks5://127.0.0.1:1080"
+"#,
+    )
+    .expect("retired Cloud fields must not fail deserialization");
+    assert!(parsed.enabled);
+    assert!(!parsed.is_web_config());
+    let reserialized = toml::to_string(&parsed).unwrap();
+    for field in [
+        "access_token",
+        "phone_number_id",
+        "verify_token",
+        "app_secret",
+        "proxy_url",
+    ] {
+        assert!(
+            !reserialized.contains(field),
+            "{field} must not be written back: {reserialized}"
+        );
+    }
 }
 
 #[test]
@@ -4534,9 +4548,7 @@ schema_version = 2
 
 [channels.whatsapp]
 enabled = true
-access_token = "tok"
-phone_number_id = "123"
-verify_token = "ver"
+session_path = "~/.zeroclaw/state/whatsapp-web/session.db"
 allowed_numbers = ["+1", "+2"]
 "#;
     let parsed = crate::migration::migrate_to_current(raw).expect("migration succeeds");
@@ -4550,102 +4562,42 @@ allowed_numbers = ["+1", "+2"]
 }
 
 #[test]
-async fn whatsapp_config_backend_type_cloud_precedence_when_ambiguous() {
-    let wc = WhatsAppConfig {
+async fn whatsapp_config_web_selectors() {
+    let session = WhatsAppConfig {
         enabled: true,
-        access_token: Some("tok".into()),
-        phone_number_id: Some("123".into()),
-        verify_token: Some("ver".into()),
-        app_secret: None,
         session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
-        pair_phone: None,
-        pair_code: None,
-        ws_url: None,
-        mention_only: false,
-        passive_group_context: false,
-        interrupt_on_new_message: false,
-        mode: WhatsAppWebMode::default(),
-        dm_policy: WhatsAppChatPolicy::default(),
-        group_policy: WhatsAppChatPolicy::default(),
-        self_chat_mode: false,
-        dm_mention_patterns: vec![],
-        group_mention_patterns: vec![],
-        allowed_groups: vec![],
-        proxy_url: None,
-        approval_timeout_secs: 300,
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
+        ..Default::default()
     };
-    assert!(wc.is_ambiguous_config());
-    assert_eq!(wc.backend_type(), "cloud");
-}
+    assert!(session.is_web_config());
 
-#[test]
-async fn whatsapp_config_backend_type_web() {
-    let wc = WhatsAppConfig {
-        enabled: true,
-        access_token: None,
-        phone_number_id: None,
-        verify_token: None,
-        app_secret: None,
-        session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
-        pair_phone: None,
-        pair_code: None,
-        ws_url: None,
-        mention_only: false,
-        passive_group_context: false,
-        interrupt_on_new_message: false,
-        mode: WhatsAppWebMode::default(),
-        dm_policy: WhatsAppChatPolicy::default(),
-        group_policy: WhatsAppChatPolicy::default(),
-        self_chat_mode: false,
-        dm_mention_patterns: vec![],
-        group_mention_patterns: vec![],
-        allowed_groups: vec![],
-        proxy_url: None,
-        approval_timeout_secs: 300,
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-    };
-    assert!(!wc.is_ambiguous_config());
-    assert_eq!(wc.backend_type(), "web");
-}
-
-#[test]
-async fn whatsapp_config_backend_type_web_from_personal_pairing() {
-    let wc = WhatsAppConfig {
+    let personal_pairing = WhatsAppConfig {
         enabled: true,
         mode: WhatsAppWebMode::Personal,
         pair_phone: Some("+10000000000".into()),
         ..Default::default()
     };
-    assert_eq!(wc.backend_type(), "web");
-    assert!(wc.is_web_config());
-    assert!(!wc.is_cloud_config());
+    assert!(personal_pairing.is_web_config());
 
     let pair_only = WhatsAppConfig {
         enabled: true,
         pair_phone: Some("+10000000000".into()),
         ..Default::default()
     };
-    assert_eq!(pair_only.backend_type(), "web");
+    assert!(pair_only.is_web_config());
 
+    let personal_only = WhatsAppConfig {
+        enabled: true,
+        mode: WhatsAppWebMode::Personal,
+        ..Default::default()
+    };
+    assert!(personal_only.is_web_config());
+
+    // No Web selector (e.g. a leftover Cloud API alias): not started.
     let empty = WhatsAppConfig {
         enabled: true,
         ..Default::default()
     };
-    assert_eq!(empty.backend_type(), "cloud");
-
-    let cloud_plus_pairing = WhatsAppConfig {
-        enabled: true,
-        phone_number_id: Some("123".into()),
-        pair_phone: Some("+10000000000".into()),
-        ..Default::default()
-    };
-    assert_eq!(cloud_plus_pairing.backend_type(), "cloud");
-    assert!(cloud_plus_pairing.is_ambiguous_config());
+    assert!(!empty.is_web_config());
 }
 
 #[test]
@@ -4664,11 +4616,7 @@ async fn channels_with_whatsapp() {
             "default".to_string(),
             WhatsAppConfig {
                 enabled: true,
-                access_token: Some("tok".into()),
-                phone_number_id: Some("123".into()),
-                verify_token: Some("ver".into()),
-                app_secret: None,
-                session_path: None,
+                session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
                 pair_phone: None,
                 pair_code: None,
                 ws_url: None,
@@ -4682,7 +4630,6 @@ async fn channels_with_whatsapp() {
                 dm_mention_patterns: vec![],
                 group_mention_patterns: vec![],
                 allowed_groups: vec![],
-                proxy_url: None,
                 approval_timeout_secs: 300,
                 excluded_tools: vec![],
                 reply_min_interval_secs: 0,
@@ -4725,7 +4672,10 @@ async fn channels_with_whatsapp() {
     let parsed: ChannelsConfig = toml::from_str(&toml_str).unwrap();
     assert!(!parsed.whatsapp.is_empty());
     let wa = parsed.whatsapp.get("default").unwrap();
-    assert_eq!(wa.phone_number_id, Some("123".into()));
+    assert_eq!(
+        wa.session_path.as_deref(),
+        Some("~/.zeroclaw/state/whatsapp-web/session.db")
+    );
 }
 
 #[test]
@@ -6417,6 +6367,115 @@ async fn load_or_init_marks_whole_config_degraded_for_unparseable_file() {
         unsafe { std::env::remove_var("HOME") };
     }
     let _ = fs::remove_dir_all(temp_home).await;
+}
+
+#[test]
+#[allow(clippy::large_futures)]
+async fn load_or_init_cloud_only_whatsapp_alias_loads_with_tombstone_warning() {
+    // The WhatsApp Cloud API backend was deleted. A V3 config whose
+    // `[channels.whatsapp.<alias>]` carries only Cloud fields must keep
+    // loading and validating: the fields are dropped and reported with
+    // `whatsapp_cloud_backend_removed`, while the alias itself (and the
+    // agent binding and peer group that reference it) stay valid.
+    let _env_guard = env_override_lock().await;
+    let temp_home =
+        std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
+    let workspace_dir = temp_home.join("profile-wa-cloud");
+    let config_path = workspace_dir.join("config.toml");
+
+    fs::create_dir_all(&workspace_dir).await.unwrap();
+    fs::write(
+        &config_path,
+        r#"schema_version = 3
+
+[providers.models.ollama.default]
+
+[risk_profiles.shared]
+
+[runtime_profiles.default]
+
+[agents.assistant]
+model_provider = "ollama.default"
+risk_profile = "shared"
+runtime_profile = "default"
+channels = ["whatsapp.business"]
+
+[channels.whatsapp.business]
+enabled = true
+access_token = "EAABx"
+phone_number_id = "123456789"
+verify_token = "verify-me"
+app_secret = "app-secret"
+
+[peer_groups.whatsapp_business]
+channel = "whatsapp.business"
+external_peers = ["+15551234567"]
+"#,
+    )
+    .await
+    .unwrap();
+
+    let original_home = std::env::var("HOME").ok();
+    // SAFETY: test-only, guarded by env_override_lock.
+    unsafe { std::env::set_var("HOME", &temp_home) };
+    // SAFETY: test-only, guarded by env_override_lock.
+    unsafe { std::env::set_var("ZEROCLAW_WORKSPACE", &workspace_dir) };
+
+    let loaded = Box::pin(Config::load_or_init()).await;
+
+    // SAFETY: test-only, guarded by env_override_lock.
+    unsafe { std::env::remove_var("ZEROCLAW_WORKSPACE") };
+    if let Some(home) = original_home {
+        // SAFETY: test-only, guarded by env_override_lock.
+        unsafe { std::env::set_var("HOME", home) };
+    } else {
+        // SAFETY: test-only, guarded by env_override_lock.
+        unsafe { std::env::remove_var("HOME") };
+    }
+    let _ = fs::remove_dir_all(temp_home).await;
+
+    let config = loaded.expect("a Cloud-only WhatsApp alias must load, not hard-fail");
+    config
+        .validate()
+        .expect("a Cloud-only WhatsApp alias must validate");
+
+    let mut paths: Vec<_> = config
+        .retired_surface_warnings
+        .iter()
+        .filter(|warning| warning.code == "whatsapp_cloud_backend_removed")
+        .map(|warning| warning.path.as_str())
+        .collect();
+    paths.sort_unstable();
+    assert_eq!(
+        paths,
+        vec![
+            "channels.whatsapp.*.access_token",
+            "channels.whatsapp.*.app_secret",
+            "channels.whatsapp.*.phone_number_id",
+            "channels.whatsapp.*.verify_token",
+        ]
+    );
+    assert!(
+        config
+            .collect_warnings()
+            .iter()
+            .any(|warning| warning.code == "whatsapp_cloud_backend_removed"),
+        "collect_warnings must replay the tombstone"
+    );
+    let alias = config
+        .channels
+        .whatsapp
+        .get("business")
+        .expect("the alias itself survives");
+    assert!(
+        !alias.is_web_config(),
+        "no Web selector: the runtime skips it"
+    );
+    assert!(
+        config.degraded_sections.is_empty(),
+        "{:?}",
+        config.degraded_sections
+    );
 }
 
 #[test]

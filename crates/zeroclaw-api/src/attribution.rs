@@ -95,7 +95,6 @@ pub enum ChannelKind {
     WeComWs,
     Webhook,
     Wechat,
-    WhatsappBusiness,
     WhatsappWeb,
     Plugin,
 }
@@ -436,8 +435,8 @@ mod tests {
     fn channel_kind_snake_case() {
         assert_eq!(<&'static str>::from(ChannelKind::Telegram), "telegram");
         assert_eq!(
-            <&'static str>::from(ChannelKind::WhatsappBusiness),
-            "whatsapp_business"
+            <&'static str>::from(ChannelKind::WhatsappWeb),
+            "whatsapp_web"
         );
     }
 

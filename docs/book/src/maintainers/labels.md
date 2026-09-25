@@ -230,7 +230,7 @@ Each channel gets a `channel:<name>` label in addition to the base `channel` lab
 | `channel:twitter` | `twitter.rs` |
 | `channel:webhook` | `webhook.rs` |
 | `channel:wecom` | `wecom.rs`, `wecom_ws.rs` |
-| `channel:whatsapp` | `whatsapp.rs`, `whatsapp_storage.rs`, `whatsapp_web.rs` |
+| `channel:whatsapp` | `whatsapp_storage.rs`, `whatsapp_web.rs` |
 
 ### Per-provider labels
 

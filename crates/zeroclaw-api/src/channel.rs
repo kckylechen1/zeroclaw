@@ -614,10 +614,6 @@ pub trait Channel: Send + Sync + crate::attribution::Attributable {
     /// Each `(callback_id, label)` pair represents one choice. Whether
     /// the `callback_id` round-trips on inbound is **channel-specific**:
     ///
-    /// - **WhatsApp Cloud** preserves the `callback_id` exactly — it
-    ///   appears as `interactive.button_reply.id` /
-    ///   `interactive.list_reply.id`, surfaced as
-    ///   `[choice]<callback_id>` in the inbound `ChannelMessage.content`.
     /// - **Signal** uses native polls. Real signal-cli `pollVote`
     ///   payloads round-trip selected option indexes, surfaced as
     ///   `[choice-index]N` with a 1-based index. Some alternate

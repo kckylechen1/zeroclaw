@@ -64,7 +64,7 @@ group = "example"
 table = true
 
 [[var]]
-path = "channels.whatsapp.home.app_secret"
+path = "channels.webhook.home.secret"
 comment = "Inject webhook signing secrets"
 value = "..."
 group = "example"

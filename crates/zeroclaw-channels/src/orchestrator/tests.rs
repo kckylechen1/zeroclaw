@@ -16644,18 +16644,17 @@ async fn deliver_announcement_rejects_whatsapp_non_web_config_clearly() {
     let mut config = zeroclaw_config::schema::Config::default();
     config.channels.whatsapp.insert(
         "default".to_string(),
+        // No Web selector: what a leftover Cloud API alias becomes once
+        // its retired fields are dropped at load.
         zeroclaw_config::schema::WhatsAppConfig {
             enabled: true,
-            access_token: Some("test-token".to_string()),
-            phone_number_id: Some("phone-number-id".to_string()),
-            verify_token: Some("verify-token".to_string()),
             ..Default::default()
         },
     );
 
     let err = deliver_announcement(&config, "whatsapp.default", "+15551234567", None, "hi")
         .await
-        .expect_err("expected WhatsApp Cloud config to be rejected for cron delivery");
+        .expect_err("expected a WhatsApp alias without a Web selector to be rejected");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("WhatsApp channel send requires Web mode"),

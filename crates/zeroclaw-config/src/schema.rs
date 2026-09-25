@@ -40,7 +40,6 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "channel.slack",
     "channel.telegram",
     "channel.wechat",
-    "channel.whatsapp",
     "tool.browser",
     "tool.composio",
     "tool.http_request",
@@ -51,10 +50,13 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "transcription.groq",
 ];
 
-/// Service keys of retired channels (inbound webhook routes removed). Still
-/// accepted by `ProxyConfig::validate` so a leftover `proxy.services` entry
-/// does not fail config load, but no longer advertised: nothing consumes them.
-const RETIRED_PROXY_SERVICE_KEYS: &[&str] = &["channel.nextcloud_talk", "channel.wati"];
+/// Service keys of retired channels (inbound webhook routes removed) and of
+/// the retired WhatsApp Cloud API backend (the WhatsApp Web client does not
+/// use the proxy client). Still accepted by `ProxyConfig::validate` so a
+/// leftover `proxy.services` entry does not fail config load, but no longer
+/// advertised: nothing consumes them.
+const RETIRED_PROXY_SERVICE_KEYS: &[&str] =
+    &["channel.nextcloud_talk", "channel.wati", "channel.whatsapp"];
 
 const SUPPORTED_PROXY_SERVICE_SELECTORS: &[&str] = &[
     "model_provider.*",
@@ -12875,12 +12877,6 @@ impl ChannelsConfig {
                 configured: !self.signal.is_empty(),
             },
             ChannelInfo {
-                kind: "whatsapp",
-                name: "WhatsApp",
-                desc: "Business Cloud API",
-                configured: !self.whatsapp.is_empty(),
-            },
-            ChannelInfo {
                 kind: "whatsapp-web",
                 name: "WhatsApp Web",
                 desc: "native WhatsApp Web (wa-rs)",
@@ -14219,9 +14215,13 @@ pub enum WhatsAppChatPolicy {
     All,
 }
 
-/// WhatsApp channel configuration (Cloud API or Web mode).
+/// WhatsApp channel configuration, served by the WhatsApp Web backend.
 ///
-/// Set `phone_number_id` for Cloud API mode, or `session_path` for Web mode.
+/// An alias starts only when it carries a Web selector (`session_path`,
+/// `pair_phone`, `pair_code`, `ws_url` or `mode = "personal"`). The former
+/// Cloud API fields (`access_token`, `phone_number_id`, `verify_token`,
+/// `app_secret`, `proxy_url`) were retired with that backend; a leftover one
+/// is ignored with a `whatsapp_cloud_backend_removed` warning.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "channels.whatsapp"]
@@ -14233,32 +14233,7 @@ pub struct WhatsAppConfig {
     #[tab(Behavior)]
     #[serde(default)]
     pub enabled: bool,
-    /// Access token from Meta Business Suite (Cloud API mode)
-    #[serde(default)]
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub access_token: Option<String>,
-    /// Phone number ID from Meta Business API (Cloud API mode)
-    #[tab(Connection)]
-    #[serde(default)]
-    pub phone_number_id: Option<String>,
-    /// Webhook verify token (you define this, Meta sends it back for verification)
-    /// Only used in Cloud API mode
-    #[serde(default)]
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub verify_token: Option<String>,
-    /// App secret from Meta Business Suite (for webhook signature verification)
-    /// Can also be set via `ZEROCLAW_WHATSAPP_APP_SECRET` environment variable
-    /// Only used in Cloud API mode
-    #[serde(default)]
-    #[secret]
-    #[tab(Connection)]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub app_secret: Option<String>,
-    /// Session database path for WhatsApp Web client (Web mode)
+    /// Session database path for the WhatsApp Web client.
     /// When set, enables native WhatsApp Web mode with wa-rs
     #[tab(Connection)]
     #[serde(default)]
@@ -14343,12 +14318,9 @@ pub struct WhatsAppConfig {
     #[tab(Advanced)]
     #[serde(default)]
     pub allowed_groups: Vec<String>,
-    /// Per-channel proxy URL (http, https, socks5, socks5h).
-    /// Overrides the global `[proxy]` setting for this channel only.
-    #[tab(Advanced)]
-    #[serde(default)]
-    pub proxy_url: Option<String>,
     /// Seconds to wait for operator approval on `always_ask` tools before auto-denying.
+    /// Currently inert: the WhatsApp Web backend has no interactive approval
+    /// prompt, so `always_ask` tools fall back to the default policy.
     #[tab(Behavior)]
     #[serde(default = "default_channel_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
@@ -14376,7 +14348,7 @@ impl ChannelConfig for WhatsAppConfig {
         "WhatsApp"
     }
     fn desc() -> &'static str {
-        "Business Cloud API"
+        "native WhatsApp Web (wa-rs)"
     }
 }
 
@@ -14393,26 +14365,6 @@ impl_reply_pacing!(
 );
 
 impl WhatsAppConfig {
-    /// Detect which backend to use based on config fields.
-    /// Cloud API when `phone_number_id` is set; otherwise Web when any
-    /// Web-only selector (`session_path`, `pair_phone`, `pair_code`,
-    /// `ws_url`, or `mode = personal`) is present. Falls back to Cloud
-    /// for an otherwise-empty config (env-injected Cloud credentials).
-    pub fn backend_type(&self) -> &'static str {
-        if self.phone_number_id.is_some() {
-            "cloud"
-        } else if self.has_web_selector() {
-            "web"
-        } else {
-            "cloud"
-        }
-    }
-
-    /// Check if this is a valid Cloud API config
-    pub fn is_cloud_config(&self) -> bool {
-        self.phone_number_id.is_some() && self.access_token.is_some() && self.verify_token.is_some()
-    }
-
     /// Any Web-only selector that signals WhatsApp Web intent. `mode`
     /// defaults to `Business` on every config, so only a non-default
     /// `Personal` mode counts; the rest are `Option` fields absent by
@@ -14426,16 +14378,11 @@ impl WhatsAppConfig {
     }
 
     /// Check if this is a valid Web config. The Web client defaults a
-    /// missing `session_path`, so any Web selector is sufficient.
+    /// missing `session_path`, so any Web selector is sufficient. An alias
+    /// without one (for example a leftover Cloud API alias whose retired
+    /// fields were dropped at load) is not started.
     pub fn is_web_config(&self) -> bool {
         self.has_web_selector()
-    }
-
-    /// Returns true when both Cloud and Web selectors are present.
-    ///
-    /// Runtime currently prefers Cloud mode in this case for backward compatibility.
-    pub fn is_ambiguous_config(&self) -> bool {
-        self.phone_number_id.is_some() && self.has_web_selector()
     }
 }
 

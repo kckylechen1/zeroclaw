@@ -1,21 +1,14 @@
 # WhatsApp
 
-ZeroClaw supports two WhatsApp backends under the same `channels.whatsapp` config family:
+ZeroClaw connects to WhatsApp through the WhatsApp Web backend, configured under `[channels.whatsapp.<alias>]`. It links a regular WhatsApp account through the Web protocol.
 
-| Mode | Use it when | Required selector |
-|---|---|---|
-| WhatsApp Cloud API | You have a Meta Business app and WhatsApp Business phone number ID | `phone_number_id` |
-| WhatsApp Web | You want to link a regular WhatsApp account through the Web protocol | `session_path` |
+An alias starts only when it sets a Web selector: `session_path`, `pair_phone`, `pair_code`, `ws_url`, or `mode = "personal"`. An alias without one is skipped with a warning.
 
-Do not configure both selectors in the same channel unless you intentionally want Cloud API mode to win for backward compatibility.
+The WhatsApp Cloud API (Meta Business) backend was removed together with its gateway webhook route. Its fields (`access_token`, `phone_number_id`, `verify_token`, `app_secret`, `proxy_url`) are ignored with a `whatsapp_cloud_backend_removed` config warning. Remove them and set a Web selector to keep using the alias.
 
 ## Who can talk to the agent
 
 {{#peer-group whatsapp}}
-
-## Cloud API mode
-
-Cloud API mode received messages through the gateway's `/whatsapp/<alias>` Meta webhook, which was removed (#375). Use Web mode.
 
 ## Web mode
 
@@ -23,7 +16,7 @@ WhatsApp Web mode links a regular WhatsApp account through the optional Web back
 
 On first start, the Web backend pairs the account using QR or pair-code linking (`pair_phone` seeds pair-code linking; leave it unset for QR). Keep `session_path` on persistent storage; removing it forces a fresh device link. Bind the channel to an agent via that agent's `channels` list.
 
-The shared `interrupt_on_new_message` option applies to both Cloud API mode and Web mode. When enabled, a newer WhatsApp message from the same sender/chat cancels the in-flight response.
+When `interrupt_on_new_message` is enabled, a newer WhatsApp message from the same sender/chat cancels the in-flight response.
 
 ## Personal and business behavior
 
@@ -61,13 +54,9 @@ allowed_groups = ["120363012345678901@g.us", "120363098765432109"]
 
 {{#config-where channels whatsapp}}
 
-{{#secret-config channels.whatsapp.<alias>.access_token}}
-
-The same applies to `verify_token` and `app_secret` (Cloud API).
-
 ## Start and check
 
-After configuring one mode, start the channel runner:
+After configuring the channel, start the channel runner:
 
 <div class="os-tabs-src">
 
@@ -79,4 +68,4 @@ zeroclaw channel start
 
 </div>
 
-Use `zeroclaw channel doctor` for a first check. For Web mode, also confirm the binary was built with `whatsapp-web`; for Cloud API mode, confirm the webhook tunnel and Meta verify token agree.
+Use `zeroclaw channel doctor` for a first check, and confirm the binary was built with `whatsapp-web`.

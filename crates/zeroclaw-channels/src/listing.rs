@@ -54,13 +54,10 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
         compiled: cfg!(feature = "channel-signal"),
     },
     ChannelCompileSpec {
-        schema_name: Some("WhatsApp"),
-        type_keys: &["whatsapp"],
-        compiled: cfg!(feature = "channel-whatsapp-cloud"),
-    },
-    ChannelCompileSpec {
+        // `[channels.whatsapp.<alias>]` is served only by the WhatsApp Web
+        // backend, so the config type key shares its compile flag.
         schema_name: Some("WhatsApp Web"),
-        type_keys: &["whatsapp-web", "whatsapp_web"],
+        type_keys: &["whatsapp", "whatsapp-web", "whatsapp_web"],
         compiled: cfg!(feature = "whatsapp-web"),
     },
     ChannelCompileSpec {

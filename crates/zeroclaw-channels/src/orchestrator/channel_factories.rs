@@ -70,8 +70,6 @@ use super::WeComChannel;
 use super::WeComWsChannel;
 #[cfg(feature = "channel-webhook")]
 use super::WebhookChannel;
-#[cfg(feature = "channel-whatsapp-cloud")]
-use super::WhatsAppChannel;
 #[cfg(feature = "whatsapp-web")]
 use super::WhatsAppWebChannel;
 
@@ -652,7 +650,7 @@ pub(crate) fn collect_configured_channels(
         );
     }
 
-    #[cfg(any(feature = "channel-whatsapp-cloud", feature = "whatsapp-web"))]
+    #[cfg(feature = "whatsapp-web")]
     for (alias, wa) in &config.channels.whatsapp {
         if !active_channel_aliases.contains(&format!("whatsapp.{alias}")) {
             continue;
@@ -660,147 +658,70 @@ pub(crate) fn collect_configured_channels(
         if !wa.enabled {
             continue;
         }
-        if wa.is_ambiguous_config() {
+        // WhatsApp Web is the only backend. An alias without any Web
+        // selector is most likely a leftover Cloud API config (whose
+        // fields are now retired and reported by the config tombstone),
+        // so it is skipped instead of silently starting a new Web pairing.
+        if !wa.is_web_config() {
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "WhatsApp config has both phone_number_id (Cloud) and a Web selector (session_path/pair_phone/pair_code/ws_url/mode=personal) set; preferring Cloud API mode. Remove one selector to avoid ambiguity."
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"alias": alias})),
+                "WhatsApp channel has no Web selector (session_path, pair_phone, pair_code, ws_url or mode = \"personal\"); skipping it. The WhatsApp Cloud API backend was removed; configure WhatsApp Web instead."
             );
+            continue;
         }
-        // Runtime negotiation: detect backend type from config
-        match wa.backend_type() {
-            #[cfg(feature = "channel-whatsapp-cloud")]
-            "cloud" => {
-                // Cloud API mode: requires phone_number_id, access_token, verify_token
-                if wa.is_cloud_config() {
-                    let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                        let cfg_arc = config_arc.clone();
-                        let alias = alias.clone();
-                        Arc::new(move || cfg_arc.read().channel_external_peers("whatsapp", &alias))
-                    };
-                    channels.push(ConfiguredChannel {
-                        display_name: "WhatsApp",
-                        alias: Some(alias.clone()),
-                        channel: crate::paced_channel::PacedChannel::wrap(
-                            Arc::new(
-                                WhatsAppChannel::new(
-                                    wa.access_token.clone().unwrap_or_default(),
-                                    wa.phone_number_id.clone().unwrap_or_default(),
-                                    wa.verify_token.clone().unwrap_or_default(),
-                                    alias.clone(),
-                                    peer_resolver,
-                                )
-                                .with_proxy_url(wa.proxy_url.clone())
-                                .with_dm_mention_patterns(wa.dm_mention_patterns.clone())
-                                .with_group_mention_patterns(wa.group_mention_patterns.clone())
-                                .with_approval_timeout_secs(wa.approval_timeout_secs),
-                            ),
-                            wa,
-                        ),
-                    });
-                } else {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "WhatsApp Cloud API configured but missing required fields (phone_number_id, access_token, verify_token)"
-                    );
-                }
-                #[cfg(not(feature = "channel-whatsapp-cloud"))]
-                {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "WhatsApp Cloud API backend requires 'channel-whatsapp-cloud' feature. Build/run with --features channel-whatsapp-cloud"
-                    );
-                }
-            }
-            #[cfg(not(feature = "channel-whatsapp-cloud"))]
-            "cloud" => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                    "WhatsApp Cloud API is configured but this build was compiled without `channel-whatsapp-cloud`; skipping WhatsApp Cloud."
-                );
-            }
-            "web" => {
-                // Web mode: requires session_path
-                #[cfg(feature = "whatsapp-web")]
-                if wa.is_web_config() {
-                    let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                        let cfg_arc = config_arc.clone();
-                        let alias = alias.clone();
-                        Arc::new(move || cfg_arc.read().channel_external_peers("whatsapp", &alias))
-                    };
-                    let workspace_dir = config.channel_workspace_dir(&format!("whatsapp.{alias}"));
-                    let allowed_groups_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                        let cfg_arc = config_arc.clone();
-                        let alias = alias.clone();
-                        Arc::new(move || {
-                            cfg_arc
-                                .read()
-                                .channels
-                                .whatsapp
-                                .get(&alias)
-                                .map(|wa| wa.allowed_groups.clone())
-                                .unwrap_or_default()
-                        })
-                    };
-                    channels.push(ConfiguredChannel {
-                        display_name: "WhatsApp",
-                        alias: Some(alias.clone()),
-                        channel: crate::paced_channel::PacedChannel::wrap(
-                            Arc::new(
-                                WhatsAppWebChannel::new(
-                                    wa,
-                                    alias.clone(),
-                                    peer_resolver,
-                                    allowed_groups_resolver,
-                                )
-                                .with_persistence(config_arc.clone())
-                                .with_transcription(config.transcription.clone())
-                                .with_tts(&config)
-                                .with_workspace_dir(workspace_dir)
-                                .with_dm_mention_patterns(wa.dm_mention_patterns.clone())
-                                .with_group_mention_patterns(wa.group_mention_patterns.clone()),
-                            ),
-                            wa,
-                        ),
-                    });
-                } else {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "WhatsApp Web configured but session_path not set"
-                    );
-                }
-                #[cfg(not(feature = "whatsapp-web"))]
-                {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "WhatsApp Web backend requires 'whatsapp-web' feature. Enable with: cargo build --features whatsapp-web"
-                    );
-                    eprintln!(
-                        "  ⚠ WhatsApp Web is configured but the 'whatsapp-web' feature is not compiled in."
-                    );
-                    eprintln!("    Rebuild with: cargo build --features whatsapp-web");
-                }
-            }
-            _ => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                    "WhatsApp config invalid: neither phone_number_id (Cloud API) nor session_path (Web) is set"
-                );
-            }
-        }
+        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
+            let cfg_arc = config_arc.clone();
+            let alias = alias.clone();
+            Arc::new(move || cfg_arc.read().channel_external_peers("whatsapp", &alias))
+        };
+        let workspace_dir = config.channel_workspace_dir(&format!("whatsapp.{alias}"));
+        let allowed_groups_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
+            let cfg_arc = config_arc.clone();
+            let alias = alias.clone();
+            Arc::new(move || {
+                cfg_arc
+                    .read()
+                    .channels
+                    .whatsapp
+                    .get(&alias)
+                    .map(|wa| wa.allowed_groups.clone())
+                    .unwrap_or_default()
+            })
+        };
+        channels.push(ConfiguredChannel {
+            display_name: "WhatsApp",
+            alias: Some(alias.clone()),
+            channel: crate::paced_channel::PacedChannel::wrap(
+                Arc::new(
+                    WhatsAppWebChannel::new(
+                        wa,
+                        alias.clone(),
+                        peer_resolver,
+                        allowed_groups_resolver,
+                    )
+                    .with_persistence(config_arc.clone())
+                    .with_transcription(config.transcription.clone())
+                    .with_tts(&config)
+                    .with_workspace_dir(workspace_dir)
+                    .with_dm_mention_patterns(wa.dm_mention_patterns.clone())
+                    .with_group_mention_patterns(wa.group_mention_patterns.clone()),
+                ),
+                wa,
+            ),
+        });
+    }
+    #[cfg(not(feature = "whatsapp-web"))]
+    if !config.channels.whatsapp.is_empty() {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+            "WhatsApp channel is configured but this build was compiled without \
+             `whatsapp-web`; skipping WhatsApp. Enable with: cargo build --features whatsapp-web"
+        );
     }
 
     #[cfg(feature = "channel-email")]

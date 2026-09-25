@@ -14,7 +14,7 @@
 //! are resolved from the canonical `Config` per call; nothing is cached.
 //!
 //! Channels that cannot relink — webhook-token channels, bot-token channels,
-//! the WhatsApp Cloud API backend, or channels whose feature is not compiled
+//! a WhatsApp alias with no Web selector, or channels whose feature is not compiled
 //! into this binary — never resolve to a [`QrPairingChannel`] key
 //! ([`crate::listing::qr_pairing_channel`] returns `None`), so they never
 //! reach this hook and **nothing is touched**: no files are removed, no
@@ -133,7 +133,7 @@ mod tests {
         assert_eq!(
             crate::listing::qr_pairing_channel("whatsapp"),
             None,
-            "the Cloud API backend has no on-disk session to clear"
+            "the bare config type key never resolves; Web aliases use `whatsapp-web`"
         );
     }
 
