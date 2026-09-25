@@ -10,6 +10,9 @@ pub struct ProtectedLiteral {
 const DOC_LOCAL_TERMS: &[&str] = &[
     "ZeroClaw",
     "ZeroClaw Maturity Framework",
+    // Kept protected after the WhatsApp Cloud API channel row left the
+    // channel registry (only "WhatsApp Web" remains there).
+    "WhatsApp",
     "ACP",
     "MCP",
     "TOML",

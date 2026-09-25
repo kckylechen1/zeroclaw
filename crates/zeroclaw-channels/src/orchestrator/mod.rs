@@ -135,8 +135,6 @@ pub use crate::wecom::WeComChannel;
 pub use crate::wecom_ws::WeComWsChannel;
 #[cfg(feature = "channel-wecom-ws")]
 use crate::wecom_ws::WeComWsRuntimePolicy;
-#[cfg(feature = "channel-whatsapp-cloud")]
-pub use crate::whatsapp::WhatsAppChannel;
 pub use zeroclaw_api::channel::{Channel, ChannelMessage, SendMessage};
 // Local channel types (in misc, not zeroclaw-channels)
 pub use crate::cli::CliChannel;

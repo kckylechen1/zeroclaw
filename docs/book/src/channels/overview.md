@@ -33,7 +33,6 @@ Real-time messaging where the agent can hold a conversation, get notified of new
 | LINE | `channel-line` | [LINE](./line.md) |
 | Signal | `channel-signal` | [Signal](./signal.md) |
 | Twitch | `channel-twitch` | No dedicated guide |
-| WhatsApp Cloud API | `channel-whatsapp-cloud` | [WhatsApp](./whatsapp.md) |
 | WhatsApp Web | `whatsapp-web` | [WhatsApp](./whatsapp.md) |
 | Discord, Slack, Telegram, iMessage, WeChat personal iLink Bot, DingTalk, Lark, QQ, IRC, Mochat, Notion | per channel | [Other chat platforms](./chat-others.md) |
 

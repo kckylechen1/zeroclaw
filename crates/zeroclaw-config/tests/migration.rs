@@ -1673,10 +1673,7 @@ allowed_from = ["+15551234567"]
 
 [channels.whatsapp]
 enabled = true
-phone_number_id = "id"
-business_account_id = "acct"
-access_token = "tok"
-verify_token = "v"
+session_path = "/var/lib/zeroclaw/whatsapp.db"
 allowed_numbers = ["+15551234567"]
 
 [channels.nostr]
@@ -1743,6 +1740,55 @@ allowed_senders = ["ops@example"]
             "channels.{channel_type}.default.{field_name} must be stripped after fold"
         );
     }
+}
+
+#[test]
+fn v2_whatsapp_cloud_fields_are_dropped_not_ported() {
+    // The WhatsApp Cloud API backend was deleted. V2 -> V3 must drop its
+    // fields from the WhatsApp table while the table itself, its Web
+    // fields and its allowlist fold keep migrating.
+    let v3 = migrate_v2(
+        r#"
+[channels.whatsapp]
+enabled = true
+access_token = "tok"
+phone_number_id = "id"
+verify_token = "v"
+app_secret = "sec"
+proxy_url = "socks5://127.0.0.1:1080"
+pair_phone = "15551234567"
+allowed_numbers = ["+15551234567"]
+"#,
+    );
+    let alias = v3
+        .get("channels")
+        .and_then(|c| c.get("whatsapp"))
+        .and_then(|w| w.get("default"))
+        .and_then(toml::Value::as_table)
+        .expect("channels.whatsapp.default survives");
+    for field in [
+        "access_token",
+        "phone_number_id",
+        "verify_token",
+        "app_secret",
+        "proxy_url",
+    ] {
+        assert!(alias.get(field).is_none(), "{field} must be dropped");
+    }
+    assert_eq!(
+        alias.get("pair_phone").and_then(toml::Value::as_str),
+        Some("15551234567")
+    );
+    assert_eq!(
+        alias.get("enabled").and_then(toml::Value::as_bool),
+        Some(true)
+    );
+    assert!(
+        v3.get("peer_groups")
+            .and_then(|g| g.get("whatsapp_default"))
+            .is_some(),
+        "allowed_numbers still folds into a peer group"
+    );
 }
 
 #[test]
@@ -2178,10 +2224,11 @@ fn generate_never_emits_retired_config_surfaces() {
     for target in 1..=CURRENT_SCHEMA_VERSION {
         let raw = generate(target, &GenerateOptions::default())
             .unwrap_or_else(|e| panic!("generate({target}) failed: {e:#}"));
-        let warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+        let mut warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+        warnings.extend(zeroclaw_config::validation_warnings::retired_field_tombstones(&raw));
         assert!(
             warnings.is_empty(),
-            "generate({target}) must not emit retired config surfaces: {warnings:?}"
+            "generate({target}) must not emit retired config surfaces or fields: {warnings:?}"
         );
     }
 }

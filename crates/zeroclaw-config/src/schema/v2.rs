@@ -1268,6 +1268,27 @@ fn apply_v2_to_v3_channel_folds(channel_type: &str, instance: &mut toml::Table) 
                 }
             }
         }
+        "whatsapp" => {
+            // The WhatsApp Cloud API backend was deleted (its gateway webhook
+            // route was removed). Drop its fields loudly instead of porting
+            // them into V3, where they would only surface as retired-field
+            // tombstones. The field set is the single retired-field table.
+            let dropped: Vec<&str> = crate::validation_warnings::RETIRED_CONFIG_FIELDS
+                .iter()
+                .filter_map(|(path, _)| path.strip_prefix("channels.whatsapp.*."))
+                .filter(|field| instance.remove(*field).is_some())
+                .collect();
+            if !dropped.is_empty() {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Skip)
+                        .with_attrs(::serde_json::json!({"fields": dropped})),
+                    "channels.whatsapp Cloud API fields dropped during migration: the \
+                     WhatsApp Cloud API backend was removed; configure WhatsApp Web \
+                     (session_path, pair_phone, pair_code, ws_url or mode = \"personal\")"
+                );
+            }
+        }
         _ => {}
     }
 }

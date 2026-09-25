@@ -443,10 +443,6 @@ curl -N -H "Authorization: Bearer <token>" http://127.0.0.1:42617/api/events
 
 These are incoming webhook endpoints for specific messaging channels. They're set up automatically when channels are configured.
 
-### WhatsApp (Meta Cloud API)
-- `GET /whatsapp` — verification (echoes `hub.challenge`)
-- `POST /whatsapp` — incoming messages (signature verified via `X-Hub-Signature-256`)
-
 ---
 
 ## Rate Limiting

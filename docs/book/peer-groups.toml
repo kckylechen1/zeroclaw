@@ -23,7 +23,7 @@ sender_example = "+15550100"
 
 [[channel]]
 key = "whatsapp"
-sender_desc = "a phone identifier (Cloud API) or the JID user part (Web mode)"
+sender_desc = "the JID user part (the phone number, without `@s.whatsapp.net`)"
 sender_example = "+15550100"
 
 [[channel]]

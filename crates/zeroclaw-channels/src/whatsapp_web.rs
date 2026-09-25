@@ -234,9 +234,7 @@ impl WhatsAppWebChannel {
     /// Invalid patterns are logged and skipped.
     #[cfg(feature = "whatsapp-web")]
     pub fn with_dm_mention_patterns(mut self, patterns: Vec<String>) -> Self {
-        self.dm_mention_patterns = Arc::new(
-            super::whatsapp::WhatsAppChannel::compile_mention_patterns(&patterns),
-        );
+        self.dm_mention_patterns = Arc::new(compile_mention_patterns(&patterns));
         self
     }
 
@@ -245,9 +243,7 @@ impl WhatsAppWebChannel {
     /// Invalid patterns are logged and skipped.
     #[cfg(feature = "whatsapp-web")]
     pub fn with_group_mention_patterns(mut self, patterns: Vec<String>) -> Self {
-        self.group_mention_patterns = Arc::new(
-            super::whatsapp::WhatsAppChannel::compile_mention_patterns(&patterns),
-        );
+        self.group_mention_patterns = Arc::new(compile_mention_patterns(&patterns));
         self
     }
 
@@ -1260,6 +1256,70 @@ impl WhatsAppWebChannel {
     }
 }
 
+/// Compile raw mention-pattern strings into case-insensitive regexes.
+/// Invalid or excessively large patterns are logged and skipped.
+#[cfg(feature = "whatsapp-web")]
+pub(crate) fn compile_mention_patterns(patterns: &[String]) -> Vec<regex::Regex> {
+    patterns
+        .iter()
+        .filter_map(|p| {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            match regex::RegexBuilder::new(trimmed)
+                .case_insensitive(true)
+                .size_limit(1 << 16) // 64 KiB — guard against ReDoS
+                .build()
+            {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                            .with_attrs(
+                                ::serde_json::json!({"trimmed": trimmed, "e": e.to_string()})
+                            ),
+                        "ignoring invalid mention_pattern"
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Check whether `text` matches any pattern in the given slice.
+#[cfg(feature = "whatsapp-web")]
+pub(crate) fn text_matches_patterns(patterns: &[regex::Regex], text: &str) -> bool {
+    patterns.iter().any(|re| re.is_match(text))
+}
+
+/// Mention gating for one inbound message: picks the group or DM pattern
+/// set, admits everything when that set is empty, and otherwise admits
+/// (unchanged) only content matching at least one pattern.
+#[cfg(feature = "whatsapp-web")]
+pub(crate) fn apply_mention_gating(
+    dm_patterns: &[regex::Regex],
+    group_patterns: &[regex::Regex],
+    content: &str,
+    is_group: bool,
+) -> Option<String> {
+    let patterns = if is_group {
+        group_patterns
+    } else {
+        dm_patterns
+    };
+    if patterns.is_empty() {
+        return Some(content.to_string());
+    }
+    if !text_matches_patterns(patterns, content) {
+        return None;
+    }
+    Some(content.to_string())
+}
+
 #[cfg(feature = "whatsapp-web")]
 fn fromme_outside_self_chat_is_operator_trigger(
     is_group: bool,
@@ -1275,7 +1335,7 @@ fn fromme_outside_self_chat_is_operator_trigger(
     if applicable.is_empty() {
         return false;
     }
-    super::whatsapp::WhatsAppChannel::text_matches_patterns(applicable, text)
+    text_matches_patterns(applicable, text)
 }
 
 #[cfg(feature = "whatsapp-web")]
@@ -2146,7 +2206,7 @@ impl Channel for WhatsAppWebChannel {
                                         false,
                                     );
                                 if !passive_context && passive_from_mention_gating_possible {
-                                    match super::whatsapp::WhatsAppChannel::apply_mention_gating(
+                                    match apply_mention_gating(
                                         &wa_dm_mention_patterns,
                                         &wa_group_mention_patterns,
                                         &content,
@@ -2220,7 +2280,7 @@ impl Channel for WhatsAppWebChannel {
                                 }
 
                                 if !passive_from_mention_gating_possible {
-                                    content = match super::whatsapp::WhatsAppChannel::apply_mention_gating(
+                                    content = match apply_mention_gating(
                                         &wa_dm_mention_patterns,
                                         &wa_group_mention_patterns,
                                         &content,
@@ -3958,5 +4018,139 @@ mod tests {
         assert!(!fromme_outside_self_chat_is_operator_trigger(
             false, &dm, &group, ""
         ));
+    }
+
+    // ── Mention-pattern gating helpers ──
+    // Moved here from the deleted WhatsApp Cloud API module; the Web
+    // backend is now their only caller.
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn compile_mention_patterns_accepts_valid_patterns() {
+        let patterns = compile_mention_patterns(&["@?ZeroClaw".into(), r"\+?15555550123".into()]);
+        assert_eq!(patterns.len(), 2);
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn compile_mention_patterns_skips_invalid_patterns() {
+        let patterns = compile_mention_patterns(&["@?ZeroClaw".into(), "[invalid".into()]);
+        assert_eq!(patterns.len(), 1);
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn compile_mention_patterns_skips_empty_patterns() {
+        let patterns = compile_mention_patterns(&["@?ZeroClaw".into(), "  ".into()]);
+        assert_eq!(patterns.len(), 1);
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn compile_mention_patterns_empty_vec() {
+        assert!(compile_mention_patterns(&[]).is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn text_matches_patterns_name_with_or_without_at() {
+        let pats = compile_mention_patterns(&["@?ZeroClaw".into()]);
+        assert!(text_matches_patterns(&pats, "Hello @ZeroClaw"));
+        assert!(text_matches_patterns(&pats, "Hello ZeroClaw"));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn text_matches_patterns_is_case_insensitive() {
+        let pats = compile_mention_patterns(&["@?ZeroClaw".into()]);
+        assert!(text_matches_patterns(&pats, "Hello @zeroclaw"));
+        assert!(text_matches_patterns(&pats, "Hello ZEROCLAW"));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn text_matches_patterns_no_match() {
+        let pats = compile_mention_patterns(&["@?ZeroClaw".into()]);
+        assert!(!text_matches_patterns(&pats, "Hello @otherbot"));
+        assert!(!text_matches_patterns(&pats, "Hello world"));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn text_matches_patterns_phone_pattern() {
+        let pats = compile_mention_patterns(&[r"\+?15555550123".into()]);
+        assert!(text_matches_patterns(&pats, "Hey +15555550123 help"));
+        assert!(text_matches_patterns(&pats, "Hey 15555550123 help"));
+        assert!(!text_matches_patterns(&pats, "Hey +19999999999 help"));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn text_matches_patterns_multiple_patterns() {
+        let pats = compile_mention_patterns(&["@?ZeroClaw".into(), r"\+?15555550123".into()]);
+        assert!(text_matches_patterns(&pats, "Hello @ZeroClaw"));
+        assert!(text_matches_patterns(&pats, "Hey +15555550123"));
+        assert!(!text_matches_patterns(&pats, "Hello world"));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn text_matches_patterns_empty_patterns_never_match() {
+        assert!(!text_matches_patterns(&[], "Hello @ZeroClaw"));
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn apply_mention_gating_group_patterns_gate_groups_only() {
+        let group = compile_mention_patterns(&["@?ZeroClaw".into()]);
+        // Group message without a mention is rejected.
+        assert_eq!(
+            apply_mention_gating(&[], &group, "Hello without mention", true),
+            None
+        );
+        // DMs pass through when only group patterns are set.
+        assert_eq!(
+            apply_mention_gating(&[], &group, "Hello without mention", false).as_deref(),
+            Some("Hello without mention")
+        );
+        // A matching group message is admitted with its content preserved,
+        // including a mid-sentence or mention-only body, case-insensitively.
+        for body in [
+            "@ZeroClaw what is the weather?",
+            "hey @zeroclaw, help",
+            "@ZeroClaw",
+        ] {
+            assert_eq!(
+                apply_mention_gating(&[], &group, body, true).as_deref(),
+                Some(body)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn apply_mention_gating_dm_patterns_gate_dms_only() {
+        let dm = compile_mention_patterns(&["@?ZeroClaw".into()]);
+        assert_eq!(apply_mention_gating(&dm, &[], "Hello", false), None);
+        assert_eq!(
+            apply_mention_gating(&dm, &[], "Hi @ZeroClaw", false).as_deref(),
+            Some("Hi @ZeroClaw")
+        );
+        // Group messages pass through when only DM patterns are set.
+        assert_eq!(
+            apply_mention_gating(&dm, &[], "Hello", true).as_deref(),
+            Some("Hello")
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn apply_mention_gating_without_patterns_admits_everything() {
+        for is_group in [true, false] {
+            assert_eq!(
+                apply_mention_gating(&[], &[], "anything", is_group).as_deref(),
+                Some("anything")
+            );
+        }
     }
 }

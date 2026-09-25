@@ -101,7 +101,7 @@ mod tests {
         assert_eq!(
             crate::listing::qr_pairing_channel("whatsapp"),
             None,
-            "the Cloud API backend has no on-disk session to probe"
+            "the bare config type key never resolves; Web aliases use `whatsapp-web`"
         );
     }
 
