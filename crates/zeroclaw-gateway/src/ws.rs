@@ -374,7 +374,6 @@ async fn handle_socket(
     // Every socket that opens this session with this agent shares one
     // conversation: one agent, one history, one running turn (#376).
     let conversation_key = format!("{session_key}\u{1f}{agent_alias}");
-    let mut restore_trim_event = None;
     let attached = state
         .ws_conversations
         .attach(&conversation_key, |seed| {
@@ -384,14 +383,13 @@ async fn handle_socket(
                 &agent_alias,
                 &session_key,
                 &session_cwd,
-                memory_session_id,
+                memory_session_id.clone(),
                 &stored_messages,
                 seed,
-                &mut restore_trim_event,
             )
         })
         .await;
-    let (mut subscription, created) = match attached {
+    let (mut subscription, restore_trim_event) = match attached {
         Ok(attached) => attached,
         Err(e) => {
             ::zeroclaw_log::record!(
@@ -422,12 +420,11 @@ async fn handle_socket(
     // Restoring history trims it at most once, when the conversation is
     // built. Only the socket that built it is told; later sockets join a
     // conversation whose history is already live.
-    if created
-        && let Some(zeroclaw_api::agent::TurnEvent::HistoryTrimmed {
-            dropped_messages,
-            kept_turns,
-            reason,
-        }) = restore_trim_event
+    if let Some(Some(zeroclaw_api::agent::TurnEvent::HistoryTrimmed {
+        dropped_messages,
+        kept_turns,
+        reason,
+    })) = restore_trim_event
     {
         let frame = history_trimmed_ws_frame(dropped_messages, kept_turns, &reason);
         let _ = sender.send(Message::Text(frame.to_string().into())).await;
@@ -536,7 +533,8 @@ struct WsTurnScope {
 }
 
 /// Build the agent for a new shared conversation and wire its approval
-/// prompts to the conversation's subscribers.
+/// prompts to the conversation's subscribers. Also returns the history-trim
+/// event from restoring the stored messages, if restoring trimmed them.
 #[allow(clippy::too_many_arguments)]
 async fn build_ws_session(
     config: &zeroclaw_config::schema::Config,
@@ -547,8 +545,7 @@ async fn build_ws_session(
     memory_session_id: String,
     stored_messages: &[zeroclaw_providers::ChatMessage],
     seed: Seed,
-    restore_trim_event: &mut Option<zeroclaw_api::agent::TurnEvent>,
-) -> anyhow::Result<WsSession> {
+) -> anyhow::Result<(WsSession, Option<zeroclaw_api::agent::TurnEvent>)> {
     let ws_memory = match resolve_ws_memory_handle(config, agent_alias).await {
         Ok(memory) => memory,
         Err(e) => {
@@ -582,9 +579,11 @@ async fn build_ws_session(
     // what lets ask_user/poll/escalate_to_human default to this conversation.
     agent.set_channel_name(WS_CHANNEL_KEY.to_string());
     agent.set_memory_session_id(Some(memory_session_id));
-    if !stored_messages.is_empty() {
-        *restore_trim_event = agent.seed_history_with_event(stored_messages);
-    }
+    let restore_trim_event = if stored_messages.is_empty() {
+        None
+    } else {
+        agent.seed_history_with_event(stored_messages)
+    };
 
     let Seed {
         pending_approvals,
@@ -626,7 +625,7 @@ async fn build_ws_session(
         );
     }
 
-    Ok(WsSession { agent, ws_memory })
+    Ok((WsSession { agent, ws_memory }, restore_trim_event))
 }
 
 /// Publish the approval channel's prompts to every subscriber. With no
@@ -2180,39 +2179,44 @@ mod tests {
         }
 
         async fn attach(&self) -> crate::ws_conversation::Subscription<WsSession> {
-            let provider = ScriptedProvider {
-                gate: Arc::clone(&self.gate),
-                seen: Arc::clone(&self.seen),
-            };
-            let workspace = self._tmp.path().to_path_buf();
             let (subscription, _) = self
                 .state
                 .ws_conversations
-                .attach(&self.scope.session_key, |_seed| async move {
-                    let memory_cfg = zeroclaw_config::schema::MemoryConfig {
-                        backend: "none".into(),
-                        ..Default::default()
+                .attach(&self.scope.session_key, |_seed| {
+                    let provider = ScriptedProvider {
+                        gate: Arc::clone(&self.gate),
+                        seen: Arc::clone(&self.seen),
                     };
-                    let mem: Arc<dyn zeroclaw_memory::Memory> = Arc::from(
-                        zeroclaw_memory::create_memory(&memory_cfg, &workspace, None).unwrap(),
-                    );
-                    let agent = zeroclaw_runtime::agent::Agent::builder()
-                        .model_provider(Box::new(provider))
-                        .tools(vec![])
-                        .memory(mem)
-                        .observer(Arc::new(zeroclaw_runtime::observability::NoopObserver))
-                        .tool_dispatcher(Box::new(
-                            zeroclaw_runtime::agent::dispatcher::NativeToolDispatcher,
+                    let workspace = self._tmp.path().to_path_buf();
+                    async move {
+                        let memory_cfg = zeroclaw_config::schema::MemoryConfig {
+                            backend: "none".into(),
+                            ..Default::default()
+                        };
+                        let mem: Arc<dyn zeroclaw_memory::Memory> = Arc::from(
+                            zeroclaw_memory::create_memory(&memory_cfg, &workspace, None).unwrap(),
+                        );
+                        let agent = zeroclaw_runtime::agent::Agent::builder()
+                            .model_provider(Box::new(provider))
+                            .tools(vec![])
+                            .memory(mem)
+                            .observer(Arc::new(zeroclaw_runtime::observability::NoopObserver))
+                            .tool_dispatcher(Box::new(
+                                zeroclaw_runtime::agent::dispatcher::NativeToolDispatcher,
+                            ))
+                            .workspace_dir(workspace)
+                            .model_name("test-model".into())
+                            .model_provider_name("scripted".into())
+                            .agent_alias("web".into())
+                            .build()?;
+                        Ok::<_, anyhow::Error>((
+                            WsSession {
+                                agent,
+                                ws_memory: None,
+                            },
+                            (),
                         ))
-                        .workspace_dir(workspace)
-                        .model_name("test-model".into())
-                        .model_provider_name("scripted".into())
-                        .agent_alias("web".into())
-                        .build()?;
-                    Ok::<_, anyhow::Error>(WsSession {
-                        agent,
-                        ws_memory: None,
-                    })
+                    }
                 })
                 .await
                 .unwrap();

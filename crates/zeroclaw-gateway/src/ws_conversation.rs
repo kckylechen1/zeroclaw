@@ -215,63 +215,81 @@ impl<A> Default for ConversationHub<A> {
 }
 
 impl<A> ConversationHub<A> {
-    /// Attach to the conversation for `key`, creating it with `create` if
-    /// no socket holds it. Returns the subscription and whether this call
-    /// created the conversation. A failed `create` leaves no entry behind.
-    pub(crate) async fn attach<F, Fut, E>(
+    /// Attach to the conversation for `key`, building it with `create` if no
+    /// socket holds it. `create` returns the agent state plus a value for
+    /// the caller; the caller gets that value back only when this call built
+    /// the conversation. A failed `create` leaves no entry behind.
+    pub(crate) async fn attach<F, Fut, X, E>(
         self: &Arc<Self>,
         key: &str,
-        create: F,
-    ) -> Result<(Subscription<A>, bool), E>
+        mut create: F,
+    ) -> Result<(Subscription<A>, Option<X>), E>
     where
-        F: FnOnce(Seed) -> Fut,
-        Fut: std::future::Future<Output = Result<A, E>>,
+        F: FnMut(Seed) -> Fut,
+        Fut: std::future::Future<Output = Result<(A, X), E>>,
     {
-        let slot = Arc::clone(
-            self.slots
-                .lock()
-                .entry(key.to_string())
-                .or_insert_with(|| Arc::new(OnceCell::new())),
-        );
-        let mut created = false;
-        let result = slot
-            .get_or_try_init(|| async {
-                let pending_approvals = new_pending_approvals();
-                let (frames, _) = broadcast::channel(FRAME_BUFFER);
-                let frames = FrameSink { frames };
-                let agent = create(Seed {
-                    pending_approvals: pending_approvals.clone(),
-                    frames: frames.clone(),
+        loop {
+            let slot = Arc::clone(
+                self.slots
+                    .lock()
+                    .entry(key.to_string())
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            );
+            let mut built = None;
+            let result = slot
+                .get_or_try_init(|| async {
+                    let pending_approvals = new_pending_approvals();
+                    let (frames, _) = broadcast::channel(FRAME_BUFFER);
+                    let frames = FrameSink { frames };
+                    let (agent, extra) = create(Seed {
+                        pending_approvals: pending_approvals.clone(),
+                        frames: frames.clone(),
+                    })
+                    .await?;
+                    built = Some(extra);
+                    Ok(Arc::new(Conversation::new(
+                        key.to_string(),
+                        agent,
+                        Seed {
+                            pending_approvals,
+                            frames,
+                        },
+                    )))
                 })
-                .await?;
-                created = true;
-                Ok(Arc::new(Conversation::new(
-                    key.to_string(),
-                    agent,
-                    Seed {
-                        pending_approvals,
-                        frames,
-                    },
-                )))
-            })
-            .await;
-        let conversation = match result {
-            Ok(conversation) => Arc::clone(conversation),
-            Err(err) => {
-                self.remove_empty_slot(key, &slot);
-                return Err(err);
+                .await;
+            let conversation = match result {
+                Ok(conversation) => Arc::clone(conversation),
+                Err(err) => {
+                    self.remove_empty_slot(key, &slot);
+                    return Err(err);
+                }
+            };
+
+            // Count the subscriber under the map lock, and only while the map
+            // still points at this conversation: an idle conversation can be
+            // released between the build above and here. A vacant key takes
+            // it back; a newer conversation under the key wins, and this
+            // attach joins that one instead.
+            let mut slots = self.slots.lock();
+            match slots.get(key) {
+                Some(held) if Arc::ptr_eq(held, &slot) => {}
+                Some(_) => continue,
+                None => {
+                    slots.insert(key.to_string(), Arc::clone(&slot));
+                }
             }
-        };
-        conversation.subscribers.fetch_add(1, Ordering::AcqRel);
-        let frames = conversation.frames.frames.subscribe();
-        Ok((
-            Subscription {
-                hub: Arc::clone(self),
-                conversation,
-                frames,
-            },
-            created,
-        ))
+            conversation.subscribers.fetch_add(1, Ordering::AcqRel);
+            let frames = conversation.frames.frames.subscribe();
+            drop(slots);
+            return Ok((
+                Subscription {
+                    hub: Arc::clone(self),
+                    conversation,
+                    frames,
+                },
+                built,
+            ));
+        }
     }
 
     /// Forget `conversation` once no socket is attached and no turn runs.
@@ -289,6 +307,8 @@ impl<A> ConversationHub<A> {
         }
     }
 
+    /// Drop a slot whose build failed. An attach still waiting on it builds
+    /// in it and puts it back (see [`Self::attach`]).
     fn remove_empty_slot(&self, key: &str, slot: &Slot<A>) {
         let mut slots = self.slots.lock();
         if slot.get().is_none() && slots.get(key).is_some_and(|held| Arc::ptr_eq(held, slot)) {
@@ -326,9 +346,11 @@ mod tests {
     use super::*;
 
     async fn attach(hub: &Arc<ConversationHub<()>>, key: &str) -> (Subscription<()>, bool) {
-        hub.attach(key, |_| async { Ok::<_, ()>(()) })
+        let (sub, built) = hub
+            .attach(key, |_| async { Ok::<_, ()>(((), ())) })
             .await
-            .unwrap()
+            .unwrap();
+        (sub, built.is_some())
     }
 
     #[tokio::test]
@@ -455,12 +477,43 @@ mod tests {
     async fn failed_creation_leaves_no_entry_and_can_be_retried() {
         let hub = Arc::new(ConversationHub::<()>::default());
         let err = hub
-            .attach("gw_s1", |_| async { Err::<(), _>("boom") })
+            .attach("gw_s1", |_| async { Err::<((), ()), _>("boom") })
             .await
             .err();
         assert_eq!(err, Some("boom"));
         assert_eq!(hub.len(), 0);
         let (_a, created) = attach(&hub, "gw_s1").await;
         assert!(created);
+    }
+
+    #[tokio::test]
+    async fn a_failed_build_keeps_the_slot_for_an_attach_waiting_on_it() {
+        let hub = Arc::new(ConversationHub::<()>::default());
+        let (fail_tx, fail_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut fail_rx = Some(fail_rx);
+        let failing = hub.attach("gw_s1", |_| {
+            let rx = fail_rx.take();
+            async move {
+                if let Some(rx) = rx {
+                    let _ = rx.await;
+                }
+                Err::<((), ()), _>("boom")
+            }
+        });
+        let waiting = async {
+            tokio::task::yield_now().await;
+            let _ = fail_tx.send(());
+            hub.attach("gw_s1", |_| async { Ok::<_, &str>(((), ())) })
+                .await
+        };
+        let (failed, joined) = tokio::join!(failing, waiting);
+        assert!(failed.is_err());
+        let (b, built) = joined.unwrap();
+        assert!(built.is_some());
+
+        // The waiting attach's conversation is the one the key maps to.
+        let (c, created) = attach(&hub, "gw_s1").await;
+        assert!(!created && Arc::ptr_eq(&b.conversation, &c.conversation));
+        assert_eq!(hub.len(), 1);
     }
 }
