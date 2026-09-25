@@ -21,6 +21,13 @@
 //! the owner writes an Identity revision; after that they are suppressed so
 //! there is one persona source.
 //!
+//! If the store cannot be opened or read, the outcome depends on whether it
+//! was ever initialized. With no `soul.db` yet (first run), the legacy files
+//! stay the persona source. With an existing `soul.db`, the identity it holds
+//! is unknown, so the projection degrades: legacy files stay suppressed, a
+//! fixed line says the identity is unavailable, and the configured Voice
+//! applies. Nothing replaces the damaged store; the next turn retries.
+//!
 //! [`PersonaKnobs`]: zeroclaw_config::persona::PersonaKnobs
 
 use std::collections::HashSet;
@@ -44,6 +51,12 @@ pub const GROWTH_FRAMING_LINE: &str = "These describe who you have become with y
 /// Fixed honesty floor rendered with every governed identity.
 pub const IDENTITY_HONESTY_LINE: &str = "If someone sincerely asks whether they are talking to an AI, \
      or which model is answering, tell them the truth.";
+
+/// Rendered in place of the Identity layer when an initialized Soul store
+/// cannot be read (#380 S13).
+pub const IDENTITY_UNAVAILABLE_LINE: &str = "Your identity record could not be loaded right now. \
+     Keep helping, but do not take on a different name or persona; if asked, \
+     say your identity settings are temporarily unavailable.";
 
 /// Legacy persona files that the governed Identity layer replaces.
 pub const LEGACY_PERSONA_FILES: &[&str] = &["SOUL.md", "IDENTITY.md"];
@@ -77,8 +90,9 @@ pub struct PersonaProjection {
 /// Resolve the persona projection for one agent.
 ///
 /// Seeds missing Soul layers on first use. Store failures never fail the
-/// turn: they log one WARN and fall back to the configured Voice dials plus
-/// the legacy files.
+/// turn: they log one WARN. Before the store exists they fall back to the
+/// configured Voice plus the legacy files; once it exists they degrade
+/// without reviving the legacy files (see the module docs).
 #[must_use]
 pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjection {
     let configured_voice = config
@@ -86,6 +100,12 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
         .copied()
         .unwrap_or_default();
 
+    // Whether a Soul store was ever created, decided before opening (opening
+    // creates the file on first run).
+    let initialized = config
+        .data_dir
+        .join(zeroclaw_memory::companion::SOUL_PROFILE_DB_FILE)
+        .exists();
     // The prompt path never creates the data directory: an install that has
     // not been set up (or a test using a default config) has no Soul yet.
     let profile = if config.data_dir.is_dir() {
@@ -103,12 +123,23 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
     };
     let profile = match profile {
         Ok(profile) => profile,
-        Err(err) => {
+        Err(err) if initialized => {
             warn_once(
                 &format!("store:{agent_alias}"),
                 "agent.soul_profile_unavailable",
                 &format!(
                     "Soul profile for agent {agent_alias} is unavailable ({err}); \
+                     running without an identity, legacy persona files stay suppressed"
+                ),
+            );
+            return degraded_projection(configured_voice);
+        }
+        Err(err) => {
+            warn_once(
+                &format!("store:{agent_alias}"),
+                "agent.soul_profile_unavailable",
+                &format!(
+                    "Soul profile for agent {agent_alias} could not be created ({err}); \
                      using configured voice and legacy persona files only"
                 ),
             );
@@ -152,6 +183,28 @@ pub fn persona_projection(config: &Config, agent_alias: &str) -> PersonaProjecti
     PersonaProjection {
         section,
         legacy_files,
+    }
+}
+
+/// The projection used when an initialized Soul store cannot be read: a
+/// fixed identity notice, the honesty floor, and the configured Voice.
+fn degraded_projection(
+    configured_voice: zeroclaw_config::persona::PersonaKnobs,
+) -> PersonaProjection {
+    let mut parts = vec![format!(
+        "## Identity\n\n{IDENTITY_UNAVAILABLE_LINE}\n{IDENTITY_HONESTY_LINE}\n"
+    )];
+    parts.extend(configured_voice.to_prompt_section());
+    PersonaProjection {
+        section: Some(
+            parts
+                .iter()
+                .map(|part| part.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+                + "\n",
+        ),
+        legacy_files: LegacyPersonaFiles::Suppress,
     }
 }
 
@@ -289,7 +342,8 @@ mod tests {
     use super::*;
     use zeroclaw_memory::companion::{
         DEFAULT_PRINCIPLES, SOUL_MAX_PRINCIPLES, SOUL_NAME_MAX_BYTES, SOUL_PRINCIPLE_MAX_BYTES,
-        SOUL_SELF_DESCRIPTION_MAX_BYTES, SOUL_SHORT_FIELD_MAX_BYTES, SoulIdentity, SoulPrinciples,
+        SOUL_PROFILE_DB_FILE, SOUL_SELF_DESCRIPTION_MAX_BYTES, SOUL_SHORT_FIELD_MAX_BYTES,
+        SoulIdentity, SoulPrinciples,
     };
 
     fn config_in(dir: &Path) -> Config {
@@ -367,12 +421,20 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_store_falls_back_to_voice_and_legacy_files() {
+    fn store_that_cannot_be_created_falls_back_to_voice_and_legacy_files() {
         let dir = tempfile::tempdir().unwrap();
-        // A directory whose store file cannot be opened as a database.
+        // A read-only data dir: first-run creation of soul.db fails.
         let config = config_in(dir.path());
-        std::fs::create_dir_all(config.data_dir.join("soul.db")).unwrap();
+        let mut perms = std::fs::metadata(&config.data_dir).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&config.data_dir, perms.clone()).unwrap();
         let projection = persona_projection(&config, "nova");
+        perms.set_readonly(false);
+        std::fs::set_permissions(&config.data_dir, perms).unwrap();
+        if config.data_dir.join(SOUL_PROFILE_DB_FILE).exists() {
+            // Running as root: permissions do not stop creation.
+            return;
+        }
         assert_eq!(projection.legacy_files, LegacyPersonaFiles::Inject);
         assert!(
             projection
@@ -380,6 +442,72 @@ mod tests {
                 .as_deref()
                 .is_none_or(|s| !s.contains("## Identity"))
         );
+    }
+
+    #[test]
+    fn unopenable_initialized_store_degrades_too() {
+        let dir = tempfile::tempdir().unwrap();
+        // soul.db exists but is a directory, so it cannot be opened.
+        let config = config_in(dir.path());
+        std::fs::create_dir_all(config.data_dir.join(SOUL_PROFILE_DB_FILE)).unwrap();
+        let projection = persona_projection(&config, "nova");
+        assert_eq!(projection.legacy_files, LegacyPersonaFiles::Suppress);
+        assert!(
+            projection
+                .section
+                .unwrap()
+                .contains(IDENTITY_UNAVAILABLE_LINE)
+        );
+    }
+
+    /// Initialize `config`'s Soul with an owner-authored identity, using a
+    /// private handle so the process-wide cache holds nothing for this dir.
+    fn init_owner_identity(config: &Config) {
+        let store = SoulProfileStore::open(&config.data_dir).unwrap();
+        store.ensure_seeded("nova", "nova", 1).unwrap();
+        store
+            .set_identity(
+                "nova",
+                SoulIdentity {
+                    name: "Nova".into(),
+                    self_description: None,
+                    primary_language: None,
+                    pronouns: None,
+                },
+                1,
+                2,
+            )
+            .unwrap();
+    }
+
+    /// #380 S13: an initialized Soul that becomes unreadable must not revive
+    /// the retired legacy persona files or be replaced by a fresh store.
+    #[test]
+    fn unreadable_initialized_store_degrades_without_reviving_legacy_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        init_owner_identity(&config);
+        let db = config.data_dir.join(SOUL_PROFILE_DB_FILE);
+        let good = std::fs::read(&db).unwrap();
+        std::fs::write(&db, b"this is not a sqlite database").unwrap();
+
+        let projection = persona_projection(&config, "nova");
+        assert_eq!(projection.legacy_files, LegacyPersonaFiles::Suppress);
+        let section = projection.section.unwrap();
+        assert!(section.contains(IDENTITY_UNAVAILABLE_LINE), "{section}");
+        assert!(section.contains(IDENTITY_HONESTY_LINE));
+        assert!(!section.contains("You are nova."));
+        // No fallback store replaced the damaged one.
+        assert_eq!(
+            std::fs::read(&db).unwrap(),
+            b"this is not a sqlite database".to_vec()
+        );
+
+        // Once the store is readable again the owner identity is back.
+        std::fs::write(&db, good).unwrap();
+        let projection = persona_projection(&config, "nova");
+        assert_eq!(projection.legacy_files, LegacyPersonaFiles::Suppress);
+        assert!(projection.section.unwrap().contains("You are Nova."));
     }
 
     #[test]
