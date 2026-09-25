@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{OnceCell, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use zeroclaw_api::channel::ChannelApprovalResponse;
+use zeroclaw_infra::session_backend::RequestReceipt;
 
 /// A serialized JSON frame, shared by every subscriber.
 pub(crate) type Frame = Arc<str>;
@@ -34,6 +35,40 @@ const FRAME_BUFFER: usize = 1024;
 
 /// Steering messages queued for a running turn.
 const STEERING_BUFFER: usize = 32;
+
+/// Client request ids a conversation remembers when the session store keeps
+/// no receipts. Mirrors the SQLite backend's per-session bound.
+const RECENT_REQUESTS: usize = 256;
+
+/// Recently accepted client request ids and their last state, in arrival
+/// order. The in-memory stand-in for the session store's receipts: it
+/// catches a retry on a live conversation, not one after a restart.
+#[derive(Default)]
+struct RecentRequests {
+    entries: std::collections::VecDeque<(String, String)>,
+}
+
+impl RecentRequests {
+    fn record(&mut self, request_id: &str, state: &str) -> RequestReceipt {
+        if let Some((_, known)) = self.entries.iter().find(|(id, _)| id == request_id) {
+            return RequestReceipt::Duplicate {
+                state: known.clone(),
+            };
+        }
+        if self.entries.len() == RECENT_REQUESTS {
+            self.entries.pop_front();
+        }
+        self.entries
+            .push_back((request_id.to_string(), state.to_string()));
+        RequestReceipt::Recorded
+    }
+
+    fn set_state(&mut self, request_id: &str, state: &str) {
+        if let Some((_, known)) = self.entries.iter_mut().find(|(id, _)| id == request_id) {
+            *known = state.to_string();
+        }
+    }
+}
 
 /// Publishes frames to every subscriber of one conversation.
 #[derive(Clone)]
@@ -81,6 +116,8 @@ pub(crate) enum Submitted {
 pub(crate) struct TurnClaim {
     /// The message that starts the turn.
     pub(crate) input: String,
+    /// The client's id for that message, if it sent one.
+    pub(crate) request_id: Option<String>,
     pub(crate) generation: u64,
     pub(crate) cancel: CancellationToken,
     pub(crate) steering: mpsc::Receiver<String>,
@@ -95,6 +132,7 @@ pub(crate) struct Conversation<A> {
     turn: parking_lot::Mutex<Option<ActiveTurn>>,
     next_generation: AtomicU64,
     subscribers: AtomicUsize,
+    requests: parking_lot::Mutex<RecentRequests>,
 }
 
 impl<A> Conversation<A> {
@@ -111,6 +149,7 @@ impl<A> Conversation<A> {
             turn: parking_lot::Mutex::new(None),
             next_generation: AtomicU64::new(1),
             subscribers: AtomicUsize::new(0),
+            requests: parking_lot::Mutex::default(),
         }
     }
 
@@ -145,6 +184,7 @@ impl<A> Conversation<A> {
         });
         Submitted::Start(TurnClaim {
             input: content,
+            request_id: None,
             generation,
             cancel,
             steering: steering_rx,
@@ -192,6 +232,16 @@ impl<A> Conversation<A> {
     pub(crate) fn drain_approvals(&self) {
         let drained: Vec<_> = self.pending_approvals.lock().drain().collect();
         drop(drained);
+    }
+
+    /// Remember a client request id in memory. For sessions whose store
+    /// keeps no receipts; see [`RecentRequests`].
+    pub(crate) fn record_request(&self, request_id: &str, state: &str) -> RequestReceipt {
+        self.requests.lock().record(request_id, state)
+    }
+
+    pub(crate) fn set_request_state(&self, request_id: &str, state: &str) {
+        self.requests.lock().set_state(request_id, state);
     }
 
     pub(crate) fn subscriber_count(&self) -> usize {
@@ -515,5 +565,30 @@ mod tests {
         let (c, created) = attach(&hub, "gw_s1").await;
         assert!(!created && Arc::ptr_eq(&b.conversation, &c.conversation));
         assert_eq!(hub.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn remembered_requests_report_duplicates_and_stay_bounded() {
+        let hub = Arc::new(ConversationHub::<()>::default());
+        let (a, _) = attach(&hub, "gw_s1").await;
+        let conv = &a.conversation;
+        assert_eq!(
+            conv.record_request("r1", "accepted"),
+            RequestReceipt::Recorded
+        );
+        conv.set_request_state("r1", "done");
+        assert_eq!(
+            conv.record_request("r1", "accepted"),
+            RequestReceipt::Duplicate {
+                state: "done".into()
+            }
+        );
+        for i in 2..=RECENT_REQUESTS + 1 {
+            conv.record_request(&format!("r{i}"), "accepted");
+        }
+        assert_eq!(
+            conv.record_request("r1", "accepted"),
+            RequestReceipt::Recorded
+        );
     }
 }

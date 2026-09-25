@@ -1,7 +1,7 @@
 //! SQLite-backed session persistence with FTS5 search.
 
 use crate::session_backend::{
-    SessionBackend, SessionContext, SessionMetadata, SessionQuery, SessionState,
+    RequestReceipt, SessionBackend, SessionContext, SessionMetadata, SessionQuery, SessionState,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -9,6 +9,9 @@ use parking_lot::Mutex;
 use rusqlite::{Connection, params};
 use std::path::Path;
 use zeroclaw_api::model_provider::ChatMessage;
+
+/// Request receipts kept per session (see `record_request`).
+const REQUEST_RECEIPTS_PER_SESSION: i64 = 256;
 
 /// SQLite-backed session store with FTS5 and WAL mode.
 pub struct SqliteSessionBackend {
@@ -49,6 +52,15 @@ impl SqliteSessionBackend {
                 last_activity TEXT NOT NULL,
                 message_count INTEGER NOT NULL DEFAULT 0,
                 name         TEXT
+             );
+
+             CREATE TABLE IF NOT EXISTS session_requests (
+                session_key TEXT NOT NULL,
+                request_id  TEXT NOT NULL,
+                state       TEXT NOT NULL,
+                accepted_at TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY (session_key, request_id)
              );
 
              CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
@@ -517,6 +529,12 @@ impl SessionBackend for SqliteSessionBackend {
         )
         .map_err(std::io::Error::other)?;
 
+        conn.execute(
+            "DELETE FROM session_requests WHERE session_key = ?1",
+            params![session_key],
+        )
+        .map_err(std::io::Error::other)?;
+
         Ok(true)
     }
 
@@ -645,6 +663,63 @@ impl SessionBackend for SqliteSessionBackend {
             "UPDATE session_metadata SET state = ?1, turn_id = ?2, turn_started_at = ?3
              WHERE session_key = ?4",
             params![state, turn_id, started_at, session_key],
+        )
+        .map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    fn record_request(
+        &self,
+        session_key: &str,
+        request_id: &str,
+        state: &str,
+    ) -> std::io::Result<Option<RequestReceipt>> {
+        let conn = self.conn.lock();
+        let now = Utc::now().to_rfc3339();
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO session_requests
+                    (session_key, request_id, state, accepted_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![session_key, request_id, state, now],
+            )
+            .map_err(std::io::Error::other)?;
+        if inserted == 0 {
+            let state: String = conn
+                .query_row(
+                    "SELECT state FROM session_requests
+                     WHERE session_key = ?1 AND request_id = ?2",
+                    params![session_key, request_id],
+                    |row| row.get(0),
+                )
+                .map_err(std::io::Error::other)?;
+            return Ok(Some(RequestReceipt::Duplicate { state }));
+        }
+        // Keep only the most recent receipts per session: enough to catch a
+        // client retrying after a lost ACK, bounded for long sessions.
+        conn.execute(
+            "DELETE FROM session_requests
+             WHERE session_key = ?1 AND rowid NOT IN (
+                SELECT rowid FROM session_requests WHERE session_key = ?1
+                ORDER BY rowid DESC LIMIT ?2
+             )",
+            params![session_key, REQUEST_RECEIPTS_PER_SESSION],
+        )
+        .map_err(std::io::Error::other)?;
+        Ok(Some(RequestReceipt::Recorded))
+    }
+
+    fn set_request_state(
+        &self,
+        session_key: &str,
+        request_id: &str,
+        state: &str,
+    ) -> std::io::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE session_requests SET state = ?1, updated_at = ?2
+             WHERE session_key = ?3 AND request_id = ?4",
+            params![state, Utc::now().to_rfc3339(), session_key, request_id],
         )
         .map_err(std::io::Error::other)?;
         Ok(())
@@ -1124,6 +1199,70 @@ mod tests {
         // Metadata count should reflect the new message
         let meta = backend.list_sessions_with_metadata();
         assert_eq!(meta[0].message_count, 1);
+    }
+
+    #[test]
+    fn request_receipts_record_once_and_report_duplicates_with_state() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+
+        assert_eq!(
+            backend.record_request("s1", "r1", "accepted").unwrap(),
+            Some(RequestReceipt::Recorded)
+        );
+        // The same id on another session is a different request.
+        assert_eq!(
+            backend.record_request("s2", "r1", "accepted").unwrap(),
+            Some(RequestReceipt::Recorded)
+        );
+        backend.set_request_state("s1", "r1", "done").unwrap();
+        assert_eq!(
+            backend.record_request("s1", "r1", "accepted").unwrap(),
+            Some(RequestReceipt::Duplicate {
+                state: "done".into()
+            })
+        );
+
+        // Receipts survive reopening the database.
+        drop(backend);
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        assert!(matches!(
+            backend.record_request("s1", "r1", "accepted").unwrap(),
+            Some(RequestReceipt::Duplicate { .. })
+        ));
+    }
+
+    #[test]
+    fn request_receipts_are_bounded_and_deleted_with_the_session() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        backend.append("s1", &ChatMessage::user("hello")).unwrap();
+        for i in 0..=REQUEST_RECEIPTS_PER_SESSION {
+            backend
+                .record_request("s1", &format!("r{i}"), "accepted")
+                .unwrap();
+        }
+        // The oldest receipt fell out; the newest is kept.
+        assert_eq!(
+            backend.record_request("s1", "r0", "accepted").unwrap(),
+            Some(RequestReceipt::Recorded)
+        );
+        assert!(matches!(
+            backend
+                .record_request(
+                    "s1",
+                    &format!("r{REQUEST_RECEIPTS_PER_SESSION}"),
+                    "accepted"
+                )
+                .unwrap(),
+            Some(RequestReceipt::Duplicate { .. })
+        ));
+
+        assert!(backend.delete_session("s1").unwrap());
+        assert_eq!(
+            backend.record_request("s1", "r1", "accepted").unwrap(),
+            Some(RequestReceipt::Recorded)
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use zeroclaw_api::channel::ChannelApprovalResponse;
+use zeroclaw_infra::session_backend::RequestReceipt;
 
 /// Default wall-clock budget for the operator to answer an
 /// `approval_request` frame before the channel auto-denies. Mirrors the
@@ -509,8 +510,14 @@ async fn handle_socket(
             }
         }
 
-        if let Some(reply) = handle_client_text(&state, &subscription.conversation, &scope, &text) {
+        let (reply, start) = handle_client_text(&state, &subscription.conversation, &scope, &text);
+        // The ACK goes out before the turn starts, so it precedes the
+        // turn's frames on this socket.
+        if let Some(reply) = reply {
             let _ = sender.send(Message::Text(reply.to_string().into())).await;
+        }
+        if let Some(claim) = start {
+            start_ws_turns(&state, &subscription.conversation, &scope, claim);
         }
     }
 }
@@ -683,16 +690,20 @@ fn approval_request_ws_frame(
     })
 }
 
-/// Act on one client text frame. Returns an error frame for this socket
-/// only; everything else reaches the client through the conversation.
+/// Act on one client text frame. Returns the reply for this socket only (an
+/// `ack` or an error) and, when the frame starts a turn, the claim to run
+/// it with; everything else reaches the client through the conversation.
 fn handle_client_text(
     state: &AppState,
     conversation: &Arc<Conversation<WsSession>>,
     scope: &WsTurnScope,
     text: &str,
-) -> Option<serde_json::Value> {
+) -> (Option<serde_json::Value>, Option<TurnClaim>) {
     let error = |message: String, code: &str| {
-        Some(serde_json::json!({ "type": "error", "message": message, "code": code }))
+        (
+            Some(serde_json::json!({ "type": "error", "message": message, "code": code })),
+            None,
+        )
     };
     let parsed: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -729,43 +740,17 @@ fn handle_client_text(
                     "approval_response with no matching pending request"
                 );
             }
-            None
+            (None, None)
         }
         // ── cancel (stop the running turn for every subscriber) ──
         "cancel" => {
             if conversation.cancel_current() {
-                None
+                (None, None)
             } else {
                 error("No turn is running".into(), "NO_ACTIVE_TURN")
             }
         }
-        "message" => {
-            let content = parsed["content"].as_str().unwrap_or("").to_string();
-            if content.is_empty() {
-                return error("Message content cannot be empty".into(), "EMPTY_CONTENT");
-            }
-            match conversation.submit(content) {
-                Submitted::Start(claim) => {
-                    let turns = run_ws_turns(
-                        state.clone(),
-                        Arc::clone(conversation),
-                        scope.clone(),
-                        claim,
-                    );
-                    zeroclaw_spawn::spawn!(turns);
-                    None
-                }
-                Submitted::Steered => None,
-                Submitted::SteeringFull => error(
-                    "Steering queue is full for the running turn".into(),
-                    "STEERING_QUEUE_FULL",
-                ),
-                Submitted::SteeringClosed => error(
-                    "Running turn is no longer accepting steering messages".into(),
-                    "STEERING_CLOSED",
-                ),
-            }
-        }
+        "message" => handle_message_frame(state, conversation, scope, &parsed),
         other => error(
             format!(
                 "Unsupported message type \"{other}\". Send {{\"type\":\"message\",\"content\":\"your text\"}}"
@@ -773,6 +758,193 @@ fn handle_client_text(
             "UNKNOWN_MESSAGE_TYPE",
         ),
     }
+}
+
+/// The longest client request id accepted on a `message` frame.
+const MAX_REQUEST_ID_LEN: usize = 128;
+
+/// Accept a `message` frame. With an `id`, the request is recorded before
+/// anything runs and answered with an `ack`; a repeated `id` is answered
+/// with its recorded state and not run again.
+fn handle_message_frame(
+    state: &AppState,
+    conversation: &Arc<Conversation<WsSession>>,
+    scope: &WsTurnScope,
+    parsed: &serde_json::Value,
+) -> (Option<serde_json::Value>, Option<TurnClaim>) {
+    let request_id = match parsed.get("id") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id))
+            if !id.is_empty()
+                && id.len() <= MAX_REQUEST_ID_LEN
+                && !id.chars().any(char::is_control) =>
+        {
+            Some(id.as_str())
+        }
+        Some(_) => {
+            return (
+                Some(serde_json::json!({
+                    "type": "error",
+                    "message": format!(
+                        "message id must be a non-empty string of at most {MAX_REQUEST_ID_LEN} characters without control characters"
+                    ),
+                    "code": "INVALID_REQUEST_ID",
+                })),
+                None,
+            );
+        }
+    };
+    let reject = |message: &str, code: &str| {
+        let mut frame = serde_json::json!({ "type": "error", "message": message, "code": code });
+        stamp_request_id(&mut frame, request_id);
+        (Some(frame), None)
+    };
+
+    let content = parsed["content"].as_str().unwrap_or("").to_string();
+    if content.is_empty() {
+        return reject("Message content cannot be empty", "EMPTY_CONTENT");
+    }
+
+    let durable = match request_id {
+        None => false,
+        Some(id) => match accept_request(state, conversation, &scope.session_key, id) {
+            Ok((RequestReceipt::Recorded, durable)) => durable,
+            Ok((RequestReceipt::Duplicate { state: recorded }, _)) => {
+                return (
+                    Some(serde_json::json!({
+                        "type": "ack",
+                        "id": id,
+                        "status": "duplicate",
+                        "state": recorded,
+                    })),
+                    None,
+                );
+            }
+            Err(e) => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "session_key": scope.session_key,
+                            "error": format!("{e}"),
+                        })),
+                    "WS request could not be recorded"
+                );
+                return reject(
+                    "The request could not be recorded; it was not run",
+                    "REQUEST_NOT_RECORDED",
+                );
+            }
+        },
+    };
+    let ack = |turn: &str| {
+        request_id.map(|id| {
+            serde_json::json!({
+                "type": "ack",
+                "id": id,
+                "status": "accepted",
+                "turn": turn,
+                "durable": durable,
+            })
+        })
+    };
+
+    match conversation.submit(content) {
+        Submitted::Start(mut claim) => {
+            claim.request_id = request_id.map(str::to_string);
+            (ack("started"), Some(claim))
+        }
+        Submitted::Steered => {
+            if let Some(id) = request_id {
+                set_request_state(state, conversation, &scope.session_key, id, "steered");
+            }
+            (ack("steered"), None)
+        }
+        Submitted::SteeringFull => {
+            if let Some(id) = request_id {
+                set_request_state(state, conversation, &scope.session_key, id, "rejected");
+            }
+            reject(
+                "Steering queue is full for the running turn",
+                "STEERING_QUEUE_FULL",
+            )
+        }
+        Submitted::SteeringClosed => {
+            if let Some(id) = request_id {
+                set_request_state(state, conversation, &scope.session_key, id, "rejected");
+            }
+            reject(
+                "Running turn is no longer accepting steering messages",
+                "STEERING_CLOSED",
+            )
+        }
+    }
+}
+
+/// Record a client request as accepted: in the session store when it keeps
+/// receipts, otherwise in the conversation's memory. The flag says whether
+/// the record survives a restart.
+fn accept_request(
+    state: &AppState,
+    conversation: &Conversation<WsSession>,
+    session_key: &str,
+    request_id: &str,
+) -> std::io::Result<(RequestReceipt, bool)> {
+    if let Some(backend) = &state.session_backend
+        && let Some(receipt) = backend.record_request(session_key, request_id, "accepted")?
+    {
+        return Ok((receipt, true));
+    }
+    Ok((conversation.record_request(request_id, "accepted"), false))
+}
+
+/// Move a recorded request to `request_state`, wherever it was recorded.
+fn set_request_state(
+    state: &AppState,
+    conversation: &Conversation<WsSession>,
+    session_key: &str,
+    request_id: &str,
+    request_state: &str,
+) {
+    conversation.set_request_state(request_id, request_state);
+    if let Some(backend) = &state.session_backend
+        && let Err(e) = backend.set_request_state(session_key, request_id, request_state)
+    {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "session_key": session_key,
+                    "request_id": request_id,
+                    "error": format!("{e}"),
+                })),
+            "WS request state could not be recorded"
+        );
+    }
+}
+
+/// Add the client's request id to a frame about that request.
+fn stamp_request_id(frame: &mut serde_json::Value, request_id: Option<&str>) {
+    if let (Some(id), Some(fields)) = (request_id, frame.as_object_mut()) {
+        fields.insert("id".into(), id.into());
+    }
+}
+
+fn start_ws_turns(
+    state: &AppState,
+    conversation: &Arc<Conversation<WsSession>>,
+    scope: &WsTurnScope,
+    claim: TurnClaim,
+) {
+    let turns = run_ws_turns(
+        state.clone(),
+        Arc::clone(conversation),
+        scope.clone(),
+        claim,
+    );
+    zeroclaw_spawn::spawn!(turns);
 }
 
 /// Run a claimed turn to completion, then any messages that arrived as
@@ -786,12 +958,13 @@ async fn run_ws_turns(
     let mut next = Some(claim);
     while let Some(TurnClaim {
         input,
+        request_id,
         generation,
         cancel,
         mut steering,
     }) = next.take()
     {
-        let late = match state.session_queue.acquire(&scope.session_key).await {
+        let (late, outcome) = match state.session_queue.acquire(&scope.session_key).await {
             Ok(_session_guard) => {
                 let mut session = conversation.agent.lock().await;
                 process_chat_message(
@@ -800,6 +973,7 @@ async fn run_ws_turns(
                     &mut session,
                     &scope,
                     &input,
+                    request_id.as_deref(),
                     generation,
                     cancel,
                     &mut steering,
@@ -808,14 +982,19 @@ async fn run_ws_turns(
             }
             Err(e) => {
                 conversation.finish_turn(generation);
-                conversation.publish(&serde_json::json!({
+                let mut frame = serde_json::json!({
                     "type": "error",
                     "message": e.to_string(),
                     "code": session_queue_ws_error_code(&e)
-                }));
-                Vec::new()
+                });
+                stamp_request_id(&mut frame, request_id.as_deref());
+                conversation.publish(&frame);
+                (Vec::new(), "error")
             }
         };
+        if let Some(id) = &request_id {
+            set_request_state(&state, &conversation, &scope.session_key, id, outcome);
+        }
         if !late.is_empty()
             && let Submitted::Start(claim) = conversation.submit(late.join("\n\n"))
         {
@@ -1017,7 +1196,9 @@ fn ws_consolidation_model(
 /// frames to every subscriber. Uses [`Agent::turn_streamed`] so that
 /// intermediate text chunks, tool calls, and tool results reach the clients
 /// in real time. Returns steering messages that arrived after the agent
-/// stopped reading them; the caller runs those as the next turn.
+/// stopped reading them, which the caller runs as the next turn, and the
+/// turn's outcome (`done`, `aborted` or `error`). Its terminal frame carries
+/// the client's `request_id` when it sent one.
 #[allow(clippy::too_many_arguments)]
 async fn process_chat_message(
     state: &AppState,
@@ -1025,10 +1206,11 @@ async fn process_chat_message(
     session: &mut WsSession,
     scope: &WsTurnScope,
     content: &str,
+    request_id: Option<&str>,
     generation: u64,
     cancel_token: tokio_util::sync::CancellationToken,
     steering_rx: &mut tokio::sync::mpsc::Receiver<String>,
-) -> Vec<String> {
+) -> (Vec<String>, &'static str) {
     use zeroclaw_runtime::agent::TurnEvent;
 
     let WsSession { agent, ws_memory } = session;
@@ -1290,7 +1472,9 @@ async fn process_chat_message(
         persist_companion_capture(state, &turn_alias, session_id, &turn_id, auth_subject);
 
         // Inform the client the turn was aborted
-        conversation.publish(&serde_json::json!({ "type": "aborted" }));
+        let mut aborted = serde_json::json!({ "type": "aborted" });
+        stamp_request_id(&mut aborted, request_id);
+        conversation.publish(&aborted);
 
         if let Some(ref backend) = state.session_backend
             && backend.session_exists(session_key)
@@ -1323,9 +1507,10 @@ async fn process_chat_message(
         );
 
         // A cancel stops the conversation's work, queued steering included.
-        return Vec::new();
+        return (Vec::new(), "aborted");
     }
 
+    let settled = if result.is_ok() { "done" } else { "error" };
     match result {
         Ok(outcome) => {
             if let Some(ref backend) = state.session_backend {
@@ -1418,6 +1603,8 @@ async fn process_chat_message(
                 "max_context_tokens": max_context_tokens,
                 "last_input_tokens": last_input_tokens,
             });
+            let mut done = done;
+            stamp_request_id(&mut done, request_id);
             conversation.publish(&done);
 
             // Set session state to idle
@@ -1492,6 +1679,8 @@ async fn process_chat_message(
                 "message": sanitized,
                 "code": error_code,
             });
+            let mut err = err;
+            stamp_request_id(&mut err, request_id);
             conversation.publish(&err);
 
             // Broadcast error event
@@ -1520,7 +1709,7 @@ async fn process_chat_message(
             );
         }
     }
-    late
+    (late, settled)
 }
 
 #[cfg(test)]
@@ -2228,12 +2417,16 @@ mod tests {
             from: &crate::ws_conversation::Subscription<WsSession>,
             frame: serde_json::Value,
         ) -> Option<serde_json::Value> {
-            handle_client_text(
+            let (reply, start) = handle_client_text(
                 &self.state,
                 &from.conversation,
                 &self.scope,
                 &frame.to_string(),
-            )
+            );
+            if let Some(claim) = start {
+                start_ws_turns(&self.state, &from.conversation, &self.scope, claim);
+            }
+            reply
         }
     }
 
@@ -2346,8 +2539,108 @@ mod tests {
         ] {
             assert_eq!(chat.send(&a, frame).unwrap()["code"], code);
         }
-        let reply = handle_client_text(&chat.state, &a.conversation, &chat.scope, "{");
+        let (reply, start) = handle_client_text(&chat.state, &a.conversation, &chat.scope, "{");
         assert_eq!(reply.unwrap()["code"], "INVALID_JSON");
+        assert!(start.is_none());
+        assert!(!a.conversation.is_running());
+    }
+
+    fn message_with_id(content: &str, id: &str) -> serde_json::Value {
+        serde_json::json!({ "type": "message", "content": content, "id": id })
+    }
+
+    #[tokio::test]
+    async fn a_message_id_is_acked_and_a_resend_is_not_run_again() {
+        let chat = SharedChat::new();
+        let mut a = chat.attach().await;
+        chat.gate.add_permits(2);
+
+        let ack = chat.send(&a, message_with_id("hello", "req-1")).unwrap();
+        assert_eq!(ack["type"], "ack");
+        assert_eq!(ack["id"], "req-1");
+        assert_eq!(ack["status"], "accepted");
+        assert_eq!(ack["turn"], "started");
+        assert_eq!(ack["durable"], false, "no session store: memory only");
+        let done = frames_until_end(&mut a).await.pop().unwrap();
+        assert_eq!(done["type"], "done");
+        assert_eq!(done["id"], "req-1");
+
+        // A client that lost the ACK resends: it learns the outcome, and
+        // nothing runs twice.
+        let again = chat.send(&a, message_with_id("hello", "req-1")).unwrap();
+        assert_eq!(again["status"], "duplicate");
+        assert_eq!(again["state"], "done");
+        assert!(!a.conversation.is_running());
+        assert_eq!(chat.seen.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipts_in_the_session_store_outlive_the_conversation() {
+        let mut chat = SharedChat::new();
+        chat.state.session_backend = Some(Arc::new(
+            zeroclaw_infra::session_sqlite::SqliteSessionBackend::new(chat._tmp.path()).unwrap(),
+        ));
+        chat.gate.add_permits(1);
+        {
+            let mut a = chat.attach().await;
+            let ack = chat.send(&a, message_with_id("hello", "req-1")).unwrap();
+            assert_eq!(ack["durable"], true);
+            assert_eq!(
+                frames_until_end(&mut a).await.pop().unwrap()["type"],
+                "done"
+            );
+        }
+        // Let the finished turn release the conversation.
+        while chat.state.ws_conversations.len() != 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let b = chat.attach().await;
+        let again = chat.send(&b, message_with_id("hello", "req-1")).unwrap();
+        assert_eq!(again["status"], "duplicate");
+        assert_eq!(again["state"], "done");
+        assert_eq!(chat.seen.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_message_id_during_a_turn_is_acked_as_steering() {
+        let chat = SharedChat::new();
+        let mut a = chat.attach().await;
+        assert_eq!(
+            chat.send(&a, message_with_id("first", "req-1")).unwrap()["turn"],
+            "started"
+        );
+        let steer = chat
+            .send(&a, message_with_id("also this", "req-2"))
+            .unwrap();
+        assert_eq!(steer["status"], "accepted");
+        assert_eq!(steer["turn"], "steered");
+        chat.gate.add_permits(4);
+        let done = frames_until_end(&mut a).await.pop().unwrap();
+        assert_eq!(done["id"], "req-1");
+        let again = chat
+            .send(&a, message_with_id("also this", "req-2"))
+            .unwrap();
+        assert_eq!(again["state"], "steered");
+    }
+
+    #[tokio::test]
+    async fn bad_message_ids_are_refused_and_errors_carry_the_id() {
+        let chat = SharedChat::new();
+        let a = chat.attach().await;
+        let too_long = "x".repeat(MAX_REQUEST_ID_LEN + 1);
+        for id in [
+            serde_json::json!(""),
+            serde_json::json!(7),
+            serde_json::json!(too_long),
+            serde_json::json!("a\nb"),
+        ] {
+            let frame = serde_json::json!({ "type": "message", "content": "hi", "id": id });
+            assert_eq!(chat.send(&a, frame).unwrap()["code"], "INVALID_REQUEST_ID");
+        }
+        let empty = chat.send(&a, message_with_id("", "req-9")).unwrap();
+        assert_eq!(empty["code"], "EMPTY_CONTENT");
+        assert_eq!(empty["id"], "req-9");
         assert!(!a.conversation.is_running());
     }
 
