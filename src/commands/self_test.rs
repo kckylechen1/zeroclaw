@@ -351,7 +351,7 @@ fn web_dist_dir_expansion_reason_key(value: &str) -> Option<&'static str> {
     }
 }
 
-fn resolve_probe_host(configured: &str) -> (&str, Option<&str>) {
+pub(crate) fn resolve_probe_host(configured: &str) -> (&str, Option<&str>) {
     match configured {
         "0.0.0.0" => ("127.0.0.1", Some("0.0.0.0")),
         // Normalise both shapes to bracketed form for the display URL so the
@@ -506,11 +506,11 @@ fn build_websocket_probe_url(
     url
 }
 
-/// Resolve a plaintext gateway bearer token for local diagnostics.
-/// Precedence: `ZEROCLAW_GATEWAY_TOKEN`, then `ZEROCLAW_ACP_BRIDGE_TOKEN`,
-/// then the first plaintext (`zc_*`) entry in `gateway.paired_tokens`.
-#[cfg(feature = "gateway")]
-fn resolve_gateway_bearer_token(config: &crate::config::Config) -> Option<String> {
+/// Resolve a plaintext gateway bearer token for local clients (self-test,
+/// `zeroclaw chat`). Precedence: `ZEROCLAW_GATEWAY_TOKEN`, then
+/// `ZEROCLAW_ACP_BRIDGE_TOKEN`, then the first plaintext (`zc_*`) entry in
+/// `gateway.paired_tokens`.
+pub(crate) fn resolve_gateway_bearer_token(config: &crate::config::Config) -> Option<String> {
     for key in ["ZEROCLAW_GATEWAY_TOKEN", "ZEROCLAW_ACP_BRIDGE_TOKEN"] {
         if let Ok(value) = std::env::var(key) {
             let trimmed = value.trim();

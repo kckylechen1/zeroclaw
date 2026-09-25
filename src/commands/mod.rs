@@ -1,6 +1,8 @@
 #[cfg(feature = "agent-runtime")]
 pub mod auth;
 #[cfg(feature = "agent-runtime")]
+pub mod chat;
+#[cfg(feature = "agent-runtime")]
 pub mod config;
 #[cfg(feature = "agent-runtime")]
 #[cfg(feature = "agent-runtime")]

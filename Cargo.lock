@@ -10713,6 +10713,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-gateway-client"
+version = "0.8.3"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "uuid",
+]
+
+[[package]]
 name = "zeroclaw-hardware"
 version = "0.8.3"
 dependencies = [
@@ -11154,6 +11167,7 @@ dependencies = [
  "zeroclaw-config",
  "zeroclaw-eval",
  "zeroclaw-gateway",
+ "zeroclaw-gateway-client",
  "zeroclaw-hardware",
  "zeroclaw-infra",
  "zeroclaw-log",
