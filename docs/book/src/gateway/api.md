@@ -147,7 +147,7 @@ configured agent alias; an unknown alias returns 404 with
 | `PUT /api/soul/voice` | Body `{ "agent", "expected_revision", "voice": { "heads": { "<key>": "<level>" } } }`. Keys are the five persona dials; a stored head wins over the configured dial for its key. |
 | `POST /api/soul/rollback` | Body `{ "agent", "layer", "to_revision", "expected_revision" }`. Appends a copy of an earlier revision. |
 | `GET /api/soul/proposals?agent=<alias>[&pending=true]` | The agent's own proposals to change its growth, voice, or principles, oldest first. |
-| `POST /api/soul/proposals/{id}/resolve` | Body `{ "agent", "resolution": "accepted" \| "dismissed", "note"?, "final_text"? }`. Accepting applies the proposal and returns `applied_revision`. Each proposal resolves once; a repeat returns 409 with `code: "proposal_already_resolved"`. |
+| `POST /api/soul/proposals/{id}/resolve` | Body `{ "agent", "resolution": "accepted" \| "dismissed", "note"?, "final_text"? }`. Accepting applies the proposal and returns `applied_revision`. Each proposal resolves once; a repeat returns 409 with `code: "proposal_already_resolved"`. A Growth retirement is bound to the entry it named when submitted (`retire_target`, read from `target_revision`); if the owner has since removed or reworded that entry, accepting returns 409 with `code: "proposal_stale"` and the proposal stays pending for dismissal. |
 
 Revisions are append-only. Seeded values have `source: "seed"`; owner writes
 and rollbacks have `source: "owner"`; approved proposals have

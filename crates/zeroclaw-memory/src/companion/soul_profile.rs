@@ -413,7 +413,10 @@ impl SoulProposalLayer {
 /// - `principles`: `proposal` is the principle to add.
 /// - `voice`: `trait_key` + `level`; `proposal` explains the change.
 /// - `growth`: add an entry of `growth_kind` whose text is `proposal`, or,
-///   with `retire_index`, retire that entry (`proposal` explains why).
+///   with `retire_index`, retire that entry (`proposal` explains why). The
+///   index is read once, at submission: the store records the entry it names
+///   and the Growth revision it was read from, and approval retires that
+///   entry, not whatever sits at the index later.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewSoulProposal {
     pub layer: SoulProposalLayer,
@@ -425,7 +428,8 @@ pub struct NewSoulProposal {
     pub level: Option<String>,
     /// Growth add only: the entry kind.
     pub growth_kind: Option<GrowthKind>,
-    /// Growth retire only: zero-based index of the entry to retire.
+    /// Growth retire only: zero-based index, in the current Growth layer, of
+    /// the entry to retire.
     pub retire_index: Option<u32>,
     /// Session the proposal came from, when known (evidence reference).
     pub session_ref: Option<String>,
@@ -565,6 +569,14 @@ pub struct SoulProposal {
     pub growth_kind: Option<GrowthKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retire_index: Option<u32>,
+    /// Growth retire only: the entry the proposal retires, as it read at
+    /// submission. `None` on retirements recorded before targets were bound;
+    /// those can only be dismissed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retire_target: Option<GrowthEntry>,
+    /// Growth retire only: the Growth revision `retire_target` was read from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_revision: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_ref: Option<String>,
     pub created_at_unix: u64,
@@ -604,6 +616,9 @@ pub enum SoulProfileError {
     ProposalNotFound { id: i64 },
     /// The proposal was already accepted or dismissed.
     ProposalAlreadyResolved { id: i64 },
+    /// The proposal no longer applies: what it targeted has changed since it
+    /// was made. It stays pending; the owner can dismiss it.
+    ProposalStale { id: i64, reason: String },
     /// The store could not be read or written.
     Storage(String),
 }
@@ -640,6 +655,9 @@ impl std::fmt::Display for SoulProfileError {
             Self::ProposalNotFound { id } => write!(f, "Soul proposal {id} not found"),
             Self::ProposalAlreadyResolved { id } => {
                 write!(f, "Soul proposal {id} was already resolved")
+            }
+            Self::ProposalStale { id, reason } => {
+                write!(f, "Soul proposal {id} no longer applies: {reason}")
             }
             Self::Storage(msg) => write!(f, "soul store error: {msg}"),
         }
@@ -750,6 +768,9 @@ impl SoulProfileStore {
                 level TEXT,
                 growth_kind TEXT,
                 retire_index INTEGER,
+                target_revision INTEGER,
+                target_kind TEXT,
+                target_text TEXT,
                 session_ref TEXT,
                 created_at_unix INTEGER NOT NULL
              );
@@ -792,6 +813,9 @@ impl SoulProfileStore {
         ensure_column(&conn, "soul_revisions", "proposal_id", "INTEGER")?;
         ensure_column(&conn, "soul_proposals", "growth_kind", "TEXT")?;
         ensure_column(&conn, "soul_proposals", "retire_index", "INTEGER")?;
+        ensure_column(&conn, "soul_proposals", "target_revision", "INTEGER")?;
+        ensure_column(&conn, "soul_proposals", "target_kind", "TEXT")?;
+        ensure_column(&conn, "soul_proposals", "target_text", "TEXT")?;
         harden_sqlite_owner_only(&db_path);
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1026,13 +1050,26 @@ impl SoulProfileStore {
         let growth_kind = proposal.growth_kind.map(GrowthKind::as_str);
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let target = match proposal.retire_index {
+            Some(index) => Some(retire_target(&tx, agent, index)?),
+            None => None,
+        };
+        let (target_revision, target_kind, target_text) = match &target {
+            Some((revision, entry)) => (
+                Some(*revision),
+                Some(entry.kind.as_str()),
+                Some(entry.text.as_str()),
+            ),
+            None => (None, None, None),
+        };
         let duplicate: Option<i64> = tx
             .query_row(
                 "SELECT p.id FROM soul_proposals p
                  LEFT JOIN soul_proposal_resolutions r ON r.proposal_id = p.id
                  WHERE p.agent = ?1 AND p.layer = ?2 AND p.proposal = ?3
                    AND p.trait_key IS ?4 AND p.level IS ?5
-                   AND p.growth_kind IS ?6 AND p.retire_index IS ?7
+                   AND p.growth_kind IS ?6
+                   AND p.target_kind IS ?7 AND p.target_text IS ?8
                    AND r.proposal_id IS NULL
                  LIMIT 1",
                 params![
@@ -1042,7 +1079,8 @@ impl SoulProfileStore {
                     proposal.trait_key,
                     proposal.level,
                     growth_kind,
-                    proposal.retire_index
+                    target_kind,
+                    target_text
                 ],
                 |row| row.get(0),
             )
@@ -1065,8 +1103,8 @@ impl SoulProfileStore {
         tx.execute(
             "INSERT INTO soul_proposals
              (agent, layer, proposal, rationale, trait_key, level, growth_kind, retire_index,
-              session_ref, created_at_unix)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              target_revision, target_kind, target_text, session_ref, created_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 agent,
                 proposal.layer.as_str(),
@@ -1076,6 +1114,9 @@ impl SoulProfileStore {
                 proposal.level,
                 growth_kind,
                 proposal.retire_index,
+                target_revision,
+                target_kind,
+                target_text,
                 proposal.session_ref,
                 now_unix
             ],
@@ -1297,15 +1338,26 @@ fn apply_proposal(
                 .unwrap_or_default();
             match (proposal.growth_kind, proposal.retire_index) {
                 (Some(kind), None) => entries.push(GrowthEntry { kind, text }),
-                (None, Some(index)) => {
-                    let index = usize::try_from(index).unwrap_or(usize::MAX);
-                    if index >= entries.len() {
-                        return Err(SoulProfileError::invalid(
-                            "retire_index",
-                            "no growth entry at that index any more",
-                        ));
-                    }
-                    entries.remove(index);
+                (None, Some(_)) => {
+                    // Retire the entry the proposal named, wherever it now
+                    // sits. Entries carry no id; kind + text is the identity,
+                    // and identical entries are interchangeable.
+                    let Some(target) = &proposal.retire_target else {
+                        return Err(SoulProfileError::ProposalStale {
+                            id: proposal.id,
+                            reason: "it predates target binding; dismiss it".to_string(),
+                        });
+                    };
+                    let Some(position) = entries.iter().position(|entry| entry == target) else {
+                        return Err(SoulProfileError::ProposalStale {
+                            id: proposal.id,
+                            reason: format!(
+                                "the growth entry {:?} was changed or removed",
+                                target.text
+                            ),
+                        });
+                    };
+                    entries.remove(position);
                 }
                 _ => {
                     return Err(SoulProfileError::Storage(format!(
@@ -1358,6 +1410,30 @@ fn apply_proposal(
     Ok(new.revision)
 }
 
+/// The Growth entry at `index` in the current layer, with that layer's
+/// revision. A retirement is bound to this pair when it is submitted.
+fn retire_target(
+    conn: &Connection,
+    agent: &str,
+    index: u32,
+) -> Result<(u64, GrowthEntry), SoulProfileError> {
+    let growth = head(conn, agent, SoulLayer::Growth)?
+        .map(decode::<SoulGrowth>)
+        .transpose()?;
+    let entry = growth.as_ref().and_then(|head| {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| head.value.entries.get(i))
+    });
+    match (growth.as_ref(), entry) {
+        (Some(head), Some(entry)) => Ok((head.revision, entry.clone())),
+        _ => Err(SoulProfileError::invalid(
+            "retire_index",
+            "no growth entry at that index",
+        )),
+    }
+}
+
 fn ensure_column(
     conn: &Connection,
     table: &str,
@@ -1395,7 +1471,8 @@ fn current_revision(
 
 const PROPOSAL_SELECT: &str = "SELECT p.id, p.layer, p.proposal, p.rationale, p.trait_key, p.level,
         p.growth_kind, p.retire_index, p.session_ref, p.created_at_unix,
-        r.resolution, r.note, r.resolved_at_unix
+        r.resolution, r.note, r.resolved_at_unix,
+        p.target_revision, p.target_kind, p.target_text
  FROM soul_proposals p
  LEFT JOIN soul_proposal_resolutions r ON r.proposal_id = p.id";
 
@@ -1413,6 +1490,9 @@ struct ProposalRow {
     resolution: Option<String>,
     note: Option<String>,
     resolved_at_unix: Option<u64>,
+    target_revision: Option<u64>,
+    target_kind: Option<String>,
+    target_text: Option<String>,
 }
 
 fn proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProposalRow> {
@@ -1430,6 +1510,9 @@ fn proposal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProposalRow> {
         resolution: row.get(10)?,
         note: row.get(11)?,
         resolved_at_unix: row.get(12)?,
+        target_revision: row.get(13)?,
+        target_kind: row.get(14)?,
+        target_text: row.get(15)?,
     })
 }
 
@@ -1443,6 +1526,15 @@ impl ProposalRow {
             Some(value) => Some(GrowthKind::parse(value).ok_or_else(|| {
                 SoulProfileError::Storage(format!("unknown growth kind {value:?}"))
             })?),
+        };
+        let retire_target = match (self.target_kind.as_deref(), self.target_text) {
+            (Some(kind), Some(text)) => Some(GrowthEntry {
+                kind: GrowthKind::parse(kind).ok_or_else(|| {
+                    SoulProfileError::Storage(format!("unknown growth kind {kind:?}"))
+                })?,
+                text,
+            }),
+            _ => None,
         };
         let resolution = match self.resolution.as_deref() {
             None => None,
@@ -1459,6 +1551,8 @@ impl ProposalRow {
             level: self.level,
             growth_kind,
             retire_index: self.retire_index,
+            retire_target,
+            target_revision: self.target_revision,
             session_ref: self.session_ref,
             created_at_unix: self.created_at_unix,
             resolution,
@@ -2072,21 +2166,232 @@ mod tests {
         assert_eq!(growth.value.entries.len(), 1);
         assert_eq!(growth.value.entries[0].text, "Two.");
 
-        let stale = recorded(store.submit_proposal("a", retire(5), 13).unwrap());
+        // An index with no entry behind it is refused when submitted.
         assert!(matches!(
-            store.resolve_proposal("a", stale, SoulProposalResolution::Accepted, None, None, 14),
+            store.submit_proposal("a", retire(5), 13),
             Err(SoulProfileError::Invalid {
                 field: "retire_index",
                 ..
             })
         ));
-        // A failed apply records no decision: the proposal is still pending.
-        assert!(
-            store
-                .proposals("a", true)
-                .unwrap()
+    }
+
+    fn seed_growth(store: &SoulProfileStore, texts: &[&str]) -> u64 {
+        let entries = texts
+            .iter()
+            .map(|text| GrowthEntry {
+                kind: GrowthKind::SelfView,
+                text: (*text).to_string(),
+            })
+            .collect();
+        store
+            .set_growth("a", SoulGrowth { entries }, 0, 1)
+            .unwrap()
+            .revision
+    }
+
+    fn retire_at(index: u32) -> NewSoulProposal {
+        NewSoulProposal {
+            layer: SoulProposalLayer::Growth,
+            proposal: "No longer true.".into(),
+            rationale: String::new(),
+            retire_index: Some(index),
+            ..NewSoulProposal::default()
+        }
+    }
+
+    fn growth_texts(store: &SoulProfileStore) -> Vec<String> {
+        store
+            .profile("a")
+            .unwrap()
+            .growth
+            .map(|head| head.value.entries.into_iter().map(|e| e.text).collect())
+            .unwrap_or_default()
+    }
+
+    /// #380 S12: an owner edit between proposal and approval must not make
+    /// the approval retire a different entry.
+    #[test]
+    fn retire_approval_follows_the_proposed_entry_not_its_old_index() {
+        let (_dir, store) = store();
+        let rev = seed_growth(&store, &["A.", "B.", "C."]);
+        let id = recorded(store.submit_proposal("a", retire_at(1), 2).unwrap());
+        // The owner drops A before reviewing; B is now at index 0.
+        store
+            .set_growth(
+                "a",
+                SoulGrowth {
+                    entries: vec![
+                        GrowthEntry {
+                            kind: GrowthKind::SelfView,
+                            text: "B.".into(),
+                        },
+                        GrowthEntry {
+                            kind: GrowthKind::SelfView,
+                            text: "C.".into(),
+                        },
+                    ],
+                },
+                rev,
+                3,
+            )
+            .unwrap();
+        store
+            .resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 4)
+            .unwrap();
+        assert_eq!(growth_texts(&store), vec!["C.".to_string()]);
+        // Approving it again changes nothing.
+        assert!(matches!(
+            store.resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 5),
+            Err(SoulProfileError::ProposalAlreadyResolved { .. })
+        ));
+        assert_eq!(growth_texts(&store), vec!["C.".to_string()]);
+    }
+
+    #[test]
+    fn retire_proposal_records_its_target_and_revision() {
+        let (_dir, store) = store();
+        let rev = seed_growth(&store, &["A.", "B."]);
+        let id = recorded(store.submit_proposal("a", retire_at(1), 2).unwrap());
+        let proposal = store.proposals("a", true).unwrap().pop().unwrap();
+        assert_eq!(proposal.id, id);
+        assert_eq!(proposal.target_revision, Some(rev));
+        assert_eq!(
+            proposal.retire_target.map(|entry| entry.text),
+            Some("B.".to_string())
+        );
+    }
+
+    /// A stale retirement applies nothing and stays pending for dismissal.
+    #[test]
+    fn retire_approval_is_refused_when_its_target_was_removed_or_edited() {
+        for replacement in [vec!["A.", "C."], vec!["A.", "B, reworded.", "C."]] {
+            let (_dir, store) = store();
+            let rev = seed_growth(&store, &["A.", "B.", "C."]);
+            let id = recorded(store.submit_proposal("a", retire_at(1), 2).unwrap());
+            let entries = replacement
                 .iter()
-                .any(|p| p.id == stale)
+                .map(|text| GrowthEntry {
+                    kind: GrowthKind::SelfView,
+                    text: (*text).to_string(),
+                })
+                .collect();
+            store
+                .set_growth("a", SoulGrowth { entries }, rev, 3)
+                .unwrap();
+            let before = store.history("a", SoulLayer::Growth).unwrap().len();
+            assert!(matches!(
+                store.resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 4),
+                Err(SoulProfileError::ProposalStale { id: stale, .. }) if stale == id
+            ));
+            assert_eq!(store.history("a", SoulLayer::Growth).unwrap().len(), before);
+            assert!(
+                store
+                    .proposals("a", true)
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.id == id)
+            );
+            store
+                .resolve_proposal("a", id, SoulProposalResolution::Dismissed, None, None, 5)
+                .unwrap();
+            assert!(store.proposals("a", true).unwrap().is_empty());
+        }
+    }
+
+    /// A rollback that brings the target back makes the retirement apply to it.
+    #[test]
+    fn retire_approval_after_rollback_retires_the_restored_entry() {
+        let (_dir, store) = store();
+        let first = seed_growth(&store, &["A.", "B.", "C."]);
+        let id = recorded(store.submit_proposal("a", retire_at(1), 2).unwrap());
+        let dropped = store
+            .set_growth(
+                "a",
+                SoulGrowth {
+                    entries: vec![GrowthEntry {
+                        kind: GrowthKind::SelfView,
+                        text: "C.".into(),
+                    }],
+                },
+                first,
+                3,
+            )
+            .unwrap()
+            .revision;
+        store
+            .rollback("a", SoulLayer::Growth, first, dropped, 4)
+            .unwrap();
+        store
+            .resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 5)
+            .unwrap();
+        assert_eq!(
+            growth_texts(&store),
+            vec!["A.".to_string(), "C.".to_string()]
+        );
+    }
+
+    /// Two retirements of the same text at different times are separate
+    /// proposals only when they name different entries.
+    #[test]
+    fn duplicate_retirements_are_matched_by_target_not_index() {
+        let (_dir, store) = store();
+        let rev = seed_growth(&store, &["A.", "B."]);
+        let first = recorded(store.submit_proposal("a", retire_at(1), 2).unwrap());
+        assert_eq!(
+            store.submit_proposal("a", retire_at(1), 3).unwrap(),
+            SoulProposalOutcome::AlreadyPending { id: first }
+        );
+        store
+            .set_growth(
+                "a",
+                SoulGrowth {
+                    entries: vec![
+                        GrowthEntry {
+                            kind: GrowthKind::SelfView,
+                            text: "A.".into(),
+                        },
+                        GrowthEntry {
+                            kind: GrowthKind::SelfView,
+                            text: "D.".into(),
+                        },
+                    ],
+                },
+                rev,
+                4,
+            )
+            .unwrap();
+        // Same index, different entry: a new proposal.
+        assert!(matches!(
+            store.submit_proposal("a", retire_at(1), 5).unwrap(),
+            SoulProposalOutcome::Recorded { .. }
+        ));
+    }
+
+    /// Retirements stored before targets were bound cannot be applied.
+    #[test]
+    fn retire_rows_without_a_bound_target_are_stale() {
+        let (dir, store) = store();
+        seed_growth(&store, &["A.", "B."]);
+        drop(store);
+        let conn = Connection::open(dir.path().join("soul.db")).unwrap();
+        conn.execute(
+            "INSERT INTO soul_proposals
+             (agent, layer, proposal, rationale, retire_index, created_at_unix)
+             VALUES ('a', 'growth', 'Old.', '', 0, 2)",
+            [],
+        )
+        .unwrap();
+        let id = conn.last_insert_rowid();
+        drop(conn);
+        let store = SoulProfileStore::open(dir.path()).unwrap();
+        assert!(matches!(
+            store.resolve_proposal("a", id, SoulProposalResolution::Accepted, None, None, 3),
+            Err(SoulProfileError::ProposalStale { .. })
+        ));
+        assert_eq!(
+            growth_texts(&store),
+            vec!["A.".to_string(), "B.".to_string()]
         );
     }
 
