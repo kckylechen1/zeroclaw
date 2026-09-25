@@ -1105,6 +1105,7 @@ channel-runtime-task-pref-invalid = Invalid task preference. Usage: /task-pref <
 
 # zeroclaw chat
 cli-chat-connect-failed = Could not attach to the gateway at {$gateway}: {$error}. Start it with `zeroclaw daemon` or `zeroclaw gateway start`, or pass --gateway.
+cli-chat-connect-refused = The gateway at {$gateway} refused the chat: {$error}
 cli-chat-attached = Session {$session} with {$agent}, {$history} earlier messages. /quit leaves, /cancel or Ctrl+C stops a running turn.
 cli-chat-approval-prompt = Allow {$tool}? {$summary} [y]es / [a]lways / [N]o:
 cli-chat-tool-call = → {$tool}

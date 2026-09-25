@@ -64,6 +64,27 @@ fn encode(value: &str) -> String {
     out
 }
 
+/// The gateway answered but refused the upgrade (bad token, unknown agent,
+/// ...). Returned inside the `anyhow::Error` from [`Client::connect`];
+/// downcast to tell it from an unreachable gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rejected {
+    pub status: u16,
+    pub reason: String,
+}
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "gateway refused the connection ({}): {}",
+            self.status, self.reason
+        )
+    }
+}
+
+impl std::error::Error for Rejected {}
+
 /// What the gateway said when the socket attached.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionStart {
@@ -207,9 +228,25 @@ impl Client {
                 .context("gateway token is not a valid header value")?;
             headers.insert(header::AUTHORIZATION, value);
         }
-        let (mut socket, _) = tokio_tungstenite::connect_async(request)
-            .await
-            .with_context(|| format!("could not connect to {}", options.gateway))?;
+        let (mut socket, _) = match tokio_tungstenite::connect_async(request).await {
+            Ok(connected) => connected,
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                let reason = response
+                    .body()
+                    .as_deref()
+                    .map(|body| String::from_utf8_lossy(body).trim().to_string())
+                    .filter(|body| !body.is_empty())
+                    .unwrap_or_else(|| response.status().to_string());
+                return Err(Rejected {
+                    status: response.status().as_u16(),
+                    reason,
+                }
+                .into());
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("could not connect to {}", options.gateway));
+            }
+        };
 
         let session = match next_value(&mut socket).await? {
             Some(value) if value["type"] == "session_start" => {

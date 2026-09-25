@@ -21,6 +21,35 @@ The alias is the `<alias>` half of an `[agents.<alias>]` block. For the full CLI
 surface and every flag, see the generated
 [CLI reference](../reference/cli.md).
 
+## Chatting through the gateway
+
+`zeroclaw agent` runs the agent inside the CLI process. To talk to the agent
+the gateway hosts (the one the web dashboard and every other device see), use
+`zeroclaw chat`:
+
+<div class="os-tabs-src">
+
+#### sh
+
+```sh
+zeroclaw chat -a <alias>                         # session "main" on this machine's gateway
+zeroclaw chat -a <alias> -s work                 # another session
+zeroclaw chat -a <alias> -m "what's on today?"   # one message, then exit
+zeroclaw chat -a <alias> --gateway wss://home.example:42617
+```
+
+</div>
+
+- Every client on the same session, including the dashboard, shares one
+  conversation and sees the same replies.
+- Leaving the chat (`/quit`) does not stop a running turn; `/cancel` or Ctrl+C
+  does, for every client on the session.
+- Tool approvals are asked in the terminal: `y` approves once, `a` always,
+  anything else denies.
+- The gateway must be running (`zeroclaw daemon` or `zeroclaw gateway start`).
+  When pairing is on, the token comes from `ZEROCLAW_GATEWAY_TOKEN`, or from a
+  plaintext `zc_*` entry in `gateway.paired_tokens`.
+
 ## Coexistence and isolation
 
 Agents run side by side from one install. Each one keeps its own workspace,

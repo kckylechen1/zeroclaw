@@ -8,7 +8,7 @@ use std::io::Write;
 
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use zeroclaw_gateway_client::{Client, ConnectOptions, Decision, Frame};
+use zeroclaw_gateway_client::{Client, ConnectOptions, Decision, Frame, Rejected};
 
 use crate::commands::self_test::{resolve_gateway_bearer_token, resolve_probe_host};
 use crate::config::Config;
@@ -75,8 +75,15 @@ pub async fn run(
                     })),
                 "chat could not attach to the gateway"
             );
+            // A refusal (unknown agent, bad token) needs a different fix
+            // than an unreachable gateway.
+            let key = if e.downcast_ref::<Rejected>().is_some() {
+                "cli-chat-connect-refused"
+            } else {
+                "cli-chat-connect-failed"
+            };
             anyhow::bail!(ta(
-                "cli-chat-connect-failed",
+                key,
                 &[("gateway", &gateway), ("error", &format!("{e:#}"))],
                 "Could not attach to the gateway",
             ));

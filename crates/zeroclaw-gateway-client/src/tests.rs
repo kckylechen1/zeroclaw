@@ -1,3 +1,7 @@
+// Tests spawn plain tokio tasks: this crate stays free of the runtime's
+// logging/spawn crates, and a test task has no attribution span to carry.
+#![allow(clippy::disallowed_methods)]
+
 use super::*;
 use tokio::net::TcpListener;
 
@@ -43,6 +47,7 @@ fn frames_parse_and_unknown_ones_pass_through() {
 
 /// A gateway stand-in: checks the handshake and the client's frames, and
 /// answers the way `/ws/chat` does.
+#[allow(clippy::result_large_err)] // the handshake callback's error type is tungstenite's
 async fn fake_gateway(listener: TcpListener) -> Vec<serde_json::Value> {
     let (stream, _) = listener.accept().await.unwrap();
     let mut seen_auth = None;
@@ -161,4 +166,36 @@ async fn a_client_attaches_sends_and_streams_a_turn() {
     assert_eq!(received[1]["id"], id);
     assert_eq!(received[2]["request_id"], "ap1");
     assert_eq!(received[2]["decision"], "always");
+}
+
+#[tokio::test]
+async fn a_refused_upgrade_reports_the_gateways_reason() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 2048];
+        let _ = stream.read(&mut buf).await.unwrap();
+        let body = "Unknown agent `nobody`";
+        let reply = format!(
+            "HTTP/1.1 400 Bad Request\r\ncontent-length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(reply.as_bytes()).await.unwrap();
+    });
+    let err = Client::connect(&ConnectOptions {
+        gateway: format!("ws://{addr}"),
+        agent: "nobody".into(),
+        session_id: None,
+        token: None,
+    })
+    .await
+    .err()
+    .unwrap();
+    let rejected = err
+        .downcast_ref::<Rejected>()
+        .expect("a rejection, not an I/O error");
+    assert_eq!(rejected.status, 400);
+    assert_eq!(rejected.reason, "Unknown agent `nobody`");
 }
