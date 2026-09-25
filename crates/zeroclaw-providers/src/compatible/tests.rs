@@ -4193,3 +4193,58 @@ fn convert_messages_for_native_tool_uses_explicit_id_when_present() {
     assert_eq!(native[1].role, "tool");
     assert_eq!(native[1].tool_call_id.as_deref(), Some("fc_456"));
 }
+
+fn effort_provider(passthrough: bool, effort: Option<&str>) -> OpenAiCompatibleModelProvider {
+    let mut builder = OpenAiCompatibleModelProvider::builder("test")
+        .display_name("test")
+        .base_url("https://example.com")
+        .credential(None)
+        .auth_style(AuthStyle::Bearer)
+        .reasoning_effort(effort.map(str::to_string));
+    if passthrough {
+        builder = builder.reasoning_effort_passthrough();
+    }
+    builder.build()
+}
+
+#[test]
+fn reasoning_effort_is_filtered_to_openai_reasoning_models_by_default() {
+    let p = effort_provider(false, Some("high"));
+    assert_eq!(p.reasoning_effort_for_model("gateway/glm-5"), None);
+    assert_eq!(
+        p.reasoning_effort_for_model("openai/o3-mini").as_deref(),
+        Some("high")
+    );
+}
+
+#[test]
+fn reasoning_effort_passthrough_sends_effort_to_any_model() {
+    let p = effort_provider(true, Some("high"));
+    for model in [
+        "gateway/glm-5",
+        "kimi-k2",
+        "openai/o3-mini",
+        "gpt-5-chat-latest",
+    ] {
+        assert_eq!(
+            p.reasoning_effort_for_model(model).as_deref(),
+            Some("high"),
+            "{model}"
+        );
+    }
+    let request = p.build_native_tool_chat_request(
+        &[ChatMessage::user("hi")],
+        None,
+        "gateway/glm-5",
+        None,
+        false,
+    );
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["reasoning_effort"], "high", "{value}");
+}
+
+#[test]
+fn reasoning_effort_passthrough_without_effort_sends_nothing() {
+    let p = effort_provider(true, None);
+    assert_eq!(p.reasoning_effort_for_model("gateway/glm-5"), None);
+}

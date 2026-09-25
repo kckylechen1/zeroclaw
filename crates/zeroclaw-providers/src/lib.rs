@@ -577,6 +577,9 @@ pub struct ModelProviderRuntimeOptions {
     pub secrets_encrypt: bool,
     pub reasoning_enabled: Option<bool>,
     pub reasoning_effort: Option<String>,
+    /// Send `reasoning_effort` to every model, not only OpenAI reasoning
+    /// models. From `ModelProviderConfig::reasoning_effort_passthrough`.
+    pub reasoning_effort_passthrough: bool,
     /// HTTP request timeout in seconds for LLM model_provider API calls.
     /// `None` uses the model_provider's built-in default (120s for compatible model_providers).
     pub provider_timeout_secs: Option<u64>,
@@ -632,6 +635,7 @@ impl Default for ModelProviderRuntimeOptions {
             secrets_encrypt: true,
             reasoning_enabled: None,
             reasoning_effort: None,
+            reasoning_effort_passthrough: false,
             provider_timeout_secs: None,
             extra_headers: std::collections::HashMap::new(),
             api_path: None,
@@ -695,6 +699,7 @@ pub fn model_provider_runtime_options_from_model_provider_entry(
         secrets_encrypt: config.secrets.encrypt,
         reasoning_enabled: config.runtime.reasoning_enabled,
         reasoning_effort: config.runtime.reasoning_effort.clone(),
+        reasoning_effort_passthrough: entry.is_some_and(|e| e.reasoning_effort_passthrough),
         provider_timeout_secs: Some(entry.and_then(|e| e.timeout_secs).unwrap_or(120)),
         extra_headers: entry.map(|e| e.extra_headers.clone()).unwrap_or_default(),
         api_path: None,
@@ -2534,6 +2539,23 @@ mod tests {
             Some(&entry),
         );
         assert_eq!(opts.vision, Some(false));
+    }
+
+    #[test]
+    fn reasoning_effort_passthrough_maps_into_runtime_options() {
+        use zeroclaw_config::schema::{Config, ModelProviderConfig};
+        let config = Config::default();
+        let off = model_provider_runtime_options_from_model_provider_entry(
+            &config,
+            Some(&ModelProviderConfig::default()),
+        );
+        assert!(!off.reasoning_effort_passthrough);
+        let entry = ModelProviderConfig {
+            reasoning_effort_passthrough: true,
+            ..Default::default()
+        };
+        let on = model_provider_runtime_options_from_model_provider_entry(&config, Some(&entry));
+        assert!(on.reasoning_effort_passthrough);
     }
 
     #[test]

@@ -59,6 +59,9 @@ pub struct OpenAiCompatibleModelProvider {
     extra_headers: std::collections::HashMap<String, String>,
     /// Optional reasoning effort for GPT-5/Codex-compatible backends.
     reasoning_effort: Option<String>,
+    /// Send `reasoning_effort` to every model instead of only OpenAI
+    /// reasoning models (see [`Self::reasoning_effort_for_model`]).
+    reasoning_effort_passthrough: bool,
     /// Whether stored assistant reasoning should be replayed on outbound
     /// assistant history messages. Some providers reject reasoning fields as
     /// input even though they may return them in responses.
@@ -323,6 +326,7 @@ pub struct OpenAiCompatibleBuilder {
     timeout_secs: Option<u64>,
     extra_headers: std::collections::HashMap<String, String>,
     reasoning_effort: Option<String>,
+    reasoning_effort_passthrough: bool,
     /// Set to `Some(false)` by
     /// [`OpenAiCompatibleBuilder::without_assistant_reasoning_replay`]. `None`
     /// preserves the default (replay enabled).
@@ -437,6 +441,13 @@ impl OpenAiCompatibleBuilder {
     /// Set reasoning effort for GPT-5/Codex-compatible chat-completions APIs.
     pub fn reasoning_effort(mut self, reasoning_effort: Option<String>) -> Self {
         self.reasoning_effort = reasoning_effort;
+        self
+    }
+
+    /// Send the configured reasoning effort to every model, not only OpenAI
+    /// reasoning models. Use only for a backend known to accept the field.
+    pub fn reasoning_effort_passthrough(mut self) -> Self {
+        self.reasoning_effort_passthrough = true;
         self
     }
 
@@ -578,6 +589,7 @@ impl OpenAiCompatibleBuilder {
             timeout_secs: self.timeout_secs.unwrap_or(120),
             extra_headers: self.extra_headers,
             reasoning_effort: self.reasoning_effort,
+            reasoning_effort_passthrough: self.reasoning_effort_passthrough,
             replay_assistant_reasoning: self.replay_assistant_reasoning_override.unwrap_or(true),
             api_path: self.api_path,
             max_tokens: self.max_tokens,
@@ -615,6 +627,7 @@ impl OpenAiCompatibleModelProvider {
             timeout_secs: None,
             extra_headers: std::collections::HashMap::new(),
             reasoning_effort: None,
+            reasoning_effort_passthrough: false,
             replay_assistant_reasoning_override: None,
             api_path: None,
             max_tokens: None,
@@ -906,6 +919,12 @@ impl OpenAiCompatibleModelProvider {
 
     fn reasoning_effort_for_model(&self, model: &str) -> Option<String> {
         let effort = self.reasoning_effort.as_ref()?;
+        // The name filter below exists because some backends reject unknown
+        // request fields; an operator who has verified theirs accepts
+        // `reasoning_effort` can switch it off per provider.
+        if self.reasoning_effort_passthrough {
+            return Some(effort.clone());
+        }
         let id = model
             .rsplit('/')
             .next()
