@@ -2106,6 +2106,7 @@ pub(crate) mod tests {
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reload_tx: None,
+            ws_conversations: Default::default(),
         }
     }
 

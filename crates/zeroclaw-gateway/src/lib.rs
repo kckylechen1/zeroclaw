@@ -33,6 +33,7 @@ pub mod tls;
 pub mod voice_duplex;
 pub mod ws;
 pub mod ws_approval;
+pub mod ws_conversation;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -451,6 +452,8 @@ pub struct AppState {
         std::sync::Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>,
     >,
     pub pending_reload: Arc<std::sync::atomic::AtomicBool>,
+    /// Live `/ws/chat` conversations, shared by every socket on a session.
+    pub ws_conversations: Arc<ws_conversation::ConversationHub<ws::WsSession>>,
 }
 
 /// The gateway's per-session turn queue, with a background reaper that
@@ -1307,6 +1310,7 @@ pub async fn run_gateway(
         web_dist_dir,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ws_conversations: Default::default(),
     };
 
     // Build router with middleware

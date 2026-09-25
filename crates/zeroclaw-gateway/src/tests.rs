@@ -255,7 +255,7 @@ fn paircode_recovery_curl_preserves_path_prefix() {
 /// Build an AppState wired with a real pairing guard, on-disk config path,
 /// and an optional device registry so the admin paircode handler's
 /// revoke + persist paths can be exercised end to end.
-fn admin_paircode_state(
+pub(crate) fn admin_paircode_state(
     tmp: &tempfile::TempDir,
     require_pairing: bool,
     with_registry: bool,
@@ -310,6 +310,7 @@ fn admin_paircode_state(
         pending_pairings: None,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ws_conversations: Default::default(),
     }
 }
 
@@ -895,6 +896,7 @@ async fn metrics_endpoint_returns_hint_when_prometheus_is_disabled() {
         pending_pairings: None,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ws_conversations: Default::default(),
     };
 
     let response = handle_metrics(State(state)).await.into_response();
@@ -965,6 +967,7 @@ async fn metrics_endpoint_renders_prometheus_output() {
         pending_pairings: None,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ws_conversations: Default::default(),
     };
 
     let response = handle_metrics(State(state)).await.into_response();
@@ -1594,6 +1597,7 @@ async fn webhook_idempotency_skips_duplicate_provider_calls() {
         pending_pairings: None,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ws_conversations: Default::default(),
     };
 
     let mut headers = HeaderMap::new();
@@ -1682,6 +1686,7 @@ async fn webhook_unknown_agent_rejected_before_dispatch() {
         pending_pairings: None,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ws_conversations: Default::default(),
     };
 
     // An idempotency key on a rejected request must NOT be consumed.
@@ -1785,6 +1790,7 @@ async fn webhook_explicit_agent_reports_model_without_owning_lifecycle() {
         pending_pairings: None,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ws_conversations: Default::default(),
     };
 
     let response = handle_webhook(
@@ -1868,6 +1874,7 @@ async fn webhook_autosave_stores_distinct_keys_per_request() {
         pending_pairings: None,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ws_conversations: Default::default(),
     };
 
     let headers = HeaderMap::new();
@@ -1970,6 +1977,7 @@ async fn webhook_secret_hash_rejects_missing_header() {
         pending_pairings: None,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ws_conversations: Default::default(),
     };
 
     let response = handle_webhook(
@@ -2038,6 +2046,7 @@ async fn webhook_secret_hash_rejects_invalid_header() {
         pending_pairings: None,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ws_conversations: Default::default(),
     };
 
     let mut headers = HeaderMap::new();
@@ -2111,6 +2120,7 @@ async fn webhook_secret_hash_accepts_valid_header() {
         pending_pairings: None,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ws_conversations: Default::default(),
     };
 
     let mut headers = HeaderMap::new();
