@@ -525,6 +525,40 @@ Examples:
         peripheral: Vec<String>,
     },
 
+    #[cfg(feature = "agent-runtime")]
+    /// Chat with an agent through the gateway
+    // i18n-exempt: clap derive help — framework requires a compile-time literal
+    #[command(long_about = "\
+Chat with an agent through the gateway.
+
+Attaches to a session on a running gateway (`zeroclaw daemon` or \
+`zeroclaw gateway start`). Every client on the same session, including the \
+web dashboard, shares one conversation. Closing the chat leaves a running \
+turn going; Ctrl+C or /cancel stops it.
+
+Examples:
+  zeroclaw chat -a assistant                          # session \"main\" on this machine's gateway
+  zeroclaw chat -a assistant -s work                  # another session
+  zeroclaw chat -a assistant -m \"What's on today?\"    # one message, then exit
+  zeroclaw chat -a assistant --gateway wss://home.example:42617")]
+    Chat {
+        /// Agent alias to talk to (must match `[agents.<alias>]` on the gateway)
+        #[arg(short = 'a', long)]
+        agent: String,
+
+        /// Session to attach to; clients on the same session share one conversation
+        #[arg(short = 's', long, default_value = "main")]
+        session: String,
+
+        /// Gateway URL (default: this machine's configured gateway)
+        #[arg(long)]
+        gateway: Option<String>,
+
+        /// Send one message, print the reply, and exit
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+
     /// Start/manage the gateway server (webhooks, websockets)
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
@@ -2094,6 +2128,14 @@ async fn async_main(command: clap::Command) -> Result<()> {
             .await?;
             Ok(())
         }
+
+        #[cfg(feature = "agent-runtime")]
+        Commands::Chat {
+            agent,
+            session,
+            gateway,
+            message,
+        } => commands::chat::run(&config, agent, session, gateway, message).await,
 
         Commands::Agent {
             agent: agent_alias,

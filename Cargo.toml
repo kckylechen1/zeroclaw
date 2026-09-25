@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-plugins", "crates/zeroclaw-plugins/tests/fixtures/channel-fixture", "crates/zeroclaw-gateway", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/robot-kit", "crates/aardvark-sys", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
+members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-plugins", "crates/zeroclaw-plugins/tests/fixtures/channel-fixture", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/robot-kit", "crates/aardvark-sys", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -25,6 +25,7 @@ zeroclaw-runtime = { path = "crates/zeroclaw-runtime", version = "0.8.3", defaul
 zeroclaw-eval = { path = "crates/zeroclaw-eval", version = "0.8.3" }
 zeroclaw-plugins = { path = "crates/zeroclaw-plugins", version = "0.8.3" }
 zeroclaw-gateway = { path = "crates/zeroclaw-gateway", version = "0.8.3" }
+zeroclaw-gateway-client = { path = "crates/zeroclaw-gateway-client", version = "0.8.3" }
 zeroclaw-hardware = { path = "crates/zeroclaw-hardware", version = "0.8.3" }
 zeroclaw-tool-call-parser = { path = "crates/zeroclaw-tool-call-parser", version = "0.8.3" }
 zeroclaw-macros = { path = "crates/zeroclaw-macros", version = "0.8.3" }
@@ -81,6 +82,7 @@ zeroclaw-runtime = { workspace = true, optional = true }
 zeroclaw-eval = { workspace = true, optional = true }
 zeroclaw-plugins = { workspace = true, optional = true }
 zeroclaw-gateway = { workspace = true, optional = true }
+zeroclaw-gateway-client = { workspace = true, optional = true }
 zeroclaw-hardware = { workspace = true, optional = true }
 zeroclaw-tool-call-parser.workspace = true
 zeroclaw-macros.workspace = true
@@ -300,6 +302,7 @@ hardware-tools = [
 # or individual `channel-*` features.
 agent-runtime = [
     "dep:zeroclaw-runtime", "dep:zeroclaw-eval", "dep:zeroclaw-channels", "dep:zeroclaw-tools",
+    "dep:zeroclaw-gateway-client",
     "dep:rusqlite",
     "dep:ring", "dep:lru", "dep:chrono-tz", "dep:cron", "dep:glob", "dep:which",
     "dep:tokio-tungstenite", "dep:tokio-socks", "dep:hostname",

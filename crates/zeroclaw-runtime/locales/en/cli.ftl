@@ -4,6 +4,7 @@ cli-try-quickstart = Try `zeroclaw quickstart` to create your first agent.
 
 cli-quickstart-about = Create your first agent end-to-end
 cli-agent-about = Start the AI agent loop
+cli-chat-about = Chat with an agent through the gateway
 cli-gateway-about = Manage the gateway server (webhooks, websockets)
 cli-acp-about = Start the ACP server (JSON-RPC 2.0 over stdio)
 cli-daemon-about = Start the long-running autonomous daemon
@@ -1101,3 +1102,16 @@ telegram-skip-update-failed = Failed to record the skip marker for update {$upda
 # ── Task-scoped preference runtime command ──
 channel-runtime-task-pref-set = Task preference recorded for this session only: {$kind}: {$statement}
 channel-runtime-task-pref-invalid = Invalid task preference. Usage: /task-pref <value|goal|preference|habit|constraint> <semantic-key> <statement...>
+
+# zeroclaw chat
+cli-chat-connect-failed = Could not attach to the gateway at {$gateway}: {$error}. Start it with `zeroclaw daemon` or `zeroclaw gateway start`, or pass --gateway.
+cli-chat-connect-refused = The gateway at {$gateway} refused the chat: {$error}
+cli-chat-attached = Session {$session} with {$agent}, {$history} earlier messages. /quit leaves, /cancel or Ctrl+C stops a running turn.
+cli-chat-approval-prompt = Allow {$tool}? {$summary} [y]es / [a]lways / [N]o:
+cli-chat-tool-call = → {$tool}
+cli-chat-aborted = (turn cancelled)
+cli-chat-error = Error: {$message}
+cli-chat-duplicate = Already handled ({$state}).
+cli-chat-steered = (added to the running turn)
+cli-chat-closed = The gateway closed the connection.
+cli-chat-event = [{$kind}] {$text}
