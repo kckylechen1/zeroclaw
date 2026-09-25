@@ -1151,6 +1151,46 @@ mod tests {
     }
 
     #[test]
+    fn send_message_builders_set_thread_and_subject() {
+        let msg = SendMessage::new("reply", "target_123").in_thread(Some("thread_abc".into()));
+        assert_eq!(msg.content, "reply");
+        assert_eq!(msg.recipient, "target_123");
+        assert_eq!(msg.thread_ts.as_deref(), Some("thread_abc"));
+        assert!(msg.in_thread(None).thread_ts.is_none());
+
+        let msg = SendMessage::with_subject("body", "to@example.com", "Re: Test")
+            .in_thread(Some("thread_1".into()));
+        assert_eq!(msg.subject.as_deref(), Some("Re: Test"));
+        assert_eq!(msg.thread_ts.as_deref(), Some("thread_1"));
+    }
+
+    #[tokio::test]
+    async fn optional_channel_capabilities_default_to_harmless_no_ops() {
+        let channel = StubChannel { handle: None };
+        assert!(channel.health_check().await);
+        assert!(channel.start_typing("target").await.is_ok());
+        assert!(channel.stop_typing("target").await.is_ok());
+        assert!(!channel.supports_draft_updates());
+        let draft = channel
+            .send_draft(&SendMessage::new("draft", "target"))
+            .await
+            .unwrap();
+        assert!(draft.is_none());
+        assert!(
+            channel
+                .update_draft("target", "m1", "updated")
+                .await
+                .is_ok()
+        );
+        assert!(
+            channel
+                .finalize_draft("target", "m1", "final", false)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn drop_self_messages_default_returns_false_when_handle_unknown() {
         let channel = StubChannel { handle: None };
         assert!(!channel.drop_self_messages(&msg_from("@anyone")));
