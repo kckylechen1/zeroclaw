@@ -2406,9 +2406,6 @@ mod tests {
     }
 
     #[test]
-    fn factory_opencode_go() {}
-
-    #[test]
     fn factory_zai() {
         assert!(create_model_provider("zai", Some("key")).is_ok());
     }
@@ -2649,18 +2646,6 @@ mod tests {
         );
         assert!(p.is_ok());
     }
-
-    #[test]
-    fn resolve_provider_credential_osaurus_env_deleted() {}
-
-    #[test]
-    fn resolve_provider_credential_doubao_volcengine_env_deleted() {}
-
-    #[test]
-    fn resolve_provider_credential_aihubmix_env_deleted() {}
-
-    #[test]
-    fn resolve_provider_credential_siliconflow_env_deleted() {}
 
     #[test]
     fn factory_aihubmix() {
@@ -3058,9 +3043,6 @@ mod tests {
     }
 
     #[test]
-    fn factory_gemini_cli() {}
-
-    #[test]
     fn factory_kilocli() {
         assert!(create_model_provider("kilocli", None).is_ok());
     }
@@ -3100,9 +3082,6 @@ mod tests {
     fn factory_deepmyst() {
         assert!(create_model_provider("deepmyst", Some("key")).is_ok());
     }
-
-    #[test]
-    fn resolve_provider_credential_deepmyst_env_deleted() {}
 
     // ── OpenAI-compatible aggregators & inference hosts ──────
 

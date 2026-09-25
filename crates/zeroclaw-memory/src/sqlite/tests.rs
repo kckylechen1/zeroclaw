@@ -384,6 +384,22 @@ async fn sqlite_get_nonexistent() {
 }
 
 #[tokio::test]
+async fn sqlite_rewriting_keys_after_reopen_does_not_duplicate() {
+    let tmp = TempDir::new().unwrap();
+    for _ in 0..2 {
+        let mem = SqliteMemory::new("test", tmp.path()).unwrap();
+        mem.store("fact_1", "original content", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+        mem.store("fact_2", "another fact", MemoryCategory::Core, None)
+            .await
+            .unwrap();
+    }
+    let mem = SqliteMemory::new("test", tmp.path()).unwrap();
+    assert_eq!(mem.count().await.unwrap(), 2);
+}
+
+#[tokio::test]
 async fn sqlite_db_persists() {
     let tmp = TempDir::new().unwrap();
 

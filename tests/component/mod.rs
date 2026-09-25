@@ -10,6 +10,5 @@ mod otel_dependency_feature_regression;
 mod plugin_feature_graph;
 mod provider_resolution;
 mod provider_schema;
-mod reply_target_field_regression;
 mod security;
 mod skills_bundle_cli;
