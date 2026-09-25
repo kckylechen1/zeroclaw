@@ -24,6 +24,10 @@ use zeroclaw_config::schema::{McpServerConfig, McpTransport};
 /// Maximum bytes for a single JSON-RPC response.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024; // 4 MB
 
+/// Largest HTTP response body, SSE line, or SSE event accepted from an MCP
+/// server. Matches the stdio line limit so every transport has one bound.
+const MAX_RESPONSE_BYTES: usize = MAX_LINE_BYTES;
+
 /// How often the stdio child-exit watcher polls the direct child process for
 /// exit. Short enough that a dead child is surfaced to health checks promptly,
 /// long enough to stay negligible against idle transports.
@@ -687,9 +691,13 @@ enum BoundedLine {
     Eof,
 }
 
-async fn read_bounded_line(
-    reader: &mut BufReader<tokio::process::ChildStdout>,
-) -> std::io::Result<BoundedLine> {
+/// Read one `\n`-terminated line of at most `limit` bytes. A longer line is
+/// consumed through its newline and reported as `Oversized`; a trailing `\r`
+/// is stripped.
+async fn read_bounded_line<R>(reader: &mut R, limit: usize) -> std::io::Result<BoundedLine>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
     let mut line = Vec::new();
     let mut oversized = false;
     loop {
@@ -708,7 +716,7 @@ async fn read_bounded_line(
         let consumed = newline.map_or(buf.len(), |index| index + 1);
         let content_len = newline.unwrap_or(buf.len());
         if !oversized {
-            if line.len().saturating_add(content_len) > MAX_LINE_BYTES {
+            if line.len().saturating_add(content_len) > limit {
                 oversized = true;
                 line.clear();
             } else {
@@ -792,7 +800,7 @@ async fn stdio_read_loop(
 ) {
     let mut reader = BufReader::new(stdout);
     loop {
-        match read_bounded_line(&mut reader).await {
+        match read_bounded_line(&mut reader, MAX_LINE_BYTES).await {
             Ok(BoundedLine::Line(line)) => {
                 let Ok(response) = serde_json::from_slice::<JsonRpcResponse>(&line) else {
                     continue;
@@ -1102,7 +1110,9 @@ impl SharedMcpTransportConn for HttpTransport {
                 }
                 .into());
             }
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_body_bounded(resp, MAX_RESPONSE_BYTES)
+                .await
+                .unwrap_or_default();
             if let Some(rpc) = modern_rpc_error_from_http_body(&body) {
                 return finish_response(request, lifecycle, rpc);
             }
@@ -1155,7 +1165,7 @@ impl SharedMcpTransportConn for HttpTransport {
             return finish_response(request, lifecycle, response);
         }
 
-        let resp_text = resp.text().await.context("failed to read HTTP response")?;
+        let resp_text = read_body_bounded(resp, MAX_RESPONSE_BYTES).await?;
         let response = parse_jsonrpc_response_text(&resp_text)?;
         finish_response(request, lifecycle, response)
     }
@@ -1314,49 +1324,26 @@ impl SseTransport {
                 .bytes_stream()
                 .map(|item| item.map_err(std::io::Error::other));
             let reader = tokio_util::io::StreamReader::new(stream);
-            let mut lines = BufReader::new(reader).lines();
-
-            let mut cur_event: Option<String> = None;
-            let mut cur_id: Option<String> = None;
-            let mut cur_data: Vec<String> = Vec::new();
+            let mut events = SseEventReader::new(BufReader::new(reader), MAX_RESPONSE_BYTES);
 
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => {
                         break;
                     }
-                    line = lines.next_line() => {
-                        let Ok(line_opt) = line else { break; };
-                        let Some(mut line) = line_opt else { break; };
-                        if line.ends_with('\r') {
-                            line.pop();
-                        }
-                        if line.is_empty() {
-                            if cur_event.is_none() && cur_id.is_none() && cur_data.is_empty() {
-                                continue;
-                            }
-                            let event = cur_event.take();
-                            let data = cur_data.join("\n");
-                            cur_data.clear();
-                            let id = cur_id.take();
-                            handle_sse_event(&server_name, &sse_url, &shared, &pending, &notify, event.as_deref(), id.as_deref(), data).await;
-                            continue;
-                        }
-
-                        if line.starts_with(':') {
-                            continue;
-                        }
-
-                        if let Some(rest) = line.strip_prefix("event:") {
-                            cur_event = Some(rest.trim().to_string());
-                        }
-                        if let Some(rest) = line.strip_prefix("data:") {
-                            let rest = rest.strip_prefix(' ').unwrap_or(rest);
-                            cur_data.push(rest.to_string());
-                        }
-                        if let Some(rest) = line.strip_prefix("id:") {
-                            cur_id = Some(rest.trim().to_string());
-                        }
+                    next = events.next_event() => {
+                        let Ok(Some(event)) = next else { break; };
+                        handle_sse_event(
+                            &server_name,
+                            &sse_url,
+                            &shared,
+                            &pending,
+                            &notify,
+                            event.event.as_deref(),
+                            event.id.as_deref(),
+                            event.data,
+                        )
+                        .await;
                     }
                 }
             }
@@ -1456,6 +1443,123 @@ fn derive_message_url(sse_url: &str, message_path: &str) -> Option<String> {
     path.push_str(message_path);
     new_url.set_path(&path);
     Some(new_url.to_string())
+}
+
+/// Read `resp`'s body as text, refusing one larger than `limit` bytes.
+async fn read_body_bounded(resp: reqwest::Response, limit: usize) -> Result<String> {
+    let mut body = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("failed to read HTTP response")?;
+        if body.len().saturating_add(chunk.len()) > limit {
+            bail!("MCP server response exceeds {limit} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// One dispatched server-sent event.
+#[derive(Debug, PartialEq, Eq)]
+struct SseEvent {
+    event: Option<String>,
+    id: Option<String>,
+    data: String,
+}
+
+/// Incremental SSE parser with bounded lines and events.
+///
+/// A line longer than `limit`, or an event whose fields add up to more than
+/// `limit` bytes, is dropped whole: the rest of that event is skipped through
+/// the next blank line, so a trailing fragment is never dispatched on its own.
+struct SseEventReader<R> {
+    reader: R,
+    limit: usize,
+    event: Option<String>,
+    id: Option<String>,
+    data: Vec<String>,
+    bytes: usize,
+    discarding: bool,
+}
+
+impl<R: tokio::io::AsyncBufRead + Unpin> SseEventReader<R> {
+    fn new(reader: R, limit: usize) -> Self {
+        Self {
+            reader,
+            limit,
+            event: None,
+            id: None,
+            data: Vec::new(),
+            bytes: 0,
+            discarding: false,
+        }
+    }
+
+    /// The next complete event, or `None` at end of stream.
+    async fn next_event(&mut self) -> std::io::Result<Option<SseEvent>> {
+        loop {
+            let line = match read_bounded_line(&mut self.reader, self.limit).await? {
+                BoundedLine::Eof => return Ok(None),
+                BoundedLine::Oversized => {
+                    self.reject();
+                    continue;
+                }
+                BoundedLine::Line(line) => line,
+            };
+            let line = String::from_utf8_lossy(&line);
+            if line.is_empty() {
+                if std::mem::take(&mut self.discarding) {
+                    self.clear();
+                    continue;
+                }
+                if self.event.is_none() && self.id.is_none() && self.data.is_empty() {
+                    continue;
+                }
+                let event = SseEvent {
+                    event: self.event.take(),
+                    id: self.id.take(),
+                    data: self.data.join("\n"),
+                };
+                self.clear();
+                return Ok(Some(event));
+            }
+            if self.discarding || line.starts_with(':') {
+                continue;
+            }
+            self.bytes = self.bytes.saturating_add(line.len());
+            if self.bytes > self.limit {
+                self.reject();
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("event:") {
+                self.event = Some(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("data:") {
+                self.data
+                    .push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+            } else if let Some(rest) = line.strip_prefix("id:") {
+                self.id = Some(rest.trim().to_string());
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.event = None;
+        self.id = None;
+        self.data.clear();
+        self.bytes = 0;
+    }
+
+    fn reject(&mut self) {
+        self.clear();
+        self.discarding = true;
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({ "max_bytes": self.limit })),
+            "mcp_transport: dropped oversized SSE event"
+        );
+    }
 }
 
 async fn handle_sse_event(
@@ -1605,53 +1709,20 @@ async fn read_first_jsonrpc_from_sse_response(
         .bytes_stream()
         .map(|item| item.map_err(std::io::Error::other));
     let reader = tokio_util::io::StreamReader::new(stream);
-    let mut lines = BufReader::new(reader).lines();
+    let mut events = SseEventReader::new(BufReader::new(reader), MAX_RESPONSE_BYTES);
 
-    let mut cur_event: Option<String> = None;
-    let mut cur_data: Vec<String> = Vec::new();
-
-    while let Ok(line_opt) = lines.next_line().await {
-        let Some(mut line) = line_opt else { break };
-        if line.ends_with('\r') {
-            line.pop();
-        }
-        if line.is_empty() {
-            if cur_event.is_none() && cur_data.is_empty() {
-                continue;
-            }
-            let event = cur_event.take();
-            let data = cur_data.join("\n");
-            cur_data.clear();
-
-            let event = event.unwrap_or_else(|| "message".to_string());
-            if event.eq_ignore_ascii_case("endpoint") || event.eq_ignore_ascii_case("mcp-endpoint")
-            {
-                continue;
-            }
-            if !event.eq_ignore_ascii_case("message") {
-                continue;
-            }
-
-            let trimmed = data.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let json_str = extract_json_from_sse_text(trimmed);
-            if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(json_str.as_ref()) {
-                return Ok(Some(resp));
-            }
+    while let Ok(Some(SseEvent { event, data, .. })) = events.next_event().await {
+        let event = event.unwrap_or_else(|| "message".to_string());
+        if !event.eq_ignore_ascii_case("message") {
             continue;
         }
-
-        if line.starts_with(':') {
+        let trimmed = data.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        if let Some(rest) = line.strip_prefix("event:") {
-            cur_event = Some(rest.trim().to_string());
-        }
-        if let Some(rest) = line.strip_prefix("data:") {
-            let rest = rest.strip_prefix(' ').unwrap_or(rest);
-            cur_data.push(rest.to_string());
+        let json_str = extract_json_from_sse_text(trimmed);
+        if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(json_str.as_ref()) {
+            return Ok(Some(resp));
         }
     }
 
@@ -1771,7 +1842,9 @@ impl SharedMcpTransportConn for SseTransport {
                 if is_sse {
                     got_direct = read_first_jsonrpc_from_sse_response(resp).await?;
                 } else {
-                    let text = resp.text().await.unwrap_or_default();
+                    let text = read_body_bounded(resp, MAX_RESPONSE_BYTES)
+                        .await
+                        .unwrap_or_default();
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
                         let json_str =
@@ -1797,7 +1870,9 @@ impl SharedMcpTransportConn for SseTransport {
                 }
                 .into());
             }
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_body_bounded(resp, MAX_RESPONSE_BYTES)
+                .await
+                .unwrap_or_default();
             if let Some(rpc) = modern_rpc_error_from_http_body(&body) {
                 return finish_response(request, lifecycle, rpc);
             }
@@ -2479,6 +2554,97 @@ mod tests {
     #[test]
     fn looks_like_sse_text_detects_embedded_data_line() {
         assert!(looks_like_sse_text("id: 1\ndata:{\"x\":1}"));
+    }
+
+    async fn sse_events(input: &str, limit: usize) -> Vec<SseEvent> {
+        let mut reader = SseEventReader::new(BufReader::new(input.as_bytes()), limit);
+        let mut out = Vec::new();
+        while let Some(event) = reader.next_event().await.unwrap() {
+            out.push(event);
+        }
+        out
+    }
+
+    fn data_event(data: &str) -> SseEvent {
+        SseEvent {
+            event: None,
+            id: None,
+            data: data.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_reader_parses_fields_comments_and_crlf() {
+        let events = sse_events(
+            ": keep-alive\r\nevent: message\r\nid: 7\r\ndata: {\"a\":1}\r\ndata: {\"b\":2}\r\n\r\n\n",
+            1024,
+        )
+        .await;
+        assert_eq!(
+            events,
+            vec![SseEvent {
+                event: Some("message".into()),
+                id: Some("7".into()),
+                data: "{\"a\":1}\n{\"b\":2}".into(),
+            }]
+        );
+    }
+
+    /// An oversized line drops its whole event; the suffix of that event is
+    /// not dispatched on its own, and the next event still arrives.
+    #[tokio::test]
+    async fn sse_reader_drops_rest_of_event_after_oversized_line() {
+        let input = format!("data: {}\ndata: suffix\n\ndata: next\n\n", "x".repeat(64));
+        assert_eq!(sse_events(&input, 32).await, vec![data_event("next")]);
+    }
+
+    /// Many short lines that together exceed the limit drop the event too.
+    #[tokio::test]
+    async fn sse_reader_drops_event_whose_total_size_exceeds_limit() {
+        let input = format!(
+            "{}data: tail\n\ndata: next\n\n",
+            "data: 0123456789\n".repeat(8)
+        );
+        assert_eq!(sse_events(&input, 64).await, vec![data_event("next")]);
+    }
+
+    #[tokio::test]
+    async fn sse_reader_limit_resets_per_event() {
+        let input = "data: 0123456789\n\ndata: 0123456789\n\n";
+        assert_eq!(
+            sse_events(input, 20).await,
+            vec![data_event("0123456789"), data_event("0123456789")]
+        );
+    }
+
+    #[tokio::test]
+    async fn read_body_bounded_refuses_oversized_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = zeroclaw_spawn::spawn!(async move {
+            for body in ["small", &"x".repeat(100)] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = socket.read(&mut request).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/");
+        let small = client.get(&url).send().await.unwrap();
+        assert_eq!(read_body_bounded(small, 50).await.unwrap(), "small");
+        let large = client.get(&url).send().await.unwrap();
+        let err = read_body_bounded(large, 50).await.unwrap_err();
+        assert!(err.to_string().contains("exceeds 50 bytes"), "{err}");
+        server.await.unwrap();
     }
 
     #[test]
