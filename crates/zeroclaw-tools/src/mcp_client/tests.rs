@@ -4384,3 +4384,54 @@ async fn dispatch_method_surfaces_jsonrpc_error() {
         .expect_err("jsonrpc error should surface");
     assert!(err.to_string().contains("nope"), "got: {err}");
 }
+
+#[test]
+fn omit_binary_content_replaces_image_audio_and_blob_payloads() {
+    let mut result = serde_json::json!({
+        "content": [
+            {"type": "text", "text": "hello"},
+            {"type": "image", "data": "iVBORw0KGgoAAAANSUhEUg==", "mimeType": "image/png",
+             "annotations": {"audience": ["user"]}},
+            {"type": "audio", "data": "AAAA", "mimeType": "audio/wav"},
+            {"type": "resource", "resource": {
+                "uri": "file:///a.pdf", "mimeType": "application/pdf", "blob": "JVBERi0xLjQK"}},
+            {"type": "resource", "resource": {"uri": "file:///a.txt", "text": "plain"}}
+        ],
+        "isError": false
+    });
+    omit_binary_content(&mut result);
+    let rendered = result.to_string();
+    for raw in ["iVBORw0KGgo", "JVBERi0x", "\"AAAA\""] {
+        assert!(!rendered.contains(raw), "{raw} leaked: {rendered}");
+    }
+    let items = result["content"].as_array().unwrap();
+    assert_eq!(
+        items[0],
+        serde_json::json!({"type": "text", "text": "hello"})
+    );
+    assert_eq!(items[1]["type"], "text");
+    assert_eq!(
+        items[1]["text"],
+        "[image attachment omitted: image/png, about 18 bytes]"
+    );
+    assert_eq!(items[1]["annotations"]["audience"][0], "user");
+    assert_eq!(
+        items[2]["text"],
+        "[audio attachment omitted: audio/wav, about 3 bytes]"
+    );
+    assert_eq!(items[3]["resource"]["uri"], "file:///a.pdf");
+    assert_eq!(
+        items[3]["resource"]["text"],
+        "[resource attachment omitted: application/pdf, about 9 bytes]"
+    );
+    assert_eq!(items[4]["resource"]["text"], "plain");
+    assert_eq!(result["isError"], false);
+}
+
+#[test]
+fn omit_binary_content_ignores_results_without_content_arrays() {
+    let mut result = serde_json::json!({"structuredContent": {"x": 1}});
+    let before = result.clone();
+    omit_binary_content(&mut result);
+    assert_eq!(result, before);
+}

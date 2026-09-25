@@ -2004,9 +2004,10 @@ impl McpRegistry {
             );
             anyhow::Error::msg(format!("unknown MCP tool `{prefixed_name}`"))
         })?;
-        let result = self.servers[*server_idx]
+        let mut result = self.servers[*server_idx]
             .call_tool(original_name, arguments)
             .await?;
+        omit_binary_content(&mut result);
         serde_json::to_string_pretty(&result)
             .with_context(|| format!("failed to serialize result of MCP tool `{prefixed_name}`"))
     }
@@ -2224,6 +2225,65 @@ impl McpRegistry {
         }
         out
     }
+}
+
+/// Replace binary payloads in a `tools/call` result with one-line notes.
+///
+/// `image` and `audio` content items carry base64 `data`, and embedded
+/// `resource` items may carry a base64 `blob`. Serialized as-is they would
+/// put the raw base64 into the model's context, where it costs tokens and
+/// means nothing. Each is replaced by a text note naming the media type and
+/// approximate decoded size; text content and all other fields are kept.
+fn omit_binary_content(result: &mut serde_json::Value) {
+    let Some(items) = result
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for item in items {
+        let Some(obj) = item.as_object_mut() else {
+            continue;
+        };
+        let kind = obj
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        match kind.as_str() {
+            "image" | "audio" => {
+                let Some(data) = obj.remove("data") else {
+                    continue;
+                };
+                let note = binary_note(&kind, obj.remove("mimeType").as_ref(), &data);
+                obj.insert("type".into(), "text".into());
+                obj.insert("text".into(), note.into());
+            }
+            "resource" => {
+                let Some(resource) = obj
+                    .get_mut("resource")
+                    .and_then(serde_json::Value::as_object_mut)
+                else {
+                    continue;
+                };
+                let Some(blob) = resource.remove("blob") else {
+                    continue;
+                };
+                let note = binary_note("resource", resource.get("mimeType"), &blob);
+                resource.insert("text".into(), note.into());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn binary_note(kind: &str, mime: Option<&serde_json::Value>, data: &serde_json::Value) -> String {
+    let mime = mime
+        .and_then(serde_json::Value::as_str)
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or("unknown type");
+    let decoded_bytes = data.as_str().map_or(0, |s| s.trim().len() / 4 * 3);
+    format!("[{kind} attachment omitted: {mime}, about {decoded_bytes} bytes]")
 }
 
 #[cfg(test)]
