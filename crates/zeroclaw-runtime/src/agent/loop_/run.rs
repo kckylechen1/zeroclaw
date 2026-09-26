@@ -603,29 +603,8 @@ pub async fn run(
         let base_system_prompt = system_prompt.clone();
 
         if let Some(msg) = message {
-            // ── Parse thinking directive from user message ─────────
-            let (thinking_directive, effective_msg) =
-                match crate::agent::thinking::parse_thinking_directive(&msg) {
-                    Some((level, remaining)) => {
-                        ::zeroclaw_log::record!(
-                            INFO,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note
-                            )
-                            .with_category(::zeroclaw_log::EventCategory::Agent)
-                            .with_attrs(::serde_json::json!({"thinking_level": level})),
-                            "Thinking directive parsed from message"
-                        );
-                        (Some(level), remaining)
-                    }
-                    None => (None, msg.clone()),
-                };
-            let thinking_level = crate::agent::thinking::resolve_thinking_level(
-                thinking_directive,
-                None,
-                &agent.resolved.thinking,
-            );
+            let effective_msg = msg.clone();
+            let thinking_level = agent.resolved.thinking.default_level;
             let thinking_params = crate::agent::thinking::apply_thinking_level_with_config(
                 thinking_level,
                 &agent.resolved.thinking,
@@ -1135,29 +1114,8 @@ pub async fn run(
                     _ => {}
                 }
 
-                // ── Parse thinking directive from interactive input ───
-                let (thinking_directive, effective_input) =
-                    match crate::agent::thinking::parse_thinking_directive(&user_input) {
-                        Some((level, remaining)) => {
-                            ::zeroclaw_log::record!(
-                                INFO,
-                                ::zeroclaw_log::Event::new(
-                                    module_path!(),
-                                    ::zeroclaw_log::Action::Note
-                                )
-                                .with_category(::zeroclaw_log::EventCategory::Agent)
-                                .with_attrs(::serde_json::json!({"thinking_level": level})),
-                                "Thinking directive parsed"
-                            );
-                            (Some(level), remaining)
-                        }
-                        None => (None, user_input.clone()),
-                    };
-                let thinking_level = crate::agent::thinking::resolve_thinking_level(
-                    thinking_directive,
-                    None,
-                    &agent.resolved.thinking,
-                );
+                let effective_input = user_input.clone();
+                let thinking_level = agent.resolved.thinking.default_level;
                 let thinking_params = crate::agent::thinking::apply_thinking_level_with_config(
                     thinking_level,
                     &agent.resolved.thinking,

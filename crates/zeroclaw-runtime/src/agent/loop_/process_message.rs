@@ -326,12 +326,10 @@ pub async fn process_message(
         ));
         }
 
-        let effective_message_for_filter =
-            crate::agent::thinking::strip_thinking_directive(message);
         let mut excluded_tools = compute_excluded_mcp_tools(
             &tools_registry,
             &agent.resolved.tool_filter_groups,
-            effective_message_for_filter.as_ref(),
+            message,
             &mcp_tool_names_pm,
         );
         {
@@ -400,26 +398,8 @@ pub async fn process_message(
             system_prompt.push_str(&deferred_section);
         }
 
-        // ── Parse thinking directive from user message ─────────────
-        let (thinking_directive, effective_message) =
-            match crate::agent::thinking::parse_thinking_directive(message) {
-                Some((level, remaining)) => {
-                    ::zeroclaw_log::record!(
-                        INFO,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_category(::zeroclaw_log::EventCategory::Agent)
-                            .with_attrs(::serde_json::json!({"thinking_level": level})),
-                        "Thinking directive parsed from message"
-                    );
-                    (Some(level), remaining)
-                }
-                None => (None, message.to_string()),
-            };
-        let thinking_level = crate::agent::thinking::resolve_thinking_level(
-            thinking_directive,
-            None,
-            &agent.resolved.thinking,
-        );
+        let effective_message = message.to_string();
+        let thinking_level = agent.resolved.thinking.default_level;
         let thinking_params = crate::agent::thinking::apply_thinking_level_with_config(
             thinking_level,
             &agent.resolved.thinking,

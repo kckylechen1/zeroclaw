@@ -1,4 +1,4 @@
-//! Runtime channel commands: parsing `/model`, `/models`, `/config`, `/thinking`,
+//! Runtime channel commands: parsing `/model`, `/models`, `/config`,
 //! `/new`, `/clear` and building help/config responses.
 //!
 //! Extracted from `orchestrator/mod.rs` so command vocabulary and pure response
@@ -8,7 +8,6 @@ use std::fmt::Write;
 use std::path::Path;
 
 use serde::Deserialize;
-use zeroclaw_config::scattered_types::ThinkingLevel;
 use zeroclaw_config::schema::Config;
 
 use super::ChannelRouteSelection;
@@ -53,8 +52,6 @@ pub(crate) enum ChannelRuntimeCommand {
     SetModelScoped(OverrideScope, String),
     ShowConfig,
     NewSession,
-    SetThinking(Option<ThinkingLevel>),
-    InvalidThinking(String),
     /// `/task-pref <kind> <semantic-key> <statement...>` — session-scoped
     /// override; never enters the durable User Model store.
     SetTaskPref(&'static str, String, String),
@@ -73,26 +70,6 @@ pub(crate) fn supports_runtime_model_switch(channel_name: &str) -> bool {
             | "whatsapp-web"
             | "whatsapp_web"
     )
-}
-
-pub(crate) fn parse_thinking_command_arg(
-    raw: Option<&str>,
-) -> Result<Option<ThinkingLevel>, String> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let token = raw.trim();
-    if token.is_empty() {
-        return Ok(None);
-    }
-    match token.to_ascii_lowercase().as_str() {
-        "reset" | "default" | "auto" => Ok(None),
-        "on" | "true" | "1" | "enable" | "enabled" | "yes" => Ok(Some(ThinkingLevel::High)),
-        "off" | "false" | "0" | "disable" | "disabled" | "no" => Ok(Some(ThinkingLevel::Off)),
-        _ => ThinkingLevel::from_str_insensitive(token)
-            .map(Some)
-            .ok_or_else(|| token.to_string()),
-    }
 }
 
 pub(crate) fn parse_runtime_command(
@@ -120,19 +97,6 @@ pub(crate) fn parse_runtime_command(
                 Some(ChannelRuntimeCommand::NewSession)
             } else {
                 None
-            }
-        }
-        "/thinking" => {
-            let arg = parts.next();
-            if parts.next().is_some() {
-                Some(ChannelRuntimeCommand::InvalidThinking(
-                    "too many arguments".to_string(),
-                ))
-            } else {
-                match parse_thinking_command_arg(arg) {
-                    Ok(level) => Some(ChannelRuntimeCommand::SetThinking(level)),
-                    Err(raw) => Some(ChannelRuntimeCommand::InvalidThinking(raw)),
-                }
             }
         }
         "/task-pref" => {

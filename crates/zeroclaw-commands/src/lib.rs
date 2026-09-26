@@ -35,7 +35,6 @@ pub enum BuiltinCommandId {
     /// Show runtime config visible to the surface.
     Config,
     /// Show or change model thinking/reasoning effort.
-    Thinking,
     /// Manage durable goal-mode work.
     Goal,
 }
@@ -165,15 +164,6 @@ static BUILTIN_COMMANDS: &[CommandSpec] = &[
         execution: CommandExecution::RuntimeCommand,
     },
     CommandSpec {
-        id: BuiltinCommandId::Thinking,
-        name: "thinking",
-        aliases: &["think"],
-        usage: "/thinking [off|low|medium|high|max|reset]",
-        description_key: "command-thinking-description",
-        surfaces: CHANNEL_ONLY,
-        execution: CommandExecution::RuntimeCommand,
-    },
-    CommandSpec {
         id: BuiltinCommandId::Goal,
         name: "goal",
         aliases: &[],
@@ -243,10 +233,6 @@ mod tests {
             command_by_name("new-session").map(|spec| spec.id),
             Some(BuiltinCommandId::New)
         );
-        assert_eq!(
-            command_by_name("/think").map(|spec| spec.id),
-            Some(BuiltinCommandId::Thinking)
-        );
     }
 
     #[test]
@@ -256,8 +242,8 @@ mod tests {
             Some("model".to_string())
         );
         assert_eq!(
-            command_by_name("  /THINK@ZeroClaw_Bot  ").map(|spec| spec.id),
-            Some(BuiltinCommandId::Thinking)
+            command_by_name("  /NEW@ZeroClaw_Bot  ").map(|spec| spec.id),
+            Some(BuiltinCommandId::New)
         );
         assert_eq!(
             parse_command_token("  /NEW-SESSION@ZeroClaw_Bot  ", CommandSurface::Channel)

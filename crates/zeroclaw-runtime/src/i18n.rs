@@ -767,32 +767,6 @@ mod tests {
                 ["gpt-test", "openai.default", "/model"].as_slice(),
             ),
             (
-                "channel-runtime-thinking-set",
-                &[("level", "high")][..],
-                ["high", "/thinking reset"].as_slice(),
-            ),
-            (
-                "channel-runtime-thinking-cleared",
-                &[("default", "medium")][..],
-                ["medium"].as_slice(),
-            ),
-            (
-                "channel-runtime-thinking-default",
-                &[("default", "medium")][..],
-                ["medium", "/thinking high", "/thinking max", "/thinking off"].as_slice(),
-            ),
-            (
-                "channel-runtime-thinking-invalid",
-                &[("raw", "banana")][..],
-                [
-                    "banana",
-                    "/thinking off|minimal|low|medium|high|max",
-                    "/thinking on",
-                    "/thinking reset",
-                ]
-                .as_slice(),
-            ),
-            (
                 "channel-runtime-provider-turn-init-failed",
                 &[("provider", "openai.default"), ("error", "bad key")][..],
                 ["openai.default", "bad key", "/models"].as_slice(),

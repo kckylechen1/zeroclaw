@@ -857,14 +857,6 @@ channel-runtime-provider-unknown = model_provider desconocido `{ $provider }`. U
 channel-runtime-scoped-model-empty = El ID del modelo no puede estar vacío. Usa `/model --user|--agent <model-id>`.
 channel-runtime-scoped-model-switched = Modelo definido en `{ $model }` (model_provider: `{ $provider }`) para el ámbito **{ $scope }**. Solo para la sesión; se restablece al reiniciar.
 channel-runtime-shadow-note = ⚠️ Hay una sobrescritura de mayor precedencia activa, por lo que los mensajes usarán `{ $model }` (`{ $provider }`) en su lugar; consulta `/model`.
-channel-runtime-thinking-set =
-    Thinking definido en `{ $level }` para esta sesión del remitente.
-    Usa `/thinking reset` para volver al valor predeterminado del agente.
-channel-runtime-thinking-cleared = Sobrescritura de thinking borrada. Usando el valor predeterminado del agente `{ $default }` para esta sesión del remitente.
-channel-runtime-thinking-default =
-    Thinking ya está usando el valor predeterminado del agente `{ $default }` para esta sesión del remitente.
-    Usa `/thinking high`, `/thinking max` o `/thinking off` para sobrescribirlo.
-channel-runtime-thinking-invalid = Nivel de thinking desconocido `{ $raw }`. Usa `/thinking off|minimal|low|medium|high|max`, `/thinking on` o `/thinking reset`.
 channel-runtime-provider-turn-init-failed =
     ⚠️ Error al inicializar model_provider `{ $provider }`. Ejecuta `/models` para elegir otro model_provider.
     Detalles: { $error }

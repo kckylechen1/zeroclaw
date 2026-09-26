@@ -408,7 +408,6 @@ fn router_test_ctx() -> Arc<ChannelRuntimeContext> {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         interrupt_on_new_message: InterruptOnNewMessageConfig {
@@ -1024,7 +1023,6 @@ fn channel_runtime_context_for_defaults_test(
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         interrupt_on_new_message: InterruptOnNewMessageConfig {
@@ -1512,7 +1510,6 @@ fn compact_sender_history_keeps_recent_truncated_messages() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         interrupt_on_new_message: InterruptOnNewMessageConfig {
@@ -1609,7 +1606,6 @@ fn append_sender_turn_stores_single_turn_per_call() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         interrupt_on_new_message: InterruptOnNewMessageConfig {
@@ -1725,7 +1721,6 @@ fn rollback_orphan_user_turn_removes_only_latest_matching_user_turn() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         interrupt_on_new_message: InterruptOnNewMessageConfig {
@@ -1845,7 +1840,6 @@ fn rollback_orphan_user_turn_also_removes_from_session_store() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         interrupt_on_new_message: InterruptOnNewMessageConfig {
@@ -2608,7 +2602,6 @@ fn test_runtime_ctx_with_observer(
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -4803,7 +4796,6 @@ fn peer_prompt_test_context(
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -4889,7 +4881,6 @@ async fn process_channel_message_executes_tool_calls_instead_of_sending_raw_json
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -5009,7 +5000,6 @@ async fn process_channel_message_scopes_sender_session_key_for_sessions_current_
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -5124,7 +5114,6 @@ async fn process_channel_message_renders_trailing_tool_receipts_block_when_enabl
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -5274,7 +5263,6 @@ async fn process_channel_message_omits_receipts_block_when_disabled() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -5396,7 +5384,6 @@ async fn process_channel_message_disabled_receipt_generator_emits_no_receipts_an
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -5542,7 +5529,6 @@ async fn process_channel_message_telegram_does_not_persist_tool_summary_prefix()
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -5671,7 +5657,6 @@ async fn process_channel_message_strips_unexecuted_tool_json_artifacts_from_repl
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -5785,7 +5770,6 @@ async fn process_channel_message_executes_tool_calls_with_alias_tags() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -5919,7 +5903,6 @@ async fn process_channel_message_handles_models_command_without_llm_call() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -6077,7 +6060,6 @@ async fn process_channel_message_uses_route_override_provider_and_model() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
         route_overrides: Arc::new(Mutex::new(route_overrides)),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -6254,7 +6236,6 @@ async fn process_channel_message_persists_model_switch_with_route_credential() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -6741,7 +6722,6 @@ async fn process_channel_message_prefers_cached_default_provider_instance() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -6850,7 +6830,6 @@ async fn process_channel_message_respects_configured_max_tool_iterations_above_d
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -6969,7 +6948,6 @@ async fn process_channel_message_reports_configured_max_tool_iterations_limit() 
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -7243,7 +7221,6 @@ async fn message_dispatch_processes_messages_in_parallel() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -7482,7 +7459,6 @@ async fn deliver_messages_through_loop(
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -7599,7 +7575,6 @@ async fn message_dispatch_interrupts_in_flight_telegram_request_and_preserves_co
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -7759,7 +7734,6 @@ async fn message_dispatch_interrupts_in_flight_slack_request_and_preserves_conte
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -7929,7 +7903,6 @@ async fn message_dispatch_interrupts_in_flight_whatsapp_request_and_preserves_co
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -8079,7 +8052,6 @@ async fn message_dispatch_interrupt_scope_is_same_sender_same_chat() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -8214,7 +8186,6 @@ async fn process_channel_message_cancels_scoped_typing_task() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -8444,7 +8415,6 @@ async fn process_channel_message_adds_and_swaps_reactions() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -8549,7 +8519,6 @@ async fn process_channel_message_no_reply_clears_early_ack() {
         model_provider_ref: Arc::new("test-provider".to_string()),
         agent_alias: Arc::new("test-agent".to_string()),
         agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         memory: Arc::new(NoopMemory),
         memory_strategy: Arc::new(
             zeroclaw_runtime::agent::memory_strategy::DefaultMemoryStrategy::with_config(
@@ -8722,7 +8691,6 @@ async fn process_channel_message_acks_before_slow_model_completes() {
         model_provider_ref: Arc::new("test-provider".to_string()),
         agent_alias: Arc::new("test-agent".to_string()),
         agent_cfg: Arc::new(zeroclaw_config::schema::AliasedAgentConfig::default()),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         memory: Arc::new(NoopMemory),
         memory_strategy: Arc::new(
             zeroclaw_runtime::agent::memory_strategy::DefaultMemoryStrategy::with_config(
@@ -10377,105 +10345,6 @@ async fn dispatch_agent_scope_rejects_when_no_peer_groups_configured() {
 }
 
 #[test]
-fn parse_runtime_command_maps_thinking_levels() {
-    assert_eq!(
-        parse_runtime_command("telegram", "/thinking high"),
-        Some(ChannelRuntimeCommand::SetThinking(Some(
-            ThinkingLevel::High
-        )))
-    );
-    assert_eq!(
-        parse_runtime_command("telegram", "/thinking max"),
-        Some(ChannelRuntimeCommand::SetThinking(Some(ThinkingLevel::Max)))
-    );
-    assert_eq!(
-        parse_runtime_command("telegram", "/thinking off"),
-        Some(ChannelRuntimeCommand::SetThinking(Some(ThinkingLevel::Off)))
-    );
-    assert_eq!(
-        parse_runtime_command("telegram", "/thinking on"),
-        Some(ChannelRuntimeCommand::SetThinking(Some(
-            ThinkingLevel::High
-        )))
-    );
-}
-
-#[test]
-fn parse_runtime_command_maps_thinking_reset_and_invalid() {
-    assert_eq!(
-        parse_runtime_command("telegram", "/thinking"),
-        Some(ChannelRuntimeCommand::SetThinking(None))
-    );
-    assert_eq!(
-        parse_runtime_command("telegram", "/thinking reset"),
-        Some(ChannelRuntimeCommand::SetThinking(None))
-    );
-    assert_eq!(
-        parse_runtime_command("telegram", "/thinking banana"),
-        Some(ChannelRuntimeCommand::InvalidThinking("banana".into()))
-    );
-    assert_eq!(
-        parse_runtime_command("telegram", "/thinking high now"),
-        Some(ChannelRuntimeCommand::InvalidThinking(
-            "too many arguments".into()
-        ))
-    );
-}
-
-#[test]
-fn resolve_channel_thinking_uses_session_override_without_inline_directive() {
-    let config = ThinkingConfig {
-        default_level: ThinkingLevel::Low,
-        ..ThinkingConfig::default()
-    };
-    let resolved = resolve_channel_thinking(
-        "explain the tradeoff",
-        Some(ThinkingLevel::High),
-        &config,
-        Some(0.5),
-    );
-
-    assert_eq!(resolved.effective_content, "explain the tradeoff");
-    assert_eq!(resolved.level, ThinkingLevel::High);
-    assert!(resolved.effective_temperature.unwrap() > 0.5);
-}
-
-#[test]
-fn resolve_channel_thinking_inline_directive_beats_session_override() {
-    let config = ThinkingConfig {
-        default_level: ThinkingLevel::Low,
-        ..ThinkingConfig::default()
-    };
-    let resolved = resolve_channel_thinking(
-        "/think:off explain briefly",
-        Some(ThinkingLevel::Max),
-        &config,
-        Some(0.5),
-    );
-
-    assert_eq!(resolved.effective_content, "explain briefly");
-    assert_eq!(resolved.level, ThinkingLevel::Off);
-    assert!(resolved.effective_temperature.unwrap() < 0.5);
-}
-
-#[test]
-fn resolve_channel_thinking_strips_directive_before_url_enrichment() {
-    let config = ThinkingConfig {
-        default_level: ThinkingLevel::Low,
-        ..ThinkingConfig::default()
-    };
-    let resolved = resolve_channel_thinking(
-        "/think:max summarize https://example.com",
-        None,
-        &config,
-        Some(0.5),
-    );
-
-    assert_eq!(resolved.effective_content, "summarize https://example.com");
-    assert_eq!(resolved.level, ThinkingLevel::Max);
-}
-
-#[test]
 fn resolve_models_command_resolves_bare_family_to_configured_alias() {
     let mut config = zeroclaw_config::schema::Config::default();
     {
@@ -10940,7 +10809,6 @@ async fn process_channel_message_restores_per_sender_history_on_follow_ups() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -11116,7 +10984,6 @@ async fn process_channel_message_refreshes_available_skills_after_new_session() 
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -11505,7 +11372,6 @@ fn cache_stability_test_context(
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -11986,7 +11852,6 @@ async fn process_channel_message_persists_image_payload_verbatim() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -12140,7 +12005,6 @@ async fn process_channel_message_telegram_keeps_system_instruction_at_top_only()
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -13772,7 +13636,6 @@ async fn e2e_photo_attachment_rejected_by_non_vision_provider() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -13893,7 +13756,6 @@ async fn e2e_failed_vision_turn_does_not_poison_follow_up_text_turn() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -14056,7 +13918,6 @@ async fn e2e_failed_non_retryable_turn_does_not_poison_follow_up_text_turn() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -14292,7 +14153,6 @@ async fn process_channel_message_applies_query_classification_route() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -14446,7 +14306,6 @@ async fn process_channel_message_classification_disabled_uses_default_route() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -14592,7 +14451,6 @@ async fn process_channel_message_classification_no_match_uses_default_route() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -14758,7 +14616,6 @@ async fn process_channel_message_classification_priority_selects_highest() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(provider_cache_seed)),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -15324,7 +15181,6 @@ async fn message_dispatch_different_threads_do_not_cancel_each_other() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),
@@ -16844,7 +16700,6 @@ async fn message_dispatch_abandoned_before_processing_stays_replayable() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         provider_runtime_options: zeroclaw_providers::ModelProviderRuntimeOptions::default(),

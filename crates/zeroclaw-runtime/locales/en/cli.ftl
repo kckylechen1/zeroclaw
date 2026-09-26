@@ -982,14 +982,6 @@ channel-runtime-provider-unknown = Unknown model_provider `{ $provider }`. Use `
 channel-runtime-scoped-model-empty = Model ID cannot be empty. Use `/model --user|--agent <model-id>`.
 channel-runtime-scoped-model-switched = Model set to `{ $model }` (model_provider: `{ $provider }`) for the **{ $scope }** scope. Session-only — resets on restart.
 channel-runtime-shadow-note = ⚠️ A higher-precedence override is active, so messages will use `{ $model }` (`{ $provider }`) instead — see `/model`.
-channel-runtime-thinking-set =
-    Thinking set to `{ $level }` for this sender session.
-    Use `/thinking reset` to return to the agent default.
-channel-runtime-thinking-cleared = Thinking override cleared. Using agent default `{ $default }` for this sender session.
-channel-runtime-thinking-default =
-    Thinking is already using agent default `{ $default }` for this sender session.
-    Use `/thinking high`, `/thinking max`, or `/thinking off` to override it.
-channel-runtime-thinking-invalid = Unknown thinking level `{ $raw }`. Use `/thinking off|minimal|low|medium|high|max`, `/thinking on`, or `/thinking reset`.
 channel-runtime-provider-turn-init-failed =
     ⚠️ Failed to initialize model_provider `{ $provider }`. Please run `/models` to choose another model_provider.
     Details: { $error }
