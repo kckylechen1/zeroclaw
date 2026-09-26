@@ -7,9 +7,16 @@ between one Telegram private chat and one gateway session.
 
 ```sh
 cargo build -p zeroclaw-bridge-telegram
-TELEGRAM_BOT_TOKEN=123:abc TELEGRAM_OWNER_ID=4242 ZEROCLAW_GATEWAY_TOKEN=zc_... \
+zeroclaw gateway bridge add telegram --session main   # prints a zcb_... token once
+TELEGRAM_BOT_TOKEN=123:abc TELEGRAM_OWNER_ID=4242 ZEROCLAW_GATEWAY_TOKEN=zcb_... \
   zeroclaw-bridge-telegram --agent assistant
 ```
+
+The gateway token is a bridge token (`[gateway.bridges.telegram]`), scoped
+to the chat sessions it may open. Pass `--session` for the session the
+bridge uses (`main` by default). A paired token still works for the chat
+relay, but the gateway refuses it on the control socket, so proactive
+messages stay off.
 
 ## Flags
 
@@ -20,7 +27,7 @@ TELEGRAM_BOT_TOKEN=123:abc TELEGRAM_OWNER_ID=4242 ZEROCLAW_GATEWAY_TOKEN=zc_... 
 | `--agent` | | required | Agent alias (`[agents.<alias>]` on the gateway) |
 | `--session` | | `main` | Gateway session the owner's chat maps to |
 | `--gateway` | | `ws://127.0.0.1:42617` | Gateway WebSocket base URL |
-| `--gateway-token` | `ZEROCLAW_GATEWAY_TOKEN` | none | Paired bearer token, when the gateway requires pairing |
+| `--gateway-token` | `ZEROCLAW_GATEWAY_TOKEN` | none | Bridge token from `zeroclaw gateway bridge add` |
 | `--telegram-api` | | `https://api.telegram.org` | Bot API base URL (tests point it at a fake) |
 
 Pass the tokens through the environment. Values given as flags show up in
@@ -66,6 +73,29 @@ default. Every client attached to that session shares one conversation:
   the reconnect. A refusal the bridge cannot fix by waiting (a bad token or an
   unknown agent) stops the bridge.
 
-Not yet: groups, attachments, `ask_user` questions, and proactive messages
-(cron, `notify`). A turn's frames that arrive while the socket is down are
-not replayed.
+## Proactive messages
+
+With a bridge token the bridge also keeps the gateway's `/ws/bridge` control
+socket open. Cron jobs whose delivery `channel` is the bridge's name
+(`telegram` above), a heartbeat targeting it, and the `notify` tool queue
+messages in the gateway's outbox, and the gateway sends them here as
+`deliver` frames.
+
+- `to` is the Telegram chat id and `thread_id` becomes `message_thread_id`.
+  Only the owner's chat is served: a message for any other chat is dropped
+  with a warning.
+- The bridge acknowledges a message (`delivered`) only after Telegram
+  accepted it. The gateway keeps unacknowledged messages and sends them again
+  on the next connection, oldest first; ids already delivered are
+  acknowledged without sending twice.
+- If Telegram fails with a retryable error (a timeout, a rate limit, a
+  server error), the bridge drops the control socket and reconnects with
+  backoff, and the message comes again. A permanent refusal, such as a
+  chat Telegram does not know, is dropped and logged so it cannot block the
+  queue.
+- If the gateway refuses the control socket (for example because the token is
+  a paired token, not a bridge token), the bridge logs an error and keeps
+  relaying chat without proactive messages.
+
+Not yet: groups, attachments and `ask_user` questions. A turn's frames that
+arrive while the chat socket is down are not replayed.

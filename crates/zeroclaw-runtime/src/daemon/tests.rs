@@ -587,6 +587,19 @@ fn resolve_delivery_requires_channel_configuration() {
 }
 
 #[test]
+fn resolve_delivery_accepts_a_configured_bridge() {
+    let mut config = Config::default();
+    config.heartbeat.target = Some("telegram".into());
+    config.heartbeat.to = Some("123456".into());
+    config
+        .gateway
+        .bridges
+        .insert("telegram".into(), Default::default());
+    let target = resolve_heartbeat_delivery(&config).unwrap();
+    assert_eq!(target, Some(("telegram".into(), "123456".into())));
+}
+
+#[test]
 fn resolve_delivery_accepts_telegram_configuration() {
     let mut config = Config::default();
     config.heartbeat.target = Some("telegram".into());

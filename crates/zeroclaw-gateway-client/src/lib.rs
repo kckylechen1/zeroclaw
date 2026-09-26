@@ -259,40 +259,13 @@ impl Client {
     /// Connect, read the gateway's `session_start`, and complete the
     /// handshake so the session is ready for messages.
     pub async fn connect(options: &ConnectOptions) -> Result<Self> {
-        let url = options.chat_url();
-        let mut request = url
-            .as_str()
-            .into_client_request()
-            .with_context(|| format!("invalid gateway URL: {url}"))?;
-        let headers = request.headers_mut();
-        headers.insert(
-            header::SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static(PROTOCOL),
-        );
-        if let Some(token) = &options.token {
-            let value = HeaderValue::from_str(&format!("Bearer {token}"))
-                .context("gateway token is not a valid header value")?;
-            headers.insert(header::AUTHORIZATION, value);
-        }
-        let (mut socket, _) = match tokio_tungstenite::connect_async(request).await {
-            Ok(connected) => connected,
-            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
-                let reason = response
-                    .body()
-                    .as_deref()
-                    .map(|body| String::from_utf8_lossy(body).trim().to_string())
-                    .filter(|body| !body.is_empty())
-                    .unwrap_or_else(|| response.status().to_string());
-                return Err(Rejected {
-                    status: response.status().as_u16(),
-                    reason,
-                }
-                .into());
-            }
-            Err(e) => {
-                return Err(e).with_context(|| format!("could not connect to {}", options.gateway));
-            }
-        };
+        let mut socket = open(
+            &options.chat_url(),
+            PROTOCOL,
+            options.token.as_deref(),
+            &options.gateway,
+        )
+        .await?;
 
         let session = match next_value(&mut socket).await? {
             Some(value) if value["type"] == "session_start" => {
@@ -315,7 +288,7 @@ impl Client {
                         value["message"].as_str().unwrap_or("unknown error")
                     )
                 }
-                // Restore notices and cron results may precede `connected`.
+                // Restore notices may precede `connected`.
                 Some(_) => continue,
                 None => bail!("gateway closed the connection during the handshake"),
             }
@@ -379,6 +352,129 @@ impl Client {
 
     /// Close the socket. The session and any running turn stay on the
     /// gateway.
+    pub async fn close(mut self) -> Result<()> {
+        self.socket.close(None).await.context("closing the socket")
+    }
+}
+
+/// Open a WebSocket to `url` offering `protocol`, with the bearer token in
+/// the `Authorization` header. A refused upgrade comes back as [`Rejected`].
+async fn open(
+    url: &str,
+    protocol: &'static str,
+    token: Option<&str>,
+    gateway: &str,
+) -> Result<Socket> {
+    let mut request = url
+        .into_client_request()
+        .with_context(|| format!("invalid gateway URL: {url}"))?;
+    let headers = request.headers_mut();
+    headers.insert(
+        header::SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static(protocol),
+    );
+    if let Some(token) = token {
+        let value = HeaderValue::from_str(&format!("Bearer {token}"))
+            .context("gateway token is not a valid header value")?;
+        headers.insert(header::AUTHORIZATION, value);
+    }
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((socket, _)) => Ok(socket),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            let reason = response
+                .body()
+                .as_deref()
+                .map(|body| String::from_utf8_lossy(body).trim().to_string())
+                .filter(|body| !body.is_empty())
+                .unwrap_or_else(|| response.status().to_string());
+            Err(Rejected {
+                status: response.status().as_u16(),
+                reason,
+            }
+            .into())
+        }
+        Err(e) => Err(e).with_context(|| format!("could not connect to {gateway}")),
+    }
+}
+
+/// The control sub-protocol of `/ws/bridge`.
+pub const BRIDGE_PROTOCOL: &str = "zeroclaw.bridge.v1";
+
+/// A proactive message the gateway asks a bridge to deliver (cron output,
+/// heartbeat, the `notify` tool). Acknowledge it with [`BridgeClient::ack`]
+/// only after the platform accepted it; until then the gateway keeps it and
+/// sends it again on the next connection, so the same `id` can arrive more
+/// than once.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Deliver {
+    pub id: String,
+    /// Recipient on the bridge's platform (for Telegram, a chat id).
+    pub to: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    pub content: String,
+}
+
+/// The URL of a gateway's bridge control socket.
+pub fn bridge_url(gateway: &str) -> String {
+    format!("{}/ws/bridge", gateway.trim_end_matches('/'))
+}
+
+/// A bridge's control socket (`/ws/bridge`). The gateway identifies the
+/// bridge by its token and keeps one control socket per bridge: a new
+/// connection replaces the old one. On connect it first replays every
+/// unacknowledged message, oldest first, then sends new ones as they are
+/// queued.
+pub struct BridgeClient {
+    socket: Socket,
+    bridge: String,
+}
+
+impl BridgeClient {
+    /// Connect with a bridge token (`zeroclaw gateway bridge add`) and read
+    /// the gateway's `bridge_start`.
+    pub async fn connect(gateway: &str, token: &str) -> Result<Self> {
+        let mut socket = open(&bridge_url(gateway), BRIDGE_PROTOCOL, Some(token), gateway).await?;
+        match next_value(&mut socket).await? {
+            Some(value) if value["type"] == "bridge_start" => {
+                let bridge = value["bridge"].as_str().unwrap_or_default().to_string();
+                Ok(Self { socket, bridge })
+            }
+            Some(value) => bail!("gateway did not start the bridge socket: {value}"),
+            None => bail!("gateway closed the bridge socket before starting it"),
+        }
+    }
+
+    /// The bridge name the gateway resolved from the token.
+    pub fn bridge(&self) -> &str {
+        &self.bridge
+    }
+
+    /// The next message to deliver, or `None` once the gateway closes the
+    /// socket (for example because a newer connection replaced this one).
+    /// Frames this client does not model are skipped.
+    pub async fn next_deliver(&mut self) -> Result<Option<Deliver>> {
+        loop {
+            let Some(value) = next_value(&mut self.socket).await? else {
+                return Ok(None);
+            };
+            if value["type"] == "deliver" {
+                return serde_json::from_value(value)
+                    .map(Some)
+                    .context("malformed deliver frame");
+            }
+        }
+    }
+
+    /// Tell the gateway `id` was delivered; it drops the message.
+    pub async fn ack(&mut self, id: &str) -> Result<()> {
+        send_json(
+            &mut self.socket,
+            &serde_json::json!({ "type": "delivered", "id": id }),
+        )
+        .await
+    }
+
     pub async fn close(mut self) -> Result<()> {
         self.socket.close(None).await.context("closing the socket")
     }

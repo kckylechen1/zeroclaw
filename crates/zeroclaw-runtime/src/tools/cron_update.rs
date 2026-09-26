@@ -169,8 +169,8 @@ impl Tool for CronUpdateTool {
                                 },
                                 "channel": {
                                     "type": "string",
-                                    "enum": cron::CRON_DELIVERY_SCHEMA_CHANNELS,
-                                    "description": "Channel type to deliver output to"
+                                    "enum": cron::delivery_schema_channels(&self.config),
+                                    "description": "Channel type, or configured bridge name, to deliver output to"
                                 },
                                 "to": {
                                     "type": "string",

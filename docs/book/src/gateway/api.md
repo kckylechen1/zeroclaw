@@ -13,6 +13,7 @@ the live surface.
 | Local ops (loopback only) | `POST /admin/shutdown`, `POST /admin/reload`, `GET /admin/paircode`, `POST /admin/paircode/new` |
 | Client pairing | `POST /pair`, `GET /pair/code`, `POST /api/pairing/initiate`, `POST /api/pair`, `GET /api/devices`, `POST /api/devices/me/capabilities`, `DELETE /api/devices/{id}`, `POST /api/devices/{id}/token/rotate` |
 | Chat | `GET /ws/chat` (WebSocket), `POST /webhook` |
+| Channel bridges | `GET /ws/bridge` (WebSocket, bridge token only) |
 | Events | `GET /api/events` (SSE), `GET /api/events/history` |
 | Sessions | `GET /api/sessions`, `GET /api/sessions/running`, `GET/POST /api/sessions/{id}/messages`, `PUT/DELETE /api/sessions/{id}`, `GET /api/sessions/{id}/state`, `POST /api/sessions/{id}/abort` |
 | Scheduling | `GET/POST /api/cron`, `GET/PATCH /api/cron/settings`, `PATCH/DELETE /api/cron/{id}`, `GET /api/cron/{id}/runs`, `POST /api/cron/{id}/run` |
@@ -104,6 +105,90 @@ the sending socket first:
   older than the TTL whose session no longer exists.
 
 Messages without an `id` behave as before: no ACK and no deduplication.
+
+## Channel bridges
+
+A bridge is a channel that runs as its own process, for example
+`zeroclaw-bridge-telegram` (ADR-013). It relays conversations through
+`/ws/chat` and receives proactive messages (cron output, heartbeat alerts,
+the `notify` tool) on the `/ws/bridge` control socket.
+
+### Bridge tokens
+
+Each bridge has an entry under `[gateway.bridges.<name>]`:
+
+```toml
+[gateway.bridges.telegram]
+token_hash = "<sha256 hex of the token>"
+sessions = ["main"]        # exact chat sessions the token may open
+session_prefix = "tg:"     # and any session whose id starts with this
+```
+
+`zeroclaw gateway bridge add telegram --session main` mints a random token,
+prints it once and stores only its SHA-256 hash (the same hashing as paired
+tokens). `--rotate` replaces the token of an existing bridge, `bridge remove`
+revokes it and `bridge list` shows the scopes. Restart or reload the gateway
+to apply a change. Pairing never issues bridge tokens, and a paired token is
+not a bridge token.
+
+- On `/ws/chat` a bridge token authenticates like a paired token, but only
+  for sessions in its scope: `session_id` must be listed in `sessions` or
+  start with `session_prefix`. Any other session, or no `session_id`, gets
+  403. With neither field set the token opens no chat session. The agent is
+  not restricted.
+- `/ws/bridge` accepts only bridge tokens, whether or not `require_pairing`
+  is set. The bridge's identity comes from the token, never from the query.
+
+### Control socket
+
+The gateway sends `{"type":"bridge_start","bridge":"<name>"}` when the socket
+opens, then one frame per queued message:
+
+```json
+{"type":"deliver","id":"<uuid>","to":"4242","thread_id":"12","content":"..."}
+```
+
+`thread_id` is present only when the sender set one. The bridge answers
+`{"type":"delivered","id":"<uuid>"}` after the platform accepted the
+message, and the gateway then deletes it. Each bridge has at most one
+control socket: a new connection closes the old one (close code 4000).
+
+### Outbox
+
+Messages wait in a SQLite outbox, `<data_dir>/sessions/bridge_outbox.db`,
+until acknowledged.
+
+- Delivery is at least once. Whatever is not acknowledged is sent again on
+  the next connection, so the same `id` can arrive twice; bridges dedupe on
+  it.
+- Order is first in, first out: on connect every pending message is
+  replayed oldest first, before anything queued later.
+- Each bridge keeps at most 1000 messages; a new one drops the oldest,
+  with a warning in the log. Messages older than 24 hours are purged unsent.
+
+Three producers write to the outbox:
+
+- **Cron.** A job whose delivery `channel` names a bridge is queued for it,
+  with `to` and `thread_id` as given:
+
+  ```toml
+  [cron.digest.delivery]
+  mode = "announce"
+  channel = "telegram"   # a [gateway.bridges.<name>] entry
+  to = "4242"            # Telegram chat id
+  ```
+
+  A bridge name takes precedence over an in-core channel of the same name.
+  Delivery counts as succeeded once the message is queued.
+- **Heartbeat.** `heartbeat.target` may name a bridge too.
+- **`notify {bridge, to, text}`.** The model's tool for proactive messages,
+  offered only when at least one bridge is configured. It is an ordinary
+  side-effecting tool: it needs approval unless listed in `auto_approve`,
+  and read-only agents cannot use it.
+
+Cron results are no longer broadcast to every `/ws/chat` socket; they reach
+people only through a bridge (or an in-core channel). The SSE stream at
+`/api/events` still carries them.
 
 ## Discovering the surface
 

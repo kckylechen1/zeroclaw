@@ -109,7 +109,10 @@ pub struct WsQuery {
     pub workspace_dir: Option<String>,
 }
 
-fn extract_ws_token<'a>(headers: &'a HeaderMap, query_token: Option<&'a str>) -> Option<&'a str> {
+pub(crate) fn extract_ws_token<'a>(
+    headers: &'a HeaderMap,
+    query_token: Option<&'a str>,
+) -> Option<&'a str> {
     // 1. Authorization header
     if let Some(t) = headers
         .get(header::AUTHORIZATION)
@@ -164,9 +167,44 @@ pub async fn handle_ws_chat(
     // hash) so a required-group approval policy can be satisfied over WS; an
     // operator grants approval rights to this paired device via a `ws:<token-hash>`
     // group member. `None` when pairing is not required (no auth identity).
-    let auth_subject = if state.pairing.require_pairing() {
-        let token = extract_ws_token(&headers, params.token.as_deref()).unwrap_or("");
-        match state.pairing.authenticate_and_hash(token) {
+    //
+    // A bridge token (`[gateway.bridges.<name>]`) also authenticates, but only
+    // for the sessions its entry scopes it to. Its subject is its token hash,
+    // like a paired token's.
+    let presented = extract_ws_token(&headers, params.token.as_deref()).unwrap_or("");
+    let bridge_scope = state
+        .config
+        .read()
+        .gateway
+        .bridge_for_token(presented)
+        .map(|(name, bridge)| (name.to_string(), bridge.clone()));
+    let auth_subject = if let Some((bridge, scope)) = &bridge_scope {
+        let allowed = params
+            .session_id
+            .as_deref()
+            .is_some_and(|session| scope.allows_session(session));
+        if !allowed {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "bridge": bridge,
+                        "session_id": params.session_id,
+                    })),
+                "bridge token used outside its session scope"
+            );
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                "Forbidden: this bridge token may not open that session (see [gateway.bridges.<name>] sessions / session_prefix)",
+            )
+                .into_response();
+        }
+        Some(zeroclaw_config::pairing::PairingGuard::token_hash(
+            presented,
+        ))
+    } else if state.pairing.require_pairing() {
+        match state.pairing.authenticate_and_hash(presented) {
             Some(hash) => Some(hash),
             None => {
                 return (
@@ -179,6 +217,7 @@ pub async fn handle_ws_chat(
     } else {
         None
     };
+    let bridge_scope = bridge_scope.map(|(_, scope)| scope);
 
     // Echo Sec-WebSocket-Protocol if the client requests our sub-protocol.
     // Absence is allowed: `/ws/chat` is not fail-closed on a missing token.
@@ -223,6 +262,7 @@ pub async fn handle_ws_chat(
             session_name,
             session_cwd,
             auth_subject,
+            bridge_scope,
         )
     })
     .into_response()
@@ -252,6 +292,7 @@ async fn resolve_ws_memory_handle(
         .map(Some)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_socket(
     socket: WebSocket,
     state: AppState,
@@ -263,6 +304,8 @@ async fn handle_socket(
     // connection was authenticated. Threaded to SOP approval frames so a policied
     // gate can be satisfied by an identified WS caller.
     auth_subject: Option<String>,
+    // Set when a bridge token opened the socket: the sessions it may use.
+    bridge_scope: Option<zeroclaw_config::schema::GatewayBridgeConfig>,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -318,6 +361,17 @@ async fn handle_socket(
                 if let Ok(cp) = serde_json::from_str::<ConnectParams>(&text) {
                     if cp.msg_type == "connect" {
                         ::zeroclaw_log::record!(DEBUG, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"session_id": cp.session_id, "device_name": cp.device_name, "capabilities": cp.capabilities, "cwd": cp.cwd})), "WebSocket connect params received");
+                        if let (Some(sid), Some(scope)) = (&cp.session_id, &bridge_scope)
+                            && !scope.allows_session(sid)
+                        {
+                            let err = serde_json::json!({
+                                "type": "error",
+                                "message": "this bridge token may not use that session",
+                                "code": "SESSION_OUT_OF_SCOPE"
+                            });
+                            let _ = sender.send(Message::Text(err.to_string().into())).await;
+                            return;
+                        }
                         if let Some(sid) = &cp.session_id {
                             memory_session_id =
                                 zeroclaw_api::session_keys::sanitize_session_key(sid);
@@ -437,8 +491,9 @@ async fn handle_socket(
         auth_subject,
     };
 
-    // Subscribe to the shared broadcast channel so cron/heartbeat events
-    // are forwarded to this WebSocket client, during turns as well.
+    // Subscribe to the shared broadcast channel so events addressed to this
+    // session (e.g. messages appended through the sessions API) reach this
+    // client, during turns as well.
     let mut broadcast_rx = state.event_tx.subscribe();
     let mut next_text = first_msg_fallback;
 
@@ -479,7 +534,7 @@ async fn handle_socket(
                     continue;
                 }
 
-                // ── Broadcast event (cron/heartbeat results) ──────────
+                // ── Broadcast event addressed to this session ─────────
                 event = broadcast_rx.recv() => {
                     if let Ok(event) = event
                         && event_matches_session(&event, &scope.session_id)
@@ -1145,18 +1200,11 @@ fn needs_onboarding_ws_error(
     }))
 }
 
+/// Only events addressed to this session reach a chat socket. Events
+/// without a `session_id` (cron results, observability) stay on the SSE
+/// stream; proactive messages reach people through the bridge outbox.
 fn event_matches_session(event: &serde_json::Value, session_id: &str) -> bool {
-    match event.get("session_id").and_then(|value| value.as_str()) {
-        Some(event_session_id) => event_session_id == session_id,
-        None => is_global_chat_event(event),
-    }
-}
-
-fn is_global_chat_event(event: &serde_json::Value) -> bool {
-    matches!(
-        event.get("type").and_then(serde_json::Value::as_str),
-        Some("cron_result")
-    )
+    event.get("session_id").and_then(|value| value.as_str()) == Some(session_id)
 }
 
 fn is_observability_telemetry(event: &serde_json::Value) -> bool {
@@ -2011,13 +2059,13 @@ mod tests {
             "session_id": "operator-2",
             "content": "different session"
         });
-        // No session_id and not on the global whitelist → dropped.
+        // No session_id → dropped.
         let nameless_observability = serde_json::json!({
             "type": "agent_start",
             "source": "observability",
             "model": "gpt-4o"
         });
-        // No session_id but on the global whitelist (`cron_result`) → forwarded.
+        // No session_id: cron results are not broadcast to chat sockets.
         let cron = serde_json::json!({
             "type": "cron_result",
             "output": "global notification"
@@ -2029,7 +2077,7 @@ mod tests {
             &nameless_observability,
             "operator-1"
         ));
-        assert!(event_matches_session(&cron, "operator-1"));
+        assert!(!event_matches_session(&cron, "operator-1"));
     }
 
     #[test]

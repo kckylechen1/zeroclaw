@@ -1,5 +1,6 @@
 //! The bridge loop: Telegram updates in, gateway frames out, one chat
-//! socket kept open for the owner's session.
+//! socket kept open for the owner's session. Proactive messages come in on
+//! a separate control socket (see `control`).
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -76,6 +77,29 @@ pub async fn run(config: BridgeConfig) -> Result<()> {
     let poll_api = api.clone();
     let poll_wait = config.poll_wait;
     let poller = zeroclaw_spawn::spawn!(poll_updates(poll_api, poll_wait, tx));
+    // Proactive messages arrive on the control socket, which needs the
+    // bridge token; without a token only the chat relay runs.
+    let control = match config.gateway.token.clone() {
+        Some(token) => {
+            let control_api = api.clone();
+            let gateway = config.gateway.gateway.clone();
+            let owner_id = config.owner_id;
+            Some(zeroclaw_spawn::spawn!(crate::control::run(
+                control_api,
+                gateway,
+                token,
+                owner_id,
+            )))
+        }
+        None => {
+            record!(
+                INFO,
+                Event::new(module_path!(), Action::Skip),
+                "no gateway token; proactive messages (cron, notify) are off"
+            );
+            None
+        }
+    };
     let mut bridge = Bridge {
         api,
         owner_id: config.owner_id,
@@ -90,6 +114,9 @@ pub async fn run(config: BridgeConfig) -> Result<()> {
     };
     let result = bridge.run(&mut updates).await;
     poller.abort();
+    if let Some(control) = control {
+        control.abort();
+    }
     result
 }
 
@@ -542,7 +569,7 @@ impl Bridge {
 }
 
 /// A refusal that retrying will not fix. Timeouts and rate limits pass.
-fn is_permanent(status: u16) -> bool {
+pub(crate) fn is_permanent(status: u16) -> bool {
     (400..500).contains(&status) && !matches!(status, 408 | 429)
 }
 

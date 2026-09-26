@@ -6835,6 +6835,72 @@ pub struct GatewayConfig {
     /// unless you trust every paired client. (default: false)
     #[serde(default)]
     pub allow_self_upgrade: bool,
+
+    /// Channel bridges allowed to attach (`[gateway.bridges.<name>]`). A
+    /// bridge is a separate process (for example `zeroclaw-bridge-telegram`)
+    /// that relays a messaging platform through `/ws/chat` and receives
+    /// proactive messages (cron, heartbeat, `notify`) on `/ws/bridge`.
+    /// Mint entries with `zeroclaw gateway bridge add <name>`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[nested]
+    pub bridges: HashMap<String, GatewayBridgeConfig>,
+}
+
+/// One channel bridge (`[gateway.bridges.<name>]`).
+///
+/// The bridge authenticates with its own bearer token; only the token's
+/// SHA-256 hash is stored. Bridge tokens are never minted by pairing and
+/// are not paired tokens: they open `/ws/bridge` and, within the session
+/// scope below, `/ws/chat`, and nothing else.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[prefix = "gateway.bridges"]
+#[serde(default)]
+pub struct GatewayBridgeConfig {
+    /// Lowercase hex SHA-256 of the bridge's bearer token.
+    #[secret]
+    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
+    pub token_hash: String,
+    /// Chat sessions whose ids start with this prefix may be opened with the
+    /// bridge token (for example `tg:` for per-chat sessions).
+    pub session_prefix: Option<String>,
+    /// Exact chat session ids the bridge token may open (for example
+    /// `main`, the owner's shared session). With neither this nor
+    /// `session_prefix` set the token opens no chat session.
+    pub sessions: Vec<String>,
+}
+
+impl GatewayBridgeConfig {
+    /// Whether the bridge token may open the chat session `session_id`.
+    pub fn allows_session(&self, session_id: &str) -> bool {
+        if self.sessions.iter().any(|s| s == session_id) {
+            return true;
+        }
+        self.session_prefix
+            .as_deref()
+            .filter(|prefix| !prefix.is_empty())
+            .is_some_and(|prefix| session_id.starts_with(prefix))
+    }
+}
+
+impl GatewayConfig {
+    /// The bridge a bearer token belongs to, by constant-time comparison
+    /// of the token's hash against every configured `token_hash`.
+    pub fn bridge_for_token(&self, token: &str) -> Option<(&str, &GatewayBridgeConfig)> {
+        if token.is_empty() {
+            return None;
+        }
+        let hash = crate::pairing::PairingGuard::token_hash(token);
+        let mut found = None;
+        for (name, bridge) in &self.bridges {
+            if crate::pairing::constant_time_eq(&hash, &bridge.token_hash.to_ascii_lowercase())
+                && found.is_none()
+            {
+                found = Some((name.as_str(), bridge));
+            }
+        }
+        found
+    }
 }
 
 fn default_gateway_port() -> u16 {
@@ -6913,6 +6979,7 @@ impl Default for GatewayConfig {
             long_running_request_timeout_secs: default_gateway_long_running_request_timeout_secs(),
             check_updates: true,
             allow_self_upgrade: false,
+            bridges: HashMap::new(),
         }
     }
 }
@@ -19246,6 +19313,18 @@ impl Config {
                          only unreserved and sub-delim URI characters are allowed"
                     );
                 }
+            }
+        }
+
+        for (name, bridge) in &self.gateway.bridges {
+            let hash = bridge.token_hash.trim();
+            if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                validation_bail!(
+                    InvalidFormat,
+                    &format!("gateway.bridges.{name}.token_hash"),
+                    "gateway.bridges.{name}.token_hash must be the 64-character hex SHA-256 \
+                     of the bridge token (mint one with `zeroclaw gateway bridge add {name}`)"
+                );
             }
         }
 

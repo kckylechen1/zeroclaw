@@ -1325,6 +1325,10 @@ pub fn register_delivery_fn(f: DeliveryFn) {
     let _ = DELIVERY_FN.set(f);
 }
 
+/// Deliver `output` to `target` on `channel`. A `channel` that names a
+/// `[gateway.bridges.<name>]` entry is queued in the bridge outbox, which
+/// the gateway drains over `/ws/bridge`; any other channel goes through the
+/// delivery function the binary registered (the in-core channels).
 pub async fn deliver_announcement(
     config: &Config,
     channel: &str,
@@ -1332,6 +1336,9 @@ pub async fn deliver_announcement(
     thread_id: Option<&str>,
     output: &str,
 ) -> Result<()> {
+    if config.gateway.bridges.contains_key(channel) {
+        return enqueue_for_bridge(config, channel, target, thread_id, output);
+    }
     if let Some(f) = DELIVERY_FN.get() {
         f(
             config.clone(),
@@ -1352,6 +1359,40 @@ pub async fn deliver_announcement(
         );
         Ok(())
     }
+}
+
+/// Queue a proactive message for a configured bridge. Delivery is
+/// asynchronous: success means the message is durably queued, and the
+/// bridge receives it the next time its control socket is connected.
+pub fn enqueue_for_bridge(
+    config: &Config,
+    bridge: &str,
+    target: &str,
+    thread_id: Option<&str>,
+    content: &str,
+) -> Result<()> {
+    let id = zeroclaw_infra::bridge_outbox::BridgeOutbox::shared(&config.data_dir)
+        .and_then(|outbox| outbox.enqueue(bridge, target, thread_id, content))
+        .inspect_err(|e| {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Send)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "bridge": bridge,
+                        "error": format!("{e:#}"),
+                    })),
+                "could not queue a message for a bridge"
+            );
+        })?;
+    ::zeroclaw_log::record!(
+        DEBUG,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Send)
+            .with_outcome(::zeroclaw_log::EventOutcome::Success)
+            .with_attrs(::serde_json::json!({"bridge": bridge, "id": id})),
+        "queued a message for a bridge"
+    );
+    Ok(())
 }
 
 async fn run_job_command(

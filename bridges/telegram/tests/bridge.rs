@@ -14,6 +14,7 @@ use axum::routing::post;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use zeroclaw_bridge_telegram::{BridgeConfig, run};
@@ -29,6 +30,8 @@ struct FakeTelegram {
     calls: Vec<(String, Value)>,
     next_update: i64,
     next_message: i64,
+    /// Refuse this many `sendMessage` calls with a retryable error.
+    fail_sends: usize,
 }
 
 type Shared = Arc<Mutex<FakeTelegram>>;
@@ -50,6 +53,11 @@ async fn bot_api(
         return Json(json!({ "ok": true, "result": [] }));
     }
     let mut tg = tg.lock().unwrap();
+    // A refused send is not recorded: Telegram did not deliver it.
+    if method == "sendMessage" && tg.fail_sends > 0 {
+        tg.fail_sends -= 1;
+        return Json(json!({ "ok": false, "error_code": 502, "description": "Bad Gateway" }));
+    }
     tg.calls.push((method.clone(), body));
     if method == "sendMessage" {
         tg.next_message += 1;
@@ -113,31 +121,66 @@ impl FakeTelegram {
 
 type Ws = WebSocketStream<TcpStream>;
 
-/// Accept the bridge's socket and complete the gateway side of the
-/// handshake.
+/// The gateway side: sockets the bridge opened, by path.
+struct FakeGateway {
+    chat: mpsc::Receiver<Ws>,
+    control: mpsc::Receiver<Ws>,
+}
+
+/// Accept the bridge's sockets and sort them by path. Both must carry the
+/// bridge token.
 #[allow(clippy::result_large_err)] // the handshake callback's error type is tungstenite's
-async fn attach(listener: &TcpListener) -> Ws {
-    let (stream, _) = tokio::time::timeout(WAIT, listener.accept())
+fn fake_gateway(listener: TcpListener) -> FakeGateway {
+    let (chat_tx, chat) = mpsc::channel(4);
+    let (control_tx, control) = mpsc::channel(4);
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut path = String::new();
+            let ws = tokio_tungstenite::accept_hdr_async(
+                stream,
+                |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                 mut resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    path = req.uri().path().to_string();
+                    assert_eq!(
+                        req.headers().get("authorization").unwrap(),
+                        "Bearer zc_token"
+                    );
+                    let protocol = if path == "/ws/bridge" {
+                        assert_eq!(req.uri().query(), None, "identity comes from the token");
+                        "zeroclaw.bridge.v1"
+                    } else {
+                        let query = req.uri().query().unwrap_or_default().to_string();
+                        assert_eq!(query, "agent=assistant&session_id=main");
+                        "zeroclaw.v1"
+                    };
+                    resp.headers_mut()
+                        .insert("sec-websocket-protocol", protocol.parse().unwrap());
+                    Ok(resp)
+                },
+            )
+            .await
+            .unwrap();
+            let tx = if path == "/ws/bridge" {
+                &control_tx
+            } else {
+                &chat_tx
+            };
+            if tx.send(ws).await.is_err() {
+                return;
+            }
+        }
+    });
+    FakeGateway { chat, control }
+}
+
+/// Take the bridge's next chat socket and complete the gateway side of the
+/// handshake.
+async fn attach(gateway: &mut FakeGateway) -> Ws {
+    let mut ws = tokio::time::timeout(WAIT, gateway.chat.recv())
         .await
         .expect("the bridge connects")
         .unwrap();
-    let mut ws = tokio_tungstenite::accept_hdr_async(
-        stream,
-        |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
-         mut resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
-            let query = req.uri().query().unwrap_or_default().to_string();
-            assert_eq!(query, "agent=assistant&session_id=main");
-            assert_eq!(
-                req.headers().get("authorization").unwrap(),
-                "Bearer zc_token"
-            );
-            resp.headers_mut()
-                .insert("sec-websocket-protocol", "zeroclaw.v1".parse().unwrap());
-            Ok(resp)
-        },
-    )
-    .await
-    .unwrap();
     send(
         &mut ws,
         json!({ "type": "session_start", "session_id": "main", "resumed": true }),
@@ -145,6 +188,20 @@ async fn attach(listener: &TcpListener) -> Ws {
     .await;
     assert_eq!(recv(&mut ws).await["type"], "connect");
     send(&mut ws, json!({ "type": "connected" })).await;
+    ws
+}
+
+/// Take the bridge's next control socket and start it.
+async fn control(gateway: &mut FakeGateway) -> Ws {
+    let mut ws = tokio::time::timeout(WAIT, gateway.control.recv())
+        .await
+        .expect("the bridge opens its control socket")
+        .unwrap();
+    send(
+        &mut ws,
+        json!({ "type": "bridge_start", "bridge": "telegram" }),
+    )
+    .await;
     ws
 }
 
@@ -177,20 +234,22 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
         .with_state(tg.clone());
     tokio::spawn(async move { axum::serve(tg_listener, app).await.unwrap() });
 
-    let gateway = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_url = format!("ws://{}", listener.local_addr().unwrap());
+    let mut gateway = fake_gateway(listener);
     let bridge = tokio::spawn(run(BridgeConfig {
         telegram_api: format!("http://{tg_addr}"),
         telegram_token: "TEST".into(),
         owner_id: OWNER,
         gateway: ConnectOptions {
-            gateway: format!("ws://{}", gateway.local_addr().unwrap()),
+            gateway: gateway_url,
             agent: "assistant".into(),
             session_id: Some("main".into()),
             token: Some("zc_token".into()),
         },
         poll_wait: Duration::from_secs(1),
     }));
-    let mut ws = attach(&gateway).await;
+    let mut ws = attach(&mut gateway).await;
 
     // A stranger is ignored; the owner's message becomes a turn that
     // streams into one Telegram message.
@@ -277,7 +336,7 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
     let lost = recv(&mut ws).await;
     assert_eq!(lost["content"], "again");
     drop(ws);
-    let mut ws = attach(&gateway).await;
+    let mut ws = attach(&mut gateway).await;
     let resent = recv(&mut ws).await;
     assert_eq!(resent["type"], "message");
     assert_eq!(resent["content"], "again");
@@ -290,6 +349,74 @@ async fn the_bridge_relays_the_owners_chat_to_a_gateway_session() {
 
     FakeTelegram::text(&tg, OWNER, "/cancel");
     assert_eq!(recv(&mut ws).await["type"], "cancel");
+
+    // Proactive messages: sent to the owner's chat, acknowledged only after
+    // Telegram accepted them, deduplicated by id.
+    let mut ctl = control(&mut gateway).await;
+    send(
+        &mut ctl,
+        json!({ "type": "deliver", "id": "d1", "to": OWNER.to_string(),
+                "content": "cron says hi" }),
+    )
+    .await;
+    FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "cron says hi").await;
+    assert_eq!(
+        recv(&mut ctl).await,
+        json!({ "type": "delivered", "id": "d1" })
+    );
+    // A replayed id is acknowledged without sending it twice; a message
+    // for anyone but the owner is dropped (and acknowledged).
+    send(
+        &mut ctl,
+        json!({ "type": "deliver", "id": "d1", "to": OWNER.to_string(),
+                "content": "cron says hi" }),
+    )
+    .await;
+    assert_eq!(recv(&mut ctl).await["id"], "d1");
+    send(
+        &mut ctl,
+        json!({ "type": "deliver", "id": "d2", "to": STRANGER.to_string(), "content": "leak" }),
+    )
+    .await;
+    assert_eq!(recv(&mut ctl).await["id"], "d2");
+    send(
+        &mut ctl,
+        json!({ "type": "deliver", "id": "d3", "to": OWNER.to_string(),
+                "thread_id": "12", "content": "in a topic" }),
+    )
+    .await;
+    let topic = FakeTelegram::wait_for(&tg, "sendMessage", |b| b["text"] == "in a topic").await;
+    assert_eq!(topic["message_thread_id"], 12);
+    assert_eq!(recv(&mut ctl).await["id"], "d3");
+    let sends = |text: &str| {
+        tg.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|(m, b)| m == "sendMessage" && b["text"] == text)
+            .count()
+    };
+    assert_eq!(sends("cron says hi"), 1);
+    assert_eq!(sends("leak"), 0);
+
+    // A retryable Telegram failure is not acknowledged: the bridge drops
+    // the control socket and the gateway replays the message on the next
+    // connection.
+    tg.lock().unwrap().fail_sends = 1;
+    let d4 = json!({ "type": "deliver", "id": "d4", "to": OWNER.to_string(),
+                     "content": "after a failure" });
+    send(&mut ctl, d4.clone()).await;
+    let closed = tokio::time::timeout(WAIT, ctl.next())
+        .await
+        .expect("the bridge gives up the socket");
+    assert!(
+        !matches!(closed, Some(Ok(Message::Text(_)))),
+        "no ack: {closed:?}"
+    );
+    let mut ctl = control(&mut gateway).await;
+    send(&mut ctl, d4).await;
+    assert_eq!(recv(&mut ctl).await["id"], "d4");
+    assert_eq!(sends("after a failure"), 1);
 
     // Nothing the stranger sent reached Telegram's owner chat or the gateway.
     let calls = tg.lock().unwrap().calls.clone();

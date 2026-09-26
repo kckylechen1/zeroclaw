@@ -226,7 +226,6 @@ export interface WsMessage {
     | "error"
     | "session_start"
     | "connected"
-    | "cron_result"
     | "approval_request"
     | "history_trimmed"
     | "aborted";

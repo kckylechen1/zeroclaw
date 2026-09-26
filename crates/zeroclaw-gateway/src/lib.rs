@@ -33,6 +33,7 @@ pub mod tls;
 pub mod voice_duplex;
 pub mod ws;
 pub mod ws_approval;
+pub mod ws_bridge;
 pub mod ws_conversation;
 
 use anyhow::{Context, Result};
@@ -454,6 +455,8 @@ pub struct AppState {
     pub pending_reload: Arc<std::sync::atomic::AtomicBool>,
     /// Live `/ws/chat` conversations, shared by every socket on a session.
     pub ws_conversations: Arc<ws_conversation::ConversationHub<ws::WsSession>>,
+    /// The live `/ws/bridge` control socket of each bridge.
+    pub bridge_sockets: Arc<ws_bridge::BridgeSockets>,
 }
 
 /// The gateway's per-session turn queue, with a background reaper that
@@ -1202,6 +1205,9 @@ pub async fn run_gateway(
     println!("  POST {pfx}/webhook   — {{\"message\": \"your prompt\"}}");
     println!("  GET  {pfx}/api/*     — REST API (bearer token required)");
     println!("  GET  {pfx}/ws/chat   — WebSocket agent chat");
+    if !config.gateway.bridges.is_empty() {
+        println!("  GET  {pfx}/ws/bridge — channel bridge control socket");
+    }
     #[cfg(feature = "nodes")]
     if config.nodes.enabled {
         println!("  GET  {pfx}/ws/nodes  — WebSocket node discovery");
@@ -1375,6 +1381,7 @@ pub async fn run_gateway(
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     };
 
     // Build router with middleware
@@ -1562,7 +1569,8 @@ pub async fn run_gateway(
         .route("/api/events", get(sse::handle_sse_events))
         .route("/api/events/history", get(sse::handle_events_history))
         // ── WebSocket agent chat ──
-        .route("/ws/chat", get(ws::handle_ws_chat));
+        .route("/ws/chat", get(ws::handle_ws_chat))
+        .route("/ws/bridge", get(ws_bridge::handle_ws_bridge));
     // ── WebSocket node discovery (nodes feature) ──
     #[cfg(feature = "nodes")]
     let inner = inner

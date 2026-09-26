@@ -91,6 +91,7 @@ fn test_state(config: Config) -> AppState {
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     }
 }
 

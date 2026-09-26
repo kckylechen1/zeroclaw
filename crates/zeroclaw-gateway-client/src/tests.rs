@@ -54,8 +54,8 @@ fn frames_parse_and_unknown_ones_pass_through() {
             cost_usd: None,
         }
     );
-    let other = Frame::parse(r#"{"type":"cron_result","output":"x"}"#).unwrap();
-    assert!(matches!(other, Frame::Other(ref v) if v["type"] == "cron_result"));
+    let other = Frame::parse(r#"{"type":"history_trimmed","kept_turns":3}"#).unwrap();
+    assert!(matches!(other, Frame::Other(ref v) if v["type"] == "history_trimmed"));
     assert!(!other.is_terminal());
     assert!(Frame::parse("not json").is_err());
 }
@@ -216,4 +216,15 @@ async fn a_refused_upgrade_reports_the_gateways_reason() {
         .expect("a rejection, not an I/O error");
     assert_eq!(rejected.status, 400);
     assert_eq!(rejected.reason, "Unknown agent `nobody`");
+}
+
+#[test]
+fn the_bridge_socket_lives_next_to_the_chat_socket() {
+    assert_eq!(bridge_url("ws://h:1/"), "ws://h:1/ws/bridge");
+    assert_eq!(bridge_url("wss://h/zc"), "wss://h/zc/ws/bridge");
+    let deliver: Deliver = serde_json::from_value(serde_json::json!({
+        "type": "deliver", "id": "d1", "to": "42", "content": "hi"
+    }))
+    .unwrap();
+    assert_eq!(deliver.thread_id, None);
 }

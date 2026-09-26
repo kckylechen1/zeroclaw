@@ -10,6 +10,7 @@ pub mod cron_runs;
 pub mod cron_update;
 pub mod file_read;
 pub mod model_switch;
+pub mod notify;
 pub mod param_options;
 #[cfg(test)]
 mod provider_wire_budget;
@@ -122,6 +123,7 @@ pub use cron_runs::CronRunsTool;
 pub use cron_update::CronUpdateTool;
 pub use file_read::FileReadTool;
 pub use model_switch::ModelSwitchTool;
+pub use notify::NotifyTool;
 pub use read_skill::ReadSkillTool;
 pub use schedule::ScheduleTool;
 pub use send_message_to_peer::SendMessageToPeerTool;
@@ -756,6 +758,15 @@ pub fn all_tools_with_runtime(
         security.clone(),
         workspace_dir.to_path_buf(),
     )));
+
+    // Proactive messages through channel bridges; only offered when a
+    // `[gateway.bridges.<name>]` exists to deliver them.
+    if !root_config.gateway.bridges.is_empty() {
+        tool_arcs.push(Arc::new(NotifyTool::new(
+            Arc::new(root_config.clone()),
+            security.clone(),
+        )));
+    }
 
     tool_arcs.push(Arc::new(CalculatorTool::new()));
     tool_arcs.push(Arc::new(WeatherTool::new()));
