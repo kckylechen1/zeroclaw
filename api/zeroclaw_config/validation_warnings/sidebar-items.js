@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["RETIRED_CONFIG_FIELDS","RETIRED_CONFIG_SURFACES"],"fn":["is_retired_channel_type","retired_field_tombstones","retired_section_tombstones"],"struct":["ValidationWarning"]};

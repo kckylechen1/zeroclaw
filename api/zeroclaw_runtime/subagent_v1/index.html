@@ -1,0 +1,98 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="V1 bounded ReasoningSubAgent vertical (frozen contract, rev 3)."><title>zeroclaw_runtime::subagent_v1 - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-17e0aaed.css"><script id="default-settings" 
+data-use_system_theme="false"
+data-theme="ayu"></script><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="zeroclaw_runtime" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.1 (31fca3adb 2026-06-26)" data-channel="1.96.1" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module subagent_v1</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../zeroclaw_runtime/index.html">zeroclaw_<wbr>runtime</a><span class="version">0.8.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module subagent_<wbr>v1</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate zeroclaw_<wbr>runtime</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">zeroclaw_runtime</a></div><h1>Module <span>subagent_<wbr>v1</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>V1 bounded ReasoningSubAgent vertical (frozen contract, rev 3).</p>
+<p>One bounded local reasoning run, end to end:</p>
+<div class="example-wrap"><pre class="language-text"><code>Parent
+  → SubAgentProfileV1     admitted, immutable                     (SA-3/SA-4)
+  → ContextBundleV1       digest-bound content snapshot           (SA-18/SA-19)
+  → admit()               the FIRST privacy boundary: Private     (SA-14/SA-15)
+                          Dyad / AgentSoul refs rejected, the
+                          AdmittedContextBundleV1 cannot express them
+  → lineage_ref           the ONE depth authority                 (SA-9)
+  → ReasoningSubAgent     run-scoped principal                    (SA-13)
+  → SubAgentReportV1      the ONLY child→parent result channel    (SA-21)
+  → Parent                disposition of findings/candidates      (SA-22)</code></pre></div>
+<p>Authority boundaries encoded here:</p>
+<ul>
+<li>The profile is the only capability source (SA-5) and the V1 child
+tool catalog is EMPTY — V1 reasoning runs execute no tools (recorded
+least-authority reading of the contract; the materialized set is
+set-equal to the profile’s declared list by construction).</li>
+<li>The execution context accepts EXACTLY the six SA-6 inputs. No
+<code>Config</code>, tool registry, channel map, or memory backend crosses the
+parent→child boundary (compile-level signature test below).</li>
+<li>Model access is a host-resolved opaque binding (SA-7d): the child
+never holds provider configuration or credential material.</li>
+<li>Nothing durable: this path writes no Task/Attempt rows anywhere
+(SA-26). The module does not touch the control plane.</li>
+<li>Children of V1 cannot spawn children (SA-12/D1): run admission
+refuses any spawning lineage deeper than the parent (depth 0).</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.BoundedModelRequest.html" title="struct zeroclaw_runtime::subagent_v1::BoundedModelRequest">Bounded<wbr>Model<wbr>Request</a></dt><dd>A bounded completion request. Carries only prompt content and sampling
+hints — no credentials, no provider configuration.</dd><dt><a class="struct" href="struct.BoundedModelResponse.html" title="struct zeroclaw_runtime::subagent_v1::BoundedModelResponse">Bounded<wbr>Model<wbr>Response</a></dt><dd>A bounded completion response with the usage the meter needs.</dd><dt><a class="struct" href="struct.CandidateRoutingRecord.html" title="struct zeroclaw_runtime::subagent_v1::CandidateRoutingRecord">Candidate<wbr>Routing<wbr>Record</a></dt><dd>A routing record: proof the candidate was sent to the reviewed
+promotion path. Carries no authority and applies nothing. From
+vertical V3 on it also carries the candidate’s payload reference and
+provenance (the promotion substance — what the reviewed path is to
+act on), when the candidate provides them.</dd><dt><a class="struct" href="struct.CapabilityChangeRefused.html" title="struct zeroclaw_runtime::subagent_v1::CapabilityChangeRefused">Capability<wbr>Change<wbr>Refused</a></dt><dd>A capability-change request against a LIVE run. Always refused — the
+type has no success path (SA-4).</dd><dt><a class="struct" href="struct.ChildToolSet.html" title="struct zeroclaw_runtime::subagent_v1::ChildToolSet">Child<wbr>Tool<wbr>Set</a></dt><dd>The child’s materialized tool set. Built from the profile ALONE
+(SA-7a): the constructor’s only input is the profile ref — there is
+no parameter through which a parent tool Arc could enter, so no
+child tool’s Arc identity can be the parent’s instance.</dd><dt><a class="struct" href="struct.ConfigModelAccessResolver.html" title="struct zeroclaw_runtime::subagent_v1::ConfigModelAccessResolver">Config<wbr>Model<wbr>Access<wbr>Resolver</a></dt><dd>Host resolver over the operator’s provider configuration. Holds the
+config privately (host side); the child context never sees this type.</dd><dt><a class="struct" href="struct.ContextInventory.html" title="struct zeroclaw_runtime::subagent_v1::ContextInventory">Context<wbr>Inventory</a></dt><dd>What a child context contains (SA-6 inventory). No credential,
+channel-map, memory, or workspace fields exist on this type. The
+<code>Serialize</code> derive is deliberate: the serialized key set IS the
+inventory — a test pins the exact field set, so adding a field
+(e.g. a credential) becomes observable.</dd><dt><a class="struct" href="struct.InvalidTerminalTransition.html" title="struct zeroclaw_runtime::subagent_v1::InvalidTerminalTransition">Invalid<wbr>Terminal<wbr>Transition</a></dt><dt><a class="struct" href="struct.ObjectiveTooLarge.html" title="struct zeroclaw_runtime::subagent_v1::ObjectiveTooLarge">Objective<wbr>TooLarge</a></dt><dt><a class="struct" href="struct.ObjectiveV1.html" title="struct zeroclaw_runtime::subagent_v1::ObjectiveV1">Objective<wbr>V1</a></dt><dt><a class="struct" href="struct.OpaqueModelBinding.html" title="struct zeroclaw_runtime::subagent_v1::OpaqueModelBinding">Opaque<wbr>Model<wbr>Binding</a></dt><dd>The opaque model-access binding handed to the run driver. Its public
+surface is exactly: resolve one bounded completion, and echo the
+non-secret provider reference. No credential material is reachable.</dd><dt><a class="struct" href="struct.QueuedCandidate.html" title="struct zeroclaw_runtime::subagent_v1::QueuedCandidate">Queued<wbr>Candidate</a></dt><dt><a class="struct" href="struct.ReasoningSubagentTool.html" title="struct zeroclaw_runtime::subagent_v1::ReasoningSubagentTool">Reasoning<wbr>Subagent<wbr>Tool</a></dt><dd>The Parent’s bounded reasoning-child spawn tool. This is a PARENT
+capability (D1: <code>Parent → local SubAgent</code> allowed): the child it
+spawns is a V1 reasoning run with no tools, an immutable bundle, and
+a structured report. Children cannot use this tool — run admission
+refuses any spawning lineage at depth &gt; 0 (SA-12).</dd><dt><a class="struct" href="struct.ReportChannelHandle.html" title="struct zeroclaw_runtime::subagent_v1::ReportChannelHandle">Report<wbr>Channel<wbr>Handle</a></dt><dd>The structured-report channel handle (SA-6 input 4): the child’s ONLY
+outbound surface. Carries typed mid-run events and the single
+terminal report — never free prose (SA-21/SA-25).</dd><dt><a class="struct" href="struct.SubAgentBudgetMeter.html" title="struct zeroclaw_runtime::subagent_v1::SubAgentBudgetMeter">SubAgent<wbr>Budget<wbr>Meter</a></dt><dd>Shared read-accounting meter (SA-8), scoped to ONE run: the SAME
+<code>Arc</code> is held by the parent-side spawn admission and the child run,
+so child consumption counts against that run’s budget and
+exhaustion terminates the run. The meter is minted fresh per
+<code>SubAgentRunRef</code> and discarded at the run’s terminal — it is
+single-run state, NEVER process-lifetime quota: a run’s 120s time
+ceiling must not moonlight as an aggregate. Aggregate quotas
+(per-ParentRun spawn counts, hourly token caps) are a separate
+future <code>ParentRunQuota</code>/<code>RateBudget</code> concept, out of scope here.</dd><dt><a class="struct" href="struct.SubAgentCandidateReviewQueue.html" title="struct zeroclaw_runtime::subagent_v1::SubAgentCandidateReviewQueue">SubAgent<wbr>Candidate<wbr>Review<wbr>Queue</a></dt><dd>Where a report’s recommendations and proposed candidates land. The
+queue’s ONLY operations are route and discard: there is no apply —
+<code>CandidateDisposition</code> has no applied variant, so no code path from
+a report field to active authority state can exist here. Candidates
+targeting KP-18 active-authority kinds route ONLY into the reviewed
+promotion path (SA-17/SA-22 seam with the KP-18 knowledge split);
+the Parent agent has no apply action for them.</dd><dt><a class="struct" href="struct.SubAgentControlHandle.html" title="struct zeroclaw_runtime::subagent_v1::SubAgentControlHandle">SubAgent<wbr>Control<wbr>Handle</a></dt><dd>Parent-held control handle: raise the two control events (SA-23).</dd><dt><a class="struct" href="struct.SubAgentExecutionContextV1.html" title="struct zeroclaw_runtime::subagent_v1::SubAgentExecutionContextV1">SubAgent<wbr>Execution<wbr>Context<wbr>V1</a></dt><dd>The execution context: EXACTLY the six SA-6 inputs — objective,
+ADMITTED bundle (the SA-14/SA-15 structural boundary: child
+execution accepts only <a href="../../zeroclaw_api/subagent_v1/struct.AdmittedContextBundleV1.html" title="struct zeroclaw_api::subagent_v1::AdmittedContextBundleV1"><code>AdmittedContextBundleV1</code></a>, whose partition
+enum cannot express Private Dyad or Agent Soul), capability list
+(materialized from the admitted profile), structured-report
+channel, lineage ref, shared budget meter — and nothing else. No
+<code>Config</code>, no tool registry, no channel map, no memory backend
+(compile-level signature test in this module’s tests).</dd><dt><a class="struct" href="struct.SubAgentProfileRegistry.html" title="struct zeroclaw_runtime::subagent_v1::SubAgentProfileRegistry">SubAgent<wbr>Profile<wbr>Registry</a></dt><dd>The admitted profile registry (SA-3). Admission validates the frozen
+profile law; runs are constructible only from an admitted
+<a href="../../zeroclaw_api/subagent_v1/struct.VersionedProfileRef.html" title="struct zeroclaw_api::subagent_v1::VersionedProfileRef"><code>VersionedProfileRef</code></a> resolved here.</dd><dt><a class="struct" href="struct.SubAgentRunV1.html" title="struct zeroclaw_runtime::subagent_v1::SubAgentRunV1">SubAgent<wbr>RunV1</a></dt><dd>The admitted, immutable run (SA-3/SA-4). Constructible only via
+<a href="struct.SubAgentRunV1.html#method.from_admitted_profile" title="associated function zeroclaw_runtime::subagent_v1::SubAgentRunV1::from_admitted_profile"><code>SubAgentRunV1::from_admitted_profile</code></a>.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CandidateDisposition.html" title="enum zeroclaw_runtime::subagent_v1::CandidateDisposition">Candidate<wbr>Disposition</a></dt><dt><a class="enum" href="enum.ChildToolSetError.html" title="enum zeroclaw_runtime::subagent_v1::ChildToolSetError">Child<wbr>Tool<wbr>SetError</a></dt><dt><a class="enum" href="enum.ProfileAdmissionError.html" title="enum zeroclaw_runtime::subagent_v1::ProfileAdmissionError">Profile<wbr>Admission<wbr>Error</a></dt><dt><a class="enum" href="enum.ReviewQueueError.html" title="enum zeroclaw_runtime::subagent_v1::ReviewQueueError">Review<wbr>Queue<wbr>Error</a></dt><dt><a class="enum" href="enum.RunAdmissionError.html" title="enum zeroclaw_runtime::subagent_v1::RunAdmissionError">RunAdmission<wbr>Error</a></dt><dt><a class="enum" href="enum.SubAgentHookDecision.html" title="enum zeroclaw_runtime::subagent_v1::SubAgentHookDecision">SubAgent<wbr>Hook<wbr>Decision</a></dt><dd>A hook decision. The enum has NO variant that can widen a profile or
+grant a capability — widening is structurally unrepresentable, and
+the application code intersects, never unions.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_REASONING_PROFILE_ID.html" title="constant zeroclaw_runtime::subagent_v1::DEFAULT_REASONING_PROFILE_ID">DEFAULT_<wbr>REASONING_<wbr>PROFILE_<wbr>ID</a></dt><dd>The built-in default minimal Reasoning profile (SA-5’s reference
+profile): zero tools, bounded budget, structured report only.</dd><dt><a class="constant" href="constant.DEFAULT_SUPERVISOR_PROFILE_ID.html" title="constant zeroclaw_runtime::subagent_v1::DEFAULT_SUPERVISOR_PROFILE_ID">DEFAULT_<wbr>SUPERVISOR_<wbr>PROFILE_<wbr>ID</a></dt><dd>The built-in default Supervisor profile (vertical V3): EXACTLY the
+ten typed SA-29 Tachi authorities, zero tools, no direct-execution
+capability of any kind (SA-29/SA-30: the transitional trio is a
+parent-kernel marking, never a Supervisor grant).</dd><dt><a class="constant" href="constant.MAX_OBJECTIVE_BYTES.html" title="constant zeroclaw_runtime::subagent_v1::MAX_OBJECTIVE_BYTES">MAX_<wbr>OBJECTIVE_<wbr>BYTES</a></dt><dd>Hard bound on the objective (bounded text, SA-6 input 1).</dd><dt><a class="constant" href="constant.V1_CHILD_TOOL_CATALOG.html" title="constant zeroclaw_runtime::subagent_v1::V1_CHILD_TOOL_CATALOG">V1_<wbr>CHILD_<wbr>TOOL_<wbr>CATALOG</a></dt><dd>The V1 child tool catalog. EMPTY: V1 reasoning runs execute no tools
+(least-authority reading — the run is a bounded reasoning unit over
+the bundle; any tool execution waits for a profile class that admits
+one). Admission refuses a declared list this catalog cannot satisfy,
+so the materialized set is set-equal to the declared list by
+construction, with nothing extra (SA-5).</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.ModelAccessResolver.html" title="trait zeroclaw_runtime::subagent_v1::ModelAccessResolver">Model<wbr>Access<wbr>Resolver</a></dt><dd>Host-side model resolution (SA-7d): resolves the profile’s
+<code>model_policy</code> reference AT USE TIME. Implemented by the trusted host
+against the operator’s provider configuration; the child context holds
+only the opaque binding, never this resolver.</dd><dt><a class="trait" href="trait.SubAgentV1Hook.html" title="trait zeroclaw_runtime::subagent_v1::SubAgentV1Hook">SubAgent<wbr>V1Hook</a></dt></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.apply_hook_decision.html" title="fn zeroclaw_runtime::subagent_v1::apply_hook_decision">apply_<wbr>hook_<wbr>decision</a></dt><dd>Apply a hook decision to a bundle. Can only deny, narrow (add
+exclusions), or redact — the resulting bundle is recomputed and
+re-digested. A decision that would widen anything has no
+representation, so a widening hook result is discarded by
+construction (SA-28).</dd><dt><a class="fn" href="fn.validate_terminal_transition.html" title="fn zeroclaw_runtime::subagent_v1::validate_terminal_transition">validate_<wbr>terminal_<wbr>transition</a></dt><dd>Validate a terminal-fact write (SA-23): <code>stopped</code>/<code>aborted</code> require
+their matching control event, <code>timed_out</code> requires budget exhaustion;
+<code>completed</code>/<code>failed</code> need no control event. No path may write a
+terminal fact around this validator.</dd></dl></section></div></main></body></html>

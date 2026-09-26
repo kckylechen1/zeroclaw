@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PROPOSAL_RECORDED_REPLY"],"struct":["ProposeSoulChangeTool"]};
