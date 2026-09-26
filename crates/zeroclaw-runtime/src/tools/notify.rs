@@ -172,6 +172,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notify_redacts_credentials_before_queueing() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = tool(&dir, AutonomyLevel::Supervised);
+        let key = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB";
+        let result = tool
+            .execute(json!({"bridge": "telegram", "to": "42", "text": format!("token {key}")}))
+            .await
+            .unwrap();
+        assert!(result.success, "{:?}", result.error);
+        let queued = queued(&dir);
+        assert_eq!(queued.len(), 1);
+        assert!(!queued[0].contains(key), "{}", queued[0]);
+        assert!(queued[0].starts_with("42:token [REDACTED"), "{}", queued[0]);
+    }
+
+    #[tokio::test]
     async fn notify_refuses_unknown_bridges_missing_fields_and_read_only() {
         let dir = tempfile::tempdir().unwrap();
         let tool = tool(&dir, AutonomyLevel::Supervised);

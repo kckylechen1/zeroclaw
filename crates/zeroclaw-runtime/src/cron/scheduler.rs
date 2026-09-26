@@ -1364,6 +1364,10 @@ pub async fn deliver_announcement(
 /// Queue a proactive message for a configured bridge. Delivery is
 /// asynchronous: success means the message is durably queued, and the
 /// bridge receives it the next time its control socket is connected.
+///
+/// Every outbox writer goes through here, so the content is passed through
+/// the outbound leak redaction the in-core channels apply before sending
+/// (`[security.leak_detection]`): the bridge delivers the row verbatim.
 pub fn enqueue_for_bridge(
     config: &Config,
     bridge: &str,
@@ -1371,8 +1375,16 @@ pub fn enqueue_for_bridge(
     thread_id: Option<&str>,
     content: &str,
 ) -> Result<()> {
+    use crate::security::outbound::{
+        outbound_content_format_for_channel, redact_channel_outbound_leaks,
+    };
+    let content = redact_channel_outbound_leaks(
+        content,
+        &config.security.leak_detection,
+        outbound_content_format_for_channel(bridge),
+    );
     let id = zeroclaw_infra::bridge_outbox::BridgeOutbox::shared(&config.data_dir)
-        .and_then(|outbox| outbox.enqueue(bridge, target, thread_id, content))
+        .and_then(|outbox| outbox.enqueue(bridge, target, thread_id, &content))
         .inspect_err(|e| {
             ::zeroclaw_log::record!(
                 WARN,

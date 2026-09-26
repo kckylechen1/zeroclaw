@@ -1475,6 +1475,44 @@ async fn delivery_to_a_configured_bridge_is_queued_in_its_outbox() {
     assert_eq!(queued[0].content, "digest ready");
 }
 
+#[tokio::test]
+async fn cron_output_with_an_api_key_is_redacted_in_the_bridge_outbox() {
+    let tmp = TempDir::new().unwrap();
+    let mut config = test_config(&tmp).await;
+    config.gateway.bridges.insert(
+        "tg".to_string(),
+        zeroclaw_config::schema::GatewayBridgeConfig {
+            token_hash: "0f".repeat(32),
+            ..Default::default()
+        },
+    );
+    let key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+    let mut job = announce_job();
+    job.delivery.channel = Some("tg".into());
+    job.delivery.to = Some("4242".into());
+
+    let outcome = deliver_and_classify_run_result(
+        &config,
+        &job,
+        true,
+        format!("env dump: ANTHROPIC_API_KEY={key}"),
+        CronDeliveryContext::Scheduled,
+    )
+    .await;
+
+    assert_eq!(outcome.delivery_status, "succeeded");
+    let outbox = zeroclaw_infra::bridge_outbox::BridgeOutbox::shared(&config.data_dir).unwrap();
+    let queued = outbox.pending("tg", 0, 10).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert!(!queued[0].content.contains(key), "{}", queued[0].content);
+    assert!(queued[0].content.starts_with("env dump: "));
+    assert!(
+        queued[0].content.contains("[REDACTED"),
+        "{}",
+        queued[0].content
+    );
+}
+
 #[test]
 fn build_cron_shell_command_uses_sh_non_login() {
     let workspace = std::env::temp_dir();
