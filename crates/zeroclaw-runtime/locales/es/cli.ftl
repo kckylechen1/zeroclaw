@@ -156,16 +156,6 @@ cli-peripheral-list-about = Lista los periféricos configurados
 cli-peripheral-add-about = Agrega un periférico por tipo de placa y ruta de transporte
 cli-peripheral-flash-about = Flashea el firmware de ZeroClaw a una placa Arduino
 cli-migrate-openclaw-about = Importa memoria de un espacio de trabajo OpenClaw a este espacio de trabajo ZeroClaw
-cli-agent-long-about =
-    Inicia el bucle del agente de IA.
-
-    Lanza una sesión de chat interactiva con el proveedor de IA configurado. Usa --message para consultas de una sola vez sin entrar en modo interactivo.
-
-    Ejemplos:
-    zeroclaw agent                              # sesión interactiva
-    zeroclaw agent -m "Summarize today's logs"  # mensaje único
-    zeroclaw agent -p anthropic --model claude-sonnet-4-20250514
-    zeroclaw agent --peripheral nucleo-f401re:/dev/ttyACM0
 cli-gateway-long-about =
     Gestiona el servidor de gateway (webhooks, websockets).
 

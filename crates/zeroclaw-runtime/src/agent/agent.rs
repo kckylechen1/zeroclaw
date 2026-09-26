@@ -16,7 +16,6 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::path::Path;
 use std::sync::Arc;
-use zeroclaw_config::schema::Config;
 use zeroclaw_memory::{self, Memory, MemoryCategory};
 #[cfg(test)]
 use zeroclaw_providers::ChatRequest;
@@ -1462,79 +1461,6 @@ impl Agent {
     pub async fn run_single(&mut self, message: &str) -> Result<String> {
         self.turn(message).await
     }
-
-    pub async fn run_interactive(&mut self) -> Result<()> {
-        println!("🦀 ZeroClaw Interactive Mode");
-        println!("Type /quit to exit.\n");
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-        let cli = crate::agent::loop_::CLI_CHANNEL_FN
-            .get()
-            .expect("CLI channel factory not registered — call register_cli_channel_fn at startup")(
-        );
-
-        let listen_handle = zeroclaw_spawn::spawn!(async move {
-            let _ = zeroclaw_api::channel::Channel::listen(&*cli, tx).await;
-        });
-
-        while let Some(msg) = rx.recv().await {
-            let response = match self.turn(&msg.content).await {
-                Ok(resp) => resp,
-                Err(e) => {
-                    eprintln!("\nError: {e}\n");
-                    continue;
-                }
-            };
-            println!("\n{response}\n");
-        }
-
-        listen_handle.abort();
-        Ok(())
-    }
-}
-
-pub async fn run(
-    config: Config,
-    agent_alias: &str,
-    message: Option<String>,
-    provider_override: Option<String>,
-    model_override: Option<String>,
-    temperature: Option<f64>,
-) -> Result<()> {
-    let mut effective_config = config;
-    if let Some(ref p) = provider_override {
-        // When a model_provider override is specified, ensure that model_provider type exists
-        // in models and update the agent's model_provider to reference it.
-        let (type_key, alias_key) = p.split_once('.').unwrap_or((p.as_str(), agent_alias));
-        effective_config
-            .providers
-            .models
-            .ensure(type_key, alias_key);
-        if let Some(agent_cfg) = effective_config.agents.get_mut(agent_alias) {
-            agent_cfg.model_provider = format!("{type_key}.{alias_key}").into();
-        }
-    }
-    // Apply model/temperature overrides to the agent's resolved provider entry.
-    if let Some(agent_cfg) = effective_config.agents.get(agent_alias)
-        && let Some((fam, ali)) = agent_cfg.model_provider.split_once('.')
-        && let Some(entry) = effective_config.providers.models.ensure(fam, ali)
-    {
-        if let Some(m) = model_override {
-            entry.model = Some(m);
-        }
-        entry.temperature = temperature;
-    }
-
-    let mut agent = Agent::from_config(&effective_config, agent_alias).await?;
-
-    if let Some(msg) = message {
-        let response = agent.run_single(&msg).await?;
-        println!("{response}");
-    } else {
-        agent.run_interactive().await?;
-    }
-
-    Ok(())
 }
 
 // safety net (child module so fixtures can reach Agent internals the

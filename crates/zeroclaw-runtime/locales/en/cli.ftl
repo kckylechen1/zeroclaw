@@ -191,13 +191,13 @@ cli-migrate-openclaw-about = Import memory from an OpenClaw workspace into this 
 cli-agent-long-about =
     Start the AI agent loop.
 
-    Launches an interactive chat session with the configured AI provider. Use --message for single-shot queries without entering interactive mode.
+    With --message, runs one turn locally and prints the reply. Without it, opens `zeroclaw chat` for this agent on this machine's gateway, so the conversation is shared with every other client.
 
     Examples:
-      zeroclaw agent                              # interactive session
-      zeroclaw agent -m "Summarize today's logs"  # single message
-      zeroclaw agent -p anthropic --model claude-sonnet-4-20250514
-      zeroclaw agent --peripheral nucleo-f401re:/dev/ttyACM0
+      zeroclaw agent -a assistant                              # chat through the gateway
+      zeroclaw agent -a assistant -m "Summarize today's logs"  # single message
+      zeroclaw agent -a assistant -p anthropic --model claude-sonnet-4-20250514
+      zeroclaw agent -a assistant --peripheral nucleo-f401re:/dev/ttyACM0
 
 cli-gateway-long-about =
     Manage the gateway server (webhooks, websockets).
@@ -1107,3 +1107,4 @@ cli-chat-duplicate = Already handled ({$state}).
 cli-chat-steered = (added to the running turn)
 cli-chat-closed = The gateway closed the connection.
 cli-chat-event = [{$kind}] {$text}
+cli-chat-usage = [context {$context}] {$cost}

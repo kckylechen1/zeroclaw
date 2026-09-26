@@ -162,6 +162,26 @@ pub async fn run(
     client.close().await
 }
 
+/// A one-line context and cost summary for a finished turn, when the
+/// gateway reported the numbers.
+fn usage_line(
+    last_input_tokens: Option<u64>,
+    max_context_tokens: Option<u64>,
+    cost_usd: Option<f64>,
+) -> Option<String> {
+    let used = last_input_tokens?;
+    let context = match max_context_tokens.filter(|max| *max > 0) {
+        Some(max) => format!("{}k/{}k ({}%)", used / 1000, max / 1000, used * 100 / max),
+        None => format!("{}k", used / 1000),
+    };
+    let cost = cost_usd.map(|usd| format!("${usd:.4}")).unwrap_or_default();
+    Some(ta(
+        "cli-chat-usage",
+        &[("context", &context), ("cost", &cost)],
+        "usage",
+    ))
+}
+
 /// Print one frame for the terminal.
 fn render(frame: &Frame) {
     match frame {
@@ -187,7 +207,17 @@ fn render(frame: &Frame) {
             );
             let _ = std::io::stdout().flush();
         }
-        Frame::Done { .. } => println!(),
+        Frame::Done {
+            last_input_tokens,
+            max_context_tokens,
+            cost_usd,
+            ..
+        } => {
+            println!();
+            if let Some(line) = usage_line(*last_input_tokens, *max_context_tokens, *cost_usd) {
+                println!("{line}");
+            }
+        }
         Frame::Aborted { .. } => println!("\n{}", ta("cli-chat-aborted", &[], "cancelled")),
         Frame::Error { message, .. } => {
             eprintln!(
@@ -251,6 +281,11 @@ mod tests {
         assert_eq!(parse_decision("a"), Decision::Always);
         assert_eq!(parse_decision(""), Decision::Deny);
         assert_eq!(parse_decision("sure"), Decision::Deny);
+    }
+
+    #[test]
+    fn usage_line_needs_a_prompt_size() {
+        assert!(usage_line(None, Some(200_000), Some(0.01)).is_none());
     }
 
     #[test]

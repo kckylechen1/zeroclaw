@@ -81,7 +81,7 @@ Platform-specific notes: [Linux](docs/book/src/setup/linux.md) · [macOS](docs/b
 
 ```bash
 zeroclaw quickstart               # one-shot setup: pick a provider, write a working config
-zeroclaw agent -a <alias>         # interactive chat using the [agents.<alias>] entry
+zeroclaw chat -a <alias>          # chat with the [agents.<alias>] entry through the gateway
 zeroclaw service install          # register as systemd/launchctl/Windows Service
 zeroclaw service start            # run it always-on in the background
 ```

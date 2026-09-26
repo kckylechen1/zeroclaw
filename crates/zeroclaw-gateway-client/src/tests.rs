@@ -29,14 +29,19 @@ fn frames_parse_and_unknown_ones_pass_through() {
             content: "hi".into()
         }
     );
-    let done =
-        Frame::parse(r#"{"type":"done","id":"r1","full_response":"ok","tokens_used":3}"#).unwrap();
+    let done = Frame::parse(
+        r#"{"type":"done","id":"r1","full_response":"ok","tokens_used":3,"last_input_tokens":1200,"max_context_tokens":200000}"#,
+    )
+    .unwrap();
     assert!(done.is_terminal());
     assert_eq!(
         done,
         Frame::Done {
             id: Some("r1".into()),
-            full_response: "ok".into()
+            full_response: "ok".into(),
+            last_input_tokens: Some(1200),
+            max_context_tokens: Some(200_000),
+            cost_usd: None,
         }
     );
     let other = Frame::parse(r#"{"type":"cron_result","output":"x"}"#).unwrap();
@@ -152,7 +157,10 @@ async fn a_client_attaches_sends_and_streams_a_turn() {
         frames.last().unwrap(),
         &Frame::Done {
             id: Some(id.clone()),
-            full_response: "hello".into()
+            full_response: "hello".into(),
+            last_input_tokens: None,
+            max_context_tokens: None,
+            cost_usd: None,
         }
     );
 

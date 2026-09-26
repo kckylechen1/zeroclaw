@@ -941,29 +941,6 @@ fn agent_command_parses_without_temperature() {
 
 #[test]
 #[cfg(feature = "agent-runtime")]
-fn agent_command_parses_session_state_file() {
-    let cli = Cli::try_parse_from([
-        "zeroclaw",
-        "agent",
-        "--agent",
-        "morning-shift",
-        "--session-state-file",
-        "session.json",
-    ])
-    .expect("agent command with session state file should parse");
-
-    match cli.command {
-        Commands::Agent {
-            session_state_file, ..
-        } => {
-            assert_eq!(session_state_file, Some(PathBuf::from("session.json")));
-        }
-        other => panic!("expected agent command, got {other:?}"),
-    }
-}
-
-#[test]
-#[cfg(feature = "agent-runtime")]
 fn agent_uses_provider_temperature_when_unset() {
     // When the user doesn't pass --temperature, the agent CLI
     // resolves from the agent's model_provider entry's temperature,

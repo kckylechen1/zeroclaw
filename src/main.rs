@@ -486,11 +486,12 @@ enum Commands {
     #[command(long_about = "\
 Start the AI agent loop.
 
-Launches an interactive chat session with the configured AI model_provider. \
-Use --message for single-shot queries without entering interactive mode.
+With --message, runs one turn locally and prints the reply. Without it, \
+opens `zeroclaw chat` for this agent on this machine's gateway, so the \
+conversation is shared with every other client.
 
 Examples:
-  zeroclaw agent -a assistant                                          # interactive session
+  zeroclaw agent -a assistant                                          # chat through the gateway
   zeroclaw agent -a assistant -m \"Summarize today's logs\"              # single message
   zeroclaw agent -a assistant -p anthropic --model claude-sonnet-4-20250514
   zeroclaw agent -a assistant --peripheral nucleo-f401re:/dev/ttyACM0")]
@@ -503,10 +504,6 @@ Examples:
         /// Single message mode (don't enter interactive mode)
         #[arg(short, long)]
         message: Option<String>,
-
-        /// Load and save interactive session state in this JSON file
-        #[arg(long)]
-        session_state_file: Option<PathBuf>,
 
         /// Model provider to use (openrouter, anthropic, openai, openai-codex)
         #[arg(short = 'p', long = "model-provider", alias = "provider")]
@@ -2140,12 +2137,16 @@ async fn async_main(command: clap::Command) -> Result<()> {
         Commands::Agent {
             agent: agent_alias,
             message,
-            session_state_file,
             model_provider,
             model,
             temperature,
             peripheral,
         } => {
+            // Interactive chat is a gateway client, so every device shares
+            // one conversation with the agent.
+            let Some(message) = message else {
+                return commands::chat::run(&config, agent_alias, "main".into(), None, None).await;
+            };
             let final_temperature: Option<f64> = temperature.or_else(|| {
                 config
                     .model_provider_for_agent(&agent_alias)
@@ -2160,11 +2161,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     "`zeroclaw agent --agent {agent_alias}` is not configured (no [agents.{agent_alias}] entry)"
                 );
             }
-
-            // Wire CLI channel for interactive mode
-            zeroclaw_runtime::agent::loop_::register_cli_channel_fn(Box::new(|| {
-                Box::new(zeroclaw_channels::cli::CliChannel::new("cli"))
-            }));
 
             // Wire peripheral tools (gpio_read/gpio_write etc.) for `zeroclaw agent`.
             // Mirrors the registration done for the daemon command.
@@ -2184,13 +2180,13 @@ async fn async_main(command: clap::Command) -> Result<()> {
             Box::pin(agent::run(
                 config,
                 &agent_alias,
-                message,
+                Some(message),
                 model_provider,
                 model,
                 final_temperature,
                 peripheral,
                 true,
-                session_state_file,
+                None,
                 None,
                 zeroclaw_api::ingress::TurnOrigin::Interactive,
                 zeroclaw_runtime::agent::loop_::AgentRunOverrides::default(),
@@ -2528,12 +2524,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     );
                 }
             }
-
-            // Wire CLI channel for interactive mode
-            #[cfg(feature = "agent-runtime")]
-            zeroclaw_runtime::agent::loop_::register_cli_channel_fn(Box::new(|| {
-                Box::new(zeroclaw_channels::cli::CliChannel::new("cli"))
-            }));
 
             // Wire peripheral tools from zeroclaw-hardware
             #[cfg(feature = "hardware")]
