@@ -80,7 +80,11 @@ fi
 # excluded so a colliding test-target name can never match a dependency.
 metadata_own="$(cd "$REPO_ROOT" && cargo metadata --no-deps --format-version 1 --offline 2>/dev/null ||
   cargo metadata --no-deps --format-version 1)"
-metadata_all="$(cd "$REPO_ROOT" && cargo metadata --format-version 1 --offline 2>/dev/null || true)"
+metadata_all="$(cd "$REPO_ROOT" && cargo metadata --format-version 1 --offline 2>/dev/null ||
+  cargo metadata --format-version 1 2>/dev/null || true)"
+# Fail closed: without the full graph there is no third-party skip list, and a
+# generic own target name (e.g. `component`, `system`) could match a dependency.
+[[ -n "$metadata_all" ]] || die "cargo metadata (full graph) failed; cannot build the third-party skip list"
 
 mapfile -t own_names < <(
   jq -r '.packages[] | .name, (.targets[].name)' <<<"$metadata_own" |
@@ -89,14 +93,12 @@ mapfile -t own_names < <(
     done | sort -u
 )
 mapfile -t third_party < <(
-  if [[ -n "$metadata_all" ]]; then
-    jq -r '[.workspace_members[]] as $ws
-      | .packages[] | select(.id as $id | $ws | index($id) | not)
-      | .name, (.targets[].name)' <<<"$metadata_all" |
-      while IFS= read -r n; do
-        printf '%s\n%s\n' "$n" "${n//-/_}"
-      done | sort -u
-  fi
+  jq -r '[.workspace_members[]] as $ws
+    | .packages[] | select(.id as $id | $ws | index($id) | not)
+    | .name, (.targets[].name)' <<<"$metadata_all" |
+    while IFS= read -r n; do
+      printf '%s\n%s\n' "$n" "${n//-/_}"
+    done | sort -u
 )
 
 declare -A own=() skip=()

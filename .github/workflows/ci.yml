@@ -469,7 +469,8 @@ jobs:
               filter="$(jq -r '.filter' <<<"$run")"
               all_features="${FEATURES:+$FEATURES,}$extra"
               echo "==> leg $LEG ($name): cargo nextest run --locked $PKGS --features $all_features -- $filter"
-              cargo nextest run --locked $PKGS --features "$all_features" -- "$filter"
+              # stdin from /dev/null: the loop reads its runs from the pipe.
+              cargo nextest run --locked $PKGS --features "$all_features" -- "$filter" </dev/null
             done
 
   # ── Post-format security checks ───────────────────────────────────────────

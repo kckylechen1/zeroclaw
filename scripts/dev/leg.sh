@@ -102,7 +102,9 @@ esac
 run() {
   echo "==> $*"
   if [[ "$dry_run" -eq 0 ]]; then
-    (cd "$REPO_ROOT" && "$@")
+    # stdin from /dev/null so a command run inside the extra-run loop below
+    # cannot swallow the remaining loop input.
+    (cd "$REPO_ROOT" && "$@") </dev/null
   fi
 }
 
