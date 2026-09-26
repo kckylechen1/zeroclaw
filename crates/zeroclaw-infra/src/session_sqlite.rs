@@ -472,7 +472,24 @@ impl SessionBackend for SqliteSessionBackend {
                 "DELETE FROM session_metadata WHERE session_key = ?1",
                 params![key],
             );
+            let _ = conn.execute(
+                "DELETE FROM session_requests WHERE session_key = ?1",
+                params![key],
+            );
         }
+
+        // Receipts are keyed by client-supplied session ids and can outlive
+        // (or never have) a metadata row; the per-key cap in `record_request`
+        // does not bound them across keys. Sweep receipts whose session no
+        // longer exists once they are older than the TTL. Recent orphans stay:
+        // a request can be recorded before the session's first append.
+        conn.execute(
+            "DELETE FROM session_requests
+             WHERE updated_at < ?1
+               AND session_key NOT IN (SELECT session_key FROM session_metadata)",
+            params![cutoff],
+        )
+        .map_err(std::io::Error::other)?;
 
         Ok(count)
     }
@@ -1143,6 +1160,53 @@ mod tests {
         let sessions = backend.list_sessions();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0], "new_session");
+    }
+
+    #[test]
+    fn cleanup_stale_sweeps_request_receipts() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        let old_time = (Utc::now() - Duration::hours(100)).to_rfc3339();
+
+        // A stale session with a receipt, and an old orphaned receipt whose
+        // session never got a metadata row.
+        {
+            let conn = backend.conn.lock();
+            conn.execute(
+                "INSERT INTO session_metadata (session_key, created_at, last_activity, message_count) VALUES (?1, ?2, ?2, 0)",
+                params!["stale", old_time],
+            ).unwrap();
+            for key in ["stale", "orphan_old"] {
+                conn.execute(
+                    "INSERT INTO session_requests (session_key, request_id, state, accepted_at, updated_at) VALUES (?1, 'r1', 'done', ?2, ?2)",
+                    params![key, old_time],
+                ).unwrap();
+            }
+        }
+        // A live session's receipt and a fresh orphan (recorded before the
+        // session's first append) must survive.
+        backend.append("live", &ChatMessage::user("hi")).unwrap();
+        backend.record_request("live", "r1", "accepted").unwrap();
+        backend
+            .record_request("orphan_new", "r1", "accepted")
+            .unwrap();
+
+        assert_eq!(backend.cleanup_stale(48).unwrap(), 1);
+
+        let remaining: Vec<String> = {
+            let conn = backend.conn.lock();
+            let mut stmt = conn
+                .prepare("SELECT session_key FROM session_requests ORDER BY session_key")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(
+            remaining,
+            vec!["live".to_string(), "orphan_new".to_string()]
+        );
     }
 
     #[test]
