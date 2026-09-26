@@ -141,7 +141,7 @@ logs, costs, cron, and gateway metadata.
 
 Derive macros for config schema, tool registration, and channel registration. Saves boilerplate across the workspace.
 
-### `aardvark-sys`, `robot-kit`
+### `aardvark-sys`
 
 Specialised hardware support used by the `hardware` submodule. Out-of-scope unless you're bringing up specific peripherals.
 

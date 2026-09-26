@@ -34,7 +34,6 @@
 /crates/zeroclaw-infra/**     @JordanTheJet
 /crates/zeroclaw-hardware/**  @JordanTheJet
 /crates/aardvark-sys/**       @JordanTheJet
-/crates/robot-kit/**          @JordanTheJet
 /crates/zeroclaw-macros/**    @JordanTheJet
 /firmware/**                  @JordanTheJet
 /src/providers/**             @JordanTheJet @Nillth

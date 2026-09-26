@@ -28,7 +28,6 @@
       "zeroclaw-memory",
       "zeroclaw-plugins",
       "zeroclaw-providers",
-      "zeroclaw-robot-kit",
       "zeroclaw-sop-graph",
       "zeroclaw-spawn",
       "zeroclaw-tool-call-parser",

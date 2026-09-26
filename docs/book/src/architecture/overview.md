@@ -56,7 +56,7 @@ flowchart TB
 | `zeroclaw-log` | The single log-emission surface: JSONL schema, attribution, `record!`/`scope!` macros, `/api/logs` reader, `Observer` bridge |
 | `zeroclaw-spawn` | Sanctioned `tokio::spawn` wrapper (`spawn!` macro) that propagates attribution |
 | `zeroclaw-macros` | Derive macros for config, tool registration |
-| `aardvark-sys`, `robot-kit` | Specialised hardware support |
+| `aardvark-sys` | Specialised hardware support |
 
 The microkernel roadmap (RFC #5574) is actively splitting `zeroclaw-runtime` further: the kernel layer will shrink to the agent loop and policy enforcement, with everything else moving behind feature flags.
 

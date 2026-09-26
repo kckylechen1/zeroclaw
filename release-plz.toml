@@ -10,7 +10,3 @@ semver_check = true
 [[package]]
 name = "aardvark-sys"
 release = false
-
-[[package]]
-name = "robot-kit"
-release = false
