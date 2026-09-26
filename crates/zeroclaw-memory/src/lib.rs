@@ -38,8 +38,6 @@ pub mod response_cache;
 pub mod retrieval;
 pub mod scanned;
 pub mod snapshot;
-pub mod soul;
-pub mod soul_candidate;
 pub mod sqlite;
 #[cfg(feature = "tachi")]
 pub mod tachi;
@@ -123,6 +121,20 @@ use zeroclaw_config::schema::{
     ActiveStorage, Config, EmbeddingRouteConfig, MemoryConfig, MemoryPolicyConfig,
     PostgresStorageConfig,
 };
+
+/// Reserved storage namespace for Soul-shaped rows. Ambient memory
+/// surfaces (plain recall, list, get, forget, and plain stores) exclude
+/// and refuse this namespace at the storage layer (sqlite and tachi
+/// backends, agent-scoped wrappers), so no memory tool, RPC, or wrapper
+/// can host or surface Soul-looking content. The live Soul model is the
+/// separate Soul profile store (`soul.db`); this reservation only keeps
+/// the general memory store from becoming a second one.
+pub(crate) const SOUL_NAMESPACE: &str = "soul";
+
+/// Reserved key prefix paired with [`SOUL_NAMESPACE`]: keys under it may
+/// exist only in the reserved namespace, and the reserved namespace
+/// accepts only keys under it.
+pub(crate) const SOUL_KEY_PREFIX: &str = "soul::";
 
 #[cfg(feature = "memory-postgres")]
 fn build_postgres_memory(

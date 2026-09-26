@@ -47,18 +47,17 @@ impl AgentScopedMemory {
     }
 
     /// This wrapper is an ambient surface: it is what tools, the agent
-    /// loop, and RPC hold. The reserved Soul key space is reachable only
-    /// through the typed Soul services on the raw backend, never through
-    /// per-agent wrappers, because Soul rows are attributed to the SAME
-    /// agent UUID the wrapper is bound to (agent scoping alone cannot
-    /// discriminate them).
+    /// loop, and RPC hold. The reserved Soul key space is never reachable
+    /// through per-agent wrappers, because Soul-shaped rows would be
+    /// attributed to the SAME agent UUID the wrapper is bound to (agent
+    /// scoping alone cannot discriminate them).
     fn refuses_soul_key(key: &str) -> bool {
-        key.starts_with(crate::soul::SOUL_KEY_PREFIX)
+        key.starts_with(crate::SOUL_KEY_PREFIX)
     }
 
     /// Ambient wrappers never operate in the reserved Soul namespace.
     fn refuses_soul_namespace(namespace: Option<&str>) -> bool {
-        namespace == Some(crate::soul::SOUL_NAMESPACE)
+        namespace == Some(crate::SOUL_NAMESPACE)
     }
 
     /// Typed refusal for any store that would write into the Soul key
@@ -75,9 +74,7 @@ impl AgentScopedMemory {
                     })),
                 "store refused: Soul key space is not writable through AgentScopedMemory"
             );
-            anyhow::bail!(
-                "AgentScopedMemory refuses stores into the reserved Soul key space; use the typed Soul services on the raw backend"
-            );
+            anyhow::bail!("AgentScopedMemory refuses stores into the reserved Soul key space");
         }
         Ok(())
     }
@@ -355,9 +352,7 @@ impl Memory for AgentScopedMemory {
                     })),
                 "forget refused: Soul key space is not deletable through AgentScopedMemory"
             );
-            anyhow::bail!(
-                "AgentScopedMemory refuses deletes in the reserved Soul key space; use the typed Soul services on the raw backend"
-            );
+            anyhow::bail!("AgentScopedMemory refuses deletes in the reserved Soul key space");
         }
         if self.inner.forget_for_agent(key, &self.agent_id).await? {
             return Ok(true);
@@ -430,9 +425,7 @@ impl Memory for AgentScopedMemory {
                     })),
                 "forget_for_agent refused: Soul key space is not deletable through AgentScopedMemory"
             );
-            anyhow::bail!(
-                "AgentScopedMemory refuses deletes in the reserved Soul key space; use the typed Soul services on the raw backend"
-            );
+            anyhow::bail!("AgentScopedMemory refuses deletes in the reserved Soul key space");
         }
         self.inner.forget_for_agent(key, agent_id).await
     }
@@ -1198,7 +1191,7 @@ mod tests {
                 "soul disposition content",
                 MemoryCategory::Custom("soul".to_string()),
                 None,
-                Some(crate::soul::SOUL_NAMESPACE),
+                Some(crate::SOUL_NAMESPACE),
                 None,
                 Some(&agent),
             )
@@ -1229,8 +1222,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            hits.iter()
-                .all(|e| e.namespace != crate::soul::SOUL_NAMESPACE),
+            hits.iter().all(|e| e.namespace != crate::SOUL_NAMESPACE),
             "wrapper recall must not leak Soul rows"
         );
 

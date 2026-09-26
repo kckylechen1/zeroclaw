@@ -6,8 +6,6 @@ status: accepted
 relates-to:
   - ADR-013
   - ADR-014
-  - crates/zeroclaw-memory/src/soul.rs
-  - crates/zeroclaw-memory/src/soul_candidate.rs
   - crates/zeroclaw-config/src/persona.rs
   - crates/zeroclaw-runtime/src/agent/personality.rs
   - crates/zeroclaw-runtime/src/agent/personality_templates
@@ -19,6 +17,13 @@ relates-to:
 ## Status
 
 Accepted by the owner on 2026-09-23, including the per-key Voice layering in Decision §2 that supersedes ADR-014's whole-section precedence rule. All other ADR-014 rules remain in force. Implementation is tracked in issue #380.
+
+Implementation note (2026-09-26): the `IdentityRegistry` / Soul candidate
+service (`soul.rs`, `soul_candidate.rs` in `zeroclaw-memory`) was never wired
+and was removed. The live Soul model is the Soul profile store (`soul.db`);
+see [#380](https://github.com/kckylechen1/zeroclaw/issues/380). References
+below to `IdentityRegistry` and `SoulCandidateService` describe the design at
+acceptance time.
 
 ## Context
 
@@ -176,4 +181,3 @@ This ADR is implemented when:
 - `crates/zeroclaw-runtime/src/agent/system_prompt.rs` (`BOOTSTRAP_FILES`, `build_system_prompt_with_persona`)
 - `crates/zeroclaw-runtime/src/agent/personality_templates/SOUL.md`, `IDENTITY.md`
 - `crates/zeroclaw-config/src/policy.rs` (`is_runtime_config_path`)
-- `crates/zeroclaw-memory/src/soul_candidate.rs` (`CandidateOrigin::ModelSummary`)

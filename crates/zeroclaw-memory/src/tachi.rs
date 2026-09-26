@@ -402,7 +402,7 @@ impl TachiMemory {
                 // Ambient recall (no namespace scope) structurally excludes
                 // the reserved Soul namespace; only `recall_namespaced`
                 // opts in.
-                if namespace.is_none() && entry.namespace == crate::soul::SOUL_NAMESPACE {
+                if namespace.is_none() && entry.namespace == crate::SOUL_NAMESPACE {
                     return false;
                 }
                 if let Some(allowed) = allowed_agents {
@@ -469,23 +469,23 @@ impl TachiMemory {
         // Soul key prefix exist only in the reserved Soul namespace, and the
         // reserved namespace accepts only reserved-prefix keys.
         let ns = namespace.unwrap_or("default");
-        if ns == crate::soul::SOUL_NAMESPACE {
-            if !key.starts_with(crate::soul::SOUL_KEY_PREFIX) {
+        if ns == crate::SOUL_NAMESPACE {
+            if !key.starts_with(crate::SOUL_KEY_PREFIX) {
                 anyhow::bail!(
                     "refused: namespace '{}' requires a key with the reserved '{}' prefix",
-                    crate::soul::SOUL_NAMESPACE,
-                    crate::soul::SOUL_KEY_PREFIX
+                    crate::SOUL_NAMESPACE,
+                    crate::SOUL_KEY_PREFIX
                 );
             }
-        } else if key.starts_with(crate::soul::SOUL_KEY_PREFIX) {
+        } else if key.starts_with(crate::SOUL_KEY_PREFIX) {
             anyhow::bail!(
                 "refused: key prefix '{}' is reserved for the Soul namespace",
-                crate::soul::SOUL_KEY_PREFIX
+                crate::SOUL_KEY_PREFIX
             );
         }
         let path = Self::storage_path(agent_id, namespace, &category, key);
         // Soul persistence does not authorize external embedding of its content.
-        let embedding = if ns == crate::soul::SOUL_NAMESPACE {
+        let embedding = if ns == crate::SOUL_NAMESPACE {
             None
         } else {
             self.compute_embedding(content).await
@@ -877,9 +877,8 @@ impl Memory for TachiMemory {
 
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
         let mut rows = self.find_rows_by_key(key, None).await?;
-        // Ambient get never returns a Soul row; the typed Soul services
-        // read through `get_for_agent`.
-        rows.retain(|e| e.namespace != crate::soul::SOUL_NAMESPACE);
+        // Ambient get never returns a row from the reserved Soul namespace.
+        rows.retain(|e| e.namespace != crate::SOUL_NAMESPACE);
         Ok(rows.pop())
     }
 
@@ -899,7 +898,7 @@ impl Memory for TachiMemory {
     ) -> anyhow::Result<Vec<MemoryEntry>> {
         let mut entries = self.list_all().await?;
         // Ambient listing excludes the reserved Soul namespace.
-        entries.retain(|e| e.namespace != crate::soul::SOUL_NAMESPACE);
+        entries.retain(|e| e.namespace != crate::SOUL_NAMESPACE);
         if let Some(cat) = category {
             entries.retain(|e| &e.category == cat);
         }
@@ -916,7 +915,7 @@ impl Memory for TachiMemory {
         // admitted identity.
         let ids: Vec<String> = rows
             .into_iter()
-            .filter(|e| e.namespace != crate::soul::SOUL_NAMESPACE)
+            .filter(|e| e.namespace != crate::SOUL_NAMESPACE)
             .map(|e| e.id)
             .collect();
         Ok(self.delete_ids(ids).await? > 0)
@@ -1274,12 +1273,9 @@ mod tests {
         for (key, namespace) in [
             (
                 "ordinary-key".to_string(),
-                Some(crate::soul::SOUL_NAMESPACE.to_string()),
+                Some(crate::SOUL_NAMESPACE.to_string()),
             ),
-            (
-                format!("{}agent::invalid", crate::soul::SOUL_KEY_PREFIX),
-                None,
-            ),
+            (format!("{}agent::invalid", crate::SOUL_KEY_PREFIX), None),
         ] {
             mem.store_with_options(
                 &key,
@@ -1297,12 +1293,12 @@ mod tests {
         }
         for suffix in ["disposition", "candidate::pending"] {
             mem.store_with_options(
-                &format!("{}agent::{suffix}", crate::soul::SOUL_KEY_PREFIX),
+                &format!("{}agent::{suffix}", crate::SOUL_KEY_PREFIX),
                 "reserved local payload",
                 MemoryCategory::Core,
                 None,
                 StoreOptions {
-                    namespace: Some(crate::soul::SOUL_NAMESPACE.into()),
+                    namespace: Some(crate::SOUL_NAMESPACE.into()),
                     ..StoreOptions::default()
                 },
             )
@@ -1341,7 +1337,7 @@ mod tests {
         // query path without a provider to inspect persistence after the call audit.
         mem.swap_embedder(Arc::new(super::super::embeddings::NoopEmbedding));
         let rows = mem
-            .recall_namespaced(crate::soul::SOUL_NAMESPACE, "*", 10, None, None, None)
+            .recall_namespaced(crate::SOUL_NAMESPACE, "*", 10, None, None, None)
             .await
             .unwrap();
         assert_eq!(rows.len(), 2);

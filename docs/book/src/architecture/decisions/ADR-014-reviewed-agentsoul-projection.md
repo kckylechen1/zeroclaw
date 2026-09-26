@@ -23,6 +23,12 @@ and independent review of the exact documentation head is complete. The ADR is
 accepted. It does not activate candidate promotion or prompt projection, and it
 does not declare issues #188, #189, #190, or #295 complete.
 
+Implementation note (2026-09-26): the `IdentityRegistry` / Soul candidate
+service (`soul.rs`, `soul_candidate.rs` in `zeroclaw-memory`) was never wired
+and was removed. The live Soul model is the Soul profile store; see
+[#380](https://github.com/kckylechen1/zeroclaw/issues/380) and
+[ADR-015](./ADR-015-one-governed-soul.md).
+
 ## Context
 
 AgentSoul is reviewed, identity-bound stable presentation state for one admitted
@@ -227,8 +233,6 @@ Negative consequences:
 - [ADR-010: memory authority boundaries](./ADR-010-memory-authority-boundaries.md)
 - [ADR-011: multi-agent runtime boundaries](./ADR-011-multi-agent-runtime-boundaries.md)
 - [Memory and payload lifecycle](../memory-payload-lifecycle.md)
-- `crates/zeroclaw-memory/src/soul.rs`
-- `crates/zeroclaw-memory/src/soul_candidate.rs`
 - `crates/zeroclaw-config/src/persona.rs`
 - `crates/zeroclaw-gateway/src/operator_auth.rs`
 - `crates/zeroclaw-gateway/src/api_user_model.rs`

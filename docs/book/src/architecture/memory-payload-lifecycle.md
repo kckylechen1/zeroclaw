@@ -40,8 +40,9 @@ a non-UUID.
 Reviewed AgentSoul is a separate protected domain. Its owner-selected minimum
 review and presentation contract is recorded in
 [ADR-014](./decisions/ADR-014-reviewed-agentsoul-projection.md). The ADR is
-accepted; candidate rows are not active Soul, and its documentation does not
-enable review writes or prompt projection.
+accepted. The live Soul model is the Soul profile store (`soul.db`) described
+in [ADR-015](./decisions/ADR-015-one-governed-soul.md); the general memory
+store reserves the `soul` namespace so ambient memory never hosts Soul rows.
 
 ## Long-term memory
 
