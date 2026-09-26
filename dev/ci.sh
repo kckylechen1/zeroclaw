@@ -52,7 +52,6 @@ Commands:
   test-component  Run component tests only
   test-integration Run integration tests only
   test-system     Run system tests only
-  test-live       Run live tests (requires credentials)
   test-manual     Run manual test scripts (dockerignore, etc.)
   build         Run release build smoke check (container only)
   audit         Run cargo audit (container only)
@@ -107,10 +106,6 @@ case "$1" in
 
   test-system)
     run_in_ci "cargo test --test system --locked --verbose"
-    ;;
-
-  test-live)
-    run_in_ci "cargo test --test live -- --ignored --verbose"
     ;;
 
   test-manual)

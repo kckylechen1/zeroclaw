@@ -12,7 +12,6 @@ When a PR claims behavior that a user directly runs, clicks, sends, installs, or
 | **Component** | One subsystem inside its own boundary | Subsystem real, everything else mocked | `tests/component/` |
 | **Integration** | Multiple internal components wired together | Real internals, external APIs mocked | `tests/integration/` |
 | **System** | Full request → response across all internal boundaries | Only external APIs mocked | `tests/system/` |
-| **Live** | Full stack with real external services | Nothing mocked, `#[ignore]`'d | `tests/live/` |
 
 Plus two non-test directories:
 
@@ -35,7 +34,6 @@ cargo test -p zeroclaw-runtime --lib --features heavy-tests   # full runtime uni
 cargo test --test component                 # component only
 cargo test --test integration               # integration only
 cargo test --test system                    # system only
-cargo test --test live -- --ignored         # live (requires API credentials)
 cargo test --test integration agent         # filter within a level
 cargo nextest run --locked --workspace  # what CI runs
 ./dev/ci.sh all                             # full CI battery (Docker)
@@ -49,7 +47,7 @@ cargo nextest run --locked --workspace  # what CI runs
 1. Testing one subsystem in isolation? → `tests/component/`
 2. Testing multiple components wired together? → `tests/integration/`
 3. Testing full message flow end to end? → `tests/system/`
-4. Requires real API keys? → `tests/live/` with `#[ignore]`
+4. Needs a real provider or API key? → don't add it to the suite. Mock the provider with `tests/support/`, and note any manual check against the real service in the PR's testing section.
 
 After creating the file, add it to the level's `mod.rs` and use shared infrastructure from `tests/support/`.
 
@@ -116,14 +114,6 @@ Fixture format:
 Response types: `"text"` (plain text) or `"tool_calls"` (LLM requests tool execution).
 
 Expects fields: `response_contains`, `response_not_contains`, `tools_used`, `tools_not_used`, `max_tool_calls`, `all_tools_succeeded`, `response_matches` (regex).
-
-## Live test conventions
-
-Live tests hit real external services and cost real money; they are `#[ignore]` by default and only run with explicit opt-in.
-
-- Always `#[ignore]`. Never let a live test run on a normal `cargo test`.
-- Read credentials from `env::var("ZEROCLAW_TEST_*")`. Don't read the operator's config; live tests should be hermetic.
-- Run with `cargo test --test live -- --ignored --nocapture`.
 
 ## Database tests are integration tests
 
