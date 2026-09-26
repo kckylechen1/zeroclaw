@@ -66,6 +66,11 @@ use serde::{Deserialize, Serialize};
 ///   services are reached through MCP servers, and outbound notifications
 ///   through the gateway bridges' `notify` tool), so the section is ignored
 ///   (see `RETIRED_CONFIG_SURFACES`).
+/// - `otel_observability_removed`: `[observability] backend` still names the
+///   retired OpenTelemetry exporter (`otel`, `otlp`, `opentelemetry`) or an
+///   `otel_*` field is still set. The exporter was removed; the backend loads
+///   as `none` and the fields are ignored (see `RETIRED_CONFIG_VALUES` and
+///   `RETIRED_CONFIG_FIELDS`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ValidationWarning {
@@ -193,12 +198,49 @@ pub const RETIRED_CONFIG_FIELDS: &[(&str, &str)] = &[
         "channels.whatsapp.*.proxy_url",
         "whatsapp_cloud_backend_removed",
     ),
+    ("observability.otel_endpoint", "otel_observability_removed"),
+    (
+        "observability.otel_service_name",
+        "otel_observability_removed",
+    ),
+    ("observability.otel_headers", "otel_observability_removed"),
+    (
+        "observability.otel_genai_content",
+        "otel_observability_removed",
+    ),
+    (
+        "observability.otel_genai_content_max_chars",
+        "otel_observability_removed",
+    ),
+    ("observability.otel_tool_io", "otel_observability_removed"),
+    (
+        "observability.otel_tool_io_max_chars",
+        "otel_observability_removed",
+    ),
 ];
+
+/// Retired config VALUES: dotted path (one `*` wildcard segment allowed, as
+/// in [`RETIRED_CONFIG_FIELDS`]) + the retired spellings (matched
+/// case-insensitively) + stable warning code. Same contract one level
+/// deeper again: the key is still valid, but a value that selected a removed
+/// backend no longer resolves. Each entry says in its warning what the key
+/// does instead; [`retired_field_tombstones`] reports these hits alongside
+/// the retired fields, so every load path that already surfaces field
+/// tombstones surfaces value tombstones too.
+pub const RETIRED_CONFIG_VALUES: &[(&str, &[&str], &str)] = &[(
+    "observability.backend",
+    &["otel", "otlp", "opentelemetry"],
+    "otel_observability_removed",
+)];
 
 /// Why a retired field was removed, keyed by its stable warning code, for
 /// the human-readable half of the field tombstone warning.
 fn retired_field_reason(code: &str) -> &'static str {
     match code {
+        "otel_observability_removed" => {
+            "the OpenTelemetry exporter was removed; the `log`, `verbose` and \
+             `prometheus` sinks remain, and a retired backend value loads as `none`"
+        }
         "whatsapp_cloud_backend_removed" => {
             "only the WhatsApp Cloud API backend read this key, and that backend \
              was removed with its gateway webhook route. WhatsApp is served by the \
@@ -244,7 +286,67 @@ pub fn retired_field_tombstones(contents: &str) -> Vec<ValidationWarning> {
         );
         warnings.push(warning);
     }
+    for (path, retired, code) in RETIRED_CONFIG_VALUES {
+        let Some(value) = field_values(root, path)
+            .into_iter()
+            .find_map(|value| value.as_str().filter(|v| is_retired_value(v, retired)))
+        else {
+            continue;
+        };
+        let reason = retired_field_reason(code);
+        let warning = ValidationWarning::new(
+            *code,
+            format!(
+                "[{path}] = \"{value}\" in config.toml is no longer supported: {reason}. \
+                 Change or remove the value."
+            ),
+            (*path).to_string(),
+        );
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({ "path": path, "value": value, "code": code })),
+            &warning.message
+        );
+        warnings.push(warning);
+    }
     warnings
+}
+
+/// True when `value` names one of the `retired` spellings, case-insensitively.
+/// A retired spelling also matches its aliased form (`<retired>.<alias>`), so
+/// `postgres` covers `memory.backend = "postgres.work"`.
+#[must_use]
+pub fn is_retired_value(value: &str, retired: &[&str]) -> bool {
+    let value = value.trim();
+    let kind = value.split_once('.').map_or(value, |(kind, _)| kind);
+    retired
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(value) || r.eq_ignore_ascii_case(kind))
+}
+
+/// Every value a dotted path with at most one `*` wildcard segment resolves
+/// to in the parsed root (one per matching map key for a wildcard path).
+fn field_values<'a>(root: &'a toml::value::Table, path: &str) -> Vec<&'a toml::Value> {
+    let segments: Vec<&str> = path.split('.').collect();
+    let lookup = |table: &'a toml::value::Table, segments: &[&str]| -> Option<&'a toml::Value> {
+        let (&last, intermediates) = segments.split_last()?;
+        value_at_table(table, intermediates)?.get(last)
+    };
+    match segments.iter().position(|segment| *segment == "*") {
+        None => lookup(root, &segments).into_iter().collect(),
+        Some(star) => {
+            let Some(parent) = value_at_table(root, &segments[..star]) else {
+                return Vec::new();
+            };
+            let suffix = &segments[star + 1..];
+            parent
+                .values()
+                .filter_map(|value| lookup(value.as_table()?, suffix))
+                .collect()
+        }
+    }
 }
 
 /// True when a dotted path with at most one `*` wildcard segment (matching a
@@ -435,6 +537,20 @@ session_path = "~/.zeroclaw/state/whatsapp-web/web.db"
             retired_field_tombstones("[channels.whatsapp.web]\nsession_path = \"/tmp/wa.db\"\n")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn retired_value_tombstones_flag_retired_backend_only() {
+        for value in ["otel", "OTLP", "opentelemetry"] {
+            let warnings =
+                retired_field_tombstones(&format!("[observability]\nbackend = \"{value}\"\n"));
+            assert_eq!(warnings.len(), 1, "{value}: {warnings:?}");
+            assert_eq!(warnings[0].code, "otel_observability_removed");
+            assert_eq!(warnings[0].path, "observability.backend");
+            assert!(warnings[0].message.contains(value), "{warnings:?}");
+        }
+        assert!(retired_field_tombstones("[observability]\nbackend = \"prometheus\"\n").is_empty());
+        assert!(retired_field_tombstones("[observability]\nbackend = 3\n").is_empty());
     }
 
     #[test]

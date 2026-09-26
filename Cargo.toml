@@ -369,7 +369,6 @@ observability-prometheus = [
     "zeroclaw-runtime/observability-prometheus",
     "zeroclaw-gateway/observability-prometheus",
 ]
-observability-otel = ["zeroclaw-runtime/observability-otel"]
 sandbox-landlock = ["zeroclaw-runtime/sandbox-landlock"]
 sandbox-bubblewrap = ["zeroclaw-runtime/sandbox-bubblewrap"]
 browser-native = ["zeroclaw-tools/browser-native"]
@@ -385,7 +384,7 @@ ci-all = [
     "agent-runtime",
     "channels-full",
     "channel-nostr", "channel-matrix", "whatsapp-web",
-    "observability-prometheus", "observability-otel",
+    "observability-prometheus",
     "sandbox-landlock", "sandbox-bubblewrap",
     "browser-native",
     "memory-postgres",

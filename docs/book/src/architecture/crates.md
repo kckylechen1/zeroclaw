@@ -110,7 +110,7 @@ registry (`ATTRIBUTION_FIELDS` + `COMPOSITE_PREFIXES`), the
 `tracing-subscriber` Layer that captures every `tracing::*` call, the
 `record!` and `scope!` macros, the rolling-trim writer, the
 paginated cursor reader behind `/api/logs`, and the bridge to the
-typed `Observer` for Prometheus / OTel consumers. See
+typed `Observer` for Prometheus consumers. See
 [`architecture/logging.md`](./logging.md).
 
 ### `zeroclaw-spawn`

@@ -9,11 +9,10 @@ use super::protocol_detect::{
 use super::redact::scrub_credentials;
 use super::tool_specs::IterationToolSpecs;
 use crate::agent::cost::record_tool_loop_cost_usage;
-use crate::agent::loop_::capture_llm_messages;
 use crate::observability::ObserverEvent;
 use std::time::Instant;
 use zeroclaw_api::agent::TurnEvent;
-use zeroclaw_providers::{ChatMessage, ChatResponse, ToolCall};
+use zeroclaw_providers::{ChatResponse, ToolCall};
 use zeroclaw_tool_call_parser::{
     ParsedToolCall, build_native_assistant_history_from_parsed_calls,
     looks_like_tool_protocol_example, parse_tool_calls, strip_think_tags,
@@ -121,7 +120,6 @@ pub(crate) struct InterpretedResponse {
 pub(crate) async fn interpret_chat_response(
     ctx: &TurnCtx<'_>,
     resp: ChatResponse,
-    history: &[ChatMessage],
     specs: &IterationToolSpecs,
     streamed_protocol_suppressed: bool,
     llm_started_at: Instant,
@@ -146,9 +144,9 @@ pub(crate) async fn interpret_chat_response(
         agent_alias: ctx.agent_alias.map(|s| s.to_string()),
         parent_agent_alias: ctx.parent_agent_alias.map(|s| s.to_string()),
         turn_id: Some(ctx.turn_id.to_string()),
-        // Credential-scrubbed prompt/completion content for OTel GenAI export;
-        // `None` unless the `observability-otel` feature is active.
-        messages: capture_llm_messages(history, Some(resp.text_or_empty()), &resp.tool_calls),
+        // Prompt/completion snapshots fed only the retired OTel exporter;
+        // the api field stays for semver and is never populated.
+        messages: None,
     });
 
     let call_cost_usd = resp
@@ -509,7 +507,7 @@ mod cost_usd_regression_tests {
         let now = std::time::Instant::now();
         crate::agent::cost::TOOL_LOOP_COST_TRACKING_CONTEXT
             .scope(Some(cost_ctx), async {
-                interpret_chat_response(&ctx, resp, &[], &specs, false, now, 0, false).await;
+                interpret_chat_response(&ctx, resp, &specs, false, now, 0, false).await;
             })
             .await;
 

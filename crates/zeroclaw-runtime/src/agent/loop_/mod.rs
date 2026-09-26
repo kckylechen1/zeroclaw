@@ -61,9 +61,7 @@ pub(crate) use super::channel_factories::{live_channel_registry, seed_channel_ha
 // Prompt / export helpers moved to `super::prompt_helpers`.
 #[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use super::prompt_helpers::tools_to_openai_format;
-pub(crate) use super::prompt_helpers::{
-    autosave_memory_key, build_system_prompt_for_turn, capture_llm_messages,
-};
+pub(crate) use super::prompt_helpers::{autosave_memory_key, build_system_prompt_for_turn};
 pub use super::prompt_helpers::{make_query_summary, native_tool_specs_present_for_turn};
 
 pub use super::text_tool_prompt::{

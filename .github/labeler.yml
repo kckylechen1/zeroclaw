@@ -564,12 +564,6 @@
           - "crates/zeroclaw-log/src/**"
           - "crates/zeroclaw-runtime/src/observability/log.rs"
 
-"observability:otel":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "crates/zeroclaw-runtime/src/observability/otel.rs"
-          - "tests/component/otel_dependency_feature_regression.rs"
-
 "observability:prometheus":
   - changed-files:
       - any-glob-to-any-file:

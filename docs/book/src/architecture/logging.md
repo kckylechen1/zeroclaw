@@ -2,7 +2,7 @@
 
 ZeroClaw has exactly one logging surface: the `zeroclaw_log::record!` macro. Every emission in the workspace, agent loop activity, channel I/O, cron runs, tool calls, memory ops, session lifecycle, errors, flows through it. The macro fires a `tracing` event that the installed subscriber feeds to two sibling layers: the stderr fmt layer (terminal output) and the `LogCaptureLayer`. The fmt layer prints colored, alias-prefixed lines on stderr (muted unless `--verbose`). The `LogCaptureLayer` materializes a structured `LogEvent` and fans it out, via `writer::record_event`, to:
 
-1. The Observer bridge (`observer_bridge::forward`) for Prometheus / OTel typed metrics.
+1. The Observer bridge (`observer_bridge::forward`) for Prometheus typed metrics.
 2. The process-wide broadcast channel so the dashboard's SSE stream sees every event live.
 3. The persisted JSONL log at `<workspace>/state/runtime-trace.jsonl` (when `[observability] log_persistence` is `"rolling"`, `"full"`, or `"rotating"`).
 
@@ -185,7 +185,7 @@ The layer in `crates/zeroclaw-log/src/layer.rs` is a `tracing-subscriber` Layer 
 1. On span creation/record with target `"zeroclaw_log_internal_attribution"` (the target the `attribution_span!` macro opens with): parses the role + alias fields into a `ZeroclawAttribution` snapshot stored on the span's extensions.
 2. On span creation/record with target `"zeroclaw_log_internal_scope"` (`scope!`-opened): parses ad-hoc kvps and stashes them similarly.
 3. On event emission with target `"zeroclaw_log_event"` (the target the `record!` macro fires through): builds a `LogEvent` from the `zc_*` field set, walks the span scope leaf→root merging every attribution snapshot it finds, parses the `zc_attrs` JSON blob into the event `attributes`, attaches `_file`/`_line` from auto-captured source location, and hands the final event to `writer::record_event`, which fans out in this order:
-   - Observer bridge (`observer_bridge.rs`) for Prometheus / OTel typed metrics (unconditional).
+   - Observer bridge (`observer_bridge.rs`) for Prometheus typed metrics (unconditional).
    - Broadcast hook (`broadcast.rs`) for SSE/dashboard subscribers (unconditional).
    - JSONL persistence (`writer.rs`), appended last and only when `log_persistence` is enabled.
 
@@ -250,4 +250,4 @@ Then add `impl Attributable for X` next to the new struct (`fn role() -> Role::F
 
 ## Operator concerns
 
-For configuration knobs (`log_persistence`, `log_tool_io`, OTel export) and query syntax, see [Logs & observability](../ops/observability.md).
+For configuration knobs (`log_persistence`, `log_tool_io`) and query syntax, see [Logs & observability](../ops/observability.md).

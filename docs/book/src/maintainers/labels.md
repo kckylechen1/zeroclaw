@@ -170,9 +170,7 @@ Scoped path labels do not guarantee a same-prefix base label. Because `pr-path-l
 | Label | Matches |
 |---|---|
 | `observability:log` | `crates/zeroclaw-log/src/**`, `crates/zeroclaw-runtime/src/observability/log.rs` |
-| `observability:otel` | `otel.rs`, OTel dependency feature regression coverage |
 | `observability:prometheus` | `prometheus.rs` |
-| `runtime:wasm` | first-party WASM plugin host files |
 | `security:bubblewrap` | `bubblewrap.rs` |
 | `security:docker` | `docker.rs` |
 | `security:leak-detector` | LeakDetector redaction and sensitive-output scanning |
@@ -190,7 +188,7 @@ Some scoped component labels are manual routing labels rather than synchronized 
 
 `agent:loop` is retired. For agent-loop routing, use base `agent` plus any matching `runtime`, provider, channel, tool, or risk labels.
 
-Do not apply legacy `observability: runtime_trace` to new issues or PRs. Use `observability:otel` when the work is about OpenTelemetry tracing, add base `observability` only when the issue or PR also matches that base surface, and decide any future runtime-trace-specific canonical label in a separate create/migrate packet.
+Do not apply legacy `observability: runtime_trace` to new issues or PRs. Add base `observability` only when the issue or PR matches that base surface, and decide any future runtime-trace-specific canonical label in a separate create/migrate packet.
 
 Do not apply legacy `security: leak_detector` to new issues or PRs. Use `security:leak-detector` for LeakDetector redaction and sensitive-output scanning work.
 

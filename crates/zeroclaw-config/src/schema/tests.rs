@@ -1654,12 +1654,12 @@ async fn observability_enums_deserialize_legacy_string_values() {
     // Backward compat: TOML configs written before the enum conversion
     // stored these as bare strings. They must still parse.
     let toml = r#"
-backend = "otel"
+backend = "prometheus"
 log_persistence = "full"
 log_tool_io = "off"
 "#;
     let o: ObservabilityConfig = toml::from_str(toml).unwrap();
-    assert_eq!(o.backend, ObservabilityBackend::Otel);
+    assert_eq!(o.backend, ObservabilityBackend::Prometheus);
     assert_eq!(o.log_persistence, LogPersistence::Full);
     assert_eq!(o.log_tool_io, LogToolIo::Off);
 
@@ -1669,7 +1669,7 @@ log_tool_io = "off"
 
     // Round-trip: serialize back to the same wire strings the runtime
     // boundary (`to_log_config`) and downstream `from_raw` expect.
-    assert_eq!(ObservabilityBackend::Otel.as_wire(), "otel");
+    assert_eq!(ObservabilityBackend::Prometheus.as_wire(), "prometheus");
     assert_eq!(LogPersistence::Full.as_wire(), "full");
     assert_eq!(LogPersistence::Rotating.as_wire(), "rotating");
     assert_eq!(LogToolIo::Off.as_wire(), "off");
@@ -1706,10 +1706,13 @@ async fn observability_backend_unknown_falls_back_to_default() {
     assert_eq!(parsed.backend, ObservabilityBackend::None);
     let noop: ObservabilityConfig = toml::from_str("backend = \"noop\"").unwrap();
     assert_eq!(noop.backend, ObservabilityBackend::None);
-    let otlp: ObservabilityConfig = toml::from_str("backend = \"otlp\"").unwrap();
-    assert_eq!(otlp.backend, ObservabilityBackend::Otel);
-    let otel_alias: ObservabilityConfig = toml::from_str("backend = \"opentelemetry\"").unwrap();
-    assert_eq!(otel_alias.backend, ObservabilityBackend::Otel);
+    // The retired OTel backend values load as the default sink; the
+    // retired-value tombstone reports them.
+    for retired in ["otel", "otlp", "opentelemetry"] {
+        let parsed: ObservabilityConfig =
+            toml::from_str(&format!("backend = \"{retired}\"")).unwrap();
+        assert_eq!(parsed.backend, ObservabilityBackend::None);
+    }
 }
 
 #[test]
@@ -3220,11 +3223,6 @@ async fn config_save_encrypts_nested_credentials() {
     ];
     config.node_transport.shared_secret = "node-shared-credential".into();
     config.nodes.auth_token = Some("nodes-auth-credential".into());
-    config.observability.backend = ObservabilityBackend::Otel;
-    config.observability.otel_headers = Some(HashMap::from([(
-        "Authorization".to_string(),
-        "Bearer otel-credential".to_string(),
-    )]));
     config.file_upload.headers = HashMap::from([(
         "Authorization".to_string(),
         "Bearer upload-credential".to_string(),
@@ -3319,7 +3317,6 @@ async fn config_save_encrypts_nested_credentials() {
         "rotation-credential-b",
         "node-shared-credential",
         "nodes-auth-credential",
-        "Bearer otel-credential",
         "Bearer upload-credential",
         "Bearer http-request-credential",
         "mcp-env-credential",
@@ -3440,15 +3437,6 @@ async fn config_save_encrypts_nested_credentials() {
     let nodes_auth = stored.nodes.auth_token.as_deref().unwrap();
     assert!(crate::secrets::SecretStore::is_encrypted(nodes_auth));
     assert_eq!(store.decrypt(nodes_auth).unwrap(), "nodes-auth-credential");
-
-    let otel_auth = stored
-        .observability
-        .otel_headers
-        .as_ref()
-        .and_then(|h| h.get("Authorization"))
-        .unwrap();
-    assert!(crate::secrets::SecretStore::is_encrypted(otel_auth));
-    assert_eq!(store.decrypt(otel_auth).unwrap(), "Bearer otel-credential");
 
     let upload_auth = stored.file_upload.headers.get("Authorization").unwrap();
     assert!(crate::secrets::SecretStore::is_encrypted(upload_auth));
@@ -6600,7 +6588,7 @@ async fn save_dirty_stamps_current_schema_version_on_stale_label() {
         config_path: config_path.clone(),
         ..Default::default()
     };
-    config.observability.backend = ObservabilityBackend::Otel;
+    config.observability.backend = ObservabilityBackend::Prometheus;
     config.mark_dirty("observability.backend");
     config.save_dirty().await.unwrap();
 
@@ -6618,7 +6606,7 @@ async fn save_dirty_stamps_current_schema_version_on_stale_label() {
     );
     // The dirty value still lands, and the stamp sits at the top of the file.
     assert!(
-        written.contains("backend = \"otel\""),
+        written.contains("backend = \"prometheus\""),
         "dirty value must still be written; got:\n{written}"
     );
     assert!(

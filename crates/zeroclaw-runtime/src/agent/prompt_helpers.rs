@@ -6,11 +6,10 @@
 use crate::tools::Tool;
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
-use regex::Regex;
 use std::collections::HashSet;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
-use zeroclaw_providers::{ChatMessage, ModelProvider, ToolCall};
+use zeroclaw_providers::ModelProvider;
 
 use super::text_tool_prompt::{apply_text_tool_prompt_policy, build_tool_instructions_for_names};
 use super::turn::scrub_credentials;
@@ -42,67 +41,6 @@ pub fn native_tool_specs_present_for_turn(
         Err(poisoned) => poisoned.into_inner(),
     };
     Ok(activated.tool_names().iter().any(|name| !is_excluded(name)))
-}
-
-static IMAGE_DATA_URI_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[IMAGE:data:[^\]]*\]").unwrap());
-
-pub(crate) fn elide_image_data(content: &str) -> String {
-    IMAGE_DATA_URI_REGEX
-        .replace_all(content, "[IMAGE:<image data elided>]")
-        .into_owned()
-}
-
-pub(crate) fn scrub_for_export(content: &str) -> String {
-    scrub_credentials(&zeroclaw_providers::scrub_secret_patterns(
-        &elide_image_data(content),
-    ))
-}
-
-pub(crate) fn capture_llm_messages(
-    messages: &[ChatMessage],
-    output_text: Option<&str>,
-    output_tool_calls: &[ToolCall],
-) -> Option<zeroclaw_api::observability_traits::LlmMessageSnapshot> {
-    if !cfg!(feature = "observability-otel") {
-        return None;
-    }
-
-    use zeroclaw_api::observability_traits::{
-        LlmMessageSnapshot, MessageSnapshot, ToolCallSnapshot,
-    };
-
-    let system_instructions = messages
-        .iter()
-        .find(|m| m.role == "system")
-        .map(|m| scrub_for_export(&m.content));
-
-    let input = messages
-        .iter()
-        .filter(|m| m.role != "system")
-        .map(|m| MessageSnapshot {
-            role: m.role.clone(),
-            content: scrub_for_export(&m.content),
-        })
-        .collect();
-
-    let output_text = output_text.filter(|t| !t.is_empty()).map(scrub_for_export);
-
-    let output_tool_calls = output_tool_calls
-        .iter()
-        .map(|tc| ToolCallSnapshot {
-            id: tc.id.clone(),
-            name: tc.name.clone(),
-            arguments_json: scrub_for_export(&tc.arguments),
-        })
-        .collect();
-
-    Some(LlmMessageSnapshot {
-        input,
-        output_text,
-        output_tool_calls,
-        system_instructions,
-    })
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -6,7 +6,6 @@ mod config_schema;
 mod dockerignore_test;
 mod gateway;
 mod gemini_capabilities;
-mod otel_dependency_feature_regression;
 mod provider_resolution;
 mod provider_schema;
 mod security;

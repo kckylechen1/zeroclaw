@@ -152,8 +152,7 @@ identifiers.
 
 Tool-call observability needs extra care because the sinks do not share one
 payload contract. Current typed tool-call observer events can carry full
-arguments and credential-scrubbed full result output, and OTel forwards those
-values into span attributes. Do not describe that path as "summaries" unless the
+arguments and credential-scrubbed full result output. Do not describe that path as "summaries" unless the
 code actually bounds or summarizes it. New telemetry should prefer bounded
 identifiers, counts, durations, success flags, and operator-useful summaries.
 Put raw content in logs or observer events only when the feature explicitly

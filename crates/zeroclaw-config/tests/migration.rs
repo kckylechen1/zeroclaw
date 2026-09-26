@@ -2060,6 +2060,63 @@ fn v3_retired_saas_sections_load_with_tombstone_warnings() {
 }
 
 #[test]
+fn v3_retired_otel_backend_and_fields_load_with_tombstone_warnings() {
+    // The OpenTelemetry exporter was removed. `backend = "otel"` and the
+    // `otel_*` keys must keep loading: the backend falls back to `none` and
+    // every retired key is reported, never silently dropped.
+    let mut value: toml::Value = toml::from_str(
+        &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
+            .expect("generate current succeeds"),
+    )
+    .expect("generated V3 parses");
+    let observability = value
+        .as_table_mut()
+        .unwrap()
+        .entry("observability")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .unwrap();
+    let retired: toml::Table = toml::from_str(
+        r#"
+backend = "otel"
+otel_endpoint = "http://localhost:4318"
+otel_service_name = "zeroclaw"
+otel_genai_content = "redacted"
+otel_genai_content_max_chars = 500
+otel_tool_io = "full"
+otel_tool_io_max_chars = 500
+
+[otel_headers]
+Authorization = "Bearer x"
+"#,
+    )
+    .unwrap();
+    observability.extend(retired);
+    let raw = toml::to_string(&value).unwrap();
+
+    let cfg = migrate_to_current(&raw).expect("retired otel config must not fail load");
+    cfg.validate()
+        .expect("retired otel config must not fail validation");
+    assert_eq!(
+        cfg.observability.backend,
+        zeroclaw_config::schema::ObservabilityBackend::None
+    );
+
+    let warnings = zeroclaw_config::validation_warnings::retired_field_tombstones(&raw);
+    assert_eq!(warnings.len(), 8, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .all(|w| w.code == "otel_observability_removed"),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings.iter().any(|w| w.path == "observability.backend"),
+        "{warnings:?}"
+    );
+}
+
+#[test]
 fn v2_matrix_allowed_users_folds_and_allowed_rooms_stays() {
     let v3 = migrate_v2(
         r#"

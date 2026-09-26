@@ -735,7 +735,6 @@ async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
                 let interpreted = interpret_chat_response(
                     &ctx,
                     resp,
-                    &prepared_messages.messages,
                     &iteration_tool_specs,
                     streamed_protocol_suppressed,
                     llm_started_at,

@@ -170,26 +170,53 @@ fn secret_key_names() -> &'static std::collections::HashSet<&'static str> {
 /// generated config value. Drops only the final segment of each retired
 /// path when its parent chain fully resolves, so adjacent live keys are
 /// untouched and a missing parent is a no-op.
+///
+/// Retired fields ([`crate::validation_warnings::RETIRED_CONFIG_FIELDS`])
+/// are dropped the same way, and a key whose value names a retired backend
+/// ([`crate::validation_warnings::RETIRED_CONFIG_VALUES`]) is dropped so it
+/// falls back to its default instead of carrying the retired value forward.
 fn strip_retired_surfaces(value: &mut toml::Value) {
     for (path, _) in crate::validation_warnings::RETIRED_CONFIG_SURFACES {
         let segments: Vec<&str> = path.split('.').collect();
-        remove_dotted(value, &segments);
+        remove_dotted(value, &segments, &|_| true);
+    }
+    for (path, _) in crate::validation_warnings::RETIRED_CONFIG_FIELDS {
+        let segments: Vec<&str> = path.split('.').collect();
+        remove_dotted(value, &segments, &|_| true);
+    }
+    for (path, retired, _) in crate::validation_warnings::RETIRED_CONFIG_VALUES {
+        let segments: Vec<&str> = path.split('.').collect();
+        remove_dotted(value, &segments, &|leaf| {
+            leaf.as_str()
+                .is_some_and(|v| crate::validation_warnings::is_retired_value(v, retired))
+        });
     }
 }
 
 /// Recursive descent so each step owns exactly one mutable borrow; drops
-/// only the final segment when the parent chain fully resolves.
-fn remove_dotted(value: &mut toml::Value, segments: &[&str]) {
+/// only the final segment when the parent chain fully resolves and the leaf
+/// passes `should_remove`. A `*` segment matches every key of that table.
+fn remove_dotted(
+    value: &mut toml::Value,
+    segments: &[&str],
+    should_remove: &dyn Fn(&toml::Value) -> bool,
+) {
     let Some((first, rest)) = segments.split_first() else {
         return;
     };
     let Some(table) = value.as_table_mut() else {
         return;
     };
-    if rest.is_empty() {
-        table.remove(*first);
+    if *first == "*" {
+        for (_, child) in table.iter_mut() {
+            remove_dotted(child, rest, should_remove);
+        }
+    } else if rest.is_empty() {
+        if table.get(*first).is_some_and(should_remove) {
+            table.remove(*first);
+        }
     } else if let Some(child) = table.get_mut(*first) {
-        remove_dotted(child, rest);
+        remove_dotted(child, rest, should_remove);
     }
 }
 
