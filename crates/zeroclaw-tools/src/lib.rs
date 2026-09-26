@@ -8,20 +8,6 @@ pub(crate) mod i18n;
 // `integrations-saas` feature preserves the standard build.
 #[cfg(feature = "integrations-saas")]
 pub mod composio;
-#[cfg(feature = "integrations-saas")]
-pub mod google_workspace;
-#[cfg(feature = "integrations-saas")]
-pub mod jira_tool;
-#[cfg(feature = "integrations-saas")]
-pub mod linkedin;
-#[cfg(feature = "integrations-saas")]
-pub mod linkedin_client;
-#[cfg(feature = "integrations-saas")]
-pub mod microsoft365;
-#[cfg(feature = "integrations-saas")]
-pub mod notion_tool;
-#[cfg(feature = "integrations-saas")]
-pub mod pushover;
 pub mod util_helpers;
 
 pub mod ask_user;
@@ -30,8 +16,6 @@ pub mod browser;
 pub mod browser_open;
 pub mod calculator;
 pub mod channel_room;
-pub mod cloud_ops;
-pub mod cloud_patterns;
 pub mod content_search;
 pub mod data_management;
 pub mod discord_search;
@@ -76,11 +60,8 @@ pub mod memory_store;
 pub mod node_capabilities;
 pub mod pipeline;
 pub mod poll;
-pub mod project_intel;
 pub mod propose_soul_change;
 pub mod reaction;
-pub mod report_template_tool;
-pub mod report_templates;
 pub mod screenshot;
 pub mod send_via;
 pub mod sessions;

@@ -2026,6 +2026,40 @@ fn v3_retired_hardware_sections_load_with_tombstone_warnings() {
 }
 
 #[test]
+fn v3_retired_saas_sections_load_with_tombstone_warnings() {
+    // The vendor SaaS tool families were retired. Their sections must keep
+    // loading with a warning, including nested tables and secrets.
+    for (path, body) in [
+        (
+            "jira",
+            "enabled = true\nbase_url = \"https://example.atlassian.net\"\napi_token = \"tok\"\nallowed_actions = [\"get_ticket\"]\n",
+        ),
+        (
+            "linkedin",
+            "enabled = true\napi_version = \"202602\"\n\n[content]\ntopics = [\"rust\"]\n\n[image]\nenabled = true\n",
+        ),
+        (
+            "microsoft365",
+            "enabled = true\ntenant_id = \"t\"\nclient_id = \"c\"\nauth_flow = \"device_code\"\n",
+        ),
+        (
+            "google_workspace",
+            "enabled = true\nallowed_services = [\"gmail\"]\n\n[[allowed_operations]]\nservice = \"gmail\"\nresource = \"users\"\nmethods = [\"list\"]\n",
+        ),
+        ("cloud_ops", "enabled = true\ndefault_cloud = \"aws\"\n"),
+        (
+            "project_intel",
+            "enabled = true\ndefault_language = \"en\"\n",
+        ),
+    ] {
+        let (_, warnings) = load_with_retired_section(path, body);
+        assert_eq!(warnings.len(), 1, "{path}: {warnings:?}");
+        assert_eq!(warnings[0].code, "saas_integration_removed");
+        assert_eq!(warnings[0].path, path);
+    }
+}
+
+#[test]
 fn v2_matrix_allowed_users_folds_and_allowed_rooms_stays() {
     let v3 = migrate_v2(
         r#"

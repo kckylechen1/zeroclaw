@@ -501,18 +501,6 @@
           - "crates/zeroclaw-tools/src/glob_search.rs"
           - "crates/zeroclaw-tools/src/content_search.rs"
 
-"tool:google-workspace":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/tools/google_workspace.rs"
-          - "crates/zeroclaw-tools/src/google_workspace.rs"
-
-"tool:pushover":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/tools/pushover.rs"
-          - "crates/zeroclaw-tools/src/pushover.rs"
-
 "tool:mcp":
   - changed-files:
       - any-glob-to-any-file:
@@ -537,12 +525,6 @@
           - "crates/zeroclaw-tools/src/memory_recall.rs"
           - "crates/zeroclaw-tools/src/memory_store.rs"
 
-"tool:microsoft365":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/tools/microsoft365/**"
-          - "crates/zeroclaw-tools/src/microsoft365/**"
-
 "tool:shell":
   - changed-files:
       - any-glob-to-any-file:
@@ -563,14 +545,6 @@
           - "crates/zeroclaw-tools/src/web_search_tool.rs"
           - "crates/zeroclaw-tools/src/web_search_provider_routing.rs"
           - "crates/zeroclaw-tools/src/http_request.rs"
-
-"tool:cloud":
-  - changed-files:
-      - any-glob-to-any-file:
-          - "src/tools/cloud_ops.rs"
-          - "src/tools/cloud_patterns.rs"
-          - "crates/zeroclaw-tools/src/cloud_ops.rs"
-          - "crates/zeroclaw-tools/src/cloud_patterns.rs"
 
 "tunnel":
   - changed-files:

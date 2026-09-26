@@ -98,13 +98,12 @@ replacement surface exists. Until then, keep them compatible and policy-visible.
 
 | Tool(s) | Likely long-term home | Why |
 |---|---|---|
-| `notion`, `jira`, `microsoft365`, `google_workspace`, `linkedin`, `composio` | Plugin, MCP server, or CLI-backed integration. | These mostly wrap third-party products and authentication models that can evolve independently from the core runtime. |
+| `composio` | MCP server or CLI-backed integration. | These mostly wrap third-party products and authentication models that can evolve independently from the core runtime. |
 | `claude_code`, `claude_code_runner`, `codex_cli`, `gemini_cli`, `opencode_cli` | Removed; retired raw launchers. | These Parent-visible raw CLI launchers were removed from the registry (#197 wall 2); harness execution goes through the typed subagent / Tachi paths instead. |
 | `email_search`, `email_read` | Channel companion plugin or MCP server. | Email search/read is useful but tied to external account auth and channel setup rather than the baseline agent contract. |
 | `discord_search` | Channel companion plugin or archive-query skill. | It depends on a Discord archive database produced by the channel; keep it close to that channel until the archive API is explicit. |
-| `image_gen`, `cloud_ops`, `cloud_patterns`, `project_intel`, `report_template` | Skill package, plugin, or MCP server. | These are optional workflows or vendor/data-service wrappers rather than core execution primitives. |
+| `image_gen` | Skill package or MCP server. | These are optional workflows or vendor/data-service wrappers rather than core execution primitives. |
 | `weather` | Skill package or HTTP-backed skill; later plugin or MCP server if parity needs custom formatting or policy. | The current built-in is a no-key `wttr.in` wrapper. A minimal lookup fits the HTTP skill shape, but full externalization still needs parity for formatted output, the `tool.weather` proxy policy, and the built-in tool name / auto-approve behavior. |
-| `pushover` | Common notification path through `system.notify`, plus a narrowly scoped service plugin. | Its core shape is device notification, which overlaps the standard node capability; Pushover-specific authentication, delivery, failure modes, and adapter compatibility still need proof before it moves outside the core runtime. |
 | `git_operations` | CLI-backed integration or narrowly scoped plugin. | It has local and remote repository side effects, so any external replacement must preserve policy checks, receipts, and explicit operator visibility. |
 
 ## No Action Yet

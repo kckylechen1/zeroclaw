@@ -362,10 +362,6 @@ pub async fn start_channels(
             "Manage scheduled tasks (create/list/get/cancel/pause/resume). Supports recurring cron and one-shot delays.",
         ));
         tool_descs.push((
-            "pushover",
-            "Send a Pushover notification to your device. Requires PUSHOVER_TOKEN and PUSHOVER_USER_KEY in .env file.",
-        ));
-        tool_descs.push((
             "channel_room",
             "Create channel rooms and invite users through active channels. Use with Matrix channel keys such as matrix.default.",
         ));

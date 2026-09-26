@@ -52,8 +52,7 @@ tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring
 webpki-roots = "1.0.6"
 
 [features]
-# Concrete SaaS/vendor business tool family: Jira, Notion, Google Workspace,
-# Microsoft 365, LinkedIn, Composio, Pushover. Default-on so the standard
+# Concrete SaaS/vendor business tool family (Composio). Default-on so the standard
 # build is unchanged; slim companion builds drop this feature to keep the
 # family out of the compiled surface.
 integrations-saas = []

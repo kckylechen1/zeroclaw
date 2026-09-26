@@ -824,7 +824,6 @@ fn parse_test_config(raw: &str) -> Config {
     let mut merged = raw.trim().to_string();
     for table in [
         "data_retention",
-        "cloud_ops",
         "conversational_ai",
         "security",
         "security_ops",
@@ -2150,7 +2149,6 @@ async fn config_toml_roundtrip() {
         trust: crate::scattered_types::TrustConfig::default(),
         backup: BackupConfig::default(),
         data_retention: DataRetentionConfig::default(),
-        cloud_ops: CloudOpsConfig::default(),
         conversational_ai: ConversationalAiConfig::default(),
         security: SecurityConfig::default(),
         security_ops: SecurityOpsConfig::default(),
@@ -2242,7 +2240,6 @@ async fn config_toml_roundtrip() {
         gateway: GatewayConfig::default(),
         a2a: crate::multi_agent::A2aServerSection::default(),
         composio: ComposioConfig::default(),
-        microsoft365: Microsoft365Config::default(),
         secrets: SecretsConfig::default(),
         browser: BrowserConfig::default(),
         http_request: HttpRequestConfig::default(),
@@ -2252,8 +2249,6 @@ async fn config_toml_roundtrip() {
         link_enricher: LinkEnricherConfig::default(),
         text_browser: TextBrowserConfig::default(),
         web_search: WebSearchConfig::default(),
-        project_intel: ProjectIntelConfig::default(),
-        google_workspace: GoogleWorkspaceConfig::default(),
         proxy: ProxyConfig::default(),
         pacing: PacingConfig::default(),
         cost: CostConfig::default(),
@@ -2274,10 +2269,8 @@ async fn config_toml_roundtrip() {
         nodes: NodesConfig::default(),
         onboard_state: OnboardStateConfig::default(),
         notion: NotionConfig::default(),
-        jira: JiraConfig::default(),
         node_transport: NodeTransportConfig::default(),
         knowledge: KnowledgeConfig::default(),
-        linkedin: LinkedInConfig::default(),
         image_gen: ImageGenConfig::default(),
         file_upload: FileUploadConfig::default(),
         file_upload_bundle: FileUploadBundleConfig::default(),
@@ -2961,7 +2954,7 @@ async fn config_save_prunes_unchanged_default_blocks() {
     // Fresh-init config without any operator edits should write a
     // tiny config.toml — only `schema_version` and any operator-
     // touched fields. The hundreds of all-default blocks
-    // (LinkedIn, memory, observability, etc.) must not appear.
+    // (knowledge, memory, observability, etc.) must not appear.
     let dir =
         std::env::temp_dir().join(format!("zeroclaw_save_prune_test_{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&dir).await.unwrap();
@@ -2984,7 +2977,7 @@ async fn config_save_prunes_unchanged_default_blocks() {
     // save. Pick representative samples from across the schema:
     for block in [
         "[memory]",
-        "[linkedin",
+        "[knowledge]",
         "[observability]",
         "[gateway]",
         "[cost]",
@@ -3079,7 +3072,6 @@ async fn config_save_and_load_tmpdir() {
         trust: crate::scattered_types::TrustConfig::default(),
         backup: BackupConfig::default(),
         data_retention: DataRetentionConfig::default(),
-        cloud_ops: CloudOpsConfig::default(),
         conversational_ai: ConversationalAiConfig::default(),
         security: SecurityConfig::default(),
         security_ops: SecurityOpsConfig::default(),
@@ -3100,7 +3092,6 @@ async fn config_save_and_load_tmpdir() {
         gateway: GatewayConfig::default(),
         a2a: crate::multi_agent::A2aServerSection::default(),
         composio: ComposioConfig::default(),
-        microsoft365: Microsoft365Config::default(),
         secrets: SecretsConfig::default(),
         browser: BrowserConfig::default(),
         http_request: HttpRequestConfig::default(),
@@ -3110,8 +3101,6 @@ async fn config_save_and_load_tmpdir() {
         link_enricher: LinkEnricherConfig::default(),
         text_browser: TextBrowserConfig::default(),
         web_search: WebSearchConfig::default(),
-        project_intel: ProjectIntelConfig::default(),
-        google_workspace: GoogleWorkspaceConfig::default(),
         proxy: ProxyConfig::default(),
         pacing: PacingConfig::default(),
         cost: CostConfig::default(),
@@ -3133,10 +3122,8 @@ async fn config_save_and_load_tmpdir() {
         nodes: NodesConfig::default(),
         onboard_state: OnboardStateConfig::default(),
         notion: NotionConfig::default(),
-        jira: JiraConfig::default(),
         node_transport: NodeTransportConfig::default(),
         knowledge: KnowledgeConfig::default(),
-        linkedin: LinkedInConfig::default(),
         image_gen: ImageGenConfig::default(),
         file_upload: FileUploadConfig::default(),
         file_upload_bundle: FileUploadBundleConfig::default(),
@@ -5974,100 +5961,6 @@ async fn validate_accepts_valid_temperature() {
 }
 
 #[test]
-async fn validate_rejects_unknown_jira_actions() {
-    for action in ["delete_ticket", "drop_database", ""] {
-        let mut config = Config::default();
-        config.jira.enabled = true;
-        config.jira.base_url = "https://jira.example.test".into();
-        config.jira.api_token = "token".into();
-        config.jira.allowed_actions = vec![action.into()];
-
-        let err = config
-            .validate()
-            .expect_err("unknown Jira action should be rejected")
-            .to_string();
-        assert!(
-            err.contains("jira.allowed_actions contains unknown action"),
-            "expected Jira allowed action error for {action:?}, got: {err}"
-        );
-    }
-}
-
-#[test]
-async fn validate_accepts_all_published_jira_actions() {
-    for action in [
-        "get_ticket",
-        "search_tickets",
-        "comment_ticket",
-        "list_projects",
-        "myself",
-        "list_transitions",
-        "transition_ticket",
-        "create_ticket",
-    ] {
-        let mut config = Config::default();
-        config.jira.enabled = true;
-        config.jira.base_url = "https://jira.example.test".into();
-        config.jira.api_token = "token".into();
-        config.jira.allowed_actions = vec![action.into()];
-
-        assert!(
-            config.validate().is_ok(),
-            "published Jira action {action:?} should validate"
-        );
-    }
-}
-
-#[test]
-async fn jira_email_empty_string_deserializes_as_none() {
-    // Legacy configs round-tripped `email = ""` to disk because the
-    // pre-rename `email: String` lacked `skip_serializing_if`. The
-    // current `Option<String>` would otherwise deserialize `""` as
-    // `Some("")`, and JiraTool would attempt Basic auth with empty
-    // username (the dropped email-required validation no longer
-    // catches this). Defense-in-depth: empty strings deserialize as
-    // None.
-    let toml_input = r#"
-enabled = true
-base_url = "https://jira.example.test"
-email = ""
-api_token = "tok"
-"#;
-    let cfg: JiraConfig = toml::from_str(toml_input).expect("parses with empty email");
-    assert!(
-        cfg.email.is_none(),
-        "empty `email = \"\"` must deserialize as None, got {:?}",
-        cfg.email
-    );
-    // Whitespace-only is also normalized to None.
-    let toml_input_ws = r#"
-enabled = true
-base_url = "https://jira.example.test"
-email = "   "
-api_token = "tok"
-"#;
-    let cfg_ws: JiraConfig = toml::from_str(toml_input_ws).expect("parses with whitespace email");
-    assert!(
-        cfg_ws.email.is_none(),
-        "whitespace-only email must deserialize as None, got {:?}",
-        cfg_ws.email
-    );
-    // A real email still survives.
-    let toml_input_real = r#"
-enabled = true
-base_url = "https://jira.example.test"
-email = "ops@example.com"
-api_token = "tok"
-"#;
-    let cfg_real: JiraConfig = toml::from_str(toml_input_real).expect("parses with real email");
-    assert_eq!(
-        cfg_real.email.as_deref(),
-        Some("ops@example.com"),
-        "non-empty email must round-trip unchanged"
-    );
-}
-
-#[test]
 async fn proxy_config_scope_services_requires_entries_when_enabled() {
     let proxy = ProxyConfig {
         enabled: true,
@@ -6081,116 +5974,6 @@ async fn proxy_config_scope_services_requires_entries_when_enabled() {
 
     let error = proxy.validate().unwrap_err().to_string();
     assert!(error.contains("proxy.scope='services'"));
-}
-
-#[test]
-async fn google_workspace_allowed_operations_require_methods() {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "gmail".into(),
-        resource: "users".into(),
-        sub_resource: Some("drafts".into()),
-        methods: Vec::new(),
-    }];
-
-    let err = config.validate().unwrap_err().to_string();
-    assert!(err.contains("google_workspace.allowed_operations[0].methods"));
-}
-
-#[test]
-async fn google_workspace_allowed_operations_reject_duplicate_service_resource_sub_resource_entries()
- {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("drafts".into()),
-            methods: vec!["create".into()],
-        },
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("drafts".into()),
-            methods: vec!["update".into()],
-        },
-    ];
-
-    let err = config.validate().unwrap_err().to_string();
-    assert!(err.contains("duplicate service/resource/sub_resource entry"));
-}
-
-#[test]
-async fn google_workspace_allowed_operations_allow_same_resource_different_sub_resource() {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("messages".into()),
-            methods: vec!["list".into(), "get".into()],
-        },
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("drafts".into()),
-            methods: vec!["create".into(), "update".into()],
-        },
-    ];
-
-    assert!(config.validate().is_ok());
-}
-
-#[test]
-async fn google_workspace_allowed_operations_reject_duplicate_methods_within_entry() {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "gmail".into(),
-        resource: "users".into(),
-        sub_resource: Some("drafts".into()),
-        methods: vec!["create".into(), "create".into()],
-    }];
-
-    let err = config.validate().unwrap_err().to_string();
-    assert!(
-        err.contains("duplicate entry"),
-        "expected duplicate entry error, got: {err}"
-    );
-}
-
-#[test]
-async fn google_workspace_allowed_operations_accept_valid_entries() {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("messages".into()),
-            methods: vec!["list".into(), "get".into()],
-        },
-        GoogleWorkspaceAllowedOperation {
-            service: "drive".into(),
-            resource: "files".into(),
-            sub_resource: None,
-            methods: vec!["list".into(), "get".into()],
-        },
-    ];
-
-    assert!(config.validate().is_ok());
-}
-
-#[test]
-async fn google_workspace_allowed_operations_reject_invalid_sub_resource_characters() {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "gmail".into(),
-        resource: "users".into(),
-        sub_resource: Some("bad resource!".into()),
-        methods: vec!["list".into()],
-    }];
-
-    let err = config.validate().unwrap_err().to_string();
-    assert!(err.contains("sub_resource contains invalid characters"));
 }
 
 fn runtime_proxy_cache_contains(cache_key: &str) -> bool {
@@ -8824,144 +8607,6 @@ async fn telegram_config_ack_reactions_is_tri_state() {
         let cfg: TelegramConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(cfg.ack_reactions, expected, "{line:?}");
     }
-}
-
-#[test]
-async fn google_workspace_allowed_operations_deserialize_from_toml() {
-    let toml_str = r#"
-        enabled = true
-
-        [[allowed_operations]]
-        service = "gmail"
-        resource = "users"
-        sub_resource = "drafts"
-        methods = ["create", "update"]
-    "#;
-
-    let cfg: GoogleWorkspaceConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(cfg.allowed_operations.len(), 1);
-    assert_eq!(cfg.allowed_operations[0].service, "gmail");
-    assert_eq!(cfg.allowed_operations[0].resource, "users");
-    assert_eq!(
-        cfg.allowed_operations[0].sub_resource.as_deref(),
-        Some("drafts")
-    );
-    assert_eq!(
-        cfg.allowed_operations[0].methods,
-        vec!["create".to_string(), "update".to_string()]
-    );
-}
-
-#[test]
-async fn google_workspace_allowed_operations_deserialize_without_sub_resource() {
-    let toml_str = r#"
-        enabled = true
-
-        [[allowed_operations]]
-        service = "drive"
-        resource = "files"
-        methods = ["list", "get"]
-    "#;
-
-    let cfg: GoogleWorkspaceConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(cfg.allowed_operations[0].sub_resource, None);
-}
-
-#[test]
-async fn config_validate_accepts_google_workspace_allowed_operations() {
-    let mut cfg = Config::default();
-    cfg.google_workspace.enabled = true;
-    cfg.google_workspace.allowed_services = vec!["gmail".into()];
-    cfg.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "gmail".into(),
-        resource: "users".into(),
-        sub_resource: Some("drafts".into()),
-        methods: vec!["create".into(), "update".into()],
-    }];
-
-    cfg.validate().unwrap();
-}
-
-#[test]
-async fn config_validate_rejects_duplicate_google_workspace_allowed_operations() {
-    let mut cfg = Config::default();
-    cfg.google_workspace.enabled = true;
-    cfg.google_workspace.allowed_services = vec!["gmail".into()];
-    cfg.google_workspace.allowed_operations = vec![
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("drafts".into()),
-            methods: vec!["create".into()],
-        },
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("drafts".into()),
-            methods: vec!["update".into()],
-        },
-    ];
-
-    let err = cfg.validate().unwrap_err().to_string();
-    assert!(err.contains("duplicate service/resource/sub_resource entry"));
-}
-
-#[test]
-async fn config_validate_rejects_operation_service_not_in_allowed_services() {
-    let mut cfg = Config::default();
-    cfg.google_workspace.enabled = true;
-    cfg.google_workspace.allowed_services = vec!["gmail".into()];
-    cfg.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "drive".into(), // drive is not in allowed_services
-        resource: "files".into(),
-        sub_resource: None,
-        methods: vec!["list".into()],
-    }];
-
-    let err = cfg.validate().unwrap_err().to_string();
-    assert!(
-        err.contains("not in the effective allowed_services"),
-        "expected not-in-allowed_services error, got: {err}"
-    );
-}
-
-#[test]
-async fn config_validate_accepts_default_service_when_allowed_services_empty() {
-    // When allowed_services is empty the validator uses DEFAULT_GWS_SERVICES.
-    // A known default service must pass.
-    let mut cfg = Config::default();
-    cfg.google_workspace.enabled = true;
-    // allowed_services deliberately left empty (falls back to defaults)
-    cfg.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "drive".into(),
-        resource: "files".into(),
-        sub_resource: None,
-        methods: vec!["list".into()],
-    }];
-
-    assert!(cfg.validate().is_ok());
-}
-
-#[test]
-async fn config_validate_rejects_unknown_service_when_allowed_services_empty() {
-    // Even with allowed_services empty (using defaults), an operation whose
-    // service is not in DEFAULT_GWS_SERVICES must fail validation — not silently
-    // pass through to be rejected at runtime.
-    let mut cfg = Config::default();
-    cfg.google_workspace.enabled = true;
-    // allowed_services deliberately left empty
-    cfg.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "not_a_real_service".into(),
-        resource: "files".into(),
-        sub_resource: None,
-        methods: vec!["list".into()],
-    }];
-
-    let err = cfg.validate().unwrap_err().to_string();
-    assert!(
-        err.contains("not in the effective allowed_services"),
-        "expected effective-allowed_services error, got: {err}"
-    );
 }
 
 // ── Bootstrap files ─────────────────────────────────────

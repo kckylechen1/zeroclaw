@@ -33,8 +33,6 @@ pub use zeroclaw_tools::browser::{BrowserTool, ComputerUseConfig};
 pub use zeroclaw_tools::browser_open::BrowserOpenTool;
 pub use zeroclaw_tools::calculator::CalculatorTool;
 pub use zeroclaw_tools::channel_room::ChannelRoomTool;
-pub use zeroclaw_tools::cloud_ops::CloudOpsTool;
-pub use zeroclaw_tools::cloud_patterns::CloudPatternsTool;
 #[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::composio::ComposioTool;
 pub use zeroclaw_tools::content_search::ContentSearchTool;
@@ -53,16 +51,10 @@ pub use zeroclaw_tools::file_write::FileWriteTool;
 pub use zeroclaw_tools::git_forge::GitForgeTool;
 pub use zeroclaw_tools::git_operations::GitOperationsTool;
 pub use zeroclaw_tools::glob_search::GlobSearchTool;
-#[cfg(feature = "integrations-saas")]
-pub use zeroclaw_tools::google_workspace::GoogleWorkspaceTool;
 pub use zeroclaw_tools::http_request::HttpRequestTool;
 pub use zeroclaw_tools::image_gen::ImageGenTool;
 pub use zeroclaw_tools::image_info::ImageInfoTool;
-#[cfg(feature = "integrations-saas")]
-pub use zeroclaw_tools::jira_tool::JiraTool;
 pub use zeroclaw_tools::knowledge_tool::KnowledgeTool;
-#[cfg(feature = "integrations-saas")]
-pub use zeroclaw_tools::linkedin::LinkedInTool;
 pub use zeroclaw_tools::llm_task::LlmTaskTool;
 pub use zeroclaw_tools::mcp_client::{McpRegistry, McpServer};
 pub use zeroclaw_tools::mcp_context;
@@ -78,18 +70,10 @@ pub use zeroclaw_tools::memory_forget::MemoryForgetTool;
 pub use zeroclaw_tools::memory_purge::MemoryPurgeTool;
 pub use zeroclaw_tools::memory_recall::MemoryRecallTool;
 pub use zeroclaw_tools::memory_store::MemoryStoreTool;
-#[cfg(feature = "integrations-saas")]
-pub use zeroclaw_tools::microsoft365::Microsoft365Tool;
-#[cfg(feature = "integrations-saas")]
-pub use zeroclaw_tools::notion_tool::NotionTool;
 pub use zeroclaw_tools::pipeline::PipelineTool;
 pub use zeroclaw_tools::poll::PollTool;
-pub use zeroclaw_tools::project_intel::ProjectIntelTool;
 pub use zeroclaw_tools::propose_soul_change::ProposeSoulChangeTool;
-#[cfg(feature = "integrations-saas")]
-pub use zeroclaw_tools::pushover::PushoverTool;
 pub use zeroclaw_tools::reaction::ReactionTool;
-pub use zeroclaw_tools::report_template_tool::ReportTemplateTool;
 pub use zeroclaw_tools::screenshot::ScreenshotTool;
 pub use zeroclaw_tools::send_via::{
     AgentPeerGroupResolver, SendViaTool, TURN_ROUTING, TurnRoutingHandle,
@@ -632,10 +616,6 @@ pub fn all_tools_with_runtime(
     // in; the parameters stay part of the stable signature for both builds.
     #[cfg(not(feature = "integrations-saas"))]
     let _ = (composio_key, composio_entity_id);
-    // `has_shell_access` gates only the SaaS-family gws integration now; the
-    // raw launcher registrations that consumed it unconditionally are retired.
-    #[cfg(feature = "integrations-saas")]
-    let has_shell_access = runtime.has_shell_access();
     let runtime_kind = root_config.runtime.kind.as_wire();
     let sandbox_cfg = risk_profile.sandbox_config();
     let sandbox = create_sandbox(&sandbox_cfg, runtime_kind, Some(&security.workspace_dir));
@@ -741,16 +721,6 @@ pub fn all_tools_with_runtime(
             workspace_dir.to_path_buf(),
         )),
     ];
-
-    // Pushover notifications are part of the SaaS integration family: only
-    // registered when the family is compiled in. Pushed here — between the
-    // git tool and the calculator group — so the full build keeps the exact
-    // registry position it had before the feature gate.
-    #[cfg(feature = "integrations-saas")]
-    tool_arcs.push(Arc::new(PushoverTool::new(
-        security.clone(),
-        workspace_dir.to_path_buf(),
-    )));
 
     // Proactive messages through channel bridges; only offered when a
     // `[gateway.bridges.<name>]` exists to deliver them.
@@ -998,90 +968,6 @@ pub fn all_tools_with_runtime(
         )));
     }
 
-    // Notion API tool (conditionally registered)
-    #[cfg(feature = "integrations-saas")]
-    if root_config.notion.enabled {
-        let notion_api_key = if root_config.notion.api_key.trim().is_empty() {
-            std::env::var("NOTION_API_KEY").unwrap_or_default()
-        } else {
-            root_config.notion.api_key.trim().to_string()
-        };
-        if notion_api_key.trim().is_empty() {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "Notion tool enabled but no API key found (set notion.api_key or NOTION_API_KEY env var)"
-            );
-        } else {
-            tool_arcs.push(Arc::new(NotionTool::new(notion_api_key, security.clone())));
-        }
-    }
-
-    // Jira integration (config-gated)
-    #[cfg(feature = "integrations-saas")]
-    if root_config.jira.enabled {
-        let api_token = if root_config.jira.api_token.trim().is_empty() {
-            std::env::var("JIRA_API_TOKEN").unwrap_or_default()
-        } else {
-            root_config.jira.api_token.trim().to_string()
-        };
-        if api_token.trim().is_empty() {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "Jira tool enabled but no API token found (set jira.api_token or JIRA_API_TOKEN env var)"
-            );
-        } else if root_config.jira.base_url.trim().is_empty() {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "Jira tool enabled but jira.base_url is empty — skipping registration"
-            );
-        } else {
-            let email = root_config
-                .jira
-                .email
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from);
-            if email.is_some() {
-                ::zeroclaw_log::record!(
-                    INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                    "Jira tool: Cloud mode (API v3, Basic auth)"
-                );
-            } else {
-                ::zeroclaw_log::record!(
-                    INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                    "Jira tool: Server/DC mode (API v2, Bearer auth)"
-                );
-            }
-            tool_arcs.push(Arc::new(JiraTool::new(
-                root_config.jira.base_url.trim().to_string(),
-                email,
-                api_token,
-                root_config.jira.allowed_actions.clone(),
-                security.clone(),
-                root_config.jira.timeout_secs,
-            )));
-        }
-    }
-
-    // Project delivery intelligence
-    if root_config.project_intel.enabled {
-        tool_arcs.push(Arc::new(ProjectIntelTool::new(
-            root_config.project_intel.default_language.clone(),
-            root_config.project_intel.risk_sensitivity.clone(),
-        )));
-        // Report template tool — direct access to template engine
-        tool_arcs.push(Arc::new(ReportTemplateTool::new()));
-    }
-
     // MCSS Security Operations: no longer registered as a model tool. The
     // diagnostics module stays compiled; `security_ops.enabled` no longer
     // admits it to any registry (the daemon notes the withheld section at
@@ -1093,34 +979,6 @@ pub fn all_tools_with_runtime(
     // BackupTool / DataManagementTool command methods; the `[backup]` and
     // `[data_retention]` sections keep configuring that surface, not a
     // model tool.
-
-    // Cloud operations advisory tools (read-only analysis)
-    if root_config.cloud_ops.enabled {
-        tool_arcs.push(Arc::new(CloudOpsTool::new(root_config.cloud_ops.clone())));
-        tool_arcs.push(Arc::new(CloudPatternsTool::new()));
-    }
-
-    // Google Workspace CLI (gws) integration — requires shell access
-    #[cfg(feature = "integrations-saas")]
-    if root_config.google_workspace.enabled && has_shell_access {
-        tool_arcs.push(Arc::new(GoogleWorkspaceTool::new(
-            security.clone(),
-            root_config.google_workspace.allowed_services.clone(),
-            root_config.google_workspace.allowed_operations.clone(),
-            root_config.google_workspace.credentials_path.clone(),
-            root_config.google_workspace.default_account.clone(),
-            root_config.google_workspace.rate_limit_per_minute,
-            root_config.google_workspace.timeout_secs,
-            root_config.google_workspace.audit_log,
-        )));
-    } else if root_config.google_workspace.enabled {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "google_workspace: skipped registration because shell access is unavailable"
-        );
-    }
 
     // Vision tools are always available
     tool_arcs.push(Arc::new(ScreenshotTool::new(security.clone())));
@@ -1139,18 +997,6 @@ pub fn all_tools_with_runtime(
             security.clone(),
         )));
         tool_arcs.push(Arc::new(SessionsSendTool::new(backend, security.clone())));
-    }
-
-    // LinkedIn integration (config-gated)
-    #[cfg(feature = "integrations-saas")]
-    if root_config.linkedin.enabled {
-        tool_arcs.push(Arc::new(LinkedInTool::new(
-            security.clone(),
-            workspace_dir.to_path_buf(),
-            root_config.linkedin.api_version.clone(),
-            root_config.linkedin.content.clone(),
-            root_config.linkedin.image.clone(),
-        )));
     }
 
     // Standalone image generation tool (config-gated)
@@ -1272,83 +1118,6 @@ pub fn all_tools_with_runtime(
     );
     tool_arcs.push(Arc::new(escalate_tool));
 
-    // Microsoft 365 Graph API integration
-    #[cfg(feature = "integrations-saas")]
-    if root_config.microsoft365.enabled {
-        let ms_cfg = &root_config.microsoft365;
-        let tenant_id = ms_cfg
-            .tenant_id
-            .as_deref()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let client_id = ms_cfg
-            .client_id
-            .as_deref()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if !tenant_id.is_empty() && !client_id.is_empty() {
-            // Fail fast: client_credentials flow requires a client_secret at registration time.
-            if ms_cfg.auth_flow.trim() == "client_credentials"
-                && ms_cfg
-                    .client_secret
-                    .as_deref()
-                    .is_none_or(|s| s.trim().is_empty())
-            {
-                ::zeroclaw_log::record!(
-                    ERROR,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-                    "microsoft365: client_credentials auth_flow requires a non-empty client_secret"
-                );
-                apply_install_composition(&mut tool_arcs, root_config);
-                return AllToolsResult {
-                    unfiltered_tool_arcs: tool_arcs.clone(),
-                    tools: boxed_registry_from_arcs(tool_arcs),
-                    ask_user_handle,
-                    channel_room_handle,
-                    reaction_handle,
-                    poll_handle: Some(poll_handle),
-                    escalate_handle,
-                };
-            }
-
-            let resolved = zeroclaw_tools::microsoft365::types::Microsoft365ResolvedConfig {
-                tenant_id,
-                client_id,
-                client_secret: ms_cfg.client_secret.clone(),
-                auth_flow: ms_cfg.auth_flow.clone(),
-                scopes: ms_cfg.scopes.clone(),
-                token_cache_encrypted: ms_cfg.token_cache_encrypted,
-                user_id: ms_cfg.user_id.as_deref().unwrap_or("me").to_string(),
-            };
-            // Store token cache in the config directory (next to config.toml),
-            // not the workspace directory, to keep bearer tokens out of the
-            // project tree.
-            let cache_dir = root_config.config_path.parent().unwrap_or(workspace_dir);
-            match Microsoft365Tool::new(resolved, security.clone(), cache_dir) {
-                Ok(tool) => tool_arcs.push(Arc::new(tool)),
-                Err(e) => {
-                    ::zeroclaw_log::record!(
-                        ERROR,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                        "microsoft365: failed to initialize tool"
-                    );
-                }
-            }
-        } else {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "microsoft365: skipped registration because tenant_id or client_id is empty"
-            );
-        }
-    }
-
     // Knowledge graph tool
     if root_config.knowledge.enabled {
         let db_path_str = root_config.knowledge.db_path.replace(
@@ -1399,14 +1168,7 @@ pub fn all_tools_with_runtime(
     // mismatch instead of silently losing the tool.
     #[cfg(not(feature = "integrations-saas"))]
     {
-        let enabled_but_absent = [
-            ("jira", root_config.jira.enabled),
-            ("notion", root_config.notion.enabled),
-            ("google_workspace", root_config.google_workspace.enabled),
-            ("microsoft365", root_config.microsoft365.enabled),
-            ("linkedin", root_config.linkedin.enabled),
-            ("composio", root_config.composio.enabled),
-        ];
+        let enabled_but_absent = [("composio", root_config.composio.enabled)];
         for (family, enabled) in enabled_but_absent {
             if enabled {
                 ::zeroclaw_log::record!(

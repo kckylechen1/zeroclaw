@@ -463,9 +463,6 @@ fn all_tools_excludes_browser_when_disabled() {
     // Operator/admin tools are never part of the model surface.
     assert!(!names.contains(&"model_routing_config"));
     assert!(!names.contains(&"proxy_config"));
-    // The pushover tool only exists when the SaaS family is compiled in.
-    #[cfg(feature = "integrations-saas")]
-    assert!(names.contains(&"pushover"));
 }
 
 #[test]
@@ -547,7 +544,6 @@ fn minimal_composition_cuts_registry_to_membership() {
     }
     assert!(!names.contains(&"model_routing_config"));
     assert!(!names.contains(&"proxy_config"));
-    assert!(!names.contains(&"pushover"));
     assert!(!names.contains(&"claude_code"));
 }
 
@@ -610,9 +606,6 @@ fn absent_composition_keeps_full_assembly() {
         names.contains(&"reasoning_subagent"),
         "full composition must carry the V1 reasoning_subagent; got: {names:?}"
     );
-    // The pushover tool only exists when the SaaS family is compiled in.
-    #[cfg(feature = "integrations-saas")]
-    assert!(names.contains(&"pushover"));
 }
 
 #[test]
@@ -660,9 +653,6 @@ fn all_tools_includes_browser_when_enabled() {
     // Operator/admin tools are never part of the model surface.
     assert!(!names.contains(&"model_routing_config"));
     assert!(!names.contains(&"proxy_config"));
-    // The pushover tool only exists when the SaaS family is compiled in.
-    #[cfg(feature = "integrations-saas")]
-    assert!(names.contains(&"pushover"));
 }
 
 #[test]

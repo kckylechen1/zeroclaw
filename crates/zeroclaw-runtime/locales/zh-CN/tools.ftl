@@ -22,8 +22,6 @@ tool-channel-room-error-invalid-visibility = 无效的房间可见性：{ $err }
 tool-channel-room-error-missing-param = 缺少 '{ $param }' 参数。
 tool-channel-room-error-string-param = '{ $param }' 必须是字符串。
 tool-channel-room-error-bool-param = '{ $param }' 必须是布尔值。
-tool-cloud-ops = 云转型咨询工具。分析 IaC 计划、评估迁移路径、审查成本，并依据 Well-Architected Framework 支柱检查架构。只读：不创建或修改云资源。
-tool-cloud-patterns = 云模式库。根据工作负载描述，建议适用的云原生架构模式（容器化、无服务器、数据库现代化等）。
 tool-composio = 通过 Composio 在 1000 多个应用上执行操作（Gmail、Notion、GitHub、Slack 等）。使用 action='list' 查看可用操作（包含参数名称）。使用 action='execute' 并提供 action_name/tool_slug 和 params 来运行操作。如果不确定确切的参数，请改为传入 'text' 并附上你想要执行内容的自然语言描述（Composio 将通过 NLP 解析出正确的参数）。使用 action='list_accounts' 或 action='connected_accounts' 列出 OAuth 已连接的账户。使用 action='connect' 并提供 app/auth_config_id 获取 OAuth URL。省略时会自动解析 connected_account_id。
 tool-content-search = 在工作区内按正则表达式模式搜索文件内容。支持 ripgrep (rg)，并以 grep 或内部搜索作为后备。输出模式：'content'（带上下文的匹配行）、'files_with_matches'（仅文件路径）、'count'（每个文件的匹配数量）。示例：pattern='fn main'，include='*.rs'，output_mode='content'。
 tool-cron-add = 创建一个定时 cron 任务（shell 或 agent），支持 cron/at/every 调度。使用 job_type='agent' 并提供提示词以按计划运行 AI agent。要将输出投递到频道（Discord、Telegram、Slack、Mattermost、Matrix），请设置 delivery={"{"}"mode":"announce","channel":"discord","to":"<channel_id_or_chat_id>"{"}"}。这是通过频道向用户发送定时/延迟消息的首选工具。
@@ -72,23 +70,16 @@ tool-git-forge-error-raw-requires-path = 'raw' 需要 'path'。
 tool-git-forge-error-requires-resource = 类型化调用需要 'resource'（或使用 action 'raw'/'describe'）。
 tool-git-forge-error-missing-repo = 缺少 'repo'（应为 'owner/repo'）。
 tool-glob-search = 在工作区内搜索匹配 glob 模式的文件。返回相对于工作区根目录的匹配文件路径排序列表。示例：'**/*.rs'（所有 Rust 文件）、'src/**/mod.rs'（src 中所有的 mod.rs）。
-tool-google-workspace = 通过 gws CLI 与 Google Workspace 服务（Drive、Gmail、Calendar、Sheets、Docs 等）交互。需要已安装并通过认证的 gws。
 tool-hardware-board-info = 返回已连接硬件的完整开发板信息（芯片、架构、内存映射）。适用场景：用户询问 'board info'、'我有什么开发板'、'已连接硬件'、'芯片信息'、'什么硬件' 或 'memory map'。
 tool-hardware-memory-map = 返回已连接硬件的内存映射（flash 和 RAM 地址范围）。适用场景：用户询问 '上下内存地址'、'memory map'、'地址空间' 或 '可读地址'。从数据手册返回 flash/RAM 范围。
 tool-hardware-memory-read = 通过 USB 从 Nucleo 读取实际的内存/寄存器值。适用场景：用户要求 '读取寄存器值'、'读取某地址的内存'、'转储内存'、'lower memory 0-126' 或 '给出地址和值'。返回十六进制转储。需要通过 USB 连接的 Nucleo 和 probe 功能。参数：address（十六进制，例如 RAM 起始处为 0x20000000）、length（字节，默认 128）。
 tool-http-request = 向外部 API 发起 HTTP 请求。支持 GET、POST、PUT、DELETE、PATCH、HEAD、OPTIONS 方法。安全约束：仅限允许列表中的域名，不允许本地/私有主机，可配置超时和响应大小限制。
 tool-image-info = 读取图像文件元数据（格式、尺寸、大小），并可选择返回 base64 编码的数据。
-tool-jira = 与 Jira 交互：读取工单、使用 JQL 搜索、添加评论、列出项目和每个问题的状态转换、推动问题在其工作流中转换状态，以及创建新问题。
 tool-knowledge = 管理架构决策、解决方案模式、经验教训、专家和关系链接的知识图谱。
-tool-linkedin = 管理 LinkedIn：创建帖子、列出你的帖子、评论、点赞、删除帖子、查看互动、获取个人资料信息，以及读取已配置的内容策略。需要 .env 文件中的 LINKEDIN_* 凭据。
 tool-discord-search = 搜索存储在 discord.db 中的 Discord 消息历史。用于查找过往消息、总结频道活动或查看用户说过的话。支持关键词搜索和可选过滤器：channel_id、since、until。
 tool-memory-forget = 按 key 移除一条记忆。用于删除过时的事实或敏感数据。返回该记忆是否被找到并移除。
 tool-memory-recall = 在长期记忆中搜索相关的事实、偏好或上下文。返回按相关性排序的评分结果。省略查询或传入裸 * 以返回近期记忆。
 tool-memory-store = 在长期记忆中存储事实、偏好或备注。使用类别 'core' 表示永久性事实，'daily' 表示会话备注，'conversation' 表示聊天上下文，或自定义类别名称。
-tool-microsoft365 = Microsoft 365 集成：通过 Microsoft Graph API 管理 Outlook 邮件、Teams 消息、Calendar 事件、OneDrive 文件和 SharePoint 搜索
-tool-notion = 与 Notion 交互：查询数据库、读取/创建/更新页面，以及搜索工作区。
-tool-project-intel = 项目交付智能：生成状态报告、检测风险、起草客户更新、总结冲刺，以及估算工作量。只读分析工具。
-tool-pushover = 向你的设备发送 Pushover 通知。需要 .env 文件中的 PUSHOVER_TOKEN 和 PUSHOVER_USER_KEY。
 tool-schedule = 管理仅限 shell 的定时任务。操作：create/add/once/list/get/cancel/remove/pause/resume。警告：此工具创建的 shell 任务输出仅被记录，不会投递到任何频道。要向 Discord/Telegram/Slack/Matrix 发送定时消息，请使用 cron_add 工具，并设置 job_type='agent' 和如 {"{"}"mode":"announce","channel":"discord","to":"<channel_id>"{"}"} 的 delivery 配置。
 tool-screenshot = 捕获当前屏幕的截图。返回文件路径和 base64 编码的 PNG 数据。
 tool-shell = 在工作区目录中执行 shell 命令

@@ -60,6 +60,12 @@ use serde::{Deserialize, Serialize};
 ///   boards, debug probes, datasheet RAG) left the body; devices join as
 ///   gateway Nodes instead (ADR-017), so the section is ignored (see
 ///   `RETIRED_CONFIG_SURFACES`).
+/// - `saas_integration_removed`: a `[jira]`, `[linkedin]`, `[microsoft365]`,
+///   `[google_workspace]`, `[cloud_ops]` or `[project_intel]` section is
+///   still present. Those vendor tool families were retired (external
+///   services are reached through MCP servers, and outbound notifications
+///   through the gateway bridges' `notify` tool), so the section is ignored
+///   (see `RETIRED_CONFIG_SURFACES`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ValidationWarning {
@@ -119,6 +125,12 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("plugins", "wasm_plugins_removed"),
     ("hardware", "hardware_moved_out_of_core"),
     ("peripherals", "hardware_moved_out_of_core"),
+    ("jira", "saas_integration_removed"),
+    ("linkedin", "saas_integration_removed"),
+    ("microsoft365", "saas_integration_removed"),
+    ("google_workspace", "saas_integration_removed"),
+    ("cloud_ops", "saas_integration_removed"),
+    ("project_intel", "saas_integration_removed"),
 ];
 
 /// True when `channel_type` names a channel whose `[channels.<type>]`

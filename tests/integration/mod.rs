@@ -4,6 +4,5 @@ mod backup_cron_scheduling;
 mod email_attachments;
 mod hooks;
 mod memory_loop_continuity;
-mod report_template_tool_test;
 mod telegram_attachment_fallback;
 mod telegram_finalize_draft;

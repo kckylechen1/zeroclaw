@@ -319,26 +319,6 @@ mod tests {
     }
 
     #[test]
-    fn google_workspace_available_in_default_config() {
-        // GoogleWorkspaceConfig defaults to enabled=false.
-        let config = Config::default();
-        assert!(matches!(
-            toggle_status(&config, |n| n == "Google Workspace"),
-            IntegrationStatus::Available
-        ));
-    }
-
-    #[test]
-    fn google_workspace_active_when_enabled() {
-        let mut config = Config::default();
-        config.google_workspace.enabled = true;
-        assert!(matches!(
-            toggle_status(&config, |n| n == "Google Workspace"),
-            IntegrationStatus::Active
-        ));
-    }
-
-    #[test]
     fn cron_available_when_no_jobs_configured() {
         let config = Config::default();
         assert!(matches!(

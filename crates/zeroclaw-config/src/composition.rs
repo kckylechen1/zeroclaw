@@ -141,8 +141,7 @@ mod tests {
     fn root_config_field_wiring() {
         // Config's TOML parse requires these tables; mirror the lean-profile
         // parse helper's minimum fragment.
-        let tables =
-            "\n[data_retention]\n[cloud_ops]\n[conversational_ai]\n[security]\n[security_ops]\n";
+        let tables = "\n[data_retention]\n[conversational_ai]\n[security]\n[security_ops]\n";
 
         let absent: crate::schema::Config =
             toml::from_str(tables).expect("absent composition must parse");

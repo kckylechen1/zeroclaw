@@ -2050,10 +2050,11 @@ fn to_acp_content(name: &str, args: &Value) -> Value {
 fn map_tool_kind(name: &str) -> &'static str {
     match name {
         "ask_user" | "calculator" | "composio" | "delegate" | "escalate_to_human"
-        | "execute_pipeline" | "jira" | "llm_task" | "schedule" | "security_ops" | "shell"
-        | "vi_verify" => "execute",
-        "backup" | "browser_open" | "cloud_ops" | "file_edit" | "file_write" | "memory_export"
-        | "memory_store" | "report_template" => "edit",
+        | "execute_pipeline" | "llm_task" | "schedule" | "security_ops" | "shell" | "vi_verify" => {
+            "execute"
+        }
+        "backup" | "browser_open" | "file_edit" | "file_write" | "memory_export"
+        | "memory_store" => "edit",
         "cron_add" | "poll" | "reaction" => "edit",
         "memory_forget" | "memory_purge" => "delete",
         // ACP clients often treat `read`/`search`/`fetch` calls as noisy
@@ -2063,17 +2064,12 @@ fn map_tool_kind(name: &str) -> &'static str {
         "content_search" | "discord_search" | "glob_search" | "knowledge" | "search"
         | "tool_search" | "web_search_tool" => "other",
         "browser"
-        | "cloud_patterns"
         | "data_management"
         | "file_read"
         | "git_operations"
-        | "google_workspace"
         | "image_info"
-        | "linkedin"
-        | "microsoft365"
         | "model_routing_config"
         | "model_switch"
-        | "project_intel"
         | "proxy_config"
         | "read_skill"
         | "sessions_history"
