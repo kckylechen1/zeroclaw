@@ -491,8 +491,9 @@ async fn handle_socket(
         auth_subject,
     };
 
-    // Subscribe to the shared broadcast channel so cron/heartbeat events
-    // are forwarded to this WebSocket client, during turns as well.
+    // Subscribe to the shared broadcast channel so events addressed to this
+    // session (e.g. messages appended through the sessions API) reach this
+    // client, during turns as well.
     let mut broadcast_rx = state.event_tx.subscribe();
     let mut next_text = first_msg_fallback;
 
@@ -533,7 +534,7 @@ async fn handle_socket(
                     continue;
                 }
 
-                // ── Broadcast event (cron/heartbeat results) ──────────
+                // ── Broadcast event addressed to this session ─────────
                 event = broadcast_rx.recv() => {
                     if let Ok(event) = event
                         && event_matches_session(&event, &scope.session_id)
@@ -1199,18 +1200,11 @@ fn needs_onboarding_ws_error(
     }))
 }
 
+/// Only events addressed to this session reach a chat socket. Events
+/// without a `session_id` (cron results, observability) stay on the SSE
+/// stream; proactive messages reach people through the bridge outbox.
 fn event_matches_session(event: &serde_json::Value, session_id: &str) -> bool {
-    match event.get("session_id").and_then(|value| value.as_str()) {
-        Some(event_session_id) => event_session_id == session_id,
-        None => is_global_chat_event(event),
-    }
-}
-
-fn is_global_chat_event(event: &serde_json::Value) -> bool {
-    matches!(
-        event.get("type").and_then(serde_json::Value::as_str),
-        Some("cron_result")
-    )
+    event.get("session_id").and_then(|value| value.as_str()) == Some(session_id)
 }
 
 fn is_observability_telemetry(event: &serde_json::Value) -> bool {
@@ -2065,13 +2059,13 @@ mod tests {
             "session_id": "operator-2",
             "content": "different session"
         });
-        // No session_id and not on the global whitelist → dropped.
+        // No session_id → dropped.
         let nameless_observability = serde_json::json!({
             "type": "agent_start",
             "source": "observability",
             "model": "gpt-4o"
         });
-        // No session_id but on the global whitelist (`cron_result`) → forwarded.
+        // No session_id: cron results are not broadcast to chat sockets.
         let cron = serde_json::json!({
             "type": "cron_result",
             "output": "global notification"
@@ -2083,7 +2077,7 @@ mod tests {
             &nameless_observability,
             "operator-1"
         ));
-        assert!(event_matches_session(&cron, "operator-1"));
+        assert!(!event_matches_session(&cron, "operator-1"));
     }
 
     #[test]

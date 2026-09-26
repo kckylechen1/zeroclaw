@@ -54,8 +54,8 @@ fn frames_parse_and_unknown_ones_pass_through() {
             cost_usd: None,
         }
     );
-    let other = Frame::parse(r#"{"type":"cron_result","output":"x"}"#).unwrap();
-    assert!(matches!(other, Frame::Other(ref v) if v["type"] == "cron_result"));
+    let other = Frame::parse(r#"{"type":"history_trimmed","kept_turns":3}"#).unwrap();
+    assert!(matches!(other, Frame::Other(ref v) if v["type"] == "history_trimmed"));
     assert!(!other.is_terminal());
     assert!(Frame::parse("not json").is_err());
 }

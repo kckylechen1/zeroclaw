@@ -367,24 +367,6 @@ export function AgentProvider({ agentAlias, children }: AgentProviderProps) {
         break;
       }
 
-      case 'cron_result': {
-        const cronOutput = msg.output ?? '';
-        if (cronOutput) {
-          localMessageMutationVersionRef.current += 1;
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: generateUUID(),
-              role: 'agent' as const,
-              content: cronOutput,
-              markdown: true,
-              timestamp: new Date(msg.timestamp ?? Date.now()),
-            },
-          ]);
-        }
-        break;
-      }
-
       case 'history_trimmed': {
         const reason = msg.reason || t('agent.history_trimmed_unknown_reason');
         const content = t('agent.history_trimmed')

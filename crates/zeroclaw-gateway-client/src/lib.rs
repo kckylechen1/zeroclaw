@@ -288,7 +288,7 @@ impl Client {
                         value["message"].as_str().unwrap_or("unknown error")
                     )
                 }
-                // Restore notices and cron results may precede `connected`.
+                // Restore notices may precede `connected`.
                 Some(_) => continue,
                 None => bail!("gateway closed the connection during the handshake"),
             }

@@ -166,7 +166,7 @@ until acknowledged.
 - Each bridge keeps at most 1000 messages; a new one drops the oldest,
   with a warning in the log. Messages older than 24 hours are purged unsent.
 
-Two producers write to the outbox:
+Three producers write to the outbox:
 
 - **Cron.** A job whose delivery `channel` names a bridge is queued for it,
   with `to` and `thread_id` as given:
@@ -181,6 +181,14 @@ Two producers write to the outbox:
   A bridge name takes precedence over an in-core channel of the same name.
   Delivery counts as succeeded once the message is queued.
 - **Heartbeat.** `heartbeat.target` may name a bridge too.
+- **`notify {bridge, to, text}`.** The model's tool for proactive messages,
+  offered only when at least one bridge is configured. It is an ordinary
+  side-effecting tool: it needs approval unless listed in `auto_approve`,
+  and read-only agents cannot use it.
+
+Cron results are no longer broadcast to every `/ws/chat` socket; they reach
+people only through a bridge (or an in-core channel). The SSE stream at
+`/api/events` still carries them.
 
 ## Discovering the surface
 
