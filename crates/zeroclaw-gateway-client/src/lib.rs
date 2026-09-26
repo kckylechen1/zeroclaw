@@ -209,6 +209,44 @@ impl Frame {
     }
 }
 
+/// A fresh request id for [`Client::send_message_with_id`].
+pub fn new_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Exponential delay between reconnect attempts: doubles from `initial` up
+/// to `max`, and starts over after [`Backoff::reset`]. A client that
+/// reconnects passes the same `session_id` again, so it resumes the same
+/// conversation.
+#[derive(Debug, Clone)]
+pub struct Backoff {
+    initial: std::time::Duration,
+    max: std::time::Duration,
+    next: std::time::Duration,
+}
+
+impl Backoff {
+    pub fn new(initial: std::time::Duration, max: std::time::Duration) -> Self {
+        Self {
+            initial,
+            max,
+            next: initial,
+        }
+    }
+
+    /// The delay before the next attempt.
+    pub fn next_delay(&mut self) -> std::time::Duration {
+        let delay = self.next;
+        self.next = (self.next * 2).min(self.max);
+        delay
+    }
+
+    /// Start over after a successful connection.
+    pub fn reset(&mut self) {
+        self.next = self.initial;
+    }
+}
+
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// An attached chat socket.
@@ -292,13 +330,21 @@ impl Client {
     /// Send a message with a fresh request id and return the id. The
     /// matching [`Frame::Ack`] arrives through [`Client::next_frame`].
     pub async fn send_message(&mut self, content: &str) -> Result<String> {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = new_request_id();
+        self.send_message_with_id(&id, content).await?;
+        Ok(id)
+    }
+
+    /// Send a message under a request id the caller chose, typically one
+    /// from [`new_request_id`]. Resending the same id after a reconnect is
+    /// safe: the gateway answers a duplicate with an `ack` of status
+    /// `duplicate` and runs nothing.
+    pub async fn send_message_with_id(&mut self, id: &str, content: &str) -> Result<()> {
         send_json(
             &mut self.socket,
             &serde_json::json!({ "type": "message", "content": content, "id": id }),
         )
-        .await?;
-        Ok(id)
+        .await
     }
 
     /// Ask the gateway to stop the session's running turn.

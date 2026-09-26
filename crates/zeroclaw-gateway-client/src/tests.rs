@@ -22,6 +22,16 @@ fn chat_url_encodes_query_values_and_keeps_the_token_out() {
 }
 
 #[test]
+fn backoff_doubles_up_to_the_cap_and_resets() {
+    use std::time::Duration;
+    let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+    let delays: Vec<_> = (0..7).map(|_| backoff.next_delay().as_secs()).collect();
+    assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30]);
+    backoff.reset();
+    assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+}
+
+#[test]
 fn frames_parse_and_unknown_ones_pass_through() {
     assert_eq!(
         Frame::parse(r#"{"type":"chunk","content":"hi"}"#).unwrap(),

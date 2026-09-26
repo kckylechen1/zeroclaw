@@ -20,6 +20,10 @@ cargo build --no-default-features --features "agent-runtime,gateway,channel-slac
 
 </div>
 
+## Bridges
+
+A **bridge** is a channel that runs as its own process and attaches to the gateway's `/ws/chat` socket, the same way `zeroclaw chat` does, instead of being compiled into the core (see [ADR-013](../architecture/decisions/ADR-013-channels-as-gateway-clients.md)). The first is the Telegram bridge, `zeroclaw-bridge-telegram`, built from `bridges/telegram` in the repository (`cargo build -p zeroclaw-bridge-telegram`). It serves one owner's private chat and maps it to a gateway session (`main` by default), so a conversation continues between Telegram and `zeroclaw chat -s main`. Its flags and behavior are in `bridges/telegram/README.md`.
+
 ## Categories
 
 ### Chat platforms

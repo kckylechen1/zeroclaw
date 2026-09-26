@@ -74,8 +74,12 @@ COPY --parents crates/zeroclaw-plugins/tests/fixtures/channel-fixture/Cargo.toml
 # dependency pre-fetch step succeeds without building them into the image.
 COPY tools/fill-translations/Cargo.toml tools/fill-translations/Cargo.toml
 COPY xtask/Cargo.toml xtask/Cargo.toml
+# Bridges are workspace members outside crates/; manifests only, stubbed below.
+COPY bridges/telegram/Cargo.toml bridges/telegram/Cargo.toml
 # Create dummy targets for all workspace members so manifest parsing succeeds.
-RUN mkdir -p src benches tools/fill-translations/src xtask/src/bin \
+RUN mkdir -p src benches tools/fill-translations/src xtask/src/bin bridges/telegram/src \
+    && echo "" > bridges/telegram/src/lib.rs \
+    && echo "fn main() {}" > bridges/telegram/src/main.rs \
     && echo "fn main() {}" > src/main.rs \
     && echo "" > src/lib.rs \
     && echo "fn main() {}" > benches/agent_benchmarks.rs \
@@ -99,13 +103,14 @@ RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/regist
     else \
       cargo build --release --locked -p zeroclawlabs; \
     fi
-RUN rm -rf src benches crates xtask tools/fill-translations
+RUN rm -rf src benches crates xtask tools/fill-translations bridges
 
 # 2. Copy only build-relevant source paths (avoid cache-busting on docs/tests/scripts)
 COPY src/ src/
 COPY benches/ benches/
 COPY crates/ crates/
 COPY xtask/ xtask/
+COPY bridges/ bridges/
 COPY tools/fill-translations/ tools/fill-translations/
 # locales.toml lives at repo root and is embedded by zeroclaw-runtime via
 # include_str!("../../../locales.toml"); the real build needs it present.

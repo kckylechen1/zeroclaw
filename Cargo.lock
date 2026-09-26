@@ -10505,6 +10505,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroclaw-bridge-telegram"
+version = "0.8.3"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures-util",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "zeroclaw-gateway-client",
+ "zeroclaw-log",
+ "zeroclaw-spawn",
+]
+
+[[package]]
 name = "zeroclaw-channel-plugin-fixture"
 version = "0.0.0"
 dependencies = [
