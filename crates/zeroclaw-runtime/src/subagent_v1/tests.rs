@@ -1855,3 +1855,269 @@ async fn empty_model_dispatch_fails_closed() {
         "{err}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Advisor (#405 phase 1)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Parent on `custom.default`, advisor alias `custom.big` configured.
+fn advisor_config() -> Arc<Config> {
+    let mut config = Config::default();
+    for (alias, model) in [("default", "small-model"), ("big", "big-model")] {
+        let entry = config
+            .providers
+            .models
+            .ensure("custom", alias)
+            .expect("custom is a known provider type");
+        entry.api_key = Some("k".into());
+        entry.model = Some(model.into());
+    }
+    config
+        .risk_profiles
+        .insert("default".to_string(), RiskProfileConfig::default());
+    config.agents.insert(
+        "parent-agent".to_string(),
+        AliasedAgentConfig {
+            risk_profile: "default".into(),
+            model_provider: "custom.default".into(),
+            advisor: Some(zeroclaw_config::advisor::AdvisorTarget::Model(
+                "custom.big".into(),
+            )),
+            ..AliasedAgentConfig::default()
+        },
+    );
+    Arc::new(config)
+}
+
+fn advisor_tool() -> ReasoningSubagentTool {
+    ReasoningSubagentTool::new(
+        advisor_config(),
+        "parent-agent",
+        Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
+    )
+    .with_advisor("custom.big")
+}
+
+#[test]
+fn advisor_provider_ref_replaces_the_parents_provider() {
+    let profile = SubAgentProfileRegistry::default_reasoning_profile();
+
+    let plain = ReasoningSubagentTool::new(
+        advisor_config(),
+        "parent-agent",
+        Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
+    );
+    let policy = plain.resolve_model_policy(&profile).unwrap();
+    assert_eq!(policy.provider_ref, "custom.default");
+    assert_eq!(policy.model.as_deref(), Some("small-model"));
+
+    let advised = advisor_tool();
+    let policy = advised.resolve_model_policy(&profile).unwrap();
+    assert_eq!(policy.provider_ref, "custom.big");
+    // The advisor alias's own `model` is read by the resolver at use time.
+    assert_eq!(policy.model, None);
+
+    // A profile that pins its own model keeps it: the pin is part of the
+    // admitted, digest-bound contract.
+    let mut pinned = profile.clone();
+    pinned.model_policy.provider_ref = "custom.default".into();
+    let policy = advised.resolve_model_policy(&pinned).unwrap();
+    assert_eq!(policy.provider_ref, "custom.default");
+}
+
+#[test]
+fn advisor_changes_the_description_but_not_the_input_schema() {
+    let plain = reasoning_tool();
+    let advised = advisor_tool();
+    assert!(!plain.description().contains("advisor"));
+    assert!(advised.description().contains("advisor model"));
+    assert!(
+        advised
+            .description()
+            .contains("question plus a short summary of the")
+    );
+    assert_eq!(plain.parameters_schema(), advised.parameters_schema());
+    let schema = advised.parameters_schema();
+    let props = schema["properties"].as_object().unwrap();
+    assert_eq!(props.keys().collect::<Vec<_>>(), vec!["objective"]);
+    assert_eq!(advised.advisor_ref(), Some("custom.big"));
+    assert_eq!(plain.advisor_ref(), None);
+}
+
+#[tokio::test]
+async fn advisor_calls_are_capped_per_turn() {
+    let stub = StubResolver::json(ok_report_body("advised"));
+    let tool = advisor_tool().with_model_resolver(stub.clone());
+    let call = || tool.execute(serde_json::json!({ "objective": "hard question" }));
+
+    super::scope_advisor_turn(async {
+        for _ in 0..2 {
+            let result = call().await.unwrap();
+            assert!(result.success, "{:?}", result.error);
+            assert!(
+                result.output.as_str().contains("advisor custom.big"),
+                "the result names who answered: {}",
+                result.output.as_str()
+            );
+        }
+        let third = call().await.unwrap();
+        assert!(!third.success);
+        let error = third.error.unwrap();
+        assert!(error.contains("advisor budget used"), "{error}");
+    })
+    .await;
+    assert_eq!(stub.requests().len(), 2, "the refused call never ran");
+
+    // A new turn gets a fresh budget.
+    super::scope_advisor_turn(async {
+        assert!(call().await.unwrap().success);
+    })
+    .await;
+    assert_eq!(stub.requests().len(), 3);
+}
+
+#[tokio::test]
+async fn advisor_cap_is_configurable_and_only_binds_advisor_tools() {
+    let stub = StubResolver::json(ok_report_body("advised"));
+    let tool = advisor_tool()
+        .with_advisor_max_calls_per_turn(1)
+        .with_model_resolver(stub.clone());
+    let plain = reasoning_tool().with_model_resolver(StubResolver::json(ok_report_body("x")));
+    super::scope_advisor_turn(async {
+        let args = serde_json::json!({ "objective": "q" });
+        assert!(tool.execute(args.clone()).await.unwrap().success);
+        assert!(!tool.execute(args.clone()).await.unwrap().success);
+        // Without an advisor, reasoning_subagent is not capped per turn.
+        for _ in 0..3 {
+            assert!(plain.execute(args.clone()).await.unwrap().success);
+        }
+    })
+    .await;
+    assert_eq!(stub.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn oversized_objective_is_refused_before_any_budget_is_spent() {
+    let stub = StubResolver::json(ok_report_body("advised"));
+    let tool = advisor_tool()
+        .with_advisor_max_calls_per_turn(1)
+        .with_model_resolver(stub.clone());
+    let oversized = "x".repeat(super::MAX_OBJECTIVE_BYTES + 1);
+    super::scope_advisor_turn(async {
+        let result = tool
+            .execute(serde_json::json!({ "objective": oversized }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert!(error.contains("8192-byte"), "{error}");
+        assert!(error.contains("short summary"), "{error}");
+        // The refusal did not consume the one advisor call.
+        let exact = "y".repeat(super::MAX_OBJECTIVE_BYTES);
+        let ok = tool
+            .execute(serde_json::json!({ "objective": exact }))
+            .await
+            .unwrap();
+        assert!(ok.success, "{:?}", ok.error);
+    })
+    .await;
+    assert_eq!(stub.requests().len(), 1);
+
+    // The cap applies to reasoning_subagent generally, not only advisors.
+    let plain = reasoning_tool().with_model_resolver(StubResolver::json(ok_report_body("x")));
+    let result = plain
+        .execute(serde_json::json!({ "objective": "z".repeat(9000) }))
+        .await
+        .unwrap();
+    assert!(!result.success);
+    assert!(result.error.unwrap().contains("8192-byte"));
+}
+
+#[tokio::test]
+async fn resolver_records_cost_under_the_resolved_type_alias() {
+    use crate::agent::cost::{TOOL_LOOP_COST_TRACKING_CONTEXT, ToolLoopCostTrackingContext};
+    use crate::cost::CostTracker;
+    use std::collections::HashMap;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "advice"}}],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 200}
+        })))
+        .mount(&server)
+        .await;
+
+    let mut config = Config::default();
+    config.providers.models.openai.insert(
+        "big".to_string(),
+        zeroclaw_config::schema::OpenAIModelProviderConfig {
+            base: zeroclaw_config::schema::ModelProviderConfig {
+                api_key: Some("test-key".into()),
+                uri: Some(server.uri()),
+                model: Some("big-model".into()),
+                wire_api: Some(zeroclaw_config::schema::WireApi::ChatCompletions),
+                ..Default::default()
+            },
+        },
+    );
+    let resolver = ConfigModelAccessResolver::new(
+        Arc::new(config),
+        zeroclaw_api::subagent_v1::ModelPolicyV1 {
+            provider_ref: "openai.big".into(),
+            model: None,
+            temperature: None,
+        },
+    );
+    let request = || BoundedModelRequest {
+        system: "s".into(),
+        user: "u".into(),
+        temperature: None,
+    };
+
+    let workspace = tempfile::TempDir::new().unwrap();
+    let tracker = Arc::new(
+        CostTracker::new(
+            zeroclaw_config::schema::CostConfig {
+                enabled: true,
+                track_per_agent: true,
+                ..Default::default()
+            },
+            workspace.path(),
+        )
+        .unwrap(),
+    );
+    // Priced under the advisor's `type.alias` only: a non-zero cost proves
+    // the usage was attributed to that alias.
+    let pricing = Arc::new(HashMap::from([(
+        "openai.big".to_string(),
+        HashMap::from([
+            ("big-model.input".to_string(), 3.0),
+            ("big-model.output".to_string(), 15.0),
+        ]),
+    )]));
+
+    // No cost scope: the call still works and nothing is recorded.
+    let response = resolver.complete(request()).await.unwrap();
+    assert_eq!(response.text, "advice");
+    assert_eq!(tracker.get_summary().unwrap().request_count, 0);
+
+    let ctx = ToolLoopCostTrackingContext::new(Arc::clone(&tracker), pricing)
+        .with_agent_alias("parent-agent");
+    let response = TOOL_LOOP_COST_TRACKING_CONTEXT
+        .scope(Some(ctx), resolver.complete(request()))
+        .await
+        .unwrap();
+    assert_eq!((response.tokens_in, response.tokens_out), (1000, 200));
+
+    let summary = tracker.get_summary_for_agent("parent-agent").unwrap();
+    assert_eq!(summary.request_count, 1);
+    let expected = (1000.0 * 3.0 + 200.0 * 15.0) / 1_000_000.0;
+    assert!(
+        (summary.session_cost_usd - expected).abs() < 1e-9,
+        "{} != {expected}",
+        summary.session_cost_usd
+    );
+}

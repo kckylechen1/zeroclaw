@@ -268,7 +268,13 @@ impl<'a> TurnState<'a> {
     }
 }
 
-pub async fn run_tool_call_loop(mut p: ToolLoop<'_>) -> Result<String> {
+pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
+    // One loop invocation is one agent turn: advisor consultations made by
+    // its tools count against a fresh per-turn budget (#405).
+    crate::subagent_v1::scope_advisor_turn(run_tool_call_loop_turn(p)).await
+}
+
+async fn run_tool_call_loop_turn(mut p: ToolLoop<'_>) -> Result<String> {
     let model_switch_state = p
         .exec
         .model_switch_callback

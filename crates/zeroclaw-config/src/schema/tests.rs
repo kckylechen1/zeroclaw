@@ -13487,6 +13487,147 @@ async fn config_validate_rejects_agent_summary_provider_missing_alias() {
     );
 }
 
+// ── Advisor (#405 phase 1) ─────────────────────────────────────────
+
+fn advisor_config(agent_extra: &str) -> String {
+    format!(
+        r#"
+        [providers.models.custom.default]
+        api_key = "k"
+        model = "qwen3.6-plus"
+        uri = "https://example.com/v1"
+        wire_api = "chat_completions"
+
+        [providers.models.custom.big]
+        api_key = "k"
+        model = "big-model"
+        uri = "https://example.com/v1"
+        wire_api = "chat_completions"
+
+        [risk_profiles.default]
+        level = "supervised"
+
+        [agents.default]
+        enabled = true
+        model_provider = "custom.default"
+        risk_profile = "default"
+        {agent_extra}
+    "#
+    )
+}
+
+#[test]
+async fn advisor_model_target_parses_validates_and_round_trips() {
+    let toml = advisor_config(
+        r#"advisor = "model:custom.big"
+        advisor_max_calls_per_turn = 3"#,
+    );
+    let cfg: Config = toml::from_str(&toml).unwrap();
+    cfg.validate()
+        .expect("advisor naming a configured alias validates");
+    let agent = &cfg.agents["default"];
+    assert_eq!(
+        agent.advisor,
+        Some(crate::advisor::AdvisorTarget::Model("custom.big".into()))
+    );
+    assert_eq!(agent.advisor_max_calls_per_turn, Some(3));
+
+    // Serialized back as the same prefixed string, and re-parses equal.
+    let rendered = toml::to_string(agent).unwrap();
+    assert!(
+        rendered.contains(r#"advisor = "model:custom.big""#),
+        "{rendered}"
+    );
+    let reparsed: AliasedAgentConfig = toml::from_str(&rendered).unwrap();
+    assert_eq!(reparsed.advisor, agent.advisor);
+    assert_eq!(reparsed.advisor_max_calls_per_turn, Some(3));
+
+    // Unset stays unset and is not serialized.
+    let plain: AliasedAgentConfig = toml::from_str("").unwrap();
+    assert!(plain.advisor.is_none());
+    assert!(!toml::to_string(&plain).unwrap().contains("advisor"));
+}
+
+#[test]
+async fn advisor_untyped_target_fails_to_parse() {
+    let toml = advisor_config(r#"advisor = "custom.big""#);
+    let err = toml::from_str::<Config>(&toml).expect_err("untyped advisor must not parse");
+    assert!(err.to_string().contains("model:<type>.<alias>"), "{err}");
+}
+
+#[test]
+async fn advisor_dangling_model_ref_fails_validation() {
+    let toml = advisor_config(r#"advisor = "model:custom.does-not-exist""#);
+    let cfg: Config = toml::from_str(&toml).unwrap();
+    let msg = format!(
+        "{:#}",
+        cfg.validate().expect_err("dangling advisor must fail")
+    );
+    assert!(
+        msg.contains("agents.default.advisor")
+            && msg.contains("providers.models.custom.does-not-exist is not configured"),
+        "expected DanglingReference for advisor, got: {msg}"
+    );
+}
+
+#[test]
+async fn advisor_harness_target_parses_but_is_refused() {
+    let toml = advisor_config(r#"advisor = "harness:codex""#);
+    let cfg: Config = toml::from_str(&toml).expect("harness target parses");
+    assert_eq!(
+        cfg.agents["default"].advisor,
+        Some(crate::advisor::AdvisorTarget::Harness("codex".into()))
+    );
+    let msg = format!(
+        "{:#}",
+        cfg.validate().expect_err("harness advisor is refused")
+    );
+    assert!(
+        msg.contains("agents.default.advisor")
+            && msg.contains("harness advisors are not supported yet"),
+        "{msg}"
+    );
+}
+
+#[test]
+async fn advisor_zero_calls_per_turn_is_refused() {
+    let toml = advisor_config(
+        r#"advisor = "model:custom.big"
+        advisor_max_calls_per_turn = 0"#,
+    );
+    let cfg: Config = toml::from_str(&toml).unwrap();
+    let msg = format!("{:#}", cfg.validate().expect_err("zero cap is refused"));
+    assert!(msg.contains("advisor_max_calls_per_turn"), "{msg}");
+}
+
+#[test]
+async fn advisor_is_settable_through_the_prop_surface() {
+    let toml = advisor_config("");
+    let mut cfg: Config = toml::from_str(&toml).unwrap();
+    assert_eq!(cfg.get_prop("agents.default.advisor").unwrap(), "<unset>");
+
+    cfg.set_prop("agents.default.advisor", "model:custom.big")
+        .unwrap();
+    assert_eq!(
+        cfg.get_prop("agents.default.advisor").unwrap(),
+        "model:custom.big"
+    );
+    cfg.validate().unwrap();
+
+    cfg.set_prop("agents.default.advisor_max_calls_per_turn", "4")
+        .unwrap();
+    assert_eq!(cfg.agents["default"].advisor_max_calls_per_turn, Some(4));
+
+    assert!(
+        cfg.set_prop("agents.default.advisor", "custom.big")
+            .is_err(),
+        "an untyped target must be rejected at the prop surface"
+    );
+
+    cfg.set_prop("agents.default.advisor", "").unwrap();
+    assert!(cfg.agents["default"].advisor.is_none());
+}
+
 // ── Cards ────────────────────────────────────────────────────────
 
 fn card_config(agent_body: &str, extra: &str) -> String {

@@ -943,6 +943,31 @@ fn lineage_registry_config() -> Config {
     config
 }
 
+#[test]
+fn registry_binds_the_agents_advisor_into_reasoning_subagent() {
+    let security = Arc::new(SecurityPolicy::default());
+    let mut cfg = lineage_registry_config();
+
+    let plain = reasoning_spawn_tool_for_registry(&cfg, "parent-agent", &security, None);
+    assert_eq!(plain.advisor_ref(), None);
+
+    let agent = cfg.agents.get_mut("parent-agent").unwrap();
+    agent.advisor = Some(zeroclaw_config::advisor::AdvisorTarget::Model(
+        "anthropic.opus".into(),
+    ));
+    let advised = reasoning_spawn_tool_for_registry(&cfg, "parent-agent", &security, None);
+    assert_eq!(advised.advisor_ref(), Some("anthropic.opus"));
+    assert!(advised.description().contains("advisor model"));
+
+    // A harness target never binds (validation refuses it; the registry
+    // does not guess).
+    cfg.agents.get_mut("parent-agent").unwrap().advisor = Some(
+        zeroclaw_config::advisor::AdvisorTarget::Harness("codex".into()),
+    );
+    let harness = reasoning_spawn_tool_for_registry(&cfg, "parent-agent", &security, None);
+    assert_eq!(harness.advisor_ref(), None);
+}
+
 #[tokio::test]
 async fn registry_rebuild_carries_spawn_lineage_and_cannot_reset_depth() {
     // The census zig-zag GREEN half: a registry built for a child

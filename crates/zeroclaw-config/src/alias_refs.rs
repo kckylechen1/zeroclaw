@@ -341,6 +341,15 @@ fn delete_model_provider(
     })
 }
 
+/// Whether `agent.advisor` is a model target naming `target` (`type.alias`).
+fn advisor_model_ref_is(agent: &crate::schema::AliasedAgentConfig, target: &str) -> bool {
+    agent
+        .advisor
+        .as_ref()
+        .and_then(crate::advisor::AdvisorTarget::model_ref)
+        .is_some_and(|model| model.trim() == target)
+}
+
 fn scrub_model_provider_refs(cfg: &mut Config, target: &str) {
     for agent in cfg.agents.values_mut() {
         if agent.classifier_provider.trim() == target {
@@ -348,6 +357,9 @@ fn scrub_model_provider_refs(cfg: &mut Config, target: &str) {
         }
         if agent.summary_provider.trim() == target {
             agent.summary_provider = crate::providers::ModelProviderRef::default();
+        }
+        if advisor_model_ref_is(agent, target) {
+            agent.advisor = None;
         }
     }
     // Profile-level context-compression summarizer ref
@@ -781,6 +793,12 @@ fn rewrite_model_provider_refs(
             agent.summary_provider = new_target.as_str().into();
             touched = true;
         }
+        if advisor_model_ref_is(agent, &old_target) {
+            agent.advisor = Some(crate::advisor::AdvisorTarget::Model(
+                new_target.as_str().into(),
+            ));
+            touched = true;
+        }
         if touched {
             dirty.push(format!("agents.{name}"));
         }
@@ -999,6 +1017,15 @@ fn collect_provider_refs(
                         format!("agents.{name}.summary_provider"),
                         ScrubAction::ClearOptional,
                         agent.summary_provider.as_str(),
+                    ));
+                }
+                if advisor_model_ref_is(agent, &target)
+                    && let Some(advisor) = &agent.advisor
+                {
+                    sites.push(RefSite::soft(
+                        format!("agents.{name}.advisor"),
+                        ScrubAction::ClearOptional,
+                        &advisor.to_string(),
                     ));
                 }
             }

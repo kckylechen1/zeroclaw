@@ -3553,6 +3553,27 @@ pub struct AliasedAgentConfig {
     #[serde(default)]
     pub summary_provider: crate::providers::ModelProviderRef,
 
+    /// Stronger model this agent may consult when a question is hard, as a
+    /// typed target: `"model:<type>.<alias>"` names a configured
+    /// `[providers.models.<type>.<alias>]` entry. The agent decides when to
+    /// consult by calling `reasoning_subagent`, which then runs on this
+    /// model instead of the agent's own. Only the objective the agent
+    /// writes is sent (no transcript), so the advisor's vendor sees that
+    /// text. `"harness:<name>"` is reserved for external-harness advisors
+    /// and is refused by validation until they are supported (#381).
+    /// Unset (default) = `reasoning_subagent` runs on the agent's own model.
+    /// Reference only, never a copy; validated in `Config::validate()`.
+    #[tab(Providers)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisor: Option<crate::advisor::AdvisorTarget>,
+
+    /// Maximum advisor consultations per turn. Each `reasoning_subagent`
+    /// call on an agent with an `advisor` counts once; further calls in the
+    /// same turn fail with a tool error. Unset = 2. Must be at least 1.
+    #[tab(Providers)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advisor_max_calls_per_turn: Option<u32>,
+
     // ── Resolved runtime tunables (populated by `resolved_agent_config`
     // from the runtime profile; not config-settable on the agent). ──
     #[serde(skip)]
@@ -3618,6 +3639,8 @@ impl Default for AliasedAgentConfig {
             classifier_provider: crate::providers::ModelProviderRef::default(),
             precheck: crate::scattered_types::ChannelPrecheckConfig::default(),
             summary_provider: crate::providers::ModelProviderRef::default(),
+            advisor: None,
+            advisor_max_calls_per_turn: None,
             resolved: ResolvedRuntime::default(),
             workspace: crate::multi_agent::AgentWorkspaceConfig::default(),
             memory: crate::multi_agent::AgentMemoryConfig::default(),
@@ -20273,7 +20296,32 @@ impl Config {
                     "summary_provider",
                     agent.summary_provider.trim(),
                 ),
+                // Advisor model target (`advisor = "model:<type>.<alias>"`);
+                // a harness target is refused just below.
+                (
+                    "providers.models",
+                    "advisor",
+                    agent
+                        .advisor
+                        .as_ref()
+                        .and_then(crate::advisor::AdvisorTarget::model_ref)
+                        .map_or("", |model| model.trim()),
+                ),
             ];
+            if let Some(crate::advisor::AdvisorTarget::Harness(name)) = &agent.advisor {
+                validation_bail!(
+                    ValidationFailed,
+                    format!("agents.{alias}.advisor"),
+                    "agents.{alias}.advisor = \"harness:{name}\": harness advisors are not supported yet (see #405); use `model:<type>.<alias>`",
+                );
+            }
+            if agent.advisor_max_calls_per_turn == Some(0) {
+                validation_bail!(
+                    InvalidNumericRange,
+                    format!("agents.{alias}.advisor_max_calls_per_turn"),
+                    "agents.{alias}.advisor_max_calls_per_turn must be at least 1; unset `advisor` to disable consultations",
+                );
+            }
             for (section_prefix, field, value) in typed_provider_refs {
                 if value.is_empty() {
                     continue;
