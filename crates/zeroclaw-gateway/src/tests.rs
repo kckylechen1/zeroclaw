@@ -311,6 +311,7 @@ pub(crate) fn admin_paircode_state(
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     }
 }
 
@@ -897,6 +898,7 @@ async fn metrics_endpoint_returns_hint_when_prometheus_is_disabled() {
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     };
 
     let response = handle_metrics(State(state)).await.into_response();
@@ -968,6 +970,7 @@ async fn metrics_endpoint_renders_prometheus_output() {
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     };
 
     let response = handle_metrics(State(state)).await.into_response();
@@ -1598,6 +1601,7 @@ async fn webhook_idempotency_skips_duplicate_provider_calls() {
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     };
 
     let mut headers = HeaderMap::new();
@@ -1687,6 +1691,7 @@ async fn webhook_unknown_agent_rejected_before_dispatch() {
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     };
 
     // An idempotency key on a rejected request must NOT be consumed.
@@ -1791,6 +1796,7 @@ async fn webhook_explicit_agent_reports_model_without_owning_lifecycle() {
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     };
 
     let response = handle_webhook(
@@ -1875,6 +1881,7 @@ async fn webhook_autosave_stores_distinct_keys_per_request() {
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     };
 
     let headers = HeaderMap::new();
@@ -1978,6 +1985,7 @@ async fn webhook_secret_hash_rejects_missing_header() {
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     };
 
     let response = handle_webhook(
@@ -2047,6 +2055,7 @@ async fn webhook_secret_hash_rejects_invalid_header() {
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     };
 
     let mut headers = HeaderMap::new();
@@ -2121,6 +2130,7 @@ async fn webhook_secret_hash_accepts_valid_header() {
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ws_conversations: Default::default(),
+        bridge_sockets: Default::default(),
     };
 
     let mut headers = HeaderMap::new();

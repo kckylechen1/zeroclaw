@@ -2107,6 +2107,7 @@ pub(crate) mod tests {
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reload_tx: None,
             ws_conversations: Default::default(),
+            bridge_sockets: Default::default(),
         }
     }
 

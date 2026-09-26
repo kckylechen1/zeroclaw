@@ -212,6 +212,52 @@ Examples:
         #[arg(long)]
         host: Option<String>,
     },
+    /// Manage channel bridge tokens ([gateway.bridges.<name>])
+    // i18n-exempt: clap derive help — framework requires a compile-time literal
+    #[command(long_about = "\
+Manage channel bridges ([gateway.bridges.<name>]).
+
+A bridge is a separate process, such as zeroclaw-bridge-telegram, that \
+relays a messaging platform through /ws/chat and receives proactive \
+messages (cron output, heartbeat alerts, the notify tool) on /ws/bridge. \
+It authenticates with its own token, which pairing never issues. Only the \
+token's SHA-256 hash is stored in the config.
+
+Examples:
+  zeroclaw gateway bridge add telegram --session main
+  zeroclaw gateway bridge add telegram --rotate
+  zeroclaw gateway bridge list
+  zeroclaw gateway bridge remove telegram")]
+    Bridge {
+        #[command(subcommand)]
+        bridge_command: BridgeCommands,
+    },
+}
+
+/// Channel bridge subcommands (`zeroclaw gateway bridge ...`)
+#[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BridgeCommands {
+    /// Mint a bridge token, store its hash, and print the token once
+    Add {
+        /// Bridge name; cron delivery `channel = "<name>"` routes to it
+        name: String,
+        /// Chat session the token may open (repeatable), e.g. `main`
+        #[arg(long = "session", value_name = "SESSION_ID")]
+        sessions: Vec<String>,
+        /// Chat sessions starting with this prefix may be opened, e.g. `tg:`
+        #[arg(long, value_name = "PREFIX")]
+        session_prefix: Option<String>,
+        /// Replace the token of an existing bridge (the old token stops working)
+        #[arg(long)]
+        rotate: bool,
+    },
+    /// Remove a bridge; its token stops working
+    Remove {
+        /// Bridge name
+        name: String,
+    },
+    /// List configured bridges and their session scope
+    List,
 }
 
 /// Service management subcommands

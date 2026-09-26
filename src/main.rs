@@ -293,9 +293,10 @@ pub(crate) use gateway_helpers::{t, ta};
 
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
 pub use zeroclaw::{
-    AgentsCommands, ChannelCommands, ChannelsCommands, CronCommands, GatewayCommands,
-    HardwareCommands, IntegrationCommands, MigrateCommands, PeripheralCommands, ProvidersCommands,
-    ServiceCommands, SkillBundleCommands, SkillCommands, SopCommands, SopGraphFormat,
+    AgentsCommands, BridgeCommands, ChannelCommands, ChannelsCommands, CronCommands,
+    GatewayCommands, HardwareCommands, IntegrationCommands, MigrateCommands, PeripheralCommands,
+    ProvidersCommands, ServiceCommands, SkillBundleCommands, SkillCommands, SopCommands,
+    SopGraphFormat,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -2453,6 +2454,10 @@ async fn async_main(command: clap::Command) -> Result<()> {
                         }
                     }
                     Ok(())
+                }
+                Some(zeroclaw::GatewayCommands::Bridge { bridge_command }) => {
+                    gateway_helpers::bridges::handle_bridge_command(&mut config, bridge_command)
+                        .await
                 }
                 Some(zeroclaw::GatewayCommands::Start {
                     port,

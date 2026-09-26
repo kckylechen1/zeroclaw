@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -58,7 +58,35 @@ struct Reply<T> {
     result: Option<T>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    error_code: Option<u16>,
 }
+
+/// Telegram answered but refused the call (`ok: false`). Returned inside
+/// the `anyhow::Error` from [`Api`] calls; transport failures are not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    pub method: String,
+    pub code: Option<u16>,
+    pub description: String,
+}
+
+impl Refused {
+    /// Whether retrying cannot help (a bad chat id, a bot blocked by the
+    /// user). Rate limits and server errors are worth retrying.
+    pub fn is_permanent(&self) -> bool {
+        self.code
+            .is_some_and(|code| (400..500).contains(&code) && code != 429)
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Telegram {} refused: {}", self.method, self.description)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 #[derive(Debug, Deserialize)]
 struct Sent {
@@ -113,10 +141,16 @@ impl Api {
                 result: Some(result),
                 ..
             } => Ok(result),
-            Reply { description, .. } => bail!(
-                "Telegram {method} refused: {}",
-                description.as_deref().unwrap_or("no description")
-            ),
+            Reply {
+                description,
+                error_code,
+                ..
+            } => Err(Refused {
+                method: method.to_string(),
+                code: error_code,
+                description: description.unwrap_or_else(|| "no description".into()),
+            }
+            .into()),
         }
     }
 
@@ -142,6 +176,22 @@ impl Api {
         let mut body = json!({ "chat_id": chat_id, "text": text });
         if let Some(keyboard) = keyboard {
             body["reply_markup"] = keyboard;
+        }
+        let sent: Sent = self.call("sendMessage", body, SHORT).await?;
+        Ok(sent.message_id)
+    }
+
+    /// Send plain text into a forum topic (`message_thread_id`) or, with
+    /// no thread, into the chat itself.
+    pub async fn send_to_thread(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        text: &str,
+    ) -> Result<i64> {
+        let mut body = json!({ "chat_id": chat_id, "text": text });
+        if let Some(thread_id) = thread_id {
+            body["message_thread_id"] = json!(thread_id);
         }
         let sent: Sent = self.call("sendMessage", body, SHORT).await?;
         Ok(sent.message_id)

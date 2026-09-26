@@ -5,6 +5,9 @@
 use anyhow::Result;
 use std::fmt::Write as _;
 
+#[cfg(feature = "agent-runtime")]
+pub mod bridges;
+
 use crate::SopCommands;
 use crate::config::Config;
 

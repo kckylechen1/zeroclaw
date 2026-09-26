@@ -301,6 +301,15 @@ fn generate_token() -> String {
     format!("zc_{}", hex::encode(bytes))
 }
 
+/// A fresh bridge bearer token (`zcb_` + 64 hex characters, 256 random
+/// bits) for `[gateway.bridges.<name>]`. Bridge tokens are minted by the
+/// operator, never through pairing; store only
+/// [`PairingGuard::token_hash`] of it.
+pub fn generate_bridge_token() -> String {
+    let bytes: [u8; 32] = rand::random();
+    format!("zcb_{}", hex::encode(bytes))
+}
+
 /// SHA-256 hash a bearer token for storage. Returns lowercase hex.
 fn hash_token(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
@@ -527,6 +536,15 @@ mod tests {
             }
         }
         panic!("Generated 10 pairs of codes and all were collisions — CSPRNG failure");
+    }
+
+    #[test]
+    async fn bridge_tokens_are_random_and_distinct_from_paired_tokens() {
+        let a = generate_bridge_token();
+        let b = generate_bridge_token();
+        assert_ne!(a, b);
+        assert!(a.starts_with("zcb_") && a.len() == 68);
+        assert_eq!(PairingGuard::token_hash(&a), hash_token(&a));
     }
 
     #[test]

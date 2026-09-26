@@ -1436,6 +1436,45 @@ async fn deliver_announcement_returns_ok_when_no_handler_registered() {
         .expect("missing delivery handler should be Ok with a warn log");
 }
 
+#[tokio::test]
+async fn delivery_to_a_configured_bridge_is_queued_in_its_outbox() {
+    register_recording_delivery_fn();
+    let tmp = TempDir::new().unwrap();
+    let mut config = test_config(&tmp).await;
+    config.gateway.bridges.insert(
+        COUNT_CHANNEL.to_string(),
+        zeroclaw_config::schema::GatewayBridgeConfig {
+            token_hash: "0f".repeat(32),
+            ..Default::default()
+        },
+    );
+    let mut job = announce_job();
+    job.delivery.to = Some("4242".into());
+    job.delivery.thread_id = Some("7".into());
+    use std::sync::atomic::Ordering::SeqCst;
+    let before = DELIVERED.load(SeqCst);
+
+    let outcome = deliver_and_classify_run_result(
+        &config,
+        &job,
+        true,
+        "digest ready".to_string(),
+        CronDeliveryContext::Scheduled,
+    )
+    .await;
+
+    assert_eq!(outcome.delivery_status, "succeeded");
+    // A bridge name shadows the in-core channel: the registered channel
+    // delivery function is not called.
+    assert_eq!(DELIVERED.load(SeqCst), before);
+    let outbox = zeroclaw_infra::bridge_outbox::BridgeOutbox::shared(&config.data_dir).unwrap();
+    let queued = outbox.pending(COUNT_CHANNEL, 0, 10).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].to, "4242");
+    assert_eq!(queued[0].thread_id.as_deref(), Some("7"));
+    assert_eq!(queued[0].content, "digest ready");
+}
+
 #[test]
 fn build_cron_shell_command_uses_sh_non_login() {
     let workspace = std::env::temp_dir();

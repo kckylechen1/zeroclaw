@@ -1789,6 +1789,10 @@ fn auto_detect_heartbeat_channel(config: &Config) -> Option<(String, String)> {
 }
 
 fn validate_heartbeat_channel_config(config: &Config, channel: &str) -> Result<()> {
+    // A bridge name is delivered through the bridge outbox.
+    if config.gateway.bridges.contains_key(channel) {
+        return Ok(());
+    }
     if !config.channels.is_known_channel(channel) {
         anyhow::bail!("unsupported heartbeat.target channel: {channel}");
     }

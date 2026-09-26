@@ -4295,6 +4295,14 @@ async fn checklist_gateway_serde_roundtrip() {
         long_running_request_timeout_secs: 600,
         check_updates: true,
         allow_self_upgrade: false,
+        bridges: HashMap::from([(
+            "telegram".to_string(),
+            GatewayBridgeConfig {
+                token_hash: "ab".repeat(32),
+                session_prefix: Some("tg:".into()),
+                sessions: vec!["main".into()],
+            },
+        )]),
     };
     let toml_str = toml::to_string(&g).unwrap();
     let parsed: GatewayConfig = toml::from_str(&toml_str).unwrap();
@@ -4312,6 +4320,72 @@ async fn checklist_gateway_serde_roundtrip() {
     assert_eq!(parsed.idempotency_max_keys, 4096);
     assert!(parsed.check_updates);
     assert!(!parsed.allow_self_upgrade);
+    let bridge = &parsed.bridges["telegram"];
+    assert_eq!(bridge.token_hash, "ab".repeat(32));
+    assert_eq!(bridge.session_prefix.as_deref(), Some("tg:"));
+    assert_eq!(bridge.sessions, vec!["main"]);
+}
+
+#[test]
+async fn bridge_tokens_resolve_by_hash_and_scope_sessions() {
+    let token = "zcb_secret";
+    let mut gateway = GatewayConfig::default();
+    gateway.bridges.insert(
+        "telegram".into(),
+        GatewayBridgeConfig {
+            token_hash: crate::pairing::PairingGuard::token_hash(token),
+            session_prefix: Some("tg:".into()),
+            sessions: vec!["main".into()],
+        },
+    );
+    gateway.bridges.insert(
+        "closed".into(),
+        GatewayBridgeConfig {
+            token_hash: crate::pairing::PairingGuard::token_hash("other"),
+            ..GatewayBridgeConfig::default()
+        },
+    );
+
+    let (name, bridge) = gateway.bridge_for_token(token).expect("token resolves");
+    assert_eq!(name, "telegram");
+    assert!(gateway.bridge_for_token("zcb_wrong").is_none());
+    assert!(gateway.bridge_for_token("").is_none());
+    // The stored hash is compared, never the plaintext.
+    assert!(gateway.bridge_for_token(&bridge.token_hash).is_none());
+
+    assert!(bridge.allows_session("main"));
+    assert!(bridge.allows_session("tg:-100123"));
+    assert!(!bridge.allows_session("mainframe"));
+    assert!(!bridge.allows_session("other"));
+    // No scope opens no chat session; an empty prefix is not a wildcard.
+    let (_, closed) = gateway.bridge_for_token("other").unwrap();
+    assert!(!closed.allows_session("main"));
+    let empty_prefix = GatewayBridgeConfig {
+        session_prefix: Some(String::new()),
+        ..GatewayBridgeConfig::default()
+    };
+    assert!(!empty_prefix.allows_session("anything"));
+}
+
+#[test]
+async fn bridge_token_hash_must_be_a_sha256_hex_digest() {
+    let mut config = Config::default();
+    config.gateway.bridges.insert(
+        "telegram".into(),
+        GatewayBridgeConfig {
+            token_hash: "zcb_plaintext".into(),
+            ..GatewayBridgeConfig::default()
+        },
+    );
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("gateway.bridges.telegram.token_hash"), "{err}");
+    config
+        .gateway
+        .bridges
+        .get_mut("telegram")
+        .unwrap()
+        .token_hash = "0f".repeat(32);
+    config.validate().unwrap();
 }
 
 #[test]
