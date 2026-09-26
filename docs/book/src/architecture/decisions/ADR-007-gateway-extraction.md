@@ -8,7 +8,6 @@ relates-to:
   - docs/book/src/foundations/fnd-001-intentional-architecture.md
   - https://github.com/zeroclaw-labs/zeroclaw/issues/8691#issuecomment-5009706612
   - crates/zeroclaw-gateway
-  - crates/zeroclaw-runtime/src/rpc
 ---
 
 # ADR-007: Extract the Gateway Into a Separate Optional Process
@@ -67,5 +66,6 @@ Negative consequences:
 - [Gateway API](../../gateway/api.md)
 - [ADR-006 and ADR-007 direction decision](https://github.com/zeroclaw-labs/zeroclaw/issues/8691#issuecomment-5009706612)
 - `crates/zeroclaw-gateway`
-- `crates/zeroclaw-runtime/src/rpc`
 - `crates/zeroclaw-api/src/jsonrpc.rs`
+
+> Note: the runtime RPC socket (`crates/zeroclaw-runtime/src/rpc`) this ADR referred to was retired in [#408](https://github.com/kckylechen1/zeroclaw/pull/408); clients reach the runtime through the gateway.
