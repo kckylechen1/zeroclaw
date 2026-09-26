@@ -2707,3 +2707,98 @@ async fn legacy_pair_rolls_back_in_process_token_when_persist_fails() {
         state.pairing.tokens()
     );
 }
+
+#[test]
+fn public_bind_without_pairing_needs_an_explicit_opt_in() {
+    use PublicBindPosture::*;
+    // Loopback is always fine, pairing or not.
+    assert_eq!(public_bind_posture("127.0.0.1", false, false, true), Local);
+    assert_eq!(public_bind_posture("::1", false, false, false), Local);
+    // Network-facing without pairing: every client is anonymous, so any of
+    // them could attach to any shared session. Refused unless opted in; a
+    // tunnel is not an opt-in.
+    assert_eq!(
+        public_bind_posture("0.0.0.0", false, false, true),
+        RefuseUnauthenticated
+    );
+    assert_eq!(
+        public_bind_posture("192.168.1.10", false, false, false),
+        RefuseUnauthenticated
+    );
+    assert_eq!(
+        public_bind_posture("0.0.0.0", false, true, true),
+        UnauthenticatedOptedIn
+    );
+    // With pairing, the pre-existing warning is unchanged.
+    assert_eq!(
+        public_bind_posture("0.0.0.0", true, false, true),
+        ExposedWithoutOptIn
+    );
+    assert_eq!(public_bind_posture("0.0.0.0", true, false, false), Local);
+    assert_eq!(public_bind_posture("0.0.0.0", true, true, true), Local);
+}
+
+/// Send a WebSocket upgrade for `/ws/chat` to a live server and return the
+/// HTTP status code of the response.
+async fn ws_chat_upgrade_status(addr: SocketAddr, query: &str, bearer: Option<&str>) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let auth = bearer
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "GET /ws/chat?{query} HTTP/1.1\r\nHost: {addr}\r\nConnection: Upgrade\r\n\
+         Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{auth}\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut buf = vec![0u8; 256];
+    let n = stream.read(&mut buf).await.unwrap();
+    let head = String::from_utf8_lossy(&buf[..n]);
+    head.split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no HTTP status in {head:?}"))
+}
+
+/// Trust model for shared sessions (#397): with pairing on, attaching to a
+/// session is gated by the paired token, not by the session id. A client
+/// that names someone's session id without a valid token is refused before
+/// the upgrade; any paired token (every paired device is the owner's) gets
+/// past the auth gate for any session id.
+#[tokio::test]
+async fn ws_chat_attach_to_an_existing_session_requires_a_paired_token() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let state = admin_paircode_state(&tmp, true, true);
+    let token = pair_device(&state, "owner-phone").await;
+    let app = Router::new()
+        .route("/ws/chat", get(ws::handle_ws_chat))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let client = async {
+        let victim = "agent=ghost&session_id=owners-session";
+        assert_eq!(ws_chat_upgrade_status(addr, victim, None).await, 401);
+        assert_eq!(
+            ws_chat_upgrade_status(addr, victim, Some("not-a-paired-token")).await,
+            401
+        );
+        assert_eq!(
+            ws_chat_upgrade_status(addr, &format!("{victim}&token=zc_forged"), None).await,
+            401
+        );
+        // The paired token passes auth; the request then fails on the
+        // unknown agent (400), proving the 401s above came from the gate.
+        assert_eq!(
+            ws_chat_upgrade_status(addr, victim, Some(&token)).await,
+            400
+        );
+    };
+    tokio::select! {
+        result = axum::serve(listener, app.into_make_service()) => {
+            panic!("server exited early: {result:?}")
+        }
+        () = client => {}
+    }
+}

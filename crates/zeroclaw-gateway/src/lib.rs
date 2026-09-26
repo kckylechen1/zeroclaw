@@ -477,6 +477,38 @@ fn gateway_session_queue() -> Arc<session_queue::SessionActorQueue> {
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
+/// How the gateway treats the address it is about to bind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicBindPosture {
+    /// Loopback, or network-facing with pairing and an explicit opt-in or tunnel.
+    Local,
+    /// Network-facing with pairing on but no tunnel or opt-in: warn.
+    ExposedWithoutOptIn,
+    /// Network-facing, pairing off, `allow_public_bind` set: allowed, warned loudly.
+    UnauthenticatedOptedIn,
+    /// Network-facing, pairing off, no opt-in: refuse to start. Without pairing
+    /// every client is anonymous, so any of them could attach to any shared
+    /// session by naming its id.
+    RefuseUnauthenticated,
+}
+
+fn public_bind_posture(
+    host: &str,
+    require_pairing: bool,
+    allow_public_bind: bool,
+    no_tunnel: bool,
+) -> PublicBindPosture {
+    if !is_public_bind(host) {
+        return PublicBindPosture::Local;
+    }
+    match (require_pairing, allow_public_bind) {
+        (false, false) => PublicBindPosture::RefuseUnauthenticated,
+        (false, true) => PublicBindPosture::UnauthenticatedOptedIn,
+        (true, false) if no_tunnel => PublicBindPosture::ExposedWithoutOptIn,
+        (true, _) => PublicBindPosture::Local,
+    }
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run_gateway(
     host: &str,
@@ -493,20 +525,52 @@ pub async fn run_gateway(
     // gateway constructs at `run_gateway_if_enabled`. Never opened here.
     companion_store: Option<Arc<zeroclaw_memory::CompanionStore>>,
 ) -> Result<()> {
-    // ── Security: warn on public bind without tunnel or explicit opt-in ──
-    if is_public_bind(host)
-        && config.tunnel.tunnel_provider == "none"
-        && !config.gateway.allow_public_bind
-    {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "⚠️  Binding to {host} — gateway will be exposed to all network interfaces.\n\
-             Suggestion: use --host 127.0.0.1 (default), configure a tunnel, or set\n\
-             [gateway] allow_public_bind = true in config.toml to silence this warning.\n\n\
-             Docker/VM: if you are running inside a container or VM, this is expected."
-        );
+    // ── Security: public bind posture ──
+    match public_bind_posture(
+        host,
+        config.gateway.require_pairing,
+        config.gateway.allow_public_bind,
+        config.tunnel.tunnel_provider == "none",
+    ) {
+        PublicBindPosture::Local => {}
+        PublicBindPosture::ExposedWithoutOptIn => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                "⚠️  Binding to {host} — gateway will be exposed to all network interfaces.\n\
+                 Suggestion: use --host 127.0.0.1 (default), configure a tunnel, or set\n\
+                 [gateway] allow_public_bind = true in config.toml to silence this warning.\n\n\
+                 Docker/VM: if you are running inside a container or VM, this is expected."
+            );
+        }
+        PublicBindPosture::UnauthenticatedOptedIn => {
+            ::zeroclaw_log::record!(
+                WARN,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"host": host})),
+                "⚠️  Binding to {host} with [gateway] require_pairing = false: anyone who can \
+                 reach this address can drive the agent, and can attach to any session by its \
+                 id (see its turns, cancel them, answer its approvals). Enable require_pairing \
+                 unless the network itself is trusted."
+            );
+        }
+        PublicBindPosture::RefuseUnauthenticated => {
+            ::zeroclaw_log::record!(
+                ERROR,
+                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"host": host})),
+                "gateway refused to bind a non-loopback address with pairing disabled"
+            );
+            anyhow::bail!(
+                "Refusing to bind the gateway to {host} with [gateway] require_pairing = false: \
+                 every client on the network could drive the agent and attach to its sessions. \
+                 Enable require_pairing, bind 127.0.0.1, or set [gateway] allow_public_bind = true \
+                 to accept an unauthenticated network-facing gateway."
+            );
+        }
     }
     let config_state = Arc::new(RwLock::new(config.clone()));
 
