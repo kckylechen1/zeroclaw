@@ -281,7 +281,7 @@ async fn run_manual_job_persists_history_and_broadcasts() {
             expr: "*/5 * * * *".into(),
             tz: None,
         },
-        "echo rpc-manual-ok",
+        "echo manual-run-ok",
         None,
         true,
     )
@@ -289,11 +289,11 @@ async fn run_manual_job_persists_history_and_broadcasts() {
     let (tx, mut rx) = tokio::sync::broadcast::channel(8);
     let event_tx = Some(tx);
 
-    let result = run_manual_job(&config, &job, CronDeliveryContext::RpcManual, &event_tx).await;
+    let result = run_manual_job(&config, &job, CronDeliveryContext::GatewayManual, &event_tx).await;
 
     assert!(result.success);
     assert_eq!(result.status, "ok");
-    assert!(result.output.contains("rpc-manual-ok"));
+    assert!(result.output.contains("manual-run-ok"));
 
     let updated = cron::get_job(&config, &job.id).expect("job state should update");
     assert_eq!(updated.last_status.as_deref(), Some("ok"));
@@ -301,7 +301,7 @@ async fn run_manual_job_persists_history_and_broadcasts() {
         updated
             .last_output
             .as_deref()
-            .is_some_and(|output| output.contains("rpc-manual-ok"))
+            .is_some_and(|output| output.contains("manual-run-ok"))
     );
 
     let runs = cron::list_runs(&config, &job.id, 10).expect("run history should list");
@@ -312,7 +312,7 @@ async fn run_manual_job_persists_history_and_broadcasts() {
             .output
             .as_deref()
             .unwrap_or("")
-            .contains("rpc-manual-ok")
+            .contains("manual-run-ok")
     );
 
     let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
@@ -327,7 +327,7 @@ async fn run_manual_job_persists_history_and_broadcasts() {
         event["output"]
             .as_str()
             .unwrap_or("")
-            .contains("rpc-manual-ok")
+            .contains("manual-run-ok")
     );
 }
 

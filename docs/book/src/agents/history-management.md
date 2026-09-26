@@ -8,7 +8,7 @@ on different representations:
    history and drops oldest whole turns until the estimated context fits the
    token budget.
 2. **Structured message-count trimming** mutates `Agent::history`
-   (`ConversationMessage`) used by RPC, gateway, and ACP `Agent` turns when it
+   (`ConversationMessage`) used by gateway and ACP `Agent` turns when it
    exceeds the structured agent's effective message cap. Daemon channel loops
    that call the legacy `agent::run` path use the separate raw-message cap
    described below.

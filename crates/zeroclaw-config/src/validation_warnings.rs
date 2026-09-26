@@ -45,6 +45,12 @@ use serde::{Deserialize, Serialize};
 ///   webhook route that was removed, so it was deleted; the key is ignored
 ///   and the alias is served by WhatsApp Web only when it carries a Web
 ///   selector (see `RETIRED_CONFIG_FIELDS`).
+/// - `wss_transport_removed`: a `[wss]` section is still present. It
+///   configured the daemon's JSON-RPC-over-WSS listener for remote TUI
+///   clients; that listener and the local `daemon.sock` RPC socket were
+///   retired (no in-repo client remained; the web dashboard and
+///   `zeroclaw chat` use the gateway HTTP API and `/ws/chat`), so the
+///   section is ignored (see `RETIRED_CONFIG_SURFACES`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ValidationWarning {
@@ -100,6 +106,7 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("channels.wati", "inbound_webhook_channel_removed"),
     ("channels.nextcloud_talk", "inbound_webhook_channel_removed"),
     ("channels.gmail_push", "inbound_webhook_channel_removed"),
+    ("wss", "wss_transport_removed"),
 ];
 
 /// True when `channel_type` names a channel whose `[channels.<type>]`

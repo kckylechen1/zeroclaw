@@ -343,11 +343,6 @@ pub struct Config {
     #[group = "Network"]
     pub a2a: crate::multi_agent::A2aServerSection,
 
-    /// WebSocket Secure (WSS) transport for remote TUI connections (`[wss]`).
-    #[serde(default)]
-    #[nested]
-    pub wss: WssConfig,
-
     /// Composio managed OAuth tools integration (`[composio]`).
     #[serde(default)]
     #[nested]
@@ -6969,52 +6964,6 @@ impl Default for GatewayClientAuthConfig {
             pinned_certs: Vec::new(),
         }
     }
-}
-
-/// WebSocket Secure (WSS) transport for remote TUI-to-daemon connections (`[wss]`).
-///
-/// When enabled, the daemon listens for TLS-encrypted WebSocket connections
-/// on the configured bind address and port. TUI clients connect via
-/// `--connect wss://host:port`.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "wss"]
-pub struct WssConfig {
-    /// Enable the WSS listener (default: false).
-    #[serde(default)]
-    pub enabled: bool,
-    /// Bind address for the WSS listener (default: "0.0.0.0").
-    #[serde(default = "default_wss_bind")]
-    pub bind: String,
-    /// Port for the WSS listener (default: 9781).
-    #[serde(default = "default_wss_port")]
-    pub port: u16,
-    /// Path to the PEM-encoded server certificate file.
-    #[serde(default)]
-    pub cert_path: String,
-    /// Path to the PEM-encoded server private key file.
-    #[serde(default)]
-    pub key_path: String,
-}
-
-impl Default for WssConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bind: default_wss_bind(),
-            port: default_wss_port(),
-            cert_path: String::new(),
-            key_path: String::new(),
-        }
-    }
-}
-
-fn default_wss_bind() -> String {
-    "0.0.0.0".into()
-}
-
-fn default_wss_port() -> u16 {
-    9781
 }
 
 /// Secure transport configuration for inter-node communication (`[node_transport]`).
@@ -16993,7 +16942,6 @@ impl Default for Config {
             tunnel: TunnelConfig::default(),
             gateway: GatewayConfig::default(),
             a2a: crate::multi_agent::A2aServerSection::default(),
-            wss: WssConfig::default(),
             composio: ComposioConfig::default(),
             microsoft365: Microsoft365Config::default(),
             secrets: SecretsConfig::default(),
@@ -17085,9 +17033,9 @@ pub fn ftl_locale_dir(locale: &str) -> Result<PathBuf> {
     Ok(default_config_dir()?.join("data").join("ftl").join(locale))
 }
 
-/// The FTL catalogues that `zeroclaw locales fetch` / the daemon's
-/// `locales/fetch` RPC can download, as `(name, upstream-path-template,
-/// output-filename)`. `{locale}` is substituted per request. This is the single
+/// The FTL catalogues that `zeroclaw locales fetch` can download, as
+/// `(name, upstream-path-template, output-filename)`. `{locale}` is
+/// substituted per request. This is the single
 /// source of truth — a caller supplies only a catalog *name* matched against
 /// this table, never a path.
 pub const FTL_CATALOGS: &[(&str, &str, &str)] = &[

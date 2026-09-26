@@ -33,7 +33,6 @@ pub mod process_stats;
 pub mod quickstart;
 pub mod rag;
 pub mod restart;
-pub mod rpc;
 pub mod security;
 pub mod service;
 pub mod skills;

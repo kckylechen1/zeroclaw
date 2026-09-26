@@ -623,10 +623,6 @@ Examples:
         #[arg(long)]
         host: Option<String>,
 
-        /// Self-terminate after all socket clients disconnect (with grace period)
-        #[arg(long)]
-        ephemeral: bool,
-
         /// Boot even when security-critical config sections were dropped to
         /// their defaults during load. Without this, the daemon refuses to
         /// start with a weakened posture; with it, the daemon boots so the
@@ -1817,9 +1813,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
     }
 
     let default_floor = match &cli.command {
-        Commands::Daemon {
-            ephemeral: true, ..
-        } => "debug",
         Commands::Acp { .. } | Commands::Agent { message: None, .. } => "warn",
         _ => "info",
     };
@@ -2435,7 +2428,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
         Commands::Daemon {
             port,
             host,
-            ephemeral,
             allow_degraded_security,
         } => {
             // Fail closed before any setup work: refuse to serve with a
@@ -2598,7 +2590,7 @@ async fn async_main(command: clap::Command) -> Result<()> {
 
                 #[cfg(feature = "gateway")]
                 registry.register_gateway(Box::new(
-                    move |host, port, config, tx, reload_controls, _tui_registry| {
+                    move |host, port, config, tx, reload_controls| {
                         let companion_store = companion_for_gateway.clone();
                         Box::pin(async move {
                             Box::pin(zeroclaw_gateway::run_gateway(
@@ -2626,44 +2618,11 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     })
                 }));
 
-                registry.register_socket(Box::new(|ctx, cancel, client_count| {
-                    Box::pin(async move {
-                        zeroclaw_runtime::rpc::local::run_local_listener(ctx, cancel, client_count)
-                            .await
-                    })
-                }));
-
-                registry.register_wss(Box::new(|ctx, cancel, client_count| {
-                    Box::pin(async move {
-                        let wss_cfg = ctx.config.read().wss.clone();
-                        if !wss_cfg.enabled {
-                            // WSS disabled — park until cancelled.
-                            cancel.cancelled().await;
-                            return Ok(());
-                        }
-                        let tls_acceptor = zeroclaw_runtime::rpc::wss::build_tls_acceptor(
-                            &wss_cfg.cert_path,
-                            &wss_cfg.key_path,
-                        )?;
-                        let bind_addr: std::net::SocketAddr =
-                            format!("{}:{}", wss_cfg.bind, wss_cfg.port).parse()?;
-                        zeroclaw_runtime::rpc::wss::run_wss_listener(
-                            ctx,
-                            cancel,
-                            client_count,
-                            tls_acceptor,
-                            bind_addr,
-                        )
-                        .await
-                    })
-                }));
-
                 let exit = Box::pin(daemon::run(
                     current_config.clone(),
                     host.clone(),
                     port,
                     registry,
-                    ephemeral,
                 ))
                 .await;
                 if let Some(handle) = companion_outbox_observer {

@@ -1911,6 +1911,39 @@ from_phone = "+15555550100"
 }
 
 #[test]
+fn v3_retired_wss_section_loads_with_tombstone_warning() {
+    // The daemon's JSON-RPC socket and WSS listener were retired. A V3
+    // config still carrying `[wss]` must keep loading: the section is
+    // ignored and reported as a structured tombstone warning.
+    let mut value: toml::Value = toml::from_str(
+        &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
+            .expect("generate current succeeds"),
+    )
+    .expect("generated V3 parses");
+    let wss: toml::Value = toml::from_str(
+        r#"
+enabled = true
+bind = "0.0.0.0"
+port = 9781
+cert_path = "/etc/zeroclaw/cert.pem"
+key_path = "/etc/zeroclaw/key.pem"
+"#,
+    )
+    .unwrap();
+    value.as_table_mut().unwrap().insert("wss".into(), wss);
+    let raw = toml::to_string(&value).unwrap();
+
+    let cfg = migrate_to_current(&raw).expect("retired [wss] section must not fail load");
+    cfg.validate()
+        .expect("retired [wss] section must not fail validation");
+
+    let warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, "wss_transport_removed");
+    assert_eq!(warnings[0].path, "wss");
+}
+
+#[test]
 fn v2_matrix_allowed_users_folds_and_allowed_rooms_stays() {
     let v3 = migrate_v2(
         r#"

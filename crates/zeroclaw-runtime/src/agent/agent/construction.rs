@@ -113,30 +113,6 @@ impl Agent {
         .await
     }
 
-    /// Build a daemon-backed TUI Agent whose structured-history cap follows
-    /// the shared config after reloads.
-    pub async fn from_live_config_with_tui_env(
-        live_config: Arc<parking_lot::RwLock<Config>>,
-        agent_alias: &str,
-        session_cwd: Option<&Path>,
-        initialize_mcp: bool,
-        exclude_memory: bool,
-        tui_env: Option<std::collections::HashMap<String, String>>,
-    ) -> Result<Self> {
-        let config = live_config.read().clone();
-        Self::from_config_with_session_cwd_and_mcp_approval_mode(
-            &config,
-            agent_alias,
-            session_cwd,
-            initialize_mcp,
-            true,
-            exclude_memory,
-            tui_env,
-            Some(live_config),
-        )
-        .await
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn from_config_with_session_cwd_and_mcp_approval_mode(
         config: &Config,

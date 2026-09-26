@@ -7,8 +7,8 @@ needs them.
 The canonical source is `zeroclaw_config::schema::Config`, loaded from
 `config.toml`. User-facing config surfaces, the generated config reference, the
 gateway config editor, env-var overrides, `zeroclaw config set`,
-`zeroclaw config patch`, Quickstart, and RPC config methods all route through
-that same typed schema.
+`zeroclaw config patch`, and Quickstart all route through that same typed
+schema.
 
 For the build order, tracked-output rules, and drift checks that turn the typed schema into the config reference, see [Generated documentation pipeline](./generated-documentation-pipeline.md).
 
@@ -21,10 +21,9 @@ For the build order, tracked-output rules, and drift checks that turn the typed 
 | Bootstrap location | `ZEROCLAW_CONFIG_DIR`, `ZEROCLAW_DATA_DIR`, deprecated `ZEROCLAW_WORKSPACE` | Environment only | Before `Config` exists |
 | Schema-mirror overrides | `ZEROCLAW_<lowercase_path>` with `__` for dots | In-memory only | Each `Config::load_or_init()` |
 | CLI config writes | `zeroclaw config set`, `config patch`, aliases, model helpers | `save_dirty()` to `config.toml` | Next load/reload unless the current command uses the new in-memory value |
-| RPC config writes | `config/*` RPC methods | `save_dirty()` to `config.toml` | RPC context updates immediately; daemon-owned subsystems need reload |
-| Quickstart apply | CLI apply path | `save_dirty()` to `config.toml` | Web and RPC can signal daemon reload; standalone CLI applies on next load/reload |
+| Quickstart apply | CLI apply path | `save_dirty()` to `config.toml` | Web can signal daemon reload; standalone CLI applies on next load/reload |
 | Gateway config writes | Config API handlers and `persist_and_swap()` | `save_dirty()` to `config.toml` | Gateway-visible state updates immediately; daemon subsystems apply after reload |
-| Daemon reload | `/admin/reload`, RPC `config/reload`, or the in-process reload channel | Re-reads `config.toml` | Recreates daemon subsystems in the same PID |
+| Daemon reload | `/admin/reload` or the in-process reload channel | Re-reads `config.toml` | Recreates daemon subsystems in the same PID |
 
 Do not hand-edit the generated config reference. If a field, enum, alias
 section, secret marker, or description is wrong there, fix the schema or the
@@ -71,7 +70,7 @@ Review config changes with this invariant in mind:
 
 Credential-like runtime values are still config values. API keys, OAuth tokens, endpoint URLs, and other provider/channel credentials should flow through the typed config schema, config secret handling, or schema-mirror `ZEROCLAW_*` overrides before a runtime constructor sees them.
 
-Do not add ad-hoc `std::env::var("PROVIDER_API_KEY")` reads inside provider, channel, tool, transcription, TTS, memory, or gateway constructors. That creates a second credential source outside `Config`, bypasses env-override visibility, and can make CLI, gateway, RPC/TUI, quickstart, and reload behavior disagree.
+Do not add ad-hoc `std::env::var("PROVIDER_API_KEY")` reads inside provider, channel, tool, transcription, TTS, memory, or gateway constructors. That creates a second credential source outside `Config`, bypasses env-override visibility, and can make CLI, gateway, quickstart, and reload behavior disagree.
 
 If ZeroClaw intentionally supports a native environment bridge for an integration family, document that bridge at the integration boundary and map it into the same typed config value before construction. Otherwise, ecosystem-default shell names such as `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, or `QDRANT_URL` should be bridged by operators into the corresponding `ZEROCLAW_*` schema-mirror variable; see [Environment variables](../reference/env-vars.md#bridging-ecosystem-default-env-vars).
 
@@ -208,7 +207,7 @@ For config-schema, env-var, default, or reload changes, ask:
 - Does the generated reference come from code rather than hand-maintained
   prose?
 - Are env overrides load-time only and masked during saves?
-- Do CLI, gateway, RPC/TUI, and quickstart surfaces agree on the dotted path?
+- Do CLI, gateway, and quickstart surfaces agree on the dotted path?
 - Are credentials resolved through typed config or documented schema-mirror bridges rather than ad-hoc provider-native env reads?
 - Does a save survive process reload, not just immediate in-memory rendering?
 - Does the PR say whether users need reload, restart, migration, or manual
@@ -221,7 +220,6 @@ For config-schema, env-var, default, or reload changes, ask:
 - Config schema and persistence: `crates/zeroclaw-config/src/schema.rs`
 - Env override grammar: `crates/zeroclaw-config/src/env_overrides.rs`
 - Config CLI commands: `src/main.rs`
-- RPC and TUI config methods: `crates/zeroclaw-runtime/src/rpc/dispatch.rs`
 - Shared Quickstart apply path: `crates/zeroclaw-runtime/src/quickstart/mod.rs`
 - Web Quickstart reload signaling: `crates/zeroclaw-gateway/src/api_quickstart.rs`
 - Gateway config API and reload banner: `crates/zeroclaw-gateway/src/api_config.rs`

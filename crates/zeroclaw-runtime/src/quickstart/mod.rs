@@ -16,7 +16,6 @@ use zeroclaw_config::schema::{Config, WireApi};
 #[serde(rename_all = "snake_case")]
 pub enum Surface {
     Web,
-    Tui,
     Cli,
     Test,
 }
@@ -25,7 +24,6 @@ impl Surface {
     pub fn as_str(self) -> &'static str {
         match self {
             Surface::Web => "web",
-            Surface::Tui => "tui",
             Surface::Cli => "cli",
             Surface::Test => "test",
         }
@@ -386,32 +384,6 @@ pub async fn apply_with_surface(
         "quickstart: apply complete"
     );
     Ok(applied)
-}
-
-pub fn record_dismissed(run_id: &str, surface: Surface, last_step: Option<QuickstartStep>) {
-    let last_step_str = last_step
-        .map(|s| match s {
-            QuickstartStep::ModelProvider => "model_provider",
-            QuickstartStep::RiskProfile => "risk_profile",
-            QuickstartStep::RuntimeProfile => "runtime_profile",
-            QuickstartStep::Memory => "memory",
-            QuickstartStep::Channels => "channels",
-            QuickstartStep::PeerGroups => "peer_groups",
-            QuickstartStep::Agent => "agent",
-        })
-        .unwrap_or("none");
-    ::zeroclaw_log::record!(
-        INFO,
-        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-            .with_attrs(::serde_json::json!({
-                "quickstart.run_id": run_id,
-                "quickstart.surface": surface.as_str(),
-                "last_step": last_step_str,
-                "dismissed": true,
-            })),
-        "quickstart: dismissed"
-    );
 }
 
 /// `onboard_state.quickstart_completed` is false **and** no

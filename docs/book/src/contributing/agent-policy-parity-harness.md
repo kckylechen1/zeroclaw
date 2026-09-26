@@ -23,7 +23,7 @@ runtime knobs) are assembled at several distinct sites:
 | Path | Where it builds the engine input |
 |---|---|
 | Channel | the channels orchestrator |
-| RPC | the `Agent` struct (`from_config` / `turn`) |
+| `Agent` API (ACP) | the `Agent` struct (`from_config` / `turn`) |
 | Gateway | the gateway server |
 | `loop_::run` | non-interactive runs: cron jobs, the daemon heartbeat, sub-agent spawning |
 | Delegate | sub-agent delegation |

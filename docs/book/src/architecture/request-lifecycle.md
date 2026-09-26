@@ -85,7 +85,7 @@ Outbound messages go back through the same channel adapter. Adapters with multi-
 - Channel orchestration: `crates/zeroclaw-channels/src/orchestrator/`
 - Provider streaming: `crates/zeroclaw-api/src/model_provider.rs` (`StreamEvent` enum, re-exported from `zeroclaw-providers`), `compatible.rs` (SSE parser)
 
-Since #7415, every transport (channels, CLI, cron, gateway WebSocket, RPC socket, ACP, and the embedded `Agent` API) runs the same turn engine: `run_tool_call_loop` in `crates/zeroclaw-runtime/src/agent/turn/`. The streaming and embedded entry points are thin wrappers in `agent.rs` that set per-caller knobs (dedup, iteration-cap behavior, event emission) around the shared loop. The `turn/` module is one file per step:
+Since #7415, every transport (channels, CLI, cron, gateway WebSocket, ACP, and the embedded `Agent` API) runs the same turn engine: `run_tool_call_loop` in `crates/zeroclaw-runtime/src/agent/turn/`. The streaming and embedded entry points are thin wrappers in `agent.rs` that set per-caller knobs (dedup, iteration-cap behavior, event emission) around the shared loop. The `turn/` module is one file per step:
 
 | File(s) | Step |
 |---|---|

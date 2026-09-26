@@ -9,13 +9,101 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use zeroclaw_config::api_error::{ConfigApiCode, ConfigApiError};
-use zeroclaw_runtime::rpc::types::{
-    CatalogModelProvider, CatalogModelsResult, CatalogResponse, ConfigSectionEntry,
-    ConfigSectionsResult, ConfigStatusResult, PickerItem, PickerResponse, SelectItemResponse,
-};
 
 use super::AppState;
 use super::api::require_auth;
+
+// ── Response wire types ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogModelProvider {
+    pub name: String,
+    pub display_name: String,
+    pub local: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogResponse {
+    pub model_providers: Vec<CatalogModelProvider>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogModelsResult {
+    pub model_provider: String,
+    pub models: Vec<String>,
+    /// Optional pricing data keyed by model id. Populated when the
+    /// provider's `/models` endpoint returns pricing (Kilo Gateway,
+    /// OpenRouter, etc.). Absent for catalog fallbacks without pricing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing:
+        Option<std::collections::HashMap<String, zeroclaw_api::model_provider::ModelPricing>>,
+    pub local: bool,
+    pub live: bool,
+}
+
+/// A config section entry for the dashboard sidebar.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigSectionEntry {
+    pub key: String,
+    pub label: String,
+    pub help: String,
+    pub has_picker: bool,
+    pub completed: bool,
+    /// Whether the section currently has enough usable config for the
+    /// first-run path.
+    #[serde(default)]
+    pub ready: bool,
+    /// Display group for the dashboard sidebar.
+    #[serde(default)]
+    pub group: String,
+    /// `true` when this section is part of the canonical Quickstart list.
+    #[serde(default)]
+    pub is_quickstart: bool,
+    /// Editor shape (direct form / one-tier alias map / typed-family map /
+    /// backend picker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<zeroclaw_config::sections::SectionShape>,
+    #[serde(default)]
+    pub cost_category: String,
+}
+
+/// Response for `GET /api/config/sections`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigSectionsResult {
+    pub sections: Vec<ConfigSectionEntry>,
+}
+
+/// Config readiness status for the dashboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigStatusResult {
+    pub needs_quickstart: bool,
+    pub reason: String,
+    pub has_partial_state: bool,
+    pub missing: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PickerItem {
+    pub key: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub badge: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PickerResponse {
+    pub section: String,
+    pub items: Vec<PickerItem>,
+    pub help: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectItemResponse {
+    pub fields_prefix: String,
+    pub created: bool,
+}
 
 /// `GET /api/config/catalog` — list every model provider the CLI wizard knows
 /// about. The dashboard shows these in the "+ Add model provider" picker so

@@ -7,10 +7,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
-use zeroclaw_runtime::rpc::types::{
-    AgentSkillEntry, AgentSkillsResult, DroppedSkillEntry, ShadowedSkillEntry, SkillBundleEntry,
-    SkillListEntry, SkillsBundlesResult, SkillsListResult, SkillsReadResult,
-};
 use zeroclaw_runtime::skills::{
     DroppedSkill, EffectiveSkill, RemoveMode, ScaffoldOptions, ServiceError, SkillDropReason,
     SkillFrontmatter, SkillOrigin, SkillsService, SlashOptionKindDescriptor,
@@ -18,6 +14,100 @@ use zeroclaw_runtime::skills::{
 
 use super::AppState;
 use super::api::require_auth;
+
+// ── Response wire types ─────────────────────────────────────────────
+
+/// Wire representation of a skill bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillBundleEntry {
+    pub alias: String,
+    pub directory: String,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsBundlesResult {
+    pub bundles: Vec<SkillBundleEntry>,
+}
+
+/// Wire representation of a skill in a list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillListEntry {
+    pub bundle: String,
+    pub name: String,
+    pub directory: String,
+    pub frontmatter: SkillFrontmatter,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsListResult {
+    pub skills: Vec<SkillListEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSkillEntry {
+    pub name: String,
+    pub description: String,
+    /// `"workspace"` | `"open-skills"` | `"plugin"` | `"bundle"`.
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    pub editable: bool,
+    /// Lower-precedence same-name skills this one shadows. Empty normally;
+    /// additive so old clients ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadowed: Vec<ShadowedSkillEntry>,
+}
+
+/// A lower-precedence same-name skill shadowed by a winning skill
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShadowedSkillEntry {
+    pub name: String,
+    /// `"workspace"` | `"open-skills"` | `"plugin"` | `"bundle"`.
+    pub origin: String,
+}
+
+/// A candidate skill the audited resolver dropped (security audit failed,
+/// unauditable, or manifest parse error)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DroppedSkillEntry {
+    pub name: String,
+    pub origin: String,
+    /// `"audit_findings"` | `"audit_error"` | `"manifest_parse_error"`.
+    pub reason_kind: String,
+    /// Human-readable detail (the audit summary / error text).
+    pub reason: String,
+    /// True when the secure-default script policy is the blocker, so the
+    /// dashboard can surface the `skills.allow_scripts = true` remediation
+    /// without parsing `reason`. Additive; old clients ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scripts_blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSkillsResult {
+    pub agent: String,
+    pub skills: Vec<AgentSkillEntry>,
+    /// Audit-dropped candidates the resolver skipped. Empty normally;
+    /// additive so old clients ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<DroppedSkillEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsReadResult {
+    pub bundle: String,
+    pub name: String,
+    pub frontmatter: SkillFrontmatter,
+    pub body: String,
+}
 
 // ── HTTP-specific request shapes (not shared) ───────────────────────
 
