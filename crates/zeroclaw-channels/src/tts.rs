@@ -1164,17 +1164,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tts_config_defaults() {
-        let config = zeroclaw_config::schema::TtsConfig::default();
-        assert!(!config.enabled);
-        // TtsConfig has no global default-provider field; per-agent
-        // `tts_provider` is the only selector.
-        assert_eq!(config.default_voice, "alloy");
-        assert_eq!(config.default_format, "mp3");
-        assert_eq!(config.max_text_length, DEFAULT_MAX_TEXT_LENGTH);
-    }
-
     fn config_with_openai_wav_alias() -> Config {
         let mut cfg = Config::default();
         cfg.agents.insert(

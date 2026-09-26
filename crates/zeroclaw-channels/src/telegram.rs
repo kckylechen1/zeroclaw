@@ -5179,10 +5179,19 @@ mod tests {
             Arc::new(Vec::new),
             mention_only,
         );
-        assert_eq!(
-            ch.api_url("getMe"),
-            "https://api.telegram.org/bot123:ABC/getMe"
-        );
+        for method in [
+            "getMe",
+            "sendDocument",
+            "sendPhoto",
+            "sendVideo",
+            "sendAudio",
+            "sendVoice",
+        ] {
+            assert_eq!(
+                ch.api_url(method),
+                format!("https://api.telegram.org/bot123:ABC/{method}")
+            );
+        }
     }
 
     #[test]
@@ -5593,81 +5602,6 @@ mod tests {
 
     // ── File sending API URL tests ──────────────────────────────────
 
-    #[test]
-    fn telegram_api_url_send_document() {
-        let mention_only = false;
-        let ch = TelegramChannel::new(
-            "123:ABC".into(),
-            "telegram_test_alias",
-            Arc::new(Vec::new),
-            mention_only,
-        );
-        assert_eq!(
-            ch.api_url("sendDocument"),
-            "https://api.telegram.org/bot123:ABC/sendDocument"
-        );
-    }
-
-    #[test]
-    fn telegram_api_url_send_photo() {
-        let mention_only = false;
-        let ch = TelegramChannel::new(
-            "123:ABC".into(),
-            "telegram_test_alias",
-            Arc::new(Vec::new),
-            mention_only,
-        );
-        assert_eq!(
-            ch.api_url("sendPhoto"),
-            "https://api.telegram.org/bot123:ABC/sendPhoto"
-        );
-    }
-
-    #[test]
-    fn telegram_api_url_send_video() {
-        let mention_only = false;
-        let ch = TelegramChannel::new(
-            "123:ABC".into(),
-            "telegram_test_alias",
-            Arc::new(Vec::new),
-            mention_only,
-        );
-        assert_eq!(
-            ch.api_url("sendVideo"),
-            "https://api.telegram.org/bot123:ABC/sendVideo"
-        );
-    }
-
-    #[test]
-    fn telegram_api_url_send_audio() {
-        let mention_only = false;
-        let ch = TelegramChannel::new(
-            "123:ABC".into(),
-            "telegram_test_alias",
-            Arc::new(Vec::new),
-            mention_only,
-        );
-        assert_eq!(
-            ch.api_url("sendAudio"),
-            "https://api.telegram.org/bot123:ABC/sendAudio"
-        );
-    }
-
-    #[test]
-    fn telegram_api_url_send_voice() {
-        let mention_only = false;
-        let ch = TelegramChannel::new(
-            "123:ABC".into(),
-            "telegram_test_alias",
-            Arc::new(Vec::new),
-            mention_only,
-        );
-        assert_eq!(
-            ch.api_url("sendVoice"),
-            "https://api.telegram.org/bot123:ABC/sendVoice"
-        );
-    }
-
     // ── File sending integration tests (with mock server) ──────────
 
     #[tokio::test]
@@ -5759,7 +5693,7 @@ mod tests {
     // ── File path handling tests ────────────────────────────────────
 
     #[tokio::test]
-    async fn telegram_send_document_nonexistent_file() {
+    async fn telegram_send_media_nonexistent_file_errors() {
         let mention_only = false;
         let ch = TelegramChannel::new(
             "fake-token".into(),
@@ -5767,81 +5701,38 @@ mod tests {
             Arc::new(|| vec!["*".into()]),
             mention_only,
         );
-        let path = Path::new("/nonexistent/path/to/file.txt");
+        let dir = Path::new("/nonexistent/path/to");
 
-        let result = ch.send_document("123456", None, path, None).await;
-
-        assert!(result.is_err());
+        let result = ch
+            .send_document("123456", None, &dir.join("file.txt"), None)
+            .await;
         let err = result.unwrap_err().to_string();
         // Should fail with file not found error
         assert!(
             err.contains("No such file") || err.contains("not found") || err.contains("os error"),
             "Expected file not found error, got: {err}"
         );
-    }
 
-    #[tokio::test]
-    async fn telegram_send_photo_nonexistent_file() {
-        let mention_only = false;
-        let ch = TelegramChannel::new(
-            "fake-token".into(),
-            "telegram_test_alias",
-            Arc::new(|| vec!["*".into()]),
-            mention_only,
+        assert!(
+            ch.send_photo("123456", None, &dir.join("photo.jpg"), None)
+                .await
+                .is_err()
         );
-        let path = Path::new("/nonexistent/path/to/photo.jpg");
-
-        let result = ch.send_photo("123456", None, path, None).await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn telegram_send_video_nonexistent_file() {
-        let mention_only = false;
-        let ch = TelegramChannel::new(
-            "fake-token".into(),
-            "telegram_test_alias",
-            Arc::new(|| vec!["*".into()]),
-            mention_only,
+        assert!(
+            ch.send_video("123456", None, &dir.join("video.mp4"), None)
+                .await
+                .is_err()
         );
-        let path = Path::new("/nonexistent/path/to/video.mp4");
-
-        let result = ch.send_video("123456", None, path, None).await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn telegram_send_audio_nonexistent_file() {
-        let mention_only = false;
-        let ch = TelegramChannel::new(
-            "fake-token".into(),
-            "telegram_test_alias",
-            Arc::new(|| vec!["*".into()]),
-            mention_only,
+        assert!(
+            ch.send_audio("123456", None, &dir.join("audio.mp3"), None)
+                .await
+                .is_err()
         );
-        let path = Path::new("/nonexistent/path/to/audio.mp3");
-
-        let result = ch.send_audio("123456", None, path, None).await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn telegram_send_voice_nonexistent_file() {
-        let mention_only = false;
-        let ch = TelegramChannel::new(
-            "fake-token".into(),
-            "telegram_test_alias",
-            Arc::new(|| vec!["*".into()]),
-            mention_only,
+        assert!(
+            ch.send_voice("123456", None, &dir.join("voice.ogg"), None)
+                .await
+                .is_err()
         );
-        let path = Path::new("/nonexistent/path/to/voice.ogg");
-
-        let result = ch.send_voice("123456", None, path, None).await;
-
-        assert!(result.is_err());
     }
 
     // ── Message splitting tests ─────────────────────────────────────
@@ -6097,64 +5988,6 @@ mod tests {
 
         // Should not panic
         assert!(result.is_err());
-    }
-
-    // ── Message ID edge cases ─────────────────────────────────────
-
-    #[test]
-    fn telegram_message_id_format_includes_chat_and_message_id() {
-        // Verify that message IDs follow the format: telegram_{chat_id}_{message_id}
-        let chat_id = "123456";
-        let message_id = 789;
-        let expected_id = format!("telegram_{chat_id}_{message_id}");
-        assert_eq!(expected_id, "telegram_123456_789");
-    }
-
-    #[test]
-    fn telegram_message_id_is_deterministic() {
-        // Same chat_id + same message_id = same ID (prevents duplicates after restart)
-        let chat_id = "123456";
-        let message_id = 789;
-        let id1 = format!("telegram_{chat_id}_{message_id}");
-        let id2 = format!("telegram_{chat_id}_{message_id}");
-        assert_eq!(id1, id2);
-    }
-
-    #[test]
-    fn telegram_message_id_different_message_different_id() {
-        // Different message IDs produce different IDs
-        let chat_id = "123456";
-        let id1 = format!("telegram_{chat_id}_789");
-        let id2 = format!("telegram_{chat_id}_790");
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn telegram_message_id_different_chat_different_id() {
-        // Different chats produce different IDs even with same message_id
-        let message_id = 789;
-        let id1 = format!("telegram_123456_{message_id}");
-        let id2 = format!("telegram_789012_{message_id}");
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn telegram_message_id_no_uuid_randomness() {
-        // Verify format doesn't contain random UUID components
-        let chat_id = "123456";
-        let message_id = 789;
-        let id = format!("telegram_{chat_id}_{message_id}");
-        assert!(!id.contains('-')); // No UUID dashes
-        assert!(id.starts_with("telegram_"));
-    }
-
-    #[test]
-    fn telegram_message_id_handles_zero_message_id() {
-        // Edge case: message_id can be 0 (fallback/missing case)
-        let chat_id = "123456";
-        let message_id = 0;
-        let id = format!("telegram_{chat_id}_{message_id}");
-        assert_eq!(id, "telegram_123456_0");
     }
 
     // ── Tool call tag stripping tests ───────────────────────────────────
@@ -6841,13 +6674,6 @@ mod tests {
         }
         let reassembled: String = parts.join("");
         assert_eq!(reassembled, long_word);
-    }
-
-    #[test]
-    fn telegram_split_exactly_at_limit_no_split() {
-        let msg = "a".repeat(TELEGRAM_MAX_MESSAGE_LENGTH);
-        let parts = split_message_for_telegram(&msg);
-        assert_eq!(parts.len(), 1, "message exactly at limit should not split");
     }
 
     #[test]

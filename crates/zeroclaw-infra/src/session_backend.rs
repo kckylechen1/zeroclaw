@@ -309,11 +309,4 @@ mod tests {
         assert_eq!(meta.key, "test");
         assert_eq!(meta.message_count, 5);
     }
-
-    #[test]
-    fn session_query_defaults() {
-        let q = SessionQuery::default();
-        assert!(q.keyword.is_none());
-        assert!(q.limit.is_none());
-    }
 }

@@ -517,13 +517,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_description_non_empty() {
-        let tool =
-            GoogleWorkspaceTool::new(test_security(), vec![], vec![], None, None, 60, 30, false);
-        assert!(!tool.description().is_empty());
-    }
-
-    #[test]
     fn tool_schema_has_required_fields() {
         let tool =
             GoogleWorkspaceTool::new(test_security(), vec![], vec![], None, None, 60, 30, false);

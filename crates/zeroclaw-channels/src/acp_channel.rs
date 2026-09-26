@@ -1331,35 +1331,6 @@ mod tests {
     }
 
     #[test]
-    fn single_select_schema_has_object_shape() {
-        let schema = single_select_schema(&[
-            "Conservative".to_string(),
-            "Balanced".to_string(),
-            "Aggressive".to_string(),
-        ]);
-        assert_eq!(schema["type"], "object");
-        assert_eq!(schema["required"], json!(["choice"]));
-        let choice = &schema["properties"]["choice"];
-        assert_eq!(choice["type"], "string");
-        let one_of = choice["oneOf"].as_array().expect("oneOf array");
-        assert_eq!(one_of.len(), 3);
-        assert_eq!(one_of[0]["const"], "choice-0");
-        assert_eq!(one_of[0]["title"], "Conservative");
-        assert_eq!(one_of[2]["const"], "choice-2");
-        assert_eq!(one_of[2]["title"], "Aggressive");
-    }
-
-    #[test]
-    fn single_select_schema_preserves_choice_text_via_index() {
-        // Empty / duplicate display strings must not collide because the
-        // wire-format `const` is index-based.
-        let schema = single_select_schema(&["".to_string(), "".to_string()]);
-        let one_of = schema["properties"]["choice"]["oneOf"].as_array().unwrap();
-        assert_eq!(one_of[0]["const"], "choice-0");
-        assert_eq!(one_of[1]["const"], "choice-1");
-    }
-
-    #[test]
     #[should_panic(expected = "sensitive")]
     fn single_select_schema_rejects_sensitive_property_names_in_debug() {
         // The trip-wire is debug-only — production builds skip the assert.

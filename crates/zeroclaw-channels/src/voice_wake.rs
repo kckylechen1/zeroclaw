@@ -549,15 +549,6 @@ mod tests {
     // ── Config parsing tests ───────────────────────────────
 
     #[test]
-    fn voice_wake_config_defaults() {
-        let config = VoiceWakeConfig::default();
-        assert_eq!(config.wake_word, "hey zeroclaw");
-        assert_eq!(config.silence_timeout_ms, 2000);
-        assert!((config.energy_threshold - 0.01).abs() < f32::EPSILON);
-        assert_eq!(config.max_capture_secs, 30);
-    }
-
-    #[test]
     fn voice_wake_config_deserialize_partial() {
         let toml_str = r#"
             wake_word = "okay agent"

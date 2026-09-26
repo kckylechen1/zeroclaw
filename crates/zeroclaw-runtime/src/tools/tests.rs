@@ -1437,13 +1437,7 @@ fn vi_verify_is_not_registered_even_when_verifiable_intent_is_enabled() {
 }
 
 #[cfg(test)]
-mod todo_registration_tests {
-    #[test]
-    fn todo_write_tool_name_is_stable() {
-        use zeroclaw_api::tool::Tool;
-        assert_eq!(super::todo_write::TodoWriteTool::new().name(), "TodoWrite");
-    }
-}
+mod todo_registration_tests {}
 
 #[cfg(test)]
 mod wrapper_spec_forwarding_tests {

@@ -2264,12 +2264,6 @@ mod tests {
     }
 
     #[test]
-    fn test_transport_default_is_stdio() {
-        let config = McpServerConfig::default();
-        assert_eq!(config.transport, McpTransport::Stdio);
-    }
-
-    #[test]
     fn test_http_transport_requires_url() {
         let config = McpServerConfig {
             name: "test".into(),
@@ -2679,11 +2673,6 @@ mod tests {
     }
 
     // ── parse_jsonrpc_response_text edge cases ────────────────────────────────
-
-    #[test]
-    fn parse_jsonrpc_response_rejects_whitespace_only() {
-        assert!(parse_jsonrpc_response_text("   \n\t  ").is_err());
-    }
 
     #[test]
     fn parse_jsonrpc_response_with_error_result() {

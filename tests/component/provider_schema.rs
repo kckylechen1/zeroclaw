@@ -7,84 +7,36 @@ use zeroclaw::providers::traits::{ChatMessage, ChatResponse, ToolCall};
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn chat_message_system_role_correct() {
-    let msg = ChatMessage::system("You are a helpful assistant");
-    assert_eq!(msg.role, "system");
-    assert_eq!(msg.content, "You are a helpful assistant");
+fn chat_message_constructors_set_role_and_content() {
+    for (msg, role) in [
+        (ChatMessage::system("body"), "system"),
+        (ChatMessage::user("body"), "user"),
+        (ChatMessage::assistant("body"), "assistant"),
+        (ChatMessage::tool("body"), "tool"),
+    ] {
+        assert_eq!(msg.role, role);
+        assert_eq!(msg.content, "body");
+    }
 }
 
 #[test]
-fn chat_message_user_role_correct() {
-    let msg = ChatMessage::user("Hello");
-    assert_eq!(msg.role, "user");
-    assert_eq!(msg.content, "Hello");
-}
-
-#[test]
-fn chat_message_assistant_role_correct() {
-    let msg = ChatMessage::assistant("Hi there!");
-    assert_eq!(msg.role, "assistant");
-    assert_eq!(msg.content, "Hi there!");
-}
-
-#[test]
-fn chat_message_tool_role_correct() {
-    let msg = ChatMessage::tool("tool result");
-    assert_eq!(msg.role, "tool");
-    assert_eq!(msg.content, "tool result");
-}
-
-#[test]
-fn chat_message_serializes_to_json_with_required_fields() {
+fn chat_message_json_has_role_and_content_and_roundtrips() {
     let msg = ChatMessage::user("test message");
     let json = serde_json::to_value(&msg).unwrap();
-
-    assert!(json.get("role").is_some(), "JSON must have 'role' field");
-    assert!(
-        json.get("content").is_some(),
-        "JSON must have 'content' field"
-    );
     assert_eq!(json["role"], "user");
     assert_eq!(json["content"], "test message");
-}
 
-#[test]
-fn chat_message_json_roundtrip() {
-    let original = ChatMessage::assistant("response text");
-    let json_str = serde_json::to_string(&original).unwrap();
-    let parsed: ChatMessage = serde_json::from_str(&json_str).unwrap();
-
-    assert_eq!(parsed.role, original.role);
-    assert_eq!(parsed.content, original.content);
+    let parsed: ChatMessage = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed.role, msg.role);
+    assert_eq!(parsed.content, msg.content);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ToolCall serialization- tool_call_id field)
+// ToolCall serialization (tool_call_id field)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn tool_call_has_required_fields() {
-    let tc = ToolCall {
-        id: "call_abc123".into(),
-        name: "web_search".into(),
-        arguments: r#"{"query": "rust programming"}"#.into(),
-        extra_content: None,
-    };
-
-    let json = serde_json::to_value(&tc).unwrap();
-    assert!(json.get("id").is_some(), "ToolCall must have 'id' field");
-    assert!(
-        json.get("name").is_some(),
-        "ToolCall must have 'name' field"
-    );
-    assert!(
-        json.get("arguments").is_some(),
-        "ToolCall must have 'arguments' field"
-    );
-}
-
-#[test]
-fn tool_call_id_preserved_in_serialization() {
+fn tool_call_json_has_required_fields_and_preserves_id() {
     let tc = ToolCall {
         id: "call_deepseek_42".into(),
         name: "shell".into(),
@@ -92,9 +44,12 @@ fn tool_call_id_preserved_in_serialization() {
         extra_content: None,
     };
 
-    let json_str = serde_json::to_string(&tc).unwrap();
-    let parsed: ToolCall = serde_json::from_str(&json_str).unwrap();
+    let json = serde_json::to_value(&tc).unwrap();
+    for field in ["id", "name", "arguments"] {
+        assert!(json.get(field).is_some(), "ToolCall must have '{field}'");
+    }
 
+    let parsed: ToolCall = serde_json::from_value(json).unwrap();
     assert_eq!(
         parsed.id, "call_deepseek_42",
         "tool_call_id must survive roundtrip"
@@ -103,55 +58,25 @@ fn tool_call_id_preserved_in_serialization() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tool message with tool_call_id (DeepSeek requirement)
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
 // ChatResponse structure
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn chat_response_text_only() {
-    let resp = ChatResponse {
+fn chat_response_text_accessors() {
+    let text_only = ChatResponse {
         text: Some("Hello world".into()),
         tool_calls: vec![],
         usage: None,
         reasoning_content: None,
     };
+    assert_eq!(text_only.text_or_empty(), "Hello world");
+    assert!(!text_only.has_tool_calls());
 
-    assert_eq!(resp.text_or_empty(), "Hello world");
-    assert!(!resp.has_tool_calls());
-}
-
-#[test]
-fn chat_response_with_tool_calls() {
-    let resp = ChatResponse {
-        text: Some(String::new()),
-        tool_calls: vec![ToolCall {
-            id: "tc_1".into(),
-            name: "echo".into(),
-            arguments: "{}".into(),
-            extra_content: None,
-        }],
-        usage: None,
-        reasoning_content: None,
-    };
-
-    assert!(resp.has_tool_calls());
-    assert_eq!(resp.tool_calls.len(), 1);
-    assert_eq!(resp.tool_calls[0].name, "echo");
-}
-
-#[test]
-fn chat_response_text_or_empty_handles_none() {
-    let resp = ChatResponse {
+    let no_text = ChatResponse {
         text: None,
-        tool_calls: vec![],
-        usage: None,
-        reasoning_content: None,
+        ..text_only
     };
-
-    assert_eq!(resp.text_or_empty(), "");
+    assert_eq!(no_text.text_or_empty(), "");
 }
 
 #[test]
@@ -178,18 +103,7 @@ fn chat_response_multiple_tool_calls() {
 
     assert!(resp.has_tool_calls());
     assert_eq!(resp.tool_calls.len(), 2);
+    assert_eq!(resp.tool_calls[0].name, "shell");
     // Each tool call should have a distinct id
     assert_ne!(resp.tool_calls[0].id, resp.tool_calls[1].id);
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AuthStyle variants
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ModelProvider naming consistency
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Conversation history message ordering
-// ─────────────────────────────────────────────────────────────────────────────

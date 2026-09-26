@@ -13,24 +13,6 @@ fn assert_provider_ok(name: &str, key: Option<&str>, url: Option<&str>) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Factory resolution: each major model_provider name resolves without error
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Factory resolution: alias variants map to same model_provider
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn factory_grok_alias_resolves_to_xai() {
-    assert_provider_ok("grok", Some("test-key"), None);
-}
-
-#[test]
-fn factory_kimi_alias_resolves_to_moonshot() {
-    assert_provider_ok("kimi", Some("test-key"), None);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Custom URL model_provider creation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -57,10 +39,6 @@ fn factory_custom_empty_url_rejected() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OpenAiCompatibleModelProvider: credential and auth style wiring
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
 // ModelProvider with api_url override (simulates- Ollama api_url config)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -71,99 +49,6 @@ fn factory_openai_with_custom_api_url() {
         Some("test-key"),
         Some("https://custom-openai-proxy.example.com/v1"),
     );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ModelProvider default convenience factory
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Primary model_providers with custom implementations
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// OpenAI-compatible ecosystem model_providers
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn factory_resolves_opencode_go_provider() {
-    assert_provider_ok("opencode-go", Some("test-key"), None);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// China region model_providers
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Local/self-hosted model_providers
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Cloud AI endpoints
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn factory_resolves_ovhcloud_provider() {
-    assert_provider_ok("ovhcloud", Some("test-key"), None);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Alias resolution tests
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn factory_google_alias_resolves_to_gemini() {
-    assert_provider_ok("google", Some("test-key"), None);
-}
-
-#[test]
-fn factory_google_gemini_alias_resolves_to_gemini() {
-    assert_provider_ok("google-gemini", Some("test-key"), None);
-}
-
-#[test]
-fn factory_aws_bedrock_alias_resolves_to_bedrock() {
-    assert_provider_ok("aws-bedrock", None, None);
-}
-
-#[test]
-fn factory_github_copilot_alias_resolves_to_copilot() {
-    assert_provider_ok("github-copilot", Some("test-key"), None);
-}
-
-#[test]
-fn factory_vercel_ai_alias_resolves_to_vercel() {
-    assert_provider_ok("vercel-ai", Some("test-key"), None);
-}
-
-#[test]
-fn factory_cloudflare_ai_alias_resolves_to_cloudflare() {
-    assert_provider_ok("cloudflare-ai", Some("test-key"), None);
-}
-
-#[test]
-fn factory_opencode_zen_alias_resolves_to_opencode() {
-    assert_provider_ok("opencode-zen", Some("test-key"), None);
-}
-
-#[test]
-fn factory_lm_studio_alias_resolves_to_lmstudio() {
-    assert_provider_ok("lm-studio", None, None);
-}
-
-#[test]
-fn factory_llama_cpp_alias_resolves_to_llamacpp() {
-    assert_provider_ok("llama.cpp", None, None);
-}
-
-#[test]
-fn factory_nvidia_nim_alias_resolves_to_nvidia() {
-    assert_provider_ok("nvidia-nim", Some("test-key"), None);
-}
-
-#[test]
-fn factory_build_nvidia_com_alias_resolves_to_nvidia() {
-    assert_provider_ok("build.nvidia.com", Some("test-key"), None);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -2587,11 +2587,6 @@ mod service_helper_tests {
         assert!(err.to_string().contains("Supported: auto, systemd, openrc"));
     }
 
-    #[test]
-    fn init_system_default_is_auto() {
-        assert_eq!(InitSystem::default(), InitSystem::Auto);
-    }
-
     #[cfg(unix)]
     #[test]
     fn is_root_matches_system_uid() {

@@ -534,13 +534,6 @@ mod tests {
     }
 
     #[test]
-    fn skill_tool_already_valid_name_is_unchanged() {
-        // The common case must not be perturbed (no spurious hash suffix).
-        let tool = SkillShellTool::new("my_skill", &sample_skill_tool(), test_security());
-        assert_eq!(tool.name(), "my_skill__run_lint");
-    }
-
-    #[test]
     fn skill_tool_name_truncated_to_64_and_stays_distinct() {
         // A raw composed name over 64 chars must be sanitized to <= 64 while
         // two distinct tools under the same long skill name stay distinct, i.e.

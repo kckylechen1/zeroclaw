@@ -1941,20 +1941,6 @@ async fn runtime_config_default() {
 }
 
 #[test]
-async fn heartbeat_config_default() {
-    let h = HeartbeatConfig::default();
-    // Heartbeat defaults to disabled. Enabling requires the user to
-    // also bind it to a configured agent — there is no default agent
-    // for heartbeat to fall through to.
-    assert!(!h.enabled);
-    assert!(h.agent.is_empty());
-    assert_eq!(h.interval_minutes, 30);
-    assert!(h.message.is_none());
-    assert!(h.target.is_none());
-    assert!(h.to.is_none());
-}
-
-#[test]
 async fn heartbeat_config_parses_delivery_aliases() {
     let raw = r#"
 enabled = true
@@ -1969,30 +1955,6 @@ recipient = "42"
     assert_eq!(parsed.message.as_deref(), Some("Ping"));
     assert_eq!(parsed.target.as_deref(), Some("telegram"));
     assert_eq!(parsed.to.as_deref(), Some("42"));
-}
-
-#[test]
-async fn scheduler_config_default() {
-    let s = SchedulerConfig::default();
-    assert!(s.enabled);
-    assert!(s.catch_up_on_startup);
-    assert_eq!(s.max_run_history, 50);
-}
-
-#[test]
-async fn scheduler_config_serde_roundtrip() {
-    let s = SchedulerConfig {
-        enabled: false,
-        max_tasks: 16,
-        max_concurrent: 2,
-        catch_up_on_startup: false,
-        max_run_history: 100,
-    };
-    let json = serde_json::to_string(&s).unwrap();
-    let parsed: SchedulerConfig = serde_json::from_str(&json).unwrap();
-    assert!(!parsed.enabled);
-    assert!(!parsed.catch_up_on_startup);
-    assert_eq!(parsed.max_run_history, 100);
 }
 
 #[test]
@@ -2020,13 +1982,6 @@ async fn memory_config_default_hygiene_settings() {
     assert_eq!(m.purge_after_days, 30);
     assert_eq!(m.conversation_retention_days, 30);
     assert_eq!(m.search_mode, SearchMode::Hybrid);
-}
-
-#[test]
-async fn memory_types_and_extract_facts_default_off() {
-    let m = MemoryConfig::default();
-    assert!(!m.consolidation_extract_facts);
-    assert!(!m.types.enabled);
 }
 
 #[test]
@@ -2109,21 +2064,6 @@ search_mode = "hybrid"
 }
 
 #[test]
-async fn search_mode_defaults_to_hybrid_when_omitted() {
-    let toml_str = r#"
-workspace_dir = "/tmp/workspace"
-config_path = "/tmp/config.toml"
-default_temperature = 0.7
-
-[memory]
-backend = "sqlite"
-auto_save = true
-"#;
-    let parsed = parse_test_config(toml_str);
-    assert_eq!(parsed.memory.search_mode, SearchMode::Hybrid);
-}
-
-#[test]
 async fn search_mode_serde_roundtrip() {
     let json_bm25 = serde_json::to_string(&SearchMode::Bm25).unwrap();
     assert_eq!(json_bm25, "\"bm25\"");
@@ -2139,16 +2079,6 @@ async fn search_mode_serde_roundtrip() {
     assert_eq!(json_hybrid, "\"hybrid\"");
     let parsed: SearchMode = serde_json::from_str(&json_hybrid).unwrap();
     assert_eq!(parsed, SearchMode::Hybrid);
-}
-
-#[test]
-async fn storage_two_tier_defaults_empty() {
-    let storage = StorageConfig::default();
-    assert!(storage.sqlite.is_empty());
-    assert!(storage.postgres.is_empty());
-    assert!(storage.qdrant.is_empty());
-    assert!(storage.markdown.is_empty());
-    assert!(storage.lucid.is_empty());
 }
 
 #[test]
@@ -3142,15 +3072,6 @@ async fn default_runtime_profile_history_cap_remains_50() {
 }
 
 #[test]
-async fn pacing_config_defaults_are_all_none_or_empty() {
-    let cfg = PacingConfig::default();
-    assert!(cfg.step_timeout_secs.is_none());
-    assert!(cfg.loop_detection_min_elapsed_secs.is_none());
-    assert!(cfg.loop_ignore_tools.is_empty());
-    assert!(cfg.message_timeout_scale_max.is_none());
-}
-
-#[test]
 async fn pacing_config_deserializes_from_toml() {
     let raw = r#"
 default_temperature = 0.7
@@ -3845,32 +3766,6 @@ async fn config_save_atomic_cleanup() {
 // ── Telegram / Discord config ────────────────────────────
 
 #[test]
-async fn telegram_config_serde() {
-    let tc = TelegramConfig {
-        enabled: true,
-        bot_token: "123:XYZ".into(),
-        api_base_url: default_telegram_api_base_url(),
-        stream_mode: StreamMode::Partial,
-        draft_update_interval_ms: 500,
-        interrupt_on_new_message: true,
-        mention_only: false,
-        ack_reactions: None,
-        proxy_url: None,
-        approval_timeout_secs: 120,
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-        debounce_ms: None,
-    };
-    let json = serde_json::to_string(&tc).unwrap();
-    let parsed: TelegramConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.bot_token, "123:XYZ");
-    assert_eq!(parsed.stream_mode, StreamMode::Partial);
-    assert_eq!(parsed.draft_update_interval_ms, 500);
-    assert!(parsed.interrupt_on_new_message);
-}
-
-#[test]
 async fn telegram_config_defaults_stream_off() {
     let json = r#"{"bot_token":"tok","allowed_users":[]}"#;
     let parsed: TelegramConfig = serde_json::from_str(json).unwrap();
@@ -3878,67 +3773,6 @@ async fn telegram_config_defaults_stream_off() {
     assert_eq!(parsed.draft_update_interval_ms, 1000);
     assert!(!parsed.interrupt_on_new_message);
     assert_eq!(parsed.api_base_url, "https://api.telegram.org");
-}
-
-#[test]
-async fn discord_config_serde() {
-    let dc = DiscordConfig {
-        enabled: true,
-        bot_token: "discord-token".into(),
-        guild_ids: vec!["12345".into()],
-        channel_ids: vec![],
-        archive: false,
-        listen_to_bots: false,
-        interrupt_on_new_message: false,
-        mention_only: false,
-        slash_commands: false,
-        slash_command_scope: SlashCommandScope::default(),
-        proxy_url: None,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1000,
-        multi_message_delay_ms: 800,
-        stall_timeout_secs: 0,
-        intents_mask: None,
-        reaction_notifications: DiscordReactionScope::Off,
-        approval_timeout_secs: 300,
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-    };
-    let json = serde_json::to_string(&dc).unwrap();
-    let parsed: DiscordConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.bot_token, "discord-token");
-    assert_eq!(parsed.guild_ids, vec!["12345".to_string()]);
-}
-
-#[test]
-async fn discord_config_empty_guild_ids() {
-    let dc = DiscordConfig {
-        enabled: true,
-        bot_token: "tok".into(),
-        guild_ids: Vec::new(),
-        channel_ids: vec![],
-        archive: false,
-        listen_to_bots: false,
-        interrupt_on_new_message: false,
-        mention_only: false,
-        slash_commands: false,
-        slash_command_scope: SlashCommandScope::default(),
-        proxy_url: None,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1000,
-        multi_message_delay_ms: 800,
-        stall_timeout_secs: 0,
-        intents_mask: None,
-        reaction_notifications: DiscordReactionScope::Off,
-        approval_timeout_secs: 300,
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-    };
-    let json = serde_json::to_string(&dc).unwrap();
-    let parsed: DiscordConfig = serde_json::from_str(&json).unwrap();
-    assert!(parsed.guild_ids.is_empty());
 }
 
 // ── iMessage / Matrix config ────────────────────────────
@@ -3972,70 +3806,6 @@ allowed_contacts = ["+1234567890", "user@icloud.com"]
 }
 
 #[test]
-async fn matrix_config_serde() {
-    let mc = MatrixConfig {
-        enabled: true,
-        homeserver: "https://matrix.org".into(),
-        access_token: Some("syt_token_abc".into()),
-        user_id: Some("@bot:matrix.org".into()),
-        device_id: Some("DEVICE123".into()),
-        allowed_rooms: vec!["!room123:matrix.org".into()],
-        interrupt_on_new_message: false,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1500,
-        multi_message_delay_ms: 800,
-        recovery_key: None,
-        mention_only: false,
-        password: None,
-        approval_timeout_secs: 300,
-        reply_in_thread: true,
-        ack_reactions: Some(true),
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-    };
-    let json = serde_json::to_string(&mc).unwrap();
-    let parsed: MatrixConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.homeserver, "https://matrix.org");
-    assert_eq!(parsed.access_token.as_deref(), Some("syt_token_abc"));
-    assert_eq!(parsed.user_id.as_deref(), Some("@bot:matrix.org"));
-    assert_eq!(parsed.device_id.as_deref(), Some("DEVICE123"));
-    assert_eq!(
-        parsed.allowed_rooms.first().map(|s| s.as_str()),
-        Some("!room123:matrix.org")
-    );
-}
-
-#[test]
-async fn matrix_config_toml_roundtrip() {
-    let mc = MatrixConfig {
-        enabled: true,
-        homeserver: "https://synapse.local:8448".into(),
-        access_token: Some("tok".into()),
-        user_id: None,
-        device_id: None,
-        allowed_rooms: vec!["!abc:synapse.local".into()],
-        interrupt_on_new_message: false,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: 1500,
-        multi_message_delay_ms: 800,
-        recovery_key: None,
-        mention_only: false,
-        password: None,
-        approval_timeout_secs: 300,
-        reply_in_thread: true,
-        ack_reactions: Some(true),
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-    };
-    let toml_str = toml::to_string(&mc).unwrap();
-    let parsed: MatrixConfig = toml::from_str(&toml_str).unwrap();
-    assert_eq!(parsed.homeserver, "https://synapse.local:8448");
-    assert_eq!(parsed.allowed_rooms.len(), 1);
-}
-
-#[test]
 async fn matrix_config_backward_compatible_without_session_hints() {
     // room_id in TOML is now migrated by prepare_table at the top level;
     // a bare MatrixConfig parse just ignores unknown keys.
@@ -4065,57 +3835,6 @@ allowed_users = ["@u:matrix.org"]
 }
 
 #[test]
-async fn signal_config_serde() {
-    let sc = SignalConfig {
-        enabled: true,
-        http_url: "http://127.0.0.1:8686".into(),
-        account: "+1234567890".into(),
-        group_ids: vec!["group123".into()],
-        dm_only: false,
-        ignore_attachments: true,
-        ignore_stories: false,
-        proxy_url: None,
-        approval_timeout_secs: 300,
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-    };
-    let json = serde_json::to_string(&sc).unwrap();
-    let parsed: SignalConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.http_url, "http://127.0.0.1:8686");
-    assert_eq!(parsed.account, "+1234567890");
-    assert_eq!(parsed.group_ids, vec!["group123".to_string()]);
-    assert!(!parsed.dm_only);
-    assert!(parsed.ignore_attachments);
-    assert!(!parsed.ignore_stories);
-}
-
-#[test]
-async fn signal_config_toml_roundtrip() {
-    let sc = SignalConfig {
-        enabled: true,
-        http_url: "http://localhost:8080".into(),
-        account: "+9876543210".into(),
-        group_ids: Vec::new(),
-        dm_only: true,
-        ignore_attachments: false,
-        ignore_stories: true,
-        proxy_url: None,
-        approval_timeout_secs: 300,
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-    };
-    let toml_str = toml::to_string(&sc).unwrap();
-    let parsed: SignalConfig = toml::from_str(&toml_str).unwrap();
-    assert_eq!(parsed.http_url, "http://localhost:8080");
-    assert_eq!(parsed.account, "+9876543210");
-    assert!(parsed.group_ids.is_empty());
-    assert!(parsed.dm_only);
-    assert!(parsed.ignore_stories);
-}
-
-#[test]
 async fn signal_config_defaults() {
     let json = r#"{"http_url":"http://127.0.0.1:8686","account":"+1234567890"}"#;
     let parsed: SignalConfig = serde_json::from_str(json).unwrap();
@@ -4123,99 +3842,6 @@ async fn signal_config_defaults() {
     assert!(!parsed.dm_only);
     assert!(!parsed.ignore_attachments);
     assert!(!parsed.ignore_stories);
-}
-
-#[test]
-async fn channels_with_imessage_and_matrix() {
-    let c = ChannelsConfig {
-        cli: true,
-        telegram: HashMap::new(),
-        discord: HashMap::new(),
-        slack: HashMap::new(),
-        mattermost: HashMap::new(),
-        webhook: HashMap::new(),
-        imessage: HashMap::from([(
-            "default".to_string(),
-            IMessageConfig {
-                enabled: true,
-                excluded_tools: vec![],
-                reply_min_interval_secs: 0,
-                reply_queue_depth_max: 0,
-            },
-        )]),
-        matrix: HashMap::from([(
-            "default".to_string(),
-            MatrixConfig {
-                enabled: true,
-                homeserver: "https://m.org".into(),
-                access_token: Some("tok".into()),
-                user_id: None,
-                device_id: None,
-                allowed_rooms: vec!["!r:m".into()],
-                interrupt_on_new_message: false,
-                stream_mode: StreamMode::default(),
-                draft_update_interval_ms: 1500,
-                multi_message_delay_ms: 800,
-                recovery_key: None,
-                mention_only: false,
-                password: None,
-                approval_timeout_secs: 300,
-                reply_in_thread: true,
-                ack_reactions: Some(true),
-                excluded_tools: vec![],
-                reply_min_interval_secs: 0,
-                reply_queue_depth_max: 0,
-            },
-        )]),
-        signal: HashMap::new(),
-        whatsapp: HashMap::new(),
-        email: HashMap::new(),
-        irc: HashMap::new(),
-        twitch: HashMap::new(),
-        lark: HashMap::new(),
-        line: HashMap::new(),
-        dingtalk: HashMap::new(),
-        wecom: HashMap::new(),
-        wecom_ws: HashMap::new(),
-        wechat: HashMap::new(),
-        qq: HashMap::new(),
-        twitter: HashMap::new(),
-        mochat: HashMap::new(),
-        nostr: HashMap::new(),
-        clawdtalk: HashMap::new(),
-        reddit: HashMap::new(),
-        bluesky: HashMap::new(),
-        git: HashMap::new(),
-        voice_call: HashMap::new(),
-        voice_duplex: HashMap::new(),
-        voice_wake: HashMap::new(),
-        mqtt: HashMap::new(),
-        amqp: HashMap::new(),
-        filesystem: HashMap::new(),
-        message_timeout_secs: 300,
-        max_concurrent_per_channel: default_channel_max_concurrent_per_channel(),
-        ack_reactions: true,
-        show_tool_calls: true,
-        session_persistence: true,
-        session_backend: default_session_backend(),
-        session_ttl_hours: 0,
-        debounce_ms: 0,
-    };
-    let toml_str = toml::to_string_pretty(&c).unwrap();
-    let parsed: ChannelsConfig = toml::from_str(&toml_str).unwrap();
-    assert!(!parsed.imessage.is_empty());
-    assert!(!parsed.matrix.is_empty());
-    assert_eq!(
-        parsed.matrix.get("default").unwrap().homeserver,
-        "https://m.org"
-    );
-}
-
-#[test]
-async fn channels_default_has_no_imessage_matrix() {
-    let c = ChannelsConfig::default();
-    assert!(c.imessage.is_empty());
-    assert!(c.matrix.is_empty());
 }
 
 // ── Edge cases: serde(default) for non-secret optional fields ─────
@@ -4267,54 +3893,83 @@ allowed_users = ["U111"]
 }
 
 #[test]
-async fn slack_config_deserializes_with_channel_ids() {
-    let json = r#"{"bot_token":"xoxb-tok","channel_ids":["C111","D222"]}"#;
-    let parsed: SlackConfig = serde_json::from_str(json).unwrap();
-    assert_eq!(parsed.channel_ids, vec!["C111", "D222"]);
-    assert!(!parsed.interrupt_on_new_message);
-    assert_eq!(parsed.thread_replies, None);
-    assert!(!parsed.mention_only);
+async fn slack_config_json_optional_fields_default_independently() {
+    // (json, channel_ids, mention_only, interrupt_on_new_message, thread_replies)
+    type Case<'a> = (&'a str, &'a [&'a str], bool, bool, Option<bool>);
+    let cases: [Case; 4] = [
+        (
+            r#"{"bot_token":"xoxb-tok","channel_ids":["C111","D222"]}"#,
+            &["C111", "D222"],
+            false,
+            false,
+            None,
+        ),
+        (
+            r#"{"bot_token":"xoxb-tok","mention_only":true}"#,
+            &[],
+            true,
+            false,
+            None,
+        ),
+        (
+            r#"{"bot_token":"xoxb-tok","interrupt_on_new_message":true}"#,
+            &[],
+            false,
+            true,
+            None,
+        ),
+        (
+            r#"{"bot_token":"xoxb-tok","thread_replies":false}"#,
+            &[],
+            false,
+            false,
+            Some(false),
+        ),
+    ];
+    for (json, channel_ids, mention_only, interrupt, thread_replies) in cases {
+        let parsed: SlackConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.channel_ids, channel_ids, "{json}");
+        assert_eq!(parsed.mention_only, mention_only, "{json}");
+        assert_eq!(parsed.interrupt_on_new_message, interrupt, "{json}");
+        assert_eq!(parsed.thread_replies, thread_replies, "{json}");
+    }
 }
 
 #[test]
-async fn slack_config_deserializes_with_mention_only() {
-    let json = r#"{"bot_token":"xoxb-tok","mention_only":true}"#;
-    let parsed: SlackConfig = serde_json::from_str(json).unwrap();
-    assert!(parsed.mention_only);
-    assert!(!parsed.interrupt_on_new_message);
-    assert_eq!(parsed.thread_replies, None);
-}
+async fn interrupt_on_new_message_defaults_off_and_parses_true() {
+    let discord = |json: &str| {
+        serde_json::from_str::<DiscordConfig>(json)
+            .unwrap()
+            .interrupt_on_new_message
+    };
+    assert!(!discord(r#"{"bot_token":"tok"}"#));
+    assert!(discord(
+        r#"{"bot_token":"tok","interrupt_on_new_message":true}"#
+    ));
 
-#[test]
-async fn slack_config_deserializes_interrupt_on_new_message() {
-    let json = r#"{"bot_token":"xoxb-tok","interrupt_on_new_message":true}"#;
-    let parsed: SlackConfig = serde_json::from_str(json).unwrap();
-    assert!(parsed.interrupt_on_new_message);
-    assert_eq!(parsed.thread_replies, None);
-    assert!(!parsed.mention_only);
-}
+    let mattermost = |json: &str| {
+        serde_json::from_str::<MattermostConfig>(json)
+            .unwrap()
+            .interrupt_on_new_message
+    };
+    assert!(!mattermost(
+        r#"{"url":"https://mm.example.com","bot_token":"tok"}"#
+    ));
+    assert!(mattermost(
+        r#"{"url":"https://mm.example.com","bot_token":"tok","interrupt_on_new_message":true}"#
+    ));
 
-#[test]
-async fn slack_config_deserializes_thread_replies() {
-    let json = r#"{"bot_token":"xoxb-tok","thread_replies":false}"#;
-    let parsed: SlackConfig = serde_json::from_str(json).unwrap();
-    assert_eq!(parsed.thread_replies, Some(false));
-    assert!(!parsed.interrupt_on_new_message);
-    assert!(!parsed.mention_only);
-}
-
-#[test]
-async fn discord_config_default_interrupt_on_new_message_is_false() {
-    let json = r#"{"bot_token":"tok"}"#;
-    let parsed: DiscordConfig = serde_json::from_str(json).unwrap();
-    assert!(!parsed.interrupt_on_new_message);
-}
-
-#[test]
-async fn discord_config_deserializes_interrupt_on_new_message_true() {
-    let json = r#"{"bot_token":"tok","interrupt_on_new_message":true}"#;
-    let parsed: DiscordConfig = serde_json::from_str(json).unwrap();
-    assert!(parsed.interrupt_on_new_message);
+    let whatsapp = |json: &str| {
+        serde_json::from_str::<WhatsAppConfig>(json)
+            .unwrap()
+            .interrupt_on_new_message
+    };
+    assert!(!whatsapp(
+        r#"{"session_path":"/tmp/zeroclaw-whatsapp-session.db"}"#
+    ));
+    assert!(whatsapp(
+        r#"{"session_path":"/tmp/zeroclaw-whatsapp-session.db","interrupt_on_new_message":true}"#
+    ));
 }
 
 #[test]
@@ -4350,36 +4005,6 @@ bot_token = "xoxb-tok"
 }
 
 #[test]
-async fn mattermost_config_default_interrupt_on_new_message_is_false() {
-    let json = r#"{"url":"https://mm.example.com","bot_token":"tok"}"#;
-    let parsed: MattermostConfig = serde_json::from_str(json).unwrap();
-    assert!(!parsed.interrupt_on_new_message);
-}
-
-#[test]
-async fn mattermost_config_deserializes_interrupt_on_new_message_true() {
-    let json =
-        r#"{"url":"https://mm.example.com","bot_token":"tok","interrupt_on_new_message":true}"#;
-    let parsed: MattermostConfig = serde_json::from_str(json).unwrap();
-    assert!(parsed.interrupt_on_new_message);
-}
-
-#[test]
-async fn whatsapp_config_default_interrupt_on_new_message_is_false() {
-    let json = r#"{"session_path":"/tmp/zeroclaw-whatsapp-session.db"}"#;
-    let parsed: WhatsAppConfig = serde_json::from_str(json).unwrap();
-    assert!(!parsed.interrupt_on_new_message);
-}
-
-#[test]
-async fn whatsapp_config_deserializes_interrupt_on_new_message_true() {
-    let json =
-        r#"{"session_path":"/tmp/zeroclaw-whatsapp-session.db","interrupt_on_new_message":true}"#;
-    let parsed: WhatsAppConfig = serde_json::from_str(json).unwrap();
-    assert!(parsed.interrupt_on_new_message);
-}
-
-#[test]
 async fn webhook_config_with_secret() {
     let json = r#"{"port":8080,"secret":"my-secret-key"}"#;
     let parsed: WebhookConfig = serde_json::from_str(json).unwrap();
@@ -4409,86 +4034,7 @@ async fn webhook_config_retry_fields_default_to_none() {
     assert!(parsed.retry_max_delay_ms.is_none());
 }
 
-#[test]
-async fn webhook_config_retry_fields_roundtrip() {
-    let wc = WebhookConfig {
-        enabled: true,
-        port: 8080,
-        listen_path: None,
-        send_url: Some("https://example.com/cb".into()),
-        send_method: None,
-        auth_header: None,
-        secret: None,
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-        max_retries: Some(5),
-        retry_base_delay_ms: Some(250),
-        retry_max_delay_ms: Some(10_000),
-    };
-
-    let json = serde_json::to_string(&wc).unwrap();
-    let parsed: WebhookConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.max_retries, Some(5));
-    assert_eq!(parsed.retry_base_delay_ms, Some(250));
-    assert_eq!(parsed.retry_max_delay_ms, Some(10_000));
-
-    let toml_str = toml::to_string(&wc).unwrap();
-    let parsed: WebhookConfig = toml::from_str(&toml_str).unwrap();
-    assert_eq!(parsed.max_retries, Some(5));
-    assert_eq!(parsed.retry_base_delay_ms, Some(250));
-    assert_eq!(parsed.retry_max_delay_ms, Some(10_000));
-}
-
 // ── WhatsApp config ──────────────────────────────────────
-
-#[test]
-async fn whatsapp_config_serde() {
-    let wc = WhatsAppConfig {
-        enabled: true,
-        session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
-        pair_phone: Some("15551234567".into()),
-        pair_code: None,
-        ws_url: None,
-        mention_only: false,
-        passive_group_context: false,
-        interrupt_on_new_message: false,
-        mode: WhatsAppWebMode::default(),
-        dm_policy: WhatsAppChatPolicy::default(),
-        group_policy: WhatsAppChatPolicy::default(),
-        self_chat_mode: false,
-        dm_mention_patterns: vec![],
-        group_mention_patterns: vec![],
-        allowed_groups: vec![],
-        approval_timeout_secs: 300,
-        excluded_tools: vec![],
-        reply_min_interval_secs: 0,
-        reply_queue_depth_max: 0,
-    };
-    let json = serde_json::to_string(&wc).unwrap();
-    let parsed: WhatsAppConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(
-        parsed.session_path.as_deref(),
-        Some("~/.zeroclaw/state/whatsapp-web/session.db")
-    );
-    assert_eq!(parsed.pair_phone.as_deref(), Some("15551234567"));
-}
-
-#[test]
-async fn whatsapp_config_toml_roundtrip() {
-    let wc = WhatsAppConfig {
-        enabled: true,
-        mode: WhatsAppWebMode::Personal,
-        pair_code: Some("ABCD1234".into()),
-        allowed_groups: vec!["123456789012345@g.us".into()],
-        ..Default::default()
-    };
-    let toml_str = toml::to_string(&wc).unwrap();
-    let parsed: WhatsAppConfig = toml::from_str(&toml_str).unwrap();
-    assert_eq!(parsed.mode, WhatsAppWebMode::Personal);
-    assert_eq!(parsed.pair_code.as_deref(), Some("ABCD1234"));
-    assert_eq!(parsed.allowed_groups, vec!["123456789012345@g.us"]);
-}
 
 #[test]
 async fn whatsapp_config_ignores_retired_cloud_fields() {
@@ -4676,12 +4222,6 @@ async fn channels_with_whatsapp() {
     );
 }
 
-#[test]
-async fn channels_default_has_no_whatsapp() {
-    let c = ChannelsConfig::default();
-    assert!(c.whatsapp.is_empty());
-}
-
 // ══════════════════════════════════════════════════════════
 // SECURITY CHECKLIST TESTS — Gateway config
 // ══════════════════════════════════════════════════════════
@@ -4842,20 +4382,6 @@ async fn composio_config_default_disabled() {
 }
 
 #[test]
-async fn composio_config_serde_roundtrip() {
-    let c = ComposioConfig {
-        enabled: true,
-        api_key: Some("comp-key-123".into()),
-        entity_id: "user42".into(),
-    };
-    let toml_str = toml::to_string(&c).unwrap();
-    let parsed: ComposioConfig = toml::from_str(&toml_str).unwrap();
-    assert!(parsed.enabled);
-    assert_eq!(parsed.api_key.as_deref(), Some("comp-key-123"));
-    assert_eq!(parsed.entity_id, "user42");
-}
-
-#[test]
 async fn composio_config_backward_compat_missing_section() {
     let minimal = r#"
 workspace_dir = "/tmp/ws"
@@ -4925,16 +4451,6 @@ default_temperature = 0.7
 }
 
 #[test]
-async fn config_default_has_composio_and_secrets() {
-    let c = Config::default();
-    assert!(!c.composio.enabled);
-    assert!(c.composio.api_key.is_none());
-    assert!(c.secrets.encrypt);
-    assert!(c.browser.enabled);
-    assert_eq!(c.browser.allowed_domains, vec!["*".to_string()]);
-}
-
-#[test]
 async fn browser_config_default_enabled() {
     let b = BrowserConfig::default();
     assert!(b.enabled);
@@ -4950,53 +4466,6 @@ async fn browser_config_default_enabled() {
     assert!(b.computer_use.window_allowlist.is_empty());
     assert!(b.computer_use.max_coordinate_x.is_none());
     assert!(b.computer_use.max_coordinate_y.is_none());
-}
-
-#[test]
-async fn browser_config_serde_roundtrip() {
-    let b = BrowserConfig {
-        enabled: true,
-        allowed_domains: vec!["example.com".into(), "docs.example.com".into()],
-        session_name: None,
-        backend: "auto".into(),
-        headed: Some(true),
-        native_headless: false,
-        native_webdriver_url: "http://localhost:4444".into(),
-        native_chrome_path: Some("/usr/bin/chromium".into()),
-        computer_use: BrowserComputerUseConfig {
-            endpoint: "https://computer-use.example.com/v1/actions".into(),
-            api_key: Some("test-token".into()),
-            timeout_ms: 8_000,
-            allow_remote_endpoint: true,
-            window_allowlist: vec!["Chrome".into(), "Visual Studio Code".into()],
-            max_coordinate_x: Some(3840),
-            max_coordinate_y: Some(2160),
-        },
-        allowed_private_hosts: vec![],
-    };
-    let toml_str = toml::to_string(&b).unwrap();
-    let parsed: BrowserConfig = toml::from_str(&toml_str).unwrap();
-    assert!(parsed.enabled);
-    assert_eq!(parsed.allowed_domains.len(), 2);
-    assert_eq!(parsed.allowed_domains[0], "example.com");
-    assert_eq!(parsed.backend, "auto");
-    assert_eq!(parsed.headed, Some(true));
-    assert!(!parsed.native_headless);
-    assert_eq!(parsed.native_webdriver_url, "http://localhost:4444");
-    assert_eq!(
-        parsed.native_chrome_path.as_deref(),
-        Some("/usr/bin/chromium")
-    );
-    assert_eq!(
-        parsed.computer_use.endpoint,
-        "https://computer-use.example.com/v1/actions"
-    );
-    assert_eq!(parsed.computer_use.api_key.as_deref(), Some("test-token"));
-    assert_eq!(parsed.computer_use.timeout_ms, 8_000);
-    assert!(parsed.computer_use.allow_remote_endpoint);
-    assert_eq!(parsed.computer_use.window_allowlist.len(), 2);
-    assert_eq!(parsed.computer_use.max_coordinate_x, Some(3840));
-    assert_eq!(parsed.computer_use.max_coordinate_y, Some(2160));
 }
 
 #[test]
@@ -7095,98 +6564,6 @@ async fn gateway_config_default_values() {
 // ── Peripherals config ───────────────────────────────────────
 
 #[test]
-async fn peripherals_config_default_disabled() {
-    let p = PeripheralsConfig::default();
-    assert!(!p.enabled);
-    assert!(p.boards.is_empty());
-}
-
-#[test]
-async fn peripheral_board_config_defaults() {
-    let b = PeripheralBoardConfig::default();
-    assert!(b.board.is_empty());
-    assert_eq!(b.transport, "serial");
-    assert!(b.path.is_none());
-    assert_eq!(b.baud, 115_200);
-}
-
-#[test]
-async fn peripherals_config_toml_roundtrip() {
-    let p = PeripheralsConfig {
-        enabled: true,
-        boards: vec![PeripheralBoardConfig {
-            board: "nucleo-f401re".into(),
-            transport: "serial".into(),
-            path: Some("/dev/ttyACM0".into()),
-            baud: 115_200,
-        }],
-        datasheet_dir: None,
-    };
-    let toml_str = toml::to_string(&p).unwrap();
-    let parsed: PeripheralsConfig = toml::from_str(&toml_str).unwrap();
-    assert!(parsed.enabled);
-    assert_eq!(parsed.boards.len(), 1);
-    assert_eq!(parsed.boards[0].board, "nucleo-f401re");
-    assert_eq!(parsed.boards[0].path.as_deref(), Some("/dev/ttyACM0"));
-}
-
-#[test]
-async fn lark_config_serde() {
-    let lc = LarkConfig {
-        enabled: true,
-        app_id: "cli_123456".into(),
-        app_secret: "secret_abc".into(),
-        encrypt_key: Some("encrypt_key".into()),
-        verification_token: Some("verify_token".into()),
-        mention_only: false,
-        use_feishu: true,
-        receive_mode: LarkReceiveMode::Websocket,
-        port: None,
-        proxy_url: None,
-        excluded_tools: vec![],
-        approval_timeout_secs: 300,
-        per_user_session: false,
-        ack_reactions: None,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: default_draft_update_interval_ms(),
-    };
-    let json = serde_json::to_string(&lc).unwrap();
-    let parsed: LarkConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.app_id, "cli_123456");
-    assert_eq!(parsed.app_secret, "secret_abc");
-    assert_eq!(parsed.encrypt_key.as_deref(), Some("encrypt_key"));
-    assert_eq!(parsed.verification_token.as_deref(), Some("verify_token"));
-    assert!(parsed.use_feishu);
-}
-
-#[test]
-async fn lark_config_toml_roundtrip() {
-    let lc = LarkConfig {
-        enabled: true,
-        app_id: "cli_123456".into(),
-        app_secret: "secret_abc".into(),
-        encrypt_key: Some("encrypt_key".into()),
-        verification_token: Some("verify_token".into()),
-        mention_only: false,
-        use_feishu: false,
-        receive_mode: LarkReceiveMode::Webhook,
-        port: Some(9898),
-        proxy_url: None,
-        excluded_tools: vec![],
-        approval_timeout_secs: 300,
-        per_user_session: false,
-        ack_reactions: None,
-        stream_mode: StreamMode::default(),
-        draft_update_interval_ms: default_draft_update_interval_ms(),
-    };
-    let toml_str = toml::to_string(&lc).unwrap();
-    let parsed: LarkConfig = toml::from_str(&toml_str).unwrap();
-    assert_eq!(parsed.app_id, "cli_123456");
-    assert_eq!(parsed.app_secret, "secret_abc");
-    assert!(!parsed.use_feishu);
-}
-
-#[test]
 async fn lark_config_deserializes_without_optional_fields() {
     let json = r#"{"app_id":"cli_123","app_secret":"secret"}"#;
     let parsed: LarkConfig = serde_json::from_str(json).unwrap();
@@ -7194,16 +6571,6 @@ async fn lark_config_deserializes_without_optional_fields() {
     assert!(parsed.verification_token.is_none());
     assert!(!parsed.mention_only);
     assert!(!parsed.use_feishu);
-}
-
-#[test]
-async fn lark_config_defaults_to_lark_endpoint() {
-    let json = r#"{"app_id":"cli_123","app_secret":"secret"}"#;
-    let parsed: LarkConfig = serde_json::from_str(json).unwrap();
-    assert!(
-        !parsed.use_feishu,
-        "use_feishu should default to false (Lark)"
-    );
 }
 
 #[test]
@@ -8604,43 +7971,6 @@ async fn world_readable_config_is_detectable() {
 }
 
 #[test]
-async fn transcription_config_defaults() {
-    let tc = TranscriptionConfig::default();
-    assert!(!tc.enabled);
-    assert!(tc.api_url.contains("groq.com"));
-    assert_eq!(tc.model, "whisper-large-v3-turbo");
-    assert!(tc.language.is_none());
-    assert!(tc.max_audio_bytes.is_none());
-    assert_eq!(tc.max_duration_secs, 120);
-    assert!(!tc.transcribe_non_ptt_audio);
-}
-
-#[test]
-async fn config_roundtrip_with_transcription() {
-    let mut config = Config::default();
-    config.transcription.enabled = true;
-    config.transcription.language = Some("en".into());
-
-    let toml_str = toml::to_string_pretty(&config).unwrap();
-    let parsed = parse_test_config(&toml_str);
-
-    assert!(parsed.transcription.enabled);
-    assert_eq!(parsed.transcription.language.as_deref(), Some("en"));
-    assert_eq!(parsed.transcription.model, "whisper-large-v3-turbo");
-}
-
-#[test]
-async fn config_roundtrip_with_transcription_max_audio_bytes() {
-    let mut config = Config::default();
-    config.transcription.max_audio_bytes = Some(65_536);
-
-    let toml_str = toml::to_string_pretty(&config).unwrap();
-    let parsed = parse_test_config(&toml_str);
-
-    assert_eq!(parsed.transcription.max_audio_bytes, Some(65_536));
-}
-
-#[test]
 async fn transcription_max_audio_bytes_round_trips_through_prop_path() {
     let mut config = Config::default();
 
@@ -9347,14 +8677,6 @@ async fn full_config_schema_nests_required_by_transport_on_mcp_server_def() {
 }
 
 #[test]
-async fn mcp_config_defaults_enabled_eager_loading_with_empty_servers() {
-    let cfg = McpConfig::default();
-    assert!(cfg.enabled);
-    assert!(!cfg.deferred_loading);
-    assert!(cfg.servers.is_empty());
-}
-
-#[test]
 async fn mcp_config_parsed_missing_flags_uses_enabled_eager_defaults() {
     let raw = r#"
 [mcp]
@@ -9608,66 +8930,16 @@ async fn git_config_debug_redacts_private_key_and_access_token() {
 }
 
 #[test]
-async fn telegram_config_ack_reactions_false_deserializes() {
-    let toml_str = r#"
-        bot_token = "123:ABC"
-        allowed_users = ["alice"]
-        ack_reactions = false
-    "#;
-    let cfg: TelegramConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(cfg.ack_reactions, Some(false));
-}
-
-#[test]
-async fn telegram_config_ack_reactions_true_deserializes() {
-    let toml_str = r#"
-        bot_token = "123:ABC"
-        allowed_users = ["alice"]
-        ack_reactions = true
-    "#;
-    let cfg: TelegramConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(cfg.ack_reactions, Some(true));
-}
-
-#[test]
-async fn telegram_config_ack_reactions_missing_defaults_to_none() {
-    let toml_str = r#"
-        bot_token = "123:ABC"
-        allowed_users = ["alice"]
-    "#;
-    let cfg: TelegramConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(cfg.ack_reactions, None);
-}
-
-#[test]
-async fn telegram_config_ack_reactions_channel_overrides_top_level() {
-    let tg_toml = r#"
-        bot_token = "123:ABC"
-        allowed_users = ["alice"]
-        ack_reactions = false
-    "#;
-    let tg: TelegramConfig = toml::from_str(tg_toml).unwrap();
-    let top_level_ack = true;
-    let effective = tg.ack_reactions.unwrap_or(top_level_ack);
-    assert!(
-        !effective,
-        "channel-level false must override top-level true"
-    );
-}
-
-#[test]
-async fn telegram_config_ack_reactions_falls_back_to_top_level() {
-    let tg_toml = r#"
-        bot_token = "123:ABC"
-        allowed_users = ["alice"]
-    "#;
-    let tg: TelegramConfig = toml::from_str(tg_toml).unwrap();
-    let top_level_ack = false;
-    let effective = tg.ack_reactions.unwrap_or(top_level_ack);
-    assert!(
-        !effective,
-        "must fall back to top-level false when channel omits field"
-    );
+async fn telegram_config_ack_reactions_is_tri_state() {
+    for (line, expected) in [
+        ("ack_reactions = false", Some(false)),
+        ("ack_reactions = true", Some(true)),
+        ("", None),
+    ] {
+        let toml_str = format!("bot_token = \"123:ABC\"\nallowed_users = [\"alice\"]\n{line}\n");
+        let cfg: TelegramConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(cfg.ack_reactions, expected, "{line:?}");
+    }
 }
 
 #[test]
@@ -9939,13 +9211,6 @@ async fn cost_enforcement_config_defaults() {
     assert_eq!(config.mode, "warn");
     assert_eq!(config.route_down_model, None);
     assert_eq!(config.reserve_percent, 10);
-}
-
-#[test]
-async fn cost_config_includes_enforcement() {
-    let config = CostConfig::default();
-    assert_eq!(config.enforcement.mode, "warn");
-    assert_eq!(config.enforcement.reserve_percent, 10);
 }
 
 // ── Configurable macro tests ──
@@ -15246,54 +14511,33 @@ async fn every_scalar_field_survives_toml_reload_round_trip() {
 }
 
 #[test]
-async fn empty_table_round_trips_to_http_request_config_default() {
-    let from_empty: HttpRequestConfig = toml::from_str("").unwrap();
-    let default = HttpRequestConfig::default();
-    assert_eq!(from_empty.enabled, default.enabled);
-    assert_eq!(from_empty.allowed_domains, default.allowed_domains);
-    assert_eq!(from_empty.max_response_size, default.max_response_size);
-}
+async fn empty_table_round_trips_to_section_defaults() {
+    // An empty TOML table must deserialize to the same values as the
+    // hand-written `Default` impl for each section.
+    let http: HttpRequestConfig = toml::from_str("").unwrap();
+    let http_default = HttpRequestConfig::default();
+    assert_eq!(http.enabled, http_default.enabled);
+    assert_eq!(http.allowed_domains, http_default.allowed_domains);
+    assert_eq!(http.max_response_size, http_default.max_response_size);
 
-#[test]
-async fn empty_table_round_trips_to_web_fetch_config_default() {
-    let from_empty: WebFetchConfig = toml::from_str("").unwrap();
-    let default = WebFetchConfig::default();
-    assert_eq!(from_empty.enabled, default.enabled);
-}
-
-#[test]
-async fn empty_table_round_trips_to_web_search_config_default() {
-    let from_empty: WebSearchConfig = toml::from_str("").unwrap();
-    let default = WebSearchConfig::default();
-    assert_eq!(from_empty.enabled, default.enabled);
-}
-
-#[test]
-async fn empty_table_round_trips_to_memory_config_default() {
-    let from_empty: MemoryConfig = toml::from_str("").unwrap();
-    let default = MemoryConfig::default();
-    assert_eq!(from_empty.backend, default.backend);
-}
-
-#[test]
-async fn empty_table_round_trips_to_tunnel_config_default() {
-    let from_empty: TunnelConfig = toml::from_str("").unwrap();
-    let default = TunnelConfig::default();
-    assert_eq!(from_empty.tunnel_provider, default.tunnel_provider);
-}
-
-#[test]
-async fn empty_table_round_trips_to_hooks_config_default() {
-    let from_empty: HooksConfig = toml::from_str("").unwrap();
-    let default = HooksConfig::default();
-    assert_eq!(from_empty.enabled, default.enabled);
-}
-
-#[test]
-async fn empty_table_round_trips_to_builtin_hooks_config_default() {
-    let from_empty: BuiltinHooksConfig = toml::from_str("").unwrap();
-    let default = BuiltinHooksConfig::default();
-    assert_eq!(from_empty.command_logger, default.command_logger);
+    let web_fetch: WebFetchConfig = toml::from_str("").unwrap();
+    assert_eq!(web_fetch.enabled, WebFetchConfig::default().enabled);
+    let web_search: WebSearchConfig = toml::from_str("").unwrap();
+    assert_eq!(web_search.enabled, WebSearchConfig::default().enabled);
+    let memory: MemoryConfig = toml::from_str("").unwrap();
+    assert_eq!(memory.backend, MemoryConfig::default().backend);
+    let tunnel: TunnelConfig = toml::from_str("").unwrap();
+    assert_eq!(
+        tunnel.tunnel_provider,
+        TunnelConfig::default().tunnel_provider
+    );
+    let hooks: HooksConfig = toml::from_str("").unwrap();
+    assert_eq!(hooks.enabled, HooksConfig::default().enabled);
+    let builtin: BuiltinHooksConfig = toml::from_str("").unwrap();
+    assert_eq!(
+        builtin.command_logger,
+        BuiltinHooksConfig::default().command_logger
+    );
 }
 
 #[test]

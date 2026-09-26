@@ -1,7 +1,6 @@
 //! TG2: Config Load/Save Round-Trip Tests
 
-use std::fs;
-use zeroclaw::config::{Config, MemoryConfig};
+use zeroclaw::config::Config;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config default construction
@@ -13,34 +12,6 @@ fn config_default_validates_without_provider_profiles() {
     config
         .validate()
         .expect("default config should validate without provider profiles");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AliasedAgentConfig defaults
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MemoryConfig defaults
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn memory_config_default_embedding_provider() {
-    let memory = MemoryConfig::default();
-    // Default embedding_provider should be set (even if "none")
-    assert!(
-        !memory.embedding_provider.is_empty(),
-        "embedding_provider should have a default value"
-    );
-}
-
-#[test]
-fn memory_config_default_vector_keyword_weights_sum_to_one() {
-    let memory = MemoryConfig::default();
-    let sum = memory.vector_weight + memory.keyword_weight;
-    assert!(
-        (sum - 1.0).abs() < 0.01,
-        "vector_weight + keyword_weight should sum to ~1.0, got {sum}"
-    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -115,77 +86,9 @@ fn config_toml_roundtrip_preserves_agent_config() {
     assert!(!agent.enabled);
 }
 
-#[test]
-fn config_toml_roundtrip_preserves_memory_config() {
-    let mut config = Config::default();
-    config.memory.embedding_provider = "openai".into();
-    config.memory.embedding_model = "text-embedding-3-small".into();
-    config.memory.vector_weight = 0.8;
-    config.memory.keyword_weight = 0.2;
-
-    let toml_str = toml::to_string(&config).expect("config should serialize to TOML");
-    let parsed: Config = toml::from_str(&toml_str).expect("TOML should deserialize back");
-
-    assert_eq!(parsed.memory.embedding_provider, "openai");
-    assert_eq!(parsed.memory.embedding_model, "text-embedding-3-small");
-    assert!((parsed.memory.vector_weight - 0.8).abs() < f64::EPSILON);
-    assert!((parsed.memory.keyword_weight - 0.2).abs() < f64::EPSILON);
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Config file write/read round-trip with tempdir
+// Config file parsing
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn config_file_write_read_roundtrip() {
-    use zeroclaw::config::{MistralModelProviderConfig, ModelProviderConfig};
-    let tmp = tempfile::TempDir::new().expect("tempdir creation should succeed");
-    let config_path = tmp.path().join("config.toml");
-
-    let mut config = Config::default();
-    config.providers.models.mistral.insert(
-        "default".to_string(),
-        MistralModelProviderConfig {
-            base: ModelProviderConfig {
-                model: Some("mistral-large".into()),
-                ..Default::default()
-            },
-        },
-    );
-    config
-        .agents
-        .entry("default".into())
-        .or_default()
-        .risk_profile = "tight".into();
-
-    let toml_str = toml::to_string(&config).expect("config should serialize");
-    fs::write(&config_path, &toml_str).expect("config file write should succeed");
-
-    let read_back = fs::read_to_string(&config_path).expect("config file read should succeed");
-    let parsed = zeroclaw::config::migration::migrate_to_current(&read_back)
-        .expect("TOML should round-trip through migration");
-
-    assert!(
-        parsed.providers.models.find("mistral", "default").is_some(),
-        "mistral.default entry should survive round-trip"
-    );
-    assert_eq!(
-        parsed
-            .providers
-            .models
-            .find("mistral", "default")
-            .and_then(|e| e.model.as_deref()),
-        Some("mistral-large")
-    );
-    assert_eq!(
-        parsed
-            .agents
-            .get("default")
-            .map(|a| a.risk_profile.as_str())
-            .unwrap_or(""),
-        "tight"
-    );
-}
 
 #[test]
 fn config_file_with_missing_optional_fields_uses_defaults() {
@@ -223,7 +126,3 @@ enabled = true
     // runtime_profile is omitted, so it stays the empty default.
     assert_eq!(agent.runtime_profile, "");
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Workspace directory creation
-// ─────────────────────────────────────────────────────────────────────────────

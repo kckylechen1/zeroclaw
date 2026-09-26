@@ -230,13 +230,6 @@ pub fn create_embedding_provider(
 mod tests {
     use super::*;
 
-    #[test]
-    fn noop_name() {
-        let p = NoopEmbedding;
-        assert_eq!(p.name(), "none");
-        assert_eq!(p.dimensions(), 0);
-    }
-
     #[tokio::test]
     async fn noop_embed_returns_empty() {
         let p = NoopEmbedding;
@@ -245,35 +238,25 @@ mod tests {
     }
 
     #[test]
-    fn factory_none() {
-        let p = create_embedding_provider("none", None, "model", 1536);
-        assert_eq!(p.name(), "none");
-    }
-
-    #[test]
-    fn factory_openai() {
-        let p = create_embedding_provider("openai", Some("key"), "text-embedding-3-small", 1536);
-        assert_eq!(p.name(), "openai");
-        assert_eq!(p.dimensions(), 1536);
-    }
-
-    #[test]
-    fn factory_openrouter() {
-        let p = create_embedding_provider(
-            "openrouter",
-            Some("sk-or-test"),
-            "openai/text-embedding-3-small",
-            1536,
-        );
-        assert_eq!(p.name(), "openai"); // uses OpenAiEmbedding internally
-        assert_eq!(p.dimensions(), 1536);
-    }
-
-    #[test]
-    fn factory_custom_url() {
-        let p = create_embedding_provider("custom:http://localhost:1234", None, "model", 768);
-        assert_eq!(p.name(), "openai"); // uses OpenAiEmbedding internally
-        assert_eq!(p.dimensions(), 768);
+    fn factory_selects_backend_by_provider_name() {
+        // (provider, api_key, dims, expected name, expected dims)
+        let cases = [
+            ("none", None, 1536, "none", 0),
+            ("", None, 1536, "none", 0),
+            ("cohere", None, 1536, "none", 0),
+            ("openai", Some("key"), 1536, "openai", 1536),
+            ("openai", None, 1536, "openai", 1536),
+            // OpenRouter and custom URLs reuse OpenAiEmbedding internally.
+            ("openrouter", Some("sk-or-test"), 1536, "openai", 1536),
+            ("custom:http://localhost:1234", None, 768, "openai", 768),
+            // "custom:" with no URL still constructs without panicking.
+            ("custom:", None, 768, "openai", 768),
+        ];
+        for (provider, key, dims, name, expected_dims) in cases {
+            let p = create_embedding_provider(provider, key, "model", dims);
+            assert_eq!(p.name(), name, "{provider:?}");
+            assert_eq!(p.dimensions(), expected_dims, "{provider:?}");
+        }
     }
 
     // ── Edge cases ───────────────────────────────────────────────
@@ -291,39 +274,6 @@ mod tests {
         let p = NoopEmbedding;
         let result = p.embed(&[]).await.unwrap();
         assert!(result.is_empty());
-    }
-
-    #[tokio::test]
-    async fn noop_embed_multiple_texts() {
-        let p = NoopEmbedding;
-        let result = p.embed(&["a", "b", "c"]).await.unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn factory_empty_string_returns_noop() {
-        let p = create_embedding_provider("", None, "model", 1536);
-        assert_eq!(p.name(), "none");
-    }
-
-    #[test]
-    fn factory_unknown_provider_returns_noop() {
-        let p = create_embedding_provider("cohere", None, "model", 1536);
-        assert_eq!(p.name(), "none");
-    }
-
-    #[test]
-    fn factory_custom_empty_url() {
-        // "custom:" with no URL — should still construct without panic
-        let p = create_embedding_provider("custom:", None, "model", 768);
-        assert_eq!(p.name(), "openai");
-    }
-
-    #[test]
-    fn factory_openai_no_api_key() {
-        let p = create_embedding_provider("openai", None, "text-embedding-3-small", 1536);
-        assert_eq!(p.name(), "openai");
-        assert_eq!(p.dimensions(), 1536);
     }
 
     #[test]

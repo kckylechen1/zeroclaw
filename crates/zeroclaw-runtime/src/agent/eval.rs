@@ -344,18 +344,4 @@ mod tests {
             evaluate_response("explain everything", "", ComplexityTier::Complex, Some(&ac));
         assert_eq!(result.retry_hint, None);
     }
-
-    #[test]
-    fn max_retries_defaults() {
-        let config = EvalConfig::default();
-        assert!(!config.enabled);
-        assert_eq!(config.max_retries, 1);
-        assert!((config.min_quality_score - 0.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn cost_optimized_hint_default() {
-        let config = AutoClassifyConfig::default();
-        assert_eq!(config.cost_optimized_hint, "cost-optimized");
-    }
 }

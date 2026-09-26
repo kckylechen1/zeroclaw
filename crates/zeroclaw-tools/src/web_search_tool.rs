@@ -1163,12 +1163,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_description() {
-        let tool = WebSearchTool::new("duckduckgo".to_string(), None, None, 5, 15);
-        assert!(tool.description().contains("Search the web"));
-    }
-
-    #[test]
     fn test_parameters_schema() {
         let tool = WebSearchTool::new("duckduckgo".to_string(), None, None, 5, 15);
         let schema = tool.parameters_schema();

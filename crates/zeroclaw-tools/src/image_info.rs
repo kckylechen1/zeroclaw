@@ -327,13 +327,6 @@ mod tests {
     }
 
     #[test]
-    fn image_info_tool_description() {
-        let tool = ImageInfoTool::new(test_security());
-        assert!(!tool.description().is_empty());
-        assert!(tool.description().contains("image"));
-    }
-
-    #[test]
     fn image_info_tool_schema() {
         let tool = ImageInfoTool::new(test_security());
         let schema = tool.parameters_schema();

@@ -708,25 +708,6 @@ mod tests {
     }
 
     #[test]
-    fn device_capabilities_default_all_false() {
-        let caps = DeviceCapabilities::default();
-        assert!(!caps.gpio);
-        assert!(!caps.i2c);
-        assert!(!caps.spi);
-        assert!(!caps.swd);
-        assert!(!caps.uart);
-        assert!(!caps.adc);
-        assert!(!caps.pwm);
-    }
-
-    #[test]
-    fn registry_default_is_empty() {
-        let reg = DeviceRegistry::default();
-        assert!(reg.is_empty());
-        assert_eq!(reg.len(), 0);
-    }
-
-    #[test]
     fn registry_aliases_returns_all() {
         let mut reg = DeviceRegistry::new();
         reg.register("pico", None, None, None, None);

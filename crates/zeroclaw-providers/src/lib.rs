@@ -2246,46 +2246,101 @@ mod tests {
     // ── Primary model_providers ────────────────────────────────────
 
     #[test]
-    fn factory_openrouter() {
-        assert!(create_model_provider("openrouter", Some("provider-test-credential")).is_ok());
-        assert!(create_model_provider("openrouter", None).is_ok());
-    }
-
-    #[test]
-    fn factory_anthropic() {
-        assert!(create_model_provider("anthropic", Some("provider-test-credential")).is_ok());
-    }
-
-    #[test]
-    fn factory_openai() {
-        assert!(create_model_provider("openai", Some("provider-test-credential")).is_ok());
+    fn factory_resolves_builtin_families_and_aliases() {
+        // Every built-in family (and the user-facing aliases that map onto
+        // one) must construct from a bare name. `None` rows are families
+        // that run without a key (local servers, AWS/CLI auth).
+        let cases: &[(&str, Option<&str>)] = &[
+            ("openrouter", Some("provider-test-credential")),
+            ("openrouter", None),
+            ("anthropic", Some("provider-test-credential")),
+            ("openai", Some("provider-test-credential")),
+            ("ollama", None),
+            ("ollama", Some("dummy")),
+            ("ollama", Some("any-value-here")),
+            ("gemini", Some("test-key")),
+            ("gemini", None),
+            ("telnyx", Some("test-key")),
+            ("telnyx", None),
+            ("vercel", Some("key")),
+            ("cloudflare", Some("key")),
+            ("moonshot", Some("key")),
+            ("synthetic", Some("key")),
+            ("opencode", Some("key")),
+            ("zai", Some("key")),
+            ("glm", Some("key")),
+            ("minimax", Some("key")),
+            ("bedrock", None),
+            ("bedrock", Some("ignored")),
+            ("qianfan", Some("key")),
+            ("doubao", Some("key")),
+            ("qwen", Some("key")),
+            ("lmstudio", Some("key")),
+            ("lmstudio", None),
+            ("llamacpp", Some("key")),
+            ("llamacpp", None),
+            ("sglang", None),
+            ("sglang", Some("key")),
+            ("vllm", None),
+            ("vllm", Some("key")),
+            ("osaurus", None),
+            ("osaurus", Some("custom-key")),
+            ("aihubmix", Some("key")),
+            ("siliconflow", Some("key")),
+            ("atomic_chat", Some("key")),
+            ("atomic_chat", None),
+            ("groq", Some("key")),
+            ("mistral", Some("key")),
+            ("xai", Some("key")),
+            ("deepseek", Some("key")),
+            ("together", Some("key")),
+            ("fireworks", Some("key")),
+            ("novita", Some("key")),
+            ("perplexity", Some("key")),
+            ("cohere", Some("key")),
+            ("copilot", Some("key")),
+            ("kilocli", None),
+            ("kilo", Some("kilo-test-key")),
+            ("nvidia", Some("nvapi-test")),
+            ("astrai", Some("sk-astrai-test")),
+            ("avian", Some("sk-avian-test")),
+            ("deepmyst", Some("key")),
+            ("morph", Some("sk-morph-test")),
+            ("github_models", Some("ghp_test_token")),
+            ("github-models", Some("ghp_test_token")),
+            ("upstage", Some("up-test-key")),
+            ("featherless", Some("featherless-test")),
+            ("arcee", Some("arcee-test")),
+            ("lambda_ai", Some("lambda-test")),
+            ("lambda-ai", Some("lambda-test")),
+            ("inception", Some("inception-test")), // Aliases resolved onto the families above.
+            ("grok", Some("test-key")),
+            ("kimi", Some("test-key")),
+            ("opencode-go", Some("test-key")),
+            ("ovhcloud", Some("test-key")),
+            ("google", Some("test-key")),
+            ("google-gemini", Some("test-key")),
+            ("aws-bedrock", None),
+            ("github-copilot", Some("test-key")),
+            ("vercel-ai", Some("test-key")),
+            ("cloudflare-ai", Some("test-key")),
+            ("opencode-zen", Some("test-key")),
+            ("lm-studio", None),
+            ("llama.cpp", None),
+            ("nvidia-nim", Some("test-key")),
+            ("build.nvidia.com", Some("test-key")),
+        ];
+        for (name, key) in cases {
+            if let Err(e) = create_model_provider(name, *key) {
+                panic!("{name} (key: {key:?}) should resolve: {e}");
+            }
+        }
     }
 
     #[test]
     fn factory_openai_codex() {
         let options = ModelProviderRuntimeOptions::default();
         assert!(create_model_provider_with_options("openai-codex", None, &options).is_ok());
-    }
-
-    #[test]
-    fn factory_ollama() {
-        assert!(create_model_provider("ollama", None).is_ok());
-        // Ollama may use API key when a remote endpoint is configured.
-        assert!(create_model_provider("ollama", Some("dummy")).is_ok());
-        assert!(create_model_provider("ollama", Some("any-value-here")).is_ok());
-    }
-
-    #[test]
-    fn factory_gemini() {
-        assert!(create_model_provider("gemini", Some("test-key")).is_ok());
-        // Should also work without key (will try CLI auth)
-        assert!(create_model_provider("gemini", None).is_ok());
-    }
-
-    #[test]
-    fn factory_telnyx() {
-        assert!(create_model_provider("telnyx", Some("test-key")).is_ok());
-        assert!(create_model_provider("telnyx", None).is_ok());
     }
 
     // ── OpenAI-compatible model_providers ──────────────────────────
@@ -2311,26 +2366,11 @@ mod tests {
     }
 
     #[test]
-    fn factory_vercel() {
-        assert!(create_model_provider("vercel", Some("key")).is_ok());
-    }
-
-    #[test]
     fn vercel_gateway_base_url_matches_public_gateway_endpoint() {
         assert_eq!(
             VERCEL_AI_GATEWAY_BASE_URL,
             "https://ai-gateway.vercel.sh/v1"
         );
-    }
-
-    #[test]
-    fn factory_cloudflare() {
-        assert!(create_model_provider("cloudflare", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_moonshot() {
-        assert!(create_model_provider("moonshot", Some("key")).is_ok());
     }
 
     #[test]
@@ -2396,58 +2436,10 @@ mod tests {
     }
 
     #[test]
-    fn factory_synthetic() {
-        assert!(create_model_provider("synthetic", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_opencode() {
-        assert!(create_model_provider("opencode", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_zai() {
-        assert!(create_model_provider("zai", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_glm() {
-        assert!(create_model_provider("glm", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_minimax() {
-        assert!(create_model_provider("minimax", Some("key")).is_ok());
-    }
-
-    #[test]
     fn factory_minimax_supports_native_tool_calling() {
         let minimax =
             create_model_provider("minimax", Some("key")).expect("model_provider should resolve");
         assert!(minimax.supports_native_tools());
-    }
-
-    #[test]
-    fn factory_bedrock() {
-        // Bedrock uses AWS env vars for credentials, not API key.
-        assert!(create_model_provider("bedrock", None).is_ok());
-        // Passing an api_key is harmless (ignored).
-        assert!(create_model_provider("bedrock", Some("ignored")).is_ok());
-    }
-
-    #[test]
-    fn factory_qianfan() {
-        assert!(create_model_provider("qianfan", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_doubao() {
-        assert!(create_model_provider("doubao", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_qwen() {
-        assert!(create_model_provider("qwen", Some("key")).is_ok());
     }
 
     #[test]
@@ -2470,18 +2462,6 @@ mod tests {
                 "alias `{alias}` should report vision capability"
             );
         }
-    }
-
-    #[test]
-    fn factory_lmstudio() {
-        assert!(create_model_provider("lmstudio", Some("key")).is_ok());
-        assert!(create_model_provider("lmstudio", None).is_ok());
-    }
-
-    #[test]
-    fn factory_llamacpp() {
-        assert!(create_model_provider("llamacpp", Some("key")).is_ok());
-        assert!(create_model_provider("llamacpp", None).is_ok());
     }
 
     #[test]
@@ -2609,34 +2589,6 @@ mod tests {
     }
 
     #[test]
-    fn factory_sglang() {
-        assert!(create_model_provider("sglang", None).is_ok());
-        assert!(create_model_provider("sglang", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_vllm() {
-        assert!(create_model_provider("vllm", None).is_ok());
-        assert!(create_model_provider("vllm", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_osaurus() {
-        // Osaurus works without an explicit key (defaults to "osaurus").
-        assert!(create_model_provider("osaurus", None).is_ok());
-        // Osaurus also works with an explicit key.
-        assert!(create_model_provider("osaurus", Some("custom-key")).is_ok());
-    }
-
-    #[test]
-    fn factory_osaurus_uses_default_key_when_none() {
-        // Verify that osaurus construction succeeds even without an API
-        // key — the impl provides a default placeholder.
-        let p = create_model_provider_with_url("osaurus", None, None);
-        assert!(p.is_ok());
-    }
-
-    #[test]
     fn factory_osaurus_custom_url() {
         // Verify that a custom api_url overrides the default localhost endpoint.
         let p = create_model_provider_with_url(
@@ -2645,34 +2597,6 @@ mod tests {
             Some("http://192.168.1.100:1337/v1"),
         );
         assert!(p.is_ok());
-    }
-
-    #[test]
-    fn factory_aihubmix() {
-        assert!(create_model_provider("aihubmix", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_siliconflow() {
-        assert!(create_model_provider("siliconflow", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_codex_dispatches_via_requires_openai_auth_flag() {
-        let options = ModelProviderRuntimeOptions::default();
-        assert!(create_model_provider_with_options("openai-codex", None, &options).is_ok());
-    }
-
-    #[test]
-    fn factory_atomic_chat() {
-        assert!(create_model_provider("atomic_chat", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_atomic_chat_allows_missing_key() {
-        // Local provider — empty key is acceptable; the runtime still
-        // attaches a placeholder Bearer header.
-        assert!(create_model_provider("atomic_chat", None).is_ok());
     }
 
     #[test]
@@ -2686,11 +2610,6 @@ mod tests {
     }
 
     // ── Extended ecosystem ───────────────────────────────────
-
-    #[test]
-    fn factory_groq() {
-        assert!(create_model_provider("groq", Some("key")).is_ok());
-    }
 
     #[test]
     fn factory_groq_disables_native_tools_by_default() {
@@ -2991,70 +2910,10 @@ mod tests {
     }
 
     #[test]
-    fn factory_mistral() {
-        assert!(create_model_provider("mistral", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_xai() {
-        assert!(create_model_provider("xai", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_deepseek() {
-        assert!(create_model_provider("deepseek", Some("key")).is_ok());
-    }
-
-    #[test]
     fn deepseek_provider_keeps_vision_disabled() {
         let model_provider = create_model_provider("deepseek", Some("key"))
             .expect("deepseek model_provider should build");
         assert!(!model_provider.supports_vision());
-    }
-
-    #[test]
-    fn factory_together() {
-        assert!(create_model_provider("together", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_fireworks() {
-        assert!(create_model_provider("fireworks", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_novita() {
-        assert!(create_model_provider("novita", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_perplexity() {
-        assert!(create_model_provider("perplexity", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_cohere() {
-        assert!(create_model_provider("cohere", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_copilot() {
-        assert!(create_model_provider("copilot", Some("key")).is_ok());
-    }
-
-    #[test]
-    fn factory_kilocli() {
-        assert!(create_model_provider("kilocli", None).is_ok());
-    }
-
-    #[test]
-    fn factory_kilo() {
-        assert!(create_model_provider("kilo", Some("kilo-test-key")).is_ok());
-    }
-
-    #[test]
-    fn factory_nvidia() {
-        assert!(create_model_provider("nvidia", Some("nvapi-test")).is_ok());
     }
 
     #[test]
@@ -3066,63 +2925,7 @@ mod tests {
         );
     }
 
-    // ── AI inference routers ─────────────────────────────────
-
-    #[test]
-    fn factory_astrai() {
-        assert!(create_model_provider("astrai", Some("sk-astrai-test")).is_ok());
-    }
-
-    #[test]
-    fn factory_avian() {
-        assert!(create_model_provider("avian", Some("sk-avian-test")).is_ok());
-    }
-
-    #[test]
-    fn factory_deepmyst() {
-        assert!(create_model_provider("deepmyst", Some("key")).is_ok());
-    }
-
     // ── OpenAI-compatible aggregators & inference hosts ──────
-
-    #[test]
-    fn factory_morph() {
-        assert!(create_model_provider("morph", Some("sk-morph-test")).is_ok());
-    }
-
-    #[test]
-    fn factory_github_models() {
-        assert!(create_model_provider("github_models", Some("ghp_test_token")).is_ok());
-        // Hyphenated form canonicalizes to the underscore slot.
-        assert!(create_model_provider("github-models", Some("ghp_test_token")).is_ok());
-    }
-
-    #[test]
-    fn factory_upstage() {
-        assert!(create_model_provider("upstage", Some("up-test-key")).is_ok());
-    }
-
-    #[test]
-    fn factory_featherless() {
-        assert!(create_model_provider("featherless", Some("featherless-test")).is_ok());
-    }
-
-    #[test]
-    fn factory_arcee() {
-        assert!(create_model_provider("arcee", Some("arcee-test")).is_ok());
-    }
-
-    #[test]
-    fn factory_lambda_ai() {
-        assert!(create_model_provider("lambda_ai", Some("lambda-test")).is_ok());
-        // Hyphenated form canonicalizes to the underscore slot.
-        assert!(create_model_provider("lambda-ai", Some("lambda-test")).is_ok());
-    }
-
-    #[test]
-    fn factory_inception() {
-        assert!(create_model_provider("inception", Some("inception-test")).is_ok());
-    }
 
     #[test]
     fn default_url_matches_compat_spec_for_new_providers() {

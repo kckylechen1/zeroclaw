@@ -75,11 +75,6 @@ mod tests {
     }
 
     #[test]
-    fn echo_tool_description_is_non_empty() {
-        assert!(!EchoTool.description().is_empty());
-    }
-
-    #[test]
     fn echo_tool_parameters_schema_has_message_property() {
         let schema = EchoTool.parameters_schema();
         assert_eq!(schema["type"], "object");

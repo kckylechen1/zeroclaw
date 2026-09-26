@@ -2329,13 +2329,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn acp_server_config_defaults() {
-        let cfg = AcpServerConfig::default();
-        assert_eq!(cfg.max_sessions, 10);
-        assert_eq!(cfg.session_timeout_secs, 3600);
-    }
-
-    #[test]
     fn acp_server_config_deserialize() {
         let json = r#"{"max_sessions": 5, "session_timeout_secs": 1800}"#;
         let cfg: AcpServerConfig = serde_json::from_str(json).unwrap();

@@ -688,12 +688,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_tool_description() {
-        let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
-        assert!(!tool.description().is_empty());
-    }
-
-    #[test]
     fn shell_tool_schema_has_command() {
         let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
         let schema = tool.parameters_schema();
