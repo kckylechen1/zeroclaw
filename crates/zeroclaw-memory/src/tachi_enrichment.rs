@@ -201,7 +201,7 @@ fn push_raw_candidate(
         .metadata
         .get(crate::tachi::METADATA_ZC_NAMESPACE)
         .and_then(|v| v.as_str())
-        == Some(crate::soul::SOUL_NAMESPACE)
+        == Some(crate::SOUL_NAMESPACE)
     {
         return Ok(());
     }
@@ -776,13 +776,13 @@ mod tests {
                 &mut store,
                 "soul::identity-a::disposition",
                 "RESERVED_DISPOSITION_TEXT",
-                Some(crate::soul::SOUL_NAMESPACE),
+                Some(crate::SOUL_NAMESPACE),
             );
             seed_namespaced_raw(
                 &mut store,
                 "soul::identity-a::candidate::density",
                 "RESERVED_CANDIDATE_TEXT",
-                Some(crate::soul::SOUL_NAMESPACE),
+                Some(crate::SOUL_NAMESPACE),
             );
             seed_raw(
                 &mut store,
@@ -863,13 +863,13 @@ mod tests {
                 &mut store,
                 "soul::identity-b::disposition",
                 "RESERVED_ONLY_DISPOSITION",
-                Some(crate::soul::SOUL_NAMESPACE),
+                Some(crate::SOUL_NAMESPACE),
             );
             seed_namespaced_raw(
                 &mut store,
                 "soul::identity-b::candidate::density",
                 "RESERVED_ONLY_CANDIDATE",
-                Some(crate::soul::SOUL_NAMESPACE),
+                Some(crate::SOUL_NAMESPACE),
             );
         }
 

@@ -398,24 +398,24 @@ impl SqliteMemory {
         // stores (namespace "default") can therefore never upsert-overwrite
         // a Soul row through the (agent_id, key) conflict target, and a
         // Soul-namespace write can never smuggle an ambient key shape.
-        if ns == crate::soul::SOUL_NAMESPACE {
-            if !key.starts_with(crate::soul::SOUL_KEY_PREFIX) {
+        if ns == crate::SOUL_NAMESPACE {
+            if !key.starts_with(crate::SOUL_KEY_PREFIX) {
                 anyhow::bail!(
                     "refused: namespace '{}' requires a key with the reserved '{}' prefix",
-                    crate::soul::SOUL_NAMESPACE,
-                    crate::soul::SOUL_KEY_PREFIX
+                    crate::SOUL_NAMESPACE,
+                    crate::SOUL_KEY_PREFIX
                 );
             }
-        } else if key.starts_with(crate::soul::SOUL_KEY_PREFIX) {
+        } else if key.starts_with(crate::SOUL_KEY_PREFIX) {
             anyhow::bail!(
                 "refused: key prefix '{}' is reserved for the Soul namespace",
-                crate::soul::SOUL_KEY_PREFIX
+                crate::SOUL_KEY_PREFIX
             );
         }
 
         // Reserved Soul content is local-only on implicit provider paths.
         // Validate its reservation above before any embedding request.
-        let embedding_bytes = if ns == crate::soul::SOUL_NAMESPACE {
+        let embedding_bytes = if ns == crate::SOUL_NAMESPACE {
             None
         } else {
             match self.get_or_compute_embedding(&content).await {
@@ -772,7 +772,7 @@ impl SqliteMemory {
                 let _ = write!(
                     sql,
                     " AND (m.namespace IS NULL OR m.namespace != '{}')",
-                    crate::soul::SOUL_NAMESPACE
+                    crate::SOUL_NAMESPACE
                 );
             }
         }
@@ -952,7 +952,7 @@ impl SqliteMemory {
                 let _ = write!(
                     sql,
                     " AND (namespace IS NULL OR namespace != '{}')",
-                    crate::soul::SOUL_NAMESPACE
+                    crate::SOUL_NAMESPACE
                 );
             }
         }
@@ -1056,7 +1056,7 @@ impl SqliteMemory {
                     let _ = write!(
                         sql,
                         " AND (m.namespace IS NULL OR m.namespace != '{}')",
-                        crate::soul::SOUL_NAMESPACE
+                        crate::SOUL_NAMESPACE
                     );
                 }
             }
@@ -1504,7 +1504,7 @@ impl SqliteMemory {
                         None => (
                             format!(
                                 " AND (m.namespace IS NULL OR m.namespace != '{}')",
-                                crate::soul::SOUL_NAMESPACE
+                                crate::SOUL_NAMESPACE
                             ),
                             None,
                         ),
@@ -1683,7 +1683,7 @@ impl Memory for SqliteMemory {
                  WHERE m.key = ?1 AND (m.namespace IS NULL OR m.namespace != ?2)",
             )?;
 
-            let mut rows = stmt.query_map(params![key, crate::soul::SOUL_NAMESPACE], |row| {
+            let mut rows = stmt.query_map(params![key, crate::SOUL_NAMESPACE], |row| {
                 Ok(MemoryEntry {
                     id: row.get(0)?,
                     key: row.get(1)?,
@@ -1801,7 +1801,7 @@ impl Memory for SqliteMemory {
                      FROM memories m LEFT JOIN agents a ON a.id = m.agent_id
                      WHERE m.superseded_by IS NULL AND m.category = ?1 AND (m.namespace IS NULL OR m.namespace != ?3) ORDER BY m.updated_at DESC LIMIT ?2",
                 )?;
-                let rows = stmt.query_map(params![cat_str, DEFAULT_LIST_LIMIT, crate::soul::SOUL_NAMESPACE], row_mapper)?;
+                let rows = stmt.query_map(params![cat_str, DEFAULT_LIST_LIMIT, crate::SOUL_NAMESPACE], row_mapper)?;
                 for row in rows {
                     let entry = row?;
                     if let Some(sid) = session_ref
@@ -1816,7 +1816,7 @@ impl Memory for SqliteMemory {
                      FROM memories m LEFT JOIN agents a ON a.id = m.agent_id
                      WHERE m.superseded_by IS NULL AND (m.namespace IS NULL OR m.namespace != ?2) ORDER BY m.updated_at DESC LIMIT ?1",
                 )?;
-                let rows = stmt.query_map(params![DEFAULT_LIST_LIMIT, crate::soul::SOUL_NAMESPACE], row_mapper)?;
+                let rows = stmt.query_map(params![DEFAULT_LIST_LIMIT, crate::SOUL_NAMESPACE], row_mapper)?;
                 for row in rows {
                     let entry = row?;
                     if let Some(sid) = session_ref
@@ -1843,7 +1843,7 @@ impl Memory for SqliteMemory {
             // service (`forget_for_agent` with the admitted identity).
             let affected = conn.execute(
                 "DELETE FROM memories WHERE key = ?1 AND (namespace IS NULL OR namespace != ?2)",
-                params![key, crate::soul::SOUL_NAMESPACE],
+                params![key, crate::SOUL_NAMESPACE],
             )?;
             Ok(affected > 0)
         })
@@ -2042,7 +2042,7 @@ impl Memory for SqliteMemory {
                 "SELECT id, content FROM memories WHERE embedding IS NULL \
                  AND (namespace IS NULL OR namespace != ?1)",
             )?;
-            let rows = stmt.query_map(params![crate::soul::SOUL_NAMESPACE], |row| {
+            let rows = stmt.query_map(params![crate::SOUL_NAMESPACE], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
             Ok::<_, anyhow::Error>(rows.filter_map(std::result::Result::ok).collect())

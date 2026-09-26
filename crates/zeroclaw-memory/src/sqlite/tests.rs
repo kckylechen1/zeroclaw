@@ -3240,16 +3240,16 @@ async fn sqlite_session_metadata_ordering_ties_are_deterministic() {
 // Reserved Soul namespace boundary (storage layer)
 // ─────────────────────────────────────────────────────────────────────
 
-/// Plant one Soul-shaped row exactly as the typed Soul services write
-/// them (reserved key prefix, reserved namespace, soul category, agent
-/// attribution) plus one ambient row for contrast.
+/// Plant one Soul-shaped row in the reserved shape (reserved key prefix,
+/// reserved namespace, soul category, agent attribution) plus one
+/// ambient row for contrast.
 async fn seed_soul_and_ambient(mem: &SqliteMemory, agent_id: &str) {
     mem.store_with_agent(
         "soul::agent-a::disposition",
         "soul disposition content",
         MemoryCategory::Custom("soul".to_string()),
         None,
-        Some(crate::soul::SOUL_NAMESPACE),
+        Some(crate::SOUL_NAMESPACE),
         None,
         Some(agent_id),
     )
@@ -3268,7 +3268,7 @@ async fn seed_soul_and_ambient(mem: &SqliteMemory, agent_id: &str) {
 fn soul_leaks(entries: &[MemoryEntry]) -> Vec<&MemoryEntry> {
     entries
         .iter()
-        .filter(|e| e.namespace == crate::soul::SOUL_NAMESPACE)
+        .filter(|e| e.namespace == crate::SOUL_NAMESPACE)
         .collect()
 }
 
@@ -3333,8 +3333,7 @@ async fn recall_namespaced_still_reads_soul_rows() {
         "namespaced recall must read the Soul row"
     );
     assert!(
-        rows.iter()
-            .all(|e| e.namespace == crate::soul::SOUL_NAMESPACE),
+        rows.iter().all(|e| e.namespace == crate::SOUL_NAMESPACE),
         "namespaced recall must not return rows outside the namespace"
     );
 }
@@ -3389,7 +3388,7 @@ async fn plain_stores_cannot_write_into_the_soul_key_space() {
             "x",
             MemoryCategory::Custom("soul".to_string()),
             None,
-            Some(crate::soul::SOUL_NAMESPACE),
+            Some(crate::SOUL_NAMESPACE),
             None,
             Some(&agent),
         )
@@ -3422,10 +3421,10 @@ async fn soul_invalid_store_refuses_before_embedding() {
     for (key, namespace) in [
         (
             "ordinary-key".to_string(),
-            Some(crate::soul::SOUL_NAMESPACE.to_string()),
+            Some(crate::SOUL_NAMESPACE.to_string()),
         ),
         (
-            format!("{}agent::disposition", crate::soul::SOUL_KEY_PREFIX),
+            format!("{}agent::disposition", crate::SOUL_KEY_PREFIX),
             None,
         ),
     ] {
@@ -3456,14 +3455,14 @@ async fn soul_valid_store_persists_without_embedding() {
     let embedder = Arc::new(StubEmbedding::new(4, 0.2));
     mem.swap_embedder(embedder.clone());
     for suffix in ["disposition", "candidate::pending"] {
-        let key = format!("{}agent::{suffix}", crate::soul::SOUL_KEY_PREFIX);
+        let key = format!("{}agent::{suffix}", crate::SOUL_KEY_PREFIX);
         mem.store_with_options(
             &key,
             "reserved local payload",
             MemoryCategory::Core,
             None,
             StoreOptions {
-                namespace: Some(crate::soul::SOUL_NAMESPACE.into()),
+                namespace: Some(crate::SOUL_NAMESPACE.into()),
                 ..StoreOptions::default()
             },
         )
@@ -3509,12 +3508,12 @@ async fn soul_reindex_excludes_reserved_rows_through_scoped_handle() {
         );
         for suffix in ["disposition", "candidate::pending"] {
             mem.store_with_options(
-                &format!("{}agent::{suffix}", crate::soul::SOUL_KEY_PREFIX),
+                &format!("{}agent::{suffix}", crate::SOUL_KEY_PREFIX),
                 "reserved local payload",
                 MemoryCategory::Core,
                 None,
                 StoreOptions {
-                    namespace: Some(crate::soul::SOUL_NAMESPACE.into()),
+                    namespace: Some(crate::SOUL_NAMESPACE.into()),
                     ..StoreOptions::default()
                 },
             )
@@ -3551,7 +3550,7 @@ async fn soul_reindex_excludes_reserved_rows_through_scoped_handle() {
         let conn = mem.conn.lock();
         let reserved: i64 = conn.query_row(
             "SELECT COUNT(*) FROM memories WHERE namespace = ?1 AND content = 'reserved local payload' AND embedding IS NULL",
-            params![crate::soul::SOUL_NAMESPACE], |r| r.get(0)).unwrap();
+            params![crate::SOUL_NAMESPACE], |r| r.get(0)).unwrap();
         assert_eq!(reserved, 2, "ambient reindex must preserve reserved rows");
         let embedded: usize = conn
             .query_row(
