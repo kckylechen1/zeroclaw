@@ -117,6 +117,33 @@ fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     config::schema::validate_temperature(t)
 }
 
+/// Flags of `zeroclaw agent` that only take effect with `-m`. Interactive
+/// `zeroclaw agent` hands off to `zeroclaw chat`, whose turns run on the
+/// gateway with the agent's configured model, so these would be ignored.
+/// Returns the flags that were given, in the order they appear in `--help`.
+#[cfg_attr(not(feature = "agent-runtime"), allow(dead_code))]
+fn interactive_agent_unsupported_flags(
+    model_provider: Option<&str>,
+    model: Option<&str>,
+    temperature: Option<f64>,
+    peripheral: &[String],
+) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    if model_provider.is_some() {
+        flags.push("--model-provider");
+    }
+    if model.is_some() {
+        flags.push("--model");
+    }
+    if temperature.is_some() {
+        flags.push("--temperature");
+    }
+    if !peripheral.is_empty() {
+        flags.push("--peripheral");
+    }
+    flags
+}
+
 fn print_no_command_help(cmd: clap::Command) -> Result<()> {
     #[cfg(feature = "agent-runtime")]
     {
@@ -493,8 +520,8 @@ conversation is shared with every other client.
 Examples:
   zeroclaw agent -a assistant                                          # chat through the gateway
   zeroclaw agent -a assistant -m \"Summarize today's logs\"              # single message
-  zeroclaw agent -a assistant -p anthropic --model claude-sonnet-4-20250514
-  zeroclaw agent -a assistant --peripheral nucleo-f401re:/dev/ttyACM0")]
+  zeroclaw agent -a assistant -m \"Hi\" -p anthropic --model claude-sonnet-4-20250514
+  zeroclaw agent -a assistant -m \"Read the sensor\" --peripheral nucleo-f401re:/dev/ttyACM0")]
     Agent {
         /// Configured agent alias to run as (must match `[agents.<alias>]`).
         /// Required — there is no default agent.
@@ -2138,6 +2165,30 @@ async fn async_main(command: clap::Command) -> Result<()> {
             // Interactive chat is a gateway client, so every device shares
             // one conversation with the agent.
             let Some(message) = message else {
+                let unsupported = interactive_agent_unsupported_flags(
+                    model_provider.as_deref(),
+                    model.as_deref(),
+                    temperature,
+                    &peripheral,
+                );
+                if !unsupported.is_empty() {
+                    let flags = unsupported.join(", ");
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({"flags": flags})),
+                        "interactive agent refused: flags only apply with --message"
+                    );
+                    anyhow::bail!(
+                        "{}",
+                        ta(
+                            "cli-agent-interactive-flags-need-message",
+                            &[("flags", &flags), ("agent", &agent_alias)],
+                            "These flags only apply with -m/--message"
+                        )
+                    );
+                }
                 return commands::chat::run(&config, agent_alias, "main".into(), None, None).await;
             };
             let final_temperature: Option<f64> = temperature.or_else(|| {

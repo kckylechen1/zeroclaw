@@ -60,6 +60,17 @@ agent, one history, one running turn.
 - A socket that falls far behind skips frames; the `done` frame still
   carries the full response.
 
+### Who can attach to a session
+
+A session id names a conversation; it is not a secret or a credential. With
+`require_pairing = true` (the default), every socket must present a paired
+token, and any paired token may attach to any session: the gateway serves one
+owner, and every paired device is that owner's. With pairing off, every client
+is anonymous, so anyone who can reach the gateway and names a session id sees
+its turns, can cancel them, and can answer its approvals. For that reason the
+gateway refuses to bind a non-loopback address with pairing off unless
+`allow_public_bind = true` explicitly accepts it.
+
 ### Request IDs and acceptance
 
 A `message` frame may carry an `id`: a client-chosen string of 1 to 128
@@ -88,7 +99,9 @@ the sending socket first:
   outcome is unknown; the request is not replayed.
 - If the receipt cannot be recorded, the message is refused with
   `REQUEST_NOT_RECORDED` and nothing runs.
-- Each session keeps its most recent 256 receipts.
+- Each session keeps its most recent 256 receipts. The stale-session sweep
+  (`session_ttl_hours`) deletes a swept session's receipts, and receipts
+  older than the TTL whose session no longer exists.
 
 Messages without an `id` behave as before: no ACK and no deduplication.
 

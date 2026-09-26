@@ -1437,9 +1437,6 @@ fn vi_verify_is_not_registered_even_when_verifiable_intent_is_enabled() {
 }
 
 #[cfg(test)]
-mod todo_registration_tests {}
-
-#[cfg(test)]
 mod wrapper_spec_forwarding_tests {
     use super::*;
     use async_trait::async_trait;

@@ -4435,3 +4435,36 @@ fn omit_binary_content_ignores_results_without_content_arrays() {
     omit_binary_content(&mut result);
     assert_eq!(result, before);
 }
+
+#[test]
+fn omit_binary_content_recurses_into_structured_content() {
+    let mut result = serde_json::json!({
+        "content": [{"type": "text", "text": "see structured"}],
+        "structuredContent": {
+            "pages": [
+                {"title": "one", "thumbnail":
+                    {"type": "image", "data": "iVBORw0KGgoAAAANSUhEUg==", "mimeType": "image/png"}},
+                {"attachment": {"type": "resource", "resource":
+                    {"uri": "file:///b.pdf", "mimeType": "application/pdf", "blob": "JVBERi0xLjQK"}}}
+            ],
+            // Not binary: `data` is not a base64 string, so it is kept.
+            "chart": {"type": "image", "data": {"points": [1, 2]}}
+        }
+    });
+    omit_binary_content(&mut result);
+    let rendered = result.to_string();
+    for raw in ["iVBORw0KGgo", "JVBERi0x"] {
+        assert!(!rendered.contains(raw), "{raw} leaked: {rendered}");
+    }
+    let pages = &result["structuredContent"]["pages"];
+    assert_eq!(pages[0]["title"], "one");
+    assert_eq!(
+        pages[0]["thumbnail"]["text"],
+        "[image attachment omitted: image/png, about 18 bytes]"
+    );
+    assert_eq!(
+        pages[1]["attachment"]["resource"]["text"],
+        "[resource attachment omitted: application/pdf, about 9 bytes]"
+    );
+    assert_eq!(result["structuredContent"]["chart"]["data"]["points"][1], 2);
+}
