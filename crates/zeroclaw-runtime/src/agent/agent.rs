@@ -139,8 +139,21 @@ pub struct Agent {
     /// Channel name stamped onto observer events to identify the calling surface
     /// (e.g. "agent", "wss", "gateway"). Defaults to "agent" for direct Agent callers.
     channel_name: String,
+    /// Per-turn Soul and User Model assembly (#380 U3). `Some` only for body
+    /// agents; delegated and test-builder agents keep a fixed prompt.
+    turn_context: Option<TurnContextState>,
+    /// The owner-profile section assembled for the current turn, appended at
+    /// the end of the system prompt. Empty when nothing applies.
+    user_model_section: String,
     #[cfg(test)]
     turn_datetime: Option<Arc<dyn Fn() -> chrono::DateTime<chrono::Local> + Send + Sync>>,
+}
+
+/// What the Agent remembers between turns to keep the Soul projection fresh.
+#[derive(Debug, Clone, Copy)]
+struct TurnContextState {
+    /// The Soul revision stamp the current persona projection was made at.
+    soul_stamp: Option<u64>,
 }
 
 impl Drop for Agent {
@@ -269,6 +282,7 @@ pub struct AgentBuilder {
     channel_name: Option<String>,
     exclude_memory: bool,
     provider_switch_config: Option<ProviderSwitchConfig>,
+    turn_context: Option<TurnContextState>,
     #[cfg(test)]
     turn_datetime: Option<Arc<dyn Fn() -> chrono::DateTime<chrono::Local> + Send + Sync>>,
 }
@@ -319,6 +333,7 @@ impl AgentBuilder {
             channel_name: None,
             exclude_memory: false,
             provider_switch_config: None,
+            turn_context: None,
             #[cfg(test)]
             turn_datetime: None,
         }
@@ -554,6 +569,16 @@ impl AgentBuilder {
         self
     }
 
+    /// Make this a body agent whose Soul and User Model are assembled per
+    /// turn from the stores under the full config's `data_dir` (see
+    /// [`crate::agent::turn_context`]). `soul_stamp` is the Soul revision
+    /// stamp read just before the prompt builder's persona was projected.
+    /// Needs [`Self::provider_switch_config`] to carry the full config.
+    pub fn governed_turn_context(mut self, soul_stamp: Option<u64>) -> Self {
+        self.turn_context = Some(TurnContextState { soul_stamp });
+        self
+    }
+
     pub fn build(self) -> Result<Agent> {
         let mut tools = self.tools.ok_or_else(|| {
             ::zeroclaw_log::record!(
@@ -682,6 +707,8 @@ impl AgentBuilder {
             channel_handles: AgentChannelHandles::default(),
             image_cache: zeroclaw_providers::multimodal::LocalImageCache::new(),
             provider_switch_config: self.provider_switch_config,
+            turn_context: self.turn_context,
+            user_model_section: String::new(),
             channel_name: self.channel_name.unwrap_or_else(|| "agent".to_string()),
             #[cfg(test)]
             turn_datetime: self.turn_datetime,
@@ -1209,7 +1236,51 @@ impl Agent {
             prompt.push_str("\n\n");
             prompt.push_str(&self.mcp_pinned_section);
         }
+        // Last, so a changed owner profile leaves the prefix above cacheable.
+        if !self.user_model_section.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&self.user_model_section);
+        }
         Ok(prompt)
+    }
+
+    /// Refresh the governed per-turn context before the system prompt is
+    /// (re)built: re-project the Soul when its revision moved and render the
+    /// owner profile that applies to this turn. No-op for agents without a
+    /// governed turn context or without a full config.
+    async fn assemble_turn_context(&mut self) {
+        let Some(state) = self.turn_context else {
+            return;
+        };
+        let Some(config) = self
+            .provider_switch_config
+            .as_ref()
+            .and_then(|cfg| cfg.config.clone())
+        else {
+            return;
+        };
+        let session = crate::agent::announce_claim::current_session_key()
+            .or_else(|| self.memory_session_id.clone())
+            .unwrap_or_default();
+        let applicability = zeroclaw_memory::companion::ApplicabilityContext::new(
+            &self.agent_alias,
+            &self.channel_name,
+            &session,
+        );
+        let assembled = crate::agent::turn_context::assemble_turn_context(
+            config,
+            self.agent_alias.clone(),
+            state.soul_stamp,
+            applicability,
+        )
+        .await;
+        if let Some(persona) = assembled.persona {
+            self.prompt_builder.set_persona(persona);
+        }
+        self.turn_context = Some(TurnContextState {
+            soul_stamp: assembled.soul_stamp,
+        });
+        self.user_model_section = assembled.user_model_section;
     }
 
     fn rebuild_system_prompt_for_dispatcher(

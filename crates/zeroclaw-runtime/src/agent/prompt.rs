@@ -72,21 +72,13 @@ impl SystemPromptBuilder {
     /// file listing once the owner has written a governed Identity
     /// (ADR-015 §2).
     pub fn with_persona(persona: crate::agent::persona_projection::PersonaProjection) -> Self {
-        let identity: Box<dyn PromptSection> = match persona.legacy_files {
-            crate::agent::persona_projection::LegacyPersonaFiles::Inject => {
-                Box::new(IdentitySection)
-            }
-            crate::agent::persona_projection::LegacyPersonaFiles::Suppress => {
-                Box::new(GovernedIdentitySection)
-            }
-        };
-        let persona_section = persona.section;
+        let (identity, voice) = persona_sections(persona);
         Self {
             sections: vec![
                 Box::new(DateTimeSection),
                 identity,
                 Box::new(ToolHonestySection),
-                Box::new(VoiceSection(persona_section)),
+                voice,
                 Box::new(ToolsSection),
                 Box::new(SafetySection),
                 Box::new(SkillsSection),
@@ -94,6 +86,24 @@ impl SystemPromptBuilder {
                 Box::new(RuntimeSection),
                 Box::new(ChannelMediaSection),
             ],
+        }
+    }
+
+    /// Swap in a new Soul projection, keeping every other section and the
+    /// section order. Used when the Soul revision moves mid-session.
+    pub fn set_persona(&mut self, persona: crate::agent::persona_projection::PersonaProjection) {
+        let (identity, voice) = persona_sections(persona);
+        let mut identity = Some(identity);
+        let mut voice = Some(voice);
+        for section in &mut self.sections {
+            let replacement = match section.name() {
+                "identity" => identity.take(),
+                "voice" => voice.take(),
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                *section = replacement;
+            }
         }
     }
 
@@ -114,6 +124,19 @@ impl SystemPromptBuilder {
         }
         Ok(output)
     }
+}
+
+/// The identity and persona sections a Soul projection selects.
+fn persona_sections(
+    persona: crate::agent::persona_projection::PersonaProjection,
+) -> (Box<dyn PromptSection>, Box<dyn PromptSection>) {
+    let identity: Box<dyn PromptSection> = match persona.legacy_files {
+        crate::agent::persona_projection::LegacyPersonaFiles::Inject => Box::new(IdentitySection),
+        crate::agent::persona_projection::LegacyPersonaFiles::Suppress => {
+            Box::new(GovernedIdentitySection)
+        }
+    };
+    (identity, Box::new(VoiceSection(persona.section)))
 }
 
 pub struct IdentitySection;

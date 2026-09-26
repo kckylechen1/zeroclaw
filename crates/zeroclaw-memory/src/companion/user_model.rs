@@ -14,8 +14,10 @@
 use std::fmt;
 use std::fmt::Write as _;
 
-use super::user_model_scope::Scope;
-use std::path::Path;
+use super::user_model_scope::{ApplicabilityContext, Scope};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use rusqlite::Connection;
@@ -199,6 +201,21 @@ impl UserModelStore {
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// One shared handle per data directory for the whole process, so the
+    /// review API and every prompt projection read through the same
+    /// connection. Blocking on first open.
+    pub fn shared(data_dir: &Path) -> Result<Arc<Self>, rusqlite::Error> {
+        static HANDLES: OnceLock<Mutex<HashMap<PathBuf, Arc<UserModelStore>>>> = OnceLock::new();
+        let handles = HANDLES.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut handles = handles.lock();
+        if let Some(store) = handles.get(data_dir) {
+            return Ok(Arc::clone(store));
+        }
+        let store = Arc::new(Self::open(data_dir)?);
+        handles.insert(data_dir.to_path_buf(), Arc::clone(&store));
+        Ok(store)
     }
 
     /// Record an explicit owner-authored statement and make it the active
@@ -644,6 +661,21 @@ pub fn project_active_heads(
         prompt_section: section,
         revision_ids: included_ids,
     }
+}
+
+/// Project the heads that apply in `applicability` (agent, channel,
+/// session), bounded by `max_chars`. The single rendering of the owner
+/// profile for every turn surface.
+pub fn project_applicable_heads(
+    heads: Vec<UserModelRevision>,
+    applicability: &ApplicabilityContext,
+    max_chars: usize,
+) -> UserModelStateProjection {
+    let applicable: Vec<_> = heads
+        .into_iter()
+        .filter(|revision| applicability.applies_str(&revision.scope))
+        .collect();
+    project_active_heads(&applicable, max_chars)
 }
 
 fn kind_from_str(raw: &str) -> Option<UserModelKind> {

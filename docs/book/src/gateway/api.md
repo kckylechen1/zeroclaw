@@ -282,6 +282,13 @@ revision. A failed narrow leaves the rejection available for a later valid
 narrow. Unknown IDs still return 404. The decision and receipt write share one
 SQLite write transaction, including across independent store connections.
 
+Active User Model revisions reach the agent's system prompt on every surface:
+`/ws/chat` (and the CLI and bridges that use it) as well as channel turns. Each
+turn projects the revisions whose scope applies to it (`global`, the agent, the
+channel, or the session), as an `## Owner profile (authoritative)` section of at
+most 1,200 bytes at the end of the system prompt. A reviewed or owner-written
+change applies from the next turn.
+
 ## Governed Soul
 
 The agent's Soul is owner-governed
@@ -312,6 +319,13 @@ A stale value returns 409 with `code: "revision_conflict"` and
 offending `field`. After the first owner-written Identity revision, the legacy
 `SOUL.md` and `IDENTITY.md` workspace files stop being injected into the system
 prompt.
+
+A Soul change (an owner write, a rollback, or an accepted proposal) applies
+from the next turn of a `/ws/chat` session that is already open; no reconnect is
+needed. The agent checks the Soul's revision at the start of each turn and
+re-renders its persona only when that revision moved, so an unchanged Soul
+keeps the system prompt byte-identical. Delegated workers never receive the
+Soul or the User Model.
 
 Model file tools cannot write `SOUL.md`, `IDENTITY.md`, or `USER.md` at an
 agent workspace root.
