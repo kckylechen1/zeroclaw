@@ -1977,6 +1977,51 @@ async fn advisor_calls_are_capped_per_turn() {
 }
 
 #[tokio::test]
+async fn advisor_call_outside_a_turn_scope_is_refused() {
+    // Fail closed: without a turn scope (e.g. the tool future was moved onto
+    // a spawned task, which does not inherit task-locals) the per-turn cap
+    // cannot be enforced, so the advisor is not consulted at all.
+    let stub = StubResolver::json(ok_report_body("advised"));
+    let tool = Arc::new(
+        advisor_tool()
+            .with_advisor_max_calls_per_turn(1)
+            .with_model_resolver(stub.clone()),
+    );
+    let args = serde_json::json!({ "objective": "hard question" });
+    for _ in 0..3 {
+        let result = tool.execute(args.clone()).await.unwrap();
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert!(error.contains("within an agent turn"), "{error}");
+    }
+    assert!(stub.requests().is_empty(), "no advisor call ran unscoped");
+
+    // A task spawned from inside a scope does not inherit it either.
+    super::scope_advisor_turn(async {
+        let tool = Arc::clone(&tool);
+        let args = args.clone();
+        let spawned = zeroclaw_spawn::spawn!(async move { tool.execute(args).await });
+        let result = spawned.await.unwrap().unwrap();
+        assert!(!result.success, "a spawned call must not escape the cap");
+    })
+    .await;
+    assert!(stub.requests().is_empty());
+
+    // Inside a scope the cap holds as configured.
+    super::scope_advisor_turn(async {
+        assert!(tool.execute(args.clone()).await.unwrap().success);
+        let second = tool.execute(args.clone()).await.unwrap();
+        assert!(second.error.unwrap().contains("advisor budget used"));
+    })
+    .await;
+    assert_eq!(stub.requests().len(), 1);
+
+    // A tool without an advisor is unaffected by the missing scope.
+    let plain = reasoning_tool().with_model_resolver(StubResolver::json(ok_report_body("x")));
+    assert!(plain.execute(args).await.unwrap().success);
+}
+
+#[tokio::test]
 async fn advisor_cap_is_configurable_and_only_binds_advisor_tools() {
     let stub = StubResolver::json(ok_report_body("advised"));
     let tool = advisor_tool()

@@ -81,6 +81,13 @@ pub(crate) fn ambient_lineage() -> Option<LineageRef> {
 // turn via [`scope_advisor_turn`]; the advisor-bound `reasoning_subagent`
 // only borrows it while it executes (same shape as the loop-owned
 // model-switch state).
+//
+// Spawn hazard: a tokio task-local is NOT inherited by a spawned task. A
+// tool future moved onto `spawn!`/`JoinSet::spawn` runs outside this scope,
+// so it cannot see (or be capped by) the turn's counter. That is why a call
+// outside the scope is refused rather than admitted: a lost scope must not
+// silently lift the per-turn cap. Code that spawns tool execution must
+// re-enter the scope in the spawned task with the parent's counter.
 tokio::task_local! {
     static ADVISOR_TURN_CALLS: Arc<std::sync::atomic::AtomicU32>;
 }
@@ -96,21 +103,31 @@ where
         .await
 }
 
-/// Reserve one advisor call in the current turn. `false` = the turn has
-/// already used `max_calls`. Outside a turn scope (a direct embedder or
-/// RPC invocation, not an agent turn) each call stands alone, so it is
-/// always admitted.
-fn try_reserve_advisor_call(max_calls: u32) -> bool {
+/// The outcome of [`try_reserve_advisor_call`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdvisorReservation {
+    Reserved,
+    /// The turn already used `max_calls`.
+    BudgetUsed,
+    /// No turn scope is installed, so the per-turn cap cannot be enforced.
+    NoTurnScope,
+}
+
+/// Reserve one advisor call in the current turn. Fails closed: outside a
+/// turn scope (see the spawn hazard above) the call is refused.
+fn try_reserve_advisor_call(max_calls: u32) -> AdvisorReservation {
     use std::sync::atomic::Ordering;
-    ADVISOR_TURN_CALLS
-        .try_with(|calls| {
-            calls
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                    (used < max_calls).then_some(used + 1)
-                })
-                .is_ok()
-        })
-        .unwrap_or(true)
+    match ADVISOR_TURN_CALLS.try_with(|calls| {
+        calls
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                (used < max_calls).then_some(used + 1)
+            })
+            .is_ok()
+    }) {
+        Ok(true) => AdvisorReservation::Reserved,
+        Ok(false) => AdvisorReservation::BudgetUsed,
+        Err(_) => AdvisorReservation::NoTurnScope,
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2302,19 +2319,42 @@ impl Tool for ReasoningSubagentTool {
             });
         }
 
-        if let Some(advisor) = &self.advisor
-            && !try_reserve_advisor_call(advisor.max_calls_per_turn)
-        {
-            return Ok(ToolResult {
-                success: false,
-                output: ToolOutput::default(),
-                error: Some(format!(
+        if let Some(advisor) = &self.advisor {
+            let error = match try_reserve_advisor_call(advisor.max_calls_per_turn) {
+                AdvisorReservation::Reserved => None,
+                AdvisorReservation::BudgetUsed => Some(format!(
                     "reasoning_subagent: advisor budget used — this turn already consulted \
                      the advisor {} time(s), the per-turn limit; continue without the \
                      advisor or answer with what you have",
                     advisor.max_calls_per_turn
                 )),
-            });
+                AdvisorReservation::NoTurnScope => {
+                    ::zeroclaw_log::record!(
+                        WARN,
+                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                            .with_category(::zeroclaw_log::EventCategory::Tool)
+                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "tool": Self::NAME,
+                                "advisor": advisor.provider_ref,
+                            })),
+                        "advisor call refused: no agent turn scope, so the per-turn cap cannot be enforced"
+                    );
+                    Some(
+                        "reasoning_subagent: the advisor can only be consulted from within an \
+                         agent turn (no per-turn advisor budget is in scope here); continue \
+                         without the advisor"
+                            .to_string(),
+                    )
+                }
+            };
+            if let Some(error) = error {
+                return Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::default(),
+                    error: Some(error),
+                });
+            }
         }
 
         match self.run_child(&objective).await {
