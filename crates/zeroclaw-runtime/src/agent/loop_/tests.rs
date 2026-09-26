@@ -18,7 +18,6 @@ use zeroclaw_api::channel::{
     Channel, ChannelApprovalRequest, ChannelApprovalResponse, ChannelMessage, SendMessage,
 };
 use zeroclaw_providers::{ChatMessage, ToolCall};
-use zeroclaw_tool_call_parser::parse_tool_calls;
 
 zeroclaw_api::mock_tool_attribution!(
     CountingTool,
@@ -8732,14 +8731,6 @@ const _: () = {
 fn constants_bounds_are_compile_time_checked() {
     // Bounds are enforced by the const assertions above.
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// Recovery Tests - Tool Call Value Parsing
-
-// ─────────────────────────────────────────────────────────────────────
-// TG4 (inline): parse_tool_calls robustness — malformed/edge-case inputs
-// Prevents: Pattern 4 issues
-// ─────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────
 // TG4 (inline): scrub_credentials edge cases
