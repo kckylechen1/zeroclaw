@@ -356,6 +356,11 @@ impl Agent {
                 Arc::new(move || max)
             };
 
+        // Read before projecting, so a Soul change that lands in between is
+        // picked up on the first turn instead of being missed.
+        let soul_stamp = crate::agent::turn_context::soul_revision_stamp(config, agent_alias);
+        let persona = crate::agent::persona_projection::persona_projection(config, agent_alias);
+
         let mut agent = Agent::builder()
             .model_provider(model_provider)
             .tools(tools)
@@ -369,14 +374,12 @@ impl Agent {
                     config.effective_memory_recall_limit(agent_alias),
                 ),
             )
-            .prompt_builder(SystemPromptBuilder::with_persona(
-                // Resolved once, here, where `&Config` and the alias are both in
-                // hand. Identity and Principles come from the governed Soul
-                // profile, Voice from the configured persona dials (ADR-015).
-                // A persona edit reaches an already-built Agent only after the
-                // session is rebuilt; reconnect heals it.
-                crate::agent::persona_projection::persona_projection(config, agent_alias),
-            ))
+            // Identity and Principles come from the governed Soul profile,
+            // Voice from the configured persona dials (ADR-015). The body
+            // re-projects it at the start of any turn whose Soul revision
+            // moved, and adds the User Model owner profile per turn.
+            .prompt_builder(SystemPromptBuilder::with_persona(persona))
+            .governed_turn_context(soul_stamp)
             .config(
                 config
                     .resolved_agent_config(agent_alias)

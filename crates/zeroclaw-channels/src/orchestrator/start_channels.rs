@@ -149,11 +149,11 @@ pub async fn start_channels(
 
     let user_model_store = match tokio::task::spawn_blocking({
         let data_dir = config.data_dir.clone();
-        move || zeroclaw_memory::companion::UserModelStore::open(&data_dir)
+        move || zeroclaw_memory::companion::UserModelStore::shared(&data_dir)
     })
     .await
     {
-        Ok(Ok(store)) => Some(Arc::new(store)),
+        Ok(Ok(store)) => Some(store),
         Ok(Err(err)) => {
             ::zeroclaw_log::record!(
                 WARN,

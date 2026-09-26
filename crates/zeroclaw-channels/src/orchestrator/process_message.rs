@@ -472,37 +472,15 @@ async fn process_channel_message_body(
     // Model store is unavailable or fails to open.
     let durable_section = match ctx.user_model().cloned() {
         Some(user_model) => {
-            let heads = tokio::task::spawn_blocking(move || user_model.active_heads(None))
-                .await
-                .ok()
-                .and_then(Result::ok);
-            match heads {
-                Some(heads) => {
-                    let applicability = zeroclaw_memory::companion::ApplicabilityContext::new(
-                        ctx.agent_alias.as_str(),
-                        &channel_composite,
-                        &history_key,
-                    );
-                    let applicable: Vec<_> = heads
-                        .into_iter()
-                        .filter(|revision| applicability.applies_str(&revision.scope))
-                        .collect();
-                    zeroclaw_memory::companion::project_active_heads(
-                        &applicable,
-                        zeroclaw_memory::companion::USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS,
-                    )
-                    .prompt_section
-                }
-                None => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "user model read failed; owner-profile projection skipped for this turn"
-                    );
-                    String::new()
-                }
-            }
+            ::zeroclaw_runtime::agent::turn_context::user_model_section(
+                user_model,
+                zeroclaw_memory::companion::ApplicabilityContext::new(
+                    ctx.agent_alias.as_str(),
+                    &channel_composite,
+                    &history_key,
+                ),
+            )
+            .await
         }
         None => String::new(),
     };

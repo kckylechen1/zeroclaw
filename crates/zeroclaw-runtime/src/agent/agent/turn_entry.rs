@@ -26,6 +26,7 @@ impl Agent {
             ));
         }
 
+        self.assemble_turn_context().await;
         if self.history.is_empty() {
             let system_prompt = self.build_system_prompt()?;
             self.history
@@ -350,6 +351,7 @@ impl Agent {
         }
 
         // ── Preamble (identical to turn) ───────────────────────────────
+        self.assemble_turn_context().await;
         if self.history.is_empty() {
             let system_prompt = self
                 .build_system_prompt()

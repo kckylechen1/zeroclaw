@@ -836,6 +836,21 @@ impl SoulProfileStore {
         Ok(store)
     }
 
+    /// A cheap change marker for one agent's Soul: the number of stored
+    /// revisions across every layer. Revisions are append-only, so any owner
+    /// write, approved proposal, rollback, or seed moves it; resolving a
+    /// proposal without applying it does not.
+    pub fn revision_stamp(&self, agent: &str) -> Result<u64, SoulProfileError> {
+        let agent = checked_agent(agent)?;
+        let conn = self.conn.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM soul_revisions WHERE agent = ?1",
+            params![agent],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
     /// Current heads without seeding.
     pub fn profile(&self, agent: &str) -> Result<SoulProfile, SoulProfileError> {
         let agent = checked_agent(agent)?;

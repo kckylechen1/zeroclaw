@@ -47,7 +47,7 @@ pub use soul_profile::{
 pub use user_model::{
     AuthorityClass, ReviewAction, USER_MODEL_PROJECTION_DEFAULT_MAX_CHARS, UserModelCandidate,
     UserModelKind, UserModelReviewReceipt, UserModelRevision, UserModelStateProjection,
-    UserModelStore, is_candidate_already_reviewed, project_active_heads,
+    UserModelStore, is_candidate_already_reviewed, project_active_heads, project_applicable_heads,
 };
 pub use user_model_scope::{ApplicabilityContext, Scope};
 

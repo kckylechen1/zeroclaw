@@ -2338,6 +2338,7 @@ mod tests {
     struct ScriptedProvider {
         gate: Arc<tokio::sync::Semaphore>,
         seen: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
+        systems: Arc<parking_lot::Mutex<Vec<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -2359,6 +2360,13 @@ mod tests {
             _temperature: Option<f64>,
         ) -> anyhow::Result<zeroclaw_providers::ChatResponse> {
             self.gate.acquire().await?.forget();
+            self.systems.lock().extend(
+                request
+                    .messages
+                    .iter()
+                    .find(|m| m.role == "system")
+                    .map(|m| m.content.clone()),
+            );
             let mut seen = self.seen.lock();
             seen.push(
                 request
@@ -2395,6 +2403,10 @@ mod tests {
         scope: WsTurnScope,
         gate: Arc<tokio::sync::Semaphore>,
         seen: Arc<parking_lot::Mutex<Vec<Vec<String>>>>,
+        systems: Arc<parking_lot::Mutex<Vec<String>>>,
+        /// When set, the agent is a body agent assembling Soul and User
+        /// Model per turn from this config's `data_dir`.
+        owner_config: Option<Arc<zeroclaw_config::schema::Config>>,
         _tmp: tempfile::TempDir,
     }
 
@@ -2411,6 +2423,8 @@ mod tests {
                 },
                 gate: Arc::new(tokio::sync::Semaphore::new(0)),
                 seen: Arc::default(),
+                systems: Arc::default(),
+                owner_config: None,
                 _tmp: tmp,
             }
         }
@@ -2423,8 +2437,10 @@ mod tests {
                     let provider = ScriptedProvider {
                         gate: Arc::clone(&self.gate),
                         seen: Arc::clone(&self.seen),
+                        systems: Arc::clone(&self.systems),
                     };
                     let workspace = self._tmp.path().to_path_buf();
+                    let owner_config = self.owner_config.clone();
                     async move {
                         let memory_cfg = zeroclaw_config::schema::MemoryConfig {
                             backend: "none".into(),
@@ -2433,7 +2449,7 @@ mod tests {
                         let mem: Arc<dyn zeroclaw_memory::Memory> = Arc::from(
                             zeroclaw_memory::create_memory(&memory_cfg, &workspace, None).unwrap(),
                         );
-                        let agent = zeroclaw_runtime::agent::Agent::builder()
+                        let mut builder = zeroclaw_runtime::agent::Agent::builder()
                             .model_provider(Box::new(provider))
                             .tools(vec![])
                             .memory(mem)
@@ -2444,8 +2460,17 @@ mod tests {
                             .workspace_dir(workspace)
                             .model_name("test-model".into())
                             .model_provider_name("scripted".into())
-                            .agent_alias("web".into())
-                            .build()?;
+                            .agent_alias("web".into());
+                        if let Some(config) = owner_config {
+                            builder = builder
+                                .provider_switch_config(
+                                    zeroclaw_runtime::agent::agent::ProviderSwitchConfig {
+                                        config: Some(config),
+                                    },
+                                )
+                                .governed_turn_context(None);
+                        }
+                        let agent = builder.build()?;
                         Ok::<_, anyhow::Error>((
                             WsSession {
                                 agent,
@@ -2524,6 +2549,75 @@ mod tests {
         let history = chat.seen.lock()[1].clone();
         assert_eq!(history.len(), 2, "{history:?}");
         assert!(history[0].ends_with("first") && history[1].ends_with("second"));
+    }
+
+    /// #380 U3: the `/ws/chat` turn path carries the owner profile that
+    /// applies to this session, and a Soul change reaches the live session on
+    /// its next turn without a reconnect.
+    #[tokio::test]
+    async fn ws_turns_carry_the_owner_profile_and_follow_soul_changes() {
+        use zeroclaw_memory::companion::{
+            SoulIdentity, SoulProfileStore, UserModelKind, UserModelStore,
+        };
+        let mut chat = SharedChat::new();
+        let data_dir = chat._tmp.path().join("owner-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let user_model = UserModelStore::shared(&data_dir).unwrap();
+        for (statement, key, scope) in [
+            ("Answer in English.", "lang", "global"),
+            ("Focus on the trading plan.", "focus", "session:gw_shared"),
+            ("Talk about gardening.", "hobby", "session:gw_other"),
+        ] {
+            user_model
+                .record_owner_statement(UserModelKind::Preference, statement, key, scope, 1)
+                .unwrap();
+        }
+        chat.owner_config = Some(Arc::new(zeroclaw_config::schema::Config {
+            data_dir: data_dir.clone(),
+            ..zeroclaw_config::schema::Config::default()
+        }));
+        let mut a = chat.attach().await;
+        chat.gate.add_permits(2);
+
+        assert!(chat.send(&a, message("first")).is_none());
+        assert_eq!(
+            frames_until_end(&mut a).await.pop().unwrap()["type"],
+            "done"
+        );
+        let first = chat.systems.lock()[0].clone();
+        assert!(
+            first.contains("## Owner profile (authoritative)"),
+            "{first}"
+        );
+        assert!(first.contains("Answer in English."), "{first}");
+        assert!(first.contains("Focus on the trading plan."), "{first}");
+        assert!(!first.contains("gardening"), "{first}");
+        assert!(first.contains("You are web."), "{first}");
+
+        let soul = SoulProfileStore::shared(&data_dir).unwrap();
+        let head = soul.profile("web").unwrap().identity.unwrap().revision;
+        soul.set_identity(
+            "web",
+            SoulIdentity {
+                name: "Webby".into(),
+                self_description: None,
+                primary_language: None,
+                pronouns: None,
+            },
+            head,
+            2,
+        )
+        .unwrap();
+
+        assert!(chat.send(&a, message("second")).is_none());
+        assert_eq!(
+            frames_until_end(&mut a).await.pop().unwrap()["type"],
+            "done"
+        );
+        let second = chat.systems.lock()[1].clone();
+        assert!(second.contains("You are Webby."), "{second}");
+        assert!(!second.contains("You are web."), "{second}");
+        assert!(second.contains("Focus on the trading plan."), "{second}");
     }
 
     #[tokio::test]

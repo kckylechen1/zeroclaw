@@ -3,16 +3,14 @@
 //! authoring is owner authority, exactly the surface the store's rules
 //! exist to govern.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use parking_lot::Mutex;
 use zeroclaw_memory::companion::{
     ReviewAction, UserModelKind, UserModelReviewReceipt, UserModelRevision, UserModelStore,
     is_candidate_already_reviewed,
@@ -20,21 +18,10 @@ use zeroclaw_memory::companion::{
 
 use crate::AppState;
 
-/// One open store handle per data_dir. The sqlite file is the source of
-/// truth; these are views (WAL + busy_timeout support multi-connection).
-fn store_handles() -> &'static Mutex<HashMap<PathBuf, Arc<UserModelStore>>> {
-    static HANDLES: OnceLock<Mutex<HashMap<PathBuf, Arc<UserModelStore>>>> = OnceLock::new();
-    HANDLES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn cached_store(data_dir: &PathBuf) -> Result<Arc<UserModelStore>, String> {
-    let mut handles = store_handles().lock();
-    if let Some(store) = handles.get(data_dir) {
-        return Ok(Arc::clone(store));
-    }
-    let store = Arc::new(UserModelStore::open(data_dir).map_err(|err| err.to_string())?);
-    handles.insert(data_dir.clone(), Arc::clone(&store));
-    Ok(store)
+/// The process-wide store handle for `data_dir`, shared with the per-turn
+/// owner-profile projection. The sqlite file is the source of truth.
+fn cached_store(data_dir: &std::path::Path) -> Result<Arc<UserModelStore>, String> {
+    UserModelStore::shared(data_dir).map_err(|err| err.to_string())
 }
 
 fn now_unix() -> u64 {
@@ -607,7 +594,6 @@ mod tests {
         let (status, _) = history_http(&state, "absent", anon_headers()).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert!(!dir.path().join("user_model.db").exists());
-        assert!(!store_handles().lock().contains_key(dir.path()));
         let (status, detail) = history_http(&state, "absent", operator_headers()).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(detail["error"], "unknown candidate id");
@@ -773,7 +759,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_narrow_scope_over_http_leaves_no_receipt() {
         let (dir, state) = state_with_tempdir();
-        let store = cached_store(&dir.path().to_path_buf()).unwrap();
+        let store = cached_store(dir.path()).unwrap();
         let candidate = store
             .record_observation(
                 UserModelKind::Habit,
@@ -839,7 +825,7 @@ mod tests {
     #[tokio::test]
     async fn review_revision_insert_failure_over_http_rolls_back_receipt() {
         let (dir, state) = state_with_tempdir();
-        let store = cached_store(&dir.path().to_path_buf()).unwrap();
+        let store = cached_store(dir.path()).unwrap();
         let candidate = store
             .record_observation(UserModelKind::Habit, "private", "atomic.http", "[]", 100)
             .unwrap();
@@ -927,7 +913,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(empty["candidates"], serde_json::json!([]));
-        let store = cached_store(&dir.path().to_path_buf()).unwrap();
+        let store = cached_store(dir.path()).unwrap();
         let c = store
             .record_observation(UserModelKind::Habit, "C", "c", "[]", 100)
             .unwrap();
@@ -1015,7 +1001,6 @@ mod tests {
             let (status, _) = pending_http(&state, &uri, operator_headers()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert!(!dir.path().join("user_model.db").exists());
-            assert!(!store_handles().lock().contains_key(dir.path()));
         }
     }
 }

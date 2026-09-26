@@ -30,6 +30,7 @@ pub mod tool_execution;
 pub mod tool_filter;
 pub mod tool_receipts;
 pub(crate) mod turn;
+pub mod turn_context;
 
 pub use turn::context::TurnMeta;
 
