@@ -1543,3 +1543,36 @@ fn bundle_refs_find_scrub_rewrite() {
     assert!(cfg.agents["b"].skill_bundles.is_empty());
     assert!(find_bundle_refs(&cfg, "tools").is_empty());
 }
+
+#[test]
+fn advisor_model_ref_is_scrubbed_on_delete_and_rewritten_on_rename() {
+    use crate::advisor::AdvisorTarget;
+
+    let mut cfg = cfg_with_provider("anthropic", "default");
+    cfg.agents.insert(
+        "fast".to_string(),
+        AliasedAgentConfig {
+            advisor: Some(AdvisorTarget::Model("anthropic.default".into())),
+            ..Default::default()
+        },
+    );
+    let kind = provider_kind("anthropic");
+
+    let sites = find_all_references(&cfg, &kind, "default");
+    assert!(
+        sites
+            .iter()
+            .any(|s| s.path == "agents.fast.advisor" && s.raw_value == "model:anthropic.default"),
+        "advisor must be listed as a soft reference: {sites:?}"
+    );
+
+    rename_with_cascade(&mut cfg, &kind, "default", "prod").expect("rename succeeds");
+    assert_eq!(
+        cfg.agents["fast"].advisor,
+        Some(AdvisorTarget::Model("anthropic.prod".into()))
+    );
+
+    delete_with_cascade(&mut cfg, &kind, "prod", CascadePolicy::RefuseOnHard)
+        .expect("advisor is a soft ref; delete succeeds");
+    assert!(cfg.agents["fast"].advisor.is_none());
+}

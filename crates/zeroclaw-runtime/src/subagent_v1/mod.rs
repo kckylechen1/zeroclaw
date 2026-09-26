@@ -73,6 +73,47 @@ pub(crate) fn ambient_lineage() -> Option<LineageRef> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Advisor per-turn budget (#405)
+// ─────────────────────────────────────────────────────────────────────────
+
+// Advisor consultations made in the current agent turn. The turn engine
+// (`run_tool_call_loop`) owns the counter and installs a fresh one per
+// turn via [`scope_advisor_turn`]; the advisor-bound `reasoning_subagent`
+// only borrows it while it executes (same shape as the loop-owned
+// model-switch state).
+tokio::task_local! {
+    static ADVISOR_TURN_CALLS: Arc<std::sync::atomic::AtomicU32>;
+}
+
+/// Run `future` as one agent turn for advisor accounting: advisor calls
+/// made inside it count against a fresh per-turn budget.
+pub(crate) async fn scope_advisor_turn<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    ADVISOR_TURN_CALLS
+        .scope(Arc::new(std::sync::atomic::AtomicU32::new(0)), future)
+        .await
+}
+
+/// Reserve one advisor call in the current turn. `false` = the turn has
+/// already used `max_calls`. Outside a turn scope (a direct embedder or
+/// RPC invocation, not an agent turn) each call stands alone, so it is
+/// always admitted.
+fn try_reserve_advisor_call(max_calls: u32) -> bool {
+    use std::sync::atomic::Ordering;
+    ADVISOR_TURN_CALLS
+        .try_with(|calls| {
+            calls
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                    (used < max_calls).then_some(used + 1)
+                })
+                .is_ok()
+        })
+        .unwrap_or(true)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Opaque model access binding (SA-7d)
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -225,6 +266,16 @@ impl ModelAccessResolver for ConfigModelAccessResolver {
         let response = dispatcher
             .chat(chat_request, &model, request.temperature)
             .await?;
+        // Attribute the child's spend to the resolved `type.alias` in the
+        // turn's cost scope (gateway WS, `loop_::run`, `turn_entry`). No
+        // scope (direct/test calls) = nothing is recorded.
+        if let Some(usage) = response.usage.as_ref() {
+            let _ = crate::agent::cost::record_tool_loop_cost_usage(
+                &self.policy.provider_ref,
+                &model,
+                usage,
+            );
+        }
         let (tokens_in, tokens_out) = response
             .usage
             .map(|usage| {
@@ -1806,7 +1857,36 @@ pub struct ReasoningSubagentTool {
     /// tests). The child context is unaffected: it still sees only the
     /// opaque binding.
     model_resolver_override: Option<Arc<dyn ModelAccessResolver>>,
+    /// The agent's configured advisor (`advisor = "model:<type>.<alias>"`).
+    /// When set, the child runs on this model instead of the parent's
+    /// own, and calls count against the per-turn advisor budget.
+    advisor: Option<AdvisorBinding>,
 }
+
+/// An advisor model the tool consults instead of the parent's provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AdvisorBinding {
+    /// Dotted `type.alias` into `[providers.models]`.
+    provider_ref: String,
+    max_calls_per_turn: u32,
+}
+
+/// Tool description when no advisor is configured.
+const REASONING_DESCRIPTION: &str = "Run one bounded reasoning SubAgent against a focused objective. The child \
+     receives only the objective and a digest-bound context snapshot — no tools, \
+     no conversation history, no memory — and returns a structured report \
+     (summary, findings, evidence pointers, uncertainty, recommendations, \
+     candidate changes for parent disposition). Use for focused analysis that \
+     should not pollute this agent's history.";
+
+/// Tool description when the agent has an advisor configured.
+const ADVISOR_DESCRIPTION: &str = "Consult this agent's configured advisor model: a stronger model for hard \
+     questions. Use it when a question is beyond what you can answer confidently. \
+     The advisor sees ONLY the objective — no tools, no conversation history, no \
+     memory — so write the objective as the question plus a short summary of the \
+     facts needed to answer it (at most 8 KiB). It returns a structured report \
+     (summary, findings, uncertainty, recommendations). Calls per turn are \
+     limited.";
 
 impl ReasoningSubagentTool {
     pub const NAME: &'static str = "reasoning_subagent";
@@ -1824,7 +1904,40 @@ impl ReasoningSubagentTool {
             registry: Mutex::new(SubAgentProfileRegistry::with_default_reasoning_profile()),
             review_queue: Arc::new(SubAgentCandidateReviewQueue::new()),
             model_resolver_override: None,
+            advisor: None,
         }
+    }
+
+    /// Bind the agent's advisor model (`type.alias` into
+    /// `[providers.models]`): the child runs on it instead of the parent's
+    /// provider, the description tells the model it is consulting an
+    /// advisor, and calls are capped per turn (default
+    /// [`zeroclaw_config::advisor::DEFAULT_ADVISOR_MAX_CALLS_PER_TURN`]).
+    #[must_use]
+    pub fn with_advisor(mut self, provider_ref: impl Into<String>) -> Self {
+        self.advisor = Some(AdvisorBinding {
+            provider_ref: provider_ref.into(),
+            max_calls_per_turn: zeroclaw_config::advisor::DEFAULT_ADVISOR_MAX_CALLS_PER_TURN,
+        });
+        self
+    }
+
+    /// Override the per-turn advisor call cap. No effect without
+    /// [`Self::with_advisor`].
+    #[must_use]
+    pub fn with_advisor_max_calls_per_turn(mut self, max_calls: u32) -> Self {
+        if let Some(advisor) = self.advisor.as_mut() {
+            advisor.max_calls_per_turn = max_calls;
+        }
+        self
+    }
+
+    /// The advisor's `type.alias`, when one is bound.
+    #[must_use]
+    pub fn advisor_ref(&self) -> Option<&str> {
+        self.advisor
+            .as_ref()
+            .map(|advisor| advisor.provider_ref.as_str())
     }
 
     /// Carry the spawning context's lineage (SA-9): the tool refuses to
@@ -1873,6 +1986,42 @@ impl ReasoningSubagentTool {
             Some(ambient) if ambient.depth() > own.depth() => ambient,
             _ => own,
         }
+    }
+
+    /// The model policy the child runs under, in precedence order: the
+    /// admitted profile's own pin (part of its digest-bound contract), then
+    /// the agent's advisor, then the parent's own resolved provider.
+    fn resolve_model_policy(&self, profile: &SubAgentProfileV1) -> Result<ModelPolicyV1, String> {
+        let policy = if !profile.model_policy.provider_ref.trim().is_empty() {
+            profile.model_policy.clone()
+        } else if let Some(advisor) = &self.advisor {
+            // The advisor alias pins its own model; the resolver reads it
+            // from `[providers.models.<type>.<alias>]` at use time.
+            ModelPolicyV1 {
+                provider_ref: advisor.provider_ref.clone(),
+                model: None,
+                temperature: None,
+            }
+        } else {
+            let (provider_ref, model) = self
+                .config
+                .resolved_model_provider_for_agent(&self.parent_alias)
+                .map(|(family, alias, entry)| (format!("{family}.{alias}"), entry.model.clone()))
+                .unwrap_or_default();
+            ModelPolicyV1 {
+                provider_ref,
+                model,
+                temperature: None,
+            }
+        };
+        if policy.provider_ref.trim().is_empty() {
+            return Err(
+                "no model provider resolvable for the reasoning child (neither the \
+                 profile's model_policy nor the parent's provider configuration)"
+                    .to_string(),
+            );
+        }
+        Ok(policy)
     }
 
     /// Run one bounded child. `meter_override` is None on the production
@@ -1934,39 +2083,14 @@ impl ReasoningSubagentTool {
 
         // The model binding is host-resolved from the profile's
         // model_policy at use time; when the profile names no provider,
-        // the parent's own resolved provider is used (still opaque to
-        // the child).
+        // the agent's advisor, else the parent's own resolved provider, is
+        // used (still opaque to the child). See `resolve_model_policy`.
         let binding = match self.model_resolver_override.clone() {
             Some(resolver) => OpaqueModelBinding::new(resolver),
-            None => {
-                let policy = if profile.model_policy.provider_ref.trim().is_empty() {
-                    let (provider_ref, model) = self
-                        .config
-                        .resolved_model_provider_for_agent(&self.parent_alias)
-                        .map(|(family, alias, entry)| {
-                            (format!("{family}.{alias}"), entry.model.clone())
-                        })
-                        .unwrap_or_default();
-                    ModelPolicyV1 {
-                        provider_ref,
-                        model,
-                        temperature: None,
-                    }
-                } else {
-                    profile.model_policy.clone()
-                };
-                if policy.provider_ref.trim().is_empty() {
-                    return Err(
-                        "no model provider resolvable for the reasoning child (neither the \
-                         profile's model_policy nor the parent's provider configuration)"
-                            .to_string(),
-                    );
-                }
-                OpaqueModelBinding::new(Arc::new(ConfigModelAccessResolver::new(
-                    Arc::clone(&self.config),
-                    policy,
-                )))
-            }
+            None => OpaqueModelBinding::new(Arc::new(ConfigModelAccessResolver::new(
+                Arc::clone(&self.config),
+                self.resolve_model_policy(&profile)?,
+            ))),
         };
 
         // SA-18/SA-16: a minimal, digest-bound bundle. The objective is
@@ -2047,12 +2171,11 @@ impl Tool for ReasoningSubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Run one bounded reasoning SubAgent against a focused objective. The child \
-         receives only the objective and a digest-bound context snapshot — no tools, \
-         no conversation history, no memory — and returns a structured report \
-         (summary, findings, evidence pointers, uncertainty, recommendations, \
-         candidate changes for parent disposition). Use for focused analysis that \
-         should not pollute this agent's history."
+        if self.advisor.is_some() {
+            ADVISOR_DESCRIPTION
+        } else {
+            REASONING_DESCRIPTION
+        }
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -2163,10 +2286,45 @@ impl Tool for ReasoningSubagentTool {
             }
         };
 
+        // The objective is the only thing the child (and, with an advisor,
+        // the advisor's vendor) sees. Refuse oversized ones up front with a
+        // message the model can act on, before any budget is spent.
+        if objective.len() > MAX_OBJECTIVE_BYTES {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!(
+                    "reasoning_subagent: objective is {} bytes, over the {MAX_OBJECTIVE_BYTES}-byte \
+                     (8 KiB) limit; send the question plus a short summary of the facts \
+                     needed, not whole documents or transcripts",
+                    objective.len()
+                )),
+            });
+        }
+
+        if let Some(advisor) = &self.advisor
+            && !try_reserve_advisor_call(advisor.max_calls_per_turn)
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: ToolOutput::default(),
+                error: Some(format!(
+                    "reasoning_subagent: advisor budget used — this turn already consulted \
+                     the advisor {} time(s), the per-turn limit; continue without the \
+                     advisor or answer with what you have",
+                    advisor.max_calls_per_turn
+                )),
+            });
+        }
+
         match self.run_child(&objective).await {
             Ok(report) => {
+                let advisor_note = self
+                    .advisor_ref()
+                    .map(|provider_ref| format!(" advisor {provider_ref}"))
+                    .unwrap_or_default();
                 let mut summary = format!(
-                    "reasoning_subagent {} [{}]\nsummary: {}",
+                    "reasoning_subagent {} [{}]{advisor_note}\nsummary: {}",
                     report.run_ref.as_str(),
                     serde_json::to_value(report.status)
                         .unwrap_or_default()
@@ -2222,7 +2380,7 @@ impl Tool for ReasoningSubagentTool {
                 // same policy every tool output follows).
                 let error = (!success).then(|| {
                     format!(
-                        "child ended {:?}\n[SubAgentReportV1]\n{json_text}",
+                        "child ended {:?}{advisor_note}\n[SubAgentReportV1]\n{json_text}",
                         report.status
                     )
                 });
@@ -2235,7 +2393,10 @@ impl Tool for ReasoningSubagentTool {
             Err(error) => Ok(ToolResult {
                 success: false,
                 output: ToolOutput::default(),
-                error: Some(error),
+                error: Some(match self.advisor_ref() {
+                    Some(provider_ref) => format!("advisor {provider_ref}: {error}"),
+                    None => error,
+                }),
             }),
         }
     }

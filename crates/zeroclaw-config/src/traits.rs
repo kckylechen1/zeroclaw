@@ -166,6 +166,12 @@ impl HasPropKind for crate::providers::CardRef {
     const PROP_KIND: PropKind = PropKind::AliasRef;
     const ALIAS_SOURCE: Option<AliasSource> = Some(AliasSource::Cards);
 }
+// Serialized as one prefixed string (`model:<type>.<alias>` /
+// `harness:<name>`), so the dashboard edits it as free text rather than an
+// alias picker: the prefix is part of the value.
+impl HasPropKind for crate::advisor::AdvisorTarget {
+    const PROP_KIND: PropKind = PropKind::String;
+}
 impl HasPropKind for Vec<crate::card::ToolGrant> {
     const PROP_KIND: PropKind = PropKind::ObjectArray;
 }

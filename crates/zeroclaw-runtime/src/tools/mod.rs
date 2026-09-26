@@ -443,12 +443,32 @@ fn reasoning_spawn_tool_for_registry(
     security: &Arc<SecurityPolicy>,
     spawn_lineage: Option<zeroclaw_api::subagent_v1::LineageRef>,
 ) -> crate::subagent_v1::ReasoningSubagentTool {
-    crate::subagent_v1::ReasoningSubagentTool::new(
+    let tool = crate::subagent_v1::ReasoningSubagentTool::new(
         Arc::new(root_config.clone()),
         agent_alias,
         security.clone(),
     )
-    .with_lineage(spawn_lineage)
+    .with_lineage(spawn_lineage);
+    // Advisor (#405): an agent with `advisor = "model:<type>.<alias>"`
+    // consults that model through this same tool. `harness:` targets are
+    // refused by `Config::validate()`, so only model targets reach here.
+    let Some(agent) = root_config.agents.get(agent_alias) else {
+        return tool;
+    };
+    match agent
+        .advisor
+        .as_ref()
+        .and_then(zeroclaw_config::advisor::AdvisorTarget::model_ref)
+    {
+        Some(model) => {
+            let tool = tool.with_advisor(model.trim());
+            match agent.advisor_max_calls_per_turn {
+                Some(max_calls) => tool.with_advisor_max_calls_per_turn(max_calls),
+                None => tool,
+            }
+        }
+        None => tool,
+    }
 }
 
 /// Tool names retired from the ordinary model-visible registry. No assembly

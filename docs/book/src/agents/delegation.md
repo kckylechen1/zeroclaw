@@ -16,6 +16,27 @@ There is no `[subagents.*]` block in the schema (the daemon-wide `[subagents]` c
 - **Run durable/heavy work under another configured agent or an external harness** → the Tachi bridge (Task/Procedure execution), not an in-kernel delegation tool.
 - **Background fan-out with task ids and result polling** → Tachi-owned durable work. The local coordinator child store was deleted with the control-plane migration wall; durable task/attempt truth lives in Tachi through the bridge.
 
+## Advisor
+
+An agent can run on a fast model and consult a stronger **advisor** model when a question is hard. Point `advisor` at a configured model provider alias:
+
+```toml
+[providers.models.anthropic.opus]
+model = "claude-opus-4-7"
+
+[agents.assistant]
+model_provider = "groq.fast"
+advisor = "model:anthropic.opus"     # consult this model for hard questions
+advisor_max_calls_per_turn = 2       # optional; default 2
+```
+
+- **The agent decides when.** The advisor is consulted through the same `reasoning_subagent` tool: with `advisor` set, that tool's child runs on the advisor model instead of the agent's own, and its description tells the model it is consulting an advisor. The input is still `{ "objective": string }`, and the tool result names the advisor's `type.alias` so the UI shows who answered.
+- **Only the objective is sent.** The advisor gets no transcript, tools, or memory. The agent writes the question plus a short summary of the facts needed; objectives over 8 KiB are refused with a tool error (this cap applies to every `reasoning_subagent` call).
+- **Per-turn cap.** At most `advisor_max_calls_per_turn` consultations per turn (default 2, at least 1). A further call in the same turn returns a tool error saying the advisor budget is used.
+- **Cost.** The advisor's token usage is recorded in the turn's cost tracker under the advisor's `type.alias` and the calling agent, so `/api/cost?agent=<alias>` includes it.
+- **Privacy.** The advisor's vendor sees the objective text. Choose an advisor whose vendor you are willing to send that content to.
+- **Validation.** A `model:` target must name a configured `[providers.models.<type>.<alias>]` entry. `harness:<name>` parses but is refused for now: advisors backed by an external harness come with #381.
+
 ## Recursion
 
 Local recursion stays denied (frozen contract D1): a v1 child cannot spawn a child: the `reasoning_subagent` admission refuses any spawning lineage deeper than the parent's root. One immutable spawn lineage (`LineageRef`, SA-9) still threads every agent boundary, so no future spawn surface can reset depth by rebuilding a registry. The runtime-profile `max_delegation_depth` key retired with the spawn tools: legacy files carrying it are ignored with a load warning. Cron `JobType::Agent` runs are top-level roots, not continuations of an interactive parent's lineage.
