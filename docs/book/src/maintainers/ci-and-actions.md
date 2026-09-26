@@ -10,17 +10,18 @@ Fires on every PR targeting `master` and on trusted pushes to `master`.
 Composite job with multiple matrix legs:
 
 - **fmt**: `cargo fmt --all -- --check`
-- **lint**: `cargo clippy --workspace --all-targets --features ci-all -- -D warnings`, plus two architecture guards (`cargo test --test architecture`): config-write isolation and Fluent coverage (no bare user-facing strings), and the provider dispatch gate (`scripts/ci/provider_dispatch_gate.sh`)
+- **lint**: `cargo clippy --workspace --all-targets --locked --features ci-all -- -D warnings`, plus the provider dispatch gate (`scripts/ci/provider_dispatch_gate.sh`). This is also the only all-features compile in the gate: it type-checks every target, benches included.
 - **build**: matrix: `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`
-- **check**: all features + no-default-features
-- **check-32bit**: `i686-unknown-linux-gnu` with no default features
-- **bench**: benchmarks compile check
-- **test**: `cargo nextest run --locked` per package partition leg (`dev/ci/test-partition.json`) on Linux
+- **check**: `cargo check --locked --no-default-features`
+- **test**: `cargo nextest run --locked` per package partition leg on Linux. `dev/ci/test-partition.json` is the single source for each leg's packages, its features, and its extra filtered runs (the runtime leg adds a `sandbox-landlock` run filtered to `landlock` tests); a guard step fails the leg if a workspace member is missing from, or duplicated in, the partition. The architecture guards (config-write isolation, Fluent coverage) are tests in the root `architecture` target and run in the `app` leg.
 - **security**: `cargo deny check`
 - **nix-eval**: evaluates the NixOS module assertions (`nixos-module-eval` flake check)
 - **docs-style**: markdown lint, em-dash prose check, and changed-line link gate via `scripts/ci/docs_quality_gate.sh` and `scripts/ci/docs_links_gate.sh`
+- **installer-drift**: `cargo generate installers --check`. On PRs it runs only when a Cargo manifest, `Cargo.lock`, `xtask/`, `dev/ci/`, `dist/`, or a generated install surface changes.
 
-`fmt` runs first as the cheap serial gate. Every other job declares `needs: [fmt]` and fans out after formatting passes; `CI Required Gate` aggregates every result. Branch protection pins the composite gate job. A PR cannot merge until this is green. The `master` push run keeps the same quality signal while seeding trusted Rust caches for later PR runs.
+The 32-bit (`i686-unknown-linux-gnu`, no default features) and minimal-companion check graphs are not in the gate; they run weekly in Cross-Platform Clippy.
+
+`fmt` runs first as the cheap serial gate. Every other job declares `needs: [fmt]` and fans out after formatting passes; `CI Required Gate` aggregates every result (a skipped job counts as passing). Branch protection pins the composite gate job. A PR cannot merge until this is green. The `master` push run keeps the same quality signal while seeding trusted Rust caches for later PR runs; jobs that write no cache and only re-prove the PR result (repository structure, docs style, Nix eval, Nix hash drift) are skipped on push.
 
 Fresh required CI is normally the shared evidence for the Cargo surfaces it actually runs. A local rerun of the same Cargo command on the same head, target, and feature set is duplicate confidence, not a stronger proof. Before asking for extra Cargo or Clippy, compare the changed surface with the current workflow files and the actual checks on the PR. Extra validation belongs where the required gate does not prove the thing under review:
 
@@ -70,7 +71,7 @@ Runs on every PR open/edit/synchronize. Runs the validator unit tests (`scripts/
 
 ### Deploy mdBook docs to Pages (`docs-deploy.yml`)
 
-Triggered on tag push (and `workflow_dispatch`); builds and publishes versioned docs to the `gh-pages` branch. See [Release Runbook → Versioned documentation deployment](./release-runbook.md#step-7-versioned-documentation-deployment) for the version-floor and bootstrap rules.
+Triggered on tag push, on `master` pushes that touch `docs/book/`, `xtask/`, or `locales.toml`, nightly (to refresh code-derived pages such as rustdoc), and on `workflow_dispatch`; builds and publishes versioned docs to the `gh-pages` branch. See [Release Runbook → Versioned documentation deployment](./release-runbook.md#step-7-versioned-documentation-deployment) for the version-floor and bootstrap rules.
 
 ### Docker Image PR Check (`docker-image-pr.yml`)
 
@@ -100,7 +101,7 @@ Manual trigger for building release binaries across the full target matrix: Linu
 
 ### Cross-Platform Clippy (`cross-platform-clippy.yml`)
 
-Manual and weekly scheduled advisory lint coverage on macOS aarch64 and Windows x86_64 targets. It mirrors the required PR lint command with `--target` set for each platform, but intentionally does not run on PRs and is not part of `CI Required Gate`.
+Manual and weekly scheduled advisory lint coverage on macOS aarch64 and Windows x86_64 targets. It mirrors the required PR lint command with `--target` set for each platform, but intentionally does not run on PRs and is not part of `CI Required Gate`. The same workflow runs the Linux check graphs that left the PR gate: `i686-unknown-linux-gnu` with no default features, and the minimal companion feature set.
 
 ### Release Stable (`release-stable-manual.yml`)
 
