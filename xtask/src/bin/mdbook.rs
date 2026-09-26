@@ -76,8 +76,6 @@ enum Cmd {
     RetrofitSelector,
     /// Regenerate pc-themes.css + switcher list from the dashboard theme registry
     Themes,
-    /// Regenerate hardware reference snippets from the board registry + catalog
-    Hardware,
     /// Check internal links in the already-built book HTML
     Linkcheck,
 }
@@ -95,7 +93,6 @@ fn main() -> anyhow::Result<()> {
                 cmd::mdbook::peer_groups::supports();
             }
             let root = xtask::util::repo_root();
-            cmd::mdbook::hardware::run(&root)?;
             cmd::mdbook::feature_matrix::run(&root)?;
             cmd::mdbook::peer_groups::run()
         }
@@ -131,7 +128,6 @@ fn main() -> anyhow::Result<()> {
         Cmd::GenRootIndex => cmd::mdbook::versions::gen_root_index(),
         Cmd::RetrofitSelector => cmd::mdbook::versions::retrofit_selector(),
         Cmd::Themes => cmd::mdbook::themes::run(&xtask::util::repo_root()),
-        Cmd::Hardware => cmd::mdbook::hardware::run(&xtask::util::repo_root()),
         Cmd::Linkcheck => cmd::mdbook::linkcheck::check_internal_links(
             &xtask::util::repo_root(),
             tag.unwrap_or("master"),

@@ -2005,6 +2005,27 @@ config = { api_key = "k" }
 }
 
 #[test]
+fn v3_retired_hardware_sections_load_with_tombstone_warnings() {
+    // In-process hardware left the body (ADR-017: devices join as Nodes).
+    // `[hardware]` and `[peripherals]` must keep loading with a warning.
+    for (path, body) in [
+        (
+            "hardware",
+            "enabled = true\ntransport = \"serial\"\nserial_port = \"/dev/ttyACM0\"\nbaud_rate = 115200\n",
+        ),
+        (
+            "peripherals",
+            "enabled = true\ndatasheet_dir = \"docs/datasheets\"\n\n[[boards]]\nboard = \"nucleo-f401re\"\ntransport = \"serial\"\npath = \"/dev/ttyACM0\"\n",
+        ),
+    ] {
+        let (_, warnings) = load_with_retired_section(path, body);
+        assert_eq!(warnings.len(), 1, "{path}: {warnings:?}");
+        assert_eq!(warnings[0].code, "hardware_moved_out_of_core");
+        assert_eq!(warnings[0].path, path);
+    }
+}
+
+#[test]
 fn v2_matrix_allowed_users_folds_and_allowed_rooms_stays() {
     let v3 = migrate_v2(
         r#"

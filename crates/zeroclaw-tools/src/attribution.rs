@@ -30,12 +30,6 @@ use crate::git_operations::GitOperationsTool;
 use crate::glob_search::GlobSearchTool;
 #[cfg(feature = "integrations-saas")]
 use crate::google_workspace::GoogleWorkspaceTool;
-#[cfg(feature = "hardware-tools")]
-use crate::hardware_board_info::HardwareBoardInfoTool;
-#[cfg(feature = "hardware-tools")]
-use crate::hardware_memory_map::HardwareMemoryMapTool;
-#[cfg(feature = "hardware-tools")]
-use crate::hardware_memory_read::HardwareMemoryReadTool;
 use crate::http_request::HttpRequestTool;
 use crate::image_gen::ImageGenTool;
 use crate::image_info::ImageInfoTool;
@@ -98,12 +92,6 @@ tool_attribution!(GitForgeTool, ToolKind::Plugin);
 tool_attribution!(GlobSearchTool, ToolKind::Search);
 #[cfg(feature = "integrations-saas")]
 tool_attribution!(GoogleWorkspaceTool, ToolKind::Plugin);
-#[cfg(feature = "hardware-tools")]
-tool_attribution!(HardwareBoardInfoTool, ToolKind::Plugin);
-#[cfg(feature = "hardware-tools")]
-tool_attribution!(HardwareMemoryMapTool, ToolKind::Plugin);
-#[cfg(feature = "hardware-tools")]
-tool_attribution!(HardwareMemoryReadTool, ToolKind::Plugin);
 tool_attribution!(HttpRequestTool, ToolKind::HttpRequest);
 tool_attribution!(ImageGenTool, ToolKind::Plugin);
 tool_attribution!(ImageInfoTool, ToolKind::Plugin);

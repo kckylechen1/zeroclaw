@@ -1,7 +1,6 @@
 pub mod build;
 pub mod check;
 pub mod feature_matrix;
-pub mod hardware;
 pub mod linkcheck;
 pub mod peer_groups;
 pub mod protected;

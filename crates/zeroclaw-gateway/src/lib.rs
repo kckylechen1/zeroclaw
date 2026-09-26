@@ -818,10 +818,6 @@ pub async fn run_gateway(
                 // Gateway tool-listing path: short-lived, no cross-turn reuse
                 // contract, so the per-call connect is correct.
                 mcp_registry: None,
-                // Listing-only registry: loading peripherals physically opens
-                // hardware (exclusive serial holds) that the live turn paths
-                // need. Never connect them for a registry no turn runs against.
-                connect_peripherals: false,
                 emit_assembly_logs: false,
                 exclude_memory: false,
                 list_deferred_mcp_specs: true,
@@ -954,10 +950,6 @@ pub async fn run_gateway(
             // Gateway tool-listing path: short-lived, no cross-turn reuse
             // contract, so the per-call connect is correct.
             mcp_registry: None,
-            // Same as the seed: never open hardware for a listing (and
-            // `config.peripherals` is global - N per-agent opens of the same
-            // boards would fail against the first holder anyway).
-            connect_peripherals: false,
             emit_assembly_logs: false,
             exclude_memory: false,
             list_deferred_mcp_specs: true,

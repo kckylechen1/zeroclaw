@@ -102,10 +102,6 @@ Model-side tool-call syntax parsing. Handles variations between providers:
 - Qwen/Ollama's function-call formats
 - Native tool-call streaming deltas
 
-### `zeroclaw-hardware`
-
-Hardware abstraction: GPIO, I2C, SPI, USB. Platform-gated. See [Hardware → Overview](../hardware/index.md).
-
 ### `zeroclaw-log`
 
 The single emission surface for every log event in the workspace. Owns
@@ -137,10 +133,6 @@ logs, costs, cron, and gateway metadata.
 
 Derive macros for config schema, tool registration, and channel registration. Saves boilerplate across the workspace.
 
-### `aardvark-sys`
-
-Specialised hardware support used by the `hardware` submodule. Out-of-scope unless you're bringing up specific peripherals.
-
 ## Feature flags
 
 The microkernel roadmap (RFC #5574) defines a feature-flag taxonomy. The practical upshot for a user:
@@ -148,7 +140,6 @@ The microkernel roadmap (RFC #5574) defines a feature-flag taxonomy. The practic
 - `default`: a sensible core build
 - `ci-all`: everything on, for CI
 - `channel-<name>`: opt-in per channel (e.g. `channel-matrix`, `channel-discord`)
-- `hardware`: enable hardware subsystem
 - `gateway`, `whatsapp-web`: opt-in capability groups
 
 Providers are not feature-gated; they all compile in. Channel selection is the main per-build knob. Read the top-level `Cargo.toml` `[features]` table for the full list.

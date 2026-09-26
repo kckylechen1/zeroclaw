@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "bridges/telegram", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/aardvark-sys", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
+members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "bridges/telegram", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -25,10 +25,8 @@ zeroclaw-runtime = { path = "crates/zeroclaw-runtime", version = "0.8.3", defaul
 zeroclaw-eval = { path = "crates/zeroclaw-eval", version = "0.8.3" }
 zeroclaw-gateway = { path = "crates/zeroclaw-gateway", version = "0.8.3" }
 zeroclaw-gateway-client = { path = "crates/zeroclaw-gateway-client", version = "0.8.3" }
-zeroclaw-hardware = { path = "crates/zeroclaw-hardware", version = "0.8.3" }
 zeroclaw-tool-call-parser = { path = "crates/zeroclaw-tool-call-parser", version = "0.8.3" }
 zeroclaw-macros = { path = "crates/zeroclaw-macros", version = "0.8.3" }
-aardvark-sys = { path = "crates/aardvark-sys", version = "0.1.0" }
 directories = "6.0"
 sys-locale = "0.3"
 
@@ -81,7 +79,6 @@ zeroclaw-runtime = { workspace = true, optional = true }
 zeroclaw-eval = { workspace = true, optional = true }
 zeroclaw-gateway = { workspace = true, optional = true }
 zeroclaw-gateway-client = { workspace = true, optional = true }
-zeroclaw-hardware = { workspace = true, optional = true }
 zeroclaw-tool-call-parser.workspace = true
 zeroclaw-macros.workspace = true
 # CLI - minimal and fast
@@ -178,9 +175,6 @@ cron = { version = "0.15", optional = true }
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 console = "0.16"
 
-# Hardware discovery (device path globbing)
-glob = { version = "0.3", optional = true }
-
 # Nostr key validation for wizard (behind channel-nostr feature)
 nostr-sdk = { version = "0.44", default-features = false, optional = true }
 
@@ -271,7 +265,6 @@ default = [
     "observability-prometheus",
     "schema-export",
     "integrations-saas",
-    "hardware-tools",
 ]
 
 # Concrete integration families forwarded from zeroclaw-tools. Default-on so
@@ -284,10 +277,6 @@ integrations-saas = [
     "zeroclaw-tools/integrations-saas",
     "zeroclaw-runtime/integrations-saas",
 ]
-hardware-tools = [
-    "zeroclaw-tools/hardware-tools",
-    "zeroclaw-runtime/hardware-tools",
-]
 
 # The core agent runtime — agent loop, tools, persistence subsystems.
 # Without this, you get the kernel: config + providers + memory + CLI chat.
@@ -297,7 +286,7 @@ agent-runtime = [
     "dep:zeroclaw-runtime", "dep:zeroclaw-eval", "dep:zeroclaw-channels", "dep:zeroclaw-tools",
     "dep:zeroclaw-gateway-client",
     "dep:rusqlite",
-    "dep:ring", "dep:lru", "dep:chrono-tz", "dep:cron", "dep:glob", "dep:which",
+    "dep:ring", "dep:lru", "dep:chrono-tz", "dep:cron", "dep:which",
     "dep:tokio-tungstenite", "dep:hostname",
     "dep:rustls",
 ]
@@ -381,16 +370,9 @@ observability-prometheus = [
     "zeroclaw-gateway/observability-prometheus",
 ]
 observability-otel = ["zeroclaw-runtime/observability-otel"]
-hardware = ["dep:zeroclaw-hardware", "zeroclaw-hardware/hardware"]
-peripheral-rpi = ["dep:zeroclaw-hardware", "zeroclaw-hardware/peripheral-rpi"]
-# Forwards `zeroclaw-hardware/dev-sim`: extends the serial allow-list with
-# `/tmp/zc-sim-*` for hardware-free simulation. Off by default; opt-in for the
-# simulator and demo.
-dev-sim = ["dep:zeroclaw-hardware", "zeroclaw-hardware/dev-sim"]
 sandbox-landlock = ["zeroclaw-runtime/sandbox-landlock"]
 sandbox-bubblewrap = ["zeroclaw-runtime/sandbox-bubblewrap"]
 browser-native = ["zeroclaw-tools/browser-native"]
-probe = ["dep:zeroclaw-hardware", "zeroclaw-hardware/probe"]
 embedded-web = ["zeroclaw-gateway/embedded-web"]
 
 # Backward-compatible aliases
@@ -404,9 +386,8 @@ ci-all = [
     "channels-full",
     "channel-nostr", "channel-matrix", "whatsapp-web",
     "observability-prometheus", "observability-otel",
-    "hardware", "peripheral-rpi",
     "sandbox-landlock", "sandbox-bubblewrap",
-    "browser-native", "probe",
+    "browser-native",
     "memory-postgres",
     "zeroclaw-channels/heavy-tests",
     "zeroclaw-runtime/heavy-tests",

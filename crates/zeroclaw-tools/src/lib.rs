@@ -22,15 +22,6 @@ pub mod microsoft365;
 pub mod notion_tool;
 #[cfg(feature = "integrations-saas")]
 pub mod pushover;
-// Concrete hardware board/memory tools. Gated behind `hardware-tools`; the
-// hardware install templates enable the `hardware` root feature, which
-// forwards it.
-#[cfg(feature = "hardware-tools")]
-pub mod hardware_board_info;
-#[cfg(feature = "hardware-tools")]
-pub mod hardware_memory_map;
-#[cfg(feature = "hardware-tools")]
-pub mod hardware_memory_read;
 pub mod util_helpers;
 
 pub mod ask_user;

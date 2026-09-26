@@ -60,8 +60,6 @@ The core binary is statically linked where possible. Some features require syste
 | Browser tool (playwright) | `libnss3`, `libatk1.0-0`, `libcups2` (see `playwright --help`) | `nss`, `atk`, `cups` | `nss`, `atk`, `cups` |
 | Audio (TTS, voice channels) | `libasound2-dev` | `alsa-lib` | `alsa-lib-devel` |
 
-The hardware feature (GPIO / I2C / SPI on a Pi) uses the pure-Rust `rppal` driver and needs no extra system library; it talks to `/dev/gpiomem`, `/dev/spidev*`, and `/dev/i2c-*` directly. What it does need is device access: enable the SPI/I2C interfaces and put the service user in the `gpio`, `spi`, and `i2c` groups (see [SBC / Raspberry Pi](#sbc--raspberry-pi) below).
-
 Most deployments don't need any of these.
 
 ## Running as a service
@@ -93,34 +91,6 @@ journalctl --user -u zeroclaw -f
 </div>
 
 Full details: [Service management](./service.md).
-
-### SBC / Raspberry Pi
-
-On a Raspberry Pi or similar SBC, build with the hardware feature:
-
-<div class="os-tabs-src">
-
-#### sh
-
-```sh
-./install.sh --source --features hardware
-```
-
-</div>
-
-For hardware access without running as root, the service user needs the `gpio`, `spi`, and `i2c` groups. The user-level unit that `zeroclaw service install` writes does not set these; use the system-level Pi unit template at [`scripts/zeroclaw.service`](https://github.com/zeroclaw-labs/zeroclaw/blob/master/scripts/zeroclaw.service), which includes `SupplementaryGroups=gpio spi i2c`. Either way, verify your user is in those groups:
-
-<div class="os-tabs-src">
-
-#### sh
-
-```sh
-getent group gpio spi i2c
-sudo usermod -aG gpio,spi,i2c $USER
-# re-login for group changes to take effect
-```
-
-</div>
 
 ## Update
 

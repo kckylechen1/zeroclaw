@@ -25,7 +25,7 @@ The generated **ZeroClaw** sections below each reflect a specific source: the cu
 | Container | ✅ | [Container](../setup/container.md) |
 | Linux / macOS / Windows | ✅ | [Linux](../setup/linux.md), [macOS](../setup/macos.md), [Windows](../setup/windows.md) |
 | FreeBSD / NixOS | ✅ | [FreeBSD](../setup/freebsd.md), [NixOS](../setup/nixos.md) |
-| SBC / edge (Raspberry Pi class) | ✅ | [Hardware](../hardware/index.md) |
+| SBC / edge (Raspberry Pi class) | ✅ | [Network deployment](../ops/network-deployment.md) |
 | VPS / cloud VM | ✅ | [Network deployment](../ops/network-deployment.md) |
 
 ## Curated channel metadata support

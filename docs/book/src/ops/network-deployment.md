@@ -86,15 +86,12 @@ Because remote access is enforced through pairing, `allow_remote_admin` has no e
 
 - Raspberry Pi 3/4/5 (or similar SBC) with Raspberry Pi OS or Alpine
 - Network connectivity (WiFi or Ethernet)
-- Optional: USB peripherals for hardware integration
 
 ### Install
 
 Clone and run the installer. With no flags it drops into an interactive picker
-where you choose the build type and which features to compile in, including the
-hardware features for GPIO/I2C/SPI. On the Pi it also uses the Pi-tuned cargo
-profiles; see [Raspberry Pi setup](../hardware/raspberry-pi-setup.md) for swap
-setup and the per-model build matrix.
+where you choose the build type and which features to compile in. On the Pi it
+also uses the Pi-tuned cargo profiles.
 
 <div class="os-tabs-src">
 

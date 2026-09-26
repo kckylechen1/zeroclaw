@@ -12,7 +12,6 @@
       "zeroclaw-config"
     ],
     "tail": [
-      "aardvark-sys",
       "fill-translations",
       "xtask",
       "zeroclaw-api",
@@ -20,7 +19,6 @@
       "zeroclaw-commands",
       "zeroclaw-eval",
       "zeroclaw-gateway-client",
-      "zeroclaw-hardware",
       "zeroclaw-infra",
       "zeroclaw-log",
       "zeroclaw-macros",

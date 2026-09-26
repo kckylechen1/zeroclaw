@@ -166,6 +166,11 @@ mod tests {
         );
         assert!(dist["features"].as_str().unwrap().contains("whatsapp-web"));
         assert!(!dist["features"].as_str().unwrap().contains("channel-slack"));
-        assert!(all["features"].as_str().unwrap().contains("hardware"));
+        assert!(
+            all["features"]
+                .as_str()
+                .unwrap()
+                .contains("sandbox-bubblewrap")
+        );
     }
 }

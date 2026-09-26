@@ -416,30 +416,6 @@ pub async fn handle(config: &Config, format: Option<String>) -> Result<()> {
             )
         );
     }
-    println!();
-    println!("{}", t("cli-status-peripherals", "Peripherals:"));
-    let peripherals_enabled = if config.peripherals.enabled {
-        t("cli-status-word-yes", "yes")
-    } else {
-        t("cli-status-word-no", "no")
-    };
-    let peripherals_enabled_fallback = format!("  Enabled:   {}", peripherals_enabled);
-    println!(
-        "{}",
-        ta(
-            "cli-status-peripherals-enabled",
-            &[("v", &peripherals_enabled)],
-            &peripherals_enabled_fallback
-        )
-    );
-    println!(
-        "{}",
-        ta(
-            "cli-status-boards",
-            &[("v", &config.peripherals.boards.len().to_string())],
-            "Boards"
-        )
-    );
 
     Ok(())
 }

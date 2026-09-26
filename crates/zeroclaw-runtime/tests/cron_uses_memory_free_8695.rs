@@ -115,7 +115,6 @@ async fn run_cron_once(config: Config, overrides: AgentRunOverrides) -> Vec<Stri
         None,
         None,
         Some(0.7),
-        vec![],
         false,
         None,
         None,

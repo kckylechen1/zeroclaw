@@ -3,7 +3,6 @@
 //! Extracted from `loop_/mod.rs` so the channel/gateway `process_message`
 //! path and the interactive CLI assembly can evolve independently.
 
-use crate::agent::TurnMeta;
 use crate::approval::ApprovalManager;
 use crate::observability::{self, Observer, ObserverEvent};
 use crate::platform;
@@ -23,9 +22,9 @@ use super::{
     AUTOSAVE_MIN_MESSAGE_CHARS, AgentRunOverrides, LoopKnobs, ResolvedAgentExecution, ResolvedIo,
     ResolvedModelAccess, ResolvedRuntimeKnobs, TOOL_LOOP_COST_TRACKING_CONTEXT, ToolLoop,
     agent_provider_composite, api_key_and_uri_for_provider, autosave_memory_key,
-    build_hardware_context, build_system_prompt_for_turn, compute_excluded_mcp_tools,
-    is_model_switch_requested, resolved_agent_for_turn, retain_registered_tool_descriptions,
-    run_tool_call_loop, scope_session_key, seed_channel_handles, synthetic_session_key_for_run,
+    build_system_prompt_for_turn, compute_excluded_mcp_tools, is_model_switch_requested,
+    resolved_agent_for_turn, retain_registered_tool_descriptions, run_tool_call_loop,
+    scope_session_key, seed_channel_handles, synthetic_session_key_for_run,
 };
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -36,7 +35,6 @@ pub async fn run(
     provider_override: Option<String>,
     model_override: Option<String>,
     temperature: Option<f64>,
-    peripheral_overrides: Vec<String>,
     interactive: bool,
     session_state_file: Option<PathBuf>,
     allowed_tools: Option<Vec<String>>,
@@ -185,18 +183,7 @@ pub async fn run(
             "Memory initialized"
         );
 
-        // ── Peripherals (merge peripheral tools into registry) ─
-        if !peripheral_overrides.is_empty() {
-            ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Load)
-                    .with_category(::zeroclaw_log::EventCategory::Agent)
-                    .with_attrs(::serde_json::json!({"peripherals": peripheral_overrides})),
-                "Peripheral overrides from CLI (config boards take precedence)"
-            );
-        }
-
-        // ── Tools (including memory tools and peripherals) ────────────
+        // ── Tools (including memory tools) ────────────
         let (composio_key, composio_entity_id) = if config.composio.enabled {
             (
                 config.composio.api_key.as_deref(),
@@ -229,9 +216,9 @@ pub async fn run(
         );
         let skills = crate::skills::load_skills_for_agent_from_config(&config, agent_alias);
         // Route the per-agent tool registry through the one gated seam
-        // (peripherals -> built-in filter -> MCP scope+gate -> skills), identical
-        // to the behavior this path hand-rolled. `caller_allowed` carries the
-        // run() per-run allowlist; connect_peripherals is true (execution path).
+        // (built-in filter -> MCP scope+gate -> skills), identical to the
+        // behavior this path hand-rolled. `caller_allowed` carries the run()
+        // per-run allowlist.
         let assembled = scoped::ScopedToolRegistry::assemble(scoped::ScopedAssembly {
             config: &config,
             agent_alias,
@@ -241,7 +228,6 @@ pub async fn run(
             runtime: runtime.clone(),
             caller_allowed: allowed_tools.as_deref(),
             connect_mcp: true,
-            connect_peripherals: true,
             // A memory-free run drops the persistent memory tools so the model
             // cannot read or write memory even though the registry is otherwise
             // built identically.
@@ -379,32 +365,6 @@ pub async fn run(
             Some(turn_id.clone()),
         );
 
-        // ── Hardware RAG (datasheet retrieval when peripherals + datasheet_dir) ──
-        let hardware_rag: Option<crate::rag::HardwareRag> = config
-            .peripherals
-            .datasheet_dir
-            .as_ref()
-            .filter(|d| !d.trim().is_empty())
-            .map(|dir| crate::rag::HardwareRag::load(&config.data_dir, dir.trim()))
-            .and_then(Result::ok)
-            .filter(|r: &crate::rag::HardwareRag| !r.is_empty());
-        if let Some(ref rag) = hardware_rag {
-            ::zeroclaw_log::record!(
-                INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Load)
-                    .with_category(::zeroclaw_log::EventCategory::Agent)
-                    .with_attrs(::serde_json::json!({"chunks": rag.len()})),
-                "Hardware RAG loaded"
-            );
-        }
-
-        let board_names: Vec<String> = config
-            .peripherals
-            .boards
-            .iter()
-            .map(|b| b.board.clone())
-            .collect();
-
         // ── Initialize locale-aware tool descriptions ──────────────────
         let _i18n_locale = config
             .locale
@@ -494,36 +454,6 @@ pub async fn run(
             "channel_room",
             "Create channel rooms and invite users through active channels. Use with Matrix channel keys such as matrix.default.",
         ));
-        if config.peripherals.enabled && !config.peripherals.boards.is_empty() {
-            tool_descs.push((
-            "gpio_read",
-            "Read GPIO pin value (0 or 1) on connected hardware (STM32, Arduino). Use when: checking sensor/button state, LED status.",
-        ));
-            tool_descs.push((
-            "gpio_write",
-            "Set GPIO pin high (1) or low (0) on connected hardware. Use when: turning LED on/off, controlling actuators.",
-        ));
-            tool_descs.push((
-            "arduino_upload",
-            "Upload agent-generated Arduino sketch. Use when: user asks for 'make a heart', 'blink pattern', or custom LED behavior on Arduino. You write the full .ino code; ZeroClaw compiles and uploads it. Pin 13 = built-in LED on Uno.",
-        ));
-            tool_descs.push((
-            "hardware_memory_map",
-            "Return flash and RAM address ranges for connected hardware. Use when: user asks for 'upper and lower memory addresses', 'memory map', or 'readable addresses'.",
-        ));
-            tool_descs.push((
-            "hardware_board_info",
-            "Return full board info (chip, architecture, memory map) for connected hardware. Use when: user asks for 'board info', 'what board do I have', 'connected hardware', 'chip info', or 'what hardware'.",
-        ));
-            tool_descs.push((
-            "hardware_memory_read",
-            "Read actual memory/register values from Nucleo via USB. Use when: user asks to 'read register values', 'read memory', 'dump lower memory 0-126', 'give address and value'. Params: address (hex, default 0x20000000), length (bytes, default 128).",
-        ));
-            tool_descs.push((
-            "hardware_capabilities",
-            "Query connected hardware for reported GPIO pins and LED pin. Use when: user asks what pins are available.",
-        ));
-        }
         retain_registered_tool_descriptions(&mut tool_descs, &tools_registry);
         let bootstrap_max_chars = if eff_compact_context {
             Some(crate::agent::system_prompt::COMPACT_BOOTSTRAP_MAX_CHARS)
@@ -652,34 +582,9 @@ pub async fn run(
             }
 
             // Memory context is injected once in the engine, keyed on the
-            // ingress origin (agent::memory_inject). Hardware RAG context
-            // stays site-built; the engine prepends the memory block above
-            // it, preserving the legacy mem -> hw -> [now] msg order.
-            let rag_limit = if eff_compact_context { 2 } else { 5 };
-            let hw_context = hardware_rag
-                .as_ref()
-                .map(|r| {
-                    build_hardware_context(
-                        r,
-                        &*observer,
-                        &effective_msg,
-                        &board_names,
-                        rag_limit,
-                        TurnMeta {
-                            parent_agent_alias: None,
-                            agent_alias: Some(agent_alias),
-                            turn_id: &turn_id,
-                            channel_name,
-                        },
-                    )
-                })
-                .unwrap_or_default();
+            // ingress origin (agent::memory_inject).
             let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-            let enriched = if hw_context.is_empty() {
-                format!("[{now}] {effective_msg}")
-            } else {
-                format!("{hw_context}[{now}] {effective_msg}")
-            };
+            let enriched = format!("[{now}] {effective_msg}");
             let mut history = vec![
                 ChatMessage::system(&system_prompt),
                 ChatMessage::user(&enriched),

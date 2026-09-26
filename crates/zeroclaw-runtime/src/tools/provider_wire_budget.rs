@@ -330,7 +330,6 @@ async fn assemble_turn(req: TurnRequest<'_>) -> (ScopedAssembled, WireBudget) {
             runtime,
             caller_allowed: None,
             connect_mcp: req.connect_mcp,
-            connect_peripherals: false,
             exclude_memory: false,
             list_deferred_mcp_specs: false,
             emit_assembly_logs: false,

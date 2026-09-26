@@ -3852,16 +3852,13 @@ struct ChannelAssembledTools {
 /// specific assembly knobs (below) are exercised directly by a unit test instead of
 /// only indirectly through `start_channels`'s much larger, harder-to-isolate flow.
 ///
-/// Replaces the channel path's former hand-rolled peripheral wiring, built-in
-/// filter, MCP scoping, and skill registration - which had silently diverged from
+/// Replaces the channel path's former hand-rolled built-in filter, MCP scoping, and skill registration - which had silently diverged from
 /// every other construction path in two ways this cutover closes: MCP
 /// resource/prompt capability tools and pinned MCP resources
 /// (`docs/book/src/tools/mcp.md` "Pinning resources into context", a documented
 /// general agent capability with no channel-specific exception) were never wired
 /// into the channel path at all.
 ///
-/// - `connect_peripherals: true` - channel-driven sessions actuate hardware,
-///   mirroring the old unconditional `load_peripheral_tools` call.
 /// - `runtime` - the orchestrator's REAL configured `RuntimeAdapter`, threaded
 ///   through skill execution. The old `register_skill_tools_with_context` call
 ///   defaulted to `NativeRuntime` regardless of `[platform]`.
@@ -3875,12 +3872,7 @@ struct ChannelAssembledTools {
 /// the built-in allow/deny and runtime-threading behavior, and -- via a mock MCP
 /// server granting a pinned resource -- that `connect_mcp: true` resolves MCP
 /// content into a `pinned_section` kept separate from the deferred tool-search
-/// listing. `connect_peripherals: true` is still only exercised as a literal
-/// value: `load_peripheral_tools` reads a process-global `OnceLock` that stays
-/// empty outside the real daemon binary, so peripheral-tool inclusion cannot be
-/// unit-tested here and a regression flipping that knob to `false` would still
-/// pass. Closing it needs a daemon-level peripheral harness; tracked as a
-/// residual, not silently skipped.
+/// listing.
 async fn assemble_channel_agent_tools(
     config: &Config,
     agent_alias: &str,
@@ -3909,7 +3901,6 @@ async fn assemble_channel_agent_tools(
                         runtime,
                         caller_allowed: None,
                         connect_mcp: true,
-                        connect_peripherals: true,
                         exclude_memory: false,
                         // Channel startup is an execution surface (the agent actually runs),
                         // so deferral behaves as normal; the dashboard-only per-spec listing

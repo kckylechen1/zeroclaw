@@ -103,7 +103,7 @@ jobs:
             args: --target i686-unknown-linux-gnu --no-default-features
             sys_deps: gcc-multilib
           # Root default minus the compile-time integration families
-          # (integrations-saas, hardware-tools): the slim companion graph.
+          # (integrations-saas): the slim companion graph.
           - name: minimal companion
             target: x86_64-unknown-linux-gnu
             args: --no-default-features --features agent-runtime,default-channels,gateway,observability-prometheus,schema-export

@@ -27,7 +27,6 @@ infer = { version = "0.19", default-features = false }
 fantoccini = { version = "0.22.1", optional = true, default-features = false, features = ["rustls-tls"] }
 nanohtml2text = "0.2"
 parking_lot = "0.12"
-probe-rs = { version = "0.31", optional = true }
 regex = "1.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots-no-provider", "__rustls-ring", "multipart", "stream"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
@@ -58,13 +57,9 @@ webpki-roots = "1.0.6"
 # build is unchanged; slim companion builds drop this feature to keep the
 # family out of the compiled surface.
 integrations-saas = []
-# Concrete hardware board/memory tool family. Default-on; the hardware install
-# templates enable the `hardware` root feature, which forwards this.
-hardware-tools = []
 email-tools = ["dep:async-imap", "dep:mail-parser"]
-default = ["integrations-saas", "hardware-tools", "email-tools"]
+default = ["integrations-saas", "email-tools"]
 browser-native = ["dep:fantoccini"]
-probe = ["dep:probe-rs", "hardware-tools"]
 # Exposes cross-crate test-only constructors (e.g.
 # `McpRegistry::for_test_with_server_count`) so downstream test
 # suites can build registry fixtures without spawning real stdio

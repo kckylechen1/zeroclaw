@@ -30,8 +30,6 @@ cli-integrations-about = Explora más de 50 integraciones
 cli-skills-about = Gestiona habilidades (capacidades definidas por el usuario)
 cli-migrate-about = Migra datos desde otros entornos de ejecución de agentes
 cli-auth-about = Gestiona los perfiles de autenticación de suscripción del proveedor
-cli-hardware-about = Descubre e inspecciona hardware USB
-cli-peripheral-about = Gestiona los periféricos de hardware
 cli-memory-about = Gestiona las entradas de memoria del agente
 cli-config-about = Gestiona la configuración de ZeroClaw
 cli-update-about = Comprueba y aplica las actualizaciones de ZeroClaw
@@ -149,12 +147,6 @@ cli-models-status-about = Muestra la configuración actual del modelo y el estad
 cli-doctor-models-about = Sondea catálogos de modelos en todos los proveedores e informa sobre la disponibilidad
 cli-doctor-traces-about = Consulta eventos de traza en tiempo de ejecución (diagnósticos de herramientas y respuestas de modelos)
 cli-doctor-update-context-windows-about = Actualiza context_window en config.toml desde los endpoints /models del proveedor
-cli-hardware-discover-about = Enumera dispositivos USB y muestra placas conocidas
-cli-hardware-introspect-about = Inspecciona un dispositivo por su número de serie o ruta de dispositivo
-cli-hardware-info-about = Obtiene información del chip vía USB usando probe-rs sobre ST-Link
-cli-peripheral-list-about = Lista los periféricos configurados
-cli-peripheral-add-about = Agrega un periférico por tipo de placa y ruta de transporte
-cli-peripheral-flash-about = Flashea el firmware de ZeroClaw a una placa Arduino
 cli-migrate-openclaw-about = Importa memoria de un espacio de trabajo OpenClaw a este espacio de trabajo ZeroClaw
 cli-gateway-long-about =
     Gestiona el servidor de gateway (webhooks, websockets).
@@ -215,26 +207,6 @@ cli-channel-long-about =
     zeroclaw channel remove my-bot
     zeroclaw channel bind-telegram zeroclaw_user
     zeroclaw channel send 'Alert!' --channel-id telegram --recipient 123456789
-cli-hardware-long-about =
-    Descubre e inspecciona hardware USB.
-
-    Enumera dispositivos USB conectados, identifica placas de desarrollo conocidas (STM32 Nucleo, Arduino, ESP32) y recupera información del chip mediante probe-rs / ST-Link.
-
-    Ejemplos:
-    zeroclaw hardware discover
-    zeroclaw hardware introspect /dev/ttyACM0
-    zeroclaw hardware info --chip STM32F401RETx
-cli-peripheral-long-about =
-    Gestiona los periféricos de hardware.
-
-    Agrega, lista, flashea y configura placas de hardware que exponen herramientas al agente (GPIO, sensores, actuadores). Placas admitidas: nucleo-f401re, rpi-gpio, esp32, arduino-uno.
-
-    Ejemplos:
-    zeroclaw peripheral list
-    zeroclaw peripheral add nucleo-f401re /dev/ttyACM0
-    zeroclaw peripheral add rpi-gpio native
-    zeroclaw peripheral flash --port /dev/cu.usbmodem12345
-    zeroclaw peripheral flash-nucleo
 cli-memory-long-about =
     Gestiona las entradas de memoria del agente.
 
@@ -389,16 +361,6 @@ cli-self-test-web-dist-dir-pass-unset = no establecido (usando detección autom�
 cli-self-test-web-dist-dir-pass-literal = {$path} (ruta literal)
 cli-self-test-web-dist-dir-fail-expansion = ADVERTENCIA: {$path} — {$reason}; gateway.web_dist_dir se lee literalmente, así que expande el valor tú mismo (p. ej., una ruta absoluta)
 cli-service-systemd-linger-disabled-warning = la permanencia de usuario de systemd está deshabilitada. El servicio de usuario de ZeroClaw puede detenerse tras cerrar sesión. Habilítala con: loginctl enable-linger {$user}
-cli-peripherals-none = No hay periféricos configurados.
-cli-peripherals-add-hint = Agregue uno con: zeroclaw peripheral add <board> <path>
-cli-peripherals-add-example = {"  "}Ejemplo: zeroclaw peripheral add nucleo-f401re <serial-path>
-cli-peripherals-config-hint = O agregue a config.toml:
-cli-peripherals-configured = Periféricos configurados:
-cli-peripherals-already-configured = La placa {$board} en {$path} ya está configurada.
-cli-peripherals-added = Se agregó {$board} en {$path}. Reinicie el daemon para aplicar.
-cli-peripherals-flash-needs-hardware = El flasheo de Arduino requiere la característica 'hardware'.
-cli-peripherals-unoq-needs-hardware = La configuración de Uno Q requiere la característica 'hardware'.
-cli-peripherals-nucleo-needs-hardware = El flasheo de Nucleo requiere la característica 'hardware'.
 cli-skills-none-installed = No hay skills instaladas.
 cli-skills-create-hint = {"  "}Cree uno: mkdir -p ~/.zeroclaw/workspace/skills/my-skill
 cli-skills-install-hint = {"  "}O instale: zeroclaw skills install <source>
@@ -641,7 +603,6 @@ cli-status-service-running = 🟢 Servicio:       en ejecución
 cli-status-service-stopped = 🔴 Servicio:       detenido
 cli-status-channels = Canales:
 cli-status-cli-always = {"  "}CLI:      ✅ siempre
-cli-status-peripherals = Periféricos:
 cli-desktop-download = Descarga la aplicación complementaria de ZeroClaw:
 cli-desktop-homebrew = O instálala con Homebrew (próximamente):
 cli-desktop-linux-pkg = {"  "}Descarga el .deb o .AppImage para tu arquitectura.
@@ -675,12 +636,8 @@ cli-status-spent-today = {"  "}Gastado hoy:       ${$spent} / ${$limit}
 cli-status-spent-month = {"  "}Gastado este mes:  ${$spent} / ${$limit}
 cli-status-otp = {"  "}OTP habilitado:       {$v}
 cli-status-estop = {"  "}Parada de emergencia activada:    {$v}
-cli-status-peripherals-enabled = {"  "}Habilitado:   {$v}
-cli-status-boards = {"  "}Tableros:    {$v}
 cli-status-word-enabled = habilitado
 cli-status-word-disabled = deshabilitado
-cli-status-word-yes = sí
-cli-status-word-no = no
 cli-status-word-on = activado
 cli-status-word-off = desactivado
 cli-status-word-none = (ninguno)
@@ -736,10 +693,6 @@ cli-locales-installed = Se instalaron {$count} catálogo(s) para '{$locale}' en 
 cli-browse-header = {$path} ({$count} entradas)
 cli-browse-empty = (vacío)
 cli-browse-file-bytes = {$name} ({$bytes} bytes)
-cli-hardware-feature-required = El descubrimiento de hardware requiere la característica 'hardware'.
-cli-hardware-feature-build = Compila con: cargo build --features hardware
-cli-hardware-unsupported-platform = El descubrimiento de USB por hardware no es compatible con esta plataforma.
-cli-hardware-supported-platforms = Plataformas compatibles: Linux, macOS, Windows.
 cli-update-already-current = Ya está actualizado (v{$version}).
 cli-update-success = ¡Actualizado correctamente a v{$version}!
 cli-update-prebuilt-channel-note = Las actualizaciones precompiladas usan la distribución estándar ligera. Compila desde el código fuente con `./install.sh --source --preset full`, `--features channels-full` o una característica `channel-*` específica para Slack y otros canales no incluidos en esa distribución.

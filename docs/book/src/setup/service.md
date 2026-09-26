@@ -111,7 +111,7 @@ systemctl --user enable --now zeroclaw
 
 </div>
 
-If you need a true system-scope unit (root-owned, `/etc/systemd/system/`, dedicated service account, or hardware groups via `SupplementaryGroups`), the CLI does not generate one; adapt the system-level template at [`scripts/zeroclaw.service`](https://github.com/zeroclaw-labs/zeroclaw/blob/master/scripts/zeroclaw.service) and install it yourself. On OpenRC hosts, `sudo zeroclaw service install` does provision a dedicated `zeroclaw` user and system paths (see below).
+If you need a true system-scope unit (root-owned, `/etc/systemd/system/`, dedicated service account, or `SupplementaryGroups`), the CLI does not generate one; write a system unit that runs `zeroclaw daemon` and install it yourself. On OpenRC hosts, `sudo zeroclaw service install` does provision a dedicated `zeroclaw` user and system paths (see below).
 
 ## Linux: OpenRC
 

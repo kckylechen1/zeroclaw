@@ -399,13 +399,6 @@ sections! {
                 channel settings live on `[channels]`; each configured platform \
                 still gets its own alias.",
     },
-    Hardware => {
-        key:   "hardware",
-        shape: DirectForm,
-        group: Foundation,
-        help:  "Optional: hardware peripherals (Arduino, STM32, GPIO, etc.). \
-                Skip if you don't need them.",
-    },
 
     Agents => {
         key:   "agents",
@@ -509,7 +502,6 @@ pub fn section_has_signal(cfg: &crate::schema::Config, section: Section) -> bool
                 .strip_prefix("channels.")
                 .is_some_and(|rest| rest.contains('.'))
         }),
-        Section::Hardware => cfg.hardware.enabled,
         Section::McpServers => !cfg.mcp.servers.is_empty(),
         // Routes' existence in the Vec is the signal, same as McpServers.
         Section::ModelRoutes => !cfg.model_routes.is_empty(),

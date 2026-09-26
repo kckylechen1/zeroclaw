@@ -18,7 +18,6 @@ Where to start:
 - Wiring up a chat platform? → [Channels](./channels/overview.md)
 - Pointing it at an LLM? → [Model Providers](./providers/overview.md)
 - Adding capabilities? → [Tools](./tools/overview.md)
-- Talking to hardware or boards? → [Hardware](./hardware/index.md)
 - Running it in production? → [Operations](./ops/overview.md)
 - Writing a workflow? → [SOP](./sop/index.md)
 - Building on top of it? → [Developing](./developing/index.md)

@@ -1,16 +1,13 @@
-//! Turn prompt assembly helpers: system prompt, export scrubbing, hardware RAG.
+//! Turn prompt assembly helpers: system prompt and export scrubbing.
 //!
 //! Extracted from `loop_.rs` so prompt/export utilities are not interleaved
 //! with the interactive `run` / `process_message` entry points.
 
-use crate::agent::TurnMeta;
-use crate::observability::{Observer, ObserverEvent};
 use crate::tools::Tool;
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
 use regex::Regex;
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::sync::{Arc, LazyLock, Mutex};
 use uuid::Uuid;
 use zeroclaw_providers::{ChatMessage, ModelProvider, ToolCall};
@@ -218,58 +215,4 @@ pub(crate) fn tools_to_openai_format(tools_registry: &[Box<dyn Tool>]) -> Vec<se
 
 pub(crate) fn autosave_memory_key(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4())
-}
-
-/// Build hardware datasheet context from RAG when peripherals are enabled.
-/// Includes pin-alias lookup (e.g. "red_led" → 13) when query matches, plus retrieved chunks.
-pub(crate) fn build_hardware_context(
-    rag: &crate::rag::HardwareRag,
-    observer: &dyn Observer,
-    user_msg: &str,
-    boards: &[String],
-    chunk_limit: usize,
-    turn: TurnMeta<'_>,
-) -> String {
-    if rag.is_empty() || boards.is_empty() {
-        return String::new();
-    }
-
-    let mut context = String::new();
-
-    // Pin aliases: when user says "red led", inject "red_led: 13" for matching boards
-    let pin_ctx = rag.pin_alias_context(user_msg, boards);
-    if !pin_ctx.is_empty() {
-        context.push_str(&pin_ctx);
-    }
-
-    let start = std::time::Instant::now();
-    let chunks = rag.retrieve(user_msg, boards, chunk_limit);
-    let duration = start.elapsed();
-    observer.record_event(&ObserverEvent::RagRetrieve {
-        query_summary: make_query_summary(user_msg),
-        duration,
-        num_chunks: chunks.len(),
-        num_boards: boards.len(),
-        channel: Some(turn.channel_name.to_string()),
-        agent_alias: turn.agent_alias.map(str::to_string),
-        turn_id: Some(turn.turn_id.to_string()),
-    });
-
-    if chunks.is_empty() && pin_ctx.is_empty() {
-        return String::new();
-    }
-
-    if !chunks.is_empty() {
-        context.push_str("[Hardware documentation]\n");
-    }
-    for chunk in chunks {
-        let board_tag = chunk.board.as_deref().unwrap_or("generic");
-        let _ = writeln!(
-            context,
-            "--- {} ({}) ---\n{}\n",
-            chunk.source, board_tag, chunk.content
-        );
-    }
-    context.push('\n');
-    context
 }

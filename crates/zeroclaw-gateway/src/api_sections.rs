@@ -427,8 +427,7 @@ pub async fn handle_sections(State(state): State<AppState>, headers: HeaderMap) 
             let has_picker = match wizard {
                 Some(w) => !matches!(
                     w,
-                    zeroclaw_config::sections::Section::Hardware
-                        | zeroclaw_config::sections::Section::Mcp
+                    zeroclaw_config::sections::Section::Mcp
                         | zeroclaw_config::sections::Section::Skills
                         | zeroclaw_config::sections::Section::Composition
                 ),
@@ -594,11 +593,9 @@ fn picker_items_for(
         | Section::EmbeddingRoutes => {
             PickerDispatch::Items(one_tier_alias_map_picker(cfg, section.as_str()))
         }
-        Section::Hardware
-        | Section::Mcp
-        | Section::Skills
-        | Section::Composition
-        | Section::QuickstartState => PickerDispatch::DirectForm,
+        Section::Mcp | Section::Skills | Section::Composition | Section::QuickstartState => {
+            PickerDispatch::DirectForm
+        }
     }
 }
 
@@ -1141,11 +1138,7 @@ pub async fn handle_section_select(
             };
             (prefix, true)
         }
-        Section::Hardware
-        | Section::Mcp
-        | Section::Skills
-        | Section::Composition
-        | Section::QuickstartState => {
+        Section::Mcp | Section::Skills | Section::Composition | Section::QuickstartState => {
             return error_response(
                 ConfigApiError::new(
                     ConfigApiCode::PathNotFound,
@@ -1438,8 +1431,8 @@ mod tests {
         for hidden in HIDDEN_TOP_LEVEL {
             roots.remove(*hidden);
         }
-        // The 5 onboarding sections must still be in the derived set.
-        for required in ["providers", "channels", "memory", "hardware", "tunnel"] {
+        // The onboarding sections must still be in the derived set.
+        for required in ["providers", "channels", "memory", "tunnel"] {
             assert!(
                 roots.contains(required),
                 "derived sections must include onboarding section `{required}`; got {roots:?}",
@@ -1798,7 +1791,6 @@ mod tests {
             Section::TranscriptionProviders,
             Section::Channels,
             Section::Memory,
-            Section::Hardware,
             Section::Tunnel,
             Section::Agents,
             Section::PeerGroups,
@@ -1811,7 +1803,7 @@ mod tests {
             Section::RiskProfiles,
             Section::RuntimeProfiles,
         ];
-        let direct_form = [Section::Hardware, Section::Mcp];
+        let direct_form = [Section::Mcp];
         for section in all {
             match picker_items_for(*section, &cfg) {
                 PickerDispatch::Items(_items) => {

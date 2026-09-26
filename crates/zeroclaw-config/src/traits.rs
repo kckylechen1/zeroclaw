@@ -255,9 +255,6 @@ impl HasPropKind for Vec<crate::schema::ExternalRegistry> {
 impl HasPropKind for Vec<crate::schema::NevisRoleMappingConfig> {
     const PROP_KIND: PropKind = PropKind::ObjectArray;
 }
-impl HasPropKind for Vec<crate::schema::PeripheralBoardConfig> {
-    const PROP_KIND: PropKind = PropKind::ObjectArray;
-}
 impl HasPropKind for Vec<crate::schema::ToolFilterGroup> {
     const PROP_KIND: PropKind = PropKind::ObjectArray;
 }

@@ -61,9 +61,9 @@ import { t } from "@/lib/i18n";
 // #5947.
 //
 // Foundation leads — Workspace / Providers / Channels / Memory /
-// Hardware / Tunnel are the most-edited sections, surfaced first inside
+// Tunnel are the most-edited sections, surfaced first inside
 // the Config explorer instead of as duplicate top-level nav entries.
-// The Quickstart flow walks the same six (reachable via the
+// The Quickstart flow walks the same five (reachable via the
 // "Run setup again" link in the breadcrumb row).
 const GROUP_ORDER = [
   "Foundation",

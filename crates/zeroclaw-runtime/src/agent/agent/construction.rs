@@ -248,7 +248,6 @@ impl Agent {
                 runtime,
                 caller_allowed: None,
                 connect_mcp: initialize_mcp,
-                connect_peripherals: false,
                 exclude_memory,
                 list_deferred_mcp_specs: false,
                 emit_assembly_logs: true,

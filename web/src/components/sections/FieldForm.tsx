@@ -2404,7 +2404,7 @@ interface ObjectArrayEditorProps {
 // inputs derived from the JSON Schema, and serializes back to JSON on save.
 // Schema v3 / #5947 will migrate the load-bearing Vecs to `HashMap<String, T>`
 // keyed tables; this editor is the bridge so the dashboard doesn't have to
-// wait on that to surface MCP servers / peripheral boards / etc.
+// wait on that to surface MCP servers / etc.
 function ObjectArrayEditor({
   inputId,
   value,

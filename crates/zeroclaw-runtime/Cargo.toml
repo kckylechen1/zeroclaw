@@ -102,7 +102,6 @@ default = [
     "observability-prometheus",
     "schema-export",
     "integrations-saas",
-    "hardware-tools",
     "email-tools",
 ]
 observability-prometheus = ["dep:prometheus"]
@@ -117,7 +116,6 @@ browser-native = []
 # consumes this crate with default-features = false and forwards these from
 # its own default so the slim companion selection can omit them.
 integrations-saas = ["zeroclaw-tools/integrations-saas"]
-hardware-tools = ["zeroclaw-tools/hardware-tools"]
 email-tools = ["zeroclaw-tools/email-tools"]
 sandbox-bubblewrap = []
 # Heavy agent/SOP behavioral suites. Gated so lib-test

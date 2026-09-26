@@ -55,12 +55,6 @@ pub use zeroclaw_tools::git_operations::GitOperationsTool;
 pub use zeroclaw_tools::glob_search::GlobSearchTool;
 #[cfg(feature = "integrations-saas")]
 pub use zeroclaw_tools::google_workspace::GoogleWorkspaceTool;
-#[cfg(feature = "hardware-tools")]
-pub use zeroclaw_tools::hardware_board_info::HardwareBoardInfoTool;
-#[cfg(feature = "hardware-tools")]
-pub use zeroclaw_tools::hardware_memory_map::HardwareMemoryMapTool;
-#[cfg(feature = "hardware-tools")]
-pub use zeroclaw_tools::hardware_memory_read::HardwareMemoryReadTool;
 pub use zeroclaw_tools::http_request::HttpRequestTool;
 pub use zeroclaw_tools::image_gen::ImageGenTool;
 pub use zeroclaw_tools::image_info::ImageInfoTool;

@@ -11355,7 +11355,6 @@ async fn runtime_entrypoints_resolve_runtime_profile_tunables_before_provider_se
         None,
         None,
         None,
-        Vec::new(),
         false,
         None,
         None,
@@ -11452,7 +11451,6 @@ async fn process_message_seam_narrows_safe_defaults_outside_allowed_tools() {
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed: None, // process_message has no caller allowlist
             connect_mcp: false,   // exercise the filter without MCP fixtures
-            connect_peripherals: false,
             exclude_memory: false,
             list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
@@ -12009,7 +12007,6 @@ async fn run_brackets_successful_turn_with_agent_start_and_agent_end() {
         None,
         None,
         None,
-        Vec::new(),
         false,
         None,
         None,
@@ -12099,7 +12096,6 @@ async fn run_still_closes_the_bracket_when_the_model_call_fails() {
         None,
         None,
         None,
-        Vec::new(),
         false,
         None,
         None,
@@ -12235,7 +12231,6 @@ async fn run_rejects_model_switch_tool_call_and_keeps_original_route() {
         None,
         None,
         None,
-        Vec::new(),
         false,
         None,
         None,
@@ -12315,57 +12310,4 @@ async fn run_rejects_model_switch_tool_call_and_keeps_original_route() {
         "AgentEnd must stay attributed to the original route — the model \
          cannot switch its own route through a tool call, got {events:?}"
     );
-}
-
-/// `build_hardware_context` must forward the caller's TurnMeta onto the
-/// RagRetrieve event it emits. Prior review flagged that RagRetrieve
-/// correlation had no executing assertion anywhere.
-#[test]
-fn build_hardware_context_forwards_turn_meta() {
-    let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().join("datasheets");
-    std::fs::create_dir_all(&base).unwrap();
-    let content = r#"# Test Board
-## Pin Aliases
-red_led: 13
-## GPIO
-Pin 13: LED
-"#;
-    std::fs::write(base.join("test-board.md"), content).unwrap();
-    let rag = crate::rag::HardwareRag::load(tmp.path(), "datasheets").unwrap();
-    let boards = vec!["test-board".to_string()];
-    let observer = CapturingObserver::default();
-
-    let _ = build_hardware_context(
-        &rag,
-        &observer,
-        "led",
-        &boards,
-        5,
-        TurnMeta {
-            parent_agent_alias: None,
-            agent_alias: Some("coder"),
-            turn_id: "turn-7",
-            channel_name: "daemon",
-        },
-    );
-
-    let events = observer.events.lock();
-    match events
-        .iter()
-        .find(|e| matches!(e, ObserverEvent::RagRetrieve { .. }))
-        .expect("build_hardware_context must emit RagRetrieve")
-    {
-        ObserverEvent::RagRetrieve {
-            turn_id,
-            channel,
-            agent_alias,
-            ..
-        } => {
-            assert_eq!(turn_id.as_deref(), Some("turn-7"));
-            assert_eq!(channel.as_deref(), Some("daemon"));
-            assert_eq!(agent_alias.as_deref(), Some("coder"));
-        }
-        _ => unreachable!(),
-    }
 }

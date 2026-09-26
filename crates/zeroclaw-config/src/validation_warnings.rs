@@ -55,6 +55,11 @@ use serde::{Deserialize, Serialize};
 ///   WASM plugin host, its registry CLI and the `wit/` contracts were
 ///   retired; extensions are served through MCP servers (`[mcp]`), so the
 ///   section is ignored (see `RETIRED_CONFIG_SURFACES`).
+/// - `hardware_moved_out_of_core`: a `[hardware]` or `[peripherals]`
+///   section is still present. In-process hardware support (GPIO, serial
+///   boards, debug probes, datasheet RAG) left the body; devices join as
+///   gateway Nodes instead (ADR-017), so the section is ignored (see
+///   `RETIRED_CONFIG_SURFACES`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ValidationWarning {
@@ -112,6 +117,8 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("channels.gmail_push", "inbound_webhook_channel_removed"),
     ("wss", "wss_transport_removed"),
     ("plugins", "wasm_plugins_removed"),
+    ("hardware", "hardware_moved_out_of_core"),
+    ("peripherals", "hardware_moved_out_of_core"),
 ];
 
 /// True when `channel_type` names a channel whose `[channels.<type>]`

@@ -76,8 +76,6 @@ If you still run out of memory, or you are not building through `install.sh`:
 4. **Serialise the build**: `CARGO_BUILD_JOBS=1 cargo build --release --locked`.
 5. **Add swap** (works for RAM, costs disk, check you have both).
 
-For the Raspberry Pi specifics, see [Raspberry Pi setup → build](../hardware/raspberry-pi-setup.md#step-3-build).
-
 ### Build is very slow
 
 The Matrix E2EE stack (`matrix-sdk`, `ruma`, `vodozemac`) and TLS/crypto native deps (`aws-lc-sys`, `ring`) are the main cost. Opt out if you don't need them:
