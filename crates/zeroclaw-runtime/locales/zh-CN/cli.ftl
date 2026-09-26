@@ -854,14 +854,6 @@ channel-runtime-provider-unknown = 未知 model_provider `{ $provider }`。使�
 channel-runtime-scoped-model-empty = 模型 ID 不能为空。请使用 `/model --user|--agent <model-id>`。
 channel-runtime-scoped-model-switched = 已为 **{ $scope }** 范围设置模型 `{ $model }`（model_provider：`{ $provider }`）。仅会话内有效，重启后重置。
 channel-runtime-shadow-note = ⚠️ 当前有更高优先级的覆盖生效，因此消息将改用 `{ $model }`（`{ $provider }`）；请查看 `/model`。
-channel-runtime-thinking-set =
-    已为此发送者会话将 thinking 设为 `{ $level }`。
-    使用 `/thinking reset` 返回 agent 默认值。
-channel-runtime-thinking-cleared = thinking 覆盖已清除。此发送者会话将使用 agent 默认值 `{ $default }`。
-channel-runtime-thinking-default =
-    thinking 已经在此发送者会话中使用 agent 默认值 `{ $default }`。
-    使用 `/thinking high`、`/thinking max` 或 `/thinking off` 覆盖。
-channel-runtime-thinking-invalid = 未知 thinking 等级 `{ $raw }`。使用 `/thinking off|minimal|low|medium|high|max`、`/thinking on` 或 `/thinking reset`。
 channel-runtime-provider-turn-init-failed =
     ⚠️ 初始化 model_provider `{ $provider }` 失败。请运行 `/models` 选择另一个 model_provider。
     详情：{ $error }

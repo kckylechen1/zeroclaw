@@ -18,8 +18,8 @@ PROTECTED_METHODS='\.(chat|stream_chat|simple_chat|chat_with_system|chat_with_hi
 # We allow:
 #   - dispatch.rs and its integration tests (the implementation + its
 #     dedicated test fakes).
-#   - Any code inside a `tests/` directory (`tests/live/` integration
-#     tests, `crates/*/tests/` integration tests).
+#   - Any code inside a `tests/` directory (root `tests/` suites,
+#     `crates/*/tests/` integration tests).
 #   - Any line inside a `#[cfg(test)]` module: the gate uses the
 #     first `^#[cfg(test)]` line in each file as a boundary and drops
 #     matches at or below it.

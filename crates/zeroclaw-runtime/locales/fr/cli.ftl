@@ -860,14 +860,6 @@ channel-runtime-provider-unknown = model_provider inconnu `{ $provider }`. Utili
 channel-runtime-scoped-model-empty = L'ID du modèle ne peut pas être vide. Utilisez `/model --user|--agent <model-id>`.
 channel-runtime-scoped-model-switched = Modèle défini sur `{ $model }` (model_provider : `{ $provider }`) pour le périmètre **{ $scope }**. Session uniquement ; réinitialisé au redémarrage.
 channel-runtime-shadow-note = ⚠️ Une surcharge de plus haute précédence est active, donc les messages utiliseront plutôt `{ $model }` (`{ $provider }`) ; voir `/model`.
-channel-runtime-thinking-set =
-    Thinking défini sur `{ $level }` pour cette session d'expéditeur.
-    Utilisez `/thinking reset` pour revenir à la valeur par défaut de l'agent.
-channel-runtime-thinking-cleared = Surcharge de thinking effacée. Utilisation de la valeur par défaut de l'agent `{ $default }` pour cette session d'expéditeur.
-channel-runtime-thinking-default =
-    Thinking utilise déjà la valeur par défaut de l'agent `{ $default }` pour cette session d'expéditeur.
-    Utilisez `/thinking high`, `/thinking max` ou `/thinking off` pour le surcharger.
-channel-runtime-thinking-invalid = Niveau de thinking inconnu `{ $raw }`. Utilisez `/thinking off|minimal|low|medium|high|max`, `/thinking on` ou `/thinking reset`.
 channel-runtime-provider-turn-init-failed =
     ⚠️ Échec de l'initialisation de model_provider `{ $provider }`. Exécutez `/models` pour choisir un autre model_provider.
     Détails : { $error }

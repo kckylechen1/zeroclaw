@@ -213,27 +213,10 @@ async fn process_channel_message_body(
             None
         };
 
-    let thinking_override = ctx
-        .thinking_overrides
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&history_key)
-        .copied();
     let thinking = resolve_channel_thinking(
-        &msg.content,
-        thinking_override,
         &ctx.agent_cfg.resolved.thinking,
         runtime_defaults_snapshot(ctx.as_ref()).defaults.temperature,
     );
-    if thinking.effective_content != msg.content {
-        ::zeroclaw_log::record!(
-            INFO,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_attrs(::serde_json::json!({"thinking_level": thinking.level})),
-            "Thinking directive parsed from channel message"
-        );
-        msg.content = thinking.effective_content.clone();
-    }
 
     // ── Media pipeline: enrich inbound message with media annotations ──
     if ctx.media_pipeline.enabled && !msg.attachments.is_empty() {

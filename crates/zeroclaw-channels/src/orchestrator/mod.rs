@@ -166,7 +166,7 @@ use tokio_util::sync::CancellationToken;
 
 use zeroclaw_api::memory_traits::MemoryStrategy;
 use zeroclaw_api::session_keys::sanitize_session_key;
-use zeroclaw_config::scattered_types::{ThinkingConfig, ThinkingLevel};
+use zeroclaw_config::scattered_types::ThinkingConfig;
 use zeroclaw_config::schema::Config;
 #[cfg(all(test, feature = "heavy-tests"))]
 use zeroclaw_memory::MEMORY_CONTEXT_OPEN;
@@ -290,7 +290,6 @@ const CHANNEL_HOOK_MAX_OUTBOUND_CHARS: usize = 20_000;
 
 type ProviderCacheMap = Arc<Mutex<HashMap<String, Arc<dyn ModelProvider>>>>;
 type RouteSelectionMap = Arc<Mutex<HashMap<String, ChannelRouteSelection>>>;
-type ThinkingOverrideMap = Arc<Mutex<HashMap<String, ThinkingLevel>>>;
 /// Session-only model overrides scoped above the per-sender [`RouteSelectionMap`].
 /// Keyed by a `scope_override_key` (prefixed `user::`/`agent::`), so both
 /// scopes share one in-memory map. Never persisted — lost on restart by design.
@@ -467,7 +466,6 @@ struct ChannelRuntimeContext {
     pending_new_sessions: PendingNewSessionSet,
     provider_cache: ProviderCacheMap,
     route_overrides: RouteSelectionMap,
-    thinking_overrides: ThinkingOverrideMap,
     /// Session-only `/model` overrides scoped by user/agent (see
     /// [`ScopedRouteMap`]). Consulted above `route_overrides` in
     /// [`get_route_selection`]; never persisted.
@@ -834,29 +832,20 @@ fn is_matrix_channel_name(channel_name: &str) -> bool {
 }
 
 struct ChannelThinkingResolution {
-    effective_content: String,
-    level: ThinkingLevel,
     params: zeroclaw_runtime::agent::thinking::ThinkingParams,
     effective_temperature: Option<f64>,
 }
 
+/// The agent's configured thinking level and the request parameters it maps
+/// to. There is no per-message or per-session override.
 fn resolve_channel_thinking(
-    content: &str,
-    session_override: Option<ThinkingLevel>,
     config: &ThinkingConfig,
     base_temperature: Option<f64>,
 ) -> ChannelThinkingResolution {
-    let (directive, effective_content) =
-        match zeroclaw_runtime::agent::thinking::parse_thinking_directive(content) {
-            Some((level, remaining)) => (Some(level), remaining),
-            None => (None, content.to_string()),
-        };
-    let level = zeroclaw_runtime::agent::thinking::resolve_thinking_level(
-        directive,
-        session_override,
+    let params = zeroclaw_runtime::agent::thinking::apply_thinking_level_with_config(
+        config.default_level,
         config,
     );
-    let params = zeroclaw_runtime::agent::thinking::apply_thinking_level_with_config(level, config);
     let effective_temperature = base_temperature.map(|temperature| {
         zeroclaw_runtime::agent::thinking::clamp_temperature(
             temperature + params.temperature_adjustment,
@@ -864,8 +853,6 @@ fn resolve_channel_thinking(
     });
 
     ChannelThinkingResolution {
-        effective_content,
-        level,
         params,
         effective_temperature,
     }
@@ -1968,10 +1955,6 @@ async fn handle_runtime_command_if_needed(
             let persist_lock = acquire_persist_lock(ctx, &sender_key);
             let _lock = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
             clear_sender_history(ctx, &sender_key);
-            ctx.thinking_overrides
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&sender_key);
             if let Some(ref store) = ctx.session_store
                 && let Err(e) = store.delete_session(&sender_key)
             {
@@ -1988,42 +1971,6 @@ async fn handle_runtime_command_if_needed(
             mark_sender_for_new_session(ctx, &sender_key);
             channel_runtime_cli_string("channel-runtime-new-session")
         }
-        ChannelRuntimeCommand::SetThinking(level) => match level {
-            Some(level) => {
-                ctx.thinking_overrides
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(sender_key.clone(), level);
-                channel_runtime_cli_string_with_args(
-                    "channel-runtime-thinking-set",
-                    &[("level", level.as_str())],
-                )
-            }
-            None => {
-                let removed = ctx
-                    .thinking_overrides
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&sender_key)
-                    .is_some();
-                let default = ctx.agent_cfg.resolved.thinking.default_level.as_str();
-                if removed {
-                    channel_runtime_cli_string_with_args(
-                        "channel-runtime-thinking-cleared",
-                        &[("default", default)],
-                    )
-                } else {
-                    channel_runtime_cli_string_with_args(
-                        "channel-runtime-thinking-default",
-                        &[("default", default)],
-                    )
-                }
-            }
-        },
-        ChannelRuntimeCommand::InvalidThinking(raw) => channel_runtime_cli_string_with_args(
-            "channel-runtime-thinking-invalid",
-            &[("raw", raw.as_str())],
-        ),
     };
 
     if let Err(err) = channel
@@ -4117,7 +4064,6 @@ fn concurrent_persist_lock_serialization() {
         pending_new_sessions: Arc::new(Mutex::new(HashSet::new())),
         provider_cache: Arc::new(Mutex::new(HashMap::new())),
         route_overrides: Arc::new(Mutex::new(HashMap::new())),
-        thinking_overrides: Arc::new(Mutex::new(HashMap::new())),
         scope_overrides: Arc::new(Mutex::new(HashMap::new())),
         reliability: Arc::new(zeroclaw_config::schema::ReliabilityConfig::default()),
         interrupt_on_new_message: InterruptOnNewMessageConfig {
