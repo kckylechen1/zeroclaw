@@ -1,8 +1,16 @@
+# The xtask aliases build in the default dev profile, not --release. xtask
+# links zeroclaw-runtime and friends, so a release build meant a fat-LTO,
+# codegen-units=1, opt-level=z compile of most of the workspace every time a
+# PR ran `cargo generate` or `cargo fluent`. The dev profile reuses the
+# third-party deps already in target/debug (a separate named profile would
+# duplicate all of them on disk), and the tasks are I/O bound anyway.
 [alias]
-mdbook = "run --release -p xtask --bin mdbook --"
-fluent = "run --release -p xtask --bin fluent --"
-web = "run --release -p xtask --bin web --"
-generate = "run --release -p xtask --bin generate --"
+mdbook = "run -p xtask --bin mdbook --"
+fluent = "run -p xtask --bin fluent --"
+web = "run -p xtask --bin web --"
+generate = "run -p xtask --bin generate --"
+# The Quality Gate's clippy command; run once before pushing.
+lint-ci = "clippy --workspace --all-targets --locked --features ci-all -- -D warnings"
 
 [build]
 rustdocflags = ["--default-theme=ayu"]
