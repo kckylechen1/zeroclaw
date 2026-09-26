@@ -553,6 +553,13 @@ pub struct Config {
     #[nested]
     pub mcp: McpConfig,
 
+    /// Delegation to external harnesses through Tachi's `tachi_staff` MCP
+    /// tool (`[tachi]`). Closed by default; the endpoint must be loopback.
+    #[serde(default, skip_serializing_if = "crate::tachi::TachiConfig::is_unset")]
+    #[nested]
+    #[group = "Integrations"]
+    pub tachi: crate::tachi::TachiConfig,
+
     /// Dynamic node discovery configuration (`[nodes]`).
     #[serde(default)]
     #[nested]
@@ -17041,6 +17048,7 @@ impl Default for Config {
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             mcp: McpConfig::default(),
+            tachi: crate::tachi::TachiConfig::default(),
             nodes: NodesConfig::default(),
             onboard_state: OnboardStateConfig::default(),
             notion: NotionConfig::default(),
@@ -19852,6 +19860,11 @@ impl Config {
         // MCP
         if self.mcp.enabled {
             validate_mcp_config(&self.mcp)?;
+        }
+
+        // Tachi delegation client
+        if let Err((path, reason)) = self.tachi.validate() {
+            validation_bail!(InvalidFormat, path, "{reason}");
         }
 
         // Knowledge graph

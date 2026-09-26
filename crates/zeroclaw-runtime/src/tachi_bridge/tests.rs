@@ -274,28 +274,10 @@ fn forbidden_payloads_are_rejected_over_every_text_bearing_field() {
 fn watershed_dimensions_are_rejected_as_prose_anywhere_in_text() {
     // Row 4 discrimination list, PROSE form: the
     // banned dimensions must be rejected even when the text is not
-    // shaped like a command or a path — a vendor name as backend prose,
-    // a worktree as a relative path, a cwd/tmux/sandbox mention, or a
+    // shaped like a command or a path — a worktree as a relative path, a cwd/tmux/sandbox mention, or a
     // CLI flag as a standalone token. Each case mutates ONLY the
     // objective of an otherwise clean intent.
     let cases: &[(&str, ForbiddenCategory)] = &[
-        // Vendor/model names as prose (TB-5).
-        (
-            "Use Anthropic Claude as the backend",
-            ForbiddenCategory::ExecutionDetail,
-        ),
-        (
-            "route this to glm-4 for speed",
-            ForbiddenCategory::ExecutionDetail,
-        ),
-        (
-            "prefer deepseek over the default",
-            ForbiddenCategory::ExecutionDetail,
-        ),
-        (
-            "Use Zhipu as the backend",
-            ForbiddenCategory::ExecutionDetail,
-        ),
         (
             "invoke with (--full-auto) enabled",
             ForbiddenCategory::ExecutionDetail,
@@ -367,73 +349,25 @@ fn watershed_dimensions_are_rejected_as_prose_anywhere_in_text() {
 }
 
 #[test]
-fn watershed_vendor_list_covers_every_canonical_provider_slot() {
-    // Drift guard: every model-provider slot declared by
-    // zeroclaw-config must be rejected as prose. When a new provider is
-    // added upstream, this test fails until the watershed list covers
-    // it — vendor coverage is data-driven, not memory-driven.
-    macro_rules! collect_provider_ids {
-        ($(($field:ident, $type_str:literal, $cfg_ty:ty)),+ $(,)?) => {
-            vec![$($type_str),+]
-        };
-    }
-    let provider_ids: Vec<&str> =
-        zeroclaw_config::for_each_model_provider_slot!(collect_provider_ids);
-    assert!(!provider_ids.is_empty(), "collector macro ran");
-    let mut uncovered: Vec<&str> = Vec::new();
-    for id in &provider_ids {
-        let exempt = VENDOR_EXEMPTIONS
-            .iter()
-            .any(|(exempt_id, _reason)| exempt_id == id);
-        let covered = id
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|token| !token.is_empty())
-            .all(|token| {
-                super::compose::WATERSHED_VENDOR_TOKENS.contains(&token)
-                    || super::compose::WATERSHED_PLACEMENT_TOKENS.contains(&token)
-            })
-            || super::compose::WATERSHED_VENDOR_PHRASES.contains(id);
-        if !covered && !exempt {
-            uncovered.push(id);
-        }
-    }
-    assert!(
-        uncovered.is_empty(),
-        "canonical provider ids not covered (and not exempted with a reason) by the \
-         watershed vendor lists: {uncovered:?}"
-    );
-    // And every NON-EXEMPT id actually rejects as prose.
-    for id in &provider_ids {
-        let exempt = VENDOR_EXEMPTIONS
-            .iter()
-            .any(|(exempt_id, _reason)| exempt_id == id);
-        if exempt {
-            continue;
-        }
-        let mut inputs = acceptance_inputs("clean objective");
-        inputs.objective = BoundedText::new(*id).expect("bounded");
-        let rejection = compose_intent(
-            &inputs,
+fn harness_and_vendor_names_in_task_text_are_ordinary_content() {
+    // ADR-017 §3: task text that mentions a harness, vendor, or model is
+    // ordinary content, not a reason to refuse it. Execution placement
+    // still comes from configuration and policy (the placement layer
+    // above stays), never from these names.
+    for payload in [
+        "Use Anthropic Claude as the backend",
+        "route this to glm-4 for speed",
+        "have Codex implement it and Claude Code review it",
+        "compare the GitHub issue against the GPT answer",
+        "prefer deepseek over the default",
+    ] {
+        let intent = compose_intent(
+            &acceptance_inputs(payload),
             &repository_implementation_policy(),
             &structural_context("bundle-7f3a"),
         )
-        .unwrap_err();
-        assert!(
-            matches!(
-                rejection,
-                ComposeRejection::ForbiddenContent {
-                    category: ForbiddenCategory::ExecutionDetail,
-                    ..
-                }
-            ) || matches!(
-                rejection,
-                ComposeRejection::ForbiddenContent {
-                    category: ForbiddenCategory::Command,
-                    ..
-                }
-            ),
-            "provider id {id:?} must reject as ExecutionDetail or Command prose, got {rejection:?}"
-        );
+        .unwrap_or_else(|rejection| panic!("{payload:?} must compose, got {rejection:?}"));
+        assert_eq!(intent.objective.as_str(), payload);
     }
 }
 
@@ -522,33 +456,6 @@ fn a_hand_built_intent_with_a_smuggled_schema_field_fails_the_scan() {
         );
     });
 }
-
-/// Canonical provider slots DELIBERATELY NOT covered by the watershed
-/// lists because the id is an ordinary dictionary word whose prose use
-/// is legitimate in objectives — banning it would reject clean intents
-/// wholesale. Each entry is a conscious, documented exemption; naming
-/// that vendor in prose still falls to the tachi host admission law
-/// (authoritative) and to human review. The drift-guard test forces
-/// every NEW upstream provider slot to be covered OR added here with a
-/// reason — silent gaps fail the build.
-const VENDOR_EXEMPTIONS: &[(&str, &str)] = &[
-    (
-        "manifest",
-        "ordinary word (the persistence manifest); naming falls to host admission",
-    ),
-    ("morph", "ordinary verb; naming falls to host admission"),
-    ("inception", "ordinary word; naming falls to host admission"),
-    (
-        "synthetic",
-        "ordinary adjective; naming falls to host admission",
-    ),
-    (
-        "custom",
-        "ordinary adjective; naming falls to host admission",
-    ),
-    ("kilo", "ordinary unit word; naming falls to host admission"),
-    ("upstage", "ordinary verb; naming falls to host admission"),
-];
 
 /// Transport wrapper that COUNTS port.submit calls — the discrimination
 /// instrument for the client fail-closed law: a client-side rejection
@@ -1456,6 +1363,7 @@ fn module_source_scans_hold() {
         "tachi_bridge/compose.rs",
         "tachi_bridge/client.rs",
         "tachi_bridge/in_memory.rs",
+        "tachi_bridge/staff.rs",
     ];
     for file in module_files {
         let source = std::fs::read_to_string(format!("{manifest_dir}/src/{file}"))

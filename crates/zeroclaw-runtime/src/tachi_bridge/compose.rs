@@ -14,9 +14,10 @@
 //! forbidden-content categories so a violation is caught BEFORE anything
 //! is sent; the host-side admission remains authoritative. The mirrored
 //! lists are byte-identical to the host's; on top of them the client
-//! runs a STRICT SUPERSET watershed layer (`ExecutionDetail`): vendor /
-//! model / worktree / cwd / tmux-SSH / sandbox / CLI-flag dimensions are
-//! rejected as PROSE anywhere in a text-bearing value. The client may
+//! runs a STRICT SUPERSET watershed layer (`ExecutionDetail`): worktree /
+//! cwd / tmux-SSH / sandbox / CLI-flag dimensions are rejected as PROSE
+//! anywhere in a text-bearing value. Vendor, model, and harness names are
+//! ordinary content and are not refused (ADR-017 §3). The client may
 //! reject more than the host; it may never reject less.
 
 use std::collections::BTreeSet;
@@ -135,8 +136,8 @@ pub enum ForbiddenCategory {
     #[error("caller-minted task/attempt id")]
     CallerMintedRef,
     /// Execution detail named as PROSE in a text-bearing value — a
-    /// vendor/model name, worktree, cwd, tmux/SSH, sandbox, or CLI-flag
-    /// token anywhere in the text (vertical V2b discrimination list).
+    /// worktree, cwd, tmux/SSH, sandbox, or CLI-flag token anywhere in the
+    /// text (vertical V2b discrimination list).
     /// Client-side strict superset of the mirrored host categories: the
     /// host law stays authoritative host-side; this layer exists so the
     /// watershed dimensions are rejected before transport even when they
@@ -249,119 +250,6 @@ const WORKTREE_MARKERS: &[&str] = &[
 /// Markers for Private-Dyad-labeled content (TB-4 category 4).
 const PRIVATE_DYAD_MARKERS: &[&str] = &["private dyad", "private_dyad", "private-dyad"];
 
-/// Vendor/model names the Parent must never place in any text-bearing
-/// value (vertical V2b discrimination list: glm/codex/any model or
-/// vendor name, TB-5). Matched on word boundaries over the lowercased
-/// text so `Use Anthropic Claude as the backend` is rejected even though
-/// it is not shaped like a command.
-///
-/// Coverage law: every canonical model-provider slot declared by
-/// `zeroclaw_config::for_each_model_provider_slot!` must be covered
-/// here (word tokens and/or [`WATERSHED_VENDOR_PHRASES`]), or carry a
-/// documented exemption in the drift-guard test in `tests.rs` — a new
-/// provider added upstream fails this crate's tests until one of the
-/// two happens. Beyond the canonical slots, the list carries the known harness
-/// CLI and vendor-alias family. A NOVEL vendor name not yet listed is
-/// the documented residual class — the authoritative rejection is the
-/// tachi host admission, and list extension is a one-line PR.
-///
-/// `together` is deliberately included despite being a common English
-/// word: it is a canonical provider id (together.ai), and the
-/// fail-closed direction (rejecting prose like `run these together`) is
-/// the contract-correct side of the trade.
-pub(crate) const WATERSHED_VENDOR_TOKENS: &[&str] = &[
-    // Canonical zeroclaw-config model-provider slots.
-    "openai",
-    "azure",
-    "anthropic",
-    "moonshot",
-    "qwen",
-    "glm",
-    "minimax",
-    "zai",
-    "doubao",
-    "yi",
-    "hunyuan",
-    "qianfan",
-    "baichuan",
-    "openrouter",
-    "ollama",
-    "gemini",
-    "bedrock",
-    "telnyx",
-    "together",
-    "fireworks",
-    "groq",
-    "mistral",
-    "deepseek",
-    "cohere",
-    "perplexity",
-    "xai",
-    "cerebras",
-    "sambanova",
-    "hyperbolic",
-    "deepinfra",
-    "huggingface",
-    "ai21",
-    "reka",
-    "baseten",
-    "nscale",
-    "anyscale",
-    "nebius",
-    "friendli",
-    "stepfun",
-    "aihubmix",
-    "siliconflow",
-    "astrai",
-    "avian",
-    "deepmyst",
-    "venice",
-    "nearai",
-    "novita",
-    "nvidia",
-    "vercel",
-    "cloudflare",
-    "ovh",
-    "copilot",
-    "lmstudio",
-    "llamacpp",
-    "sglang",
-    "vllm",
-    "osaurus",
-    "litellm",
-    "lepton",
-    "github",
-    "featherless",
-    "arcee",
-    // Known alias / harness-CLI family beyond the canonical slots.
-    "zhipu",
-    "bigmodel",
-    "chatglm",
-    "ernie",
-    "codex",
-    "claude",
-    "chatgpt",
-    "gpt",
-    "o1",
-    "kimi",
-    "llama",
-    "grok",
-    "aider",
-    "opencode",
-    "cursor",
-];
-
-/// Underscore canonical ids whose word tokens are ordinary words
-/// (`atomic_chat` → `atomic` + `chat`); matched as substrings so the id
-/// form is rejected without banning the ordinary words.
-pub(crate) const WATERSHED_VENDOR_PHRASES: &[&str] = &[
-    "atomic_chat",
-    "gemini_cli",
-    "github_models",
-    "lambda_ai",
-    "kilocli",
-];
-
 /// Execution-placement tokens banned ANYWHERE in a text-bearing value
 /// (vertical V2b discrimination list: worktree, tmux/SSH, sandbox flags,
 /// cwd — TB-4/TB-1). Word-boundary matched; `working directory` is
@@ -414,16 +302,13 @@ fn scan_str(field: &'static str, text: &str) -> Result<(), ComposeRejection> {
     // shape-based — `name the model`, `use a worktree`, `pass --flag`
     // are forbidden as PROSE, wherever they appear. The client may
     // reject more than the host; it may never reject less.
+    //
+    // Vendor, model, and harness NAMES are deliberately not in this layer
+    // (ADR-017 §3): task text that mentions a harness is ordinary content.
+    // What a task may not do is choose its own execution placement, so the
+    // placement vocabulary and flags below stay banned.
     for word in lower.split(|c: char| !c.is_ascii_alphanumeric()) {
-        if WATERSHED_VENDOR_TOKENS.contains(&word) {
-            return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
-        }
         if WATERSHED_PLACEMENT_TOKENS.contains(&word) {
-            return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
-        }
-    }
-    for phrase in WATERSHED_VENDOR_PHRASES {
-        if lower.contains(phrase) {
             return Err(forbid(ForbiddenCategory::ExecutionDetail, field));
         }
     }
