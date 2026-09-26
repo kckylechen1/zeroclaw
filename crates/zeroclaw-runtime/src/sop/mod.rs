@@ -32,31 +32,8 @@ pub use wire::{WireEdit, WireError, WireOp, apply_wire};
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use types::{SopManifest, SopMeta};
-
-/// Build the tool-spec map an SOP graph projection uses to type step pins.
-/// Keys are tool names; values are the tool's declared `parameters` (input
-/// pins) and `output` (output pin) schema. Derived once from the agent's
-/// resolved security policy so the pins mirror the exact tools the step can
-/// call, not a hand-authored list.
-#[must_use]
-pub fn tool_specs_from_config(
-    config: &zeroclaw_config::schema::Config,
-    agent_alias: &str,
-) -> ToolSpecs {
-    let security = Arc::new(
-        zeroclaw_config::policy::SecurityPolicy::for_agent(config, agent_alias).unwrap_or_default(),
-    );
-    crate::tools::default_tools(security)
-        .iter()
-        .map(|tool| {
-            let spec = tool.spec();
-            (spec.name.clone(), spec)
-        })
-        .collect()
-}
 
 /// Parse an execution mode string into `SopExecutionMode`, falling back to
 /// `Supervised` for unknown values.
@@ -151,43 +128,6 @@ pub fn create_sop(sops_dir: &Path, sop: &Sop) -> Result<()> {
         anyhow::bail!("SOP '{}' already exists", sop.name);
     }
     save_sop(sops_dir, sop)
-}
-
-/// Typed classification of an authoring failure so transports map it to the
-/// right status/RPC code without matching on stringified message substrings.
-#[derive(Debug)]
-pub enum SopAuthorError {
-    AlreadyExists(String),
-    NotFound(String),
-    Other(anyhow::Error),
-}
-
-impl std::fmt::Display for SopAuthorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SopAuthorError::AlreadyExists(name) => write!(f, "SOP '{name}' already exists"),
-            SopAuthorError::NotFound(name) => write!(f, "SOP '{name}' not found"),
-            SopAuthorError::Other(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for SopAuthorError {}
-
-pub fn create_sop_typed(sops_dir: &Path, sop: &Sop) -> std::result::Result<(), SopAuthorError> {
-    let dir = resolve_sop_dir(sops_dir, &sop.name).map_err(SopAuthorError::Other)?;
-    if dir.exists() {
-        return Err(SopAuthorError::AlreadyExists(sop.name.clone()));
-    }
-    save_sop(sops_dir, sop).map_err(SopAuthorError::Other)
-}
-
-pub fn delete_sop_typed(sops_dir: &Path, name: &str) -> std::result::Result<(), SopAuthorError> {
-    let dir = resolve_sop_dir(sops_dir, name).map_err(SopAuthorError::Other)?;
-    if !dir.exists() {
-        return Err(SopAuthorError::NotFound(name.to_string()));
-    }
-    std::fs::remove_dir_all(&dir).map_err(|e| SopAuthorError::Other(e.into()))
 }
 
 /// Renumber steps to a contiguous 1..=N sequence (positional order wins)

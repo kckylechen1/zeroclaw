@@ -134,7 +134,6 @@ pub enum CronDeliveryContext {
     Scheduled,
     ToolManual,
     GatewayManual,
-    RpcManual,
 }
 
 impl CronDeliveryContext {
@@ -146,8 +145,6 @@ impl CronDeliveryContext {
             (Self::ToolManual, false) => "cron_run delivery failed",
             (Self::GatewayManual, true) => "manual cron trigger delivery failed (best_effort)",
             (Self::GatewayManual, false) => "manual cron trigger delivery failed",
-            (Self::RpcManual, true) => "RPC cron trigger delivery failed (best_effort)",
-            (Self::RpcManual, false) => "RPC cron trigger delivery failed",
         }
     }
 }

@@ -53,7 +53,6 @@
   - [Config lifecycle](./architecture/config-lifecycle.md)
   - [Generated documentation pipeline](./architecture/generated-documentation-pipeline.md)
   - [Localization catalog lifecycle](./architecture/localization-catalog-lifecycle.md)
-  - [RPC socket transport](./architecture/rpc-socket.md)
 - [Reference](./reference/index.md)
   - [CLI](./reference/cli.md)
   - [Config](./reference/config.md)

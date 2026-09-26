@@ -6,7 +6,7 @@ The workspace is split into layers. Edge crates talk to the outside world; core 
 
 ### `zeroclaw-runtime`
 
-The agent loop, security-policy enforcement, SOP definition loading (the former SOP engine was removed with the run side), cron scheduler, SubAgent lifecycle, and the local RPC socket. Depends on every other core and edge crate.
+The agent loop, security-policy enforcement, SOP definition loading (the former SOP engine was removed with the run side), cron scheduler, and SubAgent lifecycle. Depends on every other core and edge crate.
 
 Notable submodules:
 
@@ -17,7 +17,6 @@ Notable submodules:
 - `cron/`, `daemon/`, `heartbeat/`: scheduling and long-running process management
 - `skills/`: skill loading and execution
 - `service/`: systemd / launchctl / Windows Service integration
-- `rpc/`: the local RPC socket
 
 ### `zeroclaw-config`
 

@@ -16,8 +16,6 @@ pub enum DaemonExit {
     Reload,
 }
 
-const EPHEMERAL_GRACE_SECS: u64 = 1;
-
 #[cfg(test)]
 static SCHEDULER_CLEAN_SHUTDOWN_OBSERVED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -34,50 +32,7 @@ pub(crate) fn scheduler_clean_shutdown_observed() -> bool {
 
 async fn wait_for_exit_signal(
     mut reload_rx: tokio::sync::watch::Receiver<bool>,
-    ephemeral: bool,
-    client_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) -> Result<DaemonExit> {
-    use std::sync::atomic::Ordering;
-
-    // Future that resolves when ephemeral shutdown is triggered:
-    // waits for at least one client to connect, then for all clients to
-    // disconnect, then sleeps the grace period. Pending forever if not
-    // ephemeral.
-    let ephemeral_shutdown = async {
-        if !ephemeral {
-            return std::future::pending::<()>().await;
-        }
-        // Wait until at least one client has connected.
-        loop {
-            if client_count.load(Ordering::Relaxed) > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        // Wait until all clients disconnect.
-        loop {
-            if client_count.load(Ordering::Relaxed) == 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-        ::zeroclaw_log::record!(
-            INFO,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_attrs(::serde_json::json!({"grace_secs": EPHEMERAL_GRACE_SECS})),
-            "All socket clients disconnected; starting ephemeral grace period"
-        );
-        // Grace period — if a client reconnects, abort.
-        for _ in 0..EPHEMERAL_GRACE_SECS {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            if client_count.load(Ordering::Relaxed) > 0 {
-                // Client reconnected — restart the whole wait.
-                return Box::pin(wait_for_ephemeral(client_count.clone())).await;
-            }
-        }
-    };
-    tokio::pin!(ephemeral_shutdown);
-
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -108,10 +63,6 @@ async fn wait_for_exit_signal(
                         ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), "Reload requested via /admin/reload");
                         return Ok(DaemonExit::Reload);
                     }
-                }
-                _ = &mut ephemeral_shutdown => {
-                    ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), "Ephemeral daemon: no clients remaining, shutting down");
-                    return Ok(DaemonExit::Shutdown);
                 }
             }
         }
@@ -144,35 +95,7 @@ async fn wait_for_exit_signal(
                         return Ok(DaemonExit::Reload);
                     }
                 }
-                _ = &mut ephemeral_shutdown => {
-                    ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note), "Ephemeral daemon: no clients remaining, shutting down");
-                    return Ok(DaemonExit::Shutdown);
-                }
             }
-        }
-    }
-}
-
-/// Recursive helper: wait for clients to connect then all disconnect, with grace period.
-async fn wait_for_ephemeral(client_count: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-    use std::sync::atomic::Ordering;
-    // Wait until all clients disconnect again.
-    loop {
-        if client_count.load(Ordering::Relaxed) == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    ::zeroclaw_log::record!(
-        INFO,
-        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-            .with_attrs(::serde_json::json!({"grace_secs": EPHEMERAL_GRACE_SECS})),
-        "All socket clients disconnected; starting ephemeral grace period"
-    );
-    for _ in 0..EPHEMERAL_GRACE_SECS {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        if client_count.load(Ordering::Relaxed) > 0 {
-            return Box::pin(wait_for_ephemeral(client_count)).await;
         }
     }
 }
@@ -296,7 +219,6 @@ pub async fn run(
     host: String,
     port: u16,
     mut registry: DaemonRegistry,
-    ephemeral: bool,
 ) -> Result<DaemonExit> {
     config.gateway.host = host.clone();
     if port != 0 {
@@ -337,11 +259,6 @@ pub async fn run(
     let channels_cancel = tokio_util::sync::CancellationToken::new();
     let (gateway_shutdown_tx, _) = tokio::sync::watch::channel::<bool>(false);
 
-    // Construct the TUI registry early so both the gateway (for /api/tuis)
-    // and the RPC socket (for tui/list) share the same Arc.
-    let tui_registry =
-        std::sync::Arc::new(crate::rpc::tui_identity::TuiRegistry::new(&config.data_dir));
-
     if let Some(gateway_start) = registry.take_gateway_start() {
         let gateway_cfg = config.clone();
         let gateway_host = host.clone();
@@ -350,7 +267,6 @@ pub async fn run(
             shutdown_tx: gateway_shutdown_tx.clone(),
             reload_tx: reload_tx.clone(),
         };
-        let gateway_tui_registry = tui_registry.clone();
         let gateway_start = std::sync::Arc::new(gateway_start);
         handles.push(spawn_component_supervisor(
             "gateway",
@@ -362,19 +278,8 @@ pub async fn run(
                 let host = gateway_host.clone();
                 let tx = gateway_event_tx.clone();
                 let reload_controls = gateway_reload_controls.clone();
-                let tui_reg = gateway_tui_registry.clone();
                 let start = gateway_start.clone();
-                async move {
-                    start(
-                        host,
-                        port,
-                        cfg,
-                        Some(tx),
-                        Some(reload_controls),
-                        Some(tui_reg),
-                    )
-                    .await
-                }
+                async move { start(host, port, cfg, Some(tx), Some(reload_controls)).await }
             },
         ));
     }
@@ -437,179 +342,6 @@ pub async fn run(
         );
     }
 
-    // RPC transports: Unix socketand WSS (remote TUI connections).
-    // Build the shared RpcContext if either transport is configured.
-    let socket_client_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let need_rpc_ctx = registry.has_socket_start() || registry.has_wss_start();
-
-    let rpc_ctx = if need_rpc_ctx {
-        use crate::rpc::context::RpcContext;
-        use crate::rpc::session::SessionStore;
-        use zeroclaw_infra::session_queue::SessionActorQueue;
-
-        let session_queue = std::sync::Arc::new(SessionActorQueue::new(32, 30, 600));
-        let sessions = std::sync::Arc::new(SessionStore::new(64, session_queue.clone()));
-
-        {
-            let reaper_queue = std::sync::Arc::clone(&session_queue);
-            zeroclaw_spawn::spawn!(async move {
-                const TICK: std::time::Duration = std::time::Duration::from_secs(60);
-                let mut interval = tokio::time::interval(TICK);
-                interval.tick().await;
-                loop {
-                    interval.tick().await;
-                    let queue_evicted = reaper_queue.evict_idle().await;
-                    if queue_evicted > 0 {
-                        let span = ::zeroclaw_log::info_span!(
-                            target: "zeroclaw_log_internal_scope",
-                            "zeroclaw_scope",
-                            channel = "rpc",
-                        );
-                        let _guard = span.enter();
-                        ::zeroclaw_log::record!(
-                            INFO,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note,
-                            )
-                            .with_category(::zeroclaw_log::EventCategory::Agent)
-                            .with_attrs(::serde_json::json!({
-                                "evicted_queue_slots": queue_evicted,
-                            })),
-                            "Session queue: released idle actor-queue slots"
-                        );
-                        crate::util::release_freed_heap();
-                    }
-                }
-            });
-        }
-        let session_backend = zeroclaw_infra::make_session_backend(
-            &config.data_dir,
-            &config.channels.session_backend,
-        )
-        .ok();
-
-        // Wire the memory subsystem so `memory/list` and `memory/search`
-        // work over RPC transports (same pattern as the gateway).
-        let rpc_memory: Option<std::sync::Arc<dyn zeroclaw_api::memory_traits::Memory>> = if config
-            .agents
-            .is_empty()
-        {
-            None
-        } else {
-            match zeroclaw_memory::create_memory_from_config(&config, None) {
-                Ok(mem) => Some(std::sync::Arc::from(mem)),
-                Err(_e) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-                        "RPC memory subsystem unavailable"
-                    );
-                    None
-                }
-            }
-        };
-
-        // Open the ACP session DB at boot so the file exists from the
-        // moment the daemon is up, not when (if ever) `zeroclaw acp`
-        // runs. Best-effort: on failure, log and continue with `None`.
-        let acp_session_store: Option<
-            std::sync::Arc<zeroclaw_infra::acp_session_store::AcpSessionStore>,
-        > = match zeroclaw_infra::acp_session_store::AcpSessionStore::new(&config.data_dir) {
-            Ok(s) => Some(std::sync::Arc::new(s)),
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({"error": e.to_string()})),
-                    "Failed to open ACP session store at daemon boot"
-                );
-                None
-            }
-        };
-
-        let hooks: Option<std::sync::Arc<crate::hooks::HookRunner>> = if config.hooks.enabled {
-            Some(std::sync::Arc::new(crate::hooks::HookRunner::from_config(
-                &config.hooks,
-            )))
-        } else {
-            None
-        };
-
-        Some(std::sync::Arc::new(RpcContext {
-            config: std::sync::Arc::new(parking_lot::RwLock::new(config.clone())),
-            config_write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-            sessions,
-            session_backend,
-            memory: rpc_memory,
-            // Process-global tracker shared with the gateway and channel
-            // supervisor. Without this the RPC/zerocode-TUI turn path has no
-            // tracker to record into and model cost is silently dropped
-            cost_tracker: crate::cost::CostTracker::get_or_init_global(
-                config.cost.clone(),
-                &config.data_dir,
-            ),
-            event_tx: Some(event_tx.clone()),
-            reload_tx: Some(reload_tx.clone()),
-            gateway_shutdown_tx: Some(gateway_shutdown_tx.clone()),
-            approval_pending: std::sync::Arc::new(
-                crate::rpc::context::ApprovalPendingMap::default(),
-            ),
-            tui_registry,
-            acp_session_store,
-            hooks,
-        }))
-    } else {
-        None
-    };
-
-    // Local IPC RPC listener (Unix socket on Unix, Named Pipe on Windows).
-    if let Some(socket_start) = registry.take_socket_start() {
-        let rpc_ctx = rpc_ctx
-            .clone()
-            .expect("rpc_ctx built when socket_start is Some");
-        let socket_start = std::sync::Arc::new(socket_start);
-        let socket_cancel = channels_cancel.clone();
-        let count = socket_client_count.clone();
-        handles.push(spawn_component_supervisor(
-            "socket",
-            initial_backoff,
-            max_backoff,
-            socket_cancel.clone(),
-            move || {
-                let ctx = rpc_ctx.clone();
-                let start = socket_start.clone();
-                let cancel = socket_cancel.clone();
-                let count = count.clone();
-                async move { start(ctx, cancel, count).await }
-            },
-        ));
-    }
-
-    // WSS RPC listener (remote TUI connections).
-    if let Some(wss_start) = registry.take_wss_start() {
-        let rpc_ctx = rpc_ctx
-            .clone()
-            .expect("rpc_ctx built when wss_start is Some");
-        let wss_start = std::sync::Arc::new(wss_start);
-        let wss_cancel = channels_cancel.clone();
-        let count = socket_client_count.clone();
-        handles.push(spawn_component_supervisor(
-            "wss",
-            initial_backoff,
-            max_backoff,
-            wss_cancel.clone(),
-            move || {
-                let ctx = rpc_ctx.clone();
-                let start = wss_start.clone();
-                let cancel = wss_cancel.clone();
-                let count = count.clone();
-                async move { start(ctx, cancel, count).await }
-            },
-        ));
-    }
-
     if config.heartbeat.enabled {
         let heartbeat_cfg = config.clone();
         handles.push(spawn_component_supervisor(
@@ -669,7 +401,7 @@ pub async fn run(
     record_daemon_started(&config, &host, port);
 
     // Wait for shutdown (SIGINT/SIGTERM/Ctrl+C) or reload (in-process channel).
-    let exit = wait_for_exit_signal(reload_rx, ephemeral, socket_client_count).await?;
+    let exit = wait_for_exit_signal(reload_rx).await?;
     crate::health::mark_component_error(
         "daemon",
         match exit {
@@ -728,7 +460,6 @@ fn record_daemon_started(config: &Config, host: &str, port: u16) {
             .with_outcome(::zeroclaw_log::EventOutcome::Success)
             .with_attrs(::serde_json::json!({
                 "requested_gateway": format!("http://{host}:{port}"),
-                "socket": crate::rpc::local::socket_path(config).display().to_string(),
                 "pairing_enabled": config.gateway.require_pairing,
                 "stop_signal": "Ctrl+C or SIGTERM",
             })),

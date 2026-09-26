@@ -29,7 +29,7 @@ fn add_agent_with_workspace(config: &mut Config, agent_alias: &str, workspace_di
 async fn try_recv_log_event(
     rx: &mut tokio::sync::broadcast::Receiver<serde_json::Value>,
     message: &str,
-    socket: &str,
+    requested_gateway: &str,
 ) -> Option<serde_json::Value> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
@@ -41,7 +41,8 @@ async fn try_recv_log_event(
                     .get("message")
                     .and_then(|v| v.as_str())
                     .is_some_and(|candidate| candidate == message)
-                    && value["attributes"]["socket"].as_str() == Some(socket) =>
+                    && value["attributes"]["requested_gateway"].as_str()
+                        == Some(requested_gateway) =>
             {
                 return Some(value);
             }
@@ -54,31 +55,29 @@ async fn try_recv_log_event(
 }
 
 #[tokio::test]
-async fn log_event_matcher_ignores_foreign_same_message_and_missing_socket() {
+async fn log_event_matcher_ignores_foreign_same_message_and_missing_gateway() {
     let (tx, mut rx) = tokio::sync::broadcast::channel(8);
     let message = "ZeroClaw daemon started";
-    let socket = "/fixture/daemon.sock";
+    let gateway = "http://daemon-fixture.invalid:1";
     tx.send(serde_json::json!({
-            "message": message,
-            "attributes": { "socket": "/other/daemon.sock", "requested_gateway": "http://127.0.0.1:4243" }
-        })).unwrap();
+        "message": message,
+        "attributes": { "requested_gateway": "http://127.0.0.1:4243", "pairing_enabled": false }
+    }))
+    .unwrap();
     tx.send(serde_json::json!({ "message": message })).unwrap();
     tx.send(serde_json::json!({
         "message": "another event",
-        "attributes": { "socket": socket }
+        "attributes": { "requested_gateway": gateway }
     }))
     .unwrap();
     tx.send(serde_json::json!({
         "message": message,
-        "attributes": { "socket": socket, "requested_gateway": "http://127.0.0.1:0" }
+        "attributes": { "requested_gateway": gateway, "pairing_enabled": true }
     }))
     .unwrap();
 
-    let found = try_recv_log_event(&mut rx, message, socket).await.unwrap();
-    assert_eq!(
-        found["attributes"]["requested_gateway"],
-        "http://127.0.0.1:0"
-    );
+    let found = try_recv_log_event(&mut rx, message, gateway).await.unwrap();
+    assert_eq!(found["attributes"]["pairing_enabled"].as_bool(), Some(true));
 }
 
 #[test]
@@ -159,9 +158,10 @@ async fn daemon_startup_diagnostics_are_logged_as_structured_event() {
     let tmp = TempDir::new().unwrap();
     let mut config = test_config(&tmp);
     config.gateway.require_pairing = true;
-    let expected_socket = crate::rpc::local::socket_path(&config)
-        .display()
-        .to_string();
+    // A host no other test uses, so the matcher only sees this fixture's
+    // event on the process-global broadcast channel.
+    let host = "daemon-startup-fixture.invalid";
+    let expected_gateway = format!("http://{host}:1");
 
     // The process-global broadcast channel this test subscribes to also
     // carries every log line the other parallel tests emit, and the hook
@@ -177,9 +177,9 @@ async fn daemon_startup_diagnostics_are_logged_as_structured_event() {
     for _ in 0..6 {
         let mut rx = zeroclaw_log::subscribe_or_install();
         while rx.try_recv().is_ok() {}
-        record_daemon_started(&config, "127.0.0.1", 0);
+        record_daemon_started(&config, host, 1);
         if let Some(found) =
-            try_recv_log_event(&mut rx, "ZeroClaw daemon started", &expected_socket).await
+            try_recv_log_event(&mut rx, "ZeroClaw daemon started", &expected_gateway).await
         {
             value = Some(found);
             break;
@@ -190,18 +190,10 @@ async fn daemon_startup_diagnostics_are_logged_as_structured_event() {
     assert_eq!(value["event"]["category"], "system");
     assert_eq!(value["event"]["action"], "start");
     assert_eq!(value["event"]["outcome"], "success");
-    assert_eq!(
-        value["attributes"]["requested_gateway"],
-        "http://127.0.0.1:0"
-    );
+    assert_eq!(value["attributes"]["requested_gateway"], expected_gateway);
     assert_eq!(value["attributes"]["pairing_enabled"].as_bool(), Some(true));
     assert_eq!(value["attributes"]["stop_signal"], "Ctrl+C or SIGTERM");
-    assert_eq!(
-        value["attributes"]["socket"],
-        crate::rpc::local::socket_path(&config)
-            .display()
-            .to_string()
-    );
+    assert!(value["attributes"].get("socket").is_none());
 }
 
 #[tokio::test]
@@ -680,8 +672,7 @@ async fn sighup_does_not_shut_down_daemon() {
     use tokio::time::{Duration, timeout};
 
     let (_reload_tx, reload_rx) = tokio::sync::watch::channel(false);
-    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let handle = zeroclaw_spawn::spawn!(wait_for_exit_signal(reload_rx, false, count));
+    let handle = zeroclaw_spawn::spawn!(wait_for_exit_signal(reload_rx));
 
     // Give the signal handler time to register
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -702,8 +693,7 @@ async fn reload_channel_returns_reload() {
     use tokio::time::{Duration, timeout};
 
     let (reload_tx, reload_rx) = tokio::sync::watch::channel(false);
-    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let handle = zeroclaw_spawn::spawn!(wait_for_exit_signal(reload_rx, false, count));
+    let handle = zeroclaw_spawn::spawn!(wait_for_exit_signal(reload_rx));
     tokio::time::sleep(Duration::from_millis(50)).await;
     reload_tx.send(true).expect("send reload");
 
@@ -726,7 +716,7 @@ async fn registry_gateway_starter_can_trigger_daemon_reload() {
 
     let mut registry = DaemonRegistry::new();
     registry.register_gateway(Box::new(
-        move |host, port, config, event_tx, reload_controls, tui_registry| {
+        move |host, port, config, event_tx, reload_controls| {
             let seen_tx = seen_tx.clone();
             Box::pin(async move {
                 let has_event_tx = event_tx.is_some();
@@ -735,7 +725,6 @@ async fn registry_gateway_starter_can_trigger_daemon_reload() {
                     .map(|controls| controls.reload_tx)
                     .expect("daemon should pass reload controls to gateway starter");
                 let has_reload_tx = !reload_tx.is_closed();
-                let has_tui_registry = tui_registry.is_some();
                 seen_tx
                     .send((
                         host,
@@ -744,7 +733,6 @@ async fn registry_gateway_starter_can_trigger_daemon_reload() {
                         has_event_tx,
                         has_gateway_shutdown_tx,
                         has_reload_tx,
-                        has_tui_registry,
                     ))
                     .expect("record gateway starter inputs");
                 reload_tx.send(true).expect("send reload signal");
@@ -755,22 +743,14 @@ async fn registry_gateway_starter_can_trigger_daemon_reload() {
 
     let exit = timeout(
         Duration::from_secs(2),
-        run(config, "127.0.0.1".to_string(), 4242, registry, false),
+        run(config, "127.0.0.1".to_string(), 4242, registry),
     )
     .await
     .expect("daemon should return after gateway-triggered reload")
     .expect("daemon run should succeed");
 
     assert_eq!(exit, DaemonExit::Reload);
-    let (
-        host,
-        port,
-        data_dir,
-        has_event_tx,
-        has_gateway_shutdown_tx,
-        has_reload_tx,
-        has_tui_registry,
-    ) = seen_rx
+    let (host, port, data_dir, has_event_tx, has_gateway_shutdown_tx, has_reload_tx) = seen_rx
         .try_recv()
         .expect("gateway starter should record its daemon inputs");
     assert_eq!(host, "127.0.0.1");
@@ -779,7 +759,6 @@ async fn registry_gateway_starter_can_trigger_daemon_reload() {
     assert!(has_event_tx);
     assert!(has_gateway_shutdown_tx);
     assert!(has_reload_tx);
-    assert!(has_tui_registry);
 }
 
 #[tokio::test]
@@ -794,7 +773,7 @@ async fn scheduler_cooperative_shutdown_observed_through_daemon_reload() {
 
     let mut registry = DaemonRegistry::new();
     registry.register_gateway(Box::new(
-        move |_host, _port, _config, _event_tx, reload_controls, _tui_reg| {
+        move |_host, _port, _config, _event_tx, reload_controls| {
             Box::pin(async move {
                 let reload_tx = reload_controls
                     .map(|controls| controls.reload_tx)
@@ -810,7 +789,7 @@ async fn scheduler_cooperative_shutdown_observed_through_daemon_reload() {
 
     let exit = timeout(
         Duration::from_secs(3),
-        run(config, "127.0.0.1".to_string(), 0, registry, false),
+        run(config, "127.0.0.1".to_string(), 0, registry),
     )
     .await
     .expect("daemon should return after gateway-triggered reload")
@@ -856,7 +835,7 @@ async fn daemon_boot_creates_no_control_plane_db() {
     let config = test_config(&tmp);
     let mut registry = DaemonRegistry::new();
     registry.register_gateway(Box::new(
-        |_host, _port, _config, _event_tx, reload_controls, _tui_reg| {
+        |_host, _port, _config, _event_tx, reload_controls| {
             Box::pin(async move {
                 let reload_tx = reload_controls
                     .map(|controls| controls.reload_tx)
@@ -869,7 +848,7 @@ async fn daemon_boot_creates_no_control_plane_db() {
 
     let exit = timeout(
         Duration::from_secs(2),
-        run(config, "127.0.0.1".to_string(), 4243, registry, false),
+        run(config, "127.0.0.1".to_string(), 4243, registry),
     )
     .await
     .expect("daemon should return after gateway-triggered reload")
@@ -881,84 +860,6 @@ async fn daemon_boot_creates_no_control_plane_db() {
         "a daemon boot must not create the control-plane DB; \
              durable task truth is Tachi's through the bridge (#205 annex rows 1/6)"
     );
-}
-
-#[tokio::test]
-async fn ephemeral_does_not_exit_before_client_connects() {
-    use tokio::time::{Duration, timeout};
-
-    let (_reload_tx, reload_rx) = tokio::sync::watch::channel(false);
-    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let handle = zeroclaw_spawn::spawn!(wait_for_exit_signal(reload_rx, true, count));
-
-    // No clients ever connect — should NOT shut down.
-    let result = timeout(Duration::from_millis(500), handle).await;
-    assert!(
-        result.is_err(),
-        "ephemeral daemon should not exit before any client connects"
-    );
-}
-
-#[tokio::test]
-async fn ephemeral_exits_after_client_disconnects() {
-    use std::sync::atomic::Ordering;
-    use tokio::time::{Duration, timeout};
-
-    let (_reload_tx, reload_rx) = tokio::sync::watch::channel(false);
-    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let count2 = count.clone();
-    let handle = zeroclaw_spawn::spawn!(wait_for_exit_signal(reload_rx, true, count2));
-
-    // Simulate client connect then disconnect.
-    count.store(1, Ordering::Relaxed);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    count.store(0, Ordering::Relaxed);
-
-    // Should exit within grace period + buffer.
-    let result = timeout(Duration::from_secs(EPHEMERAL_GRACE_SECS + 5), handle)
-        .await
-        .expect("ephemeral daemon should shut down after last client disconnects")
-        .expect("task should not panic")
-        .expect("signal handler should not error");
-    assert_eq!(result, DaemonExit::Shutdown);
-}
-
-#[tokio::test]
-async fn ephemeral_grace_period_resets_on_reconnect() {
-    use std::sync::atomic::Ordering;
-    use tokio::time::{Duration, timeout};
-
-    let (_reload_tx, reload_rx) = tokio::sync::watch::channel(false);
-    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let count2 = count.clone();
-    let mut handle = zeroclaw_spawn::spawn!(wait_for_exit_signal(reload_rx, true, count2));
-
-    // Client connects, disconnects.
-    count.store(1, Ordering::Relaxed);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    count.store(0, Ordering::Relaxed);
-
-    // Reconnect partway through the grace period — must be strictly
-    // less than EPHEMERAL_GRACE_SECS so the daemon hasn't already
-    // exited. With the 1s grace window we sleep ~200ms.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    count.store(1, Ordering::Relaxed);
-
-    // Should NOT shut down while client is connected.
-    let result = timeout(Duration::from_millis(500), &mut handle).await;
-    assert!(
-        result.is_err(),
-        "ephemeral daemon should not exit while client is connected"
-    );
-
-    // Disconnect again — should eventually shut down.
-    count.store(0, Ordering::Relaxed);
-    let result = timeout(Duration::from_secs(EPHEMERAL_GRACE_SECS + 5), handle)
-        .await
-        .expect("ephemeral daemon should shut down after second disconnect")
-        .expect("task should not panic")
-        .expect("signal handler should not error");
-    assert_eq!(result, DaemonExit::Shutdown);
 }
 
 // ── daemon gateway bind-mode detection (fail-fast) ────────────────

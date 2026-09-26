@@ -100,9 +100,8 @@ tables, or duplicate lists that must be kept in sync by reviewer memory.
 
 This does not ban string constants at API boundaries. It prevents a second
 dispatch surface where adding a new variant can compile while silently skipping
-one consumer. Good examples are the RPC `Method` registry for wire method names
-and `CHANNEL_COMPILE_SPECS` for channel compile keys, where one canonical owner
-drives downstream coverage.
+one consumer. A good example is `CHANNEL_COMPILE_SPECS` for channel compile
+keys, where one canonical owner drives downstream coverage.
 
 ### Deep-review checklist (high-risk only)
 

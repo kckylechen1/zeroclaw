@@ -13,13 +13,58 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use zeroclaw_runtime::agent::personality::{EDITABLE_PERSONALITY_FILES, MAX_FILE_CHARS};
 use zeroclaw_runtime::agent::personality_templates::{TemplateContext, render_preset_default};
-use zeroclaw_runtime::rpc::types::{
-    PersonalityFileEntry, PersonalityGetResult, PersonalityListResult, PersonalityPutResult,
-    PersonalityTemplatesResult, TemplateFileEntry,
-};
 
 use super::AppState;
 use super::api::require_auth;
+
+// ── Response wire types ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalityFileEntry {
+    pub filename: String,
+    pub exists: bool,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalityListResult {
+    pub files: Vec<PersonalityFileEntry>,
+    pub max_chars: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalityGetResult {
+    pub filename: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    pub exists: bool,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalityPutResult {
+    pub bytes_written: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateFileEntry {
+    pub filename: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalityTemplatesResult {
+    pub preset: String,
+    pub files: Vec<TemplateFileEntry>,
+}
 
 // ── HTTP-specific request/response shapes (not shared) ──────────────
 

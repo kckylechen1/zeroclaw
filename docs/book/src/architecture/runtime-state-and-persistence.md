@@ -44,14 +44,13 @@ new runtime state should be described in terms of `<install>/data/`,
 
 | Surface | Canonical source | Durable path | In-memory owner | Reload / concurrency boundary | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Config values | `zeroclaw-config::Config` loaded from `config.toml` | `<install>/config.toml` | daemon `Arc<RwLock<Config>>` plus per-subsystem resolved views | `/admin/reload` re-reads config and re-instantiates daemon subsystems; direct config writes use schema validation and dirty-path checks. RPC-side config mutations additionally serialize their whole read-mutate-flush section on `RpcContext::config_write_lock` (tokio mutex first, `parking_lot` `RwLock` second, and never a `parking_lot` guard held across an `.await` or `lock().await`); gateway HTTP config mutations likewise serialize their whole read-mutate-swap section on `AppState::config_write_lock` (same lock order) | Do not cache config-derived facts in long-lived structs unless the cache is explicitly rebuilt on reload. |
+| Config values | `zeroclaw-config::Config` loaded from `config.toml` | `<install>/config.toml` | daemon `Arc<RwLock<Config>>` plus per-subsystem resolved views | `/admin/reload` re-reads config and re-instantiates daemon subsystems; direct config writes use schema validation and dirty-path checks. Gateway HTTP config mutations additionally serialize their whole read-mutate-swap section on `AppState::config_write_lock` (tokio mutex first, `parking_lot` `RwLock` second, and never a `parking_lot` guard held across an `.await` or `lock().await`) | Do not cache config-derived facts in long-lived structs unless the cache is explicitly rebuilt on reload. |
 | Encrypted secrets | Config secret fields plus `.secret_key` | `<install>/config.toml`, `<install>/.secret_key` | secret-store helpers in `zeroclaw-config` | Reload observes changed config; losing `.secret_key` makes encrypted config secrets unrecoverable | Never copy decrypted values into logs, docs, PR bodies, or runtime metadata. |
 | Agent filesystem identity | Per-agent workspace files | `<install>/agents/<alias>/workspace/` | effective `SecurityPolicy` and agent prompt construction | Created lazily when the agent starts; workspace access is evaluated from config | This is the filesystem sandbox, not the config source of truth for providers/channels/tools. |
 | Shared skill bundles | Configured skill bundle entries and resolved bundle dirs | `<install>/shared/skills/<bundle>/` by default | skill loading / prompt enrichment | Reload and new agent starts observe config and filesystem changes | Bundle aliases and directory resolution come from config; the files are the bundle content. |
 | Conversation memory | `zeroclaw-memory` backend selected per agent | SQLite/Postgres/Lucid/Qdrant/Markdown backend locations; SQLite shared store lives under `data/memory/` | `Arc<dyn Memory>` wrapped in agent-scoping adapters | Backend choice is locked once an agent has written data; same-backend cross-agent recall is opt-in | Memory rows are agent-scoped. Do not replace memory ownership with copied prompt/session caches. |
-| Chat and channel sessions | `[channels].session_backend` plus `SessionBackend` | Default `data/sessions/sessions.db`; legacy/explicit JSONL uses `data/sessions/*.jsonl` | `zeroclaw-infra` session backend shared by channels, gateway, RPC tools | SQLite backend uses WAL; `SessionActorQueue` serializes active turns per session | Chat/Code sessions use this unified backend. ACP protocol sessions use a separate store. |
-| ACP sessions | ACP protocol session store | `data/sessions/acp-sessions.db` | `AcpSessionStore` opened at daemon boot and in RPC context | WAL-backed SQLite store, separate from chat sessions | ACP `session/load` and `session/resume` operate on this protocol store, not the chat session backend. |
-| Live RPC/TUI sessions | RPC `SessionStore` | none by itself | `crates/zeroclaw-runtime/src/rpc/session.rs` in-memory map | Process-local; session history persists only through the chat or ACP backend | Live session handles, uploads, cancel tokens, owners, and overrides are runtime state. |
+| Chat and channel sessions | `[channels].session_backend` plus `SessionBackend` | Default `data/sessions/sessions.db`; legacy/explicit JSONL uses `data/sessions/*.jsonl` | `zeroclaw-infra` session backend shared by channels and gateway | SQLite backend uses WAL; `SessionActorQueue` serializes active turns per session | Chat/Code sessions use this unified backend. ACP protocol sessions use a separate store. |
+| ACP sessions | ACP protocol session store | `data/sessions/acp-sessions.db` | `AcpSessionStore` opened by `zeroclaw acp` and gateway agent-state handlers | WAL-backed SQLite store, separate from chat sessions | ACP `session/load` and `session/resume` operate on this protocol store, not the chat session backend. |
 | Cron jobs | Declarative config membership plus cron SQLite store | `data/cron/jobs.db` | `zeroclaw-runtime::cron` scheduler/store | Read paths do not create `jobs.db`; scheduler owns due/lock state | Declarative jobs are reconciled from config, while run metadata and locks live in the cron DB. |
 | SOP runs | Removed with the run side | `data/sop/runs.db` only as a leftover from an older install | none | The legacy `SopEngine`/`SopRunStore` pair was demolished; leftover stores are left in place and reported by a boot-time warning | Run truth lives Tachi-side as ProcedureRuns through the procedure_v1 seam. |
 | Background task supervision | Removed with the control plane | `data/control_plane.db` only as a leftover from an older install | none | The coordinator child host and the task ledger were deleted; the daemon reports a leftover file once per boot and leaves it in place | Rows came from the detached arms of the retired `spawn_subagent`/`delegate` tools; after the spawn wall no writer minted new child rows. Durable task/attempt truth lives in Tachi through the task-intent bridge. |
@@ -70,8 +69,8 @@ daemon loop re-reads config from disk and re-runs the daemon, creating fresh
 gateway, channel, heartbeat, scheduler, MQTT, session, memory, and cost wiring
 from the new config. The PID stays the same, but listeners briefly rebind.
 
-A full process restart also rotates process-local state such as live RPC
-sessions, health snapshots, actor queues, and any ephemeral tool-receipt key.
+A full process restart also rotates process-local state such as health
+snapshots, actor queues, and any ephemeral tool-receipt key.
 Durable stores survive restart according to the table above.
 
 ## Backup and restore
@@ -99,7 +98,6 @@ the instance.
 - Config, install-root, and data-dir resolution: `crates/zeroclaw-config/src/schema.rs`
 - Session backends: `crates/zeroclaw-infra/src/session_sqlite.rs`, `crates/zeroclaw-infra/src/session_store.rs`
 - ACP session store: `crates/zeroclaw-infra/src/acp_session_store.rs`
-- RPC live sessions: `crates/zeroclaw-runtime/src/rpc/session.rs`
 - Cron persistence: `crates/zeroclaw-runtime/src/cron/store.rs`
 - SOP persistence: `crates/zeroclaw-runtime/src/sop/store/`
 - Durable task supervision: removed with the control-plane migration wall; durable work runs through the Tachi bridge (`crates/zeroclaw-runtime/src/tachi_bridge/`)
