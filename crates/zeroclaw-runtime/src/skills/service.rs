@@ -31,8 +31,6 @@ pub enum SkillOrigin {
     Workspace,
     /// The open-skills repo (tagged `open-skills`).
     OpenSkills,
-    /// A `plugins-wasm` plugin (`plugin:<name>/...`); holds the plugin name.
-    Plugin(String),
     /// A configured `[skill_bundles.<alias>]`; holds the bundle alias.
     Bundle(String),
 }
@@ -216,18 +214,11 @@ impl<'a> SkillsService<'a> {
 
     /// Attribute a resolved skill to its [`SkillOrigin`], mirroring the
     /// resolver's own discriminators so dashboard provenance can't drift: the
-    /// `open-skills` tag, the `plugin:` name/tag prefix, then a `location`
-    /// match against a configured bundle directory; otherwise the workspace.
+    /// `open-skills` tag, then a `location` match against a configured bundle
+    /// directory; otherwise the workspace.
     fn derive_origin(skill: &super::Skill, bundles: &[BundleSummary]) -> SkillOrigin {
         if skill.tags.iter().any(|t| t == "open-skills") {
             return SkillOrigin::OpenSkills;
-        }
-        if let Some(rest) = skill.name.strip_prefix("plugin:") {
-            let plugin = rest.split('/').next().unwrap_or(rest);
-            return SkillOrigin::Plugin(plugin.to_string());
-        }
-        if let Some(plugin) = skill.tags.iter().find_map(|t| t.strip_prefix("plugin:")) {
-            return SkillOrigin::Plugin(plugin.to_string());
         }
         if let Some(loc) = &skill.location {
             for b in bundles {
@@ -426,10 +417,6 @@ mod tests {
         assert_eq!(
             SkillsService::derive_origin(&mk("s", &["open-skills"], None), &bundles),
             SkillOrigin::OpenSkills
-        );
-        assert_eq!(
-            SkillsService::derive_origin(&mk("plugin:foo/bar", &[], None), &bundles),
-            SkillOrigin::Plugin("foo".into())
         );
         assert_eq!(
             SkillsService::derive_origin(

@@ -474,12 +474,11 @@ fn reasoning_spawn_tool_for_registry(
 }
 
 /// Tool names retired from the ordinary model-visible registry. No assembly
-/// path may register them and no plugin may claim the names. Most entries
+/// path may register them. Most entries
 /// keep their implementations compiled (operator surfaces and tests
 /// construct them directly); the SOP run tools below were deleted outright
-/// with the legacy run side. Kept as one list so the registry totality test
-/// and the plugin collision guard assert the same set.
-#[cfg(any(test, feature = "plugins-wasm"))]
+/// with the legacy run side. The registry totality test asserts this set.
+#[cfg(test)]
 pub(crate) const RETIRED_OPERATOR_TOOL_NAMES: &[&str] = &[
     "model_routing_config",
     "model_switch",
@@ -852,7 +851,7 @@ pub fn all_tools_with_runtime(
         zeroclaw_config::schema::SkillsPromptInjectionMode::Compact
     ) {
         // ReadSkillTool now holds full config to support all skill sources:
-        // workspace skills, open-skills, agent-bound bundles, and plugin skills.
+        // workspace skills, open-skills, and agent-bound bundles.
         tool_arcs.push(Arc::new(ReadSkillTool::new(
             config.clone(),
             agent_alias.to_string(),
@@ -1388,7 +1387,7 @@ pub fn all_tools_with_runtime(
     // delegation tool is no longer constructed on any composition. Its
     // replacement-first surfaces are the V1 `reasoning_subagent` (minimal and
     // full alike) and the Tachi bridge for durable/heavy work. The name stays
-    // reserved in RETIRED_OPERATOR_TOOL_NAMES so a plugin cannot ride it back.
+    // reserved in RETIRED_OPERATOR_TOOL_NAMES.
 
     // `vi_verify` is deliberately absent while no chain verifier exists: it checked
     // caller-supplied constraints against a caller-supplied fulfillment with nothing
@@ -1396,152 +1395,6 @@ pub fn all_tools_with_runtime(
     // notice lives at config load, since this function also runs per gateway request
     // and per nested registry rebuild. Register it again only behind a
     // verify-and-evaluate path that consumes a verified chain result.
-
-    // ── WASM plugin tools (requires plugins-wasm feature) ──
-    #[cfg(feature = "plugins-wasm")]
-    {
-        let plugin_path = config.plugins.resolved_plugins_dir();
-
-        if plugin_path.exists() && config.plugins.enabled {
-            let signature_mode = zeroclaw_plugins::host::PluginHost::resolve_signature_mode(
-                &config.plugins.security.signature_mode,
-            );
-            let trusted_publisher_keys = config.plugins.security.trusted_publisher_keys.clone();
-            match zeroclaw_plugins::host::PluginHost::from_plugins_dir_with_security(
-                &plugin_path,
-                signature_mode,
-                trusted_publisher_keys,
-            ) {
-                Ok(host) => {
-                    let mut details = host.tool_plugin_details();
-                    details.sort_unstable_by(|(left, _), (right, _)| left.name.cmp(&right.name));
-                    let discovered_count = details.len();
-                    let mut registered_count = 0_usize;
-                    let mut registered_names: std::collections::HashSet<String> = tool_arcs
-                        .iter()
-                        .map(|tool| tool.name().to_string())
-                        .collect();
-                    if root_config.pipeline.enabled {
-                        registered_names.insert(PipelineTool::NAME.to_string());
-                    }
-                    // Operator/admin tools retired from the model surface keep
-                    // their names reserved: a plugin must not be able to claim
-                    // `backup` or `proxy_config` and ride the retired name back
-                    // onto the provider wire.
-                    registered_names
-                        .extend(RETIRED_OPERATOR_TOOL_NAMES.iter().map(|s| s.to_string()));
-                    let plugin_limits = zeroclaw_plugins::component::PluginLimits {
-                        call_fuel: config.plugins.limits.call_fuel,
-                        max_memory_bytes: config
-                            .plugins
-                            .limits
-                            .max_memory_mb
-                            .saturating_mul(1024 * 1024),
-                        max_table_elements: config.plugins.limits.max_table_elements,
-                        max_instances: config.plugins.limits.max_instances,
-                    };
-                    for (manifest, wasm_path) in details {
-                        let plugin_config = config
-                            .plugins
-                            .entry_config(&manifest.name)
-                            .cloned()
-                            .unwrap_or_default();
-                        let tool = (|| -> anyhow::Result<_> {
-                            let scope =
-                                zeroclaw_plugins::instance::PluginInstanceScope::from_manifest(
-                                    manifest,
-                                    zeroclaw_plugins::PluginCapability::Tool,
-                                    manifest.name.clone(),
-                                    manifest.permissions.iter().copied(),
-                                )?;
-                            zeroclaw_plugins::wasm_tool::WasmTool::from_wasm(
-                                wasm_path.to_path_buf(),
-                                scope,
-                                plugin_config,
-                                plugin_limits,
-                            )
-                        })();
-                        match tool {
-                            Ok(tool) => {
-                                if !claim_plugin_tool_name(&mut registered_names, tool.name()) {
-                                    ::zeroclaw_log::record!(
-                                        WARN,
-                                        ::zeroclaw_log::Event::new(
-                                            module_path!(),
-                                            ::zeroclaw_log::Action::Load
-                                        )
-                                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                                        .with_attrs(
-                                            ::serde_json::json!({
-                                                "plugin": manifest.name,
-                                                "tool": tool.name(),
-                                                "error_key": "plugin_tool_name_conflict",
-                                            })
-                                        ),
-                                        "Plugin tool conflicts with an already registered tool"
-                                    );
-                                    continue;
-                                }
-                                tool_arcs.push(Arc::new(tool));
-                                registered_count += 1;
-                            }
-                            Err(e) => {
-                                ::zeroclaw_log::record!(
-                                    WARN,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Load
-                                    )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                                    .with_attrs(
-                                        ::serde_json::json!({
-                                            "plugin": manifest.name,
-                                            "error": format!("{e:#}"),
-                                        })
-                                    ),
-                                    "Failed to register WASM plugin tool"
-                                );
-                            }
-                        }
-                    }
-                    ::zeroclaw_log::record!(
-                        INFO,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_attrs(::serde_json::json!({
-                                "discovered": discovered_count,
-                                "registered": registered_count,
-                            })),
-                        "Registered WASM plugin tools"
-                    );
-                }
-                Err(e) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                        "Failed to load WASM plugins"
-                    );
-                }
-            }
-        }
-
-        // Surface plugins stranded in a legacy install dir so they aren't
-        // silently ignored — the user can relocate them with `plugin migrate`.
-        if config.plugins.enabled {
-            for legacy in zeroclaw_config::schema::legacy_plugin_dirs_with_entries(&config) {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({
-                            "legacy_dir": legacy.display().to_string()
-                        })),
-                    "Plugins in a legacy directory are not loaded; run `zeroclaw plugin migrate`"
-                );
-            }
-        }
-    }
 
     // Pipeline construction waits for ScopedToolRegistry::assemble(), where the
     // effective per-agent policy and optional caller allowlist are both known.
@@ -1622,14 +1475,6 @@ fn apply_install_composition(
             "Minimal composition excluded non-member tools from assembly"
         );
     }
-}
-
-#[cfg(feature = "plugins-wasm")]
-fn claim_plugin_tool_name(
-    registered_names: &mut std::collections::HashSet<String>,
-    plugin_name: &str,
-) -> bool {
-    registered_names.insert(plugin_name.to_string())
 }
 
 #[cfg(test)]

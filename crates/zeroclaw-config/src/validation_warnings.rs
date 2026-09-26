@@ -51,6 +51,10 @@ use serde::{Deserialize, Serialize};
 ///   retired (no in-repo client remained; the web dashboard and
 ///   `zeroclaw chat` use the gateway HTTP API and `/ws/chat`), so the
 ///   section is ignored (see `RETIRED_CONFIG_SURFACES`).
+/// - `wasm_plugins_removed`: a `[plugins]` section is still present. The
+///   WASM plugin host, its registry CLI and the `wit/` contracts were
+///   retired; extensions are served through MCP servers (`[mcp]`), so the
+///   section is ignored (see `RETIRED_CONFIG_SURFACES`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ValidationWarning {
@@ -107,6 +111,7 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("channels.nextcloud_talk", "inbound_webhook_channel_removed"),
     ("channels.gmail_push", "inbound_webhook_channel_removed"),
     ("wss", "wss_transport_removed"),
+    ("plugins", "wasm_plugins_removed"),
 ];
 
 /// True when `channel_type` names a channel whose `[channels.<type>]`

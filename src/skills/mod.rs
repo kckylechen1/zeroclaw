@@ -80,7 +80,7 @@ pub async fn handle_command(
                 ));
             } else if let Some(ref a) = agent {
                 // Exactly what this agent loads at runtime — the same loader the
-                // agent boot/loop uses (workspace + open-skills + plugins +
+                // agent boot/loop uses (workspace + open-skills +
                 // assigned bundles), so `list --agent` mirrors runtime behavior.
                 if config.agent(a).is_none() {
                     anyhow::bail!(
@@ -103,7 +103,7 @@ pub async fn handle_command(
                 ));
             } else {
                 // Full inventory: every bundle, then the agent-agnostic sources
-                // (global dir + open-skills + plugins). `load_skills_with_config`
+                // (global dir + open-skills). `load_skills_with_config`
                 // is the same loader the old `list` used, so those rows are
                 // preservedreview).
                 for alias in config.skill_bundles.keys() {

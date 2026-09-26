@@ -5,7 +5,7 @@ use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::schema::Config;
 
 /// Compact-mode helper for loading a skill's source file on demand.
-/// Supports workspace skills, open-skills, agent-bound skill bundles, and plugin skills.
+/// Supports workspace skills, open-skills, and agent-bound skill bundles.
 pub struct ReadSkillTool {
     config: Arc<Config>,
     agent_alias: String,
@@ -336,42 +336,5 @@ description = "Ship safely"
         // Workspace skill takes precedence
         assert!(result.output.contains("Workspace version"));
         assert!(!result.output.contains("Bundle version"));
-    }
-
-    #[cfg(feature = "plugins-wasm")]
-    #[tokio::test]
-    async fn reads_plugin_bundled_skill_by_namespaced_name() {
-        let tmp = TempDir::new().unwrap();
-        let plugins_dir = tmp.path().join("plugins");
-        let plugin_dir = plugins_dir.join("weatherkit");
-        let skill_dir = plugin_dir.join("skills/forecast");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("manifest.toml"),
-            "name = \"weatherkit\"\nversion = \"0.1.0\"\ncapabilities = [\"skill\"]\n",
-        )
-        .unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: forecast\ndescription: Return a weather forecast for a place.\n---\n\n# Forecast\n",
-        )
-        .unwrap();
-
-        let mut config = config_for_tmp(&tmp);
-        config.plugins.enabled = true;
-        config.plugins.plugins_dir = plugins_dir.to_string_lossy().into_owned();
-        let tool = make_tool(config);
-
-        let result = tool
-            .execute(json!({ "name": "plugin:weatherkit/forecast" }))
-            .await
-            .unwrap();
-
-        assert!(
-            result.success,
-            "advertised plugin skill must be readable; got {:?}",
-            result.error
-        );
-        assert!(result.output.contains("# Forecast"));
     }
 }

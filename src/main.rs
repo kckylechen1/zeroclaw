@@ -259,10 +259,6 @@ mod observability;
 mod peripherals;
 #[cfg(feature = "agent-runtime")]
 mod platform;
-#[cfg(feature = "plugins-wasm")]
-mod plugin_registry;
-#[cfg(feature = "plugins-wasm")]
-mod plugins;
 mod providers;
 #[cfg(feature = "agent-runtime")]
 mod security;
@@ -1042,13 +1038,6 @@ Examples (Windows PowerShell):
         props_command: DeprecatedPropsCommands,
     },
 
-    /// Manage WASM plugins
-    #[cfg(feature = "plugins-wasm")]
-    Plugin {
-        #[command(subcommand)]
-        plugin_command: PluginCommands,
-    },
-
     /// Fetch translated locale files (FTL) from upstream
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
@@ -1144,41 +1133,6 @@ fn apply_homebrew_onboard_config_dir() {
             unsafe { std::env::set_var(name, value) };
         },
     );
-}
-
-#[cfg(feature = "plugins-wasm")]
-#[derive(Subcommand, Debug)]
-enum PluginCommands {
-    /// List installed plugins
-    List,
-    /// Search an installable plugin registry
-    Search {
-        /// Query to match against plugin names and descriptions
-        query: String,
-        /// Registry JSON URL to search
-        #[arg(long)]
-        registry: Option<String>,
-    },
-    /// Install a plugin from a local directory/manifest or registry name
-    Install {
-        /// Path to plugin directory/manifest, or registry name/version
-        source: String,
-        /// Registry JSON URL used for install-by-name
-        #[arg(long)]
-        registry: Option<String>,
-    },
-    /// Remove an installed plugin
-    Remove {
-        /// Plugin name
-        name: String,
-    },
-    /// Show information about a plugin
-    Info {
-        /// Plugin name
-        name: String,
-    },
-    /// Move plugins from legacy install directories into the configured one
-    Migrate,
 }
 
 #[derive(Subcommand, Debug)]
@@ -3037,11 +2991,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 "`zeroclaw props` has been renamed to `zeroclaw config`. \
                  Replace `props` with `config` in your command and try again."
             );
-        }
-
-        #[cfg(feature = "plugins-wasm")]
-        Commands::Plugin { plugin_command } => {
-            commands::plugin::handle(plugin_command, &mut config).await
         }
     }
 }

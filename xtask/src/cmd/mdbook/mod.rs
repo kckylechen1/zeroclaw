@@ -4,7 +4,6 @@ pub mod feature_matrix;
 pub mod hardware;
 pub mod linkcheck;
 pub mod peer_groups;
-pub mod plugins;
 pub mod protected;
 pub mod refs;
 pub mod serve;

@@ -228,29 +228,6 @@ fn cost_category_resolves_only_rate_bearing_sections() {
     assert_eq!(super::cost_category_for_provider_section("models"), None);
 }
 
-#[test]
-async fn plugin_entry_config_resolves_own_section_and_isolates_others() {
-    let mut plugins = super::PluginsConfig::default();
-    plugins.entries.push(super::PluginEntryConfig {
-        name: "image_gen_fal".into(),
-        config: std::collections::HashMap::from([("api_key".into(), "secret-a".into())]),
-    });
-    plugins.entries.push(super::PluginEntryConfig {
-        name: "sd_webui".into(),
-        config: std::collections::HashMap::from([("base_url".into(), "http://host".into())]),
-    });
-
-    let fal = plugins.entry_config("image_gen_fal").unwrap();
-    assert_eq!(fal.get("api_key").map(String::as_str), Some("secret-a"));
-    assert!(fal.get("base_url").is_none());
-
-    let sd = plugins.entry_config("sd_webui").unwrap();
-    assert_eq!(sd.get("base_url").map(String::as_str), Some("http://host"));
-    assert!(sd.get("api_key").is_none());
-
-    assert!(plugins.entry_config("unknown").is_none());
-}
-
 /// The retired run-side config keys must FAIL config parse
 /// with an actionable message, never silently no-op.
 #[test]
@@ -589,88 +566,6 @@ async fn expand_tilde_path_expands_tilde_when_home_set() {
             "Tilde should be expanded when HOME is set"
         );
     }
-}
-
-// ── Plugins dir resolution ────────────────────────────────
-
-#[test]
-async fn resolved_plugins_dir_passes_absolute_path_through() {
-    let cfg = PluginsConfig {
-        plugins_dir: "/srv/plugins".to_string(),
-        ..PluginsConfig::default()
-    };
-    assert_eq!(cfg.resolved_plugins_dir(), PathBuf::from("/srv/plugins"));
-}
-
-#[test]
-async fn resolved_plugins_dir_expands_leading_tilde() {
-    let cfg = PluginsConfig {
-        plugins_dir: "~/.zeroclaw/plugins".to_string(),
-        ..PluginsConfig::default()
-    };
-    let resolved = cfg.resolved_plugins_dir();
-    if std::env::var("HOME").is_ok() {
-        assert!(!resolved.to_string_lossy().starts_with('~'));
-        assert!(resolved.ends_with(".zeroclaw/plugins"));
-    }
-}
-
-/// Build a `Config` whose data dir, install root, and configured plugins dir
-/// live under `root`, and create a plugin at `<parent>/<name>/manifest.toml`.
-fn config_with_dirs(root: &Path) -> Config {
-    Config {
-        data_dir: root.join("data"),
-        config_path: root.join("install").join("config.toml"),
-        plugins: PluginsConfig {
-            plugins_dir: root.join("plugins").to_string_lossy().into_owned(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
-fn write_plugin(parent: &Path, name: &str) {
-    std::fs::create_dir_all(parent.join(name)).unwrap();
-    std::fs::write(parent.join(name).join("manifest.toml"), "name = \"x\"\n").unwrap();
-}
-
-#[test]
-async fn legacy_plugin_dirs_detects_data_and_workspace_locations() {
-    let tmp = TempDir::new().unwrap();
-    let config = config_with_dirs(tmp.path());
-    write_plugin(&config.data_dir.join("plugins"), "fromdata");
-    write_plugin(
-        &config.install_root_dir().join("workspace").join("plugins"),
-        "fromworkspace",
-    );
-
-    let dirs = legacy_plugin_dirs_with_entries(&config);
-    assert_eq!(dirs.len(), 2, "both legacy locations should be reported");
-    assert!(dirs.contains(&config.data_dir.join("plugins")));
-    assert!(dirs.contains(&config.install_root_dir().join("workspace").join("plugins")));
-}
-
-#[test]
-async fn legacy_plugin_dirs_empty_when_no_legacy_plugins() {
-    let tmp = TempDir::new().unwrap();
-    let config = config_with_dirs(tmp.path());
-    // Plugin lives in the configured dir, not a legacy one.
-    write_plugin(&config.plugins.resolved_plugins_dir(), "current");
-
-    assert!(legacy_plugin_dirs_with_entries(&config).is_empty());
-}
-
-#[test]
-async fn legacy_plugin_dirs_skips_dir_equal_to_target() {
-    let tmp = TempDir::new().unwrap();
-    let mut config = config_with_dirs(tmp.path());
-    // Point the configured plugins dir AT the legacy data dir.
-    let data_plugins = config.data_dir.join("plugins");
-    config.plugins.plugins_dir = data_plugins.to_string_lossy().into_owned();
-    write_plugin(&data_plugins, "same");
-
-    // The data-dir candidate now equals the target → not a "legacy" dir.
-    assert!(legacy_plugin_dirs_with_entries(&config).is_empty());
 }
 
 // ── Defaults ─────────────────────────────────────────────
@@ -1299,59 +1194,6 @@ async fn validate_rejects_reply_min_interval_above_upper_bound() {
     assert!(
         msg.contains("channels.telegram.default.reply_min_interval_secs"),
         "error must name the offending path; got: {msg}"
-    );
-}
-
-#[test]
-async fn validate_rejects_zero_plugin_call_fuel() {
-    let mut config = Config::default();
-    config.plugins.limits.call_fuel = 0;
-    let err = config
-        .validate()
-        .expect_err("zero call_fuel must be rejected");
-    assert!(
-        err.to_string().contains("plugins.limits.call_fuel"),
-        "error must name the offending path; got: {err}"
-    );
-}
-
-#[test]
-async fn validate_rejects_zero_plugin_max_memory() {
-    let mut config = Config::default();
-    config.plugins.limits.max_memory_mb = 0;
-    let err = config
-        .validate()
-        .expect_err("zero max_memory_mb must be rejected");
-    assert!(
-        err.to_string().contains("plugins.limits.max_memory_mb"),
-        "error must name the offending path; got: {err}"
-    );
-}
-
-#[test]
-async fn validate_rejects_zero_plugin_max_table_elements() {
-    let mut config = Config::default();
-    config.plugins.limits.max_table_elements = 0;
-    let err = config
-        .validate()
-        .expect_err("zero max_table_elements must be rejected");
-    assert!(
-        err.to_string()
-            .contains("plugins.limits.max_table_elements"),
-        "error must name the offending path; got: {err}"
-    );
-}
-
-#[test]
-async fn validate_rejects_zero_plugin_max_instances() {
-    let mut config = Config::default();
-    config.plugins.limits.max_instances = 0;
-    let err = config
-        .validate()
-        .expect_err("zero max_instances must be rejected");
-    assert!(
-        err.to_string().contains("plugins.limits.max_instances"),
-        "error must name the offending path; got: {err}"
     );
 }
 
@@ -2442,7 +2284,6 @@ async fn config_toml_roundtrip() {
         file_upload: FileUploadConfig::default(),
         file_upload_bundle: FileUploadBundleConfig::default(),
         file_download: FileDownloadConfig::default(),
-        plugins: PluginsConfig::default(),
         locale: None,
         verifiable_intent: VerifiableIntentConfig::default(),
         sop: SopConfig::default(),
@@ -3304,7 +3145,6 @@ async fn config_save_and_load_tmpdir() {
         file_upload: FileUploadConfig::default(),
         file_upload_bundle: FileUploadBundleConfig::default(),
         file_download: FileDownloadConfig::default(),
-        plugins: PluginsConfig::default(),
         locale: None,
         verifiable_intent: VerifiableIntentConfig::default(),
         sop: SopConfig::default(),
@@ -5839,34 +5679,6 @@ enabled = false
         unsafe { std::env::remove_var("HOME") };
     }
     let _ = fs::remove_dir_all(temp_home).await;
-}
-
-#[test]
-async fn salvage_reports_dropped_plugins_section_for_malformed_entries() {
-    // `[plugins.entries]` written as a table instead of an array of
-    // tables (`[[plugins.entries]]`) drops the whole [plugins] section
-    // to defaults on the resilient path. That drop must land on
-    // `ResilientLoad::dropped`; load_or_init copies it onto
-    // `degraded_sections` so the CLI surfaces it on stderr instead of
-    // the operator discovering `enabled = false` by accident.
-    let raw = r#"schema_version = 3
-
-[plugins]
-enabled = true
-
-[plugins.entries]
-name = "weather-tool"
-"#;
-    let load = crate::migration::migrate_to_current_salvaged(raw);
-    assert!(
-        load.dropped.iter().any(|s| s == "plugins"),
-        "a malformed [plugins] section must be reported on dropped, got {:?}",
-        load.dropped
-    );
-    assert!(
-        !load.config.plugins.enabled,
-        "the malformed section must have been reset to defaults"
-    );
 }
 
 #[test]
@@ -10579,50 +10391,6 @@ async fn create_map_key_inserts_default_mcp_server() {
     assert_eq!(
         config.mcp.servers[0].name, "github",
         "new entry must carry the supplied key as its name field"
-    );
-}
-
-#[test]
-async fn create_map_key_seeds_plugin_entry_and_routes_config_set() {
-    // The `zeroclaw plugin install` seeding path: a fresh
-    // `[[plugins.entries]]` entry named after the plugin must make
-    // `config set plugins.entries.<name>.config.<key>` routable;
-    // natural-key path routing only matches keys already present in
-    // live config.
-    let mut config = Config::default();
-    let created = config
-        .create_map_key("plugins.entries", "weather-tool")
-        .expect("plugins.entries must accept new natural-key entries");
-    assert!(created, "first add should report created=true");
-    assert_eq!(config.plugins.entries.len(), 1);
-    assert_eq!(config.plugins.entries[0].name, "weather-tool");
-
-    config
-        .set_prop("plugins.entries.weather-tool.config.api_key", "sk-test")
-        .expect("config set must route through the seeded entry");
-    assert_eq!(
-        config
-            .plugins
-            .entry_config("weather-tool")
-            .and_then(|c| c.get("api_key"))
-            .map(String::as_str),
-        Some("sk-test")
-    );
-
-    // Idempotent: reinstalling must not clobber operator values.
-    let again = config
-        .create_map_key("plugins.entries", "weather-tool")
-        .expect("second add still resolves the section");
-    assert!(!again, "duplicate add should report created=false");
-    assert_eq!(config.plugins.entries.len(), 1);
-    assert_eq!(
-        config
-            .plugins
-            .entry_config("weather-tool")
-            .and_then(|c| c.get("api_key"))
-            .map(String::as_str),
-        Some("sk-test"),
-        "re-seeding must leave existing config values untouched"
     );
 }
 

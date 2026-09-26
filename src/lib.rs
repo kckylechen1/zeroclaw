@@ -87,8 +87,6 @@ pub mod observability;
 pub mod peripherals;
 #[cfg(feature = "agent-runtime")]
 pub mod platform;
-#[cfg(feature = "plugins-wasm")]
-pub mod plugins;
 pub mod providers;
 #[cfg(feature = "agent-runtime")]
 pub mod rag;
@@ -485,7 +483,7 @@ pub enum SkillCommands {
     /// List all installed skills
     List {
         /// Show exactly what this agent loads at runtime (its workspace +
-        /// open-skills + plugins + assigned bundles). --bundle takes precedence
+        /// open-skills + assigned bundles). --bundle takes precedence
         /// when both are passed.
         #[arg(long)]
         agent: Option<String>,

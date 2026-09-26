@@ -24,7 +24,6 @@ Full rustdoc for every public type in the workspace, auto-generated from the `//
 | [`zeroclaw-gateway`](/api/zeroclaw_gateway/index.html) | HTTP/WebSocket gateway |
 | [`zeroclaw-tools`](/api/zeroclaw_tools/index.html) | Agent-callable tools |
 | [`zeroclaw-memory`](/api/zeroclaw_memory/index.html) | Conversation memory, embeddings |
-| [`zeroclaw-plugins`](/api/zeroclaw_plugins/index.html) | WASM plugin host |
 | [`zeroclaw-hardware`](/api/zeroclaw_hardware/index.html) | GPIO / I2C / SPI / USB |
 | [`zeroclaw-infra`](/api/zeroclaw_infra/index.html) | Tracing, metrics |
 

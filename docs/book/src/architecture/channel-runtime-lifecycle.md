@@ -209,7 +209,6 @@ Canonical docs:
 - [Channels overview](../channels/overview.md)
 - [Gateway HTTP API](../gateway/api.md)
 - [FND-001: Intentional architecture](../foundations/fnd-001-intentional-architecture.md)
-- [Plugin protocol](../developing/plugin-protocol.md)
 
 Key code entry points:
 

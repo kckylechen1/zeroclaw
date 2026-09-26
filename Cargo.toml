@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-plugins", "crates/zeroclaw-plugins/tests/fixtures/channel-fixture", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "bridges/telegram", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/aardvark-sys", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
+members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "bridges/telegram", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/aardvark-sys", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -23,7 +23,6 @@ zeroclaw-tools = { path = "crates/zeroclaw-tools", version = "0.8.3", default-fe
 zeroclaw-sop-graph = { path = "crates/zeroclaw-sop-graph", version = "0.8.3", default-features = false }
 zeroclaw-runtime = { path = "crates/zeroclaw-runtime", version = "0.8.3", default-features = false }
 zeroclaw-eval = { path = "crates/zeroclaw-eval", version = "0.8.3" }
-zeroclaw-plugins = { path = "crates/zeroclaw-plugins", version = "0.8.3" }
 zeroclaw-gateway = { path = "crates/zeroclaw-gateway", version = "0.8.3" }
 zeroclaw-gateway-client = { path = "crates/zeroclaw-gateway-client", version = "0.8.3" }
 zeroclaw-hardware = { path = "crates/zeroclaw-hardware", version = "0.8.3" }
@@ -80,7 +79,6 @@ zeroclaw-channels = { workspace = true, optional = true }
 zeroclaw-tools = { workspace = true, optional = true }
 zeroclaw-runtime = { workspace = true, optional = true }
 zeroclaw-eval = { workspace = true, optional = true }
-zeroclaw-plugins = { workspace = true, optional = true }
 zeroclaw-gateway = { workspace = true, optional = true }
 zeroclaw-gateway-client = { workspace = true, optional = true }
 zeroclaw-hardware = { workspace = true, optional = true }
@@ -134,7 +132,7 @@ indicatif = "0.18"
 # Temp files (update pipeline rollback)
 tempfile = "3.26"
 
-# Zip extraction (plugin registry, self-update archives)
+# Zip extraction (self-update archives)
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 
 # Error handling
@@ -392,7 +390,6 @@ dev-sim = ["dep:zeroclaw-hardware", "zeroclaw-hardware/dev-sim"]
 sandbox-landlock = ["zeroclaw-runtime/sandbox-landlock"]
 sandbox-bubblewrap = ["zeroclaw-runtime/sandbox-bubblewrap"]
 browser-native = ["zeroclaw-tools/browser-native"]
-plugins-wasm = ["dep:zeroclaw-plugins", "zeroclaw-runtime/plugins-wasm"]
 probe = ["dep:zeroclaw-hardware", "zeroclaw-hardware/probe"]
 embedded-web = ["zeroclaw-gateway/embedded-web"]
 
@@ -400,33 +397,6 @@ embedded-web = ["zeroclaw-gateway/embedded-web"]
 fantoccini = ["browser-native"]
 landlock = ["sandbox-landlock"]
 metrics = ["observability-prometheus"]
-
-# WASM plugin execution choice:
-#
-# Omit all three of the following features and there will not be any WASM plugin
-# support at all — no plugin runtime, no WASM dependencies, and the plugin ABI
-# surface will be unavailable in the agent runtime.
-#
-# Each feature adds a WASM execution strategy; enable the smallest set your targets
-# need. `plugins-wasm-runtime-only` is implied by the other two. Every backend
-# feature also implies `plugins-wasm` itself, so enabling any execution strategy
-# always carries the plugin host and its CLI surface; a backend-only build
-# cannot silently produce a binary without the `plugin` subcommand.
-#
-# - `plugins-wasm-runtime-only`: Fastest startup for plugins and smallest binary size,
-#   but requires plugin authors to compile a specific version for each target
-#   architecture (`.cwasm` files instead of `.wasm`) unless one of the two JIT
-#   compilation feature flags is also used.
-# - `plugins-wasm-cranelift`: Add the Cranelift JIT compilation engine on top of
-#   the runtime which enables compiling WASM plugins on the host machine, but
-#   results in larger binary size due to the Cranelift dependency. NOTE: Not
-#   supported on all platforms (e.g., ARM32).
-# - `plugins-wasm-pulley`: Most flexible, supports JIT compilation on targets
-#   where Cranelift isn't available (e.g., ARM32), but has the slowest runtime
-#   performance.
-plugins-wasm-runtime-only = ["plugins-wasm", "zeroclaw-plugins/plugins-wasmtime"]
-plugins-wasm-cranelift    = ["plugins-wasm", "zeroclaw-plugins/plugins-wasm-cranelift"]
-plugins-wasm-pulley       = ["plugins-wasm", "zeroclaw-plugins/plugins-wasm-pulley"]
 
 # CI meta-feature
 ci-all = [
@@ -437,7 +407,6 @@ ci-all = [
     "hardware", "peripheral-rpi",
     "sandbox-landlock", "sandbox-bubblewrap",
     "browser-native", "probe",
-    "plugins-wasm", "plugins-wasm-cranelift",
     "memory-postgres",
     "zeroclaw-channels/heavy-tests",
     "zeroclaw-runtime/heavy-tests",

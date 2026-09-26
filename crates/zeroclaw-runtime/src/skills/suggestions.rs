@@ -6,11 +6,6 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use zeroclaw_config::schema::ExternalRegistryKind;
 
-#[cfg(feature = "plugins-wasm")]
-use zeroclaw_plugins::registry::{
-    install_command as plugin_install_command, read_cached_registry_index,
-};
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InstallableSkillCapability {
     name: String,
@@ -22,8 +17,6 @@ struct InstallableSkillCapability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum InstallKind {
     Skill,
-    #[cfg(feature = "plugins-wasm")]
-    Plugin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,8 +34,6 @@ impl InstallSuggestion {
                 "cli-skills-install-suggestion",
                 format!("zeroclaw skills install {}", self.source),
             ),
-            #[cfg(feature = "plugins-wasm")]
-            InstallKind::Plugin => ("cli-plugin-install-suggestion", self.source.clone()),
         };
         crate::i18n::get_required_cli_string_with_args(
             message_key,
@@ -74,24 +65,7 @@ pub(crate) fn render_missing_skill_install_suggestion(
         installed_runtime_capabilities,
         &catalog,
     );
-    if let Some(suggestion) = skill_suggestion {
-        return Some(suggestion.render_user_message());
-    }
-
-    #[cfg(feature = "plugins-wasm")]
-    {
-        let catalog = load_cached_installable_plugin_capabilities(workspace_dir);
-        suggest_missing_skill_install(
-            prompt,
-            installed_skills,
-            installed_runtime_capabilities,
-            &catalog,
-        )
-        .map(|suggestion| suggestion.render_user_message())
-    }
-
-    #[cfg(not(feature = "plugins-wasm"))]
-    None
+    skill_suggestion.map(|suggestion| suggestion.render_user_message())
 }
 
 fn suggest_missing_skill_install(
@@ -260,41 +234,6 @@ fn load_markdown_skill_package_metadata(
     })
 }
 
-#[cfg(feature = "plugins-wasm")]
-fn load_cached_installable_plugin_capabilities(
-    workspace_dir: &Path,
-) -> Vec<InstallableSkillCapability> {
-    let index = match read_cached_registry_index(workspace_dir) {
-        Ok(Some(index)) => index,
-        Ok(None) => return Vec::new(),
-        Err(error) => {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"error": error.to_string()})),
-                "failed to parse cached plugin registry metadata"
-            );
-            return Vec::new();
-        }
-    };
-    let registry_url = index.registry_url.as_deref();
-
-    index
-        .plugins
-        .into_iter()
-        .map(|entry| {
-            let description = entry.description.clone().unwrap_or_default();
-            InstallableSkillCapability {
-                name: entry.name.clone(),
-                source: plugin_install_command(&entry, registry_url),
-                aliases: vec![description],
-                install_kind: InstallKind::Plugin,
-            }
-        })
-        .collect()
-}
-
 fn read_markdown_frontmatter(markdown_path: &Path) -> Option<String> {
     let file = File::open(markdown_path).ok()?;
     let mut lines = BufReader::new(file).lines();
@@ -332,15 +271,7 @@ fn is_installed_skill(capability: &InstallableSkillCapability, installed_skills:
     let capability_source = normalize(&capability.source);
     installed_skills.iter().any(|skill| {
         let skill_name = normalize(&skill.name);
-        let plugin_skill_name = skill
-            .name
-            .strip_prefix("plugin:")
-            .and_then(|qualified| qualified.rsplit_once('/').map(|(_, name)| normalize(name)));
-        skill_name == capability_name
-            || skill_name == capability_source
-            || plugin_skill_name
-                .as_deref()
-                .is_some_and(|name| name == capability_name || name == capability_source)
+        skill_name == capability_name || skill_name == capability_source
     })
 }
 
@@ -449,21 +380,6 @@ mod tests {
     #[test]
     fn installed_capability_proceeds_without_suggestion() {
         let installed = vec![installed_skill("calendar")];
-        let catalog = vec![catalog_entry("calendar", &["calendar"])];
-
-        let suggestion = suggest_missing_skill_install(
-            "please use calendar to schedule this",
-            &installed,
-            &[],
-            &catalog,
-        );
-
-        assert!(suggestion.is_none());
-    }
-
-    #[test]
-    fn plugin_shipped_installed_capability_proceeds_without_suggestion() {
-        let installed = vec![installed_skill("plugin:my-toolkit/calendar")];
         let catalog = vec![catalog_entry("calendar", &["calendar"])];
 
         let suggestion = suggest_missing_skill_install(
@@ -724,154 +640,6 @@ aliases = ["team calendar"]
                 .render_user_message()
                 .contains("zeroclaw skills install registry:acme/team-calendar")
         );
-    }
-
-    #[cfg(feature = "plugins-wasm")]
-    #[test]
-    fn cached_plugin_registry_metadata_returns_plugin_install_suggestion() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry_dir = dir.path().join("plugin-registry");
-        std::fs::create_dir_all(&registry_dir).unwrap();
-        std::fs::write(
-            registry_dir.join("registry.json"),
-            r#"
-{
-  "registry_url": "https://example.invalid/registry.json",
-  "plugins": [
-    {
-      "name": "team-calendar",
-      "version": "0.2.0",
-      "description": "Schedule meetings on the team calendar",
-      "capabilities": ["tool"],
-      "url": "https://example.invalid/team-calendar-0.2.0.zip"
-    }
-  ]
-}
-"#,
-        )
-        .unwrap();
-
-        let suggestion = render_missing_skill_install_suggestion(
-            "please use the team calendar to schedule this",
-            &[],
-            &[],
-            dir.path(),
-            &[],
-            true,
-        )
-        .expect("cached plugin registry metadata should suggest plugin installation");
-
-        assert!(suggestion.contains("team-calendar"));
-        assert!(suggestion.contains("team calendar"));
-        assert!(suggestion.contains(
-            "zeroclaw plugin install team-calendar@0.2.0 --registry https://example.invalid/registry.json"
-        ));
-    }
-
-    #[cfg(feature = "plugins-wasm")]
-    #[test]
-    fn skill_registry_metadata_takes_precedence_over_plugin_metadata() {
-        let dir = tempfile::tempdir().unwrap();
-        let skills_dir = dir.path().join("skills-registry/skills/team-calendar");
-        std::fs::create_dir_all(&skills_dir).unwrap();
-        std::fs::write(
-            skills_dir.join("SKILL.toml"),
-            r#"
-[skill]
-name = "team-calendar"
-description = "Schedule meetings on the team calendar"
-aliases = ["team calendar"]
-"#,
-        )
-        .unwrap();
-        let registry_dir = dir.path().join("plugin-registry");
-        std::fs::create_dir_all(&registry_dir).unwrap();
-        std::fs::write(
-            registry_dir.join("registry.json"),
-            r#"
-{
-  "plugins": [
-    {
-      "name": "team-calendar-plugin",
-      "version": "0.2.0",
-      "description": "Schedule meetings on the team calendar",
-      "capabilities": ["tool"],
-      "url": "https://example.invalid/team-calendar-0.2.0.zip"
-    }
-  ]
-}
-"#,
-        )
-        .unwrap();
-
-        let suggestion = render_missing_skill_install_suggestion(
-            "please use the team calendar to schedule this",
-            &[],
-            &[],
-            dir.path(),
-            &[],
-            true,
-        )
-        .expect("skill registry metadata should suggest installation first");
-
-        assert!(suggestion.contains("zeroclaw skills install"));
-        assert!(!suggestion.contains("zeroclaw plugin install"));
-    }
-
-    #[cfg(feature = "plugins-wasm")]
-    #[test]
-    fn cached_plugin_registry_metadata_does_not_suggest_installed_runtime_capability() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry_dir = dir.path().join("plugin-registry");
-        std::fs::create_dir_all(&registry_dir).unwrap();
-        std::fs::write(
-            registry_dir.join("registry.json"),
-            r#"
-{
-  "plugins": [
-    {
-      "name": "team-calendar",
-      "version": "0.2.0",
-      "description": "Schedule meetings on the team calendar",
-      "capabilities": ["tool"],
-      "url": "https://example.invalid/team-calendar-0.2.0.zip"
-    }
-  ]
-}
-"#,
-        )
-        .unwrap();
-
-        let suggestion = render_missing_skill_install_suggestion(
-            "please use the team calendar to schedule this",
-            &[],
-            &["team_calendar"],
-            dir.path(),
-            &[],
-            true,
-        );
-
-        assert!(suggestion.is_none());
-    }
-
-    #[cfg(feature = "plugins-wasm")]
-    #[test]
-    fn disabled_config_does_not_read_cached_plugin_registry() {
-        let dir = tempfile::tempdir().unwrap();
-        let registry_dir = dir.path().join("plugin-registry");
-        std::fs::create_dir_all(&registry_dir).unwrap();
-        std::fs::write(registry_dir.join("registry.json"), "{ not json").unwrap();
-
-        let suggestion = render_missing_skill_install_suggestion(
-            "please use the team calendar to schedule this",
-            &[],
-            &[],
-            dir.path(),
-            &[],
-            false,
-        );
-
-        assert!(suggestion.is_none());
     }
 
     #[test]

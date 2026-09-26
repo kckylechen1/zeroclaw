@@ -49,10 +49,8 @@ pub struct SkillsListResult {
 pub struct AgentSkillEntry {
     pub name: String,
     pub description: String,
-    /// `"workspace"` | `"open-skills"` | `"plugin"` | `"bundle"`.
+    /// `"workspace"` | `"open-skills"` | `"bundle"`.
     pub origin: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,7 +66,7 @@ pub struct AgentSkillEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShadowedSkillEntry {
     pub name: String,
-    /// `"workspace"` | `"open-skills"` | `"plugin"` | `"bundle"`.
+    /// `"workspace"` | `"open-skills"` | `"bundle"`.
     pub origin: String,
 }
 
@@ -245,20 +243,18 @@ pub async fn handle_agent_skills(
 }
 
 /// Map a runtime [`EffectiveSkill`] to its flat wire shape (`origin` string +
-/// optional `plugin`/`bundle` detail). `editable`/`directory`/`shadowed` pass
+/// optional `bundle` detail). `editable`/`directory`/`shadowed` pass
 /// through.
 fn agent_skill_entry(s: EffectiveSkill) -> AgentSkillEntry {
-    let (origin, plugin, bundle) = match s.origin {
-        SkillOrigin::Workspace => ("workspace", None, None),
-        SkillOrigin::OpenSkills => ("open-skills", None, None),
-        SkillOrigin::Plugin(p) => ("plugin", Some(p), None),
-        SkillOrigin::Bundle(a) => ("bundle", None, Some(a)),
+    let (origin, bundle) = match s.origin {
+        SkillOrigin::Workspace => ("workspace", None),
+        SkillOrigin::OpenSkills => ("open-skills", None),
+        SkillOrigin::Bundle(a) => ("bundle", Some(a)),
     };
     AgentSkillEntry {
         name: s.name,
         description: s.description,
         origin: origin.to_string(),
-        plugin,
         bundle,
         directory: s.directory.map(|d| d.display().to_string()),
         editable: s.editable,

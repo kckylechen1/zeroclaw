@@ -66,7 +66,6 @@ Negative consequences:
 - [ADR-002: Trait-driven extensibility](./ADR-002-trait-driven-extensibility.md)
 - [ADR-009: WIT and wasmtime plugin execution](./ADR-009-wit-wasmtime-plugin-execution.md)
 - [FND-001: Intentional architecture](../../foundations/fnd-001-intentional-architecture.md)
-- [Writing a channel plugin](../../plugins/writing-a-channel-plugin.md)
 - [Channel runtime lifecycle](../channel-runtime-lifecycle.md)
 - [Migration tracker #8850](https://github.com/zeroclaw-labs/zeroclaw/issues/8850)
 - [ADR-006 and ADR-007 direction decision](https://github.com/zeroclaw-labs/zeroclaw/issues/8691#issuecomment-5009706612)

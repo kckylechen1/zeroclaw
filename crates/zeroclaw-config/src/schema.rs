@@ -119,8 +119,8 @@ pub struct Config {
     #[serde(skip)]
     pub degraded_security: Vec<String>,
     /// Non-security sections the resilient loader reset to `Default`
-    /// because the on-disk block was malformed (e.g. `[plugins.entries]`
-    /// written where `[[plugins.entries]]` was meant). Never serialized;
+    /// because the on-disk block was malformed (e.g. a table written where
+    /// an array of tables was meant). Never serialized;
     /// a load-time signal the CLI surfaces on stderr so a silently-dropped
     /// section is impossible to miss.
     #[serde(skip)]
@@ -623,12 +623,6 @@ pub struct Config {
     #[serde(default)]
     #[nested]
     pub file_download: FileDownloadConfig,
-
-    /// Plugin system configuration (`[plugins]`).
-    #[serde(default)]
-    #[nested]
-    #[group = "Tools"]
-    pub plugins: PluginsConfig,
 
     /// Locale for tool descriptions (e.g. `"en"`, `"zh-CN"`).
     ///
@@ -8214,178 +8208,6 @@ impl Default for LinkedInConfig {
 
 fn default_linkedin_api_version() -> String {
     "202602".to_string()
-}
-
-/// Per-plugin config section keyed by plugin alias; values are secret so they
-/// encrypt at rest under the same adjacent `.secret_key` as every other secret.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "plugins.entries"]
-pub struct PluginEntryConfig {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    #[secret]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub config: HashMap<String, String>,
-}
-
-/// Plugin system configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "plugins"]
-pub struct PluginsConfig {
-    /// Enable the plugin system (default: false)
-    #[serde(default)]
-    pub enabled: bool,
-    /// Directory where plugins are stored
-    #[serde(default = "default_plugins_dir")]
-    pub plugins_dir: String,
-    /// Auto-discover and load plugins on startup
-    #[serde(default)]
-    pub auto_discover: bool,
-    /// Maximum number of plugins that can be loaded
-    #[serde(default = "default_max_plugins")]
-    pub max_plugins: usize,
-    /// Plugin signature verification security settings
-    #[serde(default)]
-    #[nested]
-    pub security: PluginSecurityConfig,
-    /// Per-call WASM execution limits
-    #[serde(default)]
-    #[nested]
-    pub limits: PluginLimitsConfig,
-    #[serde(default)]
-    #[nested]
-    #[natural_key = "name"]
-    pub entries: Vec<PluginEntryConfig>,
-}
-
-impl PluginsConfig {
-    #[must_use]
-    pub fn entry_config(&self, alias: &str) -> Option<&HashMap<String, String>> {
-        self.entries
-            .iter()
-            .find(|e| e.name == alias)
-            .map(|e| &e.config)
-    }
-}
-
-impl PluginsConfig {
-    /// Resolve `plugins_dir` to an absolute path, expanding a leading `~/`.
-    ///
-    /// This is the single source of truth for the plugin directory: the CLI,
-    /// runtime tool/skill discovery, and the gateway all resolve through it so
-    /// that `zeroclaw plugin install` and the agent agree on one location.
-    /// Pure — performs no filesystem I/O.
-    #[must_use]
-    pub fn resolved_plugins_dir(&self) -> PathBuf {
-        expand_tilde_path(&self.plugins_dir)
-    }
-}
-
-/// Plugin signature verification configuration (`[plugins.security]`).
-///
-/// Controls Ed25519 signature verification for plugin manifests.
-/// In `strict` mode, only plugins signed by a trusted publisher key are loaded.
-/// In `permissive` mode, unsigned or untrusted plugins produce warnings but are
-/// still loaded. In `disabled` mode (the default), no signature checking occurs.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "plugins.security"]
-pub struct PluginSecurityConfig {
-    /// Signature enforcement mode: "disabled", "permissive", or "strict".
-    #[serde(default = "default_signature_mode")]
-    pub signature_mode: String,
-    /// Hex-encoded Ed25519 public keys of trusted plugin publishers.
-    #[serde(default)]
-    pub trusted_publisher_keys: Vec<String>,
-}
-
-fn default_signature_mode() -> String {
-    "disabled".to_string()
-}
-
-impl Default for PluginSecurityConfig {
-    fn default() -> Self {
-        Self {
-            signature_mode: default_signature_mode(),
-            trusted_publisher_keys: Vec::new(),
-        }
-    }
-}
-
-/// Per-call WASM execution limits (`[plugins.limits]`).
-///
-/// Bounds a single plugin call so a runaway or malicious component traps
-/// instead of hanging the host or exhausting memory. `call_fuel` caps
-/// instructions per call; the memory, table, and instance ceilings bound a
-/// store's growth. Every value is operator-tunable and validated as non-zero.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "plugins.limits"]
-pub struct PluginLimitsConfig {
-    /// Fuel budget per plugin call (wasmtime instruction units).
-    #[serde(default = "default_plugin_call_fuel")]
-    pub call_fuel: u64,
-    /// Maximum linear memory a plugin store may grow to, in megabytes.
-    #[serde(default = "default_plugin_max_memory_mb")]
-    pub max_memory_mb: usize,
-    /// Maximum table elements a plugin store may allocate.
-    #[serde(default = "default_plugin_max_table_elements")]
-    pub max_table_elements: usize,
-    /// Maximum component instances a plugin store may create.
-    #[serde(default = "default_plugin_max_instances")]
-    pub max_instances: usize,
-}
-
-fn default_plugin_call_fuel() -> u64 {
-    1_000_000_000
-}
-
-fn default_plugin_max_memory_mb() -> usize {
-    256
-}
-
-fn default_plugin_max_table_elements() -> usize {
-    100_000
-}
-
-fn default_plugin_max_instances() -> usize {
-    64
-}
-
-impl Default for PluginLimitsConfig {
-    fn default() -> Self {
-        Self {
-            call_fuel: default_plugin_call_fuel(),
-            max_memory_mb: default_plugin_max_memory_mb(),
-            max_table_elements: default_plugin_max_table_elements(),
-            max_instances: default_plugin_max_instances(),
-        }
-    }
-}
-
-fn default_plugins_dir() -> String {
-    default_path_under_config_dir("plugins")
-}
-
-fn default_max_plugins() -> usize {
-    50
-}
-
-impl Default for PluginsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            plugins_dir: default_plugins_dir(),
-            auto_discover: false,
-            max_plugins: default_max_plugins(),
-            security: PluginSecurityConfig::default(),
-            limits: PluginLimitsConfig::default(),
-            entries: Vec::new(),
-        }
-    }
 }
 
 /// Content strategy configuration for LinkedIn auto-posting (`[linkedin.content]`).
@@ -17060,7 +16882,6 @@ impl Default for Config {
             file_upload: FileUploadConfig::default(),
             file_upload_bundle: FileUploadBundleConfig::default(),
             file_download: FileDownloadConfig::default(),
-            plugins: PluginsConfig::default(),
             locale: None,
             verifiable_intent: VerifiableIntentConfig::default(),
             sop: SopConfig::default(),
@@ -17274,37 +17095,6 @@ fn path_is_under(path: &Path, root: &Path) -> bool {
 
 fn paths_equal_lexically(a: &Path, b: &Path) -> bool {
     a.components().eq(b.components())
-}
-
-/// Returns the legacy plugin directories that still hold installed plugins not
-/// visible to the runtime, which now scans [`PluginsConfig::resolved_plugins_dir`].
-///
-/// Historically `zeroclaw plugin install` wrote to `<data_dir>/plugins` (and,
-/// before the data-dir rename, `<install_root>/workspace/plugins`). A directory
-/// is reported only when it differs from the configured plugins dir and contains
-/// at least one plugin (a subdirectory with a `manifest.toml`). Used to surface a
-/// migration hint and to drive `zeroclaw plugin migrate`.
-#[must_use]
-pub fn legacy_plugin_dirs_with_entries(config: &Config) -> Vec<PathBuf> {
-    let target = config.plugins.resolved_plugins_dir();
-    [
-        config.data_dir.join("plugins"),
-        config.install_root_dir().join("workspace").join("plugins"),
-    ]
-    .into_iter()
-    .filter(|legacy| *legacy != target && dir_has_plugin(legacy))
-    .collect()
-}
-
-/// Returns `true` if `dir` holds at least one plugin (a subdirectory containing a
-/// `manifest.toml`).
-fn dir_has_plugin(dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    entries
-        .flatten()
-        .any(|entry| entry.path().join("manifest.toml").exists())
 }
 
 /// Detect if an executable path lives under a macOS Homebrew prefix and return
@@ -20612,35 +20402,6 @@ impl Config {
                     );
                 }
             }
-        }
-
-        if self.plugins.limits.call_fuel == 0 {
-            validation_bail!(
-                InvalidNumericRange,
-                "plugins.limits.call_fuel",
-                "plugins.limits.call_fuel must be greater than 0; a zero budget traps every plugin call before it runs"
-            );
-        }
-        if self.plugins.limits.max_memory_mb == 0 {
-            validation_bail!(
-                InvalidNumericRange,
-                "plugins.limits.max_memory_mb",
-                "plugins.limits.max_memory_mb must be greater than 0; a zero cap rejects every plugin at instantiation"
-            );
-        }
-        if self.plugins.limits.max_table_elements == 0 {
-            validation_bail!(
-                InvalidNumericRange,
-                "plugins.limits.max_table_elements",
-                "plugins.limits.max_table_elements must be greater than 0; a zero ceiling rejects every plugin that allocates a table"
-            );
-        }
-        if self.plugins.limits.max_instances == 0 {
-            validation_bail!(
-                InvalidNumericRange,
-                "plugins.limits.max_instances",
-                "plugins.limits.max_instances must be greater than 0; a zero ceiling rejects every plugin at instantiation"
-            );
         }
 
         Ok(())

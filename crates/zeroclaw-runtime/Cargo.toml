@@ -16,7 +16,6 @@ zeroclaw-providers.workspace = true
 zeroclaw-memory.workspace = true
 zeroclaw-tools.workspace = true
 zeroclaw-sop-graph.workspace = true
-zeroclaw-plugins = { workspace = true, optional = true }
 zeroclaw-tool-call-parser.workspace = true
 fluent = "0.16"
 anyhow = "1.0"
@@ -120,7 +119,6 @@ browser-native = []
 integrations-saas = ["zeroclaw-tools/integrations-saas"]
 hardware-tools = ["zeroclaw-tools/hardware-tools"]
 email-tools = ["zeroclaw-tools/email-tools"]
-plugins-wasm = ["dep:zeroclaw-plugins", "zeroclaw-plugins/plugins-wasmtime"]
 sandbox-bubblewrap = []
 # Heavy agent/SOP behavioral suites. Gated so lib-test
 # iteration does not compile them; CI runtime leg enables this feature.

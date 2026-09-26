@@ -292,11 +292,6 @@ cli-skills-install-suggestion =
 
     匹配的能力：{$matched}
     下一步：运行 `{$install_command}` 进行安装。
-cli-plugin-install-suggestion =
-    看起来此请求需要 `{$name}` 插件，但它尚未安装。
-
-    匹配的能力：{$matched}
-    下一步：运行 `{$install_command}` 进行安装。
 cli-completions-long-about =
     为 `zeroclaw` 生成 shell 补全脚本。
 
@@ -695,24 +690,7 @@ cli-desktop-blurb2 = 它连接到与 CLI 相同的网关。
 cli-config-all-configured = 所有部分均已配置。
 cli-config-schema-current = 配置已为当前架构版本。
 cli-config-applied-ops = 已应用 {$count} 个操作：
-cli-plugins-none = 未安装任何插件。
-cli-plugins-installed = 已安装的插件：
-cli-plugin-search-none = 没有匹配 '{$query}' 的插件。
-cli-plugin-search-results = 匹配 '{$query}' 的插件（{$count}）：
-cli-plugin-search-result = {$name} v{$version} — {$description}
-cli-plugin-no-description = （无描述）
-cli-plugin-install-resolving = 正在从插件注册表解析 '{$source}'...
-cli-plugin-installed-from = 已从 {$source} 安装插件
-cli-plugin-installed-name-version = 已安装插件 {$name} v{$version}
-cli-plugin-config-entry-seeded = 已为 '{$name}' 创建 [[plugins.entries]]。使用 `zeroclaw config set plugins.entries.{$name}.config.<key>` 设置插件配置值。
-cli-plugin-config-entry-seed-skipped = 警告：已跳过为 '{$name}' 创建配置条目：磁盘上的 [plugins] 部分格式不正确。请修复它，添加带有 `name = "{$name}"` 的 [[plugins.entries]] 块，然后使用 `zeroclaw config set plugins.entries.{$name}.config.<key>` 设置值。
-cli-plugin-config-entry-seed-unaddressable = 警告：已跳过为 '{$name}' 创建配置条目：包含 '.' 的插件名称无法通过点分配置路径寻址（`config set` 会按 '.' 分割）。请手动向配置文件添加带有 `name = "{$name}"` 的 [[plugins.entries]] 块。
 cli-config-section-degraded = 警告：{$path} 中的配置部分 `{$section}` 格式不正确，本次运行已重置为默认值。该部分中的值不会生效。请运行 `zeroclaw config migrate` 查看解析错误，然后修复文件。
-cli-plugin-removed = 已移除插件“{$name}”。
-cli-plugin-not-found = 未找到插件“{$name}”。
-cli-plugin-legacy-detected = 注意：位于旧位置（{$path}）的插件未被代理加载。请运行 `zeroclaw plugin migrate` 将其移动到 {$target}。
-cli-plugin-migrated = 已将 {$count} 个插件从 {$path} 移动到 {$target}。
-cli-plugin-migrate-none = 没有需要迁移的内容。
 cli-estop-resume-done = 急停恢复已完成。
 cli-estop-engaged = 急停已启用。
 cli-estop-status = 急停状态：
@@ -729,12 +707,6 @@ cli-config-secret-unset = {$path} 未设置（加密密钥）
 cli-config-updated = {$path} 已更新。
 cli-config-review-hint = 运行 `zeroclaw config list` 进行查看，然后设置必填字段。
 cli-config-backed-up = 已备份至 {$path}
-cli-plugin-name-version = 插件：{$name} v{$version}
-cli-plugin-description = 描述：{$desc}
-cli-plugin-capabilities = 功能：{$v}
-cli-plugin-permissions = 权限：{$v}
-cli-plugin-wasm = WASM：{$path}
-cli-plugin-wasm-none = WASM：（仅技能插件）
 cli-estop-domains-none = {"  "}domain_blocks:  （无）
 cli-estop-domains = {"  "}domain_blocks:  {$v}
 cli-estop-tools-none = {"  "}tool_freeze:    （无）

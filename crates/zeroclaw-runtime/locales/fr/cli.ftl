@@ -298,11 +298,6 @@ cli-skills-install-suggestion =
 
     Capacité correspondante : {$matched}
     Étape suivante : Exécutez `{$install_command}` pour l'installer.
-cli-plugin-install-suggestion =
-    Il semble que cette requête nécessite le plugin `{$name}`, mais il n'est pas installé.
-
-    Capacité correspondante : {$matched}
-    Étape suivante : Exécutez `{$install_command}` pour l'installer.
 cli-completions-long-about =
     Génère les scripts de complétion de shell pour `zeroclaw`.
 
@@ -701,24 +696,7 @@ cli-desktop-blurb2 = se connecte à la même passerelle que la CLI.
 cli-config-all-configured = Toutes les sections sont déjà configurées.
 cli-config-schema-current = La configuration est déjà à la version actuelle du schéma.
 cli-config-applied-ops = {$count} opération(s) appliquée(s) :
-cli-plugins-none = Aucun plugin installé.
-cli-plugins-installed = Plugins installés :
-cli-plugin-search-none = Aucun plugin ne correspond à '{$query}'.
-cli-plugin-search-results = Plugins correspondant à '{$query}' ({$count}) :
-cli-plugin-search-result = {$name} v{$version} — {$description}
-cli-plugin-no-description = (aucune description)
-cli-plugin-install-resolving = Résolution de '{$source}' depuis le registre de plugins...
-cli-plugin-installed-from = Plugin installé depuis {$source}
-cli-plugin-installed-name-version = Plugin {$name} v{$version} installé
-cli-plugin-config-entry-seeded = [[plugins.entries]] initialisé pour '{$name}'. Définissez les valeurs de configuration du plugin avec `zeroclaw config set plugins.entries.{$name}.config.<key>`.
-cli-plugin-config-entry-seed-skipped = avertissement : initialisation de l'entrée de configuration ignorée pour '{$name}' : la section [plugins] sur disque est mal formée. Réparez-la, ajoutez un bloc [[plugins.entries]] avec `name = "{$name}"`, puis définissez les valeurs avec `zeroclaw config set plugins.entries.{$name}.config.<key>`.
-cli-plugin-config-entry-seed-unaddressable = avertissement : initialisation de l'entrée de configuration ignorée pour '{$name}' : les noms de plugin contenant '.' ne peuvent pas être adressés par des chemins de configuration pointés (`config set` découpe sur '.'). Ajoutez manuellement un bloc [[plugins.entries]] avec `name = "{$name}"` au fichier de configuration.
 cli-config-section-degraded = avertissement : la section de configuration `{$section}` dans {$path} est mal formée et a été réinitialisée aux valeurs par défaut pour cette exécution. Les valeurs de cette section NE sont PAS appliquées. Exécutez `zeroclaw config migrate` pour voir l'erreur d'analyse, puis réparez le fichier.
-cli-plugin-removed = Plugin « {$name} » supprimé.
-cli-plugin-not-found = Plugin « {$name} » introuvable.
-cli-plugin-legacy-detected = Remarque : les plugins situés à un emplacement hérité ({$path}) ne sont pas chargés par l'agent. Exécutez `zeroclaw plugin migrate` pour les déplacer vers {$target}.
-cli-plugin-migrated = {$count} plugin(s) déplacé(s) de {$path} vers {$target}.
-cli-plugin-migrate-none = Rien à migrer.
 cli-estop-resume-done = Reprise après arrêt d'urgence terminée.
 cli-estop-engaged = Arrêt d'urgence engagé.
 cli-estop-status = État de l'arrêt d'urgence :
@@ -735,12 +713,6 @@ cli-config-secret-unset = {$path} n'est pas défini (secret chiffré)
 cli-config-updated = {$path} mis à jour.
 cli-config-review-hint = Exécutez `zeroclaw config list` pour vérifier, puis définissez les champs requis.
 cli-config-backed-up = Sauvegardé vers { $path }
-cli-plugin-name-version = Plugin : { $name } v{ $version }
-cli-plugin-description = Description : { $desc }
-cli-plugin-capabilities = Capacités : { $v }
-cli-plugin-permissions = Permissions : { $v }
-cli-plugin-wasm = WASM : { $path }
-cli-plugin-wasm-none = WASM : (plugin compétence uniquement)
 cli-estop-domains-none = {"  "}domain_blocks:  (aucun)
 cli-estop-domains = {"  "}domain_blocks:  { $v }
 cli-estop-tools-none = {"  "}tool_freeze:    (aucun)

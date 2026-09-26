@@ -355,12 +355,6 @@ cli-skills-install-suggestion =
     Matched capability: {$matched}
     Next: Run `{$install_command}` to install it.
 
-cli-plugin-install-suggestion =
-    It looks like this request needs the `{$name}` plugin, but it is not installed.
-
-    Matched capability: {$matched}
-    Next: Run `{$install_command}` to install it.
-
 cli-completions-long-about =
     Generate shell completion scripts for `zeroclaw`.
 
@@ -810,24 +804,7 @@ cli-desktop-blurb2 = connects to the same gateway as the CLI.
 cli-config-all-configured = All sections already configured.
 cli-config-schema-current = Config already at current schema version.
 cli-config-applied-ops = Applied {$count} operation(s):
-cli-plugins-none = No plugins installed.
-cli-plugins-installed = Installed plugins:
-cli-plugin-search-none = No plugins matching '{$query}'.
-cli-plugin-search-results = Plugins matching '{$query}' ({$count}):
-cli-plugin-search-result =   {$name} v{$version} — {$description}
-cli-plugin-no-description = (no description)
-cli-plugin-install-resolving = Resolving '{$source}' from plugin registry...
-cli-plugin-installed-from = Plugin installed from {$source}
-cli-plugin-installed-name-version = Installed plugin {$name} v{$version}
-cli-plugin-config-entry-seeded = Seeded [[plugins.entries]] for '{$name}'. Set plugin config values with `zeroclaw config set plugins.entries.{$name}.config.<key>`.
-cli-plugin-config-entry-seed-skipped = warning: skipped seeding the config entry for '{$name}': the [plugins] section on disk is malformed. Repair it, add a [[plugins.entries]] block with `name = "{$name}"`, then set values with `zeroclaw config set plugins.entries.{$name}.config.<key>`.
-cli-plugin-config-entry-seed-unaddressable = warning: skipped seeding the config entry for '{$name}': plugin names containing '.' cannot be addressed by dotted config paths (`config set` splits on '.'). Add a [[plugins.entries]] block with `name = "{$name}"` to the config file by hand.
 cli-config-section-degraded = warning: config section `{$section}` in {$path} is malformed and was reset to defaults for this run. Values in that section are NOT in effect. Run `zeroclaw config migrate` to see the parse error, then repair the file.
-cli-plugin-removed = Plugin '{$name}' removed.
-cli-plugin-not-found = Plugin '{$name}' not found.
-cli-plugin-legacy-detected = Note: plugins in a legacy location ({$path}) are not loaded by the agent — run `zeroclaw plugin migrate` to move them into {$target}.
-cli-plugin-migrated = Moved {$count} plugin(s) from {$path} to {$target}.
-cli-plugin-migrate-none = Nothing to migrate.
 cli-estop-resume-done = Estop resume completed.
 cli-estop-engaged = Estop engaged.
 cli-estop-status = Estop status:
@@ -846,12 +823,6 @@ cli-config-secret-unset = {$path} is not set (encrypted secret)
 cli-config-updated = {$path} updated.
 cli-config-review-hint = Run `zeroclaw config list` to review, then set required fields.
 cli-config-backed-up = Backed up to {$path}
-cli-plugin-name-version = Plugin: {$name} v{$version}
-cli-plugin-description = Description: {$desc}
-cli-plugin-capabilities = Capabilities: {$v}
-cli-plugin-permissions = Permissions: {$v}
-cli-plugin-wasm = WASM: {$path}
-cli-plugin-wasm-none = WASM: (skill-only plugin)
 cli-estop-domains-none = {"  "}domain_blocks:  (none)
 cli-estop-domains = {"  "}domain_blocks:  {$v}
 cli-estop-tools-none = {"  "}tool_freeze:    (none)

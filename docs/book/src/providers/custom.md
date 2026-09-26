@@ -189,4 +189,4 @@ from the request body entirely and the backend picks its own default. Only set
 - [Overview](./overview.md): provider model and how per-agent dispatch works
 - [Configuration](./configuration.md): full `[providers.*]` schema, Azure typed config, regional and OAuth variants
 - [Catalog](./catalog.md): every canonical slot with a worked TOML example
-- [Developing → Plugin protocol](../developing/plugin-protocol.md): if a plugin works better than a first-class crate
+- [MCP](../tools/mcp.md): if an external MCP server works better than a first-class crate

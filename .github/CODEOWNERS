@@ -101,12 +101,9 @@
 /src/channels/**             @Audacity88 @JordanTheJet @Nillth
 
 # ---------------------------------------------------------------------------
-# Skills, plugins (per Jordan's suggested patch on PR #6537)
+# Skills (per Jordan's suggested patch on PR #6537)
 # ---------------------------------------------------------------------------
-/crates/zeroclaw-plugins/**                @JordanTheJet @WareWolf-MoonWall @Audacity88
 /crates/zeroclaw-runtime/src/skills/**     @JordanTheJet @WareWolf-MoonWall @Audacity88
-/plugins/**                                @JordanTheJet @WareWolf-MoonWall @Audacity88
-/src/plugins/**                            @JordanTheJet @WareWolf-MoonWall @Audacity88
 /src/skills/**                             @JordanTheJet @WareWolf-MoonWall @Audacity88
 /.claude/skills/**                         @JordanTheJet @WareWolf-MoonWall @Audacity88
 

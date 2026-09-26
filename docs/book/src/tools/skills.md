@@ -16,7 +16,7 @@ Use bundles for skills an agent should load during runtime. A bundle is configur
 
 For hand-authored local skills, use `SKILL.md` or `SKILL.toml`. Use `SKILL.md` for instructions plus simple metadata. Use `SKILL.toml` when the skill needs structured prompts or tool definitions. ZeroClaw also understands `manifest.toml` for registry-style skill packages, but `SKILL.md` and `SKILL.toml` are the recommended local authoring formats.
 
-To distribute a set of skills as a signed, versioned, installable package, see [Skill bundles](./skill-bundles.md).
+To share one set of skills across agents, point a `[skill_bundles.<alias>]` entry at a directory of skills and assign the bundle to the agents that need it.
 
 ## Create a Markdown skill
 

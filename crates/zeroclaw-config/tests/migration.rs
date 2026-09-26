@@ -9,6 +9,7 @@ use zeroclaw_config::migration::{
 use zeroclaw_config::schema::Config;
 use zeroclaw_config::schema::v2::V2Config;
 use zeroclaw_config::secrets::SecretStore;
+use zeroclaw_config::validation_warnings::ValidationWarning;
 
 const V1_FIXTURE: &str = include_str!("../fixtures/v1.toml");
 
@@ -1941,6 +1942,66 @@ key_path = "/etc/zeroclaw/key.pem"
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert_eq!(warnings[0].code, "wss_transport_removed");
     assert_eq!(warnings[0].path, "wss");
+}
+
+/// Insert `section` (a TOML table body) at dotted `path` into a freshly
+/// generated current-schema config, load it, and return the raw text plus
+/// the tombstone warnings it produces.
+fn load_with_retired_section(path: &str, body: &str) -> (String, Vec<ValidationWarning>) {
+    let mut value: toml::Value = toml::from_str(
+        &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
+            .expect("generate current succeeds"),
+    )
+    .expect("generated V3 parses");
+    let mut table = value.as_table_mut().unwrap();
+    let segments: Vec<&str> = path.split('.').collect();
+    let (last, parents) = segments.split_last().unwrap();
+    for segment in parents {
+        table = table
+            .entry(segment.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .unwrap();
+    }
+    table.insert((*last).to_string(), toml::from_str(body).unwrap());
+    let raw = toml::to_string(&value).unwrap();
+
+    let cfg = migrate_to_current(&raw)
+        .unwrap_or_else(|e| panic!("retired [{path}] section must not fail load: {e}"));
+    cfg.validate()
+        .unwrap_or_else(|e| panic!("retired [{path}] section must not fail validation: {e}"));
+    let mut warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+    warnings.extend(zeroclaw_config::validation_warnings::retired_field_tombstones(&raw));
+    (raw, warnings)
+}
+
+#[test]
+fn v3_retired_plugins_section_loads_with_tombstone_warning() {
+    // The WASM plugin host was retired (extensions go through MCP). A V3
+    // config still carrying `[plugins]` must keep loading with a warning.
+    let (_, warnings) = load_with_retired_section(
+        "plugins",
+        r#"
+enabled = true
+plugins_dir = "~/.zeroclaw/plugins"
+auto_discover = true
+max_plugins = 5
+
+[security]
+signature_mode = "strict"
+trusted_publisher_keys = ["00"]
+
+[limits]
+call_fuel = 1000
+
+[[entries]]
+name = "weather"
+config = { api_key = "k" }
+"#,
+    );
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, "wasm_plugins_removed");
+    assert_eq!(warnings[0].path, "plugins");
 }
 
 #[test]

@@ -41,7 +41,6 @@ fn email_factory_respects_compile_feature_and_channel_activation() {
         let tmp = TempDir::new().unwrap();
         let mut cfg = test_config(&tmp);
         cfg.composition = Some(zeroclaw_config::composition::Composition::Full);
-        cfg.plugins.enabled = false;
         cfg.knowledge.enabled = false;
         if let Some(enabled) = enabled {
             cfg.channels.email.insert(
@@ -99,101 +98,6 @@ fn default_tools_has_expected_count() {
     let security = Arc::new(SecurityPolicy::default());
     let tools = default_tools(security);
     assert_eq!(tools.len(), 6);
-}
-
-#[cfg(feature = "plugins-wasm")]
-#[test]
-fn plugin_tool_names_cannot_shadow_native_reserved_or_prior_plugin_tools() {
-    let mut registered_names =
-        std::collections::HashSet::from(["shell".to_string(), PipelineTool::NAME.to_string()]);
-    let accepted = ["shell", PipelineTool::NAME, "novel-tool", "novel-tool"]
-        .into_iter()
-        .filter(|name| claim_plugin_tool_name(&mut registered_names, name))
-        .collect::<Vec<_>>();
-
-    assert_eq!(accepted, vec!["novel-tool"]);
-    assert_eq!(
-        registered_names,
-        std::collections::HashSet::from([
-            "shell".to_string(),
-            PipelineTool::NAME.to_string(),
-            "novel-tool".to_string(),
-        ])
-    );
-}
-
-#[cfg(feature = "plugins-wasm")]
-#[test]
-fn retired_tool_names_stay_reserved_from_plugin_claims() {
-    let mut registered_names = RETIRED_OPERATOR_TOOL_NAMES
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<std::collections::HashSet<_>>();
-    for name in RETIRED_OPERATOR_TOOL_NAMES {
-        assert!(
-            !claim_plugin_tool_name(&mut registered_names, name),
-            "a plugin reclaimed retired tool name {name}"
-        );
-    }
-}
-
-#[cfg(feature = "plugins-wasm")]
-#[test]
-fn component_with_failed_metadata_probe_is_not_registered() {
-    let tmp = TempDir::new().unwrap();
-    let package_dir = tmp.path().join("plugins").join("metadata-probe");
-    std::fs::create_dir_all(&package_dir).unwrap();
-    std::fs::write(
-        package_dir.join("manifest.toml"),
-        "name = \"metadata-probe\"\nversion = \"0.1.0\"\nwasm_path = \"plugin.wasm\"\ncapabilities = [\"tool\"]\n",
-    )
-    .unwrap();
-    std::fs::write(package_dir.join("plugin.wasm"), b"not a component").unwrap();
-
-    let mut config = test_config(&tmp);
-    config.plugins.enabled = true;
-    config.plugins.plugins_dir = tmp.path().join("plugins").display().to_string();
-    let security = Arc::new(SecurityPolicy::default());
-    let memory: Arc<dyn Memory> = Arc::from(
-        zeroclaw_memory::create_memory(
-            &MemoryConfig {
-                backend: "markdown".into(),
-                ..MemoryConfig::default()
-            },
-            tmp.path(),
-            None,
-        )
-        .unwrap(),
-    );
-    let browser = BrowserConfig {
-        enabled: false,
-        ..BrowserConfig::default()
-    };
-
-    let tools = all_tools(
-        Arc::new(config.clone()),
-        &security,
-        &zeroclaw_config::schema::RiskProfileConfig::default(),
-        "test-agent",
-        memory,
-        None,
-        None,
-        &browser,
-        &zeroclaw_config::schema::HttpRequestConfig::default(),
-        &zeroclaw_config::schema::WebFetchConfig::default(),
-        tmp.path(),
-        &HashMap::new(),
-        None,
-        &config,
-        false,
-        None,
-    )
-    .tools;
-
-    assert!(
-        tools.iter().all(|tool| tool.name() != "metadata-probe"),
-        "a component whose required metadata probe fails must not receive manifest fallback metadata"
-    );
 }
 
 /// Discrimination guard for the retired SOP run side: the
