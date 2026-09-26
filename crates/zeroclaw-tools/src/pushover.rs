@@ -277,15 +277,6 @@ mod tests {
     }
 
     #[test]
-    fn pushover_tool_description() {
-        let tool = PushoverTool::new(
-            test_security(AutonomyLevel::Full, 100),
-            PathBuf::from("/tmp"),
-        );
-        assert!(!tool.description().is_empty());
-    }
-
-    #[test]
     fn pushover_tool_has_parameters_schema() {
         let tool = PushoverTool::new(
             test_security(AutonomyLevel::Full, 100),

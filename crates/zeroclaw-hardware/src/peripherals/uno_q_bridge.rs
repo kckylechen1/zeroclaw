@@ -207,15 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn gpio_read_tool_description_mentions_uno_q() {
-        let tool = UnoQGpioReadTool;
-        assert!(
-            tool.description().contains("Uno Q"),
-            "description should mention Uno Q"
-        );
-    }
-
-    #[test]
     fn gpio_read_tool_schema_requires_pin() {
         let tool = UnoQGpioReadTool;
         let schema = tool.parameters_schema();
@@ -263,15 +254,6 @@ mod tests {
     fn gpio_write_tool_name() {
         let tool = UnoQGpioWriteTool;
         assert_eq!(tool.name(), "gpio_write");
-    }
-
-    #[test]
-    fn gpio_write_tool_description_mentions_uno_q() {
-        let tool = UnoQGpioWriteTool;
-        assert!(
-            tool.description().contains("Uno Q"),
-            "description should mention Uno Q"
-        );
     }
 
     #[test]

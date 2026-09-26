@@ -1867,12 +1867,6 @@ mod tests {
     }
 
     #[test]
-    fn description_mentions_connected_accounts() {
-        let tool = ComposioTool::new("test-key", None, test_security());
-        assert!(tool.description().contains("connected_accounts"));
-    }
-
-    #[test]
     fn build_execute_action_v3_request_drops_blank_optional_fields() {
         let (url, body) = ComposioTool::build_execute_action_v3_request(
             "github-list-repos",

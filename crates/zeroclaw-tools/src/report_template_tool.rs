@@ -128,12 +128,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_has_description() {
-        let tool = ReportTemplateTool::new();
-        assert!(!tool.description().is_empty());
-    }
-
-    #[tokio::test]
     async fn tool_has_parameters_schema() {
         let tool = ReportTemplateTool::new();
         let schema = tool.parameters_schema();

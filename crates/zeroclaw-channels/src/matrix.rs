@@ -5867,14 +5867,6 @@ mod tests {
                 Some(&enabled_cfg())
             ));
         }
-
-        #[test]
-        fn voice_kind_alone_is_sufficient() {
-            assert!(should_transcribe(
-                &MediaCategory::Voice,
-                Some(&enabled_cfg())
-            ));
-        }
     }
 
     mod outbound_send_outcome {

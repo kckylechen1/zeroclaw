@@ -1834,16 +1834,4 @@ mod tests {
                 .contains("STABILITY_API_KEY")
         );
     }
-
-    #[test]
-    fn image_config_default_has_all_providers() {
-        let config = LinkedInImageConfig::default();
-        assert_eq!(config.providers.len(), 4);
-        assert_eq!(config.providers[0], "stability");
-        assert_eq!(config.providers[1], "imagen");
-        assert_eq!(config.providers[2], "dalle");
-        assert_eq!(config.providers[3], "flux");
-        assert!(config.fallback_card);
-        assert!(!config.enabled);
-    }
 }

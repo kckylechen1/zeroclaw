@@ -460,11 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn description_is_non_empty() {
-        assert!(!make_tool().description().is_empty());
-    }
-
-    #[test]
     fn parameters_schema_is_valid_object() {
         let schema = make_tool().parameters_schema();
         assert_eq!(schema["type"], "object");

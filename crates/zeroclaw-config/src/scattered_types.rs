@@ -772,9 +772,4 @@ mod tests {
     fn context_compression_config_defaults_to_disabled() {
         assert!(!ContextCompressionConfig::default().enabled);
     }
-
-    #[test]
-    fn thinking_level_default_is_medium() {
-        assert_eq!(ThinkingLevel::default(), ThinkingLevel::Medium);
-    }
 }

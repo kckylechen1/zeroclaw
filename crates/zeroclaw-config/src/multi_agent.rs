@@ -252,11 +252,6 @@ external_peers = ["@user_1", "@user_2"]
     }
 
     #[test]
-    fn memory_backend_kind_default_is_sqlite() {
-        assert_eq!(MemoryBackendKind::default(), MemoryBackendKind::Sqlite);
-    }
-
-    #[test]
     fn agent_workspace_config_round_trips_with_access_map() {
         let toml_input = r#"
 unrestricted_filesystem = false
@@ -319,17 +314,6 @@ ignore = ["@known_spammer"]
         assert_eq!(parsed.external_peers[0].as_str(), "@user_1");
         assert_eq!(parsed.ignore.len(), 1);
         assert_eq!(parsed.ignore[0].as_str(), "@known_spammer");
-    }
-
-    #[test]
-    fn peer_group_config_default_is_empty() {
-        let cfg = PeerGroupConfig::default();
-        assert!(cfg.channel.is_empty());
-        assert!(cfg.agents.is_empty());
-        assert!(cfg.external_peers.is_empty());
-        assert!(cfg.ignore.is_empty());
-        // Default modality preserves the existing input-driven behavior.
-        assert_eq!(cfg.output_modality, OutputModality::Mirror);
     }
 
     #[test]

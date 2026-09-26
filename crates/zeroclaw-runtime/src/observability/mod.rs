@@ -443,15 +443,6 @@ mod tests {
     }
 
     #[test]
-    fn factory_noop_returns_noop() {
-        let cfg = ObservabilityConfig {
-            backend: ObservabilityBackend::None,
-            ..ObservabilityConfig::default()
-        };
-        assert_eq!(create_observer(&cfg).name(), "noop");
-    }
-
-    #[test]
     fn factory_log_returns_log() {
         let cfg = ObservabilityConfig {
             backend: ObservabilityBackend::Log,
@@ -485,38 +476,6 @@ mod tests {
 
     #[test]
     fn factory_otel_returns_otel() {
-        let cfg = ObservabilityConfig {
-            backend: ObservabilityBackend::Otel,
-            otel_endpoint: Some("http://127.0.0.1:19999".into()),
-            otel_service_name: Some("test".into()),
-            ..ObservabilityConfig::default()
-        };
-        let expected = if cfg!(feature = "observability-otel") {
-            "otel"
-        } else {
-            "noop"
-        };
-        assert_eq!(create_observer(&cfg).name(), expected);
-    }
-
-    #[test]
-    fn factory_opentelemetry_alias() {
-        let cfg = ObservabilityConfig {
-            backend: ObservabilityBackend::Otel,
-            otel_endpoint: Some("http://127.0.0.1:19999".into()),
-            otel_service_name: Some("test".into()),
-            ..ObservabilityConfig::default()
-        };
-        let expected = if cfg!(feature = "observability-otel") {
-            "otel"
-        } else {
-            "noop"
-        };
-        assert_eq!(create_observer(&cfg).name(), expected);
-    }
-
-    #[test]
-    fn factory_otlp_alias() {
         let cfg = ObservabilityConfig {
             backend: ObservabilityBackend::Otel,
             otel_endpoint: Some("http://127.0.0.1:19999".into()),

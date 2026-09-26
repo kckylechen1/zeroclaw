@@ -274,13 +274,6 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_tool_description() {
-        let tool = ScreenshotTool::new(test_security());
-        assert!(!tool.description().is_empty());
-        assert!(tool.description().contains("screenshot"));
-    }
-
-    #[test]
     fn screenshot_tool_schema() {
         let tool = ScreenshotTool::new(test_security());
         let schema = tool.parameters_schema();

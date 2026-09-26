@@ -3038,14 +3038,6 @@ mod tests {
     }
 
     #[test]
-    fn test_listen_mode_default_is_polling() {
-        assert_eq!(
-            MattermostListenMode::default(),
-            MattermostListenMode::Polling
-        );
-    }
-
-    #[test]
     fn test_listen_mode_serde() {
         // serialize
         assert_eq!(

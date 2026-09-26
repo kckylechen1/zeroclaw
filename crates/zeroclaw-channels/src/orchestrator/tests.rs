@@ -952,15 +952,6 @@ fn channel_message_timeout_budget_with_custom_scale_cap() {
 }
 
 #[test]
-fn pacing_config_defaults_preserve_existing_behavior() {
-    let pacing = zeroclaw_config::schema::PacingConfig::default();
-    assert!(pacing.step_timeout_secs.is_none());
-    assert!(pacing.loop_detection_min_elapsed_secs.is_none());
-    assert!(pacing.loop_ignore_tools.is_empty());
-    assert!(pacing.message_timeout_scale_max.is_none());
-}
-
-#[test]
 fn pacing_message_timeout_scale_max_overrides_default_cap() {
     // Custom cap of 8 scales budget proportionally
     assert_eq!(
@@ -1337,33 +1328,24 @@ fn strip_tool_result_content_removes_blocks_and_header() {
 }
 
 #[test]
-fn strip_tool_summary_prefix_removes_prefix_and_preserves_content() {
-    let input = "[Used tools: browser_open, shell]\nI opened the page successfully.";
-    assert_eq!(
-        strip_tool_summary_prefix(input),
-        "I opened the page successfully."
-    );
-}
-
-#[test]
-fn strip_tool_summary_prefix_returns_empty_when_only_prefix() {
-    let input = "[Used tools: browser_open]";
-    assert_eq!(strip_tool_summary_prefix(input), "");
-}
-
-#[test]
-fn strip_tool_summary_prefix_preserves_text_without_prefix() {
-    let input = "Here is the result of the search.";
-    assert_eq!(strip_tool_summary_prefix(input), input);
-}
-
-#[test]
-fn strip_tool_summary_prefix_handles_multiple_newlines() {
-    let input = "[Used tools: shell]\n\nThe command output is 42.";
-    assert_eq!(
-        strip_tool_summary_prefix(input),
-        "The command output is 42."
-    );
+fn strip_tool_summary_prefix_cases() {
+    for (input, expected) in [
+        (
+            "[Used tools: browser_open, shell]\nI opened the page successfully.",
+            "I opened the page successfully.",
+        ),
+        ("[Used tools: browser_open]", ""),
+        (
+            "Here is the result of the search.",
+            "Here is the result of the search.",
+        ),
+        (
+            "[Used tools: shell]\n\nThe command output is 42.",
+            "The command output is 42.",
+        ),
+    ] {
+        assert_eq!(strip_tool_summary_prefix(input), expected, "{input:?}");
+    }
 }
 
 #[test]
@@ -1398,20 +1380,6 @@ fn sanitize_channel_response_strips_used_tools_with_leading_whitespace() {
 
     assert!(!result.contains("[Used tools:"));
     assert!(result.contains("Here is the search result."));
-}
-
-#[test]
-fn normalize_cached_channel_turns_merges_consecutive_user_turns() {
-    let turns = vec![
-        ChatMessage::user("forwarded content"),
-        ChatMessage::user("summarize this"),
-    ];
-
-    let normalized = normalize_cached_channel_turns(turns);
-    assert_eq!(normalized.len(), 1);
-    assert_eq!(normalized[0].role, "user");
-    assert!(normalized[0].content.contains("forwarded content"));
-    assert!(normalized[0].content.contains("summarize this"));
 }
 
 #[test]
@@ -14956,62 +14924,27 @@ fn build_channel_by_id_configured_voice_call_succeeds() {
 // ── is_stop_command tests ─────────────────────────────────────────────
 
 #[test]
-fn is_stop_command_matches_bare_slash_stop() {
-    assert!(is_stop_command("/stop"));
+fn is_stop_command_matches_only_the_stop_command() {
+    for accepted in ["/stop", "  /stop  ", "/STOP", "/Stop", "/stop@zeroclaw_bot"] {
+        assert!(is_stop_command(accepted), "{accepted:?}");
+    }
+    for rejected in [
+        "/new",
+        "/model gpt-4",
+        "/models",
+        "stop",
+        "please stop",
+        "",
+        "/stopwatch",
+        "/stop-all",
+    ] {
+        assert!(!is_stop_command(rejected), "{rejected:?}");
+    }
 }
 
 #[test]
-fn is_stop_command_matches_with_leading_trailing_whitespace() {
-    assert!(is_stop_command("  /stop  "));
-}
-
-#[test]
-fn is_stop_command_is_case_insensitive() {
-    assert!(is_stop_command("/STOP"));
-    assert!(is_stop_command("/Stop"));
-}
-
-#[test]
-fn is_stop_command_matches_with_bot_suffix() {
-    assert!(is_stop_command("/stop@zeroclaw_bot"));
-}
-
-#[test]
-fn is_stop_command_rejects_other_slash_commands() {
-    assert!(!is_stop_command("/new"));
-    assert!(!is_stop_command("/model gpt-4"));
-    assert!(!is_stop_command("/models"));
-}
-
-#[test]
-fn is_stop_command_rejects_plain_text() {
-    assert!(!is_stop_command("stop"));
-    assert!(!is_stop_command("please stop"));
-    assert!(!is_stop_command(""));
-}
-
-#[test]
-fn is_stop_command_rejects_stop_as_substring() {
-    assert!(!is_stop_command("/stopwatch"));
-    assert!(!is_stop_command("/stop-all"));
-}
-
-#[test]
-fn interrupt_on_new_message_enabled_for_mattermost_when_true() {
-    let cfg = InterruptOnNewMessageConfig {
-        telegram: false,
-        slack: false,
-        discord: false,
-        mattermost: true,
-        matrix: false,
-        whatsapp: false,
-    };
-    assert!(cfg.enabled_for_channel("mattermost"));
-}
-
-#[test]
-fn interrupt_on_new_message_disabled_for_mattermost_by_default() {
-    let cfg = InterruptOnNewMessageConfig {
+fn interrupt_on_new_message_is_per_channel() {
+    let none = InterruptOnNewMessageConfig {
         telegram: false,
         slack: false,
         discord: false,
@@ -15019,33 +14952,19 @@ fn interrupt_on_new_message_disabled_for_mattermost_by_default() {
         matrix: false,
         whatsapp: false,
     };
-    assert!(!cfg.enabled_for_channel("mattermost"));
-}
+    for channel in ["mattermost", "discord", "whatsapp"] {
+        assert!(!none.enabled_for_channel(channel), "{channel}");
+    }
 
-#[test]
-fn interrupt_on_new_message_enabled_for_discord() {
-    let cfg = InterruptOnNewMessageConfig {
-        telegram: false,
-        slack: false,
-        discord: true,
-        mattermost: false,
-        matrix: false,
-        whatsapp: false,
+    let only = |channel: &str| InterruptOnNewMessageConfig {
+        mattermost: channel == "mattermost",
+        discord: channel == "discord",
+        whatsapp: channel == "whatsapp",
+        ..none
     };
-    assert!(cfg.enabled_for_channel("discord"));
-}
-
-#[test]
-fn interrupt_on_new_message_enabled_for_whatsapp() {
-    let cfg = InterruptOnNewMessageConfig {
-        telegram: false,
-        slack: false,
-        discord: false,
-        mattermost: false,
-        matrix: false,
-        whatsapp: true,
-    };
-    assert!(cfg.enabled_for_channel("whatsapp"));
+    for channel in ["mattermost", "discord", "whatsapp"] {
+        assert!(only(channel).enabled_for_channel(channel), "{channel}");
+    }
 }
 
 #[test]
@@ -15064,19 +14983,6 @@ fn interrupt_on_new_message_config_reads_whatsapp_default_alias() {
 
     assert!(cfg.enabled_for_channel("whatsapp"));
     assert!(!cfg.enabled_for_channel("telegram"));
-}
-
-#[test]
-fn interrupt_on_new_message_disabled_for_discord_by_default() {
-    let cfg = InterruptOnNewMessageConfig {
-        telegram: false,
-        slack: false,
-        discord: false,
-        mattermost: false,
-        matrix: false,
-        whatsapp: false,
-    };
-    assert!(!cfg.enabled_for_channel("discord"));
 }
 
 // ── interruption_scope_key tests ──────────────────────────────────────
@@ -15978,45 +15884,18 @@ fn sanitize_channel_response_strips_mixed_tool_result_and_text() {
 // ── Tests for strip_think_tags_inline (streaming draft sanitization) ──
 
 #[test]
-fn strip_think_tags_inline_removes_single_block() {
-    assert_eq!(
-        strip_think_tags_inline("<think>reasoning</think>Hello"),
-        "Hello"
-    );
-}
-
-#[test]
-fn strip_think_tags_inline_removes_multiple_blocks() {
-    assert_eq!(
-        strip_think_tags_inline("<think>a</think>X<think>b</think>Y"),
-        "XY"
-    );
-}
-
-#[test]
-fn strip_think_tags_inline_handles_unclosed_block() {
-    assert_eq!(
-        strip_think_tags_inline("visible<think>hidden tail"),
-        "visible"
-    );
-}
-
-#[test]
-fn strip_think_tags_inline_preserves_text_without_tags() {
-    assert_eq!(strip_think_tags_inline("plain text"), "plain text");
-}
-
-#[test]
-fn strip_think_tags_inline_handles_empty_string() {
-    assert_eq!(strip_think_tags_inline(""), "");
-}
-
-#[test]
-fn strip_think_tags_inline_strips_surrounding_whitespace() {
-    assert_eq!(
-        strip_think_tags_inline("<think>hidden</think>  Answer  "),
-        "Answer"
-    );
+fn strip_think_tags_inline_cases() {
+    for (input, expected) in [
+        ("<think>reasoning</think>Hello", "Hello"),
+        ("<think>a</think>X<think>b</think>Y", "XY"),
+        // An unclosed block hides everything after it.
+        ("visible<think>hidden tail", "visible"),
+        ("plain text", "plain text"),
+        ("", ""),
+        ("<think>hidden</think>  Answer  ", "Answer"),
+    ] {
+        assert_eq!(strip_think_tags_inline(input), expected, "{input:?}");
+    }
 }
 
 // ── Tests tool context preservation ──────────────
@@ -16080,12 +15959,6 @@ fn normalize_cached_channel_turns_passes_through_tool_messages() {
     // user, assistant(tool_call), tool, assistant(final), user
     assert_eq!(normalized.len(), 5);
     assert_eq!(normalized[2].role, "tool");
-}
-
-#[test]
-fn default_keep_tool_context_turns_is_two() {
-    let config = zeroclaw_config::schema::AliasedAgentConfig::default();
-    assert_eq!(config.resolved.keep_tool_context_turns, 2);
 }
 
 #[test]

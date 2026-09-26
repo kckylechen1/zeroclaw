@@ -928,138 +928,72 @@ fn tool_call_function_arguments_prefers_nested_function_field() {
 // ----------------------------------------------------------
 
 #[test]
-fn chat_completions_url_standard_openai() {
-    // Standard OpenAI-compatible model_providers get /chat/completions appended
-    let p = make_model_provider("openai", "https://api.openai.com/v1", None);
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://api.openai.com/v1/chat/completions"
-    );
-}
-
-#[test]
-fn chat_completions_url_trailing_slash() {
-    // Trailing slash is stripped, then /chat/completions appended
-    let p = make_model_provider("test", "https://api.example.com/v1/", None);
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://api.example.com/v1/chat/completions"
-    );
-}
-
-#[test]
-fn chat_completions_url_volcengine_ark() {
-    // VolcEngine ARK uses custom path - should use as-is
-    let p = make_model_provider(
-        "volcengine",
-        "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
-        None,
-    );
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"
-    );
-}
-
-#[test]
-fn chat_completions_url_custom_full_endpoint() {
-    // Custom model_provider with full endpoint path
-    let p = make_model_provider(
-        "custom",
-        "https://my-api.example.com/v2/llm/chat/completions",
-        None,
-    );
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://my-api.example.com/v2/llm/chat/completions"
-    );
-}
-
-#[test]
-fn chat_completions_url_requires_exact_suffix_match() {
-    let p = make_model_provider(
-        "custom",
-        "https://my-api.example.com/v2/llm/chat/completions-proxy",
-        None,
-    );
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://my-api.example.com/v2/llm/chat/completions-proxy/chat/completions"
-    );
-}
-
-#[test]
-fn chat_completions_url_without_v1() {
-    // ModelProvider configured without /v1 in base URL
-    let p = make_model_provider("test", "https://api.example.com", None);
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://api.example.com/chat/completions"
-    );
-}
-
-#[test]
-fn chat_completions_url_base_with_v1() {
-    // ModelProvider configured with /v1 in base URL
-    let p = make_model_provider("test", "https://api.example.com/v1", None);
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://api.example.com/v1/chat/completions"
-    );
-}
-
-// ----------------------------------------------------------
-// ModelProvider-specific endpoint tests
-// ----------------------------------------------------------
-
-#[test]
-fn chat_completions_url_zai() {
-    // Z.AI uses /api/paas/v4 base path
-    let p = make_model_provider("zai", "https://api.z.ai/api/paas/v4", None);
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://api.z.ai/api/paas/v4/chat/completions"
-    );
-}
-
-#[test]
-fn chat_completions_url_minimax() {
-    // MiniMax OpenAI-compatible endpoint requires /v1 base path.
-    let p = make_model_provider("minimax", "https://api.minimaxi.com/v1", None);
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://api.minimaxi.com/v1/chat/completions"
-    );
-}
-
-#[test]
-fn chat_completions_url_glm() {
-    // GLM (BigModel) uses /api/paas/v4 base path
-    let p = make_model_provider("glm", "https://open.bigmodel.cn/api/paas/v4", None);
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-    );
-}
-
-#[test]
-fn chat_completions_url_opencode() {
-    // OpenCode Zen uses /zen/v1 base path
-    let p = make_model_provider("opencode", "https://opencode.ai/zen/v1", None);
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://opencode.ai/zen/v1/chat/completions"
-    );
-}
-
-#[test]
-fn chat_completions_url_opencode_go() {
-    // OpenCode Go uses /zen/go/v1 base path
-    let p = make_model_provider("opencode-go", "https://opencode.ai/zen/go/v1", None);
-    assert_eq!(
-        p.chat_completions_url(),
-        "https://opencode.ai/zen/go/v1/chat/completions"
-    );
+fn chat_completions_url_appends_path_unless_base_is_full_endpoint() {
+    for (name, base, expected) in [
+        // Standard base URLs get /chat/completions appended.
+        (
+            "openai",
+            "https://api.openai.com/v1",
+            "https://api.openai.com/v1/chat/completions",
+        ),
+        // Trailing slash is stripped before appending.
+        (
+            "test",
+            "https://api.example.com/v1/",
+            "https://api.example.com/v1/chat/completions",
+        ),
+        (
+            "test",
+            "https://api.example.com",
+            "https://api.example.com/chat/completions",
+        ),
+        // A base that already is the full endpoint is used as-is.
+        (
+            "volcengine",
+            "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+            "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+        ),
+        (
+            "custom",
+            "https://my-api.example.com/v2/llm/chat/completions",
+            "https://my-api.example.com/v2/llm/chat/completions",
+        ),
+        // Only an exact suffix counts as a full endpoint.
+        (
+            "custom",
+            "https://my-api.example.com/v2/llm/chat/completions-proxy",
+            "https://my-api.example.com/v2/llm/chat/completions-proxy/chat/completions",
+        ),
+        // Provider-specific base paths.
+        (
+            "zai",
+            "https://api.z.ai/api/paas/v4",
+            "https://api.z.ai/api/paas/v4/chat/completions",
+        ),
+        (
+            "minimax",
+            "https://api.minimaxi.com/v1",
+            "https://api.minimaxi.com/v1/chat/completions",
+        ),
+        (
+            "glm",
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        ),
+        (
+            "opencode",
+            "https://opencode.ai/zen/v1",
+            "https://opencode.ai/zen/v1/chat/completions",
+        ),
+        (
+            "opencode-go",
+            "https://opencode.ai/zen/go/v1",
+            "https://opencode.ai/zen/go/v1/chat/completions",
+        ),
+    ] {
+        let p = make_model_provider(name, base, None);
+        assert_eq!(p.chat_completions_url(), expected, "{name}: {base}");
+    }
 }
 
 #[test]
@@ -3190,12 +3124,6 @@ fn timeout_secs_overrides_default() {
 }
 
 #[test]
-fn extra_headers_default_empty() {
-    let p = make_model_provider("test", "https://example.com", None);
-    assert!(p.extra_headers.is_empty());
-}
-
-#[test]
 fn extra_headers_sets_headers() {
     let mut headers = std::collections::HashMap::new();
     headers.insert("X-Title".to_string(), "zeroclaw".to_string());
@@ -3851,177 +3779,35 @@ fn public_model_listing_flag_can_be_set() {
 }
 
 #[test]
-fn token_count_u64_positive() {
-    assert_eq!(normalize_token_count_value(serde_json::json!(42)), Some(42));
-}
-
-#[test]
-fn token_count_u64_zero() {
-    assert_eq!(normalize_token_count_value(serde_json::json!(0)), Some(0));
-}
-
-#[test]
-fn token_count_large_u64() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(u64::MAX)),
-        Some(u64::MAX)
-    );
-}
-
-#[test]
-fn token_count_i64_positive() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(100i64)),
-        Some(100)
-    );
-}
-
-#[test]
-fn token_count_i64_negative() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(-1i64)),
-        None,
-        "negative token counts must be rejected"
-    );
-}
-
-#[test]
-fn token_count_f64_positive_integer() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(15.0)),
-        Some(15)
-    );
-}
-
-#[test]
-fn token_count_f64_fractional() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(3.7)),
-        Some(3),
-        "fractional floats floor toward zero"
-    );
-}
-
-#[test]
-fn token_count_f64_less_than_one() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(0.5)),
-        Some(0),
-        "fractional token < 1 counts as zero (avoids noise)"
-    );
-}
-
-#[test]
-fn token_count_f64_negative() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(-0.5)),
-        None,
-        "negative float token counts must be rejected"
-    );
-}
-
-#[test]
-fn token_count_f64_nan() {
-    let nan: f64 = f64::NAN;
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(nan)),
-        None,
-        "NaN must be rejected"
-    );
-}
-
-#[test]
-fn token_count_f64_infinity() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(f64::INFINITY)),
-        None,
-        "+Infinity must be rejected"
-    );
-}
-
-#[test]
-fn token_count_f64_neg_infinity() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(f64::NEG_INFINITY)),
-        None,
-        "-Infinity must be rejected"
-    );
-}
-
-#[test]
-fn token_count_f64_exceeds_u64_max() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(u64::MAX as f64 * 2.0)),
-        None,
-        "value > u64::MAX must be rejected"
-    );
-}
-
-#[test]
-fn token_count_string_integer() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!("15")),
-        Some(15)
-    );
-}
-
-#[test]
-fn token_count_string_float() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!("3.7")),
-        Some(3)
-    );
-}
-
-#[test]
-fn token_count_string_whitespace() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(" 20 ")),
-        Some(20)
-    );
-}
-
-#[test]
-fn token_count_string_negative() {
-    assert_eq!(normalize_token_count_value(serde_json::json!("-5")), None);
-}
-
-#[test]
-fn token_count_string_garbage() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!("not-a-number")),
-        None
-    );
-}
-
-#[test]
-fn token_count_null() {
-    assert_eq!(normalize_token_count_value(serde_json::Value::Null), None);
-}
-
-#[test]
-fn token_count_bool() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!(true)),
-        None,
-        "boolean must not be misinterpreted as token count"
-    );
-}
-
-#[test]
-fn token_count_array() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!([1, 2, 3])),
-        None
-    );
-}
-
-#[test]
-fn token_count_object() {
-    assert_eq!(
-        normalize_token_count_value(serde_json::json!({"count": 10})),
-        None
-    );
+fn normalize_token_count_value_accepts_only_non_negative_finite_counts() {
+    use serde_json::{Value, json};
+    let cases: Vec<(Value, Option<u64>, &str)> = vec![
+        (json!(42), Some(42), "u64"),
+        (json!(0), Some(0), "zero"),
+        (json!(u64::MAX), Some(u64::MAX), "u64::MAX"),
+        (json!(100i64), Some(100), "i64"),
+        (json!(-1i64), None, "negative token counts must be rejected"),
+        (json!(15.0), Some(15), "integral float"),
+        (json!(3.7), Some(3), "fractional floats floor toward zero"),
+        (json!(0.5), Some(0), "fractional token < 1 counts as zero"),
+        (json!(-0.5), None, "negative float must be rejected"),
+        (json!(f64::NAN), None, "NaN must be rejected"),
+        (json!(f64::INFINITY), None, "+Infinity must be rejected"),
+        (json!(f64::NEG_INFINITY), None, "-Infinity must be rejected"),
+        (json!(u64::MAX as f64 * 2.0), None, "value > u64::MAX"),
+        (json!("15"), Some(15), "string integer"),
+        (json!("3.7"), Some(3), "string float"),
+        (json!(" 20 "), Some(20), "string with whitespace"),
+        (json!("-5"), None, "negative string"),
+        (json!("not-a-number"), None, "garbage string"),
+        (Value::Null, None, "null"),
+        (json!(true), None, "boolean is not a token count"),
+        (json!([1, 2, 3]), None, "array"),
+        (json!({"count": 10}), None, "object"),
+    ];
+    for (value, expected, why) in cases {
+        assert_eq!(normalize_token_count_value(value), expected, "{why}");
+    }
 }
 
 // ── `deserialize_optional_token_count` round-trip tests ────────────

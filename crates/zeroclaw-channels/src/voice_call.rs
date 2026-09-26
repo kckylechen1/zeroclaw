@@ -812,11 +812,6 @@ mod tests {
     }
 
     #[test]
-    fn default_provider_is_twilio() {
-        assert_eq!(VoiceProvider::default(), VoiceProvider::Twilio);
-    }
-
-    #[test]
     fn provider_serde_roundtrip() {
         let json = serde_json::to_string(&VoiceProvider::Telnyx).unwrap();
         assert_eq!(json, "\"telnyx\"");

@@ -8,45 +8,19 @@ fn gemini_model_provider() -> Box<dyn ModelProvider> {
         .expect("Gemini model_provider should resolve with test key")
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Capabilities declaration
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[test]
-fn gemini_reports_no_native_tool_calling() {
+fn gemini_capabilities_are_prompt_guided_with_vision() {
     let model_provider = gemini_model_provider();
     let caps = model_provider.capabilities();
     assert!(
-        !caps.native_tool_calling,
+        !caps.native_tool_calling && !model_provider.supports_native_tools(),
         "Gemini should use prompt-guided tool calling, not native"
     );
-}
-
-#[test]
-fn gemini_reports_vision_support() {
-    let model_provider = gemini_model_provider();
-    let caps = model_provider.capabilities();
-    assert!(caps.vision, "Gemini should report vision support");
-}
-
-#[test]
-fn gemini_supports_native_tools_returns_false() {
-    let model_provider = gemini_model_provider();
     assert!(
-        !model_provider.supports_native_tools(),
-        "supports_native_tools() must be false to trigger prompt-guided fallback in chat()"
+        caps.vision && model_provider.supports_vision(),
+        "Gemini should report vision support"
     );
 }
-
-#[test]
-fn gemini_supports_vision_returns_true() {
-    let model_provider = gemini_model_provider();
-    assert!(model_provider.supports_vision());
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tool conversion contract
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
 fn gemini_convert_tools_returns_prompt_guided() {

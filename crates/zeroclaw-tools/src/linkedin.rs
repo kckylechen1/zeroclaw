@@ -491,13 +491,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_description() {
-        let tool = make_tool(AutonomyLevel::Full, 100);
-        assert!(!tool.description().is_empty());
-        assert!(tool.description().contains("LinkedIn"));
-    }
-
-    #[test]
     fn parameters_schema_has_required_action() {
         let tool = make_tool(AutonomyLevel::Full, 100);
         let schema = tool.parameters_schema();

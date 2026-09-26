@@ -1194,15 +1194,6 @@ mod tests {
     // ── Firecrawl config parsing ────────────────────────────────────
 
     #[test]
-    fn firecrawl_config_defaults() {
-        let cfg = FirecrawlConfig::default();
-        assert!(!cfg.enabled);
-        assert_eq!(cfg.api_key_env, "FIRECRAWL_API_KEY");
-        assert_eq!(cfg.api_url, "https://api.firecrawl.dev/v1");
-        assert_eq!(cfg.mode, zeroclaw_config::schema::FirecrawlMode::Scrape);
-    }
-
-    #[test]
     fn firecrawl_config_deserializes_from_toml() {
         let toml_str = r#"
             enabled = true

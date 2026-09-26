@@ -364,13 +364,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_description_is_nonempty() {
-        let tool = test_tool();
-        assert!(!tool.description().is_empty());
-        assert!(tool.description().contains("image"));
-    }
-
-    #[test]
     fn tool_schema_has_required_prompt() {
         let tool = test_tool();
         let schema = tool.parameters_schema();

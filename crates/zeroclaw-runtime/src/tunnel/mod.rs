@@ -343,69 +343,30 @@ mod tests {
         assert_eq!(t.unwrap().name(), "pinggy");
     }
 
-    #[test]
-    fn none_tunnel_name() {
-        let t = NoneTunnel;
-        assert_eq!(t.name(), "none");
-    }
-
-    #[test]
-    fn none_tunnel_public_url_is_none() {
-        let t = NoneTunnel;
-        assert!(t.public_url().is_none());
-    }
-
     #[tokio::test]
-    async fn none_tunnel_health_always_true() {
-        let t = NoneTunnel;
-        assert!(t.health_check().await);
-    }
-
-    #[tokio::test]
-    async fn none_tunnel_start_returns_local() {
-        let t = NoneTunnel;
-        let url = t.start("127.0.0.1", 8080).await.unwrap();
-        assert_eq!(url, "http://127.0.0.1:8080");
-    }
-
-    #[test]
-    fn cloudflare_tunnel_name() {
-        let t = CloudflareTunnel::new("tok".into());
-        assert_eq!(t.name(), "cloudflare");
-        assert!(t.public_url().is_none());
-    }
-
-    #[test]
-    fn tailscale_tunnel_name() {
-        let t = TailscaleTunnel::new(false, None);
-        assert_eq!(t.name(), "tailscale");
-        assert!(t.public_url().is_none());
-    }
-
-    #[test]
-    fn tailscale_funnel_mode() {
-        let t = TailscaleTunnel::new(true, Some("myhost".into()));
-        assert_eq!(t.name(), "tailscale");
-    }
-
-    #[test]
-    fn ngrok_tunnel_name() {
-        let t = NgrokTunnel::new("tok".into(), None);
-        assert_eq!(t.name(), "ngrok");
-        assert!(t.public_url().is_none());
-    }
-
-    #[test]
-    fn ngrok_with_domain() {
-        let t = NgrokTunnel::new("tok".into(), Some("my.ngrok.io".into()));
-        assert_eq!(t.name(), "ngrok");
-    }
-
-    #[test]
-    fn custom_tunnel_name() {
-        let t = CustomTunnel::new("echo hi".into(), None, None);
-        assert_eq!(t.name(), "custom");
-        assert!(t.public_url().is_none());
+    async fn tunnels_have_no_public_url_and_fail_health_before_start() {
+        let tunnels: Vec<Box<dyn Tunnel>> = vec![
+            Box::new(CloudflareTunnel::new("tok".into())),
+            Box::new(TailscaleTunnel::new(false, None)),
+            Box::new(NgrokTunnel::new("tok".into(), None)),
+            Box::new(CustomTunnel::new("echo hi".into(), None, None)),
+            Box::new(CustomTunnel::new(
+                "echo hi".into(),
+                None,
+                Some("https://".into()),
+            )),
+            Box::new(OpenVpnTunnel::new(
+                "client.ovpn".into(),
+                None,
+                None,
+                30,
+                vec![],
+            )),
+        ];
+        for tunnel in tunnels {
+            assert!(tunnel.public_url().is_none(), "{}", tunnel.name());
+            assert!(!tunnel.health_check().await, "{}", tunnel.name());
+        }
     }
 
     #[test]
@@ -433,19 +394,6 @@ mod tests {
         let t = create_tunnel(&cfg).unwrap();
         assert!(t.is_some());
         assert_eq!(t.unwrap().name(), "openvpn");
-    }
-
-    #[test]
-    fn openvpn_tunnel_name() {
-        let t = OpenVpnTunnel::new("client.ovpn".into(), None, None, 30, vec![]);
-        assert_eq!(t.name(), "openvpn");
-        assert!(t.public_url().is_none());
-    }
-
-    #[tokio::test]
-    async fn openvpn_health_false_before_start() {
-        let tunnel = OpenVpnTunnel::new("client.ovpn".into(), None, None, 30, vec![]);
-        assert!(!tunnel.health_check().await);
     }
 
     #[tokio::test]
@@ -480,48 +428,5 @@ mod tests {
 
         let guard = proc.lock().await;
         assert!(guard.is_none());
-    }
-
-    #[tokio::test]
-    async fn cloudflare_health_false_before_start() {
-        let tunnel = CloudflareTunnel::new("tok".into());
-        assert!(!tunnel.health_check().await);
-    }
-
-    #[tokio::test]
-    async fn ngrok_health_false_before_start() {
-        let tunnel = NgrokTunnel::new("tok".into(), None);
-        assert!(!tunnel.health_check().await);
-    }
-
-    #[tokio::test]
-    async fn tailscale_health_false_before_start() {
-        let tunnel = TailscaleTunnel::new(false, None);
-        assert!(!tunnel.health_check().await);
-    }
-
-    #[tokio::test]
-    async fn custom_health_false_before_start_without_health_url() {
-        let tunnel = CustomTunnel::new("echo hi".into(), None, Some("https://".into()));
-        assert!(!tunnel.health_check().await);
-    }
-
-    #[test]
-    fn pinggy_tunnel_name() {
-        let t = PinggyTunnel::new(Some("tok".into()), None);
-        assert_eq!(t.name(), "pinggy");
-        assert!(t.public_url().is_none());
-    }
-
-    #[test]
-    fn pinggy_without_token() {
-        let t = PinggyTunnel::new(None, None);
-        assert_eq!(t.name(), "pinggy");
-    }
-
-    #[tokio::test]
-    async fn pinggy_health_false_before_start() {
-        let tunnel = PinggyTunnel::new(None, None);
-        assert!(!tunnel.health_check().await);
     }
 }

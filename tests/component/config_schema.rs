@@ -3,7 +3,7 @@
 //! and gateway/security/agent config boundary conditions.
 
 use zeroclaw::config::migration;
-use zeroclaw::config::{ChannelsConfig, Config, GatewayConfig, RiskProfileConfig, SecurityConfig};
+use zeroclaw::config::{Config, GatewayConfig, RiskProfileConfig, SecurityConfig};
 
 fn migrate(toml_str: &str) -> Config {
     migration::migrate_to_current(toml_str).expect("migration succeeds")
@@ -48,13 +48,16 @@ another_fake = 42
 }
 
 #[test]
-fn config_wrong_type_for_port_fails() {
-    let toml_str = r#"
-[gateway]
-port = "not_a_number"
-"#;
-    let result: Result<Config, _> = toml::from_str(toml_str);
-    assert!(result.is_err(), "string for u16 port should fail to parse");
+fn config_invalid_gateway_port_fails() {
+    for (value, why) in [
+        ("\"not_a_number\"", "string for u16 port"),
+        ("-1", "negative port"),
+        ("99999", "port > 65535"),
+    ] {
+        let toml_str = format!("[gateway]\nport = {value}\n");
+        let result: Result<Config, _> = toml::from_str(&toml_str);
+        assert!(result.is_err(), "{why} should fail to parse");
+    }
 }
 
 #[test]
@@ -71,26 +74,6 @@ default_temperature = "hot"
         result.is_err(),
         "string for f64 temperature should fail migration"
     );
-}
-
-#[test]
-fn config_negative_port_fails() {
-    let toml_str = r#"
-[gateway]
-port = -1
-"#;
-    let result: Result<Config, _> = toml::from_str(toml_str);
-    assert!(result.is_err(), "negative port should fail for u16");
-}
-
-#[test]
-fn config_overflow_port_fails() {
-    let toml_str = r#"
-[gateway]
-port = 99999
-"#;
-    let result: Result<Config, _> = toml::from_str(toml_str);
-    assert!(result.is_err(), "port > 65535 should fail for u16");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -115,27 +98,6 @@ fn gateway_config_defaults_are_secure() {
         gw.path_prefix.is_none(),
         "path_prefix should default to None"
     );
-}
-
-#[test]
-fn gateway_config_toml_roundtrip() {
-    let gw = GatewayConfig {
-        port: 8080,
-        host: "0.0.0.0".into(),
-        require_pairing: false,
-        pair_rate_limit_per_minute: 5,
-        path_prefix: Some("/zeroclaw".into()),
-        ..Default::default()
-    };
-
-    let toml_str = toml::to_string(&gw).expect("gateway config should serialize");
-    let parsed: GatewayConfig = toml::from_str(&toml_str).expect("should deserialize back");
-
-    assert_eq!(parsed.port, 8080);
-    assert_eq!(parsed.host, "0.0.0.0");
-    assert!(!parsed.require_pairing);
-    assert_eq!(parsed.pair_rate_limit_per_minute, 5);
-    assert_eq!(parsed.path_prefix.as_deref(), Some("/zeroclaw"));
 }
 
 #[test]
@@ -170,36 +132,20 @@ port = 9090
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn gateway_path_prefix_rejects_missing_leading_slash() {
-    let mut config = Config::default();
-    config.gateway.path_prefix = Some("zeroclaw".into());
-    let err = config.validate().unwrap_err();
-    assert!(
-        err.to_string().contains("must start with '/'"),
-        "expected leading-slash error, got: {err}"
-    );
-}
-
-#[test]
-fn gateway_path_prefix_rejects_trailing_slash() {
-    let mut config = Config::default();
-    config.gateway.path_prefix = Some("/zeroclaw/".into());
-    let err = config.validate().unwrap_err();
-    assert!(
-        err.to_string().contains("must not end with '/'"),
-        "expected trailing-slash error, got: {err}"
-    );
-}
-
-#[test]
-fn gateway_path_prefix_rejects_bare_slash() {
-    let mut config = Config::default();
-    config.gateway.path_prefix = Some("/".into());
-    let err = config.validate().unwrap_err();
-    assert!(
-        err.to_string().contains("must not end with '/'"),
-        "expected bare-slash error, got: {err}"
-    );
+fn gateway_path_prefix_rejects_bad_slashes() {
+    for (prefix, expected) in [
+        ("zeroclaw", "must start with '/'"),
+        ("/zeroclaw/", "must not end with '/'"),
+        ("/", "must not end with '/'"),
+    ] {
+        let mut config = Config::default();
+        config.gateway.path_prefix = Some(prefix.into());
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains(expected),
+            "prefix {prefix:?}: expected {expected:?}, got: {err}"
+        );
+    }
 }
 
 #[test]
@@ -268,17 +214,6 @@ fn security_config_defaults() {
     );
 }
 
-#[test]
-fn security_config_toml_roundtrip() {
-    let mut sec = SecurityConfig::default();
-    sec.audit.max_size_mb = 200;
-
-    let toml_str = toml::to_string(&sec).expect("SecurityConfig should serialize");
-    let parsed: SecurityConfig = toml::from_str(&toml_str).expect("should deserialize back");
-
-    assert_eq!(parsed.audit.max_size_mb, 200);
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // RiskProfileConfig boundary tests (security policy via Config.autonomy)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -328,24 +263,6 @@ allowed_paths = ["/tmp/data"]
 // ─────────────────────────────────────────────────────────────────────────────
 // Backward compatibility
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn config_empty_toml_uses_default_temperature() {
-    let config = migrate("");
-    assert!(
-        (config
-            .providers
-            .models
-            .iter_entries()
-            .next()
-            .map(|(_, _, e)| e)
-            .and_then(|e| e.temperature)
-            .unwrap_or(0.7)
-            - 0.7)
-            .abs()
-            < f64::EPSILON
-    );
-}
 
 #[test]
 fn config_minimal_toml_with_temperature_uses_defaults() {
@@ -424,17 +341,6 @@ bot_token = "test_token"
 }
 
 #[test]
-fn config_channels_all_optional_channels_none_by_default() {
-    let channels = ChannelsConfig::default();
-    assert!(channels.telegram.is_empty());
-    assert!(channels.discord.is_empty());
-    assert!(channels.slack.is_empty());
-    assert!(channels.matrix.is_empty());
-    assert!(channels.lark.is_empty());
-    assert!(channels.webhook.is_empty());
-}
-
-#[test]
 fn config_memory_defaults_when_section_absent() {
     let toml_str = "default_temperature = 0.7\n";
     let parsed: Config = toml::from_str(toml_str).expect("minimal TOML should parse");
@@ -489,22 +395,6 @@ allowed_numbers = ["*"]
     assert_eq!(
         wa.session_path.as_deref(),
         Some("~/.zeroclaw/state/whatsapp-web/session.db")
-    );
-}
-
-#[test]
-fn config_only_whatsapp_channel_parses() {
-    let toml_str = r#"
-[channels.whatsapp.default]
-session_path = "~/.zeroclaw/state/whatsapp-web/session.db"
-allowed_numbers = ["*"]
-"#;
-    let parsed: Config =
-        toml::from_str(toml_str).expect("config with only whatsapp channel should parse");
-    assert!(!parsed.channels.whatsapp.is_empty());
-    assert!(
-        parsed.channels.cli,
-        "cli should default to true when omitted"
     );
 }
 

@@ -6084,57 +6084,6 @@ mod tests {
         );
     }
 
-    // ── Message ID edge cases ─────────────────────────────────────
-
-    #[test]
-    fn discord_message_id_format_includes_discord_prefix() {
-        // Verify that message IDs follow the format: discord_{message_id}
-        let message_id = "123456789012345678";
-        let expected_id = format!("discord_{message_id}");
-        assert_eq!(expected_id, "discord_123456789012345678");
-    }
-
-    #[test]
-    fn discord_message_id_is_deterministic() {
-        // Same message_id = same ID (prevents duplicates after restart)
-        let message_id = "123456789012345678";
-        let id1 = format!("discord_{message_id}");
-        let id2 = format!("discord_{message_id}");
-        assert_eq!(id1, id2);
-    }
-
-    #[test]
-    fn discord_message_id_different_message_different_id() {
-        // Different message IDs produce different IDs
-        let id1 = "discord_123456789012345678".to_string();
-        let id2 = "discord_987654321098765432".to_string();
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn discord_message_id_uses_snowflake_id() {
-        // Discord snowflake IDs are numeric strings
-        let message_id = "123456789012345678"; // Typical snowflake format
-        let id = format!("discord_{message_id}");
-        assert!(id.starts_with("discord_"));
-        // Snowflake IDs are numeric
-        assert!(message_id.chars().all(|c| c.is_ascii_digit()));
-    }
-
-    #[test]
-    fn discord_message_id_fallback_to_uuid_on_empty() {
-        // Edge case: empty message_id falls back to UUID
-        let message_id = "";
-        let id = if message_id.is_empty() {
-            format!("discord_{}", uuid::Uuid::new_v4())
-        } else {
-            format!("discord_{message_id}")
-        };
-        assert!(id.starts_with("discord_"));
-        // Should have UUID dashes
-        assert!(id.contains('-'));
-    }
-
     // ─────────────────────────────────────────────────────────────────────
     // TG6: Channel platform limit edge cases for Discord (2000 char limit)
     // Prevents: Pattern 6 — issues
