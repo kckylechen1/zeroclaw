@@ -196,8 +196,13 @@ cli-agent-long-about =
     Examples:
       zeroclaw agent -a assistant                              # chat through the gateway
       zeroclaw agent -a assistant -m "Summarize today's logs"  # single message
-      zeroclaw agent -a assistant -p anthropic --model claude-sonnet-4-20250514
-      zeroclaw agent -a assistant --peripheral nucleo-f401re:/dev/ttyACM0
+      zeroclaw agent -a assistant -m "Hi" -p anthropic --model claude-sonnet-4-20250514
+      zeroclaw agent -a assistant -m "Read the sensor" --peripheral nucleo-f401re:/dev/ttyACM0
+
+    --model-provider, --model, --temperature, and --peripheral apply only with --message; the interactive chat uses the agent's configured model.
+
+cli-agent-interactive-flags-need-message =
+    { $flags } only apply with -m/--message. Interactive `zeroclaw agent` opens `zeroclaw chat`, which uses the model configured for agent "{ $agent }". Add -m "<message>" for a one-off turn with these overrides, or change the agent's configuration.
 
 cli-gateway-long-about =
     Manage the gateway server (webhooks, websockets).
