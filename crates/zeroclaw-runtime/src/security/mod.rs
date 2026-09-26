@@ -18,6 +18,7 @@ pub mod ingress;
 pub mod landlock;
 pub mod leak_detector;
 pub mod otp;
+pub mod outbound;
 pub mod pairing;
 pub mod policy;
 pub mod prompt_guard;

@@ -966,7 +966,6 @@ impl Agent {
         }
     }
 
-    #[cfg(test)]
     pub fn tool_names(&self) -> Vec<&str> {
         self.tools.iter().map(|t| t.name()).collect()
     }

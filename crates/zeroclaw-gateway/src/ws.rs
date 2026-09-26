@@ -1317,6 +1317,19 @@ async fn process_chat_message(
             .insert(session_key.to_string(), cancel_token.clone());
     }
 
+    // Outbound sanitization, shared with the channels: chunks go through a
+    // stream redactor that holds back any tail that could still become a
+    // credential or a protocol envelope, and the done frame's full response
+    // gets the channels' final pass.
+    let known_tool_names =
+        zeroclaw_runtime::security::outbound::known_tool_names(agent.tool_names());
+    let leak_detection = state.config.read().security.leak_detection.clone();
+    let mut chunk_redactor = zeroclaw_runtime::security::outbound::OutboundStreamRedactor::new(
+        known_tool_names.clone(),
+        &leak_detection,
+        zeroclaw_runtime::security::outbound::OutboundContentFormat::Markdown,
+    );
+
     // Channel for streaming turn events from the agent.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TurnEvent>(64);
 
@@ -1402,7 +1415,10 @@ async fn process_chat_message(
                         }
                         TurnEvent::Chunk { ref delta } => {
                             accumulated_text.push_str(delta);
-                            serde_json::json!({ "type": "chunk", "content": delta })
+                            let Some(visible) = chunk_redactor.push(delta) else {
+                                continue;
+                            };
+                            serde_json::json!({ "type": "chunk", "content": visible })
                         }
                         TurnEvent::Thinking { delta } => {
                             serde_json::json!({ "type": "thinking", "content": delta })
@@ -1639,9 +1655,15 @@ async fn process_chat_message(
                 .filter(|usage| usage.input_tokens > 0 || usage.output_tokens > 0)
                 .map(|usage| usage.cost_usd);
 
+            let full_response = zeroclaw_runtime::security::outbound::sanitize_outbound_response(
+                &outcome.response,
+                &known_tool_names,
+                &leak_detection,
+                zeroclaw_runtime::security::outbound::OutboundContentFormat::Markdown,
+            );
             let done = serde_json::json!({
                 "type": "done",
-                "full_response": outcome.response,
+                "full_response": full_response,
                 "input_tokens": total_input_tokens,
                 "output_tokens": total_output_tokens,
                 "tokens_used": total_tokens,
@@ -2376,8 +2398,14 @@ mod tests {
                     .map(|m| m.content.clone())
                     .collect(),
             );
+            // `echo:<text>` scripts the reply text itself.
+            let echoed = seen
+                .last()
+                .and_then(|turn| turn.last())
+                .and_then(|m| m.split_once("echo:"))
+                .map(|(_, text)| text.to_string());
             Ok(zeroclaw_providers::ChatResponse {
-                text: Some(format!("reply {}", seen.len())),
+                text: Some(echoed.unwrap_or_else(|| format!("reply {}", seen.len()))),
                 tool_calls: vec![],
                 usage: None,
                 reasoning_content: None,
@@ -2524,6 +2552,44 @@ mod tests {
 
     fn message(content: &str) -> serde_json::Value {
         serde_json::json!({ "type": "message", "content": content })
+    }
+
+    #[tokio::test]
+    async fn chunks_and_done_frame_are_redacted_and_stripped_like_channels() {
+        let chat = SharedChat::new();
+        let mut a = chat.attach().await;
+        chat.gate.add_permits(1);
+        let key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+
+        assert!(
+            chat.send(
+                &a,
+                message(&format!(
+                    "echo:<think>private plan</think>Your key is {key} \
+                     <tool_call>{{\"name\":\"shell\",\"arguments\":{{}}}}</tool_call>done"
+                )),
+            )
+            .is_none()
+        );
+        let frames = frames_until_end(&mut a).await;
+        let done = frames.last().unwrap();
+        assert_eq!(done["type"], "done");
+        let full = done["full_response"].as_str().unwrap();
+        assert!(!full.contains(key), "{full}");
+        assert!(full.contains("[REDACTED"), "{full}");
+        assert!(full.starts_with("Your key is "), "{full}");
+        for hidden in ["private plan", "<think>", "tool_call", "\"shell\""] {
+            assert!(!full.contains(hidden), "{hidden} in {full}");
+        }
+        let streamed: String = frames
+            .iter()
+            .filter(|f| f["type"] == "chunk")
+            .filter_map(|f| f["content"].as_str())
+            .collect();
+        assert!(streamed.starts_with("Your key is "), "{streamed}");
+        for hidden in ["sk-ant", "private plan", "<think>", "tool_call"] {
+            assert!(!streamed.contains(hidden), "{hidden} in {streamed}");
+        }
     }
 
     #[tokio::test]
