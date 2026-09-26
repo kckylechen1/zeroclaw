@@ -1110,9 +1110,15 @@ impl SharedMcpTransportConn for HttpTransport {
                 }
                 .into());
             }
-            let body = read_body_bounded(resp, MAX_RESPONSE_BYTES)
-                .await
-                .unwrap_or_default();
+            let body = match read_body_bounded(resp, MAX_RESPONSE_BYTES).await {
+                Ok(body) => body,
+                Err(e) => {
+                    lifecycle.mark_completed();
+                    return Err(e.context(format!(
+                        "MCP server returned HTTP {status}; its error body could not be read"
+                    )));
+                }
+            };
             if let Some(rpc) = modern_rpc_error_from_http_body(&body) {
                 return finish_response(request, lifecycle, rpc);
             }
@@ -1842,9 +1848,12 @@ impl SharedMcpTransportConn for SseTransport {
                 if is_sse {
                     got_direct = read_first_jsonrpc_from_sse_response(resp).await?;
                 } else {
+                    // An unreadable or over-limit body is an error, not an
+                    // empty reply: treating it as empty would fall through to
+                    // waiting on the SSE stream for a response already sent.
                     let text = read_body_bounded(resp, MAX_RESPONSE_BYTES)
                         .await
-                        .unwrap_or_default();
+                        .context("MCP server's direct response could not be read")?;
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
                         let json_str =
@@ -1870,9 +1879,15 @@ impl SharedMcpTransportConn for SseTransport {
                 }
                 .into());
             }
-            let body = read_body_bounded(resp, MAX_RESPONSE_BYTES)
-                .await
-                .unwrap_or_default();
+            let body = match read_body_bounded(resp, MAX_RESPONSE_BYTES).await {
+                Ok(body) => body,
+                Err(e) => {
+                    lifecycle.mark_completed();
+                    return Err(e.context(format!(
+                        "MCP server returned HTTP {status}; its error body could not be read"
+                    )));
+                }
+            };
             if let Some(rpc) = modern_rpc_error_from_http_body(&body) {
                 return finish_response(request, lifecycle, rpc);
             }
@@ -2876,6 +2891,84 @@ mod tests {
             err.to_string().contains("MCP server returned HTTP 404"),
             "got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn http_transport_oversized_error_body_is_reported_not_swallowed() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_string("x".repeat(MAX_RESPONSE_BYTES + 1)),
+            )
+            .mount(&server)
+            .await;
+        let config = McpServerConfig {
+            name: "test-http".into(),
+            transport: McpTransport::Http,
+            url: Some(server.uri()),
+            ..Default::default()
+        };
+        let transport = HttpTransport::new(&config).expect("build transport");
+        let req = JsonRpcRequest::new(1, "tools/call", serde_json::json!({}));
+        let lifecycle = McpRequestLifecycle::uncoordinated(0);
+        let err = transport
+            .send_and_recv(&req, &lifecycle)
+            .await
+            .expect_err("oversized error body should error");
+        let message = format!("{err:#}");
+        assert!(message.contains("HTTP 500"), "{message}");
+        assert!(message.contains("exceeds"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn sse_oversized_direct_response_is_an_error_not_an_empty_reply() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string("x".repeat(MAX_RESPONSE_BYTES + 1)),
+            )
+            .mount(&server)
+            .await;
+        let config = McpServerConfig {
+            name: "sse-oversized".into(),
+            transport: McpTransport::Sse,
+            url: Some(format!("{}/sse", server.uri())),
+            ..Default::default()
+        };
+        let transport = SseTransport::new(&config).expect("build transport");
+        // A connected stream that never delivers: before the fix the swallowed
+        // body left the request waiting here for a reply already sent.
+        let reader = zeroclaw_spawn::spawn!(std::future::pending::<()>());
+        {
+            let mut conn = transport.conn.lock().await;
+            conn.stream_state = SseStreamState::Connected;
+            conn.reader_task = Some(reader);
+        }
+        {
+            let mut shared = transport.shared.lock().await;
+            shared.message_url = Some(format!("{}/messages", server.uri()));
+            shared.message_url_from_endpoint = true;
+        }
+        let request = JsonRpcRequest::new(7, "tools/call", serde_json::json!({}));
+        let lifecycle = McpRequestLifecycle::uncoordinated(0);
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            SharedMcpTransportConn::send_and_recv(&transport, &request, &lifecycle),
+        )
+        .await
+        .expect("an unreadable body must fail fast, not wait on the stream")
+        .expect_err("oversized body should error");
+        assert!(format!("{err:#}").contains("exceeds"), "{err:#}");
+        assert!(transport.pending.lock().is_empty());
+        SharedMcpTransportConn::close(&transport).await.ok();
     }
 
     #[tokio::test]

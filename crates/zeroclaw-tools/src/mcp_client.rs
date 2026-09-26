@@ -2234,46 +2234,51 @@ impl McpRegistry {
 /// put the raw base64 into the model's context, where it costs tokens and
 /// means nothing. Each is replaced by a text note naming the media type and
 /// approximate decoded size; text content and all other fields are kept.
-fn omit_binary_content(result: &mut serde_json::Value) {
-    let Some(items) = result
-        .get_mut("content")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return;
-    };
-    for item in items {
-        let Some(obj) = item.as_object_mut() else {
-            continue;
-        };
-        let kind = obj
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        match kind.as_str() {
-            "image" | "audio" => {
-                let Some(data) = obj.remove("data") else {
-                    continue;
-                };
-                let note = binary_note(&kind, obj.remove("mimeType").as_ref(), &data);
-                obj.insert("type".into(), "text".into());
-                obj.insert("text".into(), note.into());
-            }
-            "resource" => {
-                let Some(resource) = obj
-                    .get_mut("resource")
-                    .and_then(serde_json::Value::as_object_mut)
-                else {
-                    continue;
-                };
-                let Some(blob) = resource.remove("blob") else {
-                    continue;
-                };
-                let note = binary_note("resource", resource.get("mimeType"), &blob);
-                resource.insert("text".into(), note.into());
-            }
-            _ => {}
+/// The whole result is walked, so such items nested anywhere (for example
+/// inside `structuredContent`) are covered too.
+fn omit_binary_content(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(items) => items.iter_mut().for_each(omit_binary_content),
+        serde_json::Value::Object(obj) => {
+            omit_binary_item(obj);
+            obj.values_mut().for_each(omit_binary_content);
         }
+        _ => {}
+    }
+}
+
+/// Rewrite one object if it is a binary content item; see [`omit_binary_content`].
+fn omit_binary_item(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    let kind = obj
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    match kind.as_str() {
+        "image" | "audio" if obj.get("data").is_some_and(serde_json::Value::is_string) => {
+            let data = obj.remove("data").unwrap_or_default();
+            let note = binary_note(&kind, obj.remove("mimeType").as_ref(), &data);
+            obj.insert("type".into(), "text".into());
+            obj.insert("text".into(), note.into());
+        }
+        "resource" => {
+            let Some(resource) = obj
+                .get_mut("resource")
+                .and_then(serde_json::Value::as_object_mut)
+            else {
+                return;
+            };
+            if !resource
+                .get("blob")
+                .is_some_and(serde_json::Value::is_string)
+            {
+                return;
+            }
+            let blob = resource.remove("blob").unwrap_or_default();
+            let note = binary_note("resource", resource.get("mimeType"), &blob);
+            resource.insert("text".into(), note.into());
+        }
+        _ => {}
     }
 }
 

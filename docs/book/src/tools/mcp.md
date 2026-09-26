@@ -75,7 +75,7 @@ Per-server fields (`[[mcp.servers]]`), generated from the schema:
 
 ## Binary tool results
 
-When a tool result contains an `image` or `audio` item, or an embedded `resource` with a base64 `blob`, ZeroClaw replaces the base64 payload with a one-line note such as `[image attachment omitted: image/png, about 18 bytes]` before the result reaches the model. Text content and other fields are kept. The model does not see the binary data itself; images from MCP tools are not yet passed to vision-capable models.
+When a tool result contains an `image` or `audio` item, or an embedded `resource` with a base64 `blob`, anywhere in the result (including nested inside `structuredContent`), ZeroClaw replaces the base64 payload with a one-line note such as `[image attachment omitted: image/png, about 18 bytes]` before the result reaches the model. Text content and other fields are kept. The model does not see the binary data itself; images from MCP tools are not yet passed to vision-capable models.
 
 ## Security and approval
 
