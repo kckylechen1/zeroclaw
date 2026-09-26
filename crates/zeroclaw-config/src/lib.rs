@@ -37,6 +37,7 @@ pub mod schema_markdown;
 pub mod secrets;
 pub mod sections;
 pub mod skill_bundles;
+pub mod tachi;
 pub mod traits;
 pub mod typed_value;
 pub mod validation_warnings;

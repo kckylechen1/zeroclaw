@@ -1,6 +1,15 @@
-//! Tachi TaskIntent bridge — the ZeroClaw CLIENT half (vertical V2b of
-//! the gated-open program; frozen contract rev 3; host half = the tachi
-//! TaskIntent bridge, vertical V2a).
+//! Tachi bridge — the ZeroClaw CLIENT half of delegation (ADR-017).
+//!
+//! Two surfaces live here while the bridge migrates:
+//!
+//! - [`staff`] — the production client of Tachi's `tachi_staff` MCP tool
+//!   (start / status / result / cancel over the MCP HTTP transport). This is
+//!   the surface a real Tachi daemon serves; see ADR-017 "ZeroClaw ↔
+//!   tachi_staff mapping".
+//! - the TaskIntent port below (vertical V2b; frozen contract rev 3). No
+//!   Tachi build serves it. It stays only because `procedure_v1` and
+//!   `supervisor_v1` still compile against it, and leaves with them (#381
+//!   PR D).
 //!
 //! ```text
 //! Parent
@@ -48,6 +57,7 @@
 pub mod client;
 pub mod compose;
 pub mod procedure;
+pub mod staff;
 
 /// Test doubles for the [`TachiTaskBridge`] port — STRICTLY test-only
 /// (TB-22): the in-memory bridge is structurally a task/status ledger
@@ -60,6 +70,8 @@ pub mod procedure;
 #[cfg(test)]
 pub(crate) mod in_memory;
 
+#[cfg(test)]
+mod staff_tests;
 #[cfg(test)]
 mod tests;
 
@@ -75,3 +87,7 @@ pub use compose::{
     scan_intent, scan_text,
 };
 pub use procedure::ProcedureSubmitPort;
+pub use staff::{
+    CancelOutcome, CancelReceipt, RunResult, RunState, RunStatus, StaffReceipt, StaffRefs,
+    StaffingReason, TachiStaffClient, TachiStaffError, TachiStaffSettings,
+};
