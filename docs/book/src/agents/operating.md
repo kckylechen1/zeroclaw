@@ -23,9 +23,10 @@ surface and every flag, see the generated
 
 ## Chatting through the gateway
 
-`zeroclaw agent` runs the agent inside the CLI process. To talk to the agent
-the gateway hosts (the one the web dashboard and every other device see), use
-`zeroclaw chat`:
+`zeroclaw agent -m "..."` runs one turn inside the CLI process and prints the
+reply. To talk to the agent the gateway hosts (the one the web dashboard and
+every other device see), use `zeroclaw chat`; `zeroclaw agent` without `-m`
+opens it too:
 
 <div class="os-tabs-src">
 

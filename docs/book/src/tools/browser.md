@@ -79,7 +79,7 @@ See the [Config reference](../reference/config.md) for all browser fields and de
 #### sh
 
 ```sh
-echo "Open https://example.com and tell me what it says" | zeroclaw agent -a assistant
+zeroclaw agent -a assistant -m "Open https://example.com and tell me what it says"
 ```
 
 </div>
@@ -223,13 +223,13 @@ agent-browser close
 
 ```sh
 # Content extraction
-echo "Open https://example.com and summarize it" | zeroclaw agent -a assistant
+zeroclaw agent -a assistant -m "Open https://example.com and summarize it"
 
 # Navigation
-echo "Go to https://github.com/trending and list the top 3 repos" | zeroclaw agent -a assistant
+zeroclaw agent -a assistant -m "Go to https://github.com/trending and list the top 3 repos"
 
 # Form interaction
-echo "Go to Wikipedia, search for 'Rust programming language', and summarize" | zeroclaw agent -a assistant
+zeroclaw agent -a assistant -m "Go to Wikipedia, search for 'Rust programming language', and summarize"
 ```
 
 </div>

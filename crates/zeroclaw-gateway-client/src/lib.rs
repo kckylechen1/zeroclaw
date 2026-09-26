@@ -167,6 +167,14 @@ pub enum Frame {
         id: Option<String>,
         #[serde(default)]
         full_response: String,
+        /// Prompt size of the turn's last model call, in tokens.
+        #[serde(default)]
+        last_input_tokens: Option<u64>,
+        /// The agent's context budget, in tokens.
+        #[serde(default)]
+        max_context_tokens: Option<u64>,
+        #[serde(default)]
+        cost_usd: Option<f64>,
     },
     /// The turn was cancelled.
     Aborted {

@@ -39,7 +39,7 @@ For providers that frequently encounter rate limits, supply additional API keys 
 
 Run a local-Ollama agent and a hosted-provider agent side by side; route each channel to whichever you want it to use.
 
-The `dev` agent runs from the CLI (no channel binding required, `zeroclaw agent -a dev` is enough). When Ollama is down, the dev agent fails fast and surfaces the error. The prod channels are unaffected.
+The `dev` agent runs from the CLI (no channel binding required, `zeroclaw agent -a dev -m "..."` is enough). When Ollama is down, the dev agent fails fast and surfaces the error. The prod channels are unaffected.
 
 ## Local-small no-text-fallback profile
 
@@ -132,7 +132,7 @@ zeroclaw doctor traces --contains "model_provider"
 1. **One agent per routing intent.** If two channels need different model behavior, name two agents.
 2. **Use OpenRouter for cross-vendor reliability.** Cross-vendor "if Claude fails, try OpenAI" is OpenRouter's job; configure it as one provider and let its endpoint handle the fan-out.
 3. **Keep API key rotation pools homogeneous.** All keys in `[reliability] api_keys` should be from the same provider account, this is rate-limit smoothing, not multi-tenancy.
-4. **Smoke-test each agent in isolation.** `zeroclaw agent -a <alias>` runs an agent without channel plumbing in the way.
+4. **Smoke-test each agent in isolation.** `zeroclaw agent -a <alias> -m "hello"` runs one turn locally, without the gateway or channel plumbing in the way.
 5. **Document agent intent.** Add `# comment` lines explaining which channels each agent serves and why.
 6. **Inject secrets via env, not inline.** `ZEROCLAW_providers__models__<type>__<alias>__api_key=...` sets `api_key` at startup; see [Environment variables](../reference/env-vars.md).
 7. **Separate dev and prod agents.** Each environment gets its own `[agents.<alias>]` entry bound to its own channels.

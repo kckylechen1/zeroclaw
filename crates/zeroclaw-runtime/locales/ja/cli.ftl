@@ -155,16 +155,6 @@ cli-peripheral-list-about = 設定されたペリフェラルを一覧表示
 cli-peripheral-add-about = ボードタイプとトランスポートパスでペリフェラルを追加
 cli-peripheral-flash-about = Arduino ボードに ZeroClaw ファームウェアをフラッシュ
 cli-migrate-openclaw-about = OpenClaw ワークスペースからこの ZeroClaw ワークスペースにメモリをインポート
-cli-agent-long-about =
-    AI エージェントループを起動します。
-
-    設定された AI プロバイダーでインタラクティブなチャットセッションを起動します。単一ショットクエリの場合は --message を使用し、インタラクティブモードに入りません。
-
-    例:
-    zeroclaw agent                              # インタラクティブセッション
-    zeroclaw agent -m "Summarize today's logs"  # 単一メッセージ
-    zeroclaw agent -p anthropic --model claude-sonnet-4-20250514
-    zeroclaw agent --peripheral nucleo-f401re:/dev/ttyACM0
 cli-gateway-long-about =
     ゲートウェイサーバー（webhook、websocket）を管理します。
 

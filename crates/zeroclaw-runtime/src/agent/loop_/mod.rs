@@ -1,16 +1,3 @@
-/// Format token count with thousands separators.
-pub(crate) fn format_tokens(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, ch) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out.chars().rev().collect()
-}
-
 // Test suites under `loop_/tests.rs` pull these through `use super::*`.
 #[cfg(all(test, feature = "heavy-tests"))]
 pub(crate) use crate::agent::TurnMeta;
@@ -47,8 +34,7 @@ pub use super::cost::{
 // History management moved to `super::history`.
 pub use super::history::{
     append_or_merge_system_message, canonicalize_tool_result_media_markers,
-    estimate_history_tokens, load_interactive_session_history, normalize_system_messages,
-    save_interactive_session_history, trim_history, truncate_tool_result,
+    estimate_history_tokens, normalize_system_messages, trim_history, truncate_tool_result,
 };
 
 // Tool / MCP filter admission moved to `super::tool_filter`.
@@ -67,12 +53,10 @@ pub(crate) use super::tool_filter::{
 pub(crate) use super::text_tool_prompt::retain_registered_tool_descriptions;
 
 // Bounded interactive line IO moved to `super::capped_line`.
-pub(crate) use super::capped_line::{CappedLine, MAX_INTERACTIVE_INPUT_BYTES, read_capped_line};
 
 // Channel / peripheral factories moved to `super::channel_factories`.
 pub use super::channel_factories::{
-    CLI_CHANNEL_FN, PeripheralToolsFn, load_peripheral_tools, register_channel_map_fn,
-    register_cli_channel_fn, register_peripheral_tools_fn,
+    PeripheralToolsFn, load_peripheral_tools, register_channel_map_fn, register_peripheral_tools_fn,
 };
 pub(crate) use super::channel_factories::{live_channel_registry, seed_channel_handles};
 

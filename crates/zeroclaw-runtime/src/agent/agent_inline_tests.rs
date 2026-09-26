@@ -6,6 +6,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use zeroclaw_api::observability_traits::ObserverMetric;
+use zeroclaw_config::schema::Config;
 
 #[test]
 fn build_session_model_provider_rejects_undotted_ref() {

@@ -153,16 +153,6 @@ cli-peripheral-list-about = 列出已配置的外设
 cli-peripheral-add-about = 按开发板类型和传输路径添加外设
 cli-peripheral-flash-about = 将 ZeroClaw 固件刷写到 Arduino 开发板
 cli-migrate-openclaw-about = 将 OpenClaw 工作区中的记忆导入到此 ZeroClaw 工作区
-cli-agent-long-about =
-    启动 AI 代理循环。
-
-    与已配置的 AI 提供商启动交互式聊天会话。使用 --message 进行单次查询，无需进入交互模式。
-
-    示例：
-    zeroclaw agent                              # 交互式会话
-    zeroclaw agent -m "Summarize today's logs"  # 单条消息
-    zeroclaw agent -p anthropic --model claude-sonnet-4-20250514
-    zeroclaw agent --peripheral nucleo-f401re:/dev/ttyACM0
 cli-gateway-long-about =
     管理网关服务器（webhooks、websockets）。
 

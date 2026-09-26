@@ -6,18 +6,6 @@
 use crate::tools::{self, Tool};
 use std::sync::Arc;
 
-/// CLI channel factory, injected by the binary. Returns a `Box<dyn Channel>` for interactive mode.
-pub static CLI_CHANNEL_FN: std::sync::OnceLock<
-    Box<dyn Fn() -> Box<dyn zeroclaw_api::channel::Channel> + Send + Sync>,
-> = std::sync::OnceLock::new();
-
-/// Register the CLI channel factory. Called once at startup by the binary.
-pub fn register_cli_channel_fn(
-    f: Box<dyn Fn() -> Box<dyn zeroclaw_api::channel::Channel> + Send + Sync>,
-) {
-    let _ = CLI_CHANNEL_FN.set(f);
-}
-
 /// Peripheral tools factory type — takes owned config so the returned future is 'static.
 pub type PeripheralToolsFn = Box<
     dyn Fn(
