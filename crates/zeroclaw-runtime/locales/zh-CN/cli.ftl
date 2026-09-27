@@ -851,3 +851,55 @@ sop-rpc-decision-invalid-state = 运行 {$run_id} 无法在当前状态下完成
 sop-rpc-decision-unauthorized = RPC 主体无权对该 SOP 步骤作出决策。
 sop-rpc-policy-missing = 未配置 SOP 审批策略“{$name}”。
 sop-rpc-policy-unavailable = 暂停的 SOP 策略不可用：{$reason}。
+
+channel-runtime-task-pref-invalid = 任务偏好无效。用法：/task-pref <value|goal|preference|habit|constraint> <semantic-key> <statement...>
+channel-runtime-task-pref-set = 已记录仅本会话生效的任务偏好：{$kind}：{$statement}
+cli-agent-interactive-flags-need-message =
+    { $flags } 仅在与 -m/--message 一起使用时生效。交互式 `zeroclaw agent` 会打开 `zeroclaw chat`，并使用为代理 "{ $agent }" 配置的模型。如需用这些覆盖执行单轮任务，请添加 -m "<消息>"，或修改该代理的配置。
+cli-agent-long-about =
+    启动 AI 代理循环。
+cli-bridge-added = 网桥 "{$name}" 已保存到 [gateway.bridges.{$name}]。
+cli-bridge-apply = 重启网关（或 POST /admin/reload）后生效。
+cli-bridge-exists = 网桥 "{$name}" 已存在；传入 --rotate 可替换其令牌。
+cli-bridge-invalid-name = 无效的网桥名称 "{$name}"：请使用字母、数字、'-' 和 '_'。
+cli-bridge-list-empty = 未配置任何网桥。可使用以下命令添加：zeroclaw gateway bridge add <名称>
+cli-bridge-list-no-sessions = （无）
+cli-bridge-list-row = {$name}：会话 {$scope}
+cli-bridge-removed = 网桥 "{$name}" 已移除；其令牌不再有效。
+cli-bridge-scope = 此令牌可打开的聊天会话：{$scope}
+cli-bridge-scope-none = 此令牌不能打开任何聊天会话；添加 --session 或 --session-prefix 可允许部分会话。
+cli-bridge-token-once = 网桥令牌（仅显示一次；请提供给网桥，例如作为 ZEROCLAW_GATEWAY_TOKEN）：
+cli-bridge-unknown = 未配置名为 "{$name}" 的网桥。
+cli-chat-aborted = （回合已取消）
+cli-chat-about = 通过网关与代理聊天
+cli-chat-approval-prompt = 允许 {$tool}？{$summary} [y]es / [a]lways / [N]o：
+cli-chat-attached = 会话 {$session}（代理 {$agent}），历史消息 {$history} 条。/quit 退出，/cancel 或 Ctrl+C 停止正在运行的回合。
+cli-chat-closed = 网关已关闭连接。
+cli-chat-connect-failed = 无法连接到 {$gateway} 的网关：{$error}。请用 `zeroclaw daemon` 或 `zeroclaw gateway start` 启动它，或传入 --gateway。
+cli-chat-connect-refused = {$gateway} 的网关拒绝了聊天：{$error}
+cli-chat-duplicate = 已处理过（{$state}）。
+cli-chat-error = 错误：{$message}
+cli-chat-event = [{$kind}] {$text}
+cli-chat-steered = （已加入正在运行的回合）
+cli-chat-tool-call = → {$tool}
+cli-chat-usage = [上下文 {$context}] {$cost}
+cli-doctor-personality-file-truncated = {$alias}/{$filename}：个性上限 {$cap}，共 {$total} 字符（将丢弃 {$discarded}）
+cli-skills-install-catalog-clone-failed = 克隆技能目录 {$url} 失败
+cli-skills-install-catalog-failed = 从目录 {$source} 安装技能 '{$skill}' 失败
+cli-skills-install-catalog-root-escapes = 技能目录 {$url} 的 skills/ 目录解析到克隆目录之外；拒绝检查
+cli-skills-install-catalog-root-symlink = 技能目录 {$url} 的 skills/ 目录是符号链接；拒绝检查
+cli-skills-install-catalog-skill-escapes = {$url} 中的技能 '{$skill}' 解析到克隆目录之外；拒绝安装
+cli-skills-install-catalog-skill-symlink = {$url} 中的技能 '{$skill}' 是符号链接；目录技能必须是仓库内的真实目录
+cli-skills-install-invalid-skill-name = 无效的 --skill 名称 '{$skill}'：请使用纯技能名（字母、数字、'-'、'_'）
+cli-skills-install-skill-not-in-catalog =
+    在 {$url} 中未找到技能 '{$skill}'。
+    可用技能：{$available}
+cli-skills-install-skill-not-in-catalog-empty = 在 {$url} 中未找到技能 '{$skill}'：没有 skills/ 目录或其为空
+cli-skills-install-skill-requires-git = --skill <名称> 需要一个 git 仓库 URL 作为来源（收到的是 '{$source}'）
+telegram-skip-update-failed = 记录机器人 '{$alias}' 更新 {$update_id} 的跳过标记失败：{$error}
+telegram-skip-update-pending = 机器人 '{$alias}' 更新 {$update_id} 的跳过标记已在等待中。
+telegram-skip-update-written = 已记录机器人 '{$alias}' 更新 {$update_id} 的跳过标记。运行中的守护进程会在下次重试（几秒内）时应用它，并将载荷作为死信归档到其数据目录下。
+tool-runtime-command-build-failed = 构建运行时命令失败：{$error}
+tool-runtime-command-docker-allowed-root = 构建运行时命令失败：无法规范化 Docker 工作区根 {$path}：{$cause}
+tool-runtime-command-docker-workspace-path = 构建运行时命令失败：无法规范化 Docker 工作区路径 {$path}：{$cause}
+turn-max-iterations-reached = *回合已停止：达到工具迭代上限（{ $max_iterations }）。*

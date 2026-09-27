@@ -853,3 +853,55 @@ sop-rpc-decision-invalid-state = 実行 {$run_id} は現在の状態では解決
 sop-rpc-decision-unauthorized = RPC プリンシパルには、この SOP ステップを解決する権限がありません。
 sop-rpc-policy-missing = SOP 承認ポリシー '{$name}' が構成されていません。
 sop-rpc-policy-unavailable = 待機中の SOP ポリシーを利用できません: {$reason}。
+
+channel-runtime-task-pref-invalid = タスク設定が無効です。使い方: /task-pref <value|goal|preference|habit|constraint> <semantic-key> <statement...>
+channel-runtime-task-pref-set = このセッションのみで有効なタスク設定を記録しました: {$kind}: {$statement}
+cli-agent-interactive-flags-need-message =
+    { $flags } は -m/--message 指定時のみ有効です。対話モードの `zeroclaw agent` は `zeroclaw chat` を開き、エージェント "{ $agent }" に設定されたモデルを使用します。これらの上書きで単発のターンを実行するには -m "<メッセージ>" を追加するか、エージェントの設定を変更してください。
+cli-agent-long-about =
+    AI エージェントループを開始します。
+cli-bridge-added = ブリッジ "{$name}" を [gateway.bridges.{$name}] に保存しました。
+cli-bridge-apply = 適用するにはゲートウェイを再起動するか、POST /admin/reload を実行してください。
+cli-bridge-exists = ブリッジ "{$name}" は既に存在します。トークンを置き換えるには --rotate を指定してください。
+cli-bridge-invalid-name = ブリッジ名 "{$name}" は無効です: 英字・数字・'-'・'_' を使用してください。
+cli-bridge-list-empty = ブリッジは構成されていません。次で追加できます: zeroclaw gateway bridge add <名前>
+cli-bridge-list-no-sessions = (なし)
+cli-bridge-list-row = {$name}: セッション {$scope}
+cli-bridge-removed = ブリッジ "{$name}" を削除しました。そのトークンはもう機能しません。
+cli-bridge-scope = このトークンが開けるチャットセッション: {$scope}
+cli-bridge-scope-none = このトークンはチャットセッションを開けません。許可するには --session または --session-prefix を追加してください。
+cli-bridge-token-once = ブリッジトークン (一度だけ表示されます。ブリッジに渡してください。例: ZEROCLAW_GATEWAY_TOKEN として):
+cli-bridge-unknown = "{$name}" という名前のブリッジは構成されていません。
+cli-chat-aborted = (ターンをキャンセルしました)
+cli-chat-about = ゲートウェイ経由でエージェントとチャット
+cli-chat-approval-prompt = {$tool} を許可しますか? {$summary} [y]es / [a]lways / [N]o:
+cli-chat-attached = セッション {$session} (エージェント {$agent})、過去のメッセージ {$history} 件。/quit で終了、/cancel または Ctrl+C で実行中のターンを停止します。
+cli-chat-closed = ゲートウェイが接続を閉じました。
+cli-chat-connect-failed = {$gateway} のゲートウェイに接続できませんでした: {$error}。`zeroclaw daemon` または `zeroclaw gateway start` で起動するか、--gateway を指定してください。
+cli-chat-connect-refused = {$gateway} のゲートウェイがチャットを拒否しました: {$error}
+cli-chat-duplicate = 既に処理済みです ({$state})。
+cli-chat-error = エラー: {$message}
+cli-chat-event = [{$kind}] {$text}
+cli-chat-steered = (実行中のターンに追加しました)
+cli-chat-tool-call = → {$tool}
+cli-chat-usage = [コンテキスト {$context}] {$cost}
+cli-doctor-personality-file-truncated = {$alias}/{$filename}: パーソナリティ上限 {$cap} / 全 {$total} 文字 ({$discarded} 文字が破棄されます)
+cli-skills-install-catalog-clone-failed = スキルカタログ {$url} のクローンに失敗しました
+cli-skills-install-catalog-failed = カタログ {$source} からスキル '{$skill}' のインストールに失敗しました
+cli-skills-install-catalog-root-escapes = カタログ {$url} の skills/ ディレクトリがクローン外に解決されます。検査を拒否しました
+cli-skills-install-catalog-root-symlink = カタログ {$url} の skills/ ディレクトリはシンボリックリンクです。検査を拒否しました
+cli-skills-install-catalog-skill-escapes = {$url} のスキル '{$skill}' がクローン外に解決されます。インストールを拒否しました
+cli-skills-install-catalog-skill-symlink = {$url} のスキル '{$skill}' はシンボリックリンクです。カタログのスキルはリポジトリ内の実ディレクトリである必要があります
+cli-skills-install-invalid-skill-name = --skill 名 '{$skill}' は無効です: スキル名のみ (英字・数字・'-'・'_') を指定してください
+cli-skills-install-skill-not-in-catalog =
+    スキル '{$skill}' が {$url} に見つかりません。
+    利用可能なスキル: {$available}
+cli-skills-install-skill-not-in-catalog-empty = スキル '{$skill}' が {$url} に見つかりません: skills/ ディレクトリがないか空です
+cli-skills-install-skill-requires-git = --skill <名前> には git リポジトリ URL が必要です ('{$source}' が指定されました)
+telegram-skip-update-failed = ボット '{$alias}' の更新 {$update_id} のスキップマーカーの記録に失敗しました: {$error}
+telegram-skip-update-pending = ボット '{$alias}' の更新 {$update_id} のスキップマーカーは既に保留中です。
+telegram-skip-update-written = ボット '{$alias}' の更新 {$update_id} のスキップマーカーを記録しました。実行中のデーモンは次の再試行 (数秒以内) で適用し、ペイロードをデータディレクトリ配下のデッドレターとしてアーカイブします。
+tool-runtime-command-build-failed = ランタイムコマンドの構築に失敗しました: {$error}
+tool-runtime-command-docker-allowed-root = ランタイムコマンドの構築に失敗しました: Docker ワークスペースルート {$path} の正規化に失敗しました: {$cause}
+tool-runtime-command-docker-workspace-path = ランタイムコマンドの構築に失敗しました: Docker ワークスペースパス {$path} の正規化に失敗しました: {$cause}
+turn-max-iterations-reached = *ターンを停止しました: ツールイテレーションの上限に達しました ({ $max_iterations })。*

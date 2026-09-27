@@ -854,3 +854,55 @@ sop-rpc-decision-invalid-state = La ejecución {$run_id} no se puede resolver en
 sop-rpc-decision-unauthorized = La identidad RPC no está autorizada para resolver este paso de SOP.
 sop-rpc-policy-missing = La política de aprobación de SOP '{$name}' no está configurada.
 sop-rpc-policy-unavailable = La política del SOP en espera no está disponible: {$reason}.
+
+channel-runtime-task-pref-invalid = Preferencia de tarea no válida. Uso: /task-pref <value|goal|preference|habit|constraint> <semantic-key> <statement...>
+channel-runtime-task-pref-set = Preferencia de tarea registrada solo para esta sesión: {$kind}: {$statement}
+cli-agent-interactive-flags-need-message =
+    { $flags } solo se aplican con -m/--message. `zeroclaw agent` interactivo abre `zeroclaw chat`, que usa el modelo configurado para el agente "{ $agent }". Añade -m "<mensaje>" para un turno puntual con estos ajustes, o cambia la configuración del agente.
+cli-agent-long-about =
+    Inicia el bucle del agente de IA.
+cli-bridge-added = Bridge "{$name}" guardado en [gateway.bridges.{$name}].
+cli-bridge-apply = Reinicia el gateway (o haz POST /admin/reload) para aplicarlo.
+cli-bridge-exists = El bridge "{$name}" ya existe; pasa --rotate para reemplazar su token.
+cli-bridge-invalid-name = Nombre de bridge no válido "{$name}": usa letras, dígitos, '-' y '_'.
+cli-bridge-list-empty = No hay bridges configurados. Añade uno con: zeroclaw gateway bridge add <nombre>
+cli-bridge-list-no-sessions = (ninguna)
+cli-bridge-list-row = {$name}: sesiones {$scope}
+cli-bridge-removed = Bridge "{$name}" eliminado; su token ya no funciona.
+cli-bridge-scope = Sesiones de chat que este token puede abrir: {$scope}
+cli-bridge-scope-none = Este token no puede abrir ninguna sesión de chat; añade --session o --session-prefix para permitir algunas.
+cli-bridge-token-once = Token del bridge (se muestra una sola vez; dáselo al bridge, p. ej. como ZEROCLAW_GATEWAY_TOKEN):
+cli-bridge-unknown = No hay ningún bridge llamado "{$name}" configurado.
+cli-chat-aborted = (turno cancelado)
+cli-chat-about = Chatea con un agente a través del gateway
+cli-chat-approval-prompt = ¿Permitir {$tool}? {$summary} [y]es / [a]lways / [N]o:
+cli-chat-attached = Sesión {$session} con {$agent}, {$history} mensajes anteriores. /quit sale, /cancel o Ctrl+C detiene un turno en curso.
+cli-chat-closed = El gateway cerró la conexión.
+cli-chat-connect-failed = No se pudo conectar al gateway en {$gateway}: {$error}. Inícialo con `zeroclaw daemon` o `zeroclaw gateway start`, o pasa --gateway.
+cli-chat-connect-refused = El gateway en {$gateway} rechazó el chat: {$error}
+cli-chat-duplicate = Ya gestionado ({$state}).
+cli-chat-error = Error: {$message}
+cli-chat-event = [{$kind}] {$text}
+cli-chat-steered = (añadido al turno en curso)
+cli-chat-tool-call = → {$tool}
+cli-chat-usage = [contexto {$context}] {$cost}
+cli-doctor-personality-file-truncated = {$alias}/{$filename}: límite de personalidad {$cap} frente a {$total} caracteres (se descartarían {$discarded})
+cli-skills-install-catalog-clone-failed = fallo al clonar el catálogo de habilidades {$url}
+cli-skills-install-catalog-failed = fallo al instalar la habilidad '{$skill}' del catálogo {$source}
+cli-skills-install-catalog-root-escapes = el catálogo {$url} tiene un directorio skills/ que resuelve fuera del catálogo clonado; se rechaza inspeccionarlo
+cli-skills-install-catalog-root-symlink = el catálogo {$url} tiene un directorio skills/ que es un enlace simbólico; se rechaza inspeccionarlo
+cli-skills-install-catalog-skill-escapes = la habilidad '{$skill}' en {$url} resuelve fuera del catálogo clonado; se rechaza instalarla
+cli-skills-install-catalog-skill-symlink = la habilidad '{$skill}' en {$url} es un enlace simbólico; las habilidades del catálogo deben ser directorios reales dentro del repositorio
+cli-skills-install-invalid-skill-name = nombre --skill no válido '{$skill}': usa un nombre simple (letras, dígitos, '-', '_')
+cli-skills-install-skill-not-in-catalog =
+    la habilidad '{$skill}' no se encontró en {$url}.
+    Habilidades disponibles: {$available}
+cli-skills-install-skill-not-in-catalog-empty = habilidad '{$skill}' no encontrada en {$url}: no hay directorio skills/ o está vacío
+cli-skills-install-skill-requires-git = --skill <nombre> requiere una URL de repositorio git como origen (se recibió '{$source}')
+telegram-skip-update-failed = No se pudo registrar el marcador de omisión para la actualización {$update_id} del bot '{$alias}': {$error}
+telegram-skip-update-pending = Ya hay un marcador de omisión pendiente para la actualización {$update_id} del bot '{$alias}'.
+telegram-skip-update-written = Marcador de omisión registrado para la actualización {$update_id} del bot '{$alias}'. El daemon en ejecución lo aplica en su siguiente reintento (en unos segundos) y archiva el payload como carta muerta bajo su directorio de datos.
+tool-runtime-command-build-failed = Error al construir el comando de runtime: {$error}
+tool-runtime-command-docker-allowed-root = Error al construir el comando de runtime: no se pudo canonizar la raíz del espacio de trabajo de Docker {$path}: {$cause}
+tool-runtime-command-docker-workspace-path = Error al construir el comando de runtime: no se pudo canonizar la ruta del espacio de trabajo de Docker {$path}: {$cause}
+turn-max-iterations-reached = *Turno detenido: se alcanzó el máximo de iteraciones de herramientas ({ $max_iterations }).*
