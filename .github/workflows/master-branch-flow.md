@@ -7,8 +7,8 @@ Use with:
 - [`docs/book/src/maintainers/ci-and-actions.md`](../../docs/book/src/maintainers/ci-and-actions.md)
 - [`docs/book/src/maintainers/release-runbook.md`](../../docs/book/src/maintainers/release-runbook.md)
 
-Last updated: **July 2026** (merge queue disabled on `master`; maintainers
-merge directly. The `merge_group` CI plumbing is retained, so the queue can be
+Last updated: **September 2026** (PR gate trimmed of duplicate compiles;
+merge queue disabled on `master`; maintainers merge directly. The `merge_group` CI plumbing is retained, so the queue can be
 re-enabled from branch protection with no code change).
 
 ---
@@ -31,7 +31,8 @@ Maintainers with merge authority: `JordanTheJet`, `Audacity88`, `WareWolf-MoonWa
 | `docker-publish.yml` | `workflow_call`, `workflow_dispatch`, tag push `v*` | Build, sign, and scan the generated Docker variant matrix |
 | `trivy-scheduled.yml` | `workflow_dispatch`; weekly schedule | Re-scan published `dist` and `default-features` images for new CVEs |
 | `cross-platform-build-manual.yml` | `workflow_dispatch` | Full platform build matrix (manual smoke check) |
-| `cross-platform-clippy.yml` | `workflow_dispatch`; weekly schedule | Advisory macOS/Windows Clippy coverage, outside the required PR gate |
+| `cross-platform-clippy.yml` | `workflow_dispatch`; weekly schedule | Advisory macOS/Windows Clippy coverage plus the 32-bit and minimal-companion Linux checks, outside the required PR gate |
+| `docs-deploy.yml` | `push` → `master` (book, `xtask/`, `locales.toml` paths); tag push `v*`; nightly schedule; `workflow_dispatch` | Build and publish the versioned mdBook + rustdoc site to `gh-pages` |
 | `pr-path-labeler.yml` | `pull_request` lifecycle | Automatic path-based PR labeling |
 
 ---
@@ -42,7 +43,7 @@ Maintainers with merge authority: `JordanTheJet`, `Audacity88`, `WareWolf-MoonWa
 |---|---|
 | PR opened or updated against `master` | `ci.yml` (full lint + test + build) |
 | PR added to the merge queue (`merge_group`) | **Inactive**: the merge queue is currently disabled. If re-enabled, `ci.yml` runs the full gate on a temporary `gh-readonly-queue/master/…` branch stacking the base + earlier queue entries + this PR. |
-| Push to `master` | `ci.yml` (post-merge quality signal + trusted Rust cache warming) |
+| Push to `master` | `ci.yml` (post-merge quality signal + trusted Rust cache warming; cache-free re-checks such as docs style and Nix eval are skipped) and, when the book changes, `docs-deploy.yml` |
 | Manual dispatch | `cross-platform-build-manual.yml`, `cross-platform-clippy.yml`, `docker-publish.yml`, `trivy-scheduled.yml`, or `release-stable-manual.yml` |
 | Tag push `vX.Y.Z` | `release-stable-manual.yml` (full release pipeline) and `docker-publish.yml` (generated variant matrix) |
 
@@ -59,16 +60,20 @@ tag push.
 
 1. Contributor opens or updates a PR targeting `master`.
 2. `ci.yml` runs:
-   - `lint`: `cargo fmt --all -- --check`, `cargo clippy --workspace
-     --all-targets --features ci-all -- -D warnings`
-     (PRs only).
+   - `fmt`: `cargo fmt --all -- --check` (every other job waits on it).
+   - `lint`: `cargo clippy --workspace --all-targets --locked --features
+     ci-all -- -D warnings`, plus the provider dispatch gate. This is the
+     only all-features compile in the gate (benches included).
    - `build`: matrix across `x86_64-unknown-linux-gnu`,
      `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
-   - `check`: matrix: all features + no default features.
-   - `check-32bit`: `i686-unknown-linux-gnu`, no default features.
-   - `bench`: benchmarks compile check.
-   - `test`: `cargo nextest run --locked --workspace` on `ubuntu-latest`.
-   - `security`: `cargo deny check`.
+   - `check`: no default features.
+   - `test`: `cargo nextest run --locked` per leg of
+     `dev/ci/test-partition.json` (runtime, channels, app, tail); the runtime
+     leg adds a filtered `sandbox-landlock` run, and the app leg runs the
+     architecture guards.
+   - `security`: `cargo deny check`, lockfile integrity, `cargo audit`.
+   - `installer-drift`: `cargo generate installers --check` (PRs: only when
+     manifests, `xtask/`, or generated install surfaces change).
    - `CI Required Gate`: composite job; branch protection requires this.
 3. Maintainer reviews. Once the gate is green and review policy is satisfied,
    the maintainer merges the PR directly (squash).
@@ -127,13 +132,11 @@ for the full procedure. In summary:
 flowchart TD
   A["PR opened or updated → master"] --> B["ci.yml"]
   B --> L["lint\nfmt · clippy"]
-  L --> T["test\ncargo nextest --workspace"]
+  L --> T["test\nnextest per partition leg"]
   L --> BLD["build\nLinux · macOS · Windows"]
-  L --> CHK["check\nall features · no default features"]
-  L --> C32["check-32bit\ni686-unknown-linux-gnu"]
-  L --> BCH["bench\ncompile check"]
+  L --> CHK["check\nno default features"]
   L --> SEC["security\ncargo deny check"]
-  T & BLD & CHK & C32 & BCH & SEC --> G["CI Required Gate"]
+  T & BLD & CHK & SEC --> G["CI Required Gate"]
   G -->|red| D["PR stays open"]
   G -->|green| R["Maintainer merges (squash) → master"]
 ```

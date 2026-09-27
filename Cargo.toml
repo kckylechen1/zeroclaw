@@ -453,9 +453,12 @@ opt-level = 1                 # own code: mild opt, still fast to compile
 debug = "line-tables-only"    # keep panic backtraces (file:line), drop the bulk of
                               # debuginfo — the main disk hog on a 1200+ dep tree
 
-# Third-party deps: optimized once and content-hash cached by sccache, so dev
-# runtime is fast; debug=false drops their debuginfo entirely (you never step
-# into deps), which is the real cut to the runaway target size.
+# Third-party deps: optimized once and then reused from target/ (no sccache
+# or mold is assumed; rust-lld, the toolchain default on x86_64 Linux, links),
+# so dev runtime is fast; debug=false drops their debuginfo entirely (you never
+# step into deps), which is the real cut to the runaway target size. Reclaim
+# disk with scripts/dev/target_sweep.sh, which keeps these and drops only
+# workspace crates.
 [profile.dev.package."*"]
 opt-level = 3
 debug = false

@@ -9,8 +9,7 @@
     ],
     "app": [
       "zeroclawlabs",
-      "zeroclaw-config",
-      "zeroclaw-tools"
+      "zeroclaw-config"
     ],
     "tail": [
       "aardvark-sys",
@@ -32,7 +31,27 @@
       "zeroclaw-robot-kit",
       "zeroclaw-sop-graph",
       "zeroclaw-spawn",
-      "zeroclaw-tool-call-parser"
+      "zeroclaw-tool-call-parser",
+      "zeroclaw-tools"
+    ]
+  },
+  "features": {
+    "runtime": [
+      "zeroclaw-runtime/heavy-tests"
+    ],
+    "channels": [
+      "zeroclaw-channels/heavy-tests"
+    ]
+  },
+  "extra_runs": {
+    "runtime": [
+      {
+        "name": "landlock",
+        "features": [
+          "zeroclaw-runtime/sandbox-landlock"
+        ],
+        "filter": "landlock"
+      }
     ]
   },
   "excluded": []

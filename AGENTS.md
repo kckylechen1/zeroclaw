@@ -50,16 +50,29 @@ Fork-specific facts (type placement, upstream divergences, known gaps) are in [`
 
 ## Validation
 
-Run what matches the change, and paste the commands and results in the PR:
+Validate in two tiers, and paste the commands and results in the PR.
+
+**Iterate** on the crates you are changing, with their default features:
+
+```bash
+cargo check -p <crate>                  # or: cargo clippy -p <crate> --all-targets
+cargo test -p <crate> [--lib <filter> | --test <name>]
+```
+
+**Before pushing**, run once:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --features ci-all -- -D warnings
-cargo test -p <changed crates>          # a full `cargo test` before an issue's last slice
+cargo clippy --workspace --all-targets --locked --features ci-all -- -D warnings   # alias: cargo lint-ci
+scripts/dev/leg.sh <leg>                # each test leg that owns a crate you touched
 bash scripts/ci/provider_dispatch_gate.sh   # model calls go through ProviderDispatch
 bash scripts/ci/docs_quality_gate.sh && bash scripts/ci/docs_links_gate.sh   # docs changes
 (cd web && npm ci && npm run build)     # gateway routes or web/ changed
 ```
+
+- `scripts/dev/leg.sh` runs a leg from `dev/ci/test-partition.json` with the same packages and features as CI (`--list` shows the legs, `--dry-run` prints the commands). Do not run a full-workspace `cargo test`; CI runs every leg in parallel.
+- One cargo process per worktree at a time, and only one agent runs the before-push tier at a time on a shared machine.
+- When disk is tight, run `scripts/dev/target_sweep.sh` (it removes only workspace-owned artifacts and refuses while a build is running). Never `cargo clean`, and never delete third-party artifacts from `target/`: they are the expensive part to rebuild.
 
 `scripts/ci/toolchain_gate.sh` checks that the active toolchain matches `rust-toolchain.toml`. Tests that rely on a `chmod`-read-only directory fail when run as root; CI runs unprivileged.
 

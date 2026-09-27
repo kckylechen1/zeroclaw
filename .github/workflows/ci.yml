@@ -52,6 +52,8 @@ jobs:
   repo-structure:
     name: Repository Structure
     needs: [fmt]
+    # PR-only: nothing here writes a cache, and the PR run already proved it.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -125,6 +127,7 @@ jobs:
           cargo clippy \
             --workspace \
             --all-targets \
+            --locked \
             --features ci-all \
             -- -D warnings 2>&1 | tee "$cargo_log"
           cargo_status=${PIPESTATUS[0]}
@@ -154,10 +157,10 @@ jobs:
           exit "$cargo_status"
         env:
           RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
-      - name: Config-write isolation guard
-        run: cargo test --test architecture tests_that_persist_config_isolate_the_path
-      - name: Fluent coverage guard (no bare user-facing strings)
-        run: cargo test --test architecture user_facing_strings_route_through_fluent
+      # The architecture guards (config-write isolation, Fluent coverage) are
+      # ordinary tests in the root `architecture` test target, so the
+      # `Test (app)` leg already runs them under nextest. Running them here
+      # too cost a second debug build of the root package on the critical path.
       - name: Provider dispatch gate (no direct ModelProvider method calls outside ProviderDispatch)
         run: bash scripts/ci/provider_dispatch_gate.sh
 
@@ -358,26 +361,14 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
+  # `--features ci-all` is already type-checked (all targets) by `lint`, so
+  # only the no-default-features graph needs its own check here. The 32-bit
+  # and minimal-companion checks run weekly in cross-platform-clippy.yml.
   check:
-    name: Check (${{ matrix.name }})
+    name: Check (no default features)
     needs: [fmt]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: all features
-            args: --features ci-all
-            sys_deps: libudev-dev
-          - name: no default features
-            args: --no-default-features
-            sys_deps: ""
-          # Root default minus the compile-time integration families
-          # (integrations-saas, hardware-tools): the slim companion graph.
-          - name: minimal companion
-            args: --no-default-features --features agent-runtime,default-channels,gateway,observability-prometheus,schema-export
-            sys_deps: ""
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -388,136 +379,10 @@ jobs:
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
-      - name: Install system dependencies
-        if: matrix.sys_deps != ''
-        run: bash scripts/ci/apt_install.sh ${{ matrix.sys_deps }}
       - name: Ensure web/dist placeholder exists
         run: mkdir -p web/dist && touch web/dist/.gitkeep
       - name: Check
-        run: cargo check --locked ${{ matrix.args }}
-
-  check-plugin-backends:
-    name: Check (${{ matrix.name }})
-    needs: [fmt]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: plugins cranelift backend
-            features: plugins-wasm-cranelift
-          - name: plugins pulley backend
-            features: plugins-wasm-pulley
-          - name: plugins runtime-only backend
-            features: plugins-wasmtime
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-      - name: Detect plugin backend changes
-        id: changed
-        run: |
-          base="${{ github.event.pull_request.base.sha }}"
-          if [ -z "$base" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
-          if git diff --name-only "$base" HEAD | grep -qE '^crates/zeroclaw-plugins/|^wit/|^Cargo\.(toml|lock)$'; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-        if: steps.changed.outputs.run == 'true'
-        with:
-          toolchain: 1.96.1
-      - name: Install channel plugin fixture target
-        if: steps.changed.outputs.run == 'true' && matrix.features == 'plugins-wasm-cranelift'
-        run: rustup target add wasm32-wasip2
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        if: steps.changed.outputs.run == 'true'
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-      - name: Check
-        if: steps.changed.outputs.run == 'true'
-        run: cargo check --locked -p zeroclaw-plugins --no-default-features --features ${{ matrix.features }}
-      - name: Run channel plugin component test
-        if: steps.changed.outputs.run == 'true' && matrix.features == 'plugins-wasm-cranelift'
-        run: cargo test --locked -p zeroclaw-plugins --features plugins-wasm-cranelift --test channel_plugin_e2e
-
-  check-32bit:
-    name: Check (32-bit)
-    needs: [fmt]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: 1.96.1
-          targets: i686-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        id: rust-cache
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-      - name: Install 32-bit system libraries
-        run: bash scripts/ci/apt_install.sh gcc-multilib
-      - name: Ensure web/dist placeholder exists
-        run: mkdir -p web/dist && touch web/dist/.gitkeep
-      - name: Check (32-bit, no default features)
-        run: cargo check --locked --target i686-unknown-linux-gnu --no-default-features
-
-  bench:
-    name: Benchmarks Compile
-    needs: [fmt]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: 1.96.1
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        id: rust-cache
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-      - name: Ensure web/dist placeholder exists
-        run: mkdir -p web/dist && touch web/dist/.gitkeep
-      - name: Verify benchmarks compile
-        shell: bash
-        run: |
-          set +e
-          cargo_log="${RUNNER_TEMP}/cargo-bench.log"
-          SECONDS=0
-          cargo bench --bench agent_benchmarks --no-run --locked --no-default-features --features agent-runtime 2>&1 | tee "$cargo_log"
-          cargo_status=${PIPESTATUS[0]}
-          duration_seconds=$SECONDS
-          set -e
-
-          workspace_path_compiles="$(grep -E -c 'Compiling.*\([^)]*zeroclaw' "$cargo_log" || true)"
-          total_compiles="$(grep -c 'Compiling' "$cargo_log" || true)"
-          downloaded_crates="$(grep -c 'Downloaded' "$cargo_log" || true)"
-          cache_hit="${RUST_CACHE_HIT:-unknown}"
-          summary_file="${GITHUB_STEP_SUMMARY:-/dev/null}"
-
-          {
-            echo "### Benchmarks Compile diagnostics"
-            echo ""
-            echo "| Field | Value |"
-            echo "| --- | --- |"
-            echo "| Runner OS | \`${{ runner.os }}\` |"
-            echo "| Rust cache exact hit | \`${cache_hit}\` |"
-            echo "| Cargo duration | \`${duration_seconds}s\` |"
-            echo "| Cargo status | \`${cargo_status}\` |"
-            echo "| Workspace path compile lines | \`${workspace_path_compiles}\` |"
-            echo "| Total compile lines | \`${total_compiles}\` |"
-            echo "| Downloaded crate lines | \`${downloaded_crates}\` |"
-          } >> "$summary_file"
-
-          exit "$cargo_status"
-        env:
-          RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: cargo check --locked --no-default-features
 
   # ── Post-format tests ─────────────────────────────────────────────────────
 
@@ -556,53 +421,57 @@ jobs:
         run: bash scripts/ci/apt_install.sh mold
       - name: Install cargo-nextest
         run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
+      - name: Partition guard (every workspace member in exactly one leg)
+        shell: bash
+        run: |
+          members="$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[].name' | sort)"
+          listed="$(jq -r '[.legs[][], .excluded[]] | .[]' dev/ci/test-partition.json | sort)"
+          dupes="$(printf '%s\n' "$listed" | uniq -d)"
+          if [ -n "$dupes" ]; then
+            echo "::error::Listed more than once in dev/ci/test-partition.json: $dupes"
+            exit 1
+          fi
+          if [ "$members" != "$listed" ]; then
+            echo "::error::dev/ci/test-partition.json does not match the workspace members"
+            diff <(printf '%s\n' "$members") <(printf '%s\n' "$listed") || true
+            exit 1
+          fi
       - name: Run tests
+        shell: bash
         env:
           LEG: ${{ matrix.leg }}
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+        # Packages, per-leg features and extra filtered runs all come from
+        # dev/ci/test-partition.json; scripts/dev/leg.sh reads the same file so
+        # a local leg run matches this one. Landlock is an extra run on the
+        # runtime leg rather than a leg feature: with `sandbox-landlock` on,
+        # Auto sandbox detection prefers Landlock, which would silently change
+        # every other runtime test.
         run: |
           PKGS="$(jq -r --arg leg "$LEG" '.legs[$leg] // [] | map("-p " + .) | join(" ")' dev/ci/test-partition.json)"
           if [ -z "$PKGS" ]; then
             echo "::error::No packages defined for test leg '$LEG' in dev/ci/test-partition.json"
             exit 1
           fi
+          FEATURES="$(jq -r --arg leg "$LEG" '.features[$leg] // [] | join(",")' dev/ci/test-partition.json)"
           FEATURE_ARGS=""
-          if [ "$LEG" = "channels" ]; then
-            FEATURE_ARGS="--features zeroclaw-channels/heavy-tests"
-          fi
-          if [ "$LEG" = "runtime" ]; then
-            FEATURE_ARGS="--features zeroclaw-runtime/heavy-tests"
+          if [ -n "$FEATURES" ]; then
+            FEATURE_ARGS="--features $FEATURES"
           fi
           echo "==> leg $LEG: cargo nextest run --locked $PKGS $FEATURE_ARGS"
           cargo nextest run --locked $PKGS $FEATURE_ARGS
 
-  test-landlock:
-    name: Test (Landlock)
-    needs: [fmt]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: 1.96.1
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        id: rust-cache
-        with:
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-      - name: Ensure web/dist placeholder exists
-        run: mkdir -p web/dist && touch web/dist/.gitkeep
-      - name: Install mold linker
-        run: bash scripts/ci/apt_install.sh mold
-      - name: Install cargo-nextest
-        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
-      - name: Run Landlock tests
-        run: cargo nextest run --locked -p zeroclaw-runtime --features sandbox-landlock -- landlock
-        env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          jq -c --arg leg "$LEG" '.extra_runs[$leg] // [] | .[]' dev/ci/test-partition.json |
+            while IFS= read -r run; do
+              name="$(jq -r '.name' <<<"$run")"
+              extra="$(jq -r '.features | join(",")' <<<"$run")"
+              filter="$(jq -r '.filter' <<<"$run")"
+              all_features="${FEATURES:+$FEATURES,}$extra"
+              echo "==> leg $LEG ($name): cargo nextest run --locked $PKGS --features $all_features -- $filter"
+              # stdin from /dev/null: the loop reads its runs from the pipe.
+              cargo nextest run --locked $PKGS --features "$all_features" -- "$filter" </dev/null
+            done
 
   # ── Post-format security checks ───────────────────────────────────────────
 
@@ -650,6 +519,8 @@ jobs:
   nix-eval:
     name: Nix Module Eval
     needs: [fmt]
+    # PR-only: nothing here writes a cache, and the PR run already proved it.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -664,6 +535,8 @@ jobs:
   nix-hash-drift:
     name: Nix Hash Drift
     needs: [fmt]
+    # PR-only: nothing here writes a cache, and the PR run already proved it.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -705,6 +578,8 @@ jobs:
   docs-style:
     name: Docs Style
     needs: [fmt]
+    # PR-only: nothing here writes a cache, and the PR run already proved it.
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -730,17 +605,42 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      # The generator derives every install surface from Cargo manifests
+      # (features), xtask, and the surfaces themselves, so a PR touching none
+      # of them cannot drift. Pushes to master always run, which keeps this
+      # job's Rust cache (an xtask build) warm for the PRs that do need it.
+      - name: Detect install-surface changes
+        id: changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "${{ github.event.pull_request.base.sha }}" HEAD \
+            | grep -qE '(^|/)Cargo\.toml$|^Cargo\.lock$|^xtask/|^dev/ci/|^dist/|^scripts/ci/install|^install\.sh$|^setup\.bat$|^flake\.nix$|^Containerfile$|^Dockerfile|^\.cargo/config\.toml$|^\.github/workflows/ci\.yml$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Test installer target detection
+        if: steps.changed.outputs.run == 'true'
         run: bash scripts/ci/install_target_triple_test.sh
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        if: steps.changed.outputs.run == 'true'
         with:
           toolchain: 1.96.1
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        if: steps.changed.outputs.run == 'true'
         id: rust-cache
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Check generated install surfaces are in sync with the spec
+        if: steps.changed.outputs.run == 'true'
         run: cargo generate installers --check
 
   web-permission-tests:
@@ -769,7 +669,7 @@ jobs:
   gate:
     name: CI Required Gate
     if: always()
-    needs: [fmt, repo-structure, lint, windows-clippy-tools-changes, windows-clippy-tools, build, check, check-plugin-backends, check-32bit, bench, test, test-landlock, security, nix-eval, nix-hash-drift, docs-style, installer-drift, web-permission-tests]
+    needs: [fmt, repo-structure, lint, windows-clippy-tools-changes, windows-clippy-tools, build, check, test, security, nix-eval, nix-hash-drift, docs-style, installer-drift, web-permission-tests]
     runs-on: ubuntu-latest
     steps:
       - name: Check results

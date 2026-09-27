@@ -15,19 +15,21 @@ env:
   DOCS_KEEP_VERSIONS: "3"
 
 on:
+  # Master pushes redeploy only when the book itself (or its generator)
+  # changes. Code-derived pages (rustdoc, generated references) move with
+  # every merge, so rebuilding them per merge burned ~15 runner minutes each
+  # time; the nightly schedule refreshes them instead. Tags always deploy.
   push:
     branches: [master]
     paths:
       - "docs/book/**"
-      - "src/**"
-      - "crates/**"
       - "xtask/**"
       - "locales.toml"
-      - "Cargo.toml"
-      - "Cargo.lock"
       - ".github/workflows/docs-deploy.yml"
     tags:
       - "v*"
+  schedule:
+    - cron: "41 3 * * *"
   workflow_dispatch:
     inputs:
       tag:
