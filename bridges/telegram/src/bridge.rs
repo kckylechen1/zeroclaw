@@ -287,7 +287,11 @@ impl Bridge {
                 self.disconnected(format!("{e:#}"));
                 return;
             }
-            self.typing_at.get_or_insert_with(Instant::now);
+            // Send inline: a replayed message may complete its turn before
+            // the loop's timer branch gets scheduled at all.
+            if self.typing_at.is_none() {
+                self.show_typing().await;
+            }
         }
     }
 
@@ -361,7 +365,11 @@ impl Bridge {
         };
         match client.send_message_with_id(&id, &text).await {
             Ok(()) => {
-                self.typing_at.get_or_insert_with(Instant::now);
+                // Show typing inline instead of arming the timer: the
+                // gateway can stream the whole turn (ack through done)
+                // before the select loop's typing branch is ever polled,
+                // which used to starve the indicator on fast turns.
+                self.show_typing().await;
             }
             Err(e) => self.disconnected(format!("{e:#}")),
         }
@@ -436,7 +444,9 @@ impl Bridge {
             Frame::Chunk { content } => {
                 // Chunks from a turn another client started land here too:
                 // the session is shared, so the owner sees it.
-                self.typing_at.get_or_insert_with(Instant::now);
+                if self.typing_at.is_none() {
+                    self.show_typing().await;
+                }
                 let stream = self.stream.get_or_insert_with(Stream::default);
                 stream.text.push_str(&content);
                 if stream.sent.is_empty()
@@ -451,7 +461,9 @@ impl Bridge {
                 }
             }
             Frame::Thinking { .. } | Frame::ToolCall { .. } | Frame::ToolResult { .. } => {
-                self.typing_at.get_or_insert_with(Instant::now);
+                if self.typing_at.is_none() {
+                    self.show_typing().await;
+                }
             }
             Frame::ApprovalRequest {
                 request_id,
