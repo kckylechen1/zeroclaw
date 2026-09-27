@@ -12,6 +12,12 @@ use zeroclaw_api::model_provider::ChatMessage;
 
 /// Request receipts kept per session (see `record_request`).
 const REQUEST_RECEIPTS_PER_SESSION: i64 = 256;
+/// Hard bound on the whole `session_requests` table. Session keys are
+/// client-supplied, so the per-session cap alone cannot bound the table when
+/// `session_ttl_hours` is 0 (the default: no sweep ever runs). Under abuse the
+/// oldest receipts are evicted first — at-most-once dedup degrades to
+/// at-least-once for evicted ids; no session data is touched.
+const REQUEST_RECEIPTS_GLOBAL_CAP: i64 = 16384;
 
 /// SQLite-backed session store with FTS5 and WAL mode.
 pub struct SqliteSessionBackend {
@@ -723,6 +729,17 @@ impl SessionBackend for SqliteSessionBackend {
             params![session_key, REQUEST_RECEIPTS_PER_SESSION],
         )
         .map_err(std::io::Error::other)?;
+        // Global bound: distinct session keys are client-supplied and the TTL
+        // sweep is opt-in, so cap the whole table or it grows without end.
+        conn.execute(
+            "DELETE FROM session_requests
+             WHERE rowid NOT IN (
+                SELECT rowid FROM session_requests
+                ORDER BY rowid DESC LIMIT ?1
+             )",
+            params![REQUEST_RECEIPTS_GLOBAL_CAP],
+        )
+        .map_err(std::io::Error::other)?;
         Ok(Some(RequestReceipt::Recorded))
     }
 
@@ -1327,6 +1344,38 @@ mod tests {
             backend.record_request("s1", "r1", "accepted").unwrap(),
             Some(RequestReceipt::Recorded)
         );
+    }
+
+    #[test]
+    fn request_receipts_are_globally_bounded_across_sessions() {
+        let tmp = TempDir::new().unwrap();
+        let backend = SqliteSessionBackend::new(tmp.path()).unwrap();
+        // Session keys are client-supplied; without a global bound the table
+        // grows without end on installs that never enable the TTL sweep
+        // (`session_ttl_hours` defaults to 0).
+        for i in 0..(REQUEST_RECEIPTS_GLOBAL_CAP + 200) {
+            backend
+                .record_request(&format!("gw_{i}"), "r1", "accepted")
+                .unwrap();
+        }
+        let rows: i64 = {
+            let conn = backend.conn.lock();
+            conn.query_row("SELECT COUNT(*) FROM session_requests", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        assert!(rows <= REQUEST_RECEIPTS_GLOBAL_CAP, "rows: {rows}");
+        // The most recent key's receipt survives the flood; the first key's
+        // was evicted (at-most-once dedup degrades under abuse, it does not
+        // corrupt).
+        let last = REQUEST_RECEIPTS_GLOBAL_CAP + 199;
+        assert!(matches!(
+            backend
+                .record_request(&format!("gw_{last}"), "r1", "accepted")
+                .unwrap(),
+            Some(RequestReceipt::Duplicate { .. })
+        ));
     }
 
     #[test]
