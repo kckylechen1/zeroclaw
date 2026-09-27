@@ -227,6 +227,20 @@ impl LeakDetector {
                     Regex::new(r#"api[_-]?key[=:]\s*['"]*[a-zA-Z0-9_-]{20,}"#).unwrap(),
                     "Generic API key",
                 ),
+                // ZeroClaw's own gateway bearer tokens (pairing.rs): `zc_`
+                // paired and `zcb_` bridge tokens are `prefix + 64 lowercase
+                // hex`. Their hex entropy (~3.9 bits/char) is below the
+                // entropy pass threshold, so they need a deterministic prefix
+                // match. Tool receipts use the dashed `zc-receipt-` shape and
+                // do not collide.
+                (
+                    Regex::new(r"zc_[0-9a-f]{64}").unwrap(),
+                    "ZeroClaw paired token",
+                ),
+                (
+                    Regex::new(r"zcb_[0-9a-f]{64}").unwrap(),
+                    "ZeroClaw bridge token",
+                ),
             ]
         });
 
@@ -878,6 +892,31 @@ mod tests {
                 assert!(!redacted.contains("gsk_abcdefghijklmnopqrstuvwxyz123456"));
             }
             LeakResult::Clean => panic!("Should detect Groq API key"),
+        }
+    }
+
+    #[test]
+    fn detects_gateway_paired_and_bridge_tokens() {
+        let detector = LeakDetector::new();
+        // Real mint shapes: `zc_`/`zcb_` + 64 lowercase hex (pairing.rs).
+        // Their hex entropy (~3.90 bits/char) sits below the entropy pass's
+        // threshold (~4.375 at default sensitivity), so a deterministic
+        // prefix pattern is the only reliable catch.
+        let paired = format!("zc_{}", "a1b2c3d4".repeat(8));
+        let bridge = format!("zcb_{}", "e5f6a7b8".repeat(8));
+        for (label, token) in [("paired", paired.as_str()), ("bridge", bridge.as_str())] {
+            let result = detector.scan(&format!("the gateway said {token} in clear"));
+            match result {
+                LeakResult::Detected { patterns, redacted } => {
+                    assert!(
+                        patterns.iter().any(|p| p.contains("ZeroClaw")),
+                        "{label}: patterns: {patterns:?}"
+                    );
+                    assert!(!redacted.contains(token), "{label}: token survived");
+                    assert!(redacted.contains("[REDACTED"), "{label}");
+                }
+                LeakResult::Clean => panic!("Should detect {label} gateway token"),
+            }
         }
     }
 
