@@ -48,7 +48,6 @@ Conditionally registered:
 | Tool | Enabled by |
 |---|---|
 | `knowledge` | `[knowledge].enabled = true`. Stores structured relationship memory; see [Relationship memory](./relationship-memory.md) |
-| Hardware probes | `--features hardware`: GPIO, I2C, SPI reads/writes |
 | `sop_*` tools | Registered when `sop.sops_dir` is configured: run and inspect SOPs |
 | `discord_search` | Registered when a Discord alias has `archive` enabled |
 

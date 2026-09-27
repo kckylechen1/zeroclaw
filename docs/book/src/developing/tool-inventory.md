@@ -1,7 +1,7 @@
 # Built-In Tool Inventory
 
 Use this page when deciding whether an agent-callable tool should stay in the
-core binary, become feature-gated, move to a WASM plugin, ship as a skill
+core binary, become feature-gated, ship as a skill
 package, or use an MCP or CLI-backed integration.
 
 This is a classification map, not a removal plan. Do not remove or externalize a
@@ -58,7 +58,7 @@ boundaries because they add platform, dependency, network, or UI surface area.
 | `browser`, `browser_open`, `text_browser` | Config-gated and runtime-dependent. | Keep first-party, but continue tightening feature/config gates because browser automation is a large trusted surface. |
 | `http_request`, `web_fetch`, `web_search_tool` | Config-gated network access. | Keep first-party while SSRF, allowlist, provider routing, and receipt behavior remain ZeroClaw-owned. Revisit only after MCP/plugin replacements can express the same network policy. |
 | SOP tools (`sop_list`, `sop_execute`, `sop_advance`, `sop_approve`, `sop_status`, `sop_workshop`) | Removed with the SOP run side. | Retired: no agent-facing SOP run tools remain; runs are Tachi-side ProcedureRuns through the procedure_v1 seam. |
-| WASM plugin tools | Compile-feature and config-gated host bridge. | Keep the host bridge first-party; individual plugin capabilities should live outside core. |
+| WASM plugin tools | Removed with the WASM plugin host. | Retired: extensions go through MCP servers. |
 | `execute_pipeline` | Config-gated tool chaining. | Keep gated until tool chaining policy, per-step receipts, and caller allowlists are stable enough to judge whether it is core. |
 | `knowledge` | Config-gated knowledge surface. | Keep gated while relationship memory and graph workflows are still being promoted into user-facing docs and skills. |
 | `file_upload`, `file_upload_bundle`, `file_download` | Config-gated data movement. | Keep gated; these are policy-sensitive data movement tools and need an explicit replacement before externalization. |
@@ -87,8 +87,8 @@ trusted surface or was deleted.
 Config sections that used to enable these as model tools still parse. Sections
 that keep configuring an operator surface (`[backup]`, `[data_retention]`)
 log a startup/reload notice naming that surface when enabled; nothing widens
-the model-visible registry. The retired names are reserved against WASM plugin
-registration so a plugin cannot claim one and ride it back onto the provider
+the model-visible registry. The retired names are reserved against external tool
+registration so no extension can claim one and ride it back onto the provider
 wire.
 
 ## Externalize Later

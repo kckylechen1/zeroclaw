@@ -110,7 +110,7 @@ advisory input you have personally vetted. If the file does not exist, do not
 auto-invoke `pr-architecture-check`.
 
 > **Tip:** If the PR touches core crates (`zeroclaw-api`, `zeroclaw-runtime`,
-> `zeroclaw-gateway`, `zeroclaw-plugins`), consider running `arch-check #<N>`
+> `zeroclaw-gateway`), consider running `arch-check #<N>`
 > first to get an architecture analysis before starting your review.
 
 ### Phase 2 — Execute the protocol

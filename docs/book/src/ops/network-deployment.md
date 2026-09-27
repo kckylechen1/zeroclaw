@@ -114,8 +114,7 @@ cd zeroclaw
 
 </div>
 
-Grants access to GPIO, I2C, SPI via `rppal` when you pick the hardware features.
-The stock service unit already adds the user to the `gpio`, `spi`, `i2c` groups.
+In-process hardware features were removed from the core; physical devices join as gateway Nodes (ADR-017).
 
 ### Checklist
 

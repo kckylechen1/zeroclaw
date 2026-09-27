@@ -27,7 +27,7 @@
 
 ---
 
-ZeroClaw is an agent runtime — a single Rust binary you configure and run. It talks to LLM providers (Anthropic, OpenAI, Ollama, and ~20 others), reaches the world through 30+ channels (Discord, Telegram, Matrix, email, voice, webhooks, your own CLI), and acts through tools (shell, browser, HTTP, hardware, custom MCP servers). Everything runs on your machine, with your keys, in your workspace.
+ZeroClaw is an agent runtime — a single Rust binary you configure and run. It talks to LLM providers (Anthropic, OpenAI, Ollama, and ~20 others), reaches the world through 30+ channels (Discord, Telegram, Matrix, email, voice, webhooks, your own CLI), and acts through tools (shell, browser, HTTP, custom MCP servers). Everything runs on your machine, with your keys, in your workspace.
 
 Read the [Philosophy](docs/book/src/philosophy/index.md) for the four opinions that shape it.
 
@@ -153,7 +153,7 @@ Notes:
 │         (Anthropic,  (shell,    (SQLite,                     │
 │          OpenAI,     browser,    embeddings)                 │
 │          Ollama,     HTTP,                                   │
-│          ~20 more)   hardware)                               │
+│          ~20 more)   MCP)                                    │
 └──────────────────────────────────────────────────────────────┘
 ```
 

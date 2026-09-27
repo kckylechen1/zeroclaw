@@ -79,7 +79,7 @@ Pairing is required by default; `[gateway.allow_public_bind = true]` enables bin
 
 Callable tools the agent invokes. Not to be confused with CLI `zeroclaw` subcommands.
 
-Includes: `browser`, `http_request`, `web_search`, `shell`, `file_read`, `file_write`, hardware probes (`hardware_board_info`, `hardware_memory_read`), and more. See [Tools → Overview](../tools/overview.md).
+Includes: `browser`, `http_request`, `web_search`, `shell`, `file_read`, `file_write`, and more. See [Tools → Overview](../tools/overview.md).
 
 Each tool is registered via factory and described to the model via Fluent-localised strings.
 

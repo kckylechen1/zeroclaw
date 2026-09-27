@@ -66,7 +66,17 @@ Full per-distro list: [Setup → Linux](../setup/linux.md).
 
 Building ZeroClaw from source is memory-hungry, mostly during the final link. `install.sh` already adapts to this automatically when it builds from source:
 
-{{#include ../_snippets/hardware-lowmem-lto.md}}
+When `install.sh` builds from source on Linux, it reads `MemTotal` from `/proc/meminfo` and, on hosts with **under 12 GiB** of RAM, exports `CARGO_PROFILE_RELEASE_LTO=thin` before building. Fat LTO (the `[profile.release]` default) can peak past 7 GB RSS during the cross-crate type pass and OOM a low-RAM board; thin LTO trades a small binary-size increase for a much lower build-time memory peak.
+
+The switch only applies when you have not already pinned the variable. Override either direction explicitly:
+
+```sh
+# Force fat LTO even on a low-RAM host (smaller binary, higher build RAM)
+export CARGO_PROFILE_RELEASE_LTO=fat
+
+# Force thin LTO on a high-RAM host (lower build RAM)
+export CARGO_PROFILE_RELEASE_LTO=thin
+```
 
 If you still run out of memory, or you are not building through `install.sh`:
 

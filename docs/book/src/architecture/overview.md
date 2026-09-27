@@ -1,6 +1,6 @@
 # Architecture Overview
 
-ZeroClaw is a layered Rust workspace. At the top is the agent runtime; below it are pluggable providers, channels, tools, and memory; supporting crates handle config, sandboxing, and hardware.
+ZeroClaw is a layered Rust workspace. At the top is the agent runtime; below it are pluggable providers, channels, tools, and memory; supporting crates handle config and sandboxing.
 
 ## High-level shape
 
@@ -16,7 +16,7 @@ flowchart TB
         CH["zeroclaw-channels<br/>30+ messaging integrations"]
         GW["zeroclaw-gateway<br/>REST · WebSocket · dashboard"]
         PR["zeroclaw-providers<br/>LLM clients · retry · routing"]
-        TL["zeroclaw-tools<br/>browser · HTTP · hardware"]
+        TL["zeroclaw-tools<br/>browser · HTTP · files"]
     end
 
     subgraph Core["Core"]

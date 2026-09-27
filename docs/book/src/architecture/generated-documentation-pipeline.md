@@ -1,8 +1,8 @@
 # Generated documentation pipeline
 
-ZeroClaw documentation combines hand-authored Markdown with references and snippets materialized from Rust types, command definitions, registries, WIT contracts, workflow files, and UI metadata. The generated file is not a second source of truth: fix the owning source or generator, then rebuild the documentation.
+ZeroClaw documentation combines hand-authored Markdown with references and snippets materialized from Rust types, command definitions, registries, workflow files, and UI metadata. The generated file is not a second source of truth: fix the owning source or generator, then rebuild the documentation.
 
-Use this page when a change touches a schema, CLI flag, feature or hardware inventory, plugin contract, default keymap, theme registry, mdBook directive, generated reference, docs gate, or deployment workflow. For configuration values specifically, also read [Config lifecycle](./config-lifecycle.md). For translated output, continue with [Localization catalog lifecycle](./localization-catalog-lifecycle.md).
+Use this page when a change touches a schema, CLI flag, feature inventory, default keymap, theme registry, mdBook directive, generated reference, docs gate, or deployment workflow. For configuration values specifically, also read [Config lifecycle](./config-lifecycle.md). For translated output, continue with [Localization catalog lifecycle](./localization-catalog-lifecycle.md).
 
 ## Source-to-output map
 
@@ -12,7 +12,6 @@ Use this page when a change touches a schema, CLI flag, feature or hardware inve
 | CLI reference | Clap command tree in `src/main.rs` | `cargo mdbook refs` or `cargo mdbook build`, through `markdown-help` | `docs/book/src/reference/cli.md` | Ignored derived file | CLI reference chapter |
 | Rust API reference | Public Rust items across workspace crates | `cargo doc` inside `cargo mdbook refs` or `cargo mdbook build` | `target/doc/`, copied to `docs/book/book/api/` | Ignored build output | Published API reference |
 | Feature matrix | Channel inventory, model-provider slots, default tools, and `docs/book/feature-matrix-parity.toml` | `xtask/src/cmd/mdbook/feature_matrix.rs` during locale builds | `docs/book/src/_snippets/feature-matrix-*.md` | Ignored derived snippets | Feature comparison pages through `{{#include}}` |
-| Hardware tables | Hardware board registry and tool catalog, transport descriptions in the generator, release workflow targets, and the low-memory threshold in `install.sh` | `xtask/src/cmd/mdbook/hardware.rs` during locale builds | `docs/book/src/_snippets/hardware-*.md` | Ignored derived snippets | Hardware and release-target guides |
 | Peer-group blocks | `docs/book/peer-groups.toml` | `xtask/src/cmd/mdbook/peer_groups.rs` mdBook preprocessor | Expanded chapter content | Build-time only | Channel and peer-group pages using peer-group directives |
 | Theme CSS and names | `web/src/contexts/themes.json` | `xtask/src/cmd/mdbook/themes.rs` during locale builds | Ignored CSS fragment plus the generated marker region in tracked `docs/book/theme/index.hbs` | Mixed: derived files are ignored; the template outside its marker remains authored | mdBook theme picker |
 | Locale switcher | `locales.toml` and tracked `docs/book/theme/lang-switcher.js.tpl` | `inject_lang_switcher_locales` during locale builds | `docs/book/theme/lang-switcher.js` | Ignored derived file | Published language selector |
@@ -28,7 +27,7 @@ This matrix describes the current high-value surfaces, not every helper file pro
 
 1. Generate `reference/cli.md` and `reference/config.md` from the current command tree and config schema.
 2. Build workspace rustdoc.
-3. Materialize theme, keymap, hardware, feature-matrix, and plugin snippets.
+3. Materialize theme, keymap, and feature-matrix snippets.
 4. Run mdBook once for every locale in `locales.toml`, with preprocessors configured by `docs/book/book.toml`.
 5. Check links in the rendered primary locale.
 6. Assemble the version directory, locale redirect, rustdoc tree, and shared theme assets under `docs/book/book/`.
@@ -39,7 +38,7 @@ The docs deployment workflow initializes the translation submodule, installs the
 
 ## Tracked and build-only outputs
 
-Tracked files are reviewable inputs or templates: authored Markdown, `locales.toml`, `docs/book/peer-groups.toml`, feature-matrix parity metadata, theme templates, Rust/WIT sources, and workflow definitions. The `docs/book/po` path is a tracked gitlink to the separate translation-catalog repository; its contents and release tags have their own lifecycle.
+Tracked files are reviewable inputs or templates: authored Markdown, `locales.toml`, `docs/book/peer-groups.toml`, feature-matrix parity metadata, theme templates, Rust sources, and workflow definitions. The `docs/book/po` path is a tracked gitlink to the separate translation-catalog repository; its contents and release tags have their own lifecycle.
 
 Ignored files are reproducible materializations: CLI and config references, generated snippets, rustdoc, rendered HTML, locale-switcher JavaScript, generated theme CSS, and the dashboard TypeScript API client. They may exist in a working tree after a docs build without belonging in a commit.
 

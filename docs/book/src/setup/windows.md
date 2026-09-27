@@ -63,7 +63,7 @@ Flags:
 | Flag | Behaviour |
 |---|---|
 | `--prebuilt` | Download prebuilt binary from GitHub Releases (fastest once reached; current script still checks for `cargo` first) |
-| `--minimal`  | Build core only (no channels, no hardware) |
+| `--minimal`  | Build core only (no channels) |
 | `--standard` | Build with common channels (Telegram, Discord, Slack, Matrix) |
 | `--full`     | Build everything |
 
