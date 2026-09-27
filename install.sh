@@ -53,7 +53,7 @@ feature_members() {
 # Aggregate/meta features and deprecated aliases: internal groupings, not
 # individual picker rows. The single source of truth for what to skip when
 # rendering rows and what to expand when resolving `default`.
-NON_ROW_FEATURES="default default-channels channels-full ci-all fantoccini landlock metrics embedded-web"
+NON_ROW_FEATURES="default default-channels channels-full ci-all landlock metrics embedded-web"
 
 is_aggregate() {
   case " $NON_ROW_FEATURES " in *" $1 "*) return 0 ;; *) return 1 ;; esac
@@ -82,9 +82,8 @@ expand_default_features() {
 
 validate_feature() {
   case "$1" in
-  fantoccini)
-    warn "'fantoccini' is deprecated — use 'browser-native'"
-    return 0
+  fantoccini | browser-native | hardware | peripheral-rpi | probe | dev-sim | plugins-wasm* | observability-otel | memory-postgres)
+    die "Feature '$1' was retired and is no longer available. Run: $0 --list-features"
     ;;
   landlock)
     warn "'landlock' is deprecated — use 'sandbox-landlock'"
@@ -121,10 +120,10 @@ list_features() {
   channels="" observability="" platform="" other=""
   for feat in $ALL_FEATURES; do
     case "$feat" in
-    default | ci-all | fantoccini | landlock | metrics) continue ;;
+    default | ci-all | landlock | metrics) continue ;;
     channel-*) channels="${channels:+$channels, }$feat" ;;
     observability-*) observability="${observability:+$observability, }$feat" ;;
-    hardware | peripheral-* | sandbox-* | browser-* | probe | webauthn)
+    sandbox-* | browser-* | webauthn)
       platform="${platform:+$platform, }$feat"
       ;;
     *) other="${other:+$other, }$feat" ;;
@@ -464,7 +463,7 @@ quickstart_needed() {
 # ── Interactive feature picker ───────────────────────────────────
 #
 # POSIX-sh number-toggle picker over the OPTIONAL feature set (channel-*,
-# observability-*, hardware/peripheral/sandbox/browser flavours). Default
+# observability-*, sandbox/browser flavours). Default
 # features are always on; this only surfaces the opt-in extras. The output
 # is a comma-separated list of selected features written to stdout.
 #

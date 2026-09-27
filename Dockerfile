@@ -77,8 +77,6 @@ COPY Cargo.toml Cargo.lock ./
 # no longer requires editing this file.  --parents preserves the
 # crates/<name>/Cargo.toml directory structure.
 COPY --parents crates/*/Cargo.toml ./
-# The plugin test fixture is a nested workspace member the glob above misses.
-COPY --parents crates/zeroclaw-plugins/tests/fixtures/channel-fixture/Cargo.toml ./
 # zeroclaw-macros is a proc-macro crate, compiled for the host even on a cross
 # build. If only a stub lib.rs is present during the pre-fetch, its host-cached
 # artifact is reused in the real build under the target-triple dir, leaving
@@ -104,11 +102,7 @@ RUN mkdir -p src benches tools/fill-translations/src xtask/src/bin bridges/teleg
     && echo "fn main() {}" > xtask/src/bin/mdbook.rs \
     && echo "fn main() {}" > xtask/src/bin/fluent.rs \
     && echo "fn main() {}" > xtask/src/bin/web.rs \
-    && mkdir -p crates/zeroclaw-hardware/examples \
-    && echo "fn main() {}" > crates/zeroclaw-hardware/examples/esp32_sim.rs \
     && for d in crates/*/; do [ "$d" = "crates/zeroclaw-macros/" ] && continue; mkdir -p "${d}src" && printf '' > "${d}src/lib.rs"; done \
-    && mkdir -p crates/zeroclaw-plugins/tests/fixtures/channel-fixture/src \
-    && printf '' > crates/zeroclaw-plugins/tests/fixtures/channel-fixture/src/lib.rs \
     && mkdir -p crates/zeroclaw-gateway/tests \
     && printf '' > crates/zeroclaw-gateway/tests/nodes_mdns.rs
 RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \

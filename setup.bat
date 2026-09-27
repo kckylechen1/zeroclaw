@@ -379,7 +379,7 @@ echo   --prebuilt    Download pre-compiled binary (fastest)
 echo   --minimal     Build core only ^(--no-default-features^)
 echo   --dist        Build lean standard distribution (recommended)
 echo   --default     Build the default feature set
-echo   --all         Build every feature including hardware and browser
+echo   --all         Build every feature
 echo   --dry-run     Show what would happen without building or installing
 echo   --help, -h    Show this help message
 echo.
