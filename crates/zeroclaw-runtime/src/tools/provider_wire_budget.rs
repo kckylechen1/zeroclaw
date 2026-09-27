@@ -41,7 +41,6 @@ const LEAN_PROVIDER_WIRE_TOKEN_CEILING: usize = 5_000;
 
 const PARSE_HELPER_TABLES: &[&str] = &[
     "data_retention",
-    "cloud_ops",
     "conversational_ai",
     "security",
     "security_ops",
@@ -330,7 +329,6 @@ async fn assemble_turn(req: TurnRequest<'_>) -> (ScopedAssembled, WireBudget) {
             runtime,
             caller_allowed: None,
             connect_mcp: req.connect_mcp,
-            connect_peripherals: false,
             exclude_memory: false,
             list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
@@ -883,12 +881,6 @@ async fn minimal_composition_no_bypass_subsystem_flags() {
     config.browser.enabled = true;
     config.http_request.enabled = true;
     config.web_search.enabled = true;
-    config.jira.enabled = true;
-    config.jira.base_url = "https://example.atlassian.net".into();
-    config.jira.api_token = "dummy_jira_token".into();
-    config.notion.enabled = true;
-    config.notion.api_key = "secret_notion_key".into();
-    config.notion.database_id = "00000000-0000-0000-0000-000000000000".into();
 
     // Positive control: under full composition, EVERY enabled non-minimal subsystem tool is registered
     config.composition = Some(zeroclaw_config::composition::Composition::Full);
@@ -919,16 +911,6 @@ async fn minimal_composition_no_bypass_subsystem_flags() {
     assert!(
         full_budget.names.contains(&"http_request".to_string()),
         "http_request must be registered under full composition: {:?}",
-        full_budget.names
-    );
-    assert!(
-        full_budget.names.contains(&"jira".to_string()),
-        "jira must be registered under full composition: {:?}",
-        full_budget.names
-    );
-    assert!(
-        full_budget.names.contains(&"notion".to_string()),
-        "notion must be registered under full composition: {:?}",
         full_budget.names
     );
 
@@ -964,13 +946,7 @@ async fn minimal_composition_no_bypass_subsystem_flags() {
         "git_forge",
         "model_routing_config",
         "backup",
-        "jira",
-        "notion",
-        "google_workspace",
-        "microsoft365",
-        "linkedin",
         "composio",
-        "pushover",
         "cron_add",
         "cron_update",
         "browser",
@@ -996,11 +972,9 @@ async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
         data_dir: tmp.path().join("data"),
         ..Config::default()
     };
-    config.jira.enabled = true;
-    config.jira.base_url = "https://example.atlassian.net".into();
-    config.jira.api_token = "dummy_jira_token".into();
+    config.http_request.enabled = true;
 
-    // Create a skill attempting to elevate non-minimal built-in tools (cron_add / jira)
+    // Create a skill attempting to elevate non-minimal built-in tools (cron_add / http_request)
     let bypass_skill = Skill {
         name: "malicious_skill".into(),
         description: "attempting bypass".into(),
@@ -1020,12 +994,12 @@ async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
                 timeout_secs: None,
             },
             crate::skills::SkillTool {
-                name: "elevate_jira".into(),
-                description: "jira bypass".into(),
+                name: "elevate_http".into(),
+                description: "http_request bypass".into(),
                 kind: "builtin".into(),
                 command: String::new(),
                 args: Default::default(),
-                target: Some("jira".into()),
+                target: Some("http_request".into()),
                 locked_args: Default::default(),
                 timeout_secs: None,
             },
@@ -1035,7 +1009,7 @@ async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
         location: None,
     };
 
-    // Positive control: under full composition, skill elevation of available built-in tools succeeds for both cron_add and jira
+    // Positive control: under full composition, skill elevation of available built-in tools succeeds for both cron_add and http_request
     config.composition = Some(zeroclaw_config::composition::Composition::Full);
     let (_, full_budget) = assemble_turn(TurnRequest {
         config: &config,
@@ -1056,8 +1030,8 @@ async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
     assert!(
         full_budget
             .names
-            .contains(&"malicious_skill__elevate_jira".to_string()),
-        "full composition must permit skill elevation of available jira tool: {:?}",
+            .contains(&"malicious_skill__elevate_http".to_string()),
+        "full composition must permit skill elevation of available http_request tool: {:?}",
         full_budget.names
     );
 
@@ -1083,7 +1057,7 @@ async fn skill_builtin_elevation_cannot_bypass_minimal_composition() {
     assert!(
         !budget
             .names
-            .contains(&"malicious_skill__elevate_jira".to_string()),
+            .contains(&"malicious_skill__elevate_http".to_string()),
         "skill elevation must not resurrect excluded non-minimal tool: {:?}",
         budget.names
     );

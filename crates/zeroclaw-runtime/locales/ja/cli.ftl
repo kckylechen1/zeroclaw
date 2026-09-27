@@ -29,8 +29,6 @@ cli-integrations-about = 50以上の統合を参照
 cli-skills-about = スキル (ユーザー定義機能) を管理
 cli-migrate-about = 他のエージェントランタイムからデータを移行
 cli-auth-about = プロバイダー サブスクリプション認証プロファイルを管理
-cli-hardware-about = USBハードウェアを発見・内省
-cli-peripheral-about = ハードウェアペリフェラルを管理
 cli-memory-about = エージェントメモリエントリを管理
 cli-config-about = ZeroClaw設定を管理
 cli-update-about = ZeroClaw更新を確認・適用
@@ -138,7 +136,7 @@ cli-memory-list-about = オプションのフィルター付きでメモリエ�
 cli-memory-get-about = キーで特定のメモリエントリを取得
 cli-memory-stats-about = メモリバックエンド統計とヘルスを表示
 cli-memory-clear-about = カテゴリ別、キー別、またはすべてをクリアしてメモリをクリア
-cli-memory-clear-unsupported-backend = memory clear は追記専用バックエンド '{$backend}' ではサポートされていません。削除可能なバックエンド（sqlite、lucid、またはpostgres）に切り替えてください
+cli-memory-clear-unsupported-backend = memory clear は追記専用バックエンド '{$backend}' ではサポートされていません。削除可能なバックエンド（sqlite または lucid）に切り替えてください
 cli-estop-status-about = 現在の estop ステータスを表示
 cli-estop-resume-about = エンゲージされた estop レベルから再開
 cli-models-refresh-about = プロバイダーモデルをリフレッシュしてキャッシュ
@@ -148,12 +146,6 @@ cli-models-status-about = 現在のモデル設定とキャッシュステータ
 cli-doctor-models-about = プロバイダー全体のモデルカタログをプローブして可用性を報告
 cli-doctor-traces-about = ランタイムトレースイベント (ツール診断とモデル応答) をクエリ
 cli-doctor-update-context-windows-about = プロバイダーの /models エンドポイントから config.toml の context_window を更新
-cli-hardware-discover-about = USB デバイスを列挙して既知のボードを表示
-cli-hardware-introspect-about = デバイスをそのシリアル番号またはデバイスパスで内省
-cli-hardware-info-about = ST-Link 経由 probe-rs を使用して USB でチップ情報を取得
-cli-peripheral-list-about = 設定されたペリフェラルを一覧表示
-cli-peripheral-add-about = ボードタイプとトランスポートパスでペリフェラルを追加
-cli-peripheral-flash-about = Arduino ボードに ZeroClaw ファームウェアをフラッシュ
 cli-migrate-openclaw-about = OpenClaw ワークスペースからこの ZeroClaw ワークスペースにメモリをインポート
 cli-gateway-long-about =
     ゲートウェイサーバー（webhook、websocket）を管理します。
@@ -214,26 +206,6 @@ cli-channel-long-about =
     zeroclaw channel remove my-bot
     zeroclaw channel bind-telegram zeroclaw_user
     zeroclaw channel send 'Alert!' --channel-id telegram --recipient 123456789
-cli-hardware-long-about =
-    USB ハードウェアを検出して内省します。
-
-    接続されている USB デバイスを列挙し、既知の開発ボード（STM32 Nucleo、Arduino、ESP32）を特定し、probe-rs/ST-Link 経由でチップ情報を取得します。
-
-    例:
-    zeroclaw hardware discover
-    zeroclaw hardware introspect /dev/ttyACM0
-    zeroclaw hardware info --chip STM32F401RETx
-cli-peripheral-long-about =
-    ハードウェアペリフェラルを管理します。
-
-    エージェントにツール（GPIO、センサー、アクチュエーター）を公開するハードウェアボードを追加、一覧表示、フラッシュ、および設定します。サポートされるボード: nucleo-f401re、rpi-gpio、esp32、arduino-uno。
-
-    例:
-    zeroclaw peripheral list
-    zeroclaw peripheral add nucleo-f401re /dev/ttyACM0
-    zeroclaw peripheral add rpi-gpio native
-    zeroclaw peripheral flash --port /dev/cu.usbmodem12345
-    zeroclaw peripheral flash-nucleo
 cli-memory-long-about =
     エージェントメモリエントリを管理します。
 
@@ -291,11 +263,6 @@ cli-self-test-long-about =
     zeroclaw self-test --quick     # 高速チェックのみ（ネットワークなし）
 cli-skills-install-suggestion =
     このリクエストには `{$name}` スキルが必要なようですが、インストールされていません。
-
-    一致した機能: {$matched}
-    次: `{$install_command}` を実行してインストールしてください。
-cli-plugin-install-suggestion =
-    このリクエストには `{$name}` プラグインが必要なようですが、インストールされていません。
 
     一致した機能: {$matched}
     次: `{$install_command}` を実行してインストールしてください。
@@ -393,16 +360,6 @@ cli-self-test-web-dist-dir-pass-unset = 未設定（自動検出を使用）
 cli-self-test-web-dist-dir-pass-literal = {$path}（リテラルパス）
 cli-self-test-web-dist-dir-fail-expansion = 警告: {$path} — {$reason}。gateway.web_dist_dir はそのまま読み込まれるため、値を自分で展開してください（例: 絶対パス）
 cli-service-systemd-linger-disabled-warning = systemd ユーザー linger は無効です。ZeroClaw のユーザーサービスはログアウト後に停止する可能性があります。有効化: loginctl enable-linger {$user}
-cli-peripherals-none = 周辺機器が設定されていません。
-cli-peripherals-add-hint = 次のコマンドで追加します: zeroclaw peripheral add <board> <path>
-cli-peripherals-add-example = {"  "}例: zeroclaw peripheral add nucleo-f401re <serial-path>
-cli-peripherals-config-hint = または config.toml に追加します:
-cli-peripherals-configured = 設定済みの周辺機器:
-cli-peripherals-already-configured = ボード {$board} ({$path}) は既に設定されています。
-cli-peripherals-added = {$board} を {$path} に追加しました。適用するにはデーモンを再起動してください。
-cli-peripherals-flash-needs-hardware = Arduino のフラッシュには 'hardware' 機能が必要です。
-cli-peripherals-unoq-needs-hardware = Uno Q のセットアップには 'hardware' 機能が必要です。
-cli-peripherals-nucleo-needs-hardware = Nucleo のフラッシュには 'hardware' 機能が必要です。
 cli-skills-none-installed = スキルがインストールされていません。
 cli-skills-create-hint = {"  "}作成: mkdir -p ~/.zeroclaw/workspace/skills/my-skill
 cli-skills-install-hint = {"  "}またはインストール: zeroclaw skills install <source>
@@ -645,7 +602,6 @@ cli-status-service-running = 🟢 サービス:       実行中
 cli-status-service-stopped = 🔴 サービス:       停止
 cli-status-channels = チャンネル:
 cli-status-cli-always = {"  "}CLI:      ✅ 常時
-cli-status-peripherals = 周辺機器:
 cli-desktop-download = ZeroClaw コンパニオンアプリをダウンロード:
 cli-desktop-homebrew = または Homebrew でインストール(近日対応予定):
 cli-desktop-linux-pkg = {"  "}お使いのアーキテクチャ用の .deb または .AppImage をダウンロードしてください。
@@ -679,12 +635,8 @@ cli-status-spent-today = {"  "}本日の支出:       ${$spent} / ${$limit}
 cli-status-spent-month = {"  "}今月の支出:  ${$spent} / ${$limit}
 cli-status-otp = {"  "}OTP 有効:       {$v}
 cli-status-estop = {"  "}E-stop 有効:    {$v}
-cli-status-peripherals-enabled = {"  "}有効:   {$v}
-cli-status-boards = {"  "}ボード:    {$v}
 cli-status-word-enabled = 有効
 cli-status-word-disabled = 無効
-cli-status-word-yes = はい
-cli-status-word-no = いいえ
 cli-status-word-on = オン
 cli-status-word-off = オフ
 cli-status-word-none = (なし)
@@ -697,24 +649,7 @@ cli-desktop-blurb2 = CLI と同じゲートウェイに接続します。
 cli-config-all-configured = すべてのセクションは既に設定済みです。
 cli-config-schema-current = 設定は既に現在のスキーマバージョンです。
 cli-config-applied-ops = {$count} 件の操作を適用しました:
-cli-plugins-none = インストールされているプラグインはありません。
-cli-plugins-installed = インストール済みプラグイン:
-cli-plugin-search-none = '{$query}' に一致するプラグインはありません。
-cli-plugin-search-results = '{$query}' に一致するプラグイン ({$count}):
-cli-plugin-search-result = {$name} v{$version} — {$description}
-cli-plugin-no-description = (説明なし)
-cli-plugin-install-resolving = プラグインレジストリから '{$source}' を解決しています...
-cli-plugin-installed-from = プラグインを {$source} からインストールしました
-cli-plugin-installed-name-version = プラグイン {$name} v{$version} をインストールしました
-cli-plugin-config-entry-seeded = '{$name}' の [[plugins.entries]] を作成しました。プラグイン設定値は `zeroclaw config set plugins.entries.{$name}.config.<key>` で設定してください。
-cli-plugin-config-entry-seed-skipped = 警告: '{$name}' の設定エントリ作成をスキップしました: ディスク上の [plugins] セクションが不正です。修復し、`name = "{$name}"` を含む [[plugins.entries]] ブロックを追加してから、`zeroclaw config set plugins.entries.{$name}.config.<key>` で値を設定してください。
-cli-plugin-config-entry-seed-unaddressable = 警告: '{$name}' の設定エントリ作成をスキップしました: '.' を含むプラグイン名はドット区切りの設定パスで指定できません (`config set` は '.' で分割します)。設定ファイルに `name = "{$name}"` を含む [[plugins.entries]] ブロックを手動で追加してください。
 cli-config-section-degraded = 警告: {$path} の設定セクション `{$section}` は不正なため、この実行ではデフォルト値にリセットされました。そのセクションの値は有効ではありません。`zeroclaw config migrate` を実行して解析エラーを確認し、ファイルを修復してください。
-cli-plugin-removed = プラグイン '{$name}' を削除しました。
-cli-plugin-not-found = プラグイン '{$name}' が見つかりません。
-cli-plugin-legacy-detected = 注意: レガシーな場所 ({$path}) にあるプラグインはエージェントに読み込まれません。`zeroclaw plugin migrate` を実行して {$target} に移動してください。
-cli-plugin-migrated = {$count} 個のプラグインを {$path} から {$target} に移動しました。
-cli-plugin-migrate-none = 移行する項目はありません。
 cli-estop-resume-done = Estop の再開が完了しました。
 cli-estop-engaged = Estop を作動させました。
 cli-estop-status = Estop ステータス:
@@ -731,12 +666,6 @@ cli-config-secret-unset = {$path} は設定されていません(暗号化され
 cli-config-updated = {$path} を更新しました。
 cli-config-review-hint = `zeroclaw config list` を実行して確認し、必須フィールドを設定してください。
 cli-config-backed-up = {$path} にバックアップしました
-cli-plugin-name-version = プラグイン: {$name} v{$version}
-cli-plugin-description = 説明: {$desc}
-cli-plugin-capabilities = 機能: {$v}
-cli-plugin-permissions = 権限: {$v}
-cli-plugin-wasm = WASM: {$path}
-cli-plugin-wasm-none = WASM: (スキルのみのプラグイン)
 cli-estop-domains-none = {"  "}domain_blocks:  (なし)
 cli-estop-domains = {"  "}domain_blocks:  {$v}
 cli-estop-tools-none = {"  "}tool_freeze:    (なし)
@@ -763,10 +692,6 @@ cli-locales-installed = {$dir} 配下に '{$locale}' 用のカタログを {$cou
 cli-browse-header = {$path} ({$count} 件のエントリ)
 cli-browse-empty = (空)
 cli-browse-file-bytes = {$name} ({$bytes} バイト)
-cli-hardware-feature-required = ハードウェア検出には 'hardware' 機能が必要です。
-cli-hardware-feature-build = ビルド方法: cargo build --features hardware
-cli-hardware-unsupported-platform = このプラットフォームではハードウェア USB 検出はサポートされていません。
-cli-hardware-supported-platforms = 対応プラットフォーム: Linux、macOS、Windows。
 cli-update-already-current = すでに最新です (v{$version})。
 cli-update-success = v{$version} に正常に更新しました！
 cli-update-prebuilt-channel-note = ビルド済み更新は軽量な標準配布セットを使います。Slack やその他の配布対象外チャンネルを使うには、`./install.sh --source --preset full`、`--features channels-full`、または特定の `channel-*` 機能でソースからビルドしてください。

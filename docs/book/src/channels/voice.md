@@ -65,5 +65,3 @@ For always-on voice on an SBC:
 - USB mic: any UAC-compliant mic works. `arecord -l` to verify the OS sees it.
 - Speaker: either USB audio out or the SBC's onboard jack; pick the OS default device for the user the daemon runs as.
 - Microphones with built-in AEC (acoustic echo cancellation) dramatically improve wake reliability when the speaker is nearby.
-
-See [Hardware → Android](../hardware/android-setup.md) for Android-specific audio setup.

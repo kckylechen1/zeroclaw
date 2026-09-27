@@ -16,7 +16,7 @@ Every new default capability must evaluate all 6 extension planes:
 
 1. **Skill**: Can this capability be authored as a prompt/instruction skill with local workspace scripts or tools?
    - *If yes*: Deliver as a Skill bundle, not a Rust kernel tool.
-2. **MCP / Optional Integration**: Can this capability run as an MCP server or optional first-party crate/feature (`integrations-saas`, `hardware-tools`, etc.)?
+2. **MCP / Optional Integration**: Can this capability run as an MCP server or optional first-party crate/feature (`integrations-saas`, etc.)?
    - *If yes*: Deliver as an external MCP server or feature-gated optional adapter.
 3. **Node Capability (#55)**: Does this capability interact with physical device sensors, local hardware, or peripheral peripherals?
    - *If yes*: Route to the Node capability fabric via `/ws/nodes`.
@@ -46,5 +46,5 @@ selection; they add no runtime configuration or admission authority.
 Root `channel-email` conditionally forwards to an already selected runtime.
 The channel feature also forwards to the shared IMAP utility in the tools crate.
 Minimal runtime composition still applies its existing membership policy even
-when email support is compiled. SaaS and hardware feature selection is separate.
+when email support is compiled. SaaS feature selection is separate.
 This is the email compile-graph slice of [issue #211](https://github.com/kckylechen1/zeroclaw/issues/211), not completion of its remaining integration census.

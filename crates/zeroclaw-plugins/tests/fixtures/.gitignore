@@ -1,3 +1,0 @@
-# Plugin WASM components are build artifacts, never committed source.
-*.wasm
-*.cwasm

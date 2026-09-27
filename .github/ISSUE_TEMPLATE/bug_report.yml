@@ -24,8 +24,6 @@ body:
         - gateway/api
         - web dashboard
         - tools
-        - plugins
-        - hardware/peripherals
         - security/sandbox
         - tooling/ci
         - docs

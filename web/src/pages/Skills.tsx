@@ -86,7 +86,7 @@ export default function Skills() {
   const skillKey = (skill: AgentSkillEntry): string =>
     skill.editable && skill.bundle
       ? `${skill.bundle}/${skill.name}`
-      : `${skill.origin}:${skill.plugin ?? ''}/${skill.name}`;
+      : `${skill.origin}:/${skill.name}`;
 
   const filtered = skills.filter((s) => {
     const q = search.toLowerCase();
@@ -94,8 +94,7 @@ export default function Skills() {
       s.name.toLowerCase().includes(q) ||
       s.description.toLowerCase().includes(q) ||
       s.origin.toLowerCase().includes(q) ||
-      (s.bundle ?? '').toLowerCase().includes(q) ||
-      (s.plugin ?? '').toLowerCase().includes(q)
+      (s.bundle ?? '').toLowerCase().includes(q)
     );
   });
 

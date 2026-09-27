@@ -102,7 +102,7 @@ pub enum SkillDropReason {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DroppedSkill {
     pub name: String,
-    /// `"workspace"` | `"open-skills"` | `"plugin"` | `"bundle"`.
+    /// `"workspace"` | `"open-skills"` | `"bundle"`.
     pub origin_hint: String,
     pub reason: SkillDropReason,
     pub location: Option<PathBuf>,
@@ -115,7 +115,7 @@ pub struct DroppedSkill {
 pub struct ShadowedSkill {
     /// The name shared with (and won by) the higher-precedence skill.
     pub name: String,
-    /// Origin of the LOSER: `"open-skills"` | `"plugin"` | `"bundle"`.
+    /// Origin of the LOSER: `"open-skills"` | `"bundle"`.
     pub origin_hint: String,
 }
 
@@ -570,13 +570,6 @@ pub fn load_skills_with_config_audited(
         Some(config.skills.allow_scripts),
     );
 
-    #[cfg(feature = "plugins-wasm")]
-    {
-        let (plugin_skills, plugin_dropped) = load_plugin_skills_from_config(config);
-        skills.extend(plugin_skills);
-        dropped.extend(plugin_dropped);
-    }
-
     (skills, dropped)
 }
 
@@ -591,10 +584,6 @@ pub fn load_skills_for_agent(
 fn origin_hint_of(skill: &Skill) -> &'static str {
     if skill.tags.iter().any(|t| t == "open-skills") {
         "open-skills"
-    } else if skill.name.starts_with("plugin:")
-        || skill.tags.iter().any(|t| t.starts_with("plugin:"))
-    {
-        "plugin"
     } else {
         "workspace"
     }
@@ -2672,69 +2661,6 @@ pub fn install_extra_registry_skill_source(
         skills_path,
         allow_scripts,
     )
-}
-
-// ─── Plugin-shipped skills (plugins-wasm only) ───────────────────────────────
-
-#[cfg(feature = "plugins-wasm")]
-pub fn load_plugin_skills_from_config(
-    config: &zeroclaw_config::schema::Config,
-) -> (Vec<Skill>, Vec<DroppedSkill>) {
-    if !config.plugins.enabled {
-        return (Vec::new(), Vec::new());
-    }
-
-    let plugins_dir = config.plugins.resolved_plugins_dir();
-
-    let signature_mode = zeroclaw_plugins::host::PluginHost::resolve_signature_mode(
-        &config.plugins.security.signature_mode,
-    );
-    let trusted_keys = config.plugins.security.trusted_publisher_keys.clone();
-
-    let host = match zeroclaw_plugins::host::PluginHost::from_plugins_dir_with_security(
-        &plugins_dir,
-        signature_mode,
-        trusted_keys,
-    ) {
-        Ok(host) => host,
-        Err(err) => {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                    .with_attrs(::serde_json::json!({"error": format!("{}", err)})),
-                "failed to discover plugin skills"
-            );
-            return (Vec::new(), Vec::new());
-        }
-    };
-
-    let allow_scripts = config.skills.allow_scripts;
-    let mut skills = Vec::new();
-    let mut dropped = Vec::new();
-    for (manifest, skills_dir) in host.skill_plugin_details() {
-        let (raw_skills, raw_dropped) = load_skills_from_directory(&skills_dir, allow_scripts);
-        for raw in raw_skills {
-            skills.push(namespace_plugin_skill(&manifest.name, raw));
-        }
-        // Retag the workspace-loader's drops as plugin-origin.
-        dropped.extend(raw_dropped.into_iter().map(|mut d| {
-            d.origin_hint = "plugin".into();
-            d
-        }));
-    }
-    (skills, dropped)
-}
-
-#[cfg(feature = "plugins-wasm")]
-fn namespace_plugin_skill(plugin_name: &str, mut skill: Skill) -> Skill {
-    let qualified = format!("plugin:{}/{}", plugin_name, skill.name);
-    skill.name = qualified;
-    let plugin_tag = format!("plugin:{plugin_name}");
-    if !skill.tags.iter().any(|t| t == &plugin_tag) {
-        skill.tags.push(plugin_tag);
-    }
-    skill
 }
 
 #[cfg(test)]

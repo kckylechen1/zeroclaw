@@ -107,7 +107,6 @@ Follow-up decisions:
 
 - [Architecture: Crates](../crates.md)
 - [Built-in tool inventory](../../developing/tool-inventory.md)
-- [Plugin protocol](../../developing/plugin-protocol.md)
 - `crates/zeroclaw-api/src/model_provider.rs`
 - `crates/zeroclaw-api/src/channel.rs`
 - `crates/zeroclaw-api/src/tool.rs`

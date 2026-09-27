@@ -19,8 +19,6 @@ interface SkillCardProps {
 /** Short, display-ready origin label for the badge. */
 function originLabel(skill: AgentSkillEntry): string {
   switch (skill.origin) {
-    case 'plugin':
-      return skill.plugin ? `plugin:${skill.plugin}` : 'plugin';
     case 'bundle':
       return skill.bundle ?? 'bundle';
     default:

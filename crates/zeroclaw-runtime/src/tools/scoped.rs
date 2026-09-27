@@ -1,6 +1,6 @@
 //! `ScopedToolRegistry` - the one gated seam that mints the per-agent tool set.
 //!
-//! Assembly applies peripherals, built-in policy, ACP memory stripping, MCP
+//! Assembly applies built-in policy, ACP memory stripping, MCP
 //! scope and policy, capability tools, pinned resources, and skills in that
 //! order. This is the intended construction path; the type boundary remains
 //! temporarily unsealed while legacy callers still accept raw tool vectors.
@@ -14,8 +14,8 @@ use zeroclaw_config::schema::Config;
 
 use crate::agent::loop_::{
     append_pinned_mcp_section, apply_policy_tool_filter, eager_mcp_tool_allowed,
-    load_peripheral_tools, mcp_allowed_tool_count, mcp_tool_access_policy,
-    preactivate_always_filter_groups, register_eager_mcp_tool_if_allowed,
+    mcp_allowed_tool_count, mcp_tool_access_policy, preactivate_always_filter_groups,
+    register_eager_mcp_tool_if_allowed,
 };
 use crate::skills::Skill;
 use crate::tools::{
@@ -71,11 +71,6 @@ pub struct ScopedAssembly<'a> {
     /// connect MCP servers - they are neither resolved nor connected; nothing is
     /// granted.
     pub connect_mcp: bool,
-    /// Documented divergence: loading peripherals physically connects hardware (the
-    /// daemon's loader opens serial ports, exclusively for real devices). Listing-only
-    /// surfaces (the gateway's `/api/tools` registries) MUST pass `false` so they never
-    /// hold devices the live turn paths need; execution surfaces pass `true`.
-    pub connect_peripherals: bool,
     /// Documented divergence: ACP excludes persistent memory tools.
     pub exclude_memory: bool,
     pub list_deferred_mcp_specs: bool,
@@ -174,7 +169,6 @@ impl ScopedToolRegistry {
             runtime,
             caller_allowed,
             connect_mcp,
-            connect_peripherals,
             exclude_memory,
             list_deferred_mcp_specs,
             emit_assembly_logs,
@@ -193,32 +187,13 @@ impl ScopedToolRegistry {
 
         // Install-wide composition. `minimal` is a terminal gate for built-in
         // surface: the registry arrives pre-cut from `all_tools`, and every
-        // built-in appended during this assembly (peripherals, pipeline) is
+        // built-in appended during this assembly (the pipeline) is
         // gated too. Extension surfaces — MCP tools admitted by the effective
         // policy and skill-defined tools — are NOT built-ins and stay governed
         // by their own admission policies.
         let composition_minimal =
             zeroclaw_config::composition::Composition::effective(config.composition)
                 == zeroclaw_config::composition::Composition::Minimal;
-
-        // 1. Peripherals. Loading CONNECTS hardware (serial opens are exclusive for
-        //    real devices), so this is gated: execution surfaces pass
-        //    `connect_peripherals = true`; listing-only surfaces pass `false` and
-        //    enumerate without holding devices. Hardware is demoted from the
-        //    minimal composition, so it never connects there either.
-        if connect_peripherals && !composition_minimal {
-            let peripheral_tools = load_peripheral_tools(config.peripherals.clone()).await;
-            if emit_assembly_logs && !peripheral_tools.is_empty() {
-                ::zeroclaw_log::record!(
-                    INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Load)
-                        .with_category(::zeroclaw_log::EventCategory::Tool)
-                        .with_attrs(::serde_json::json!({"count": peripheral_tools.len()})),
-                    "Peripheral tools added"
-                );
-            }
-            tools_registry.extend(peripheral_tools);
-        }
 
         // Mint the pipeline only after the effective caller policy is known. The
         // same immutable Arc is used for top-level registration and any
@@ -682,7 +657,6 @@ mod tests {
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed,
             connect_mcp: false,
-            connect_peripherals: false,
             exclude_memory: false,
             list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
@@ -697,7 +671,7 @@ mod tests {
         // registers under absent composition; this locks the inverse: an
         // enabled flag cannot widen the minimal surface, at the assemble
         // boundary where the pipeline tool is appended after the built-in
-        // cut. Peripherals share the same `composition_minimal` gate.
+        // cut.
         let calls = Arc::new(AtomicUsize::new(0));
         let security = Arc::new(SecurityPolicy::default());
         let mut config = Config::default();
@@ -714,7 +688,6 @@ mod tests {
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed: None,
             connect_mcp: false,
-            connect_peripherals: false,
             exclude_memory: false,
             list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
@@ -920,7 +893,6 @@ mod tests {
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed: None,
             connect_mcp: false,
-            connect_peripherals: false,
             exclude_memory,
             list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
@@ -992,7 +964,6 @@ mod tests {
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed,
             connect_mcp: false, // exercise the filter path without MCP fixtures
-            connect_peripherals: false,
             exclude_memory: false,
             list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
@@ -1074,7 +1045,6 @@ mod tests {
                 runtime: Arc::new(crate::platform::NativeRuntime::new()),
                 caller_allowed: None,
                 connect_mcp: true,
-                connect_peripherals: false,
                 exclude_memory: false,
                 list_deferred_mcp_specs: false,
                 emit_assembly_logs: false,
@@ -1220,7 +1190,6 @@ mod tests {
                 runtime: Arc::new(crate::platform::NativeRuntime::new()),
                 caller_allowed: None,
                 connect_mcp: true,
-                connect_peripherals: false,
                 exclude_memory: false,
                 list_deferred_mcp_specs: true,
                 emit_assembly_logs: false,
@@ -1362,7 +1331,6 @@ mod tests {
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed: None,
             connect_mcp: false,
-            connect_peripherals: false,
             exclude_memory: false,
             list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
@@ -1485,7 +1453,6 @@ mod tests {
                 runtime: Arc::new(crate::platform::NativeRuntime::new()),
                 caller_allowed: None,
                 connect_mcp: true,
-                connect_peripherals: false,
                 exclude_memory: false,
                 list_deferred_mcp_specs: false,
                 emit_assembly_logs: false,

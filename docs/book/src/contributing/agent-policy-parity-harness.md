@@ -85,8 +85,7 @@ The per-agent tool registry is the first surface with a single gated constructor
 `ScopedToolRegistry::assemble` (`crates/zeroclaw-runtime/src/tools/scoped.rs`). The
 registry has historically been assembled by hand at six construction sites - the
 reason the built-in filter and MCP scoping had to be patched per-site (#7064,
-\#6960, #8120). `assemble` applies, in order: the agent's `config.peripherals`
-(when connected - see the knob below), the built-in `allowed_tools`/
+\#6960, #8120). `assemble` applies, in order: the built-in `allowed_tools`/
 `excluded_tools` filter, the ACP memory strip, MCP server scoping per `mcp_bundles`
 plus per-tool gating (eager or deferred; omission is not a grant) with the MCP
 capability tools and pinned-resources prompt section, and skill registration under
@@ -101,9 +100,6 @@ grants:
   overrides, the policy filter and the MCP tool-access policy.
 - `connect_mcp` - `false` on the ACP fast-boot path: MCP servers are neither
   resolved nor connected, so nothing is granted.
-- `connect_peripherals` - `false` on listing-only surfaces: loading peripherals
-  physically connects hardware (exclusive serial holds), which a registry no turn
-  runs against must never do.
 - `exclude_memory` - the ACP memory-tool strip.
 
 Cut-over status (the strangle, one site per PR): the **gateway** (#8640),
@@ -113,10 +109,7 @@ dashboard-agent seed and the per-agent `/api/tools` listings - closed the
 gateway's filter gap by construction: its listings previously showed
 unfiltered built-ins the agent's policy denies (live gateway chat resolves
 through `process_message`, which already filtered), plus a `tool_search` stub
-even when policy denied every deferred MCP tool. One scoping note keeps the
-listings claim honest: peripherals are excluded from listings by design
-(`connect_peripherals: false` - enumerating them without connecting hardware
-is a future refinement). The `process_message` cut-over closed a second,
+even when policy denied every deferred MCP tool. The `process_message` cut-over closed a second,
 independent divergence: it previously filtered built-ins through
 `filter_channel_builtin_tools`, a variant that admitted the canonical
 read-only defaults past `allowed_tools` at non-Full autonomy, while every

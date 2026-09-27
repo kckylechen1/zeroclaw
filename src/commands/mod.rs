@@ -7,8 +7,6 @@ pub mod config;
 #[cfg(feature = "agent-runtime")]
 #[cfg(feature = "agent-runtime")]
 pub mod eval;
-#[cfg(feature = "plugins-wasm")]
-pub mod plugin;
 #[cfg(feature = "agent-runtime")]
 pub mod quickstart;
 #[cfg(feature = "agent-runtime")]

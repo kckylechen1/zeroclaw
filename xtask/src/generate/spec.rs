@@ -620,7 +620,7 @@ impl Selection {
             Selection::Minimal => "core only, no default features",
             Selection::Dist => "lean standard distribution (recommended)",
             Selection::DistBroad => "broad-channel distribution measurement build",
-            Selection::All => "every feature including hardware and browser",
+            Selection::All => "every optional feature (kitchen sink)",
             Selection::Features(_) => "custom feature selection",
         }
     }
@@ -884,7 +884,7 @@ mod tests {
         let broad = resolve_feature_list(&root(), &Selection::DistBroad).unwrap();
         assert_eq!(broad, expected);
         assert!(broad.contains(&"channel-slack".to_string()));
-        assert!(!broad.contains(&"hardware".to_string()));
+        assert!(!broad.contains(&"sandbox-bubblewrap".to_string()));
     }
 
     #[test]
@@ -908,7 +908,7 @@ mod tests {
         let all = resolve(&root(), &Selection::All).unwrap();
         // All includes optional features outside the lean distribution.
         assert!(
-            all.cargo_flags.contains("hardware"),
+            all.cargo_flags.contains("sandbox-bubblewrap"),
             "all is the kitchen sink"
         );
         assert!(dist.cargo_flags.len() < all.cargo_flags.len());

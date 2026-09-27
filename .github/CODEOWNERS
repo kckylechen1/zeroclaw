@@ -27,18 +27,13 @@
 /dev/**                              @Audacity88
 
 # ---------------------------------------------------------------------------
-# JordanTheJet-primary areas (providers, API, infra, hardware, firmware, web)
+# JordanTheJet-primary areas (providers, API, infra, web)
 # ---------------------------------------------------------------------------
 /crates/zeroclaw-providers/** @JordanTheJet @Nillth
 /crates/zeroclaw-api/**       @JordanTheJet
 /crates/zeroclaw-infra/**     @JordanTheJet
-/crates/zeroclaw-hardware/**  @JordanTheJet
-/crates/aardvark-sys/**       @JordanTheJet
-/crates/robot-kit/**          @JordanTheJet
 /crates/zeroclaw-macros/**    @JordanTheJet
-/firmware/**                  @JordanTheJet
 /src/providers/**             @JordanTheJet @Nillth
-/src/hardware/**              @JordanTheJet
 /web/**                       @JordanTheJet @IftekharUddin
 /dist/**                      @JordanTheJet
 
@@ -57,9 +52,7 @@
 /src/hooks/**             @WareWolf-MoonWall @Audacity88
 /src/nodes/**             @WareWolf-MoonWall @Audacity88
 /src/observability/**     @WareWolf-MoonWall @Audacity88
-/src/peripherals/**       @WareWolf-MoonWall @Audacity88
 /src/platform/**          @WareWolf-MoonWall @Audacity88
-/src/rag/**               @WareWolf-MoonWall @Audacity88
 /src/service/**           @WareWolf-MoonWall @Audacity88
 /src/sop/**               @WareWolf-MoonWall @Audacity88
 /src/tunnel/**            @WareWolf-MoonWall @Audacity88
@@ -102,12 +95,9 @@
 /src/channels/**             @Audacity88 @JordanTheJet @Nillth
 
 # ---------------------------------------------------------------------------
-# Skills, plugins (per Jordan's suggested patch on PR #6537)
+# Skills (per Jordan's suggested patch on PR #6537)
 # ---------------------------------------------------------------------------
-/crates/zeroclaw-plugins/**                @JordanTheJet @WareWolf-MoonWall @Audacity88
 /crates/zeroclaw-runtime/src/skills/**     @JordanTheJet @WareWolf-MoonWall @Audacity88
-/plugins/**                                @JordanTheJet @WareWolf-MoonWall @Audacity88
-/src/plugins/**                            @JordanTheJet @WareWolf-MoonWall @Audacity88
 /src/skills/**                             @JordanTheJet @WareWolf-MoonWall @Audacity88
 /.claude/skills/**                         @JordanTheJet @WareWolf-MoonWall @Audacity88
 

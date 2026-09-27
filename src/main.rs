@@ -126,7 +126,6 @@ fn interactive_agent_unsupported_flags(
     model_provider: Option<&str>,
     model: Option<&str>,
     temperature: Option<f64>,
-    peripheral: &[String],
 ) -> Vec<&'static str> {
     let mut flags = Vec::new();
     if model_provider.is_some() {
@@ -137,9 +136,6 @@ fn interactive_agent_unsupported_flags(
     }
     if temperature.is_some() {
         flags.push("--temperature");
-    }
-    if !peripheral.is_empty() {
-        flags.push("--peripheral");
     }
     flags
 }
@@ -212,16 +208,12 @@ mod approval;
 #[cfg(feature = "agent-runtime")]
 mod auth;
 #[cfg(feature = "agent-runtime")]
+mod browse;
+#[cfg(feature = "agent-runtime")]
 mod channels;
 #[cfg(feature = "agent-runtime")]
 mod cli_input;
 mod commands;
-#[cfg(feature = "agent-runtime")]
-mod rag {
-    pub use zeroclaw::rag::*;
-}
-#[cfg(feature = "agent-runtime")]
-mod browse;
 mod config;
 #[cfg(feature = "agent-runtime")]
 mod cost;
@@ -234,8 +226,6 @@ mod doctor;
 #[cfg(feature = "gateway")]
 mod gateway;
 mod gateway_helpers;
-#[cfg(feature = "agent-runtime")]
-mod hardware;
 #[cfg(feature = "agent-runtime")]
 mod health;
 #[cfg(feature = "agent-runtime")]
@@ -256,13 +246,7 @@ mod multimodal;
 #[cfg(feature = "agent-runtime")]
 mod observability;
 #[cfg(feature = "agent-runtime")]
-mod peripherals;
-#[cfg(feature = "agent-runtime")]
 mod platform;
-#[cfg(feature = "plugins-wasm")]
-mod plugin_registry;
-#[cfg(feature = "plugins-wasm")]
-mod plugins;
 mod providers;
 #[cfg(feature = "agent-runtime")]
 mod security;
@@ -294,9 +278,8 @@ pub(crate) use gateway_helpers::{t, ta};
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
 pub use zeroclaw::{
     AgentsCommands, BridgeCommands, ChannelCommands, ChannelsCommands, CronCommands,
-    GatewayCommands, HardwareCommands, IntegrationCommands, MigrateCommands, PeripheralCommands,
-    ProvidersCommands, ServiceCommands, SkillBundleCommands, SkillCommands, SopCommands,
-    SopGraphFormat,
+    GatewayCommands, IntegrationCommands, MigrateCommands, ProvidersCommands, ServiceCommands,
+    SkillBundleCommands, SkillCommands, SopCommands, SopGraphFormat,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -521,8 +504,7 @@ conversation is shared with every other client.
 Examples:
   zeroclaw agent -a assistant                                          # chat through the gateway
   zeroclaw agent -a assistant -m \"Summarize today's logs\"              # single message
-  zeroclaw agent -a assistant -m \"Hi\" -p anthropic --model claude-sonnet-4-20250514
-  zeroclaw agent -a assistant -m \"Read the sensor\" --peripheral nucleo-f401re:/dev/ttyACM0")]
+  zeroclaw agent -a assistant -m \"Hi\" -p anthropic --model claude-sonnet-4-20250514")]
     Agent {
         /// Configured agent alias to run as (must match `[agents.<alias>]`).
         /// Required — there is no default agent.
@@ -544,10 +526,6 @@ Examples:
         /// Temperature (0.0 - 2.0, defaults to `providers.models.<type>.<alias>.temperature`)
         #[arg(short, long, value_parser = parse_temperature)]
         temperature: Option<f64>,
-
-        /// Attach a peripheral (board:path, e.g. nucleo-f401re:/dev/ttyACM0)
-        #[arg(long)]
-        peripheral: Vec<String>,
     },
 
     #[cfg(feature = "agent-runtime")]
@@ -828,44 +806,6 @@ Examples:
         auth_command: AuthCommands,
     },
 
-    /// Discover and introspect USB hardware
-    // i18n-exempt: clap derive help — framework requires a compile-time literal
-    #[command(long_about = "\
-Discover and introspect USB hardware.
-
-Enumerate connected USB devices, identify known development boards \
-(STM32 Nucleo, Arduino, ESP32), and retrieve chip information via \
-probe-rs / ST-Link.
-
-Examples:
-  zeroclaw hardware discover
-  zeroclaw hardware introspect /dev/ttyACM0
-  zeroclaw hardware info --chip STM32F401RETx")]
-    Hardware {
-        #[command(subcommand)]
-        hardware_command: zeroclaw::HardwareCommands,
-    },
-
-    /// Manage hardware peripherals (STM32, RPi GPIO, etc.)
-    // i18n-exempt: clap derive help — framework requires a compile-time literal
-    #[command(long_about = "\
-Manage hardware peripherals.
-
-Add, list, flash, and configure hardware boards that expose tools \
-to the agent (GPIO, sensors, actuators). Supported boards: \
-nucleo-f401re, rpi-gpio, esp32, arduino-uno.
-
-Examples:
-  zeroclaw peripheral list
-  zeroclaw peripheral add nucleo-f401re /dev/ttyACM0
-  zeroclaw peripheral add rpi-gpio native
-  zeroclaw peripheral flash --port /dev/cu.usbmodem12345
-  zeroclaw peripheral flash-nucleo")]
-    Peripheral {
-        #[command(subcommand)]
-        peripheral_command: zeroclaw::PeripheralCommands,
-    },
-
     /// Manage agent memory (list, get, stats, clear)
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
@@ -1042,13 +982,6 @@ Examples (Windows PowerShell):
         props_command: DeprecatedPropsCommands,
     },
 
-    /// Manage WASM plugins
-    #[cfg(feature = "plugins-wasm")]
-    Plugin {
-        #[command(subcommand)]
-        plugin_command: PluginCommands,
-    },
-
     /// Fetch translated locale files (FTL) from upstream
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
@@ -1144,41 +1077,6 @@ fn apply_homebrew_onboard_config_dir() {
             unsafe { std::env::set_var(name, value) };
         },
     );
-}
-
-#[cfg(feature = "plugins-wasm")]
-#[derive(Subcommand, Debug)]
-enum PluginCommands {
-    /// List installed plugins
-    List,
-    /// Search an installable plugin registry
-    Search {
-        /// Query to match against plugin names and descriptions
-        query: String,
-        /// Registry JSON URL to search
-        #[arg(long)]
-        registry: Option<String>,
-    },
-    /// Install a plugin from a local directory/manifest or registry name
-    Install {
-        /// Path to plugin directory/manifest, or registry name/version
-        source: String,
-        /// Registry JSON URL used for install-by-name
-        #[arg(long)]
-        registry: Option<String>,
-    },
-    /// Remove an installed plugin
-    Remove {
-        /// Plugin name
-        name: String,
-    },
-    /// Show information about a plugin
-    Info {
-        /// Plugin name
-        name: String,
-    },
-    /// Move plugins from legacy install directories into the configured one
-    Migrate,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2161,7 +2059,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
             model_provider,
             model,
             temperature,
-            peripheral,
         } => {
             // Interactive chat is a gateway client, so every device shares
             // one conversation with the agent.
@@ -2170,7 +2067,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                     model_provider.as_deref(),
                     model.as_deref(),
                     temperature,
-                    &peripheral,
                 );
                 if !unsupported.is_empty() {
                     let flags = unsupported.join(", ");
@@ -2207,15 +2103,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 );
             }
 
-            // Wire peripheral tools (gpio_read/gpio_write etc.) for `zeroclaw agent`.
-            // Mirrors the registration done for the daemon command.
-            #[cfg(feature = "hardware")]
-            zeroclaw_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(|config| {
-                Box::pin(async move {
-                    zeroclaw_hardware::peripherals::create_peripheral_tools(&config).await
-                })
-            }));
-
             // Register channel map factory for late-bound tool handle population.
             zeroclaw_runtime::agent::loop_::register_channel_map_fn(Box::new({
                 let config_clone = config.clone();
@@ -2229,7 +2116,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 model_provider,
                 model,
                 final_temperature,
-                peripheral,
                 true,
                 None,
                 None,
@@ -2573,14 +2459,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 }
             }
 
-            // Wire peripheral tools from zeroclaw-hardware
-            #[cfg(feature = "hardware")]
-            zeroclaw_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(|config| {
-                Box::pin(async move {
-                    zeroclaw_hardware::peripherals::create_peripheral_tools(&config).await
-                })
-            }));
-
             // Cron delivery is registered earlier (before the command match)
             // so it works for both `daemon` and `gateway start`.
 
@@ -2877,13 +2755,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
 
         Commands::Channel { channel_command } => match channel_command {
             ChannelCommands::Start => {
-                #[cfg(feature = "hardware")]
-                zeroclaw_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(|config| {
-                    Box::pin(async move {
-                        zeroclaw_hardware::peripherals::create_peripheral_tools(&config).await
-                    })
-                }));
-
                 let cancel = tokio_util::sync::CancellationToken::new();
                 let companion_store = zeroclaw_memory::create_companion_store(&config)?;
                 let companion_outbox_observer =
@@ -2926,18 +2797,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
 
         Commands::Auth { auth_command } => {
             commands::auth::handle_auth_command(auth_command, &config).await
-        }
-
-        Commands::Hardware { hardware_command } => {
-            hardware::handle_command(hardware_command.clone(), &config)
-        }
-
-        Commands::Peripheral { peripheral_command } => {
-            Box::pin(peripherals::handle_command(
-                peripheral_command.clone(),
-                &config,
-            ))
-            .await
         }
 
         Commands::Locales { locales_command } => {
@@ -3037,11 +2896,6 @@ async fn async_main(command: clap::Command) -> Result<()> {
                 "`zeroclaw props` has been renamed to `zeroclaw config`. \
                  Replace `props` with `config` in your command and try again."
             );
-        }
-
-        #[cfg(feature = "plugins-wasm")]
-        Commands::Plugin { plugin_command } => {
-            commands::plugin::handle(plugin_command, &mut config).await
         }
     }
 }

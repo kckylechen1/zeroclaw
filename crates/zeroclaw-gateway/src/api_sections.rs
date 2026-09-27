@@ -427,8 +427,7 @@ pub async fn handle_sections(State(state): State<AppState>, headers: HeaderMap) 
             let has_picker = match wizard {
                 Some(w) => !matches!(
                     w,
-                    zeroclaw_config::sections::Section::Hardware
-                        | zeroclaw_config::sections::Section::Mcp
+                    zeroclaw_config::sections::Section::Mcp
                         | zeroclaw_config::sections::Section::Skills
                         | zeroclaw_config::sections::Section::Composition
                 ),
@@ -594,11 +593,9 @@ fn picker_items_for(
         | Section::EmbeddingRoutes => {
             PickerDispatch::Items(one_tier_alias_map_picker(cfg, section.as_str()))
         }
-        Section::Hardware
-        | Section::Mcp
-        | Section::Skills
-        | Section::Composition
-        | Section::QuickstartState => PickerDispatch::DirectForm,
+        Section::Mcp | Section::Skills | Section::Composition | Section::QuickstartState => {
+            PickerDispatch::DirectForm
+        }
     }
 }
 
@@ -690,10 +687,8 @@ fn storage_picker(cfg: &zeroclaw_config::schema::Config) -> Vec<PickerItem> {
 fn storage_rank(key: &str) -> usize {
     match key {
         "sqlite" => 0,
-        "postgres" => 1,
-        "qdrant" => 2,
-        "markdown" => 3,
-        "lucid" => 4,
+        "markdown" => 1,
+        "lucid" => 2,
         _ => 99,
     }
 }
@@ -703,12 +698,6 @@ fn storage_description(key: &str) -> Option<&'static str> {
         "sqlite" => Some(
             "Safe default for single-node installs: file-based, zero-config, no external service.",
         ),
-        "postgres" => {
-            Some("Shared or multi-instance deployments that need durable server-backed storage.")
-        }
-        "qdrant" => {
-            Some("Vector database backend for semantic search when you already run Qdrant.")
-        }
         "markdown" => {
             Some("Human-readable files with simple local storage and no database service.")
         }
@@ -1141,11 +1130,7 @@ pub async fn handle_section_select(
             };
             (prefix, true)
         }
-        Section::Hardware
-        | Section::Mcp
-        | Section::Skills
-        | Section::Composition
-        | Section::QuickstartState => {
+        Section::Mcp | Section::Skills | Section::Composition | Section::QuickstartState => {
             return error_response(
                 ConfigApiError::new(
                     ConfigApiCode::PathNotFound,
@@ -1438,8 +1423,8 @@ mod tests {
         for hidden in HIDDEN_TOP_LEVEL {
             roots.remove(*hidden);
         }
-        // The 5 onboarding sections must still be in the derived set.
-        for required in ["providers", "channels", "memory", "hardware", "tunnel"] {
+        // The onboarding sections must still be in the derived set.
+        for required in ["providers", "channels", "memory", "tunnel"] {
             assert!(
                 roots.contains(required),
                 "derived sections must include onboarding section `{required}`; got {roots:?}",
@@ -1798,7 +1783,6 @@ mod tests {
             Section::TranscriptionProviders,
             Section::Channels,
             Section::Memory,
-            Section::Hardware,
             Section::Tunnel,
             Section::Agents,
             Section::PeerGroups,
@@ -1811,7 +1795,7 @@ mod tests {
             Section::RiskProfiles,
             Section::RuntimeProfiles,
         ];
-        let direct_form = [Section::Hardware, Section::Mcp];
+        let direct_form = [Section::Mcp];
         for section in all {
             match picker_items_for(*section, &cfg) {
                 PickerDispatch::Items(_items) => {
@@ -1836,7 +1820,7 @@ mod tests {
         let cfg = empty_cfg();
         let items = storage_picker(&cfg);
         let keys: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
-        for expected in ["sqlite", "postgres", "qdrant", "markdown", "lucid"] {
+        for expected in ["sqlite", "markdown", "lucid"] {
             assert!(
                 keys.contains(&expected),
                 "storage picker must list `{expected}`, got: {keys:?}",

@@ -50,7 +50,7 @@ same.
      change it" — surfaces if any code path still tries to PUT
      to `mcp.servers.<name>.name` directly.
 3. Drop the `ObjectArrayEditor` code path for `mcp.servers`
-   only (other `Vec<T>` schema fields — `peripheral.boards`,
+   only (other `Vec<T>` schema fields —
    `classification`, etc. — have not opted into `#[natural_key]`
    yet and still need the JSON-array editor).
 
@@ -65,7 +65,6 @@ at the field declaration site:
 - `Vec<GoogleWorkspaceAllowedOperation>` — natural key is `name`.
 - `Vec<ModelRouteConfig>` — natural key is `name`.
 - `Vec<NevisRoleMappingConfig>` — natural key is `name`.
-- `Vec<PeripheralBoardConfig>` — natural key is `name`.
 - `Vec<ToolFilterGroup>` — natural key is `name`.
 
 Adding the attribute is one line per type; the dashboard then

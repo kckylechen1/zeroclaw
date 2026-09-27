@@ -141,7 +141,7 @@ echo   1) Prebuilt binary - Download pre-compiled release (fastest)
 echo   2) minimal build - core only, no default features
 echo   3) dist build - lean standard distribution (recommended)
 echo   4) default build - default feature set
-echo   5) all build - every feature including hardware and browser
+echo   5) all build - every optional feature (kitchen sink)
 echo.
 set /p "CHOICE=  Select [1-5] (default: 1): "
 if "%CHOICE%"=="" set "CHOICE=1"
@@ -213,7 +213,7 @@ set "BUILD_DESC=minimal (core only, no default features)"
 goto :do_build
 
 :build_dist
-set "FEATURES=--no-default-features --features agent-runtime,channel-acp-server,channel-discord,channel-email,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,hardware-tools,integrations-saas,observability-prometheus,schema-export,whatsapp-web"
+set "FEATURES=--no-default-features --features agent-runtime,channel-acp-server,channel-discord,channel-email,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,integrations-saas,observability-prometheus,schema-export,whatsapp-web"
 set "BUILD_DESC=dist (lean standard distribution (recommended))"
 goto :do_build
 
@@ -223,8 +223,8 @@ set "BUILD_DESC=default (default feature set)"
 goto :do_build
 
 :build_all
-set "FEATURES=--no-default-features --features agent-runtime,browser-native,channel-acp-server,channel-amqp,channel-bluesky,channel-clawdtalk,channel-dingtalk,channel-discord,channel-email,channel-feishu,channel-git,channel-imessage,channel-irc,channel-lark,channel-line,channel-matrix,channel-mattermost,channel-mochat,channel-nostr,channel-notion,channel-qq,channel-reddit,channel-signal,channel-slack,channel-telegram,channel-twitch,channel-twitter,channel-voice-call,channel-webhook,channel-wechat,channel-wecom,channel-wecom-ws,dev-sim,gateway,hardware,hardware-tools,integrations-saas,memory-postgres,memory-tachi,nodes,observability-otel,observability-prometheus,peripheral-rpi,plugins-wasm,plugins-wasm-cranelift,plugins-wasm-pulley,plugins-wasm-runtime-only,probe,provider-gitea,provider-github,sandbox-bubblewrap,sandbox-landlock,schema-export,whatsapp-web"
-set "BUILD_DESC=all (every feature including hardware and browser)"
+set "FEATURES=--no-default-features --features agent-runtime,channel-acp-server,channel-amqp,channel-bluesky,channel-clawdtalk,channel-dingtalk,channel-discord,channel-email,channel-feishu,channel-git,channel-imessage,channel-irc,channel-lark,channel-line,channel-matrix,channel-mattermost,channel-mochat,channel-nostr,channel-notion,channel-qq,channel-reddit,channel-signal,channel-slack,channel-telegram,channel-twitch,channel-twitter,channel-voice-call,channel-webhook,channel-wechat,channel-wecom,channel-wecom-ws,gateway,integrations-saas,memory-tachi,nodes,observability-prometheus,provider-gitea,provider-github,sandbox-bubblewrap,sandbox-landlock,schema-export,whatsapp-web"
+set "BUILD_DESC=all (every optional feature (kitchen sink))"
 goto :do_build
 :: >>> end generated:presets <<<
 
@@ -379,7 +379,7 @@ echo   --prebuilt    Download pre-compiled binary (fastest)
 echo   --minimal     Build core only ^(--no-default-features^)
 echo   --dist        Build lean standard distribution (recommended)
 echo   --default     Build the default feature set
-echo   --all         Build every feature including hardware and browser
+echo   --all         Build every feature
 echo   --dry-run     Show what would happen without building or installing
 echo   --help, -h    Show this help message
 echo.

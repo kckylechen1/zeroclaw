@@ -1507,24 +1507,14 @@ async fn models_set_persists_model_and_preserves_slash_bearing_ids() {
 
 #[test]
 fn interactive_agent_rejects_flags_that_only_apply_with_message() {
-    assert!(interactive_agent_unsupported_flags(None, None, None, &[]).is_empty());
+    assert!(interactive_agent_unsupported_flags(None, None, None).is_empty());
     assert_eq!(
-        interactive_agent_unsupported_flags(Some("anthropic"), None, None, &[]),
+        interactive_agent_unsupported_flags(Some("anthropic"), None, None),
         vec!["--model-provider"]
     );
     assert_eq!(
-        interactive_agent_unsupported_flags(
-            Some("anthropic"),
-            Some("claude-sonnet-4"),
-            Some(0.2),
-            &["nucleo-f401re:/dev/ttyACM0".to_string()],
-        ),
-        vec![
-            "--model-provider",
-            "--model",
-            "--temperature",
-            "--peripheral"
-        ]
+        interactive_agent_unsupported_flags(Some("anthropic"), Some("claude-sonnet-4"), Some(0.2),),
+        vec!["--model-provider", "--model", "--temperature"]
     );
     // The interactive form clap accepts still parses, so the guard (not clap)
     // is what refuses it.
@@ -1539,7 +1529,7 @@ fn interactive_agent_rejects_flags_that_only_apply_with_message() {
     };
     assert!(message.is_none());
     assert_eq!(
-        interactive_agent_unsupported_flags(None, None, temperature, &[]),
+        interactive_agent_unsupported_flags(None, None, temperature),
         vec!["--temperature"]
     );
 }

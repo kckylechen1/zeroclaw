@@ -307,7 +307,7 @@ fn unsupported_clear_backend_message(backend: &str) -> String {
     #[cfg(not(feature = "agent-runtime"))]
     {
         format!(
-            "memory clear is unsupported for append-only backend '{backend}'; switch to a deletable backend (sqlite, lucid, or postgres)"
+            "memory clear is unsupported for append-only backend '{backend}'; switch to a deletable backend (sqlite or lucid)"
         )
     }
 }
@@ -321,7 +321,7 @@ async fn handle_clear(
     let backend = backend_kind_from_dotted(&config.memory.backend);
     if matches!(
         classify_memory_backend(&backend),
-        MemoryBackendKind::Markdown | MemoryBackendKind::Qdrant
+        MemoryBackendKind::Markdown
     ) {
         bail!(unsupported_clear_backend_message(&backend));
     }
@@ -536,7 +536,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_rejects_qdrant_backend_constructed_as_markdown() {
+    async fn clear_rejects_retired_qdrant_backend() {
         let tmp = TempDir::new().unwrap();
         let mut config = Config::default();
         config.data_dir = tmp.path().to_path_buf();
@@ -558,7 +558,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_rejects_dotted_qdrant_backend() {
+    async fn clear_rejects_dotted_retired_qdrant_backend() {
         let tmp = TempDir::new().unwrap();
         let mut config = Config::default();
         config.data_dir = tmp.path().to_path_buf();

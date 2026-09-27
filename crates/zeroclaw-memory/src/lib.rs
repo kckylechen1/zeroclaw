@@ -29,9 +29,6 @@ pub mod none;
 pub mod normalize;
 pub mod policy;
 pub mod policy_gate;
-#[cfg(feature = "memory-postgres")]
-pub mod postgres;
-pub mod qdrant;
 pub mod redact;
 pub mod rerank;
 pub mod response_cache;
@@ -56,8 +53,8 @@ pub use agent_scoped_markdown::{AgentScopedMarkdownMemory, MarkdownPeer};
 pub use audit::AuditedMemory;
 #[allow(unused_imports)]
 pub use backend::{
-    MemoryBackendKind, MemoryBackendProfile, classify_memory_backend, default_memory_backend_key,
-    memory_backend_profile, selectable_memory_backends,
+    MemoryBackendKind, MemoryBackendProfile, RETIRED_MEMORY_BACKENDS, classify_memory_backend,
+    default_memory_backend_key, memory_backend_profile, selectable_memory_backends,
 };
 pub use companion::{
     CompanionCapture, CompanionStore, OUTBOX_OBSERVE_INTERVAL_SECS, OUTBOX_PENDING_AGE_WARN_SECS,
@@ -72,10 +69,6 @@ pub use markdown::MarkdownMemory;
 pub use none::NoneMemory;
 #[allow(unused_imports)]
 pub use policy::PolicyEnforcer;
-#[cfg(feature = "memory-postgres")]
-#[allow(unused_imports)]
-pub use postgres::PostgresMemory;
-pub use qdrant::QdrantMemory;
 pub use rerank::{RerankConfig, RerankStrategy};
 pub use response_cache::ResponseCache;
 #[allow(unused_imports)]
@@ -119,7 +112,6 @@ use std::sync::Arc;
 use zeroclaw_config::providers::ModelProviders;
 use zeroclaw_config::schema::{
     ActiveStorage, Config, EmbeddingRouteConfig, MemoryConfig, MemoryPolicyConfig,
-    PostgresStorageConfig,
 };
 
 /// Reserved storage namespace for Soul-shaped rows. Ambient memory
@@ -136,32 +128,20 @@ pub(crate) const SOUL_NAMESPACE: &str = "soul";
 /// accepts only keys under it.
 pub(crate) const SOUL_KEY_PREFIX: &str = "soul::";
 
-#[cfg(feature = "memory-postgres")]
-fn build_postgres_memory(
-    storage: &PostgresStorageConfig,
-) -> anyhow::Result<postgres::PostgresMemory> {
-    use postgres::PostgresMemory;
-    let db_url = storage
-        .db_url
-        .as_deref()
-        .context("memory backend 'postgres' requires [storage.postgres.<alias>].db_url")?;
-    PostgresMemory::new(
-        "postgres",
-        db_url,
-        &storage.schema,
-        &storage.table,
-        storage.connect_timeout_secs,
-        Some(storage.vector_enabled),
-        Some(storage.vector_dimensions),
-    )
-}
-
-#[cfg(not(feature = "memory-postgres"))]
-fn build_postgres_memory(_storage: &PostgresStorageConfig) -> anyhow::Result<Box<dyn Memory>> {
-    anyhow::bail!(
-        "memory backend 'postgres' requested but this build was compiled without \
-         `memory-postgres`; rebuild with `--features memory-postgres`"
-    )
+/// Explicit construction error for a removed backend. Selecting one never
+/// falls back to another store: the operator must pick a supported backend.
+fn retired_backend_error(backend: &str, selector: &str) -> anyhow::Error {
+    ::zeroclaw_log::record!(
+        ERROR,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+            .with_attrs(::serde_json::json!({ "backend": backend, "selector": selector })),
+        "memory backend was removed"
+    );
+    anyhow::Error::msg(format!(
+        "{selector} selects the '{backend}' memory backend, which was removed; set it to \
+         sqlite, lucid, markdown or none (existing data is not migrated automatically)"
+    ))
 }
 
 /// Wrap the backend in the `AuditedMemory` decorator when
@@ -220,13 +200,10 @@ where
                 audit_enabled,
             )
         }
-        MemoryBackendKind::Postgres => {
-            anyhow::bail!(
-                "postgres backend requires storage config; \
-                 call create_memory_with_storage_and_routes instead of create_memory_with_builders"
-            )
+        MemoryBackendKind::Retired(backend) => {
+            Err(retired_backend_error(backend, "memory.backend"))
         }
-        MemoryBackendKind::Qdrant | MemoryBackendKind::Markdown => wrap_scanned_and_audit(
+        MemoryBackendKind::Markdown => wrap_scanned_and_audit(
             MarkdownMemory::new("markdown", workspace_dir),
             policy,
             workspace_dir,
@@ -711,65 +688,8 @@ pub fn create_memory_with_storage_and_routes(
         _ => None,
     };
 
-    if matches!(backend_kind, MemoryBackendKind::Qdrant) {
-        let qdrant_cfg = match active_storage {
-            ActiveStorage::Qdrant(q) => q,
-            _ => anyhow::bail!(
-                "memory backend 'qdrant' requires a `[storage.qdrant.<alias>]` entry \
-                 referenced by `memory.backend = \"qdrant.<alias>\"`"
-            ),
-        };
-        let url = qdrant_cfg
-            .url
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .context("Qdrant memory backend requires `url` in [storage.qdrant.<alias>]")?;
-        let collection = qdrant_cfg.collection.clone();
-        let qdrant_api_key = qdrant_cfg.api_key.clone().filter(|s| !s.trim().is_empty());
-        let embedder: Arc<dyn embeddings::EmbeddingProvider> =
-            Arc::from(embeddings::create_embedding_provider(
-                &resolved_embedding.model_provider,
-                resolved_embedding.api_key.as_deref(),
-                &resolved_embedding.model,
-                resolved_embedding.dimensions,
-            ));
-        ::zeroclaw_log::record!(
-            INFO,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
-            &format!(
-                "📦 Qdrant memory backend configured (url: {}, collection: {})",
-                url, collection
-            )
-        );
-        return wrap_scanned_and_audit(
-            QdrantMemory::new_lazy("qdrant", &url, &collection, qdrant_api_key, embedder),
-            &config.policy,
-            workspace_dir,
-            config.audit_enabled,
-        );
-    }
-
-    if matches!(backend_kind, MemoryBackendKind::Postgres) {
-        let pg_cfg = match active_storage {
-            ActiveStorage::Postgres(p) => p,
-            _ => anyhow::bail!(
-                "memory backend 'postgres' requires a `[storage.postgres.<alias>]` entry \
-                 referenced by `memory.backend = \"postgres.<alias>\"`"
-            ),
-        };
-        #[cfg(feature = "memory-postgres")]
-        {
-            return wrap_scanned_and_audit(
-                build_postgres_memory(pg_cfg)?,
-                &config.policy,
-                workspace_dir,
-                config.audit_enabled,
-            );
-        }
-        #[cfg(not(feature = "memory-postgres"))]
-        {
-            return build_postgres_memory(pg_cfg);
-        }
+    if let MemoryBackendKind::Retired(backend) = backend_kind {
+        return Err(retired_backend_error(backend, "memory.backend"));
     }
 
     if matches!(backend_kind, MemoryBackendKind::Lucid) {
@@ -1036,7 +956,7 @@ fn wrap_in_retrieval_pipeline(memory: Arc<dyn Memory>, config: &MemoryConfig) ->
 /// Build the per-agent memory wrapper for `agent_alias`.
 ///
 /// Wraps the appropriate inner backend with `AgentScopedMemory` (for
-/// SQL- and Qdrant-backed agents — single shared backend, agent_id
+/// SQL-backed agents — single shared backend, agent_id
 /// column distinguishes rows) or `AgentScopedMarkdownMemory` (for
 /// Markdown-backed agents — per-agent dirs, peer set composed from
 /// the resolved `read_memory_from` allowlist). `NoneMemory` agents
@@ -1061,6 +981,19 @@ pub async fn create_memory_for_agent(
         .get(agent_alias)
         .with_context(|| format!("agents.{agent_alias} is not configured"))?;
     let backend_kind = agent_cfg.memory.backend;
+    if matches!(
+        backend_kind,
+        ConfigBackend::Postgres | ConfigBackend::Qdrant
+    ) {
+        let backend = match backend_kind {
+            ConfigBackend::Postgres => "postgres",
+            _ => "qdrant",
+        };
+        return Err(retired_backend_error(
+            backend,
+            &format!("agents.{agent_alias}.memory.backend"),
+        ));
+    }
 
     // Typed-memory producers are SQLite-only. Config::validate already
     // rejects this combination on every save path, but boot is
@@ -1119,7 +1052,7 @@ pub async fn create_memory_for_agent(
         // write `memory/audit.db` rows and emit the `memory.audit` event;
         // default-off passes it through untouched (byte-identical). The
         // audit db is rooted at the install `data_dir` (shared across
-        // agents), mirroring how the SQL/Qdrant/Lucid arms compose it.
+        // agents), mirroring how the SQL/Lucid arms compose it.
         let audited: Arc<dyn Memory> = Arc::from(wrap_audit(
             scoped,
             &config.data_dir,

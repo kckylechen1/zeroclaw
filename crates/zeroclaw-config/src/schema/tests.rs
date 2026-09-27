@@ -228,29 +228,6 @@ fn cost_category_resolves_only_rate_bearing_sections() {
     assert_eq!(super::cost_category_for_provider_section("models"), None);
 }
 
-#[test]
-async fn plugin_entry_config_resolves_own_section_and_isolates_others() {
-    let mut plugins = super::PluginsConfig::default();
-    plugins.entries.push(super::PluginEntryConfig {
-        name: "image_gen_fal".into(),
-        config: std::collections::HashMap::from([("api_key".into(), "secret-a".into())]),
-    });
-    plugins.entries.push(super::PluginEntryConfig {
-        name: "sd_webui".into(),
-        config: std::collections::HashMap::from([("base_url".into(), "http://host".into())]),
-    });
-
-    let fal = plugins.entry_config("image_gen_fal").unwrap();
-    assert_eq!(fal.get("api_key").map(String::as_str), Some("secret-a"));
-    assert!(fal.get("base_url").is_none());
-
-    let sd = plugins.entry_config("sd_webui").unwrap();
-    assert_eq!(sd.get("base_url").map(String::as_str), Some("http://host"));
-    assert!(sd.get("api_key").is_none());
-
-    assert!(plugins.entry_config("unknown").is_none());
-}
-
 /// The retired run-side config keys must FAIL config parse
 /// with an actionable message, never silently no-op.
 #[test]
@@ -591,88 +568,6 @@ async fn expand_tilde_path_expands_tilde_when_home_set() {
     }
 }
 
-// ── Plugins dir resolution ────────────────────────────────
-
-#[test]
-async fn resolved_plugins_dir_passes_absolute_path_through() {
-    let cfg = PluginsConfig {
-        plugins_dir: "/srv/plugins".to_string(),
-        ..PluginsConfig::default()
-    };
-    assert_eq!(cfg.resolved_plugins_dir(), PathBuf::from("/srv/plugins"));
-}
-
-#[test]
-async fn resolved_plugins_dir_expands_leading_tilde() {
-    let cfg = PluginsConfig {
-        plugins_dir: "~/.zeroclaw/plugins".to_string(),
-        ..PluginsConfig::default()
-    };
-    let resolved = cfg.resolved_plugins_dir();
-    if std::env::var("HOME").is_ok() {
-        assert!(!resolved.to_string_lossy().starts_with('~'));
-        assert!(resolved.ends_with(".zeroclaw/plugins"));
-    }
-}
-
-/// Build a `Config` whose data dir, install root, and configured plugins dir
-/// live under `root`, and create a plugin at `<parent>/<name>/manifest.toml`.
-fn config_with_dirs(root: &Path) -> Config {
-    Config {
-        data_dir: root.join("data"),
-        config_path: root.join("install").join("config.toml"),
-        plugins: PluginsConfig {
-            plugins_dir: root.join("plugins").to_string_lossy().into_owned(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
-fn write_plugin(parent: &Path, name: &str) {
-    std::fs::create_dir_all(parent.join(name)).unwrap();
-    std::fs::write(parent.join(name).join("manifest.toml"), "name = \"x\"\n").unwrap();
-}
-
-#[test]
-async fn legacy_plugin_dirs_detects_data_and_workspace_locations() {
-    let tmp = TempDir::new().unwrap();
-    let config = config_with_dirs(tmp.path());
-    write_plugin(&config.data_dir.join("plugins"), "fromdata");
-    write_plugin(
-        &config.install_root_dir().join("workspace").join("plugins"),
-        "fromworkspace",
-    );
-
-    let dirs = legacy_plugin_dirs_with_entries(&config);
-    assert_eq!(dirs.len(), 2, "both legacy locations should be reported");
-    assert!(dirs.contains(&config.data_dir.join("plugins")));
-    assert!(dirs.contains(&config.install_root_dir().join("workspace").join("plugins")));
-}
-
-#[test]
-async fn legacy_plugin_dirs_empty_when_no_legacy_plugins() {
-    let tmp = TempDir::new().unwrap();
-    let config = config_with_dirs(tmp.path());
-    // Plugin lives in the configured dir, not a legacy one.
-    write_plugin(&config.plugins.resolved_plugins_dir(), "current");
-
-    assert!(legacy_plugin_dirs_with_entries(&config).is_empty());
-}
-
-#[test]
-async fn legacy_plugin_dirs_skips_dir_equal_to_target() {
-    let tmp = TempDir::new().unwrap();
-    let mut config = config_with_dirs(tmp.path());
-    // Point the configured plugins dir AT the legacy data dir.
-    let data_plugins = config.data_dir.join("plugins");
-    config.plugins.plugins_dir = data_plugins.to_string_lossy().into_owned();
-    write_plugin(&data_plugins, "same");
-
-    // The data-dir candidate now equals the target → not a "legacy" dir.
-    assert!(legacy_plugin_dirs_with_entries(&config).is_empty());
-}
-
 // ── Defaults ─────────────────────────────────────────────
 
 fn has_test_table(raw: &str, table: &str) -> bool {
@@ -929,7 +824,6 @@ fn parse_test_config(raw: &str) -> Config {
     let mut merged = raw.trim().to_string();
     for table in [
         "data_retention",
-        "cloud_ops",
         "conversational_ai",
         "security",
         "security_ops",
@@ -1299,59 +1193,6 @@ async fn validate_rejects_reply_min_interval_above_upper_bound() {
     assert!(
         msg.contains("channels.telegram.default.reply_min_interval_secs"),
         "error must name the offending path; got: {msg}"
-    );
-}
-
-#[test]
-async fn validate_rejects_zero_plugin_call_fuel() {
-    let mut config = Config::default();
-    config.plugins.limits.call_fuel = 0;
-    let err = config
-        .validate()
-        .expect_err("zero call_fuel must be rejected");
-    assert!(
-        err.to_string().contains("plugins.limits.call_fuel"),
-        "error must name the offending path; got: {err}"
-    );
-}
-
-#[test]
-async fn validate_rejects_zero_plugin_max_memory() {
-    let mut config = Config::default();
-    config.plugins.limits.max_memory_mb = 0;
-    let err = config
-        .validate()
-        .expect_err("zero max_memory_mb must be rejected");
-    assert!(
-        err.to_string().contains("plugins.limits.max_memory_mb"),
-        "error must name the offending path; got: {err}"
-    );
-}
-
-#[test]
-async fn validate_rejects_zero_plugin_max_table_elements() {
-    let mut config = Config::default();
-    config.plugins.limits.max_table_elements = 0;
-    let err = config
-        .validate()
-        .expect_err("zero max_table_elements must be rejected");
-    assert!(
-        err.to_string()
-            .contains("plugins.limits.max_table_elements"),
-        "error must name the offending path; got: {err}"
-    );
-}
-
-#[test]
-async fn validate_rejects_zero_plugin_max_instances() {
-    let mut config = Config::default();
-    config.plugins.limits.max_instances = 0;
-    let err = config
-        .validate()
-        .expect_err("zero max_instances must be rejected");
-    assert!(
-        err.to_string().contains("plugins.limits.max_instances"),
-        "error must name the offending path; got: {err}"
     );
 }
 
@@ -1813,12 +1654,12 @@ async fn observability_enums_deserialize_legacy_string_values() {
     // Backward compat: TOML configs written before the enum conversion
     // stored these as bare strings. They must still parse.
     let toml = r#"
-backend = "otel"
+backend = "prometheus"
 log_persistence = "full"
 log_tool_io = "off"
 "#;
     let o: ObservabilityConfig = toml::from_str(toml).unwrap();
-    assert_eq!(o.backend, ObservabilityBackend::Otel);
+    assert_eq!(o.backend, ObservabilityBackend::Prometheus);
     assert_eq!(o.log_persistence, LogPersistence::Full);
     assert_eq!(o.log_tool_io, LogToolIo::Off);
 
@@ -1828,7 +1669,7 @@ log_tool_io = "off"
 
     // Round-trip: serialize back to the same wire strings the runtime
     // boundary (`to_log_config`) and downstream `from_raw` expect.
-    assert_eq!(ObservabilityBackend::Otel.as_wire(), "otel");
+    assert_eq!(ObservabilityBackend::Prometheus.as_wire(), "prometheus");
     assert_eq!(LogPersistence::Full.as_wire(), "full");
     assert_eq!(LogPersistence::Rotating.as_wire(), "rotating");
     assert_eq!(LogToolIo::Off.as_wire(), "off");
@@ -1865,10 +1706,13 @@ async fn observability_backend_unknown_falls_back_to_default() {
     assert_eq!(parsed.backend, ObservabilityBackend::None);
     let noop: ObservabilityConfig = toml::from_str("backend = \"noop\"").unwrap();
     assert_eq!(noop.backend, ObservabilityBackend::None);
-    let otlp: ObservabilityConfig = toml::from_str("backend = \"otlp\"").unwrap();
-    assert_eq!(otlp.backend, ObservabilityBackend::Otel);
-    let otel_alias: ObservabilityConfig = toml::from_str("backend = \"opentelemetry\"").unwrap();
-    assert_eq!(otel_alias.backend, ObservabilityBackend::Otel);
+    // The retired OTel backend values load as the default sink; the
+    // retired-value tombstone reports them.
+    for retired in ["otel", "otlp", "opentelemetry"] {
+        let parsed: ObservabilityConfig =
+            toml::from_str(&format!("backend = \"{retired}\"")).unwrap();
+        assert_eq!(parsed.backend, ObservabilityBackend::None);
+    }
 }
 
 #[test]
@@ -2082,34 +1926,6 @@ async fn search_mode_serde_roundtrip() {
 }
 
 #[test]
-async fn storage_postgres_alias_pgvector_roundtrip() {
-    let toml = r#"
-        [postgres.default]
-        db_url = "postgres://user:pw@host/db"
-        vector_enabled = true
-        vector_dimensions = 768
-    "#;
-    let parsed: StorageConfig = toml::from_str(toml).unwrap();
-    let pg = parsed.postgres.get("default").expect("alias present");
-    assert_eq!(pg.db_url.as_deref(), Some("postgres://user:pw@host/db"));
-    assert!(pg.vector_enabled);
-    assert_eq!(pg.vector_dimensions, 768);
-}
-
-#[test]
-async fn storage_postgres_pgvector_defaults_when_omitted() {
-    let toml = r#"
-        [postgres.default]
-    "#;
-    let parsed: StorageConfig = toml::from_str(toml).unwrap();
-    let pg = parsed.postgres.get("default").expect("alias present");
-    assert!(!pg.vector_enabled);
-    assert_eq!(pg.vector_dimensions, 1536);
-    assert_eq!(pg.schema, "public");
-    assert_eq!(pg.table, "memories");
-}
-
-#[test]
 async fn ollama_alias_tuning_fields_roundtrip() {
     // Ollama-specific tuning lives on `OllamaModelProviderConfig`,
     // not on the generic `ModelProviderConfig` base. These knobs
@@ -2308,7 +2124,6 @@ async fn config_toml_roundtrip() {
         trust: crate::scattered_types::TrustConfig::default(),
         backup: BackupConfig::default(),
         data_retention: DataRetentionConfig::default(),
-        cloud_ops: CloudOpsConfig::default(),
         conversational_ai: ConversationalAiConfig::default(),
         security: SecurityConfig::default(),
         security_ops: SecurityOpsConfig::default(),
@@ -2400,7 +2215,6 @@ async fn config_toml_roundtrip() {
         gateway: GatewayConfig::default(),
         a2a: crate::multi_agent::A2aServerSection::default(),
         composio: ComposioConfig::default(),
-        microsoft365: Microsoft365Config::default(),
         secrets: SecretsConfig::default(),
         browser: BrowserConfig::default(),
         http_request: HttpRequestConfig::default(),
@@ -2410,12 +2224,9 @@ async fn config_toml_roundtrip() {
         link_enricher: LinkEnricherConfig::default(),
         text_browser: TextBrowserConfig::default(),
         web_search: WebSearchConfig::default(),
-        project_intel: ProjectIntelConfig::default(),
-        google_workspace: GoogleWorkspaceConfig::default(),
         proxy: ProxyConfig::default(),
         pacing: PacingConfig::default(),
         cost: CostConfig::default(),
-        peripherals: PeripheralsConfig::default(),
         agents: HashMap::new(),
         runtime_profiles: HashMap::new(),
         personas: HashMap::new(),
@@ -2426,7 +2237,6 @@ async fn config_toml_roundtrip() {
         mcp_bundles: HashMap::new(),
         peer_groups: HashMap::new(),
         hooks: HooksConfig::default(),
-        hardware: HardwareConfig::default(),
         transcription: TranscriptionConfig::default(),
         tts: TtsConfig::default(),
         mcp: McpConfig::default(),
@@ -2434,15 +2244,12 @@ async fn config_toml_roundtrip() {
         nodes: NodesConfig::default(),
         onboard_state: OnboardStateConfig::default(),
         notion: NotionConfig::default(),
-        jira: JiraConfig::default(),
         node_transport: NodeTransportConfig::default(),
         knowledge: KnowledgeConfig::default(),
-        linkedin: LinkedInConfig::default(),
         image_gen: ImageGenConfig::default(),
         file_upload: FileUploadConfig::default(),
         file_upload_bundle: FileUploadBundleConfig::default(),
         file_download: FileDownloadConfig::default(),
-        plugins: PluginsConfig::default(),
         locale: None,
         verifiable_intent: VerifiableIntentConfig::default(),
         sop: SopConfig::default(),
@@ -2737,30 +2544,6 @@ default_temperature = 0.7
             .map(|(_, _, e)| e.extra_headers.is_empty())
             .unwrap_or(true)
     );
-}
-
-#[test]
-async fn storage_postgres_dburl_alias_deserializes() {
-    let raw = r#"
-default_temperature = 0.7
-
-[storage.postgres.default]
-dbURL = "postgres://user:pw@host/db"
-schema = "public"
-table = "memories"
-connect_timeout_secs = 12
-"#;
-
-    let parsed = parse_test_config(raw);
-    let pg = parsed
-        .storage
-        .postgres
-        .get("default")
-        .expect("postgres.default present");
-    assert_eq!(pg.db_url.as_deref(), Some("postgres://user:pw@host/db"));
-    assert_eq!(pg.schema, "public");
-    assert_eq!(pg.table, "memories");
-    assert_eq!(pg.connect_timeout_secs, Some(12));
 }
 
 #[test]
@@ -3122,7 +2905,7 @@ async fn config_save_prunes_unchanged_default_blocks() {
     // Fresh-init config without any operator edits should write a
     // tiny config.toml — only `schema_version` and any operator-
     // touched fields. The hundreds of all-default blocks
-    // (LinkedIn, memory, observability, etc.) must not appear.
+    // (knowledge, memory, observability, etc.) must not appear.
     let dir =
         std::env::temp_dir().join(format!("zeroclaw_save_prune_test_{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&dir).await.unwrap();
@@ -3145,7 +2928,7 @@ async fn config_save_prunes_unchanged_default_blocks() {
     // save. Pick representative samples from across the schema:
     for block in [
         "[memory]",
-        "[linkedin",
+        "[knowledge]",
         "[observability]",
         "[gateway]",
         "[cost]",
@@ -3240,7 +3023,6 @@ async fn config_save_and_load_tmpdir() {
         trust: crate::scattered_types::TrustConfig::default(),
         backup: BackupConfig::default(),
         data_retention: DataRetentionConfig::default(),
-        cloud_ops: CloudOpsConfig::default(),
         conversational_ai: ConversationalAiConfig::default(),
         security: SecurityConfig::default(),
         security_ops: SecurityOpsConfig::default(),
@@ -3261,7 +3043,6 @@ async fn config_save_and_load_tmpdir() {
         gateway: GatewayConfig::default(),
         a2a: crate::multi_agent::A2aServerSection::default(),
         composio: ComposioConfig::default(),
-        microsoft365: Microsoft365Config::default(),
         secrets: SecretsConfig::default(),
         browser: BrowserConfig::default(),
         http_request: HttpRequestConfig::default(),
@@ -3271,12 +3052,9 @@ async fn config_save_and_load_tmpdir() {
         link_enricher: LinkEnricherConfig::default(),
         text_browser: TextBrowserConfig::default(),
         web_search: WebSearchConfig::default(),
-        project_intel: ProjectIntelConfig::default(),
-        google_workspace: GoogleWorkspaceConfig::default(),
         proxy: ProxyConfig::default(),
         pacing: PacingConfig::default(),
         cost: CostConfig::default(),
-        peripherals: PeripheralsConfig::default(),
         agents: HashMap::new(),
         risk_profiles: HashMap::new(),
         runtime_profiles: HashMap::new(),
@@ -3288,7 +3066,6 @@ async fn config_save_and_load_tmpdir() {
         mcp_bundles: HashMap::new(),
         peer_groups: HashMap::new(),
         hooks: HooksConfig::default(),
-        hardware: HardwareConfig::default(),
         transcription: TranscriptionConfig::default(),
         tts: TtsConfig::default(),
         mcp: McpConfig::default(),
@@ -3296,15 +3073,12 @@ async fn config_save_and_load_tmpdir() {
         nodes: NodesConfig::default(),
         onboard_state: OnboardStateConfig::default(),
         notion: NotionConfig::default(),
-        jira: JiraConfig::default(),
         node_transport: NodeTransportConfig::default(),
         knowledge: KnowledgeConfig::default(),
-        linkedin: LinkedInConfig::default(),
         image_gen: ImageGenConfig::default(),
         file_upload: FileUploadConfig::default(),
         file_upload_bundle: FileUploadBundleConfig::default(),
         file_download: FileDownloadConfig::default(),
-        plugins: PluginsConfig::default(),
         locale: None,
         verifiable_intent: VerifiableIntentConfig::default(),
         sop: SopConfig::default(),
@@ -3377,31 +3151,12 @@ async fn config_save_encrypts_nested_credentials() {
     config.browser.computer_use.api_key = Some("browser-credential".into());
     config.web_search.brave_api_key = Some("brave-credential".into());
     config.web_search.tavily_api_key = Some("tavily-credential".into());
-    config.storage.postgres.insert(
-        "default".to_string(),
-        PostgresStorageConfig {
-            db_url: Some("postgres://user:pw@host/db".into()),
-            ..PostgresStorageConfig::default()
-        },
-    );
-    config.storage.qdrant.insert(
-        "default".to_string(),
-        QdrantStorageConfig {
-            api_key: Some("qdrant-credential".into()),
-            ..QdrantStorageConfig::default()
-        },
-    );
     config.reliability.api_keys = vec![
         "rotation-credential-a".into(),
         "rotation-credential-b".into(),
     ];
     config.node_transport.shared_secret = "node-shared-credential".into();
     config.nodes.auth_token = Some("nodes-auth-credential".into());
-    config.observability.backend = ObservabilityBackend::Otel;
-    config.observability.otel_headers = Some(HashMap::from([(
-        "Authorization".to_string(),
-        "Bearer otel-credential".to_string(),
-    )]));
     config.file_upload.headers = HashMap::from([(
         "Authorization".to_string(),
         "Bearer upload-credential".to_string(),
@@ -3490,13 +3245,10 @@ async fn config_save_encrypts_nested_credentials() {
         "browser-credential",
         "brave-credential",
         "tavily-credential",
-        "postgres://user:pw@host/db",
-        "qdrant-credential",
         "rotation-credential-a",
         "rotation-credential-b",
         "node-shared-credential",
         "nodes-auth-credential",
-        "Bearer otel-credential",
         "Bearer upload-credential",
         "Bearer http-request-credential",
         "mcp-env-credential",
@@ -3573,27 +3325,6 @@ async fn config_save_encrypts_nested_credentials() {
     assert!(crate::secrets::SecretStore::is_encrypted(worker_encrypted));
     assert_eq!(store.decrypt(worker_encrypted).unwrap(), "agent-credential");
 
-    let storage_db_url = stored
-        .storage
-        .postgres
-        .get("default")
-        .and_then(|p| p.db_url.as_deref())
-        .unwrap();
-    assert!(crate::secrets::SecretStore::is_encrypted(storage_db_url));
-    assert_eq!(
-        store.decrypt(storage_db_url).unwrap(),
-        "postgres://user:pw@host/db"
-    );
-
-    let qdrant_key = stored
-        .storage
-        .qdrant
-        .get("default")
-        .and_then(|q| q.api_key.as_deref())
-        .unwrap();
-    assert!(crate::secrets::SecretStore::is_encrypted(qdrant_key));
-    assert_eq!(store.decrypt(qdrant_key).unwrap(), "qdrant-credential");
-
     for key in &stored.reliability.api_keys {
         assert!(crate::secrets::SecretStore::is_encrypted(key));
     }
@@ -3617,15 +3348,6 @@ async fn config_save_encrypts_nested_credentials() {
     let nodes_auth = stored.nodes.auth_token.as_deref().unwrap();
     assert!(crate::secrets::SecretStore::is_encrypted(nodes_auth));
     assert_eq!(store.decrypt(nodes_auth).unwrap(), "nodes-auth-credential");
-
-    let otel_auth = stored
-        .observability
-        .otel_headers
-        .as_ref()
-        .and_then(|h| h.get("Authorization"))
-        .unwrap();
-    assert!(crate::secrets::SecretStore::is_encrypted(otel_auth));
-    assert_eq!(store.decrypt(otel_auth).unwrap(), "Bearer otel-credential");
 
     let upload_auth = stored.file_upload.headers.get("Authorization").unwrap();
     assert!(crate::secrets::SecretStore::is_encrypted(upload_auth));
@@ -4533,9 +4255,6 @@ async fn browser_config_default_enabled() {
     assert_eq!(b.allowed_domains, vec!["*".to_string()]);
     assert_eq!(b.backend, "agent_browser");
     assert_eq!(b.headed, None);
-    assert!(b.native_headless);
-    assert_eq!(b.native_webdriver_url, "http://127.0.0.1:9515");
-    assert!(b.native_chrome_path.is_none());
     assert_eq!(b.computer_use.endpoint, "http://127.0.0.1:8787/v1/actions");
     assert_eq!(b.computer_use.timeout_ms, 15_000);
     assert!(!b.computer_use.allow_remote_endpoint);
@@ -4556,7 +4275,6 @@ headed = true
 
     assert_eq!(parsed.backend, "agent_browser");
     assert_eq!(parsed.headed, Some(true));
-    assert!(parsed.native_headless);
 }
 
 #[test]
@@ -5842,34 +5560,6 @@ enabled = false
 }
 
 #[test]
-async fn salvage_reports_dropped_plugins_section_for_malformed_entries() {
-    // `[plugins.entries]` written as a table instead of an array of
-    // tables (`[[plugins.entries]]`) drops the whole [plugins] section
-    // to defaults on the resilient path. That drop must land on
-    // `ResilientLoad::dropped`; load_or_init copies it onto
-    // `degraded_sections` so the CLI surfaces it on stderr instead of
-    // the operator discovering `enabled = false` by accident.
-    let raw = r#"schema_version = 3
-
-[plugins]
-enabled = true
-
-[plugins.entries]
-name = "weather-tool"
-"#;
-    let load = crate::migration::migrate_to_current_salvaged(raw);
-    assert!(
-        load.dropped.iter().any(|s| s == "plugins"),
-        "a malformed [plugins] section must be reported on dropped, got {:?}",
-        load.dropped
-    );
-    assert!(
-        !load.config.plugins.enabled,
-        "the malformed section must have been reset to defaults"
-    );
-}
-
-#[test]
 #[allow(clippy::large_futures)]
 async fn load_or_init_marks_whole_config_degraded_for_unparseable_file() {
     let _env_guard = env_override_lock().await;
@@ -6166,100 +5856,6 @@ async fn validate_accepts_valid_temperature() {
 }
 
 #[test]
-async fn validate_rejects_unknown_jira_actions() {
-    for action in ["delete_ticket", "drop_database", ""] {
-        let mut config = Config::default();
-        config.jira.enabled = true;
-        config.jira.base_url = "https://jira.example.test".into();
-        config.jira.api_token = "token".into();
-        config.jira.allowed_actions = vec![action.into()];
-
-        let err = config
-            .validate()
-            .expect_err("unknown Jira action should be rejected")
-            .to_string();
-        assert!(
-            err.contains("jira.allowed_actions contains unknown action"),
-            "expected Jira allowed action error for {action:?}, got: {err}"
-        );
-    }
-}
-
-#[test]
-async fn validate_accepts_all_published_jira_actions() {
-    for action in [
-        "get_ticket",
-        "search_tickets",
-        "comment_ticket",
-        "list_projects",
-        "myself",
-        "list_transitions",
-        "transition_ticket",
-        "create_ticket",
-    ] {
-        let mut config = Config::default();
-        config.jira.enabled = true;
-        config.jira.base_url = "https://jira.example.test".into();
-        config.jira.api_token = "token".into();
-        config.jira.allowed_actions = vec![action.into()];
-
-        assert!(
-            config.validate().is_ok(),
-            "published Jira action {action:?} should validate"
-        );
-    }
-}
-
-#[test]
-async fn jira_email_empty_string_deserializes_as_none() {
-    // Legacy configs round-tripped `email = ""` to disk because the
-    // pre-rename `email: String` lacked `skip_serializing_if`. The
-    // current `Option<String>` would otherwise deserialize `""` as
-    // `Some("")`, and JiraTool would attempt Basic auth with empty
-    // username (the dropped email-required validation no longer
-    // catches this). Defense-in-depth: empty strings deserialize as
-    // None.
-    let toml_input = r#"
-enabled = true
-base_url = "https://jira.example.test"
-email = ""
-api_token = "tok"
-"#;
-    let cfg: JiraConfig = toml::from_str(toml_input).expect("parses with empty email");
-    assert!(
-        cfg.email.is_none(),
-        "empty `email = \"\"` must deserialize as None, got {:?}",
-        cfg.email
-    );
-    // Whitespace-only is also normalized to None.
-    let toml_input_ws = r#"
-enabled = true
-base_url = "https://jira.example.test"
-email = "   "
-api_token = "tok"
-"#;
-    let cfg_ws: JiraConfig = toml::from_str(toml_input_ws).expect("parses with whitespace email");
-    assert!(
-        cfg_ws.email.is_none(),
-        "whitespace-only email must deserialize as None, got {:?}",
-        cfg_ws.email
-    );
-    // A real email still survives.
-    let toml_input_real = r#"
-enabled = true
-base_url = "https://jira.example.test"
-email = "ops@example.com"
-api_token = "tok"
-"#;
-    let cfg_real: JiraConfig = toml::from_str(toml_input_real).expect("parses with real email");
-    assert_eq!(
-        cfg_real.email.as_deref(),
-        Some("ops@example.com"),
-        "non-empty email must round-trip unchanged"
-    );
-}
-
-#[test]
 async fn proxy_config_scope_services_requires_entries_when_enabled() {
     let proxy = ProxyConfig {
         enabled: true,
@@ -6273,116 +5869,6 @@ async fn proxy_config_scope_services_requires_entries_when_enabled() {
 
     let error = proxy.validate().unwrap_err().to_string();
     assert!(error.contains("proxy.scope='services'"));
-}
-
-#[test]
-async fn google_workspace_allowed_operations_require_methods() {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "gmail".into(),
-        resource: "users".into(),
-        sub_resource: Some("drafts".into()),
-        methods: Vec::new(),
-    }];
-
-    let err = config.validate().unwrap_err().to_string();
-    assert!(err.contains("google_workspace.allowed_operations[0].methods"));
-}
-
-#[test]
-async fn google_workspace_allowed_operations_reject_duplicate_service_resource_sub_resource_entries()
- {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("drafts".into()),
-            methods: vec!["create".into()],
-        },
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("drafts".into()),
-            methods: vec!["update".into()],
-        },
-    ];
-
-    let err = config.validate().unwrap_err().to_string();
-    assert!(err.contains("duplicate service/resource/sub_resource entry"));
-}
-
-#[test]
-async fn google_workspace_allowed_operations_allow_same_resource_different_sub_resource() {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("messages".into()),
-            methods: vec!["list".into(), "get".into()],
-        },
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("drafts".into()),
-            methods: vec!["create".into(), "update".into()],
-        },
-    ];
-
-    assert!(config.validate().is_ok());
-}
-
-#[test]
-async fn google_workspace_allowed_operations_reject_duplicate_methods_within_entry() {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "gmail".into(),
-        resource: "users".into(),
-        sub_resource: Some("drafts".into()),
-        methods: vec!["create".into(), "create".into()],
-    }];
-
-    let err = config.validate().unwrap_err().to_string();
-    assert!(
-        err.contains("duplicate entry"),
-        "expected duplicate entry error, got: {err}"
-    );
-}
-
-#[test]
-async fn google_workspace_allowed_operations_accept_valid_entries() {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("messages".into()),
-            methods: vec!["list".into(), "get".into()],
-        },
-        GoogleWorkspaceAllowedOperation {
-            service: "drive".into(),
-            resource: "files".into(),
-            sub_resource: None,
-            methods: vec!["list".into(), "get".into()],
-        },
-    ];
-
-    assert!(config.validate().is_ok());
-}
-
-#[test]
-async fn google_workspace_allowed_operations_reject_invalid_sub_resource_characters() {
-    let mut config = Config::default();
-    config.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "gmail".into(),
-        resource: "users".into(),
-        sub_resource: Some("bad resource!".into()),
-        methods: vec!["list".into()],
-    }];
-
-    let err = config.validate().unwrap_err().to_string();
-    assert!(err.contains("sub_resource contains invalid characters"));
 }
 
 fn runtime_proxy_cache_contains(cache_key: &str) -> bool {
@@ -7009,7 +6495,7 @@ async fn save_dirty_stamps_current_schema_version_on_stale_label() {
         config_path: config_path.clone(),
         ..Default::default()
     };
-    config.observability.backend = ObservabilityBackend::Otel;
+    config.observability.backend = ObservabilityBackend::Prometheus;
     config.mark_dirty("observability.backend");
     config.save_dirty().await.unwrap();
 
@@ -7027,7 +6513,7 @@ async fn save_dirty_stamps_current_schema_version_on_stale_label() {
     );
     // The dirty value still lands, and the stamp sits at the top of the file.
     assert!(
-        written.contains("backend = \"otel\""),
+        written.contains("backend = \"prometheus\""),
         "dirty value must still be written; got:\n{written}"
     );
     assert!(
@@ -9018,144 +8504,6 @@ async fn telegram_config_ack_reactions_is_tri_state() {
     }
 }
 
-#[test]
-async fn google_workspace_allowed_operations_deserialize_from_toml() {
-    let toml_str = r#"
-        enabled = true
-
-        [[allowed_operations]]
-        service = "gmail"
-        resource = "users"
-        sub_resource = "drafts"
-        methods = ["create", "update"]
-    "#;
-
-    let cfg: GoogleWorkspaceConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(cfg.allowed_operations.len(), 1);
-    assert_eq!(cfg.allowed_operations[0].service, "gmail");
-    assert_eq!(cfg.allowed_operations[0].resource, "users");
-    assert_eq!(
-        cfg.allowed_operations[0].sub_resource.as_deref(),
-        Some("drafts")
-    );
-    assert_eq!(
-        cfg.allowed_operations[0].methods,
-        vec!["create".to_string(), "update".to_string()]
-    );
-}
-
-#[test]
-async fn google_workspace_allowed_operations_deserialize_without_sub_resource() {
-    let toml_str = r#"
-        enabled = true
-
-        [[allowed_operations]]
-        service = "drive"
-        resource = "files"
-        methods = ["list", "get"]
-    "#;
-
-    let cfg: GoogleWorkspaceConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(cfg.allowed_operations[0].sub_resource, None);
-}
-
-#[test]
-async fn config_validate_accepts_google_workspace_allowed_operations() {
-    let mut cfg = Config::default();
-    cfg.google_workspace.enabled = true;
-    cfg.google_workspace.allowed_services = vec!["gmail".into()];
-    cfg.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "gmail".into(),
-        resource: "users".into(),
-        sub_resource: Some("drafts".into()),
-        methods: vec!["create".into(), "update".into()],
-    }];
-
-    cfg.validate().unwrap();
-}
-
-#[test]
-async fn config_validate_rejects_duplicate_google_workspace_allowed_operations() {
-    let mut cfg = Config::default();
-    cfg.google_workspace.enabled = true;
-    cfg.google_workspace.allowed_services = vec!["gmail".into()];
-    cfg.google_workspace.allowed_operations = vec![
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("drafts".into()),
-            methods: vec!["create".into()],
-        },
-        GoogleWorkspaceAllowedOperation {
-            service: "gmail".into(),
-            resource: "users".into(),
-            sub_resource: Some("drafts".into()),
-            methods: vec!["update".into()],
-        },
-    ];
-
-    let err = cfg.validate().unwrap_err().to_string();
-    assert!(err.contains("duplicate service/resource/sub_resource entry"));
-}
-
-#[test]
-async fn config_validate_rejects_operation_service_not_in_allowed_services() {
-    let mut cfg = Config::default();
-    cfg.google_workspace.enabled = true;
-    cfg.google_workspace.allowed_services = vec!["gmail".into()];
-    cfg.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "drive".into(), // drive is not in allowed_services
-        resource: "files".into(),
-        sub_resource: None,
-        methods: vec!["list".into()],
-    }];
-
-    let err = cfg.validate().unwrap_err().to_string();
-    assert!(
-        err.contains("not in the effective allowed_services"),
-        "expected not-in-allowed_services error, got: {err}"
-    );
-}
-
-#[test]
-async fn config_validate_accepts_default_service_when_allowed_services_empty() {
-    // When allowed_services is empty the validator uses DEFAULT_GWS_SERVICES.
-    // A known default service must pass.
-    let mut cfg = Config::default();
-    cfg.google_workspace.enabled = true;
-    // allowed_services deliberately left empty (falls back to defaults)
-    cfg.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "drive".into(),
-        resource: "files".into(),
-        sub_resource: None,
-        methods: vec!["list".into()],
-    }];
-
-    assert!(cfg.validate().is_ok());
-}
-
-#[test]
-async fn config_validate_rejects_unknown_service_when_allowed_services_empty() {
-    // Even with allowed_services empty (using defaults), an operation whose
-    // service is not in DEFAULT_GWS_SERVICES must fail validation — not silently
-    // pass through to be rejected at runtime.
-    let mut cfg = Config::default();
-    cfg.google_workspace.enabled = true;
-    // allowed_services deliberately left empty
-    cfg.google_workspace.allowed_operations = vec![GoogleWorkspaceAllowedOperation {
-        service: "not_a_real_service".into(),
-        resource: "files".into(),
-        sub_resource: None,
-        methods: vec!["list".into()],
-    }];
-
-    let err = cfg.validate().unwrap_err().to_string();
-    assert!(
-        err.contains("not in the effective allowed_services"),
-        "expected effective-allowed_services error, got: {err}"
-    );
-}
-
 // ── Bootstrap files ─────────────────────────────────────
 
 #[tokio::test]
@@ -10583,50 +9931,6 @@ async fn create_map_key_inserts_default_mcp_server() {
 }
 
 #[test]
-async fn create_map_key_seeds_plugin_entry_and_routes_config_set() {
-    // The `zeroclaw plugin install` seeding path: a fresh
-    // `[[plugins.entries]]` entry named after the plugin must make
-    // `config set plugins.entries.<name>.config.<key>` routable;
-    // natural-key path routing only matches keys already present in
-    // live config.
-    let mut config = Config::default();
-    let created = config
-        .create_map_key("plugins.entries", "weather-tool")
-        .expect("plugins.entries must accept new natural-key entries");
-    assert!(created, "first add should report created=true");
-    assert_eq!(config.plugins.entries.len(), 1);
-    assert_eq!(config.plugins.entries[0].name, "weather-tool");
-
-    config
-        .set_prop("plugins.entries.weather-tool.config.api_key", "sk-test")
-        .expect("config set must route through the seeded entry");
-    assert_eq!(
-        config
-            .plugins
-            .entry_config("weather-tool")
-            .and_then(|c| c.get("api_key"))
-            .map(String::as_str),
-        Some("sk-test")
-    );
-
-    // Idempotent: reinstalling must not clobber operator values.
-    let again = config
-        .create_map_key("plugins.entries", "weather-tool")
-        .expect("second add still resolves the section");
-    assert!(!again, "duplicate add should report created=false");
-    assert_eq!(config.plugins.entries.len(), 1);
-    assert_eq!(
-        config
-            .plugins
-            .entry_config("weather-tool")
-            .and_then(|c| c.get("api_key"))
-            .map(String::as_str),
-        Some("sk-test"),
-        "re-seeding must leave existing config values untouched"
-    );
-}
-
-#[test]
 async fn create_map_key_inserts_default_alias_under_typed_family() {
     // Dashboard "+ Add alias" target is the typed family slot,
     // not a free-form provider key under `providers.models`.
@@ -12044,10 +11348,6 @@ async fn credential_shaped_prop_fields_have_explicit_classification() {
         .channels
         .matrix
         .insert("default".into(), MatrixConfig::default());
-    config
-        .storage
-        .qdrant
-        .insert("default".into(), QdrantStorageConfig::default());
 
     let fields = config.prop_fields();
     let missing: Vec<_> = fields
@@ -12566,19 +11866,19 @@ async fn validate_rejects_read_memory_from_self_reference() {
 async fn validate_rejects_read_memory_from_cross_backend() {
     let mut config = multi_agent_test_config();
 
-    // Add a second agent on Postgres.
+    // Add a second agent on Markdown.
     let beta = AliasedAgentConfig {
         channels: vec![crate::providers::ChannelRef::new("telegram.draft")],
         model_provider: crate::providers::ModelProviderRef::new("anthropic.default"),
         risk_profile: "default".into(),
         memory: crate::multi_agent::AgentMemoryConfig {
-            backend: crate::multi_agent::MemoryBackendKind::Postgres,
+            backend: crate::multi_agent::MemoryBackendKind::Markdown,
         },
         ..AliasedAgentConfig::default()
     };
     config.agents.insert("beta".to_string(), beta);
 
-    // Alpha (Sqlite default) tries to read from beta (Postgres).
+    // Alpha (Sqlite default) tries to read from beta (Markdown).
     let alpha = config.agents.get_mut("alpha").unwrap();
     alpha
         .workspace
@@ -12599,7 +11899,7 @@ async fn validate_rejects_read_memory_from_cross_backend() {
 async fn validate_rejects_typed_memory_flags_on_non_sqlite_global_backend() {
     let mut config = multi_agent_test_config();
     config.memory.types.enabled = true;
-    config.memory.backend = "postgres.work".to_string();
+    config.memory.backend = "markdown.work".to_string();
 
     let err = config
         .validate()
@@ -12668,9 +11968,9 @@ async fn validate_accepts_typed_memory_flags_on_mixed_case_sqlite() {
 #[test]
 async fn validate_allows_non_sqlite_backend_when_typed_memory_flags_off() {
     let mut config = multi_agent_test_config();
-    config.memory.backend = "postgres.work".to_string();
+    config.memory.backend = "markdown.work".to_string();
     let alpha = config.agents.get_mut("alpha").unwrap();
-    alpha.memory.backend = crate::multi_agent::MemoryBackendKind::Postgres;
+    alpha.memory.backend = crate::multi_agent::MemoryBackendKind::Markdown;
 
     config
         .validate()

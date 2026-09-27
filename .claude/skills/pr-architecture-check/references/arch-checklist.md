@@ -76,9 +76,7 @@ New code must land in the correct crate per the repository map:
 | `zeroclaw-memory` | Memory backends (markdown, sqlite, embeddings, vector merge) |
 | `zeroclaw-infra` | Shared infrastructure (debounce, session, stall watchdog) |
 | `zeroclaw-gateway` | Webhook/gateway server (separate binary) |
-| `zeroclaw-hardware` | USB discovery, peripherals, serial, GPIO |
 | `zeroclaw-tui` | TUI onboarding wizard |
-| `zeroclaw-plugins` | WASM plugin system |
 | `zeroclaw-tool-call-parser` | Tool call parsing |
 
 **Check:** Verify new modules/files are placed in the crate whose responsibility matches the functionality. Flag code that belongs in one crate but is placed in another.

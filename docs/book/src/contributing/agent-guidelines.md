@@ -67,13 +67,9 @@ The stability-tier definitions and versioning policy live in [FND-001](../founda
 | `zeroclaw-tools` | Experimental | Plugin migration at v1.0.0 |
 | `zeroclaw-runtime` | Experimental | Agent runtime: agent loop, security, cron, SOP, skills, and observability |
 | `zeroclaw-gateway` | Experimental | Separate binary at v0.9.0 |
-| `zeroclaw-plugins` | Experimental | WASM plugin system and foundation for the v1.0.0 plugin ecosystem |
-| `zeroclaw-hardware` | Experimental | USB discovery, peripherals, and serial support |
 | `zeroclaw-macros` | Beta | Tightly coupled to the config schema |
 | `zeroclaw-eval` | Experimental | Agent evaluation harness with deterministic replay of LLM trace fixtures |
 | `zeroclaw-spawn` | Beta | Attribution-propagating `tokio::spawn` wrapper layered on `zeroclaw-log` |
-| `robot-kit` | Experimental | Robot control toolkit: drive, vision, speech, sensors, and safety |
-| `aardvark-sys` | Experimental | Low-level FFI bindings for the Total Phase Aardvark adapter; the only crate where `unsafe` is permitted |
 
 Stable components follow the breaking-change policy. Beta components may make breaking changes in a MINOR release with changelog notes. Experimental components carry no stability guarantee. Tiers are promoted, never demoted, through deliberate team decision.
 

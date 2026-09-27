@@ -37,10 +37,11 @@ pub enum MemoryBackendKind {
     /// extra services.
     #[default]
     Sqlite,
-    /// PostgreSQL with optional pgvector
-    /// (`crates/zeroclaw-memory/src/postgres.rs`, feature `memory-postgres`).
+    /// Retired PostgreSQL backend. Still parses so an old config loads (with
+    /// the `memory_backend_removed` warning); selecting it fails memory
+    /// construction explicitly.
     Postgres,
-    /// Qdrant vector store (`crates/zeroclaw-memory/src/qdrant.rs`).
+    /// Retired Qdrant backend. Same contract as [`Self::Postgres`].
     Qdrant,
     /// Markdown files in the agent's workspace
     /// (`crates/zeroclaw-memory/src/markdown.rs`).
@@ -284,9 +285,12 @@ gamma = "read_write"
 
     #[test]
     fn agent_memory_config_round_trips() {
-        let toml_input = r#"backend = "postgres""#;
+        let toml_input = r#"backend = "markdown""#;
         let parsed: AgentMemoryConfig = toml::from_str(toml_input).unwrap();
-        assert_eq!(parsed.backend, MemoryBackendKind::Postgres);
+        assert_eq!(parsed.backend, MemoryBackendKind::Markdown);
+        // The retired backends still parse so old configs keep loading.
+        let retired: AgentMemoryConfig = toml::from_str(r#"backend = "postgres""#).unwrap();
+        assert_eq!(retired.backend, MemoryBackendKind::Postgres);
     }
 
     #[test]

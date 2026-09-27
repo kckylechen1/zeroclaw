@@ -1,9 +1,5 @@
 pub mod log;
 pub mod noop;
-#[cfg(feature = "observability-otel")]
-pub mod otel;
-#[cfg(feature = "observability-otel")]
-pub mod otel_config;
 #[cfg(feature = "observability-prometheus")]
 pub mod prometheus;
 pub mod runtime_trace;
@@ -12,12 +8,7 @@ pub mod verbose;
 
 #[allow(unused_imports)]
 pub use self::log::LogObserver;
-#[allow(unused_imports)]
-#[cfg(feature = "observability-otel")]
-use self::otel_config::OtelContentConfig;
 pub use noop::NoopObserver;
-#[cfg(feature = "observability-otel")]
-pub use otel::OtelObserver;
 #[cfg(feature = "observability-prometheus")]
 pub use prometheus::PrometheusObserver;
 pub use traits::{Observer, ObserverEvent};
@@ -209,16 +200,14 @@ fn current_broadcast_hook() -> Option<Arc<dyn Observer>> {
 /// Guard that flushes its observer on drop — the telemetry analogue of
 /// [`AgentTurnGuard`]. Held for the lifetime of a short-lived agent
 /// invocation (today: the CLI one-shot, `zeroclaw agent -m ...`), whose
-/// process exits before the OTLP batch exporter / metric
-/// `PeriodicReader`'s background interval fires. Without this flush all
-/// buffered telemetry — including the never-ended `gen_ai.agent.invoke`
-/// span, which is only `.end()`'d inside [`Observer::flush`] — is lost
-/// when the runtime is torn down.
+/// process exits before a buffering backend's background export fires.
+/// Without this flush any buffered telemetry is lost when the runtime is
+/// torn down.
 ///
 /// Long-lived callers (daemon heartbeat/cron, channel `process_message`,
 /// subagent spawns) pass `interactive = false` and skip this guard: they
 /// rely on the periodic export firing on its own cadence, and a flush
-/// per turn would add a synchronous OTLP HTTP POST to every invocation.
+/// per turn would add a synchronous export to every invocation.
 ///
 /// Backend-agnostic: calls `Observer::flush()`, which is a no-op for
 /// synchronous backends (`Log`/`Verbose`/`Noop`) and meaningless-but-
@@ -289,49 +278,6 @@ impl Observer for TeeObserver {
     }
 }
 
-/// Emit startup warnings for any non-`Off` OTel content policy. Behavior is
-/// unchanged from the pre-isolation inline block: a non-`Off` GenAI or tool
-/// I/O policy surfaces a privacy reminder at observer construction time.
-#[cfg(feature = "observability-otel")]
-fn warn_otel_content_policy(config: OtelContentConfig) {
-    use zeroclaw_config::schema::OtelContentPolicy;
-
-    if config.genai_policy != OtelContentPolicy::Off {
-        let msg = match config.genai_policy {
-            OtelContentPolicy::Redacted => {
-                "otel_genai_content=redacted: OTel GenAI input/output will be captured with sensitive-content processing and per-field truncation. Processed content may still contain information that could lead to leakage. Enable only when necessary."
-            }
-            OtelContentPolicy::Full => {
-                "otel_genai_content=full: OTel GenAI input/output will be captured with sensitive-content processing but WITHOUT truncation. Use only in controlled environments."
-            }
-            _ => unreachable!(),
-        };
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            msg
-        );
-    }
-    if config.tool_io_policy != OtelContentPolicy::Off {
-        let msg = match config.tool_io_policy {
-            OtelContentPolicy::Redacted => {
-                "otel_tool_io=redacted: OTel tool input/output will be captured with sensitive-content processing and per-field truncation. Processed content may still contain information that could lead to leakage. Enable only when necessary."
-            }
-            OtelContentPolicy::Full => {
-                "otel_tool_io=full: OTel tool input/output will be captured with sensitive-content processing but WITHOUT truncation. Use only in controlled environments."
-            }
-            _ => unreachable!(),
-        };
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            msg
-        );
-    }
-}
-
 /// Factory: create the right observer from config
 pub fn create_observer(config: &ObservabilityConfig) -> Box<dyn Observer> {
     Box::new(TeeObserver {
@@ -355,62 +301,6 @@ fn create_primary_observer(config: &ObservabilityConfig) -> Box<dyn Observer> {
                     ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
                         .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
                     "Prometheus backend requested but this build was compiled without `observability-prometheus`; falling back to noop."
-                );
-                Box::new(NoopObserver)
-            }
-        }
-        ObservabilityBackend::Otel => {
-            #[cfg(feature = "observability-otel")]
-            {
-                let content_config = OtelContentConfig::from_observability_config(config);
-
-                match OtelObserver::new(
-                    config.otel_endpoint.as_deref(),
-                    config.otel_service_name.as_deref(),
-                    config.otel_headers.clone(),
-                    content_config,
-                ) {
-                    Ok(obs) => {
-                        warn_otel_content_policy(content_config);
-
-                        ::zeroclaw_log::record!(
-                            INFO,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note
-                            )
-                            .with_attrs(
-                                ::serde_json::json!({"endpoint": config
-                                .otel_endpoint
-                                .as_deref()
-                                .unwrap_or("http://localhost:4318")})
-                            ),
-                            "OpenTelemetry observer initialized"
-                        );
-                        Box::new(obs)
-                    }
-                    Err(e) => {
-                        ::zeroclaw_log::record!(
-                            ERROR,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Fail
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                            "Failed to create OTel observer. Falling back to noop."
-                        );
-                        Box::new(NoopObserver)
-                    }
-                }
-            }
-            #[cfg(not(feature = "observability-otel"))]
-            {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                    "OpenTelemetry backend requested but this build was compiled without `observability-otel`; falling back to noop."
                 );
                 Box::new(NoopObserver)
             }
@@ -468,22 +358,6 @@ mod tests {
         };
         let expected = if cfg!(feature = "observability-prometheus") {
             "prometheus"
-        } else {
-            "noop"
-        };
-        assert_eq!(create_observer(&cfg).name(), expected);
-    }
-
-    #[test]
-    fn factory_otel_returns_otel() {
-        let cfg = ObservabilityConfig {
-            backend: ObservabilityBackend::Otel,
-            otel_endpoint: Some("http://127.0.0.1:19999".into()),
-            otel_service_name: Some("test".into()),
-            ..ObservabilityConfig::default()
-        };
-        let expected = if cfg!(feature = "observability-otel") {
-            "otel"
         } else {
             "noop"
         };

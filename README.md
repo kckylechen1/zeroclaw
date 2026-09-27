@@ -27,7 +27,7 @@
 
 ---
 
-ZeroClaw is an agent runtime — a single Rust binary you configure and run. It talks to LLM providers (Anthropic, OpenAI, Ollama, and ~20 others), reaches the world through 30+ channels (Discord, Telegram, Matrix, email, voice, webhooks, your own CLI), and acts through tools (shell, browser, HTTP, hardware, custom MCP servers). Everything runs on your machine, with your keys, in your workspace.
+ZeroClaw is an agent runtime — a single Rust binary you configure and run. It talks to LLM providers (Anthropic, OpenAI, Ollama, and ~20 others), reaches the world through 30+ channels (Discord, Telegram, Matrix, email, voice, webhooks, your own CLI), and acts through tools (shell, browser, HTTP, custom MCP servers). Everything runs on your machine, with your keys, in your workspace.
 
 Read the [Philosophy](docs/book/src/philosophy/index.md) for the four opinions that shape it.
 
@@ -93,7 +93,7 @@ Full walkthrough: [Quick start](docs/book/src/getting-started/quickstart.md) —
 - **Multi-channel** — one agent answering you across [every channel you configure](docs/book/src/channels/overview.md). Inbound messages from Discord, Telegram, Matrix, email, webhooks, CLI — all delivered to the same agent loop.
 - **Provider-agnostic** — [model providers](docs/book/src/providers/overview.md) are pluggable. Configure Anthropic, OpenAI, local Ollama, or any OpenAI-compatible endpoint. [Fallback chains and routing](docs/book/src/providers/routing.md) keep the agent running when a provider flakes.
 - **Security-first, with escape hatches** — default autonomy is `supervised`: medium-risk ops require approval, high-risk blocked. Workspace boundaries, command policy, OS-level sandboxes (Landlock / Bubblewrap / Seatbelt / Docker), and cryptographic [tool receipts](docs/book/src/security/tool-receipts.md) on every action. [YOLO mode](docs/book/src/getting-started/yolo.md) exists for trusted dev environments.
-- **Hardware-capable** — GPIO / I2C / SPI / USB on Raspberry Pi, STM32, Arduino, and ESP32 via the `Peripheral` trait. See [Hardware](docs/book/src/hardware/index.md).
+- **Edge devices as Nodes** — speakers, phones, robots and boards join through the gateway as Nodes; the body never drives serial ports or GPIO in its own process (ADR-017).
 - **Gateway + dashboard** — HTTP / WebSocket gateway for clients, with a web dashboard for chat, memory browsing, config editing, cron management, and tool inspection.
 - **SOP definitions**: event-trigger-format [Standard Operating Procedures](docs/book/src/sop/index.md) with triggers, steps, and condition syntax, authored and validated in ZeroClaw. The former run side (approval gates, resumable runs) was removed; SOP runs live Tachi-side as ProcedureRuns via the procedure_v1 seam.
 - **ACP** — IDE / editor integration via [Agent Client Protocol](docs/book/src/channels/acp.md) (JSON-RPC 2.0 over stdio).
@@ -153,7 +153,7 @@ Notes:
 │         (Anthropic,  (shell,    (SQLite,                     │
 │          OpenAI,     browser,    embeddings)                 │
 │          Ollama,     HTTP,                                   │
-│          ~20 more)   hardware)                               │
+│          ~20 more)   MCP)                                    │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -168,7 +168,6 @@ Good places to start:
 - New channel → `crates/zeroclaw-channels/`
 - New provider → `crates/zeroclaw-providers/`
 - New tool → `crates/zeroclaw-tools/`
-- Hardware support → `crates/zeroclaw-hardware/`
 - Docs → `docs/book/src/`
 
 AI-assisted PRs are welcome; see [Contribution culture (RFC #5615)](https://github.com/zeroclaw-labs/zeroclaw/issues/5615) for the co-authorship norms.

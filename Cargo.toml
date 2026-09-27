@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-plugins", "crates/zeroclaw-plugins/tests/fixtures/channel-fixture", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "bridges/telegram", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/robot-kit", "crates/aardvark-sys", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
+members = [".", "crates/zeroclaw-api", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-log", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-gateway", "crates/zeroclaw-gateway-client", "bridges/telegram", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros", "tools/fill-translations", "xtask"]
 resolver = "2"
 
 [workspace.package]
@@ -23,13 +23,10 @@ zeroclaw-tools = { path = "crates/zeroclaw-tools", version = "0.8.3", default-fe
 zeroclaw-sop-graph = { path = "crates/zeroclaw-sop-graph", version = "0.8.3", default-features = false }
 zeroclaw-runtime = { path = "crates/zeroclaw-runtime", version = "0.8.3", default-features = false }
 zeroclaw-eval = { path = "crates/zeroclaw-eval", version = "0.8.3" }
-zeroclaw-plugins = { path = "crates/zeroclaw-plugins", version = "0.8.3" }
 zeroclaw-gateway = { path = "crates/zeroclaw-gateway", version = "0.8.3" }
 zeroclaw-gateway-client = { path = "crates/zeroclaw-gateway-client", version = "0.8.3" }
-zeroclaw-hardware = { path = "crates/zeroclaw-hardware", version = "0.8.3" }
 zeroclaw-tool-call-parser = { path = "crates/zeroclaw-tool-call-parser", version = "0.8.3" }
 zeroclaw-macros = { path = "crates/zeroclaw-macros", version = "0.8.3" }
-aardvark-sys = { path = "crates/aardvark-sys", version = "0.1.0" }
 directories = "6.0"
 sys-locale = "0.3"
 
@@ -80,10 +77,8 @@ zeroclaw-channels = { workspace = true, optional = true }
 zeroclaw-tools = { workspace = true, optional = true }
 zeroclaw-runtime = { workspace = true, optional = true }
 zeroclaw-eval = { workspace = true, optional = true }
-zeroclaw-plugins = { workspace = true, optional = true }
 zeroclaw-gateway = { workspace = true, optional = true }
 zeroclaw-gateway-client = { workspace = true, optional = true }
-zeroclaw-hardware = { workspace = true, optional = true }
 zeroclaw-tool-call-parser.workspace = true
 zeroclaw-macros.workspace = true
 # CLI - minimal and fast
@@ -134,7 +129,7 @@ indicatif = "0.18"
 # Temp files (update pipeline rollback)
 tempfile = "3.26"
 
-# Zip extraction (plugin registry, self-update archives)
+# Zip extraction (self-update archives)
 zip = { version = "8.1", default-features = false, features = ["deflate-flate2"] }
 
 # Error handling
@@ -179,9 +174,6 @@ cron = { version = "0.15", optional = true }
 # Interactive CLI prompts (memory CLI uses dialoguer unconditionally)
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 console = "0.16"
-
-# Hardware discovery (device path globbing)
-glob = { version = "0.3", optional = true }
 
 # Nostr key validation for wizard (behind channel-nostr feature)
 nostr-sdk = { version = "0.44", default-features = false, optional = true }
@@ -235,7 +227,6 @@ non_row_features = [
     "default-channels",
     "channels-full",
     "ci-all",
-    "fantoccini",
     "landlock",
     "metrics",
     "embedded-web",
@@ -273,7 +264,6 @@ default = [
     "observability-prometheus",
     "schema-export",
     "integrations-saas",
-    "hardware-tools",
 ]
 
 # Concrete integration families forwarded from zeroclaw-tools. Default-on so
@@ -286,10 +276,6 @@ integrations-saas = [
     "zeroclaw-tools/integrations-saas",
     "zeroclaw-runtime/integrations-saas",
 ]
-hardware-tools = [
-    "zeroclaw-tools/hardware-tools",
-    "zeroclaw-runtime/hardware-tools",
-]
 
 # The core agent runtime — agent loop, tools, persistence subsystems.
 # Without this, you get the kernel: config + providers + memory + CLI chat.
@@ -299,7 +285,7 @@ agent-runtime = [
     "dep:zeroclaw-runtime", "dep:zeroclaw-eval", "dep:zeroclaw-channels", "dep:zeroclaw-tools",
     "dep:zeroclaw-gateway-client",
     "dep:rusqlite",
-    "dep:ring", "dep:lru", "dep:chrono-tz", "dep:cron", "dep:glob", "dep:which",
+    "dep:ring", "dep:lru", "dep:chrono-tz", "dep:cron", "dep:which",
     "dep:tokio-tungstenite", "dep:hostname",
     "dep:rustls",
 ]
@@ -374,7 +360,6 @@ channel-line = ["zeroclaw-channels/channel-line"]
 channel-feishu = ["channel-lark"]
 whatsapp-web = ["zeroclaw-channels/whatsapp-web", "zeroclaw-gateway?/whatsapp-web"]
 voice-wake = ["zeroclaw-channels/voice-wake"]
-memory-postgres = ["zeroclaw-memory/memory-postgres"]
 memory-tachi = ["zeroclaw-memory/tachi"]
 
 # Backends and platform flags — each forwards to ONE crate
@@ -382,63 +367,21 @@ observability-prometheus = [
     "zeroclaw-runtime/observability-prometheus",
     "zeroclaw-gateway/observability-prometheus",
 ]
-observability-otel = ["zeroclaw-runtime/observability-otel"]
-hardware = ["dep:zeroclaw-hardware", "zeroclaw-hardware/hardware"]
-peripheral-rpi = ["dep:zeroclaw-hardware", "zeroclaw-hardware/peripheral-rpi"]
-# Forwards `zeroclaw-hardware/dev-sim`: extends the serial allow-list with
-# `/tmp/zc-sim-*` for hardware-free simulation. Off by default; opt-in for the
-# simulator and demo.
-dev-sim = ["dep:zeroclaw-hardware", "zeroclaw-hardware/dev-sim"]
 sandbox-landlock = ["zeroclaw-runtime/sandbox-landlock"]
 sandbox-bubblewrap = ["zeroclaw-runtime/sandbox-bubblewrap"]
-browser-native = ["zeroclaw-tools/browser-native"]
-plugins-wasm = ["dep:zeroclaw-plugins", "zeroclaw-runtime/plugins-wasm"]
-probe = ["dep:zeroclaw-hardware", "zeroclaw-hardware/probe"]
 embedded-web = ["zeroclaw-gateway/embedded-web"]
 
 # Backward-compatible aliases
-fantoccini = ["browser-native"]
 landlock = ["sandbox-landlock"]
 metrics = ["observability-prometheus"]
-
-# WASM plugin execution choice:
-#
-# Omit all three of the following features and there will not be any WASM plugin
-# support at all — no plugin runtime, no WASM dependencies, and the plugin ABI
-# surface will be unavailable in the agent runtime.
-#
-# Each feature adds a WASM execution strategy; enable the smallest set your targets
-# need. `plugins-wasm-runtime-only` is implied by the other two. Every backend
-# feature also implies `plugins-wasm` itself, so enabling any execution strategy
-# always carries the plugin host and its CLI surface; a backend-only build
-# cannot silently produce a binary without the `plugin` subcommand.
-#
-# - `plugins-wasm-runtime-only`: Fastest startup for plugins and smallest binary size,
-#   but requires plugin authors to compile a specific version for each target
-#   architecture (`.cwasm` files instead of `.wasm`) unless one of the two JIT
-#   compilation feature flags is also used.
-# - `plugins-wasm-cranelift`: Add the Cranelift JIT compilation engine on top of
-#   the runtime which enables compiling WASM plugins on the host machine, but
-#   results in larger binary size due to the Cranelift dependency. NOTE: Not
-#   supported on all platforms (e.g., ARM32).
-# - `plugins-wasm-pulley`: Most flexible, supports JIT compilation on targets
-#   where Cranelift isn't available (e.g., ARM32), but has the slowest runtime
-#   performance.
-plugins-wasm-runtime-only = ["plugins-wasm", "zeroclaw-plugins/plugins-wasmtime"]
-plugins-wasm-cranelift    = ["plugins-wasm", "zeroclaw-plugins/plugins-wasm-cranelift"]
-plugins-wasm-pulley       = ["plugins-wasm", "zeroclaw-plugins/plugins-wasm-pulley"]
 
 # CI meta-feature
 ci-all = [
     "agent-runtime",
     "channels-full",
     "channel-nostr", "channel-matrix", "whatsapp-web",
-    "observability-prometheus", "observability-otel",
-    "hardware", "peripheral-rpi",
+    "observability-prometheus",
     "sandbox-landlock", "sandbox-bubblewrap",
-    "browser-native", "probe",
-    "plugins-wasm", "plugins-wasm-cranelift",
-    "memory-postgres",
     "zeroclaw-channels/heavy-tests",
     "zeroclaw-runtime/heavy-tests",
 ]

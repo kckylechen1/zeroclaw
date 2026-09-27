@@ -232,9 +232,6 @@ impl HasPropKind for Vec<crate::schema::EmbeddingRouteConfig> {
         crate::schema::EmbeddingRouteConfig::secret_field_terminals()
     }
 }
-impl HasPropKind for Vec<crate::schema::GoogleWorkspaceAllowedOperation> {
-    const PROP_KIND: PropKind = PropKind::ObjectArray;
-}
 impl HasPropKind for Vec<crate::schema::McpServerConfig> {
     const PROP_KIND: PropKind = PropKind::ObjectArray;
 
@@ -253,9 +250,6 @@ impl HasPropKind for Vec<crate::schema::ExternalRegistry> {
     const PROP_KIND: PropKind = PropKind::ObjectArray;
 }
 impl HasPropKind for Vec<crate::schema::NevisRoleMappingConfig> {
-    const PROP_KIND: PropKind = PropKind::ObjectArray;
-}
-impl HasPropKind for Vec<crate::schema::PeripheralBoardConfig> {
     const PROP_KIND: PropKind = PropKind::ObjectArray;
 }
 impl HasPropKind for Vec<crate::schema::ToolFilterGroup> {

@@ -3,7 +3,6 @@
 //! Extracted from `loop_/mod.rs` so the interactive CLI `run` path and the
 //! inbound message path can evolve independently.
 
-use crate::agent::TurnMeta;
 use crate::approval::ApprovalManager;
 use crate::observability::{self, Observer};
 use crate::platform;
@@ -19,13 +18,13 @@ use zeroclaw_memory::{self, Memory};
 use zeroclaw_providers::{ChatMessage, ModelProvider};
 
 use super::{
-    agent_turn, apply_text_tool_prompt_policy, build_hardware_context,
-    build_tool_instructions_for_names, compute_excluded_mcp_tools, live_channel_registry,
-    native_tool_specs_present_for_turn, resolved_agent_for_turn, seed_channel_handles,
+    agent_turn, apply_text_tool_prompt_policy, build_tool_instructions_for_names,
+    compute_excluded_mcp_tools, live_channel_registry, native_tool_specs_present_for_turn,
+    resolved_agent_for_turn, seed_channel_handles,
 };
 
-/// Process a single message through the full agent (with tools, peripherals, memory).
-/// Used by channels (Telegram, Discord, etc.) to enable hardware and tool use.
+/// Process a single message through the full agent (with tools and memory).
+/// Used by channels (Telegram, Discord, etc.) to enable tool use.
 pub async fn process_message(
     config: Config,
     agent_alias: &str,
@@ -164,7 +163,6 @@ pub async fn process_message(
             runtime: runtime.clone(),
             caller_allowed: None,
             connect_mcp: true,
-            connect_peripherals: true,
             exclude_memory: false,
             list_deferred_mcp_specs: false,
             emit_assembly_logs: true,
@@ -246,21 +244,6 @@ pub async fn process_message(
                 &provider_runtime_options,
             )?;
 
-        let hardware_rag: Option<crate::rag::HardwareRag> = config
-            .peripherals
-            .datasheet_dir
-            .as_ref()
-            .filter(|d| !d.trim().is_empty())
-            .map(|dir| crate::rag::HardwareRag::load(&config.data_dir, dir.trim()))
-            .and_then(Result::ok)
-            .filter(|r: &crate::rag::HardwareRag| !r.is_empty());
-        let board_names: Vec<String> = config
-            .peripherals
-            .boards
-            .iter()
-            .map(|b| b.board.clone())
-            .collect();
-
         // ── Initialize locale-aware tool descriptions ──────────────────
         let _i18n_locale = config
             .locale
@@ -298,33 +281,6 @@ pub async fn process_message(
             "channel_room",
             "Create channel rooms and invite users through active channels.",
         ));
-        if config.peripherals.enabled && !config.peripherals.boards.is_empty() {
-            tool_descs.push(("gpio_read", "Read GPIO pin value on connected hardware."));
-            tool_descs.push((
-                "gpio_write",
-                "Set GPIO pin high or low on connected hardware.",
-            ));
-            tool_descs.push((
-            "arduino_upload",
-            "Upload Arduino sketch. Use for 'make a heart', custom patterns. You write full .ino code; ZeroClaw uploads it.",
-        ));
-            tool_descs.push((
-            "hardware_memory_map",
-            "Return flash and RAM address ranges. Use when user asks for memory addresses or memory map.",
-        ));
-            tool_descs.push((
-            "hardware_board_info",
-            "Return full board info (chip, architecture, memory map). Use when user asks for board info, what board, connected hardware, or chip info.",
-        ));
-            tool_descs.push((
-            "hardware_memory_read",
-            "Read actual memory/register values from Nucleo. Use when user asks to read registers, read memory, dump lower memory 0-126, or give address and value.",
-        ));
-            tool_descs.push((
-            "hardware_capabilities",
-            "Query connected hardware for reported GPIO pins and LED pin. Use when user asks what pins are available.",
-        ));
-        }
 
         let mut excluded_tools = compute_excluded_mcp_tools(
             &tools_registry,
@@ -433,41 +389,12 @@ pub async fn process_message(
 
         // Memory context is injected once in the engine, keyed on the ingress
         // origin (agent::memory_inject); recall is scoped to this entry's
-        // session_id. Hardware RAG stays site-built; the engine prepends the
-        // memory block above it.
-        // Pre-mint the turn id so the pre-turn RAG retrieval and the
-        // agent_turn bracket share one correlation id. The RAG span stays a
-        // root span (it runs before AgentStart) but carries the matching
-        // zeroclaw.turn_id attribute; nesting it is a tracked follow-up.
+        // session_id.
+        // Pre-mint the turn id so the agent_turn bracket carries one
+        // correlation id.
         let turn_id = uuid::Uuid::new_v4().to_string();
-        let rag_limit = if eff_compact_context { 2 } else { 5 };
-        let hw_context = hardware_rag
-            .as_ref()
-            .map(|r| {
-                build_hardware_context(
-                    r,
-                    &*observer,
-                    effective_msg_ref,
-                    &board_names,
-                    rag_limit,
-                    TurnMeta {
-                        parent_agent_alias: None,
-                        agent_alias: Some(agent_alias),
-                        turn_id: &turn_id,
-                        channel_name: "daemon",
-                    },
-                )
-            })
-            .unwrap_or_default();
-        // `process_message` does not scope a session key of its own — its
-        // callers (gateway, peer messaging) do, and they are outer entry
-        let context = hw_context;
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-        let enriched = if context.is_empty() {
-            format!("[{now}] {effective_message}")
-        } else {
-            format!("{context}[{now}] {effective_message}")
-        };
+        let enriched = format!("[{now}] {effective_message}");
         let mut history = vec![
             ChatMessage::system(&system_prompt),
             ChatMessage::user(&enriched),

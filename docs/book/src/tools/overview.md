@@ -48,7 +48,6 @@ Conditionally registered:
 | Tool | Enabled by |
 |---|---|
 | `knowledge` | `[knowledge].enabled = true`. Stores structured relationship memory; see [Relationship memory](./relationship-memory.md) |
-| Hardware probes | `--features hardware`: GPIO, I2C, SPI reads/writes |
 | `sop_*` tools | Registered when `sop.sops_dir` is configured: run and inspect SOPs |
 | `discord_search` | Registered when a Discord alias has `archive` enabled |
 
@@ -86,7 +85,7 @@ pub trait Tool: Send + Sync + Attributable {
 
 Every `Tool` is also `Attributable`, so a tool call's log emissions and audit traces carry the same `<kind>.<alias>` attribution the rest of the runtime uses.
 
-Register via the runtime's tool factory. See [Developing → Plugin protocol](../developing/plugin-protocol.md) for the full pattern.
+Register via the runtime's tool factory. Capabilities that should live outside the core binary go through an MCP server instead (see [MCP](./mcp.md)).
 
 ## Describing tools to the model
 

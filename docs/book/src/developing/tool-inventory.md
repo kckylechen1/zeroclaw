@@ -1,7 +1,7 @@
 # Built-In Tool Inventory
 
 Use this page when deciding whether an agent-callable tool should stay in the
-core binary, become feature-gated, move to a WASM plugin, ship as a skill
+core binary, become feature-gated, ship as a skill
 package, or use an MCP or CLI-backed integration.
 
 This is a classification map, not a removal plan. Do not remove or externalize a
@@ -58,7 +58,7 @@ boundaries because they add platform, dependency, network, or UI surface area.
 | `browser`, `browser_open`, `text_browser` | Config-gated and runtime-dependent. | Keep first-party, but continue tightening feature/config gates because browser automation is a large trusted surface. |
 | `http_request`, `web_fetch`, `web_search_tool` | Config-gated network access. | Keep first-party while SSRF, allowlist, provider routing, and receipt behavior remain ZeroClaw-owned. Revisit only after MCP/plugin replacements can express the same network policy. |
 | SOP tools (`sop_list`, `sop_execute`, `sop_advance`, `sop_approve`, `sop_status`, `sop_workshop`) | Removed with the SOP run side. | Retired: no agent-facing SOP run tools remain; runs are Tachi-side ProcedureRuns through the procedure_v1 seam. |
-| WASM plugin tools | Compile-feature and config-gated host bridge. | Keep the host bridge first-party; individual plugin capabilities should live outside core. |
+| WASM plugin tools | Removed with the WASM plugin host. | Retired: extensions go through MCP servers. |
 | `execute_pipeline` | Config-gated tool chaining. | Keep gated until tool chaining policy, per-step receipts, and caller allowlists are stable enough to judge whether it is core. |
 | `knowledge` | Config-gated knowledge surface. | Keep gated while relationship memory and graph workflows are still being promoted into user-facing docs and skills. |
 | `file_upload`, `file_upload_bundle`, `file_download` | Config-gated data movement. | Keep gated; these are policy-sensitive data movement tools and need an explicit replacement before externalization. |
@@ -67,7 +67,6 @@ boundaries because they add platform, dependency, network, or UI surface area.
 | `llm_task` | Provider-dependent subtask execution. | Keep until provider-scoped subtask execution has a separate contract from delegation. |
 | `security_ops` | Retired from the model surface. | Default-off diagnostics with no operator surface; the module stays compiled but unreachable, and enabling the section only emits a startup/reload notice. See "Retired Operator Tools" below. |
 | `verifiable_intent` | Config-gated trust policy. **The `vi_verify` tool is temporarily withheld from the model-visible registry.** | Keep gated and first-party; intent issuance and verification affect trust policy and should stay first-party until the credential boundary is stable. No chain verifier exists yet, so `vi_verify` is not registered even when `verifiable_intent.enabled = true`; enabling the section now only emits a warning naming that gap, at process startup and again on each daemon reload. The issuance and verification library paths are unchanged. Restore registration only behind a verify-and-evaluate path that consumes a verified chain result. |
-| Hardware probes (`hardware_board_info`, `hardware_memory_map`, `hardware_memory_read`) | Peripheral-gated hardware access. | Keep first-party while hardware tools are added through the peripheral registry path and touch physical devices under ZeroClaw permission rules. |
 
 ## Retired Operator Tools
 
@@ -88,8 +87,8 @@ trusted surface or was deleted.
 Config sections that used to enable these as model tools still parse. Sections
 that keep configuring an operator surface (`[backup]`, `[data_retention]`)
 log a startup/reload notice naming that surface when enabled; nothing widens
-the model-visible registry. The retired names are reserved against WASM plugin
-registration so a plugin cannot claim one and ride it back onto the provider
+the model-visible registry. The retired names are reserved against external tool
+registration so no extension can claim one and ride it back onto the provider
 wire.
 
 ## Externalize Later
@@ -99,13 +98,12 @@ replacement surface exists. Until then, keep them compatible and policy-visible.
 
 | Tool(s) | Likely long-term home | Why |
 |---|---|---|
-| `notion`, `jira`, `microsoft365`, `google_workspace`, `linkedin`, `composio` | Plugin, MCP server, or CLI-backed integration. | These mostly wrap third-party products and authentication models that can evolve independently from the core runtime. |
+| `composio` | MCP server or CLI-backed integration. | These mostly wrap third-party products and authentication models that can evolve independently from the core runtime. |
 | `claude_code`, `claude_code_runner`, `codex_cli`, `gemini_cli`, `opencode_cli` | Removed; retired raw launchers. | These Parent-visible raw CLI launchers were removed from the registry (#197 wall 2); harness execution goes through the typed subagent / Tachi paths instead. |
 | `email_search`, `email_read` | Channel companion plugin or MCP server. | Email search/read is useful but tied to external account auth and channel setup rather than the baseline agent contract. |
 | `discord_search` | Channel companion plugin or archive-query skill. | It depends on a Discord archive database produced by the channel; keep it close to that channel until the archive API is explicit. |
-| `image_gen`, `cloud_ops`, `cloud_patterns`, `project_intel`, `report_template` | Skill package, plugin, or MCP server. | These are optional workflows or vendor/data-service wrappers rather than core execution primitives. |
+| `image_gen` | Skill package or MCP server. | These are optional workflows or vendor/data-service wrappers rather than core execution primitives. |
 | `weather` | Skill package or HTTP-backed skill; later plugin or MCP server if parity needs custom formatting or policy. | The current built-in is a no-key `wttr.in` wrapper. A minimal lookup fits the HTTP skill shape, but full externalization still needs parity for formatted output, the `tool.weather` proxy policy, and the built-in tool name / auto-approve behavior. |
-| `pushover` | Common notification path through `system.notify`, plus a narrowly scoped service plugin. | Its core shape is device notification, which overlaps the standard node capability; Pushover-specific authentication, delivery, failure modes, and adapter compatibility still need proof before it moves outside the core runtime. |
 | `git_operations` | CLI-backed integration or narrowly scoped plugin. | It has local and remote repository side effects, so any external replacement must preserve policy checks, receipts, and explicit operator visibility. |
 
 ## No Action Yet

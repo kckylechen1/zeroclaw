@@ -31,8 +31,6 @@ cli-integrations-about = Browse 50+ integrations
 cli-skills-about = Manage skills (user-defined capabilities)
 cli-migrate-about = Migrate data from other agent runtimes
 cli-auth-about = Manage provider subscription authentication profiles
-cli-hardware-about = Discover and introspect USB hardware
-cli-peripheral-about = Manage hardware peripherals
 cli-memory-about = Manage agent memory entries
 cli-config-about = Manage ZeroClaw configuration
 cli-update-about = Check for and apply ZeroClaw updates
@@ -163,7 +161,7 @@ cli-memory-list-about = List memory entries with optional filters
 cli-memory-get-about = Get a specific memory entry by key
 cli-memory-stats-about = Show memory backend statistics and health
 cli-memory-clear-about = Clear memories by category, by key, or clear all
-cli-memory-clear-unsupported-backend = memory clear is unsupported for append-only backend '{$backend}'; switch to a deletable backend (sqlite, lucid, or postgres)
+cli-memory-clear-unsupported-backend = memory clear is unsupported for append-only backend '{$backend}'; switch to a deletable backend (sqlite or lucid)
 
 cli-estop-status-about = Print current estop status
 cli-estop-resume-about = Resume from an engaged estop level
@@ -177,15 +175,6 @@ cli-doctor-models-about = Probe model catalogs across providers and report avail
 cli-doctor-traces-about = Query runtime trace events (tool diagnostics and model replies)
 cli-doctor-update-context-windows-about = Update context_window in config.toml from provider /models endpoints
 
-cli-hardware-discover-about = Enumerate USB devices and show known boards
-cli-hardware-introspect-about = Introspect a device by its serial or device path
-cli-hardware-info-about = Get chip info via USB using probe-rs over ST-Link
-
-cli-peripheral-list-about = List configured peripherals
-cli-peripheral-add-about = Add a peripheral by board type and transport path
-cli-peripheral-flash-about = Flash ZeroClaw firmware to an Arduino board
-
-
 cli-migrate-openclaw-about = Import memory from an OpenClaw workspace into this ZeroClaw workspace
 
 cli-agent-long-about =
@@ -197,9 +186,8 @@ cli-agent-long-about =
       zeroclaw agent -a assistant                              # chat through the gateway
       zeroclaw agent -a assistant -m "Summarize today's logs"  # single message
       zeroclaw agent -a assistant -m "Hi" -p anthropic --model claude-sonnet-4-20250514
-      zeroclaw agent -a assistant -m "Read the sensor" --peripheral nucleo-f401re:/dev/ttyACM0
 
-    --model-provider, --model, --temperature, and --peripheral apply only with --message; the interactive chat uses the agent's configured model.
+    --model-provider, --model, and --temperature apply only with --message; the interactive chat uses the agent's configured model.
 
 cli-agent-interactive-flags-need-message =
     { $flags } only apply with -m/--message. Interactive `zeroclaw agent` opens `zeroclaw chat`, which uses the model configured for agent "{ $agent }". Add -m "<message>" for a one-off turn with these overrides, or change the agent's configuration.
@@ -268,28 +256,6 @@ cli-channel-long-about =
       zeroclaw channel bind-telegram zeroclaw_user
       zeroclaw channel send 'Alert!' --channel-id telegram --recipient 123456789
 
-cli-hardware-long-about =
-    Discover and introspect USB hardware.
-
-    Enumerate connected USB devices, identify known development boards (STM32 Nucleo, Arduino, ESP32), and retrieve chip information via probe-rs / ST-Link.
-
-    Examples:
-      zeroclaw hardware discover
-      zeroclaw hardware introspect /dev/ttyACM0
-      zeroclaw hardware info --chip STM32F401RETx
-
-cli-peripheral-long-about =
-    Manage hardware peripherals.
-
-    Add, list, flash, and configure hardware boards that expose tools to the agent (GPIO, sensors, actuators). Supported boards: nucleo-f401re, rpi-gpio, esp32, arduino-uno.
-
-    Examples:
-      zeroclaw peripheral list
-      zeroclaw peripheral add nucleo-f401re /dev/ttyACM0
-      zeroclaw peripheral add rpi-gpio native
-      zeroclaw peripheral flash --port /dev/cu.usbmodem12345
-      zeroclaw peripheral flash-nucleo
-
 cli-memory-long-about =
     Manage agent memory entries.
 
@@ -351,12 +317,6 @@ cli-self-test-long-about =
 
 cli-skills-install-suggestion =
     It looks like this request needs the `{$name}` skill, but it is not installed.
-
-    Matched capability: {$matched}
-    Next: Run `{$install_command}` to install it.
-
-cli-plugin-install-suggestion =
-    It looks like this request needs the `{$name}` plugin, but it is not installed.
 
     Matched capability: {$matched}
     Next: Run `{$install_command}` to install it.
@@ -478,18 +438,6 @@ cli-self-test-web-dist-dir-fail-expansion = WARNING: {$path} — {$reason}; gate
 
 # Service lifecycle warnings.
 cli-service-systemd-linger-disabled-warning = systemd user lingering is disabled. ZeroClaw's user service may stop after logout. Enable it with: loginctl enable-linger {$user}
-
-# ── peripherals (zeroclaw peripheral) ──
-cli-peripherals-none = No peripherals configured.
-cli-peripherals-add-hint = Add one with: zeroclaw peripheral add <board> <path>
-cli-peripherals-add-example = {"  "}Example: zeroclaw peripheral add nucleo-f401re <serial-path>
-cli-peripherals-config-hint = Or add to config.toml:
-cli-peripherals-configured = Configured peripherals:
-cli-peripherals-already-configured = Board {$board} at {$path} already configured.
-cli-peripherals-added = Added {$board} at {$path}. Restart daemon to apply.
-cli-peripherals-flash-needs-hardware = Arduino flash requires the 'hardware' feature.
-cli-peripherals-unoq-needs-hardware = Uno Q setup requires the 'hardware' feature.
-cli-peripherals-nucleo-needs-hardware = Nucleo flash requires the 'hardware' feature.
 
 # ── skills (zeroclaw skills list) ──
 cli-skills-none-installed = No skills installed.
@@ -754,7 +702,6 @@ cli-status-service-running = 🟢 Service:       running
 cli-status-service-stopped = 🔴 Service:       stopped
 cli-status-channels = Channels:
 cli-status-cli-always = {"  "}CLI:      ✅ always
-cli-status-peripherals = Peripherals:
 cli-desktop-download = Download the ZeroClaw companion app:
 cli-desktop-homebrew = Or install via Homebrew (coming soon):
 cli-desktop-linux-pkg = {"  "}Download the .deb or .AppImage for your architecture.
@@ -790,12 +737,8 @@ cli-status-spent-today = {"  "}Spent today:       ${$spent} / ${$limit}
 cli-status-spent-month = {"  "}Spent this month:  ${$spent} / ${$limit}
 cli-status-otp = {"  "}OTP enabled:       {$v}
 cli-status-estop = {"  "}E-stop enabled:    {$v}
-cli-status-peripherals-enabled = {"  "}Enabled:   {$v}
-cli-status-boards = {"  "}Boards:    {$v}
 cli-status-word-enabled = enabled
 cli-status-word-disabled = disabled
-cli-status-word-yes = yes
-cli-status-word-no = no
 cli-status-word-on = on
 cli-status-word-off = off
 cli-status-word-none = (none)
@@ -803,38 +746,21 @@ cli-status-word-configured = configured
 cli-status-word-not-configured = not configured
 cli-status-channel-not-compiled = 🚫 configured, not compiled
 
-# ── desktop / config / plugins / estop / auth ──
+# ── desktop / config / estop / auth ──
 cli-desktop-not-installed = ZeroClaw companion app is not installed.
 cli-desktop-blurb1 = The companion app is a lightweight menu bar app that
 cli-desktop-blurb2 = connects to the same gateway as the CLI.
 cli-config-all-configured = All sections already configured.
 cli-config-schema-current = Config already at current schema version.
 cli-config-applied-ops = Applied {$count} operation(s):
-cli-plugins-none = No plugins installed.
-cli-plugins-installed = Installed plugins:
-cli-plugin-search-none = No plugins matching '{$query}'.
-cli-plugin-search-results = Plugins matching '{$query}' ({$count}):
-cli-plugin-search-result =   {$name} v{$version} — {$description}
-cli-plugin-no-description = (no description)
-cli-plugin-install-resolving = Resolving '{$source}' from plugin registry...
-cli-plugin-installed-from = Plugin installed from {$source}
-cli-plugin-installed-name-version = Installed plugin {$name} v{$version}
-cli-plugin-config-entry-seeded = Seeded [[plugins.entries]] for '{$name}'. Set plugin config values with `zeroclaw config set plugins.entries.{$name}.config.<key>`.
-cli-plugin-config-entry-seed-skipped = warning: skipped seeding the config entry for '{$name}': the [plugins] section on disk is malformed. Repair it, add a [[plugins.entries]] block with `name = "{$name}"`, then set values with `zeroclaw config set plugins.entries.{$name}.config.<key>`.
-cli-plugin-config-entry-seed-unaddressable = warning: skipped seeding the config entry for '{$name}': plugin names containing '.' cannot be addressed by dotted config paths (`config set` splits on '.'). Add a [[plugins.entries]] block with `name = "{$name}"` to the config file by hand.
 cli-config-section-degraded = warning: config section `{$section}` in {$path} is malformed and was reset to defaults for this run. Values in that section are NOT in effect. Run `zeroclaw config migrate` to see the parse error, then repair the file.
-cli-plugin-removed = Plugin '{$name}' removed.
-cli-plugin-not-found = Plugin '{$name}' not found.
-cli-plugin-legacy-detected = Note: plugins in a legacy location ({$path}) are not loaded by the agent — run `zeroclaw plugin migrate` to move them into {$target}.
-cli-plugin-migrated = Moved {$count} plugin(s) from {$path} to {$target}.
-cli-plugin-migrate-none = Nothing to migrate.
 cli-estop-resume-done = Estop resume completed.
 cli-estop-engaged = Estop engaged.
 cli-estop-status = Estop status:
 cli-auth-none = No auth profiles configured.
 cli-auth-active = Active profiles:
 
-# ── misc main (errors, config, plugin info, estop fields, auth) ──
+# ── misc main (errors, config, estop fields, auth) ──
 cli-warn-crypto-provider = Warning: Failed to install default crypto provider: {$err}
 cli-error-label = {"   "}Error: {$err}
 cli-warn-cost-usage = {"  "}⚠ Could not load cost usage: {$err}
@@ -846,12 +772,6 @@ cli-config-secret-unset = {$path} is not set (encrypted secret)
 cli-config-updated = {$path} updated.
 cli-config-review-hint = Run `zeroclaw config list` to review, then set required fields.
 cli-config-backed-up = Backed up to {$path}
-cli-plugin-name-version = Plugin: {$name} v{$version}
-cli-plugin-description = Description: {$desc}
-cli-plugin-capabilities = Capabilities: {$v}
-cli-plugin-permissions = Permissions: {$v}
-cli-plugin-wasm = WASM: {$path}
-cli-plugin-wasm-none = WASM: (skill-only plugin)
 cli-estop-domains-none = {"  "}domain_blocks:  (none)
 cli-estop-domains = {"  "}domain_blocks:  {$v}
 cli-estop-tools-none = {"  "}tool_freeze:    (none)
@@ -882,12 +802,6 @@ cli-locales-installed = Installed {$count} catalogue(s) for '{$locale}' under {$
 cli-browse-header = {$path} ({$count} entries)
 cli-browse-empty = (empty)
 cli-browse-file-bytes = {$name} ({$bytes} bytes)
-
-# ── hardware (zeroclaw hardware) ──
-cli-hardware-feature-required = Hardware discovery requires the 'hardware' feature.
-cli-hardware-feature-build = Build with: cargo build --features hardware
-cli-hardware-unsupported-platform = Hardware USB discovery is not supported on this platform.
-cli-hardware-supported-platforms = Supported platforms: Linux, macOS, Windows.
 
 # ── update (zeroclaw update) ──
 cli-update-already-current = Already up to date (v{$version}).
@@ -1101,7 +1015,6 @@ sop-rpc-policy-unavailable = The parked SOP policy is unavailable: {$reason}.
 tool-runtime-command-build-failed = Failed to build runtime command: {$error}
 tool-runtime-command-docker-workspace-path = Failed to build runtime command: Failed to canonicalize Docker workspace path {$path}: {$cause}
 tool-runtime-command-docker-allowed-root = Failed to build runtime command: Failed to canonicalize Docker workspace root {$path}: {$cause}
-
 
 # ── Telegram operator tooling ──
 telegram-skip-update-written = Skip marker recorded for update {$update_id} on bot '{$alias}'. The running daemon applies it on its next retry (within a few seconds) and archives the payload as a dead letter under its data directory.

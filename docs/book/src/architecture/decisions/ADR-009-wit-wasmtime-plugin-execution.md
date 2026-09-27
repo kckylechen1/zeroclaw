@@ -2,7 +2,7 @@
 id: ADR-009
 title: WIT components and direct wasmtime replace the Extism plugin bridge
 date: 2026-07-04
-status: accepted
+status: retired
 relates-to:
   - ADR-003
   - crates/zeroclaw-plugins
@@ -11,6 +11,15 @@ relates-to:
 ---
 
 # ADR-009: WIT Components And Direct Wasmtime Replace The Extism Plugin Bridge
+
+> Retired (2026-09). The WASM plugin host (`crates/zeroclaw-plugins`), the
+> `plugins-wasm*` features, the `zeroclaw plugin` CLI, the `[plugins]` config
+> section and the `wit/` contracts were removed. Extensions outside the core
+> binary are served through MCP servers (`[mcp]`). The `zeroclaw:plugin@0.x`
+> WIT package never carried a `wit/v0/.frozen` marker, so it was retired as an
+> experimental surface with no frozen-version compatibility promise; no
+> `wit/v1/` successor exists. A leftover `[plugins]` section loads with the
+> `wasm_plugins_removed` warning. Kept as the historical record.
 
 This ADR supersedes [ADR-003](./ADR-003-wasm-plugin-model.md). ADR-003
 recorded the initial Extism bridge. The current accepted architecture is
@@ -111,7 +120,6 @@ Follow-up:
 
 - [ADR-003: WASM plugins use Extism as the initial execution bridge](./ADR-003-wasm-plugin-model.md)
 - [FND-001: Intentional architecture](../../foundations/fnd-001-intentional-architecture.md)
-- [Plugin protocol](../../developing/plugin-protocol.md)
 - `wit/v0/`
 - `wit/VERSIONING.md`
 - `crates/zeroclaw-plugins/src/component.rs`

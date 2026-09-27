@@ -1,11 +1,9 @@
-# Plugins
+# Developing
 
-Use these pages when working with ZeroClaw's plugin system or on project
-tooling. For step-by-step plugin authoring, see the
-[Guides](../plugins/index.md).
+Use these pages when working on project tooling. ZeroClaw no longer ships a
+WASM plugin host; external capabilities are added through MCP servers
+(`[mcp]`, see [MCP](../tools/mcp.md)).
 
-- [How plugins work](./how-plugins-work.md)
 - [Built-in tool inventory](./tool-inventory.md)
-- [Plugin protocol](./plugin-protocol.md)
 - [Building the docs locally](./building-docs.md)
 - [Building the web dashboard](./web.md)

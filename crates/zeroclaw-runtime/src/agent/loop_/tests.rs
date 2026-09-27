@@ -10937,89 +10937,6 @@ fn apply_policy_tool_filter_policy_deny_all_drops_everything() {
 
 // ── capture_llm_messages tests ────────────────────────────────
 
-#[cfg(feature = "observability-otel")]
-#[test]
-fn capture_llm_messages_splits_system_scrubs_and_maps_output() {
-    // scrub_credentials catches key=value; scrub_secret_patterns catches bare token
-    // prefixes (ghp_, sk-, xoxb-). capture composes both via scrub_for_export, so
-    // assert each field == scrub_for_export(raw) (robust regardless of exact regex).
-    let sys_raw = "You are helpful. api_key=SUPERSECRETVALUE123";
-    let user_raw = "deploy token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let messages = vec![
-        ChatMessage::system(sys_raw),
-        ChatMessage::user(user_raw),
-        ChatMessage::assistant("earlier reply"),
-    ];
-    let tool_calls = vec![ToolCall {
-        id: "call_1".into(),
-        name: "shell".into(),
-        arguments: r#"{"cmd":"echo api_key=ANOTHERSECRET99"}"#.into(),
-        extra_content: None,
-    }];
-
-    let snap = super::capture_llm_messages(&messages, Some("final answer"), &tool_calls)
-        .expect("Some under observability-otel");
-
-    // System split out and routed through the composed scrubber.
-    assert_eq!(
-        snap.system_instructions.as_deref(),
-        Some(crate::agent::prompt_helpers::scrub_for_export(sys_raw).as_str())
-    );
-    assert_ne!(snap.system_instructions.as_deref(), Some(sys_raw)); // proves scrubbing ran
-
-    // input excludes system, preserves order; bare ghp_ token must be scrubbed.
-    assert_eq!(snap.input.len(), 2);
-    assert!(snap.input.iter().all(|m| m.role != "system"));
-    assert_eq!(snap.input[0].role, "user");
-    assert_eq!(
-        snap.input[0].content,
-        crate::agent::prompt_helpers::scrub_for_export(user_raw)
-    );
-    assert_ne!(snap.input[0].content, user_raw); // proves the bare-prefix scrubber fired
-
-    // output text + scrubbed tool-call arguments.
-    assert_eq!(snap.output_text.as_deref(), Some("final answer"));
-    assert_eq!(snap.output_tool_calls.len(), 1);
-    assert_eq!(snap.output_tool_calls[0].name, "shell");
-    assert_eq!(
-        snap.output_tool_calls[0].arguments_json,
-        crate::agent::prompt_helpers::scrub_for_export(r#"{"cmd":"echo api_key=ANOTHERSECRET99"}"#)
-    );
-    assert!(
-        !snap.output_tool_calls[0]
-            .arguments_json
-            .contains("ANOTHERSECRET99")
-    );
-}
-
-#[cfg(feature = "observability-otel")]
-#[test]
-fn capture_llm_messages_elides_image_data_uris() {
-    let raw = "see [IMAGE:data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB] here";
-    let messages = vec![ChatMessage::user(raw)];
-    let snap = super::capture_llm_messages(&messages, None, &[]).expect("Some");
-    let content = &snap.input[0].content;
-    assert!(
-        !content.contains("base64,iVBOR"),
-        "image bytes not elided: {content}"
-    );
-    assert!(
-        content.contains("[IMAGE:<image data elided>]"),
-        "placeholder missing: {content}"
-    );
-}
-
-#[cfg(feature = "observability-otel")]
-#[test]
-fn capture_llm_messages_empty_output_and_no_system() {
-    let messages = vec![ChatMessage::user("hi")];
-    let snap = super::capture_llm_messages(&messages, Some(""), &[]).expect("Some");
-    assert_eq!(snap.system_instructions, None);
-    assert_eq!(snap.output_text, None); // empty string captured as None
-    assert!(snap.output_tool_calls.is_empty());
-    assert_eq!(snap.input.len(), 1);
-}
-
 #[test]
 fn eager_mcp_policy_allows_only_names_that_pass_policy_and_caller_gates() {
     let policy = TestPolicy {
@@ -11355,7 +11272,6 @@ async fn runtime_entrypoints_resolve_runtime_profile_tunables_before_provider_se
         None,
         None,
         None,
-        Vec::new(),
         false,
         None,
         None,
@@ -11452,7 +11368,6 @@ async fn process_message_seam_narrows_safe_defaults_outside_allowed_tools() {
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed: None, // process_message has no caller allowlist
             connect_mcp: false,   // exercise the filter without MCP fixtures
-            connect_peripherals: false,
             exclude_memory: false,
             list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
@@ -12009,7 +11924,6 @@ async fn run_brackets_successful_turn_with_agent_start_and_agent_end() {
         None,
         None,
         None,
-        Vec::new(),
         false,
         None,
         None,
@@ -12099,7 +12013,6 @@ async fn run_still_closes_the_bracket_when_the_model_call_fails() {
         None,
         None,
         None,
-        Vec::new(),
         false,
         None,
         None,
@@ -12235,7 +12148,6 @@ async fn run_rejects_model_switch_tool_call_and_keeps_original_route() {
         None,
         None,
         None,
-        Vec::new(),
         false,
         None,
         None,
@@ -12315,57 +12227,4 @@ async fn run_rejects_model_switch_tool_call_and_keeps_original_route() {
         "AgentEnd must stay attributed to the original route — the model \
          cannot switch its own route through a tool call, got {events:?}"
     );
-}
-
-/// `build_hardware_context` must forward the caller's TurnMeta onto the
-/// RagRetrieve event it emits. Prior review flagged that RagRetrieve
-/// correlation had no executing assertion anywhere.
-#[test]
-fn build_hardware_context_forwards_turn_meta() {
-    let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().join("datasheets");
-    std::fs::create_dir_all(&base).unwrap();
-    let content = r#"# Test Board
-## Pin Aliases
-red_led: 13
-## GPIO
-Pin 13: LED
-"#;
-    std::fs::write(base.join("test-board.md"), content).unwrap();
-    let rag = crate::rag::HardwareRag::load(tmp.path(), "datasheets").unwrap();
-    let boards = vec!["test-board".to_string()];
-    let observer = CapturingObserver::default();
-
-    let _ = build_hardware_context(
-        &rag,
-        &observer,
-        "led",
-        &boards,
-        5,
-        TurnMeta {
-            parent_agent_alias: None,
-            agent_alias: Some("coder"),
-            turn_id: "turn-7",
-            channel_name: "daemon",
-        },
-    );
-
-    let events = observer.events.lock();
-    match events
-        .iter()
-        .find(|e| matches!(e, ObserverEvent::RagRetrieve { .. }))
-        .expect("build_hardware_context must emit RagRetrieve")
-    {
-        ObserverEvent::RagRetrieve {
-            turn_id,
-            channel,
-            agent_alias,
-            ..
-        } => {
-            assert_eq!(turn_id.as_deref(), Some("turn-7"));
-            assert_eq!(channel.as_deref(), Some("daemon"));
-            assert_eq!(agent_alias.as_deref(), Some("coder"));
-        }
-        _ => unreachable!(),
-    }
 }

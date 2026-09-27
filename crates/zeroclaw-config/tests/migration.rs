@@ -9,6 +9,7 @@ use zeroclaw_config::migration::{
 use zeroclaw_config::schema::Config;
 use zeroclaw_config::schema::v2::V2Config;
 use zeroclaw_config::secrets::SecretStore;
+use zeroclaw_config::validation_warnings::ValidationWarning;
 
 const V1_FIXTURE: &str = include_str!("../fixtures/v1.toml");
 
@@ -517,29 +518,39 @@ api_key = "sk-tts"
 // ─────────────────────────────────────────────────────────────
 
 #[test]
-fn t9_memory_qdrant_promoted_to_storage() {
-    let raw = r#"
-default_provider = "openai"
-default_model = "gpt-4o-mini"
-
-[memory]
-backend = "qdrant"
-auto_save = true
-
+fn t9_memory_qdrant_promoted_to_retired_storage_section() {
+    // The qdrant backend was removed. A V2 [memory.qdrant] block still folds
+    // into [storage.qdrant.default] (a retired surface that loads with a
+    // warning), and the config keeps loading; selecting the backend then
+    // fails explicitly at memory construction.
+    let v3 = migrate_v2(
+        r#"
 [memory.qdrant]
 url = "http://qdrant.example:6333"
 collection = "fold_test_memories"
 api_key = "qd-key"
-"#;
-    let cfg = migrate_to_current(raw).expect("V1 memory.qdrant migrates");
-    let qdrant = cfg
-        .storage
-        .qdrant
-        .get("default")
+"#,
+    );
+    let qdrant = v3
+        .get("storage")
+        .and_then(toml::Value::as_table)
+        .and_then(|s| s.get("qdrant"))
+        .and_then(toml::Value::as_table)
+        .and_then(|q| q.get("default"))
+        .and_then(toml::Value::as_table)
         .expect("[memory.qdrant] promoted to [storage.qdrant.default]");
-    assert_eq!(qdrant.url.as_deref(), Some("http://qdrant.example:6333"));
-    assert_eq!(qdrant.collection, "fold_test_memories");
-    assert_eq!(qdrant.api_key.as_deref(), Some("qd-key"));
+    assert_eq!(
+        qdrant.get("url").and_then(toml::Value::as_str),
+        Some("http://qdrant.example:6333")
+    );
+    let raw = toml::to_string(&v3).unwrap();
+    let warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.path == "storage.qdrant" && w.code == "memory_backend_removed"),
+        "{warnings:?}"
+    );
 }
 
 #[test]
@@ -597,7 +608,7 @@ sqlite_open_timeout_secs = 60
 }
 
 #[test]
-fn t10_storage_provider_postgres_promoted() {
+fn t10_storage_provider_postgres_still_loads() {
     let raw = r#"
 default_provider = "openai"
 default_model = "gpt-4o-mini"
@@ -609,20 +620,10 @@ schema = "zc_schema"
 table = "memories"
 connect_timeout_secs = 42
 "#;
-    let cfg = migrate_to_current(raw).expect("V1 storage.provider migrates");
-    let pg = cfg
-        .storage
-        .postgres
-        .get("default")
-        .expect("[storage.postgres.default] exists");
-    assert_eq!(
-        pg.db_url.as_deref(),
-        Some("postgres://u:p@localhost/zc"),
-        "V2 [storage.provider.config].db_url must land at V3 storage.postgres.default.db_url"
-    );
-    assert_eq!(pg.schema, "zc_schema");
-    assert_eq!(pg.table, "memories");
-    assert_eq!(pg.connect_timeout_secs, Some(42));
+    // The postgres backend was removed: the V1 section still migrates and
+    // the config still loads (the promoted [storage.postgres] table is a
+    // retired surface reported by the tombstone warning).
+    migrate_to_current(raw).expect("V1 storage.provider still migrates");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1943,6 +1944,258 @@ key_path = "/etc/zeroclaw/key.pem"
     assert_eq!(warnings[0].path, "wss");
 }
 
+/// Insert `section` (a TOML table body) at dotted `path` into a freshly
+/// generated current-schema config, load it, and return the raw text plus
+/// the tombstone warnings it produces.
+fn load_with_retired_section(path: &str, body: &str) -> (String, Vec<ValidationWarning>) {
+    let mut value: toml::Value = toml::from_str(
+        &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
+            .expect("generate current succeeds"),
+    )
+    .expect("generated V3 parses");
+    let mut table = value.as_table_mut().unwrap();
+    let segments: Vec<&str> = path.split('.').collect();
+    let (last, parents) = segments.split_last().unwrap();
+    for segment in parents {
+        table = table
+            .entry(segment.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .unwrap();
+    }
+    table.insert((*last).to_string(), toml::from_str(body).unwrap());
+    let raw = toml::to_string(&value).unwrap();
+
+    let cfg = migrate_to_current(&raw)
+        .unwrap_or_else(|e| panic!("retired [{path}] section must not fail load: {e}"));
+    cfg.validate()
+        .unwrap_or_else(|e| panic!("retired [{path}] section must not fail validation: {e}"));
+    let mut warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+    warnings.extend(zeroclaw_config::validation_warnings::retired_field_tombstones(&raw));
+    (raw, warnings)
+}
+
+#[test]
+fn v3_retired_plugins_section_loads_with_tombstone_warning() {
+    // The WASM plugin host was retired (extensions go through MCP). A V3
+    // config still carrying `[plugins]` must keep loading with a warning.
+    let (_, warnings) = load_with_retired_section(
+        "plugins",
+        r#"
+enabled = true
+plugins_dir = "~/.zeroclaw/plugins"
+auto_discover = true
+max_plugins = 5
+
+[security]
+signature_mode = "strict"
+trusted_publisher_keys = ["00"]
+
+[limits]
+call_fuel = 1000
+
+[[entries]]
+name = "weather"
+config = { api_key = "k" }
+"#,
+    );
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, "wasm_plugins_removed");
+    assert_eq!(warnings[0].path, "plugins");
+}
+
+#[test]
+fn v3_retired_hardware_sections_load_with_tombstone_warnings() {
+    // In-process hardware left the body (ADR-017: devices join as Nodes).
+    // `[hardware]` and `[peripherals]` must keep loading with a warning.
+    for (path, body) in [
+        (
+            "hardware",
+            "enabled = true\ntransport = \"serial\"\nserial_port = \"/dev/ttyACM0\"\nbaud_rate = 115200\n",
+        ),
+        (
+            "peripherals",
+            "enabled = true\ndatasheet_dir = \"docs/datasheets\"\n\n[[boards]]\nboard = \"nucleo-f401re\"\ntransport = \"serial\"\npath = \"/dev/ttyACM0\"\n",
+        ),
+    ] {
+        let (_, warnings) = load_with_retired_section(path, body);
+        assert_eq!(warnings.len(), 1, "{path}: {warnings:?}");
+        assert_eq!(warnings[0].code, "hardware_moved_out_of_core");
+        assert_eq!(warnings[0].path, path);
+    }
+}
+
+#[test]
+fn v3_retired_saas_sections_load_with_tombstone_warnings() {
+    // The vendor SaaS tool families were retired. Their sections must keep
+    // loading with a warning, including nested tables and secrets.
+    for (path, body) in [
+        (
+            "jira",
+            "enabled = true\nbase_url = \"https://example.atlassian.net\"\napi_token = \"tok\"\nallowed_actions = [\"get_ticket\"]\n",
+        ),
+        (
+            "linkedin",
+            "enabled = true\napi_version = \"202602\"\n\n[content]\ntopics = [\"rust\"]\n\n[image]\nenabled = true\n",
+        ),
+        (
+            "microsoft365",
+            "enabled = true\ntenant_id = \"t\"\nclient_id = \"c\"\nauth_flow = \"device_code\"\n",
+        ),
+        (
+            "google_workspace",
+            "enabled = true\nallowed_services = [\"gmail\"]\n\n[[allowed_operations]]\nservice = \"gmail\"\nresource = \"users\"\nmethods = [\"list\"]\n",
+        ),
+        ("cloud_ops", "enabled = true\ndefault_cloud = \"aws\"\n"),
+        (
+            "project_intel",
+            "enabled = true\ndefault_language = \"en\"\n",
+        ),
+    ] {
+        let (_, warnings) = load_with_retired_section(path, body);
+        assert_eq!(warnings.len(), 1, "{path}: {warnings:?}");
+        assert_eq!(warnings[0].code, "saas_integration_removed");
+        assert_eq!(warnings[0].path, path);
+    }
+}
+
+#[test]
+fn v3_retired_otel_backend_and_fields_load_with_tombstone_warnings() {
+    // The OpenTelemetry exporter was removed. `backend = "otel"` and the
+    // `otel_*` keys must keep loading: the backend falls back to `none` and
+    // every retired key is reported, never silently dropped.
+    let mut value: toml::Value = toml::from_str(
+        &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
+            .expect("generate current succeeds"),
+    )
+    .expect("generated V3 parses");
+    let observability = value
+        .as_table_mut()
+        .unwrap()
+        .entry("observability")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .unwrap();
+    let retired: toml::Table = toml::from_str(
+        r#"
+backend = "otel"
+otel_endpoint = "http://localhost:4318"
+otel_service_name = "zeroclaw"
+otel_genai_content = "redacted"
+otel_genai_content_max_chars = 500
+otel_tool_io = "full"
+otel_tool_io_max_chars = 500
+
+[otel_headers]
+Authorization = "Bearer x"
+"#,
+    )
+    .unwrap();
+    observability.extend(retired);
+    let raw = toml::to_string(&value).unwrap();
+
+    let cfg = migrate_to_current(&raw).expect("retired otel config must not fail load");
+    cfg.validate()
+        .expect("retired otel config must not fail validation");
+    assert_eq!(
+        cfg.observability.backend,
+        zeroclaw_config::schema::ObservabilityBackend::None
+    );
+
+    let warnings = zeroclaw_config::validation_warnings::retired_field_tombstones(&raw);
+    assert_eq!(warnings.len(), 8, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .all(|w| w.code == "otel_observability_removed"),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings.iter().any(|w| w.path == "observability.backend"),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn v3_retired_memory_and_browser_backends_load_with_tombstone_warnings() {
+    // postgres/qdrant memory and the rust_native browser backend were
+    // removed. A config that still selects them must keep loading and
+    // report every retired selector; selecting them then fails explicitly
+    // at construction (memory factory / browser tool), never silently.
+    let mut value: toml::Value = toml::from_str(
+        &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
+            .expect("generate current succeeds"),
+    )
+    .expect("generated V3 parses");
+    let root = value.as_table_mut().unwrap();
+    let retired: toml::Table = toml::from_str(
+        r#"
+[memory]
+backend = "postgres.work"
+
+[storage.postgres.work]
+db_url = "postgres://user:pw@host/db"
+vector_enabled = true
+
+[storage.qdrant.default]
+url = "http://localhost:6333"
+
+[browser]
+backend = "rust_native"
+native_headless = true
+native_webdriver_url = "http://127.0.0.1:9515"
+native_chrome_path = "/usr/bin/chromium"
+"#,
+    )
+    .unwrap();
+    for (key, table) in retired {
+        let slot = root
+            .entry(key)
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .unwrap();
+        for (k, v) in table.as_table().unwrap() {
+            match (slot.get_mut(k).and_then(toml::Value::as_table_mut), v) {
+                (Some(existing), toml::Value::Table(inner)) => existing.extend(inner.clone()),
+                _ => {
+                    slot.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    let raw = toml::to_string(&value).unwrap();
+
+    let cfg = migrate_to_current(&raw).expect("retired backends must not fail load");
+    assert_eq!(cfg.memory.backend, "postgres.work");
+
+    let mut warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+    warnings.extend(zeroclaw_config::validation_warnings::retired_field_tombstones(&raw));
+    let mut hits: Vec<(&str, &str)> = warnings
+        .iter()
+        .map(|w| (w.path.as_str(), w.code.as_str()))
+        .collect();
+    hits.sort_unstable();
+    assert_eq!(
+        hits,
+        vec![
+            ("browser.backend", "browser_native_backend_removed"),
+            (
+                "browser.native_chrome_path",
+                "browser_native_backend_removed"
+            ),
+            ("browser.native_headless", "browser_native_backend_removed"),
+            (
+                "browser.native_webdriver_url",
+                "browser_native_backend_removed"
+            ),
+            ("memory.backend", "memory_backend_removed"),
+            ("storage.postgres", "memory_backend_removed"),
+            ("storage.qdrant", "memory_backend_removed"),
+        ],
+        "{warnings:?}"
+    );
+}
+
 #[test]
 fn v2_matrix_allowed_users_folds_and_allowed_rooms_stays() {
     let v3 = migrate_v2(
@@ -2381,10 +2634,6 @@ fn generate_v3_covers_every_v3_top_level_section() {
     assert!(
         cfg.scheduler.enabled,
         "[scheduler] populated from V1 [cron] subsystem knobs"
-    );
-    assert!(
-        !cfg.storage.qdrant.is_empty(),
-        "[memory.qdrant] promoted to [storage.qdrant.default]"
     );
     assert!(
         !cfg.peer_groups.is_empty(),

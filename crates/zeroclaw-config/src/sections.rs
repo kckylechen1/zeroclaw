@@ -299,9 +299,8 @@ sections! {
         shape: TypedFamilyMap,
         group: Storage,
         help:  "SQLite is the safe default for single-node installs (file-based, \
-                zero-config, no extra services). Pick Postgres for shared or \
-                multi-instance deployments, Qdrant for vector search, Markdown or \
-                Lucid for human-readable files. Each backend supports multiple \
+                zero-config, no extra services). Pick Markdown or Lucid for \
+                human-readable files. Each backend supports multiple \
                 aliased instances; agents reference them via `memory.storage_ref`.",
     },
     Memory => {
@@ -398,13 +397,6 @@ sections! {
         help:  "Pick which chat platforms ZeroClaw should listen on. Global \
                 channel settings live on `[channels]`; each configured platform \
                 still gets its own alias.",
-    },
-    Hardware => {
-        key:   "hardware",
-        shape: DirectForm,
-        group: Foundation,
-        help:  "Optional: hardware peripherals (Arduino, STM32, GPIO, etc.). \
-                Skip if you don't need them.",
     },
 
     Agents => {
@@ -509,7 +501,6 @@ pub fn section_has_signal(cfg: &crate::schema::Config, section: Section) -> bool
                 .strip_prefix("channels.")
                 .is_some_and(|rest| rest.contains('.'))
         }),
-        Section::Hardware => cfg.hardware.enabled,
         Section::McpServers => !cfg.mcp.servers.is_empty(),
         // Routes' existence in the Vec is the signal, same as McpServers.
         Section::ModelRoutes => !cfg.model_routes.is_empty(),
@@ -824,7 +815,6 @@ mod tests {
         const UNGROUPED: &[&str] = &[
             "escalation",
             "locale",
-            "microsoft365",
             "file_upload",
             "file_upload_bundle",
             "file_download",
@@ -886,7 +876,7 @@ mod tests {
             help.contains("default") || help.contains("safe") || help.contains("recommend"),
             "storage help must signal SQLite is the default/safe/recommended choice; got: {help}",
         );
-        for other in ["postgres", "qdrant", "markdown", "lucid"] {
+        for other in ["markdown", "lucid"] {
             let other_pos = help.find(other).unwrap_or_else(|| {
                 panic!(
                     "storage help must still name `{other}` so operators know the alternatives \

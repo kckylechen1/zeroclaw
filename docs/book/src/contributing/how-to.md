@@ -135,7 +135,6 @@ Risk labels:
 | New provider | `crates/zeroclaw-providers/`: `compatible.rs` covers most OpenAI-like ones |
 | Docs | `docs/book/src/`: anything marked outdated or missing |
 | Translations | `cargo fluent fill --locale <code>`: see [Maintainers → Docs & Translations](../maintainers/docs-and-translations.md) |
-| Hardware | `crates/zeroclaw-hardware/`: new board support, new sensor drivers |
 
 ## Code of conduct
 

@@ -1,7 +1,7 @@
 //! Network-safety primitives shared across crates that must reject SSRF and
-//! local/private targets. Lives in `zeroclaw-infra` so both the tool layer
-//! (`zeroclaw-tools` domain guard) and the plugin host (`zeroclaw-plugins`
-//! `zc_http_request`) read one implementation without a tool-to-plugin
+//! local/private targets. Lives in `zeroclaw-infra` so every crate that
+//! guards outbound requests (e.g. the `zeroclaw-tools` domain guard) reads
+//! one implementation.
 
 /// True when `host` is loopback, private, link-local, a documentation/
 /// benchmark range, or one of the `localhost` / `*.local` name forms. Accepts

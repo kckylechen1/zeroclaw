@@ -8,12 +8,6 @@ pub fn memory_backend_excludes(backend: &str) -> Vec<&'static str> {
         out.push("sqlite-open-timeout-secs");
         out.push("conversation-retention-days");
     }
-    if backend != "qdrant" {
-        out.push("qdrant.");
-    }
-    if backend != "postgres" {
-        out.push("postgres.");
-    }
     out
 }
 
@@ -35,7 +29,7 @@ pub fn excluded_paths(cfg: &Config, prefix: &str) -> Vec<String> {
 
 /// Test whether `path` is one of the excluded entries returned from
 /// `excluded_paths`. Handles both exact matches and sub-table prefix
-/// markers (`"memory.qdrant."` matches every `memory.qdrant.*`).
+/// markers (`"memory.foo."` matches every `memory.foo.*`).
 pub fn is_excluded(path: &str, excludes: &[String]) -> bool {
     excludes
         .iter()
@@ -59,19 +53,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_excludes_hide_inactive_backends() {
-        // sqlite active → hide qdrant + postgres subsections, keep sqlite
-        // open-timeout
+    fn memory_excludes_hide_sqlite_knobs_for_other_backends() {
         let ex = memory_backend_excludes("sqlite");
-        assert!(ex.contains(&"qdrant."));
-        assert!(ex.contains(&"postgres."));
         assert!(!ex.contains(&"sqlite-open-timeout-secs"));
         assert!(!ex.contains(&"conversation-retention-days"));
 
-        // qdrant active → hide sqlite-only knobs + postgres
-        let ex = memory_backend_excludes("qdrant");
-        assert!(!ex.contains(&"qdrant."));
-        assert!(ex.contains(&"postgres."));
+        let ex = memory_backend_excludes("markdown");
         assert!(ex.contains(&"sqlite-open-timeout-secs"));
         assert!(ex.contains(&"conversation-retention-days"));
     }
@@ -79,34 +66,22 @@ mod tests {
     #[test]
     fn excluded_paths_for_memory_uses_active_backend() {
         let mut cfg = Config::default();
-        cfg.memory.backend = "sqlite".into();
+        cfg.memory.backend = "markdown".into();
         let paths = excluded_paths(&cfg, "memory");
-        assert!(paths.iter().any(|p| p == "memory.qdrant."));
-        assert!(paths.iter().any(|p| p == "memory.postgres."));
+        assert!(paths.iter().any(|p| p == "memory.sqlite-open-timeout-secs"));
     }
 
     #[test]
     fn is_excluded_handles_sub_table_marker() {
-        let excludes = vec!["memory.qdrant.".to_string(), "memory.foo".to_string()];
+        let excludes = vec!["memory.sub.".to_string(), "memory.foo".to_string()];
         // Sub-table prefix matches anything under it.
-        assert!(is_excluded("memory.qdrant.url", &excludes));
-        assert!(is_excluded("memory.qdrant.api-key", &excludes));
+        assert!(is_excluded("memory.sub.url", &excludes));
+        assert!(is_excluded("memory.sub.api-key", &excludes));
         // Exact matches still work.
         assert!(is_excluded("memory.foo", &excludes));
         // Unrelated paths don't match.
-        assert!(!is_excluded("memory.postgres.url", &excludes));
+        assert!(!is_excluded("memory.other.url", &excludes));
         assert!(!is_excluded("memory.foobar", &excludes));
-    }
-
-    #[test]
-    fn postgres_backend_hides_sqlite_and_qdrant_subsections() {
-        // postgres active → hide sqlite-only knobs and qdrant subsection,
-        // keep postgres subsection visible
-        let ex = memory_backend_excludes("postgres");
-        assert!(ex.contains(&"sqlite-open-timeout-secs"));
-        assert!(ex.contains(&"conversation-retention-days"));
-        assert!(ex.contains(&"qdrant."));
-        assert!(!ex.contains(&"postgres."));
     }
 
     #[test]

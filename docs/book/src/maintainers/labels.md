@@ -170,9 +170,7 @@ Scoped path labels do not guarantee a same-prefix base label. Because `pr-path-l
 | Label | Matches |
 |---|---|
 | `observability:log` | `crates/zeroclaw-log/src/**`, `crates/zeroclaw-runtime/src/observability/log.rs` |
-| `observability:otel` | `otel.rs`, OTel dependency feature regression coverage |
 | `observability:prometheus` | `prometheus.rs` |
-| `runtime:wasm` | first-party WASM plugin host files |
 | `security:bubblewrap` | `bubblewrap.rs` |
 | `security:docker` | `docker.rs` |
 | `security:leak-detector` | LeakDetector redaction and sensitive-output scanning |
@@ -190,7 +188,7 @@ Some scoped component labels are manual routing labels rather than synchronized 
 
 `agent:loop` is retired. For agent-loop routing, use base `agent` plus any matching `runtime`, provider, channel, tool, or risk labels.
 
-Do not apply legacy `observability: runtime_trace` to new issues or PRs. Use `observability:otel` when the work is about OpenTelemetry tracing, add base `observability` only when the issue or PR also matches that base surface, and decide any future runtime-trace-specific canonical label in a separate create/migrate packet.
+Do not apply legacy `observability: runtime_trace` to new issues or PRs. Add base `observability` only when the issue or PR matches that base surface, and decide any future runtime-trace-specific canonical label in a separate create/migrate packet.
 
 Do not apply legacy `security: leak_detector` to new issues or PRs. Use `security:leak-detector` for LeakDetector redaction and sensitive-output scanning work.
 
@@ -266,16 +264,12 @@ Tools are grouped by logical function rather than one label per file.
 | Label | Matches |
 |---|---|
 | `tool:browser` | `browser.rs`, `browser_open.rs`, `text_browser.rs`, `screenshot.rs` |
-| `tool:cloud` | `cloud_ops.rs`, `cloud_patterns.rs` |
 | `tool:composio` | `composio.rs` |
 | `tool:cron` | `src/tools/cron_add.rs`, `src/tools/cron_list.rs`, `src/tools/cron_remove.rs`, `src/tools/cron_run.rs`, `src/tools/cron_runs.rs`, `src/tools/cron_update.rs`, `crates/zeroclaw-runtime/src/tools/cron_add.rs`, `crates/zeroclaw-runtime/src/tools/cron_common.rs`, `crates/zeroclaw-runtime/src/tools/cron_list.rs`, `crates/zeroclaw-runtime/src/tools/cron_remove.rs`, `crates/zeroclaw-runtime/src/tools/cron_run.rs`, `crates/zeroclaw-runtime/src/tools/cron_runs.rs`, `crates/zeroclaw-runtime/src/tools/cron_update.rs` |
 | `tool:delegate` | `crates/zeroclaw-runtime/src/tools/delegate.rs` |
 | `tool:file` | `src/tools/file_edit.rs`, `src/tools/file_read.rs`, `src/tools/file_write.rs`, `src/tools/glob_search.rs`, `src/tools/content_search.rs`, `crates/zeroclaw-tools/src/file_edit.rs`, `crates/zeroclaw-runtime/src/tools/file_read.rs`, `crates/zeroclaw-tools/src/file_write.rs`, `crates/zeroclaw-tools/src/glob_search.rs`, `crates/zeroclaw-tools/src/content_search.rs` |
-| `tool:google-workspace` | `google_workspace.rs` |
 | `tool:mcp` | `mcp_client.rs`, `mcp_deferred.rs`, `mcp_protocol.rs`, `mcp_tool.rs`, `mcp_transport.rs` |
 | `tool:memory` | `memory_forget.rs`, `memory_recall.rs`, `memory_store.rs` |
-| `tool:microsoft365` | `microsoft365/**` |
-| `tool:pushover` | `pushover.rs` |
 | `tool:security` | `src/tools/security_ops.rs`, `src/tools/verifiable_intent.rs`, `crates/zeroclaw-runtime/src/tools/security_ops.rs`, `crates/zeroclaw-runtime/src/tools/verifiable_intent.rs` |
 | `tool:shell` | `src/tools/shell.rs`, `crates/zeroclaw-runtime/src/tools/shell.rs` |
 | `tool:web` | `web_fetch.rs`, `web_search_tool.rs`, `web_search_provider_routing.rs`, `http_request.rs` |

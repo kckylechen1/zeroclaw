@@ -28,8 +28,6 @@ cli-integrations-about = 浏览 50+ 个集成
 cli-skills-about = 管理技能（用户自定义能力）
 cli-migrate-about = 从其他智能体运行时迁移数据
 cli-auth-about = 管理提供商订阅认证配置文件
-cli-hardware-about = 发现并检查 USB 硬件
-cli-peripheral-about = 管理硬件外设
 cli-memory-about = 管理智能体记忆条目
 cli-config-about = 管理 ZeroClaw 配置
 cli-update-about = 检查并应用 ZeroClaw 更新
@@ -136,7 +134,7 @@ cli-memory-list-about = 列出内存条目，可使用可选过滤器
 cli-memory-get-about = 按键获取特定的内存条目
 cli-memory-stats-about = 显示内存后端的统计信息和健康状况
 cli-memory-clear-about = 按类别、按键清除内存，或清除全部
-cli-memory-clear-unsupported-backend = 内存清除不支持仅追加后端 '{$backend}'；请切换到可删除的后端（sqlite、lucid 或 postgres）
+cli-memory-clear-unsupported-backend = 内存清除不支持仅追加后端 '{$backend}'；请切换到可删除的后端（sqlite 或 lucid）
 cli-estop-status-about = 打印当前急停状态
 cli-estop-resume-about = 从已激活的急停级别恢复
 cli-models-refresh-about = 刷新并缓存提供商模型
@@ -146,12 +144,6 @@ cli-models-status-about = 显示当前模型配置和缓存状态
 cli-doctor-models-about = 探测各提供商的模型目录并报告可用性
 cli-doctor-traces-about = 查询运行时跟踪事件（工具诊断和模型回复）
 cli-doctor-update-context-windows-about = 从提供商的 /models 端点更新 config.toml 中的 context_window
-cli-hardware-discover-about = 枚举 USB 设备并显示已知开发板
-cli-hardware-introspect-about = 通过序列号或设备路径检视设备
-cli-hardware-info-about = 通过 ST-Link 使用 probe-rs 经 USB 获取芯片信息
-cli-peripheral-list-about = 列出已配置的外设
-cli-peripheral-add-about = 按开发板类型和传输路径添加外设
-cli-peripheral-flash-about = 将 ZeroClaw 固件刷写到 Arduino 开发板
 cli-migrate-openclaw-about = 将 OpenClaw 工作区中的记忆导入到此 ZeroClaw 工作区
 cli-gateway-long-about =
     管理网关服务器（webhooks、websockets）。
@@ -212,26 +204,6 @@ cli-channel-long-about =
     zeroclaw channel remove my-bot
     zeroclaw channel bind-telegram zeroclaw_user
     zeroclaw channel send 'Alert!' --channel-id telegram --recipient 123456789
-cli-hardware-long-about =
-    发现和检视 USB 硬件。
-
-    枚举已连接的 USB 设备，识别已知的开发板（STM32 Nucleo、Arduino、ESP32），并通过 probe-rs / ST-Link 检索芯片信息。
-
-    示例：
-    zeroclaw hardware discover
-    zeroclaw hardware introspect /dev/ttyACM0
-    zeroclaw hardware info --chip STM32F401RETx
-cli-peripheral-long-about =
-    管理硬件外设。
-
-    添加、列出、烧录和配置向代理公开工具的硬件板（GPIO、传感器、执行器）。支持的板：nucleo-f401re、rpi-gpio、esp32、arduino-uno。
-
-    示例：
-    zeroclaw peripheral list
-    zeroclaw peripheral add nucleo-f401re /dev/ttyACM0
-    zeroclaw peripheral add rpi-gpio native
-    zeroclaw peripheral flash --port /dev/cu.usbmodem12345
-    zeroclaw peripheral flash-nucleo
 cli-memory-long-about =
     管理代理记忆条目。
 
@@ -289,11 +261,6 @@ cli-self-test-long-about =
     zeroclaw self-test --quick     # 仅快速检查（无网络）
 cli-skills-install-suggestion =
     看起来此请求需要 `{$name}` 技能，但它尚未安装。
-
-    匹配的能力：{$matched}
-    下一步：运行 `{$install_command}` 进行安装。
-cli-plugin-install-suggestion =
-    看起来此请求需要 `{$name}` 插件，但它尚未安装。
 
     匹配的能力：{$matched}
     下一步：运行 `{$install_command}` 进行安装。
@@ -391,16 +358,6 @@ cli-self-test-web-dist-dir-pass-unset = 未设置（使用自动检测）
 cli-self-test-web-dist-dir-pass-literal = {$path}（字面路径）
 cli-self-test-web-dist-dir-fail-expansion = 警告：{$path} — {$reason}；gateway.web_dist_dir 按原样读取，请自行展开该值（例如使用绝对路径）
 cli-service-systemd-linger-disabled-warning = systemd 用户 linger 已禁用。ZeroClaw 的用户服务可能会在注销后停止。启用命令：loginctl enable-linger {$user}
-cli-peripherals-none = 未配置外设。
-cli-peripherals-add-hint = 使用以下命令添加: zeroclaw peripheral add <board> <path>
-cli-peripherals-add-example = {"  "}示例: zeroclaw peripheral add nucleo-f401re <serial-path>
-cli-peripherals-config-hint = 或添加到 config.toml:
-cli-peripherals-configured = 已配置的外设:
-cli-peripherals-already-configured = 位于 {$path} 的开发板 {$board} 已配置。
-cli-peripherals-added = 已在 {$path} 添加 {$board}。重启守护进程以应用。
-cli-peripherals-flash-needs-hardware = Arduino 烧录需要 'hardware' 功能。
-cli-peripherals-unoq-needs-hardware = Uno Q 设置需要 'hardware' 功能。
-cli-peripherals-nucleo-needs-hardware = Nucleo 烧录需要 'hardware' 功能。
 cli-skills-none-installed = 未安装技能。
 cli-skills-create-hint = {"  "}创建一个: mkdir -p ~/.zeroclaw/workspace/skills/my-skill
 cli-skills-install-hint = {"  "}或安装: zeroclaw skills install <source>
@@ -643,7 +600,6 @@ cli-status-service-running = 🟢 服务：       运行中
 cli-status-service-stopped = 🔴 服务：       已停止
 cli-status-channels = 通道：
 cli-status-cli-always = {"  "}CLI:      ✅ 始终
-cli-status-peripherals = 外设：
 cli-desktop-download = 下载 ZeroClaw 配套应用：
 cli-desktop-homebrew = 或通过 Homebrew 安装（即将推出）：
 cli-desktop-linux-pkg = {"  "}下载适合您架构的 .deb 或 .AppImage。
@@ -677,12 +633,8 @@ cli-status-spent-today = {"  "}今日已花费：       ${$spent} / ${$limit}
 cli-status-spent-month = {"  "}本月已花费：  ${$spent} / ${$limit}
 cli-status-otp = {"  "}已启用 OTP：       {$v}
 cli-status-estop = {"  "}已启用急停：    {$v}
-cli-status-peripherals-enabled = {"  "}已启用：   {$v}
-cli-status-boards = {"  "}Boards:    {$v}
 cli-status-word-enabled = 已启用
 cli-status-word-disabled = 已禁用
-cli-status-word-yes = 是
-cli-status-word-no = 否
 cli-status-word-on = 开启
 cli-status-word-off = 关闭
 cli-status-word-none = （无）
@@ -695,24 +647,7 @@ cli-desktop-blurb2 = 它连接到与 CLI 相同的网关。
 cli-config-all-configured = 所有部分均已配置。
 cli-config-schema-current = 配置已为当前架构版本。
 cli-config-applied-ops = 已应用 {$count} 个操作：
-cli-plugins-none = 未安装任何插件。
-cli-plugins-installed = 已安装的插件：
-cli-plugin-search-none = 没有匹配 '{$query}' 的插件。
-cli-plugin-search-results = 匹配 '{$query}' 的插件（{$count}）：
-cli-plugin-search-result = {$name} v{$version} — {$description}
-cli-plugin-no-description = （无描述）
-cli-plugin-install-resolving = 正在从插件注册表解析 '{$source}'...
-cli-plugin-installed-from = 已从 {$source} 安装插件
-cli-plugin-installed-name-version = 已安装插件 {$name} v{$version}
-cli-plugin-config-entry-seeded = 已为 '{$name}' 创建 [[plugins.entries]]。使用 `zeroclaw config set plugins.entries.{$name}.config.<key>` 设置插件配置值。
-cli-plugin-config-entry-seed-skipped = 警告：已跳过为 '{$name}' 创建配置条目：磁盘上的 [plugins] 部分格式不正确。请修复它，添加带有 `name = "{$name}"` 的 [[plugins.entries]] 块，然后使用 `zeroclaw config set plugins.entries.{$name}.config.<key>` 设置值。
-cli-plugin-config-entry-seed-unaddressable = 警告：已跳过为 '{$name}' 创建配置条目：包含 '.' 的插件名称无法通过点分配置路径寻址（`config set` 会按 '.' 分割）。请手动向配置文件添加带有 `name = "{$name}"` 的 [[plugins.entries]] 块。
 cli-config-section-degraded = 警告：{$path} 中的配置部分 `{$section}` 格式不正确，本次运行已重置为默认值。该部分中的值不会生效。请运行 `zeroclaw config migrate` 查看解析错误，然后修复文件。
-cli-plugin-removed = 已移除插件“{$name}”。
-cli-plugin-not-found = 未找到插件“{$name}”。
-cli-plugin-legacy-detected = 注意：位于旧位置（{$path}）的插件未被代理加载。请运行 `zeroclaw plugin migrate` 将其移动到 {$target}。
-cli-plugin-migrated = 已将 {$count} 个插件从 {$path} 移动到 {$target}。
-cli-plugin-migrate-none = 没有需要迁移的内容。
 cli-estop-resume-done = 急停恢复已完成。
 cli-estop-engaged = 急停已启用。
 cli-estop-status = 急停状态：
@@ -729,12 +664,6 @@ cli-config-secret-unset = {$path} 未设置（加密密钥）
 cli-config-updated = {$path} 已更新。
 cli-config-review-hint = 运行 `zeroclaw config list` 进行查看，然后设置必填字段。
 cli-config-backed-up = 已备份至 {$path}
-cli-plugin-name-version = 插件：{$name} v{$version}
-cli-plugin-description = 描述：{$desc}
-cli-plugin-capabilities = 功能：{$v}
-cli-plugin-permissions = 权限：{$v}
-cli-plugin-wasm = WASM：{$path}
-cli-plugin-wasm-none = WASM：（仅技能插件）
 cli-estop-domains-none = {"  "}domain_blocks:  （无）
 cli-estop-domains = {"  "}domain_blocks:  {$v}
 cli-estop-tools-none = {"  "}tool_freeze:    （无）
@@ -761,10 +690,6 @@ cli-locales-installed = 已为“{$locale}”在 {$dir} 下安装 {$count} 个�
 cli-browse-header = {$path}（{$count} 个条目）
 cli-browse-empty = （空）
 cli-browse-file-bytes = {$name}（{$bytes} 字节）
-cli-hardware-feature-required = 硬件发现需要 'hardware' 功能。
-cli-hardware-feature-build = 构建命令：cargo build --features hardware
-cli-hardware-unsupported-platform = 此平台不支持硬件 USB 发现。
-cli-hardware-supported-platforms = 支持的平台：Linux、macOS、Windows。
 cli-update-already-current = 已是最新版本（v{$version}）。
 cli-update-success = 已成功更新至 v{$version}！
 cli-update-prebuilt-channel-note = 预构建更新使用精简的标准发行集。如需 Slack 和其他未包含在该发行集中的通道，请从源码构建：`./install.sh --source --preset full`、`--features channels-full`，或指定对应的 `channel-*` 功能。

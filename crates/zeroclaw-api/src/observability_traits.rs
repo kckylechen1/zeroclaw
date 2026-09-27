@@ -23,12 +23,9 @@ pub struct ToolCallSnapshot {
 /// credential-scrubbed at the agent-loop boundary so the OTel exporter can emit
 /// `gen_ai.input.messages` / `gen_ai.output.messages` / `gen_ai.system_instructions`.
 ///
-/// Populated at the agent-loop capture boundary whenever the `observability-otel`
-/// feature is active; `None` otherwise (other observers and non-OTel builds leave
-/// it `None`). Capture is policy-agnostic: whether the snapshot is actually
-/// exported — and at which privacy level (`off` / `redacted` / `full`) — is
-/// decided by the owning `OtelObserver`'s instance content config at the OTel
-/// export boundary, not by the capture path.
+/// The in-tree OTel exporter was removed, so the runtime no longer captures
+/// this snapshot and always leaves the field `None`; the type stays for API
+/// compatibility.
 #[derive(Debug, Clone)]
 pub struct LlmMessageSnapshot {
     /// Non-system input messages, in send order.
@@ -59,9 +56,6 @@ pub struct TurnTokenUsage {
 /// degrade gracefully when new variants are added in future minor
 /// releases — they must include a wildcard arm in their `match`
 /// expressions and will simply ignore unknown event kinds.
-/// Exception: under the `observability-otel` feature, [`ObserverEvent::LlmResponse`]
-/// carries credential-scrubbed prompt/completion content in `messages` for GenAI
-/// semantic-convention export. See [`LlmMessageSnapshot`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ObserverEvent {
@@ -100,11 +94,8 @@ pub enum ObserverEvent {
         error_message: Option<String>,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
-        /// Credential-scrubbed prompt/completion content for OTel GenAI export.
-        /// `None` unless the `observability-otel` feature is active. When
-        /// populated, whether the content is exported (and at which privacy
-        /// level) is gated by the receiving `OtelObserver`'s instance content
-        /// policy, not by the capture path. See [`LlmMessageSnapshot`].
+        /// Prompt/completion snapshot for the retired OTel exporter. Always
+        /// `None` in-tree; kept for API compatibility. See [`LlmMessageSnapshot`].
         messages: Option<LlmMessageSnapshot>,
         channel: Option<String>,
         agent_alias: Option<String>,

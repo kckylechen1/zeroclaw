@@ -1044,7 +1044,6 @@ async fn run_agent_job_with_timeout(
                         None,
                         model_override,
                         run_temperature,
-                        vec![],
                         false,
                         Some(run_session_path),
                         run_allowed_tools,

@@ -96,6 +96,5 @@ Follow-up decisions:
 
 - [FND-001: Intentional architecture](../../foundations/fnd-001-intentional-architecture.md)
 - [Architecture: Crates](../crates.md)
-- [Plugin protocol](../../developing/plugin-protocol.md)
 - `AGENTS.md`
 - `Cargo.toml`

@@ -1,41 +1,10 @@
-//! Binary-injected channel and peripheral tool factories for the agent loop.
+//! Binary-injected channel factories for the agent loop.
 //!
 //! Extracted from `loop_.rs` so process-global wiring stays next to the
 //! seed/load helpers rather than above cost/history re-exports.
 
-use crate::tools::{self, Tool};
+use crate::tools;
 use std::sync::Arc;
-
-/// Peripheral tools factory type — takes owned config so the returned future is 'static.
-pub type PeripheralToolsFn = Box<
-    dyn Fn(
-            zeroclaw_config::schema::PeripheralsConfig,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = anyhow::Result<Vec<Box<dyn Tool>>>> + Send>,
-        > + Send
-        + Sync,
->;
-
-/// Peripheral tools factory, injected by the binary when hardware feature is on.
-static PERIPHERAL_TOOLS_FN: std::sync::OnceLock<PeripheralToolsFn> = std::sync::OnceLock::new();
-
-/// Register the peripheral tools factory. Called once at startup by the binary.
-pub fn register_peripheral_tools_fn(f: PeripheralToolsFn) {
-    let _ = PERIPHERAL_TOOLS_FN.set(f);
-}
-
-/// Public helper for other crates (e.g. channels orchestrator) to load
-/// peripheral tools through the registered factory. Returns empty vec
-/// when nothing is registered (hardware feature off or not yet wired).
-pub async fn load_peripheral_tools(
-    config: zeroclaw_config::schema::PeripheralsConfig,
-) -> Vec<Box<dyn Tool>> {
-    if let Some(f) = PERIPHERAL_TOOLS_FN.get() {
-        f(config).await.unwrap_or_default()
-    } else {
-        Vec::new()
-    }
-}
 
 /// Channel map factory type — builds `channel_key → Arc<dyn Channel>` map.
 /// Injected by the binary so `zeroclaw-runtime` doesn't depend on

@@ -79,7 +79,7 @@ Pairing is required by default; `[gateway.allow_public_bind = true]` enables bin
 
 Callable tools the agent invokes. Not to be confused with CLI `zeroclaw` subcommands.
 
-Includes: `browser`, `http_request`, `web_search`, `shell`, `file_read`, `file_write`, hardware probes (`hardware_board_info`, `hardware_memory_read`), and more. See [Tools → Overview](../tools/overview.md).
+Includes: `browser`, `http_request`, `web_search`, `shell`, `file_read`, `file_write`, and more. See [Tools → Overview](../tools/overview.md).
 
 Each tool is registered via factory and described to the model via Fluent-localised strings.
 
@@ -87,10 +87,10 @@ Each tool is registered via factory and described to the model via Fluent-locali
 
 ### `zeroclaw-memory`
 
-Conversation memory and retrieval. SQLite is the default backend; PostgreSQL is available behind `--features memory-postgres` for multi-instance deployments that need a shared, concurrent-write store. Optional:
+Conversation memory and retrieval. SQLite is the default backend; Lucid and Markdown are the alternatives (the PostgreSQL and Qdrant backends were removed). Optional:
 
 - Embedding backends (OpenAI, Ollama, local)
-- Vector retrieval over stored conversations (pgvector when on PostgreSQL)
+- Vector retrieval over stored conversations
 - Memory consolidation (summaries, fact extraction)
 
 ### `zeroclaw-tool-call-parser`
@@ -102,14 +102,6 @@ Model-side tool-call syntax parsing. Handles variations between providers:
 - Qwen/Ollama's function-call formats
 - Native tool-call streaming deltas
 
-### `zeroclaw-plugins`
-
-Sandboxed WASM plugin host: loads component-model plugins (tool, channel, memory, skill bundles) in-process under WASI with per-call fuel and memory limits. See [Developing → Plugin protocol](../developing/plugin-protocol.md).
-
-### `zeroclaw-hardware`
-
-Hardware abstraction: GPIO, I2C, SPI, USB. Platform-gated. See [Hardware → Overview](../hardware/index.md).
-
 ### `zeroclaw-log`
 
 The single emission surface for every log event in the workspace. Owns
@@ -118,7 +110,7 @@ registry (`ATTRIBUTION_FIELDS` + `COMPOSITE_PREFIXES`), the
 `tracing-subscriber` Layer that captures every `tracing::*` call, the
 `record!` and `scope!` macros, the rolling-trim writer, the
 paginated cursor reader behind `/api/logs`, and the bridge to the
-typed `Observer` for Prometheus / OTel consumers. See
+typed `Observer` for Prometheus consumers. See
 [`architecture/logging.md`](./logging.md).
 
 ### `zeroclaw-spawn`
@@ -141,10 +133,6 @@ logs, costs, cron, and gateway metadata.
 
 Derive macros for config schema, tool registration, and channel registration. Saves boilerplate across the workspace.
 
-### `aardvark-sys`, `robot-kit`
-
-Specialised hardware support used by the `hardware` submodule. Out-of-scope unless you're bringing up specific peripherals.
-
 ## Feature flags
 
 The microkernel roadmap (RFC #5574) defines a feature-flag taxonomy. The practical upshot for a user:
@@ -152,7 +140,6 @@ The microkernel roadmap (RFC #5574) defines a feature-flag taxonomy. The practic
 - `default`: a sensible core build
 - `ci-all`: everything on, for CI
 - `channel-<name>`: opt-in per channel (e.g. `channel-matrix`, `channel-discord`)
-- `hardware`: enable hardware subsystem
 - `gateway`, `whatsapp-web`: opt-in capability groups
 
 Providers are not feature-gated; they all compile in. Channel selection is the main per-build knob. Read the top-level `Cargo.toml` `[features]` table for the full list.

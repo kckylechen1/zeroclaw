@@ -636,10 +636,9 @@ pub trait Memory: Send + Sync + crate::attribution::Attributable {
     /// Store a memory entry attributed to an explicit agent UUID.
     /// Every backend must implement this explicitly so the agent_id
     /// is never silently dropped at storage time. Backends with
-    /// native agent_id columns (SqliteMemory, PostgresMemory,
-    /// LucidMemory) persist the attribution in SQL; MarkdownMemory
-    /// attributes via the per-agent directory path; QdrantMemory
-    /// persists in the vector payload; NoneMemory is a no-op stub.
+    /// native agent_id columns (SqliteMemory, LucidMemory) persist the
+    /// attribution in SQL; MarkdownMemory attributes via the per-agent
+    /// directory path; NoneMemory is a no-op stub.
     /// `AgentScopedMemory` is the canonical caller.
     async fn store_with_agent(
         &self,
@@ -661,8 +660,7 @@ pub trait Memory: Send + Sync + crate::attribution::Attributable {
     ///
     /// For SQL-backed stores the filter is `WHERE agent_id IN (...)`.
     /// For Markdown the implementation walks the allowed agents'
-    /// per-agent directories. For Qdrant it's a payload filter on
-    /// the `agent_id` field. For None it returns an empty list.
+    /// per-agent directories. For None it returns an empty list.
     /// `AgentScopedMemory` is the canonical caller; direct invocation
     /// is also valid for read-only cross-agent queries that bypass
     /// the wrapper.
@@ -684,9 +682,9 @@ pub trait Memory: Send + Sync + crate::attribution::Attributable {
     /// Look up (or create) the identifier the backend uses to refer
     /// to the agent named by `alias`.
     ///
-    /// Backends with an `agents` table (SqliteMemory, PostgresMemory,
-    /// LucidMemory) return the row's UUID, inserting if absent.
-    /// Backends without (MarkdownMemory, QdrantMemory, NoneMemory)
+    /// Backends with an `agents` table (SqliteMemory, LucidMemory)
+    /// return the row's UUID, inserting if absent.
+    /// Backends without (MarkdownMemory, NoneMemory)
     /// return the alias verbatim — there is no UUID indirection at
     /// the storage layer, so the alias serves as the agent_id.
     /// Default impl returns the alias unchanged; SQL backends

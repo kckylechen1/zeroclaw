@@ -14,9 +14,8 @@ Curated operational reference for common `zeroclaw` commands. It is not an exhau
 8. [Service Management](#service-management)
 9. [Channels](#channels)
 10. [Security & Emergency Stop](#security--emergency-stop)
-11. [Hardware Peripherals](#hardware-peripherals)
-12. [Skills](#skills)
-13. [Shell Completions](#shell-completions)
+11. [Skills](#skills)
+12. [Shell Completions](#shell-completions)
 
 ---
 
@@ -29,7 +28,6 @@ zeroclaw agent -a assistant                                          # Interacti
 zeroclaw agent -a assistant -m "Summarize today's logs"              # Single message
 zeroclaw agent -a assistant -p anthropic --model claude-sonnet-4-6   # Override provider/model
 zeroclaw agent -a assistant -t 0.3                                   # Set temperature
-zeroclaw agent -a assistant --peripheral nucleo-f401re:/dev/ttyACM0  # Attach hardware
 ```
 
 `-a <alias>` is required and must match a configured `[agents.<alias>]` entry — there is no default agent.
@@ -39,7 +37,6 @@ zeroclaw agent -a assistant --peripheral nucleo-f401re:/dev/ttyACM0  # Attach ha
 - `-p <provider>` — override provider (openrouter, anthropic, openai, ollama)
 - `--model <model>` — override model
 - `-t <float>` — temperature (0.0–2.0)
-- `--peripheral <name>:<port>` — attach hardware peripheral
 
 The agent has access to 30+ tools gated by security policy: shell, file_read, file_write, file_edit, glob_search, content_search, memory_store, memory_recall, memory_forget, browser, http_request, web_fetch, web_search, cron, delegate, git, and more. Max tool iterations defaults to 10.
 
@@ -215,23 +212,6 @@ forbidden_paths = ["/etc", "/root", "~/.ssh"]
 max_actions_per_hour = 20
 max_cost_per_day_cents = 500
 ```
-
----
-
-## Hardware Peripherals
-
-```bash
-zeroclaw hardware discover                              # Find USB devices
-zeroclaw hardware introspect /dev/ttyACM0               # Probe device capabilities
-zeroclaw peripheral list                                # List configured peripherals
-zeroclaw peripheral add nucleo-f401re /dev/ttyACM0      # Add peripheral
-zeroclaw peripheral flash-nucleo                        # Flash STM32 firmware
-zeroclaw peripheral flash --port /dev/cu.usbmodem101    # Flash Arduino firmware
-```
-
-**Supported boards:** STM32 Nucleo-F401RE, Arduino Uno R4, Raspberry Pi GPIO, ESP32.
-
-Attach to agent session: `zeroclaw agent -a assistant --peripheral nucleo-f401re:/dev/ttyACM0`
 
 ---
 

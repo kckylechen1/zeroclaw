@@ -30,8 +30,6 @@ cli-integrations-about = Parcourir plus de 50 intégrations
 cli-skills-about = Gérer les compétences (capacités définies par l'utilisateur)
 cli-migrate-about = Migrer les données depuis d'autres runtimes d'agents
 cli-auth-about = Gérer les profils d'authentification des abonnements fournisseur
-cli-hardware-about = Découvrir et analyser le matériel USB
-cli-peripheral-about = Gérer les périphériques matériels
 cli-memory-about = Gérer les entrées de mémoire de l'agent
 cli-config-about = Gérer la configuration de ZeroClaw
 cli-update-about = Vérifier et appliquer les mises à jour de ZeroClaw
@@ -139,7 +137,7 @@ cli-memory-list-about = Lister les entrées de mémoire avec des filtres optionn
 cli-memory-get-about = Obtenir une entrée de mémoire spécifique par clé
 cli-memory-stats-about = Afficher les statistiques et l'état de santé du backend mémoire
 cli-memory-clear-about = Effacer les mémoires par catégorie, par clé, ou tout effacer
-cli-memory-clear-unsupported-backend = memory clear n'est pas pris en charge pour le backend en ajout seul '{$backend}' ; passez à un backend supprimable (sqlite, lucid ou postgres)
+cli-memory-clear-unsupported-backend = memory clear n'est pas pris en charge pour le backend en ajout seul '{$backend}' ; passez à un backend supprimable (sqlite ou lucid)
 cli-estop-status-about = Imprimer le statut actuel d'arrêt d'urgence
 cli-estop-resume-about = Reprendre depuis un niveau d'arrêt d'urgence engagé
 cli-models-refresh-about = Actualiser et mettre en cache les modèles du fournisseur
@@ -149,12 +147,6 @@ cli-models-status-about = Afficher la configuration actuelle du modèle et l'ét
 cli-doctor-models-about = Sonder les catalogues de modèles à travers les fournisseurs et signaler la disponibilité
 cli-doctor-traces-about = Interroger les événements de trace d'exécution (diagnostics d'outils et réponses de modèle)
 cli-doctor-update-context-windows-about = Mettre à jour context_window dans config.toml depuis les endpoints /models du fournisseur
-cli-hardware-discover-about = Énumérer les dispositifs USB et afficher les cartes connues
-cli-hardware-introspect-about = Inspecter un appareil par son numéro de série ou son chemin de dispositif
-cli-hardware-info-about = Obtenir les informations de puce via USB en utilisant probe-rs via ST-Link
-cli-peripheral-list-about = Lister les périphériques configurés
-cli-peripheral-add-about = Ajouter un périphérique en fonction du type de carte et du chemin de transport
-cli-peripheral-flash-about = Flasher le firmware de ZeroClaw sur une carte Arduino
 cli-migrate-openclaw-about = Importer la mémoire d'un espace de travail OpenClaw vers cet espace de travail ZeroClaw
 cli-gateway-long-about =
     Gérer le serveur gateway (webhooks, websockets).
@@ -215,29 +207,6 @@ cli-channel-long-about =
     zeroclaw channel remove my-bot
     zeroclaw channel bind-telegram zeroclaw_user
     zeroclaw channel send 'Alerte !' --channel-id telegram --recipient 123456789
-cli-hardware-long-about =
-    Découvrir et inspecter le matériel USB.
-
-    Énumérer les dispositifs USB connectés, identifier les cartes de développement connues (STM32 Nucleo, Arduino, ESP32), et récupérer les informations de puce via probe-rs / ST-Link.
-
-    Exemples :
-    zeroclaw hardware discover
-    zeroclaw hardware introspect /dev/ttyACM0
-    zeroclaw hardware info --chip STM32F401RETx
-cli-peripheral-long-about =
-    Gérer les périphériques matériels.
-
-    Connecter, tester et diagnostiquer les appareils via des périphériques USB (UART, I²C, SPI, etc.). Prend en charge la connexion, la désconnexion, la détection, le diagnostic d'éventail et le débogage de protocoles.
-
-    Exemples :
-    zeroclaw peripheral connect nucleo-f401re:/dev/ttyACM0
-    zeroclaw peripheral disconnect nucleo-f401re
-    zeroclaw peripheral detect nucleo-f401re
-    zeroclaw peripheral probe nucleo-f401re
-    zeroclaw peripheral trace nucleo-f401re
-    zeroclaw peripheral debug nucleo-f401re
-    zeroclaw peripheral connect esp32-usb-serial:/dev/ttyUSB0
-    zeroclaw peripheral disconnect esp32-usb-serial
 cli-memory-long-about =
     Gérer les entrées de mémoire de l'agent.
 
@@ -295,11 +264,6 @@ cli-self-test-long-about =
     zeroclaw self-test --quick     # tests rapides uniquement (pas de réseau)
 cli-skills-install-suggestion =
     Il semble que cette requête nécessite le skill `{$name}`, mais il n'est pas installé.
-
-    Capacité correspondante : {$matched}
-    Étape suivante : Exécutez `{$install_command}` pour l'installer.
-cli-plugin-install-suggestion =
-    Il semble que cette requête nécessite le plugin `{$name}`, mais il n'est pas installé.
 
     Capacité correspondante : {$matched}
     Étape suivante : Exécutez `{$install_command}` pour l'installer.
@@ -397,16 +361,6 @@ cli-self-test-web-dist-dir-pass-unset = non défini (détection automatique util
 cli-self-test-web-dist-dir-pass-literal = {$path} (chemin littéral)
 cli-self-test-web-dist-dir-fail-expansion = AVERTISSEMENT : {$path} — {$reason} ; gateway.web_dist_dir est lu tel quel, vous devez donc développer la valeur vous-même (p. ex. un chemin absolu)
 cli-service-systemd-linger-disabled-warning = la persistance utilisateur systemd est désactivée. Le service utilisateur ZeroClaw peut s'arrêter après la déconnexion. Activez-la avec : loginctl enable-linger {$user}
-cli-peripherals-none = Aucun périphérique configuré.
-cli-peripherals-add-hint = Ajoutez-en un avec : zeroclaw peripheral add <board> <path>
-cli-peripherals-add-example = {"  "}Exemple : zeroclaw peripheral add nucleo-f401re <serial-path>
-cli-peripherals-config-hint = Ou ajoutez à config.toml :
-cli-peripherals-configured = Périphériques configurés :
-cli-peripherals-already-configured = La carte {$board} à {$path} est déjà configurée.
-cli-peripherals-added = {$board} ajouté à {$path}. Redémarrez le démon pour appliquer.
-cli-peripherals-flash-needs-hardware = Le flash Arduino nécessite la fonctionnalité « hardware ».
-cli-peripherals-unoq-needs-hardware = La configuration Uno Q nécessite la fonctionnalité « hardware ».
-cli-peripherals-nucleo-needs-hardware = Le flash Nucleo nécessite la fonctionnalité « hardware ».
 cli-skills-none-installed = Aucune compétence installée.
 cli-skills-create-hint = {"  "}Créez-en une : mkdir -p ~/.zeroclaw/workspace/skills/my-skill
 cli-skills-install-hint = {"  "}Ou installez : zeroclaw skills install <source>
@@ -649,7 +603,6 @@ cli-status-service-running = 🟢 Service :       en cours d'exécution
 cli-status-service-stopped = 🔴 Service :       arrêté
 cli-status-channels = Canaux :
 cli-status-cli-always = {"  "}CLI :      ✅ toujours
-cli-status-peripherals = Périphériques :
 cli-desktop-download = Téléchargez l'application compagnon ZeroClaw :
 cli-desktop-homebrew = Ou installez via Homebrew (bientôt disponible) :
 cli-desktop-linux-pkg = {"  "}Téléchargez le fichier .deb ou .AppImage pour votre architecture.
@@ -683,12 +636,8 @@ cli-status-spent-today = {"  "}Dépensé aujourd'hui :       {$spent} $ / {$limi
 cli-status-spent-month = {"  "}Dépensé ce mois-ci :  {$spent} $ / {$limit} $
 cli-status-otp = {"  "}OTP activé :       {$v}
 cli-status-estop = {"  "}Arrêt d'urgence activé :    {$v}
-cli-status-peripherals-enabled = {"  "}Activé :   {$v}
-cli-status-boards = {"  "}Cartes :    {$v}
 cli-status-word-enabled = activé
 cli-status-word-disabled = désactivé
-cli-status-word-yes = oui
-cli-status-word-no = non
 cli-status-word-on = activé
 cli-status-word-off = désactivé
 cli-status-word-none = (aucun)
@@ -701,24 +650,7 @@ cli-desktop-blurb2 = se connecte à la même passerelle que la CLI.
 cli-config-all-configured = Toutes les sections sont déjà configurées.
 cli-config-schema-current = La configuration est déjà à la version actuelle du schéma.
 cli-config-applied-ops = {$count} opération(s) appliquée(s) :
-cli-plugins-none = Aucun plugin installé.
-cli-plugins-installed = Plugins installés :
-cli-plugin-search-none = Aucun plugin ne correspond à '{$query}'.
-cli-plugin-search-results = Plugins correspondant à '{$query}' ({$count}) :
-cli-plugin-search-result = {$name} v{$version} — {$description}
-cli-plugin-no-description = (aucune description)
-cli-plugin-install-resolving = Résolution de '{$source}' depuis le registre de plugins...
-cli-plugin-installed-from = Plugin installé depuis {$source}
-cli-plugin-installed-name-version = Plugin {$name} v{$version} installé
-cli-plugin-config-entry-seeded = [[plugins.entries]] initialisé pour '{$name}'. Définissez les valeurs de configuration du plugin avec `zeroclaw config set plugins.entries.{$name}.config.<key>`.
-cli-plugin-config-entry-seed-skipped = avertissement : initialisation de l'entrée de configuration ignorée pour '{$name}' : la section [plugins] sur disque est mal formée. Réparez-la, ajoutez un bloc [[plugins.entries]] avec `name = "{$name}"`, puis définissez les valeurs avec `zeroclaw config set plugins.entries.{$name}.config.<key>`.
-cli-plugin-config-entry-seed-unaddressable = avertissement : initialisation de l'entrée de configuration ignorée pour '{$name}' : les noms de plugin contenant '.' ne peuvent pas être adressés par des chemins de configuration pointés (`config set` découpe sur '.'). Ajoutez manuellement un bloc [[plugins.entries]] avec `name = "{$name}"` au fichier de configuration.
 cli-config-section-degraded = avertissement : la section de configuration `{$section}` dans {$path} est mal formée et a été réinitialisée aux valeurs par défaut pour cette exécution. Les valeurs de cette section NE sont PAS appliquées. Exécutez `zeroclaw config migrate` pour voir l'erreur d'analyse, puis réparez le fichier.
-cli-plugin-removed = Plugin « {$name} » supprimé.
-cli-plugin-not-found = Plugin « {$name} » introuvable.
-cli-plugin-legacy-detected = Remarque : les plugins situés à un emplacement hérité ({$path}) ne sont pas chargés par l'agent. Exécutez `zeroclaw plugin migrate` pour les déplacer vers {$target}.
-cli-plugin-migrated = {$count} plugin(s) déplacé(s) de {$path} vers {$target}.
-cli-plugin-migrate-none = Rien à migrer.
 cli-estop-resume-done = Reprise après arrêt d'urgence terminée.
 cli-estop-engaged = Arrêt d'urgence engagé.
 cli-estop-status = État de l'arrêt d'urgence :
@@ -735,12 +667,6 @@ cli-config-secret-unset = {$path} n'est pas défini (secret chiffré)
 cli-config-updated = {$path} mis à jour.
 cli-config-review-hint = Exécutez `zeroclaw config list` pour vérifier, puis définissez les champs requis.
 cli-config-backed-up = Sauvegardé vers { $path }
-cli-plugin-name-version = Plugin : { $name } v{ $version }
-cli-plugin-description = Description : { $desc }
-cli-plugin-capabilities = Capacités : { $v }
-cli-plugin-permissions = Permissions : { $v }
-cli-plugin-wasm = WASM : { $path }
-cli-plugin-wasm-none = WASM : (plugin compétence uniquement)
 cli-estop-domains-none = {"  "}domain_blocks:  (aucun)
 cli-estop-domains = {"  "}domain_blocks:  { $v }
 cli-estop-tools-none = {"  "}tool_freeze:    (aucun)
@@ -767,10 +693,6 @@ cli-locales-installed = {$count} catalogue(s) installé(s) pour « {$locale} » 
 cli-browse-header = { $path } ({ $count } entrées)
 cli-browse-empty = (vide)
 cli-browse-file-bytes = { $name } ({ $bytes } octets)
-cli-hardware-feature-required = La découverte du matériel nécessite la fonctionnalité « hardware ».
-cli-hardware-feature-build = Compiler avec : cargo build --features hardware
-cli-hardware-unsupported-platform = La découverte USB du matériel n'est pas prise en charge sur cette plateforme.
-cli-hardware-supported-platforms = Plateformes prises en charge : Linux, macOS, Windows.
 cli-update-already-current = Déjà à jour (v{ $version }).
 cli-update-success = Mise à jour réussie vers la v{ $version } !
 cli-update-prebuilt-channel-note = Les mises à jour précompilées utilisent la distribution standard légère. Compilez depuis les sources avec `./install.sh --source --preset full`, `--features channels-full` ou une fonctionnalité `channel-*` spécifique pour Slack et les autres canaux non inclus dans cette distribution.
