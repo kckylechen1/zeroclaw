@@ -561,6 +561,42 @@ async fn create_memory_for_agent_rejects_typed_flags_on_non_sqlite_backend() {
     );
 }
 
+/// A per-agent `memory.backend` still naming a removed backend must fail
+/// explicitly, never fall back to another store.
+#[tokio::test]
+async fn create_memory_for_agent_rejects_retired_backends() {
+    use zeroclaw_config::multi_agent::{AgentMemoryConfig, MemoryBackendKind as ConfigBackend};
+    use zeroclaw_config::schema::{AliasedAgentConfig, Config};
+
+    for (backend, name) in [
+        (ConfigBackend::Postgres, "postgres"),
+        (ConfigBackend::Qdrant, "qdrant"),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let install_root = tmp.path();
+        let mut cfg = Config {
+            data_dir: install_root.join("data"),
+            config_path: install_root.join("config.toml"),
+            ..Config::default()
+        };
+        cfg.agents.insert(
+            "scribe".to_string(),
+            AliasedAgentConfig {
+                memory: AgentMemoryConfig { backend },
+                ..AliasedAgentConfig::default()
+            },
+        );
+        let err = match create_memory_for_agent(&cfg, "scribe", None).await {
+            Ok(_) => panic!("agent backend {name} was removed and must fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("agents.scribe.memory.backend") && err.contains(name),
+            "{name}: {err}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn create_memory_for_agent_allows_typed_flags_on_sqlite() {
     use zeroclaw_config::multi_agent::{AgentMemoryConfig, MemoryBackendKind as ConfigBackend};
@@ -849,33 +885,33 @@ fn factory_none_uses_noop_memory() {
     assert_eq!(mem.name(), "none");
 }
 
-#[cfg(not(feature = "memory-postgres"))]
 #[test]
-fn factory_postgres_without_feature_gives_clear_error() {
-    use zeroclaw_config::schema::PostgresStorageConfig;
-    let tmp = TempDir::new().unwrap();
-    let cfg = MemoryConfig {
-        backend: "postgres.default".into(),
-        ..MemoryConfig::default()
-    };
-    let storage = PostgresStorageConfig {
-        db_url: Some("postgres://placeholder".into()),
-        ..PostgresStorageConfig::default()
-    };
-    let error = create_memory_with_storage_and_routes(
-        &cfg,
-        &[],
-        ActiveStorage::Postgres(&storage),
-        tmp.path(),
-        None,
-        None,
-    )
-    .err()
-    .expect("backend=postgres without memory-postgres feature should fail");
-    assert!(
-        error.to_string().contains("memory-postgres"),
-        "error should mention the feature flag: {error}"
-    );
+fn factory_retired_backends_fail_explicitly_never_fall_back() {
+    // postgres and qdrant were removed. Selecting one (bare or aliased)
+    // must fail memory construction with an explicit error, never fall
+    // back to markdown or sqlite.
+    for backend in ["postgres", "qdrant", "postgres.default", "Qdrant.Prod"] {
+        let tmp = TempDir::new().unwrap();
+        let cfg = MemoryConfig {
+            backend: backend.into(),
+            ..MemoryConfig::default()
+        };
+        let error = create_memory_with_storage_and_routes(
+            &cfg,
+            &[],
+            ActiveStorage::None,
+            tmp.path(),
+            None,
+            None,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("memory.backend = {backend:?} must fail"));
+        let message = error.to_string();
+        assert!(
+            message.contains("was removed") && message.contains("memory.backend"),
+            "{backend}: {message}"
+        );
+    }
 }
 
 #[test]

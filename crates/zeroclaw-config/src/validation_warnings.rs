@@ -71,6 +71,18 @@ use serde::{Deserialize, Serialize};
 ///   `otel_*` field is still set. The exporter was removed; the backend loads
 ///   as `none` and the fields are ignored (see `RETIRED_CONFIG_VALUES` and
 ///   `RETIRED_CONFIG_FIELDS`).
+/// - `memory_backend_removed`: `memory.backend` or `agents.<a>.memory.backend`
+///   still selects the removed `postgres` or `qdrant` backend, or a
+///   `[storage.postgres]` / `[storage.qdrant]` section is still present. The
+///   config keeps loading, but selecting a removed backend fails memory
+///   construction with an explicit error; it never falls back to another
+///   store (see `RETIRED_CONFIG_VALUES`, `RETIRED_CONFIG_SURFACES` and
+///   [`RETIRED_MEMORY_BACKENDS`]).
+/// - `browser_native_backend_removed`: `browser.backend` still selects the
+///   removed WebDriver backend (`rust_native` / `native`) or a
+///   `browser.native_*` key is still set. Selecting it fails the browser tool
+///   with an explicit error (see `RETIRED_CONFIG_VALUES` and
+///   `RETIRED_CONFIG_FIELDS`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 pub struct ValidationWarning {
@@ -136,7 +148,14 @@ pub const RETIRED_CONFIG_SURFACES: &[(&str, &str)] = &[
     ("google_workspace", "saas_integration_removed"),
     ("cloud_ops", "saas_integration_removed"),
     ("project_intel", "saas_integration_removed"),
+    ("storage.postgres", "memory_backend_removed"),
+    ("storage.qdrant", "memory_backend_removed"),
 ];
+
+/// Memory backend names that were removed. The memory factory classifies
+/// them as retired and fails construction explicitly; the config value
+/// tombstones below report them at load.
+pub const RETIRED_MEMORY_BACKENDS: &[&str] = &["postgres", "qdrant"];
 
 /// True when `channel_type` names a channel whose `[channels.<type>]`
 /// section is registered in [`RETIRED_CONFIG_SURFACES`]. Load-time
@@ -217,6 +236,15 @@ pub const RETIRED_CONFIG_FIELDS: &[(&str, &str)] = &[
         "observability.otel_tool_io_max_chars",
         "otel_observability_removed",
     ),
+    ("browser.native_headless", "browser_native_backend_removed"),
+    (
+        "browser.native_webdriver_url",
+        "browser_native_backend_removed",
+    ),
+    (
+        "browser.native_chrome_path",
+        "browser_native_backend_removed",
+    ),
 ];
 
 /// Retired config VALUES: dotted path (one `*` wildcard segment allowed, as
@@ -227,16 +255,42 @@ pub const RETIRED_CONFIG_FIELDS: &[(&str, &str)] = &[
 /// does instead; [`retired_field_tombstones`] reports these hits alongside
 /// the retired fields, so every load path that already surfaces field
 /// tombstones surfaces value tombstones too.
-pub const RETIRED_CONFIG_VALUES: &[(&str, &[&str], &str)] = &[(
-    "observability.backend",
-    &["otel", "otlp", "opentelemetry"],
-    "otel_observability_removed",
-)];
+pub const RETIRED_CONFIG_VALUES: &[(&str, &[&str], &str)] = &[
+    (
+        "observability.backend",
+        &["otel", "otlp", "opentelemetry"],
+        "otel_observability_removed",
+    ),
+    (
+        "memory.backend",
+        RETIRED_MEMORY_BACKENDS,
+        "memory_backend_removed",
+    ),
+    (
+        "agents.*.memory.backend",
+        RETIRED_MEMORY_BACKENDS,
+        "memory_backend_removed",
+    ),
+    (
+        "browser.backend",
+        &["rust_native", "rust-native", "native"],
+        "browser_native_backend_removed",
+    ),
+];
 
 /// Why a retired field was removed, keyed by its stable warning code, for
 /// the human-readable half of the field tombstone warning.
 fn retired_field_reason(code: &str) -> &'static str {
     match code {
+        "memory_backend_removed" => {
+            "the postgres and qdrant memory backends were removed; selecting one \
+             fails memory construction instead of falling back to another store. \
+             Choose sqlite, lucid, markdown or none"
+        }
+        "browser_native_backend_removed" => {
+            "the rust_native (WebDriver) browser backend was removed; selecting it \
+             fails the browser tool. Use agent_browser, computer_use or auto"
+        }
         "otel_observability_removed" => {
             "the OpenTelemetry exporter was removed; the `log`, `verbose` and \
              `prometheus` sinks remain, and a retired backend value loads as `none`"

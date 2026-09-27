@@ -518,29 +518,39 @@ api_key = "sk-tts"
 // ─────────────────────────────────────────────────────────────
 
 #[test]
-fn t9_memory_qdrant_promoted_to_storage() {
-    let raw = r#"
-default_provider = "openai"
-default_model = "gpt-4o-mini"
-
-[memory]
-backend = "qdrant"
-auto_save = true
-
+fn t9_memory_qdrant_promoted_to_retired_storage_section() {
+    // The qdrant backend was removed. A V2 [memory.qdrant] block still folds
+    // into [storage.qdrant.default] (a retired surface that loads with a
+    // warning), and the config keeps loading; selecting the backend then
+    // fails explicitly at memory construction.
+    let v3 = migrate_v2(
+        r#"
 [memory.qdrant]
 url = "http://qdrant.example:6333"
 collection = "fold_test_memories"
 api_key = "qd-key"
-"#;
-    let cfg = migrate_to_current(raw).expect("V1 memory.qdrant migrates");
-    let qdrant = cfg
-        .storage
-        .qdrant
-        .get("default")
+"#,
+    );
+    let qdrant = v3
+        .get("storage")
+        .and_then(toml::Value::as_table)
+        .and_then(|s| s.get("qdrant"))
+        .and_then(toml::Value::as_table)
+        .and_then(|q| q.get("default"))
+        .and_then(toml::Value::as_table)
         .expect("[memory.qdrant] promoted to [storage.qdrant.default]");
-    assert_eq!(qdrant.url.as_deref(), Some("http://qdrant.example:6333"));
-    assert_eq!(qdrant.collection, "fold_test_memories");
-    assert_eq!(qdrant.api_key.as_deref(), Some("qd-key"));
+    assert_eq!(
+        qdrant.get("url").and_then(toml::Value::as_str),
+        Some("http://qdrant.example:6333")
+    );
+    let raw = toml::to_string(&v3).unwrap();
+    let warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.path == "storage.qdrant" && w.code == "memory_backend_removed"),
+        "{warnings:?}"
+    );
 }
 
 #[test]
@@ -598,7 +608,7 @@ sqlite_open_timeout_secs = 60
 }
 
 #[test]
-fn t10_storage_provider_postgres_promoted() {
+fn t10_storage_provider_postgres_still_loads() {
     let raw = r#"
 default_provider = "openai"
 default_model = "gpt-4o-mini"
@@ -610,20 +620,10 @@ schema = "zc_schema"
 table = "memories"
 connect_timeout_secs = 42
 "#;
-    let cfg = migrate_to_current(raw).expect("V1 storage.provider migrates");
-    let pg = cfg
-        .storage
-        .postgres
-        .get("default")
-        .expect("[storage.postgres.default] exists");
-    assert_eq!(
-        pg.db_url.as_deref(),
-        Some("postgres://u:p@localhost/zc"),
-        "V2 [storage.provider.config].db_url must land at V3 storage.postgres.default.db_url"
-    );
-    assert_eq!(pg.schema, "zc_schema");
-    assert_eq!(pg.table, "memories");
-    assert_eq!(pg.connect_timeout_secs, Some(42));
+    // The postgres backend was removed: the V1 section still migrates and
+    // the config still loads (the promoted [storage.postgres] table is a
+    // retired surface reported by the tombstone warning).
+    migrate_to_current(raw).expect("V1 storage.provider still migrates");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2117,6 +2117,86 @@ Authorization = "Bearer x"
 }
 
 #[test]
+fn v3_retired_memory_and_browser_backends_load_with_tombstone_warnings() {
+    // postgres/qdrant memory and the rust_native browser backend were
+    // removed. A config that still selects them must keep loading and
+    // report every retired selector; selecting them then fails explicitly
+    // at construction (memory factory / browser tool), never silently.
+    let mut value: toml::Value = toml::from_str(
+        &generate(CURRENT_SCHEMA_VERSION, &GenerateOptions::default())
+            .expect("generate current succeeds"),
+    )
+    .expect("generated V3 parses");
+    let root = value.as_table_mut().unwrap();
+    let retired: toml::Table = toml::from_str(
+        r#"
+[memory]
+backend = "postgres.work"
+
+[storage.postgres.work]
+db_url = "postgres://user:pw@host/db"
+vector_enabled = true
+
+[storage.qdrant.default]
+url = "http://localhost:6333"
+
+[browser]
+backend = "rust_native"
+native_headless = true
+native_webdriver_url = "http://127.0.0.1:9515"
+native_chrome_path = "/usr/bin/chromium"
+"#,
+    )
+    .unwrap();
+    for (key, table) in retired {
+        let slot = root
+            .entry(key)
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .unwrap();
+        for (k, v) in table.as_table().unwrap() {
+            match (slot.get_mut(k).and_then(toml::Value::as_table_mut), v) {
+                (Some(existing), toml::Value::Table(inner)) => existing.extend(inner.clone()),
+                _ => {
+                    slot.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    let raw = toml::to_string(&value).unwrap();
+
+    let cfg = migrate_to_current(&raw).expect("retired backends must not fail load");
+    assert_eq!(cfg.memory.backend, "postgres.work");
+
+    let mut warnings = zeroclaw_config::validation_warnings::retired_section_tombstones(&raw);
+    warnings.extend(zeroclaw_config::validation_warnings::retired_field_tombstones(&raw));
+    let mut hits: Vec<(&str, &str)> = warnings
+        .iter()
+        .map(|w| (w.path.as_str(), w.code.as_str()))
+        .collect();
+    hits.sort_unstable();
+    assert_eq!(
+        hits,
+        vec![
+            ("browser.backend", "browser_native_backend_removed"),
+            (
+                "browser.native_chrome_path",
+                "browser_native_backend_removed"
+            ),
+            ("browser.native_headless", "browser_native_backend_removed"),
+            (
+                "browser.native_webdriver_url",
+                "browser_native_backend_removed"
+            ),
+            ("memory.backend", "memory_backend_removed"),
+            ("storage.postgres", "memory_backend_removed"),
+            ("storage.qdrant", "memory_backend_removed"),
+        ],
+        "{warnings:?}"
+    );
+}
+
+#[test]
 fn v2_matrix_allowed_users_folds_and_allowed_rooms_stays() {
     let v3 = migrate_v2(
         r#"
@@ -2554,10 +2634,6 @@ fn generate_v3_covers_every_v3_top_level_section() {
     assert!(
         cfg.scheduler.enabled,
         "[scheduler] populated from V1 [cron] subsystem knobs"
-    );
-    assert!(
-        !cfg.storage.qdrant.is_empty(),
-        "[memory.qdrant] promoted to [storage.qdrant.default]"
     );
     assert!(
         !cfg.peer_groups.is_empty(),

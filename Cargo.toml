@@ -227,7 +227,6 @@ non_row_features = [
     "default-channels",
     "channels-full",
     "ci-all",
-    "fantoccini",
     "landlock",
     "metrics",
     "embedded-web",
@@ -361,7 +360,6 @@ channel-line = ["zeroclaw-channels/channel-line"]
 channel-feishu = ["channel-lark"]
 whatsapp-web = ["zeroclaw-channels/whatsapp-web", "zeroclaw-gateway?/whatsapp-web"]
 voice-wake = ["zeroclaw-channels/voice-wake"]
-memory-postgres = ["zeroclaw-memory/memory-postgres"]
 memory-tachi = ["zeroclaw-memory/tachi"]
 
 # Backends and platform flags — each forwards to ONE crate
@@ -371,11 +369,9 @@ observability-prometheus = [
 ]
 sandbox-landlock = ["zeroclaw-runtime/sandbox-landlock"]
 sandbox-bubblewrap = ["zeroclaw-runtime/sandbox-bubblewrap"]
-browser-native = ["zeroclaw-tools/browser-native"]
 embedded-web = ["zeroclaw-gateway/embedded-web"]
 
 # Backward-compatible aliases
-fantoccini = ["browser-native"]
 landlock = ["sandbox-landlock"]
 metrics = ["observability-prometheus"]
 
@@ -386,8 +382,6 @@ ci-all = [
     "channel-nostr", "channel-matrix", "whatsapp-web",
     "observability-prometheus",
     "sandbox-landlock", "sandbox-bubblewrap",
-    "browser-native",
-    "memory-postgres",
     "zeroclaw-channels/heavy-tests",
     "zeroclaw-runtime/heavy-tests",
 ]

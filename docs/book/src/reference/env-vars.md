@@ -86,7 +86,7 @@ For example, `[providers.models.anthropic.home] api_key = "sk-..."` lives at the
 
 ## Bridging ecosystem-default env vars
 
-The schema-mirror grammar is the canonical way to inject values, but `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` / `QDRANT_URL` / etc. are still common names in `.env` files and CI configs. One-line shell expansions point a schema-mirror name at the ecosystem-default value:
+The schema-mirror grammar is the canonical way to inject values, but `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` / etc. are still common names in `.env` files and CI configs. One-line shell expansions point a schema-mirror name at the ecosystem-default value:
 
 {{#env-var-bridge}}
 

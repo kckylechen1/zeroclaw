@@ -4350,18 +4350,6 @@ impl Config {
                 .get(alias)
                 .map(ActiveStorage::Sqlite)
                 .unwrap_or(ActiveStorage::None),
-            "postgres" => self
-                .storage
-                .postgres
-                .get(alias)
-                .map(ActiveStorage::Postgres)
-                .unwrap_or(ActiveStorage::None),
-            "qdrant" => self
-                .storage
-                .qdrant
-                .get(alias)
-                .map(ActiveStorage::Qdrant)
-                .unwrap_or(ActiveStorage::None),
             "markdown" => self
                 .storage
                 .markdown
@@ -4389,10 +4377,6 @@ pub enum ActiveStorage<'a> {
     None,
     /// SQLite storage instance.
     Sqlite(&'a SqliteStorageConfig),
-    /// PostgreSQL storage instance.
-    Postgres(&'a PostgresStorageConfig),
-    /// Qdrant storage instance.
-    Qdrant(&'a QdrantStorageConfig),
     /// Markdown directory storage instance.
     Markdown(&'a MarkdownStorageConfig),
     /// Lucid CLI sync instance.
@@ -4400,14 +4384,12 @@ pub enum ActiveStorage<'a> {
 }
 
 impl ActiveStorage<'_> {
-    /// Backend type name (`"sqlite"`, `"postgres"`, etc.); `"none"` for unconfigured.
+    /// Backend type name (`"sqlite"`, `"markdown"`, etc.); `"none"` for unconfigured.
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
             ActiveStorage::None => "none",
             ActiveStorage::Sqlite(_) => "sqlite",
-            ActiveStorage::Postgres(_) => "postgres",
-            ActiveStorage::Qdrant(_) => "qdrant",
             ActiveStorage::Markdown(_) => "markdown",
             ActiveStorage::Lucid(_) => "lucid",
         }
@@ -7039,21 +7021,12 @@ pub struct BrowserConfig {
     /// Browser session name (for agent-browser automation)
     #[serde(default)]
     pub session_name: Option<String>,
-    /// Browser automation backend: "agent_browser" | "rust_native" | "computer_use" | "auto"
+    /// Browser automation backend: "agent_browser" | "computer_use" | "auto"
     #[serde(default = "default_browser_backend")]
     pub backend: String,
     /// Show browser window for agent_browser backend. When unset, inherits AGENT_BROWSER_HEADED.
     #[serde(default)]
     pub headed: Option<bool>,
-    /// Headless mode for rust-native backend
-    #[serde(default = "default_true")]
-    pub native_headless: bool,
-    /// WebDriver endpoint URL for rust-native backend (e.g. `http://127.0.0.1:9515`)
-    #[serde(default = "default_browser_webdriver_url")]
-    pub native_webdriver_url: String,
-    /// Optional Chrome/Chromium executable path for rust-native backend
-    #[serde(default)]
-    pub native_chrome_path: Option<String>,
     /// Computer-use sidecar configuration
     #[serde(default)]
     #[nested]
@@ -7078,10 +7051,6 @@ fn default_browser_backend() -> String {
     "agent_browser".into()
 }
 
-fn default_browser_webdriver_url() -> String {
-    "http://127.0.0.1:9515".into()
-}
-
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
@@ -7090,9 +7059,6 @@ impl Default for BrowserConfig {
             session_name: None,
             backend: default_browser_backend(),
             headed: None,
-            native_headless: default_true(),
-            native_webdriver_url: default_browser_webdriver_url(),
-            native_chrome_path: None,
             computer_use: BrowserComputerUseConfig::default(),
             allowed_private_hosts: vec![],
         }
@@ -9114,7 +9080,7 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 /// Storage is a two-tier alias-keyed map: `[storage.<backend>.<alias>]`,
 /// parallel to `[providers.models.<type>.<alias>]`. Each backend has its own typed
 /// config struct. `MemoryConfig.backend` carries a dotted reference (`"sqlite.default"`,
-/// `"postgres.work"`) that resolves to one of these entries via
+/// `"markdown.notes"`) that resolves to one of these entries via
 /// [`Config::resolve_active_storage`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -9124,14 +9090,6 @@ pub struct StorageConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub sqlite: HashMap<String, SqliteStorageConfig>,
-    /// PostgreSQL storage instances (`[storage.postgres.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub postgres: HashMap<String, PostgresStorageConfig>,
-    /// Qdrant storage instances (`[storage.qdrant.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub qdrant: HashMap<String, QdrantStorageConfig>,
     /// Markdown storage instances (`[storage.markdown.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -9154,80 +9112,6 @@ pub struct SqliteStorageConfig {
     /// Maximum seconds to wait when opening the DB if it's locked.
     /// `None` waits indefinitely. Recommended max: 300.
     pub open_timeout_secs: Option<u64>,
-}
-
-/// PostgreSQL storage backend (`[storage.postgres.<alias>]`).
-///
-/// Holds connection parameters AND pgvector settings on one alias-keyed
-/// entry; previously these lived in two separate sections.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "storage_postgres"]
-#[serde(default)]
-pub struct PostgresStorageConfig {
-    /// Connection URL (e.g. `"postgres://user:pass@host/db"`).
-    /// Accepts legacy aliases: dbURL, database_url, databaseUrl.
-    #[serde(alias = "dbURL", alias = "database_url", alias = "databaseUrl")]
-    #[secret]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub db_url: Option<String>,
-    /// Database schema for the memory table.
-    pub schema: String,
-    /// Table name for memory entries.
-    pub table: String,
-    /// Optional connection timeout in seconds.
-    pub connect_timeout_secs: Option<u64>,
-    /// Enable pgvector extension for hybrid vector+keyword recall.
-    pub vector_enabled: bool,
-    /// Vector dimensions for pgvector embeddings.
-    pub vector_dimensions: usize,
-}
-
-impl Default for PostgresStorageConfig {
-    fn default() -> Self {
-        Self {
-            db_url: None,
-            schema: default_storage_schema(),
-            table: default_storage_table(),
-            connect_timeout_secs: None,
-            vector_enabled: false,
-            vector_dimensions: default_pgvector_dimensions(),
-        }
-    }
-}
-
-/// Qdrant vector database backend (`[storage.qdrant.<alias>]`).
-///
-/// URL, collection, and API key are typed config values. Use schema-mirror env
-/// overrides such as `ZEROCLAW_storage__qdrant__<alias>__url=...` for runtime
-/// env injection.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "storage_qdrant"]
-#[serde(default)]
-pub struct QdrantStorageConfig {
-    /// Qdrant server URL (e.g. `"http://localhost:6333"`).
-    /// Use `ZEROCLAW_storage__qdrant__<alias>__url=...` for env injection.
-    pub url: Option<String>,
-    /// Collection name for storing memories.
-    /// Use `ZEROCLAW_storage__qdrant__<alias>__collection=...` for env injection.
-    pub collection: String,
-    /// API key for Qdrant Cloud or secured instances.
-    /// Use `ZEROCLAW_storage__qdrant__<alias>__api_key=...` for env injection.
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub api_key: Option<String>,
-}
-
-impl Default for QdrantStorageConfig {
-    fn default() -> Self {
-        Self {
-            url: None,
-            collection: default_qdrant_collection(),
-            api_key: None,
-        }
-    }
 }
 
 /// Markdown directory storage (`[storage.markdown.<alias>]`).
@@ -9267,18 +9151,6 @@ pub struct LucidStorageConfig {
     pub store_timeout_ms: Option<u64>,
 }
 
-fn default_storage_schema() -> String {
-    "public".into()
-}
-
-fn default_storage_table() -> String {
-    "memories".into()
-}
-
-fn default_qdrant_collection() -> String {
-    "zeroclaw_memories".into()
-}
-
 /// Search strategy for memory recall.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, zeroclaw_macros::ConfigEnum)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -9305,7 +9177,7 @@ pub enum SearchMode {
 #[allow(clippy::struct_excessive_bools)]
 pub struct MemoryConfig {
     /// Dotted reference to the active storage instance: `<backend>.<alias>`
-    /// (e.g. `"sqlite.default"`, `"postgres.work"`). Resolves through
+    /// (e.g. `"sqlite.default"`, `"markdown.notes"`). Resolves through
     /// `Config.storage.<backend>.<alias>` at runtime. Bare backend names
     /// (`"sqlite"`) are treated as `"<backend>.default"`. Set to `"none"` to
     /// disable persistence entirely.
@@ -9502,8 +9374,8 @@ pub struct MemoryConfig {
     #[serde(default)]
     #[nested]
     pub types: MemoryTypesConfig,
-    // Backend-specific config fields (sqlite_open_timeout_secs, qdrant.*,
-    // postgres.*) live on `[storage.<backend>.<alias>]`. The `backend` field
+    // Backend-specific config fields (sqlite_open_timeout_secs, lucid.*)
+    // live on `[storage.<backend>.<alias>]`. The `backend` field
     // carries a dotted alias reference and the runtime looks up the typed
     // config via `Config::resolve_active_storage`.
 }
@@ -9747,10 +9619,6 @@ pub enum MemoryEvictOrder {
 
 fn default_audit_retention_days() -> u32 {
     30
-}
-
-fn default_pgvector_dimensions() -> usize {
-    1536
 }
 
 fn default_embedding_provider() -> String {

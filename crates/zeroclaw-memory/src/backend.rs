@@ -2,10 +2,11 @@
 pub enum MemoryBackendKind {
     Sqlite,
     Lucid,
-    Postgres,
-    Qdrant,
     Markdown,
     None,
+    /// A backend that was removed (`postgres`, `qdrant`). Selecting it is an
+    /// explicit construction error, never a silent fallback.
+    Retired(&'static str),
     #[cfg(feature = "tachi")]
     Tachi,
     Unknown,
@@ -49,24 +50,6 @@ const MARKDOWN_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
     optional_dependency: false,
 };
 
-const POSTGRES_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
-    key: "postgres",
-    label: "PostgreSQL — remote durable storage via [storage.model_provider.config]",
-    auto_save_default: true,
-    uses_sqlite_hygiene: false,
-    sqlite_based: false,
-    optional_dependency: true,
-};
-
-const QDRANT_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
-    key: "qdrant",
-    label: "Qdrant — vector database for semantic search via [memory.qdrant]",
-    auto_save_default: true,
-    uses_sqlite_hygiene: false,
-    sqlite_based: false,
-    optional_dependency: false,
-};
-
 const NONE_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
     key: "none",
     label: "None — disable persistent memory",
@@ -95,10 +78,24 @@ const CUSTOM_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
     optional_dependency: false,
 };
 
-const SELECTABLE_MEMORY_BACKENDS: [MemoryBackendProfile; 5] = [
+const RETIRED_PROFILE: MemoryBackendProfile = MemoryBackendProfile {
+    key: "retired",
+    label: "Removed backend — select sqlite, lucid, markdown or none",
+    auto_save_default: false,
+    uses_sqlite_hygiene: false,
+    sqlite_based: false,
+    optional_dependency: false,
+};
+
+/// Backend names that were removed. Selecting one fails memory construction
+/// with an explicit error instead of falling back to another backend. The
+/// list lives with the config retirement tables so load-time warnings and
+/// construction-time errors cannot drift.
+pub use zeroclaw_config::validation_warnings::RETIRED_MEMORY_BACKENDS;
+
+const SELECTABLE_MEMORY_BACKENDS: [MemoryBackendProfile; 4] = [
     SQLITE_PROFILE,
     LUCID_PROFILE,
-    POSTGRES_PROFILE,
     MARKDOWN_PROFILE,
     NONE_PROFILE,
 ];
@@ -115,13 +112,16 @@ pub fn classify_memory_backend(backend: &str) -> MemoryBackendKind {
     match backend {
         "sqlite" => MemoryBackendKind::Sqlite,
         "lucid" => MemoryBackendKind::Lucid,
-        "postgres" => MemoryBackendKind::Postgres,
-        "qdrant" => MemoryBackendKind::Qdrant,
         "markdown" => MemoryBackendKind::Markdown,
         "none" => MemoryBackendKind::None,
         #[cfg(feature = "tachi")]
         "tachi" => MemoryBackendKind::Tachi,
-        _ => MemoryBackendKind::Unknown,
+        other => RETIRED_MEMORY_BACKENDS
+            .iter()
+            .find(|retired| **retired == other)
+            .map_or(MemoryBackendKind::Unknown, |retired| {
+                MemoryBackendKind::Retired(retired)
+            }),
     }
 }
 
@@ -129,8 +129,7 @@ pub fn memory_backend_profile(backend: &str) -> MemoryBackendProfile {
     match classify_memory_backend(backend) {
         MemoryBackendKind::Sqlite => SQLITE_PROFILE,
         MemoryBackendKind::Lucid => LUCID_PROFILE,
-        MemoryBackendKind::Postgres => POSTGRES_PROFILE,
-        MemoryBackendKind::Qdrant => QDRANT_PROFILE,
+        MemoryBackendKind::Retired(_) => RETIRED_PROFILE,
         MemoryBackendKind::Markdown => MARKDOWN_PROFILE,
         MemoryBackendKind::None => NONE_PROFILE,
         #[cfg(feature = "tachi")]
@@ -148,10 +147,6 @@ mod tests {
         assert_eq!(classify_memory_backend("sqlite"), MemoryBackendKind::Sqlite);
         assert_eq!(classify_memory_backend("lucid"), MemoryBackendKind::Lucid);
         assert_eq!(
-            classify_memory_backend("postgres"),
-            MemoryBackendKind::Postgres
-        );
-        assert_eq!(
             classify_memory_backend("markdown"),
             MemoryBackendKind::Markdown
         );
@@ -166,21 +161,11 @@ mod tests {
     #[test]
     fn selectable_backends_are_ordered_for_onboarding() {
         let backends = selectable_memory_backends();
-        assert_eq!(backends.len(), 5);
+        assert_eq!(backends.len(), 4);
         assert_eq!(backends[0].key, "sqlite");
         assert_eq!(backends[1].key, "lucid");
-        assert_eq!(backends[2].key, "postgres");
-        assert_eq!(backends[3].key, "markdown");
-        assert_eq!(backends[4].key, "none");
-    }
-
-    #[test]
-    fn postgres_profile_is_optional_non_sqlite_backend() {
-        let profile = memory_backend_profile("postgres");
-        assert!(!profile.sqlite_based);
-        assert!(profile.optional_dependency);
-        assert!(!profile.uses_sqlite_hygiene);
-        assert!(profile.auto_save_default);
+        assert_eq!(backends[2].key, "markdown");
+        assert_eq!(backends[3].key, "none");
     }
 
     #[test]
@@ -200,21 +185,24 @@ mod tests {
     }
 
     #[test]
-    fn classify_recognizes_qdrant_even_though_it_is_not_selectable() {
-        // Qdrant is a known backend kind but is omitted from the onboarding
-        // list, so it was missing from the classify coverage above.
-        assert_eq!(classify_memory_backend("qdrant"), MemoryBackendKind::Qdrant);
-        assert!(
-            !selectable_memory_backends()
-                .iter()
-                .any(|b| b.key == "qdrant"),
-            "qdrant is configurable but not an onboarding option"
-        );
+    fn classify_marks_removed_backends_as_retired_not_unknown() {
+        // A retired name must never classify as Unknown: Unknown falls back
+        // to markdown, and a removed backend must fail explicitly instead.
+        for name in RETIRED_MEMORY_BACKENDS {
+            assert_eq!(
+                classify_memory_backend(name),
+                MemoryBackendKind::Retired(name)
+            );
+            assert!(
+                !selectable_memory_backends().iter().any(|b| b.key == *name),
+                "{name} is removed and must not be offered"
+            );
+        }
     }
 
     #[test]
     fn each_known_backend_profile_carries_a_matching_key() {
-        for name in ["sqlite", "lucid", "postgres", "qdrant", "markdown", "none"] {
+        for name in ["sqlite", "lucid", "markdown", "none"] {
             assert_eq!(
                 memory_backend_profile(name).key,
                 name,

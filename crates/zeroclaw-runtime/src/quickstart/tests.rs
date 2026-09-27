@@ -144,28 +144,28 @@ fn apply_fresh_provider(
 }
 
 #[test]
-fn existing_postgres_memory_storage_ref_is_accepted() {
+fn existing_markdown_memory_storage_ref_is_accepted() {
     let mut cfg = Config::default();
-    cfg.storage.postgres.insert(
+    cfg.storage.markdown.insert(
         "default".into(),
-        zeroclaw_config::schema::PostgresStorageConfig::default(),
+        zeroclaw_config::schema::MarkdownStorageConfig::default(),
     );
-    let choice = SelectorChoice::Existing("postgres.default".to_string());
+    let choice = SelectorChoice::Existing("markdown.default".to_string());
     let mut errors = Vec::new();
 
     let applied = apply_memory(&mut cfg, &choice, &mut errors, None);
 
     assert!(errors.is_empty(), "apply_memory errors: {errors:?}");
-    assert_eq!(applied.as_deref(), Some("postgres.default"));
-    assert_eq!(cfg.memory.backend, "postgres.default");
+    assert_eq!(applied.as_deref(), Some("markdown.default"));
+    assert_eq!(cfg.memory.backend, "markdown.default");
 }
 
 #[test]
 fn memory_storage_refs_from_snapshot_are_accepted() {
     let mut cfg = Config::default();
-    cfg.storage.postgres.insert(
+    cfg.storage.markdown.insert(
         "default".into(),
-        zeroclaw_config::schema::PostgresStorageConfig::default(),
+        zeroclaw_config::schema::MarkdownStorageConfig::default(),
     );
     let snapshot = snapshot_state(&cfg);
 
@@ -173,8 +173,8 @@ fn memory_storage_refs_from_snapshot_are_accepted() {
         snapshot
             .storage
             .iter()
-            .any(|ref_| ref_ == "postgres.default"),
-        "snapshot should expose configured postgres storage: {:?}",
+            .any(|ref_| ref_ == "markdown.default"),
+        "snapshot should expose configured markdown storage: {:?}",
         snapshot.storage
     );
     for reference in snapshot.storage {

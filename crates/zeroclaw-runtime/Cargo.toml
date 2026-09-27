@@ -106,7 +106,6 @@ sandbox-landlock = ["dep:landlock"]
 schema-export = ["dep:schemars", "zeroclaw-config/schema-export", "zeroclaw-sop-graph/schema-export"]
 
 
-browser-native = []
 # Concrete integration families from zeroclaw-tools. Default-on so this
 # crate's standalone build and test surface are unchanged; the root package
 # consumes this crate with default-features = false and forwards these from

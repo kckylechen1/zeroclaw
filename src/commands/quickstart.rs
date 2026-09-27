@@ -604,22 +604,22 @@ pub async fn run_quickstart_cli(
                 }
             }
             Action::Memory => {
-                let kinds: [MemoryChoice; 6] = [
+                let kinds: [MemoryChoice; 4] = [
                     MemoryChoice::Sqlite,
                     MemoryChoice::Markdown,
-                    MemoryChoice::Postgres,
-                    MemoryChoice::Qdrant,
                     MemoryChoice::Lucid,
                     MemoryChoice::None,
                 ];
+                // The retired postgres/qdrant variants only parse for old
+                // configs and are never offered.
                 #[allow(clippy::no_effect_underscore_binding)]
                 let _exhaustive = |k: MemoryChoice| match k {
                     MemoryChoice::Sqlite
                     | MemoryChoice::Markdown
-                    | MemoryChoice::Postgres
-                    | MemoryChoice::Qdrant
                     | MemoryChoice::Lucid
-                    | MemoryChoice::None => (),
+                    | MemoryChoice::None
+                    | MemoryChoice::Postgres
+                    | MemoryChoice::Qdrant => (),
                 };
                 let labels: Vec<String> = kinds
                     .iter()

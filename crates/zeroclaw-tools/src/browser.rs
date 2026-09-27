@@ -61,21 +61,12 @@ pub struct BrowserTool {
     session_name: Option<String>,
     backend: String,
     headed: Option<bool>,
-    #[allow(dead_code)] // read only with browser-native feature
-    native_headless: bool,
-    #[allow(dead_code)]
-    native_webdriver_url: String,
-    #[allow(dead_code)]
-    native_chrome_path: Option<String>,
     computer_use: ComputerUseConfig,
-    #[cfg(feature = "browser-native")]
-    native_state: tokio::sync::Mutex<native_backend::NativeBrowserState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserBackendKind {
     AgentBrowser,
-    RustNative,
     ComputerUse,
     Auto,
 }
@@ -83,7 +74,6 @@ enum BrowserBackendKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResolvedBackend {
     AgentBrowser,
-    RustNative,
     ComputerUse,
 }
 
@@ -92,11 +82,23 @@ impl BrowserBackendKind {
         let key = raw.trim().to_ascii_lowercase().replace('-', "_");
         match key.as_str() {
             "agent_browser" | "agentbrowser" => Ok(Self::AgentBrowser),
-            "rust_native" | "native" => Ok(Self::RustNative),
             "computer_use" | "computeruse" => Ok(Self::ComputerUse),
             "auto" => Ok(Self::Auto),
+            "rust_native" | "native" => {
+                ::zeroclaw_log::record!(
+                    WARN,
+                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
+                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({ "backend": raw })),
+                    "browser backend 'rust_native' was removed"
+                );
+                anyhow::bail!(
+                    "browser.backend '{raw}' is no longer supported: the rust_native (WebDriver) \
+                     backend was removed. Use 'agent_browser', 'computer_use', or 'auto'"
+                )
+            }
             _ => anyhow::bail!(
-                "Unsupported browser backend '{raw}'. Use 'agent_browser', 'rust_native', 'computer_use', or 'auto'"
+                "Unsupported browser backend '{raw}'. Use 'agent_browser', 'computer_use', or 'auto'"
             ),
         }
     }
@@ -104,7 +106,6 @@ impl BrowserBackendKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::AgentBrowser => "agent_browser",
-            Self::RustNative => "rust_native",
             Self::ComputerUse => "computer_use",
             Self::Auto => "auto",
         }
@@ -209,9 +210,6 @@ impl BrowserTool {
             session_name,
             "agent_browser".into(),
             None,
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
             ComputerUseConfig::default(),
             Vec::new(),
         )
@@ -224,9 +222,6 @@ impl BrowserTool {
         session_name: Option<String>,
         backend: String,
         headed: Option<bool>,
-        native_headless: bool,
-        native_webdriver_url: String,
-        native_chrome_path: Option<String>,
         computer_use: ComputerUseConfig,
         allowed_private_hosts: Vec<String>,
     ) -> anyhow::Result<Self> {
@@ -243,12 +238,7 @@ impl BrowserTool {
             session_name,
             backend,
             headed,
-            native_headless,
-            native_webdriver_url,
-            native_chrome_path,
             computer_use,
-            #[cfg(feature = "browser-native")]
-            native_state: tokio::sync::Mutex::new(native_backend::NativeBrowserState::default()),
         })
     }
 
@@ -276,25 +266,6 @@ impl BrowserTool {
 
     fn configured_backend(&self) -> anyhow::Result<BrowserBackendKind> {
         BrowserBackendKind::parse(&self.backend)
-    }
-
-    fn rust_native_compiled() -> bool {
-        cfg!(feature = "browser-native")
-    }
-
-    fn rust_native_available(&self) -> bool {
-        #[cfg(feature = "browser-native")]
-        {
-            native_backend::NativeBrowserState::is_available(
-                self.native_headless,
-                &self.native_webdriver_url,
-                self.native_chrome_path.as_deref(),
-            )
-        }
-        #[cfg(not(feature = "browser-native"))]
-        {
-            false
-        }
     }
 
     fn computer_use_endpoint_url(&self) -> anyhow::Result<reqwest::Url> {
@@ -375,19 +346,6 @@ impl BrowserTool {
                     )
                 }
             }
-            BrowserBackendKind::RustNative => {
-                if !Self::rust_native_compiled() {
-                    anyhow::bail!(
-                        "browser.backend='rust_native' requires build feature 'browser-native'"
-                    );
-                }
-                if !self.rust_native_available() {
-                    anyhow::bail!(
-                        "Rust-native browser backend is enabled but WebDriver endpoint is unreachable. Set browser.native_webdriver_url and start a compatible driver"
-                    );
-                }
-                Ok(ResolvedBackend::RustNative)
-            }
             BrowserBackendKind::ComputerUse => {
                 if !self.computer_use_available()? {
                     anyhow::bail!(
@@ -397,9 +355,6 @@ impl BrowserTool {
                 Ok(ResolvedBackend::ComputerUse)
             }
             BrowserBackendKind::Auto => {
-                if Self::rust_native_compiled() && self.rust_native_available() {
-                    return Ok(ResolvedBackend::RustNative);
-                }
                 if Self::is_agent_browser_available().await {
                     return Ok(ResolvedBackend::AgentBrowser);
                 }
@@ -410,25 +365,14 @@ impl BrowserTool {
                     Err(err) => Some(err.to_string()),
                 };
 
-                if Self::rust_native_compiled() {
-                    if let Some(err) = computer_use_err {
-                        anyhow::bail!(
-                            "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use invalid: {err})"
-                        );
-                    }
-                    anyhow::bail!(
-                        "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use sidecar unreachable)"
-                    )
-                }
-
                 if let Some(err) = computer_use_err {
                     anyhow::bail!(
-                        "browser.backend='auto' needs agent-browser CLI, browser-native, or valid computer-use sidecar (error: {err})"
+                        "browser.backend='auto' needs agent-browser CLI or a valid computer-use sidecar (error: {err})"
                     );
                 }
 
                 anyhow::bail!(
-                    "browser.backend='auto' needs agent-browser CLI, browser-native, or computer-use sidecar"
+                    "browser.backend='auto' needs agent-browser CLI or a computer-use sidecar"
                 )
             }
         }
@@ -716,62 +660,6 @@ impl BrowserTool {
                 let resp = self.run_command(&args).await?;
                 self.to_result(resp)
             }
-        }
-    }
-
-    #[allow(clippy::unused_async)]
-    async fn execute_rust_native_action(
-        &self,
-        action: BrowserAction,
-    ) -> anyhow::Result<ToolResult> {
-        #[cfg(feature = "browser-native")]
-        {
-            let mut state = self.native_state.lock().await;
-
-            let first_attempt = state
-                .execute_action(
-                    action.clone(),
-                    self.native_headless,
-                    &self.native_webdriver_url,
-                    self.native_chrome_path.as_deref(),
-                )
-                .await;
-
-            let output = match first_attempt {
-                Ok(output) => output,
-                Err(err) => {
-                    if !is_recoverable_rust_native_error(&err) {
-                        return Err(err);
-                    }
-
-                    state.reset_session().await;
-                    state
-                        .execute_action(
-                            action,
-                            self.native_headless,
-                            &self.native_webdriver_url,
-                            self.native_chrome_path.as_deref(),
-                        )
-                        .await
-                        .with_context(|| "rust_native backend retry after session reset failed")?
-                }
-            };
-
-            Ok(ToolResult {
-                success: true,
-                output: serde_json::to_string_pretty(&output)
-                    .unwrap_or_default()
-                    .into(),
-                error: None,
-            })
-        }
-
-        #[cfg(not(feature = "browser-native"))]
-        {
-            let _ = action;
-            anyhow::bail!(
-                "Rust-native browser backend is not compiled. Rebuild with --features browser-native"
-            )
         }
     }
 
@@ -1273,7 +1161,6 @@ impl BrowserTool {
 
         match backend {
             ResolvedBackend::AgentBrowser => self.execute_agent_browser_action(action).await,
-            ResolvedBackend::RustNative => self.execute_rust_native_action(action).await,
             ResolvedBackend::ComputerUse => anyhow::bail!(
                 "Internal error: computer_use backend must be handled before BrowserAction parsing"
             ),
@@ -1498,775 +1385,6 @@ impl Tool for BrowserTool {
         };
 
         self.execute_action(action, backend).await
-    }
-}
-
-#[cfg(feature = "browser-native")]
-mod native_backend {
-    use super::BrowserAction;
-    use anyhow::{Context, Result};
-    use base64::Engine;
-    use fantoccini::actions::{InputSource, MouseActions, PointerAction};
-    use fantoccini::key::Key;
-    use fantoccini::{Client, ClientBuilder, Locator};
-    use serde_json::{Map, Value, json};
-    use std::net::{TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-
-    #[derive(Default)]
-    pub struct NativeBrowserState {
-        client: Option<Client>,
-    }
-
-    impl NativeBrowserState {
-        pub fn is_available(
-            _headless: bool,
-            webdriver_url: &str,
-            _chrome_path: Option<&str>,
-        ) -> bool {
-            webdriver_endpoint_reachable(webdriver_url, Duration::from_millis(500))
-        }
-
-        #[allow(clippy::too_many_lines)]
-        pub async fn execute_action(
-            &mut self,
-            action: BrowserAction,
-            headless: bool,
-            webdriver_url: &str,
-            chrome_path: Option<&str>,
-        ) -> Result<Value> {
-            match action {
-                BrowserAction::Open { url } => {
-                    self.ensure_session(headless, webdriver_url, chrome_path)
-                        .await?;
-                    let client = self.active_client()?;
-                    client
-                        .goto(&url)
-                        .await
-                        .with_context(|| format!("Failed to open URL: {url}"))?;
-                    let current_url = client
-                        .current_url()
-                        .await
-                        .context("Failed to read current URL after navigation")?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "open",
-                        "url": current_url.as_str(),
-                    }))
-                }
-                BrowserAction::Snapshot {
-                    interactive_only,
-                    compact,
-                    depth,
-                } => {
-                    let client = self.active_client()?;
-                    let snapshot = client
-                        .execute(
-                            &snapshot_script(interactive_only, compact, depth.map(i64::from)),
-                            vec![],
-                        )
-                        .await
-                        .context("Failed to evaluate snapshot script")?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "snapshot",
-                        "data": snapshot,
-                    }))
-                }
-                BrowserAction::Click { selector } => {
-                    let client = self.active_client()?;
-                    find_element(client, &selector).await?.click().await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "click",
-                        "selector": selector,
-                    }))
-                }
-                BrowserAction::Fill { selector, value } => {
-                    let client = self.active_client()?;
-                    let element = find_element(client, &selector).await?;
-                    let _ = element.clear().await;
-                    element.send_keys(&value).await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "fill",
-                        "selector": selector,
-                    }))
-                }
-                BrowserAction::Type { selector, text } => {
-                    let client = self.active_client()?;
-                    find_element(client, &selector)
-                        .await?
-                        .send_keys(&text)
-                        .await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "type",
-                        "selector": selector,
-                        "typed": text.len(),
-                    }))
-                }
-                BrowserAction::GetText { selector } => {
-                    let client = self.active_client()?;
-                    let text = find_element(client, &selector).await?.text().await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "get_text",
-                        "selector": selector,
-                        "text": text,
-                    }))
-                }
-                BrowserAction::GetTitle => {
-                    let client = self.active_client()?;
-                    let title = client.title().await.context("Failed to read page title")?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "get_title",
-                        "title": title,
-                    }))
-                }
-                BrowserAction::GetUrl => {
-                    let client = self.active_client()?;
-                    let url = client
-                        .current_url()
-                        .await
-                        .context("Failed to read current URL")?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "get_url",
-                        "url": url.as_str(),
-                    }))
-                }
-                BrowserAction::Screenshot { path, full_page } => {
-                    let client = self.active_client()?;
-                    let png = client
-                        .screenshot()
-                        .await
-                        .context("Failed to capture screenshot")?;
-                    let mut payload = json!({
-                        "backend": "rust_native",
-                        "action": "screenshot",
-                        "full_page": full_page,
-                        "bytes": png.len(),
-                    });
-
-                    if let Some(path_str) = path {
-                        tokio::fs::write(&path_str, &png)
-                            .await
-                            .with_context(|| format!("Failed to write screenshot to {path_str}"))?;
-                        payload["path"] = Value::String(path_str);
-                    } else {
-                        payload["png_base64"] =
-                            Value::String(base64::engine::general_purpose::STANDARD.encode(&png));
-                    }
-
-                    Ok(payload)
-                }
-                BrowserAction::Wait { selector, ms, text } => {
-                    let client = self.active_client()?;
-                    if let Some(sel) = selector.as_ref() {
-                        wait_for_selector(client, sel).await?;
-                        Ok(json!({
-                            "backend": "rust_native",
-                            "action": "wait",
-                            "selector": sel,
-                        }))
-                    } else if let Some(duration_ms) = ms {
-                        tokio::time::sleep(Duration::from_millis(duration_ms)).await;
-                        Ok(json!({
-                            "backend": "rust_native",
-                            "action": "wait",
-                            "ms": duration_ms,
-                        }))
-                    } else if let Some(needle) = text.as_ref() {
-                        let xpath = xpath_contains_text(needle);
-                        client
-                            .wait()
-                            .for_element(Locator::XPath(&xpath))
-                            .await
-                            .with_context(|| {
-                                format!("Timed out waiting for text to appear: {needle}")
-                            })?;
-                        Ok(json!({
-                            "backend": "rust_native",
-                            "action": "wait",
-                            "text": needle,
-                        }))
-                    } else {
-                        tokio::time::sleep(Duration::from_millis(250)).await;
-                        Ok(json!({
-                            "backend": "rust_native",
-                            "action": "wait",
-                            "ms": 250,
-                        }))
-                    }
-                }
-                BrowserAction::Press { key } => {
-                    let client = self.active_client()?;
-                    let key_input = webdriver_key(&key);
-                    match client.active_element().await {
-                        Ok(element) => {
-                            element.send_keys(&key_input).await?;
-                        }
-                        Err(_) => {
-                            find_element(client, "body")
-                                .await?
-                                .send_keys(&key_input)
-                                .await?;
-                        }
-                    }
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "press",
-                        "key": key,
-                    }))
-                }
-                BrowserAction::Hover { selector } => {
-                    let client = self.active_client()?;
-                    let element = find_element(client, &selector).await?;
-                    hover_element(client, &element).await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "hover",
-                        "selector": selector,
-                    }))
-                }
-                BrowserAction::Scroll { direction, pixels } => {
-                    let client = self.active_client()?;
-                    let amount = i64::from(pixels.unwrap_or(600));
-                    let (dx, dy) = match direction.as_str() {
-                        "up" => (0, -amount),
-                        "down" => (0, amount),
-                        "left" => (-amount, 0),
-                        "right" => (amount, 0),
-                        _ => anyhow::bail!(
-                            "Unsupported scroll direction '{direction}'. Use up/down/left/right"
-                        ),
-                    };
-
-                    let position = client
-                        .execute(
-                            "window.scrollBy(arguments[0], arguments[1]); return { x: window.scrollX, y: window.scrollY };",
-                            vec![json!(dx), json!(dy)],
-                        )
-                        .await
-                        .context("Failed to execute scroll script")?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "scroll",
-                        "position": position,
-                    }))
-                }
-                BrowserAction::IsVisible { selector } => {
-                    let client = self.active_client()?;
-                    let visible = find_element(client, &selector)
-                        .await?
-                        .is_displayed()
-                        .await?;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "is_visible",
-                        "selector": selector,
-                        "visible": visible,
-                    }))
-                }
-                BrowserAction::Close => {
-                    self.reset_session().await;
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "close",
-                        "closed": true,
-                    }))
-                }
-                BrowserAction::Find {
-                    by,
-                    value,
-                    action,
-                    fill_value,
-                } => {
-                    let client = self.active_client()?;
-                    let selector = selector_for_find(&by, &value);
-                    let element = find_element(client, &selector).await?;
-
-                    let payload = match action.as_str() {
-                        "click" => {
-                            element.click().await?;
-                            json!({"result": "clicked"})
-                        }
-                        "fill" => {
-                            let fill = fill_value.ok_or_else(|| {
-                                ::zeroclaw_log::record!(
-                                    WARN,
-                                    ::zeroclaw_log::Event::new(
-                                        module_path!(),
-                                        ::zeroclaw_log::Action::Reject
-                                    )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                                    .with_attrs(
-                                        ::serde_json::json!({
-                                            "find_action": "fill",
-                                            "missing": "fill_value",
-                                        })
-                                    ),
-                                    "browser: fill action requires fill_value"
-                                );
-                                anyhow::Error::msg("find_action='fill' requires fill_value")
-                            })?;
-                            let _ = element.clear().await;
-                            element.send_keys(&fill).await?;
-                            json!({"result": "filled", "typed": fill.len()})
-                        }
-                        "text" => {
-                            let text = element.text().await?;
-                            json!({"result": "text", "text": text})
-                        }
-                        "hover" => {
-                            hover_element(client, &element).await?;
-                            json!({"result": "hovered"})
-                        }
-                        "check" => {
-                            let checked_before = element_checked(&element).await?;
-                            if !checked_before {
-                                element.click().await?;
-                            }
-                            let checked_after = element_checked(&element).await?;
-                            json!({
-                                "result": "checked",
-                                "checked_before": checked_before,
-                                "checked_after": checked_after,
-                            })
-                        }
-                        _ => anyhow::bail!(
-                            "Unsupported find_action '{action}'. Use click/fill/text/hover/check"
-                        ),
-                    };
-
-                    Ok(json!({
-                        "backend": "rust_native",
-                        "action": "find",
-                        "by": by,
-                        "value": value,
-                        "selector": selector,
-                        "data": payload,
-                    }))
-                }
-            }
-        }
-
-        pub async fn reset_session(&mut self) {
-            if let Some(client) = self.client.take() {
-                let _ = client.close().await;
-            }
-        }
-
-        async fn ensure_session(
-            &mut self,
-            headless: bool,
-            webdriver_url: &str,
-            chrome_path: Option<&str>,
-        ) -> Result<()> {
-            if self.client.is_some() {
-                return Ok(());
-            }
-
-            let mut capabilities: Map<String, Value> = Map::new();
-            let mut chrome_options: Map<String, Value> = Map::new();
-            let mut args: Vec<Value> = Vec::new();
-
-            if headless {
-                args.push(Value::String("--headless=new".to_string()));
-                args.push(Value::String("--disable-gpu".to_string()));
-            }
-
-            // When running as a service (systemd/OpenRC), the browser sandbox
-            // fails because the process lacks a user namespace / session.
-            // --no-sandbox and --disable-dev-shm-usage are required in this context.
-            if super::is_service_environment() {
-                args.push(Value::String("--no-sandbox".to_string()));
-                args.push(Value::String("--disable-dev-shm-usage".to_string()));
-            }
-
-            if !args.is_empty() {
-                chrome_options.insert("args".to_string(), Value::Array(args));
-            }
-
-            if let Some(path) = chrome_path {
-                let trimmed = path.trim();
-                if !trimmed.is_empty() {
-                    chrome_options.insert("binary".to_string(), Value::String(trimmed.to_string()));
-                }
-            }
-
-            if !chrome_options.is_empty() {
-                capabilities.insert(
-                    "goog:chromeOptions".to_string(),
-                    Value::Object(chrome_options),
-                );
-            }
-
-            let mut builder =
-                ClientBuilder::rustls().context("Failed to initialize rustls connector")?;
-            if !capabilities.is_empty() {
-                builder.capabilities(capabilities);
-            }
-
-            let client = builder
-                .connect(webdriver_url)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to connect to WebDriver at {webdriver_url}. Start chromedriver/geckodriver first"
-                    )
-                })?;
-
-            self.client = Some(client);
-            Ok(())
-        }
-
-        fn active_client(&self) -> Result<&Client> {
-            self.client.as_ref().ok_or_else(|| {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-                    "browser: no active native browser session"
-                );
-                anyhow::Error::msg(
-                    "No active native browser session. Run browser action='open' first",
-                )
-            })
-        }
-    }
-
-    fn webdriver_endpoint_reachable(webdriver_url: &str, timeout: Duration) -> bool {
-        let parsed = match reqwest::Url::parse(webdriver_url) {
-            Ok(url) => url,
-            Err(_) => return false,
-        };
-
-        if parsed.scheme() != "http" && parsed.scheme() != "https" {
-            return false;
-        }
-
-        let host = match parsed.host_str() {
-            Some(h) if !h.is_empty() => h,
-            _ => return false,
-        };
-
-        let port = parsed.port_or_known_default().unwrap_or(4444);
-        let mut addrs = match (host, port).to_socket_addrs() {
-            Ok(iter) => iter,
-            Err(_) => return false,
-        };
-
-        let addr = match addrs.next() {
-            Some(a) => a,
-            None => return false,
-        };
-
-        TcpStream::connect_timeout(&addr, timeout).is_ok()
-    }
-
-    fn selector_for_find(by: &str, value: &str) -> String {
-        let escaped = css_attr_escape(value);
-        match by {
-            "role" => format!("[role=\"{escaped}\"]"),
-            "label" => format!("label={value}"),
-            "placeholder" => format!("[placeholder=\"{escaped}\"]"),
-            "testid" => format!("[data-testid=\"{escaped}\"]"),
-            _ => format!("text={value}"),
-        }
-    }
-
-    async fn wait_for_selector(client: &Client, selector: &str) -> Result<()> {
-        match parse_selector(selector) {
-            SelectorKind::Css(css) => {
-                client
-                    .wait()
-                    .for_element(Locator::Css(&css))
-                    .await
-                    .with_context(|| format!("Timed out waiting for selector '{selector}'"))?;
-            }
-            SelectorKind::XPath(xpath) => {
-                client
-                    .wait()
-                    .for_element(Locator::XPath(&xpath))
-                    .await
-                    .with_context(|| format!("Timed out waiting for selector '{selector}'"))?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn find_element(
-        client: &Client,
-        selector: &str,
-    ) -> Result<fantoccini::elements::Element> {
-        let element = match parse_selector(selector) {
-            SelectorKind::Css(css) => client
-                .find(Locator::Css(&css))
-                .await
-                .with_context(|| format!("Failed to find element by CSS '{css}'"))?,
-            SelectorKind::XPath(xpath) => client
-                .find(Locator::XPath(&xpath))
-                .await
-                .with_context(|| format!("Failed to find element by XPath '{xpath}'"))?,
-        };
-        Ok(element)
-    }
-
-    async fn hover_element(client: &Client, element: &fantoccini::elements::Element) -> Result<()> {
-        let actions = MouseActions::new("mouse".to_string()).then(PointerAction::MoveToElement {
-            element: element.clone(),
-            duration: Some(Duration::from_millis(150)),
-            x: 0.0,
-            y: 0.0,
-        });
-
-        client
-            .perform_actions(actions)
-            .await
-            .context("Failed to perform hover action")?;
-        let _ = client.release_actions().await;
-        Ok(())
-    }
-
-    async fn element_checked(element: &fantoccini::elements::Element) -> Result<bool> {
-        let checked = element
-            .prop("checked")
-            .await
-            .context("Failed to read checkbox checked property")?
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        Ok(matches!(checked.as_str(), "true" | "checked" | "1"))
-    }
-
-    enum SelectorKind {
-        Css(String),
-        XPath(String),
-    }
-
-    fn parse_selector(selector: &str) -> SelectorKind {
-        let trimmed = selector.trim();
-        if let Some(text_query) = trimmed.strip_prefix("text=") {
-            return SelectorKind::XPath(xpath_contains_text(text_query));
-        }
-
-        if let Some(label_query) = trimmed.strip_prefix("label=") {
-            let literal = xpath_literal(label_query);
-            return SelectorKind::XPath(format!(
-                "(//label[contains(normalize-space(.), {literal})]/following::*[self::input or self::textarea or self::select][1] | //*[@aria-label and contains(normalize-space(@aria-label), {literal})] | //label[contains(normalize-space(.), {literal})])"
-            ));
-        }
-
-        if trimmed.starts_with('@') {
-            let escaped = css_attr_escape(trimmed);
-            return SelectorKind::Css(format!("[data-zc-ref=\"{escaped}\"]"));
-        }
-
-        SelectorKind::Css(trimmed.to_string())
-    }
-
-    fn css_attr_escape(input: &str) -> String {
-        input
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', " ")
-    }
-
-    fn xpath_contains_text(text: &str) -> String {
-        format!("//*[contains(normalize-space(.), {})]", xpath_literal(text))
-    }
-
-    fn xpath_literal(input: &str) -> String {
-        if !input.contains('"') {
-            return format!("\"{input}\"");
-        }
-        if !input.contains('\'') {
-            return format!("'{input}'");
-        }
-
-        let segments: Vec<&str> = input.split('"').collect();
-        let mut parts: Vec<String> = Vec::new();
-        for (index, part) in segments.iter().enumerate() {
-            if !part.is_empty() {
-                parts.push(format!("\"{part}\""));
-            }
-            if index + 1 < segments.len() {
-                parts.push("'\"'".to_string());
-            }
-        }
-
-        if parts.is_empty() {
-            "\"\"".to_string()
-        } else {
-            format!("concat({})", parts.join(","))
-        }
-    }
-
-    fn webdriver_key(key: &str) -> String {
-        match key.trim().to_ascii_lowercase().as_str() {
-            "enter" => Key::Enter.to_string(),
-            "return" => Key::Return.to_string(),
-            "tab" => Key::Tab.to_string(),
-            "escape" | "esc" => Key::Escape.to_string(),
-            "backspace" => Key::Backspace.to_string(),
-            "delete" => Key::Delete.to_string(),
-            "space" => Key::Space.to_string(),
-            "arrowup" | "up" => Key::Up.to_string(),
-            "arrowdown" | "down" => Key::Down.to_string(),
-            "arrowleft" | "left" => Key::Left.to_string(),
-            "arrowright" | "right" => Key::Right.to_string(),
-            "home" => Key::Home.to_string(),
-            "end" => Key::End.to_string(),
-            "pageup" => Key::PageUp.to_string(),
-            "pagedown" => Key::PageDown.to_string(),
-            other => other.to_string(),
-        }
-    }
-
-    fn snapshot_script(interactive_only: bool, compact: bool, depth: Option<i64>) -> String {
-        let depth_literal = depth
-            .map(|level| level.to_string())
-            .unwrap_or_else(|| "null".to_string());
-
-        format!(
-            r#"return (() => {{
-  const interactiveOnly = {interactive_only};
-  const compact = {compact};
-  const maxDepth = {depth_literal};
-  const nodes = [];
-  const root = document.body || document.documentElement;
-  let counter = 0;
-
-  const isVisible = (el) => {{
-    const style = window.getComputedStyle(el);
-    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) {{
-      return false;
-    }}
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  }};
-
-  const isInteractive = (el) => {{
-    if (el.matches('a,button,input,select,textarea,summary,[role],*[tabindex]')) return true;
-    return typeof el.onclick === 'function';
-  }};
-
-  const describe = (el, depth) => {{
-    const interactive = isInteractive(el);
-    const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 140);
-    if (interactiveOnly && !interactive) return;
-    if (compact && !interactive && !text) return;
-
-    const ref = '@e' + (++counter);
-    el.setAttribute('data-zc-ref', ref);
-    nodes.push({{
-      ref,
-      depth,
-      tag: el.tagName.toLowerCase(),
-      id: el.id || null,
-      role: el.getAttribute('role'),
-      text,
-      interactive,
-    }});
-  }};
-
-  const walk = (el, depth) => {{
-    if (!(el instanceof Element)) return;
-    if (maxDepth !== null && depth > maxDepth) return;
-    if (isVisible(el)) {{
-      describe(el, depth);
-    }}
-    for (const child of el.children) {{
-      walk(child, depth + 1);
-      if (nodes.length >= 400) return;
-    }}
-  }};
-
-  if (root) walk(root, 0);
-
-  return {{
-    title: document.title,
-    url: window.location.href,
-    count: nodes.length,
-    nodes,
-  }};
-}})();"#
-        )
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn snapshot_script_starts_with_return() {
-            let script = snapshot_script(true, false, None);
-            assert!(
-                script.starts_with("return (() => {"),
-                "snapshot_script must start with 'return (() => {{' for WebDriver ExecuteScript; got: {:?}",
-                &script[..60]
-            );
-        }
-
-        #[test]
-        fn selector_for_find_role_emits_normal_css_attribute() {
-            let sel = selector_for_find("role", "button");
-            assert_eq!(sel, r#"[role="button"]"#);
-        }
-
-        #[test]
-        fn selector_for_find_placeholder_emits_normal_css_attribute() {
-            let sel = selector_for_find("placeholder", "Search");
-            assert_eq!(sel, r#"[placeholder="Search"]"#);
-        }
-
-        #[test]
-        fn selector_for_find_testid_emits_normal_css_attribute() {
-            let sel = selector_for_find("testid", "submit-btn");
-            assert_eq!(sel, r#"[data-testid="submit-btn"]"#);
-        }
-
-        #[test]
-        fn parse_selector_at_ref_emits_normal_css_attribute() {
-            let sel = parse_selector("@elem");
-            let SelectorKind::Css(css) = sel else {
-                panic!("expected Css selector, got XPath");
-            };
-            assert_eq!(css, r#"[data-zc-ref="@elem"]"#);
-        }
-
-        #[test]
-        fn css_attr_escape_escapes_backslashes() {
-            let escaped = css_attr_escape(r#"path\to\file"#);
-            assert_eq!(escaped, r#"path\\to\\file"#);
-        }
-
-        #[test]
-        fn css_attr_escape_escapes_double_quotes() {
-            let escaped = css_attr_escape(r#"he said "hello""#);
-            assert_eq!(escaped, r#"he said \"hello\""#);
-        }
-
-        #[test]
-        fn css_attr_escape_handles_both() {
-            let escaped = css_attr_escape(r#"a\"b"#);
-            assert_eq!(escaped, r#"a\\\"b"#);
-        }
     }
 }
 
@@ -2590,7 +1708,6 @@ fn is_computer_use_only_action(action: &str) -> bool {
 fn backend_name(backend: ResolvedBackend) -> &'static str {
     match backend {
         ResolvedBackend::AgentBrowser => "agent_browser",
-        ResolvedBackend::RustNative => "rust_native",
         ResolvedBackend::ComputerUse => "computer_use",
     }
 }
@@ -2600,22 +1717,6 @@ fn unavailable_action_for_backend_error(action: &str, backend: ResolvedBackend) 
         "Action '{action}' is unavailable for backend '{}'",
         backend_name(backend)
     )
-}
-
-#[allow(dead_code)] // called from browser-native feature paths and tests
-fn is_recoverable_rust_native_error(err: &anyhow::Error) -> bool {
-    let message = format!("{err:#}").to_ascii_lowercase();
-
-    if message.contains("invalid session id")
-        || message.contains("no such window")
-        || message.contains("session not created")
-        || message.contains("connection reset")
-        || message.contains("broken pipe")
-    {
-        return true;
-    }
-
-    message.contains("webdriver") && (message.contains("timed out") || message.contains("timeout"))
 }
 
 fn endpoint_reachable(endpoint: &reqwest::Url, timeout: Duration) -> bool {
@@ -2697,14 +1798,18 @@ mod tests {
     }
 
     #[test]
+    fn browser_backend_parser_rejects_retired_rust_native_explicitly() {
+        for raw in ["rust_native", "rust-native", "native"] {
+            let err = BrowserBackendKind::parse(raw).unwrap_err().to_string();
+            assert!(err.contains("no longer supported"), "{raw}: {err}");
+        }
+    }
+
+    #[test]
     fn browser_backend_parser_accepts_supported_values() {
         assert_eq!(
             BrowserBackendKind::parse("agent_browser").unwrap(),
             BrowserBackendKind::AgentBrowser
-        );
-        assert_eq!(
-            BrowserBackendKind::parse("rust-native").unwrap(),
-            BrowserBackendKind::RustNative
         );
         assert_eq!(
             BrowserBackendKind::parse("computer_use").unwrap(),
@@ -2757,9 +1862,6 @@ mod tests {
             None,
             "agent_browser".into(),
             Some(false),
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
             ComputerUseConfig::default(),
             Vec::new(),
         )
@@ -2785,9 +1887,6 @@ mod tests {
             None,
             "agent_browser".into(),
             Some(true),
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
             ComputerUseConfig::default(),
             Vec::new(),
         )
@@ -2813,9 +1912,6 @@ mod tests {
             None,
             "auto".into(),
             None,
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
             ComputerUseConfig::default(),
             Vec::new(),
         )
@@ -2831,9 +1927,6 @@ mod tests {
             vec!["example.com".into()],
             None,
             "computer_use".into(),
-            None,
-            true,
-            "http://127.0.0.1:9515".into(),
             None,
             ComputerUseConfig::default(),
             Vec::new(),
@@ -2853,9 +1946,6 @@ mod tests {
             vec!["example.com".into()],
             None,
             "computer_use".into(),
-            None,
-            true,
-            "http://127.0.0.1:9515".into(),
             None,
             ComputerUseConfig {
                 endpoint: "http://computer-use.example.com/v1/actions".into(),
@@ -2877,9 +1967,6 @@ mod tests {
             None,
             "computer_use".into(),
             None,
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
             ComputerUseConfig {
                 endpoint: "https://computer-use.example.com/v1/actions".into(),
                 allow_remote_endpoint: true,
@@ -2900,9 +1987,6 @@ mod tests {
             vec!["example.com".into()],
             None,
             "computer_use".into(),
-            None,
-            true,
-            "http://127.0.0.1:9515".into(),
             None,
             ComputerUseConfig {
                 max_coordinate_x: Some(100),
@@ -2982,51 +2066,6 @@ mod tests {
             unavailable_action_for_backend_error("mouse_move", ResolvedBackend::AgentBrowser),
             "Action 'mouse_move' is unavailable for backend 'agent_browser'"
         );
-        assert_eq!(
-            unavailable_action_for_backend_error("mouse_move", ResolvedBackend::RustNative),
-            "Action 'mouse_move' is unavailable for backend 'rust_native'"
-        );
-    }
-
-    #[test]
-    fn recoverable_error_detection_matches_session_patterns() {
-        for message in [
-            "invalid session id",
-            "No Such Window",
-            "session not created",
-            "connection reset by peer",
-            "broken pipe while writing webdriver command",
-            "WebDriver request timed out",
-        ] {
-            let err = anyhow::Error::msg(message);
-            assert!(is_recoverable_rust_native_error(&err), "{message}");
-        }
-
-        let allowlist_error =
-            anyhow::Error::msg("URL host 'localhost' is not in browser allowlist [example.com]");
-        assert!(!is_recoverable_rust_native_error(&allowlist_error));
-    }
-
-    #[test]
-    fn non_recoverable_error_detection_rejects_policy_errors() {
-        for message in [
-            "Blocked by security policy",
-            "URL host '127.0.0.1' is private and disallowed",
-            "Action 'mouse_move' is unavailable for backend 'rust_native'",
-        ] {
-            let err = anyhow::Error::msg(message);
-            assert!(!is_recoverable_rust_native_error(&err), "{message}");
-        }
-    }
-
-    #[cfg(feature = "browser-native")]
-    #[test]
-    fn reset_session_is_idempotent_without_client() {
-        tokio_test::block_on(async {
-            let mut state = native_backend::NativeBrowserState::default();
-            state.reset_session().await;
-            state.reset_session().await;
-        });
     }
 
     #[test]
@@ -3132,9 +2171,6 @@ mod tests {
             allowed_domains.into_iter().map(String::from).collect(),
             None,
             "agent_browser".into(),
-            None,
-            true,
-            "http://127.0.0.1:9515".into(),
             None,
             ComputerUseConfig::default(),
             allowed_private_hosts
@@ -3535,21 +2571,6 @@ mod tests {
             "a non-UTF-8 canonical target must be rejected by the validator before backend \
              dispatch, got: {err}"
         );
-
-        // RustNative: same gate, same rejection, before the local write.
-        let action2 = BrowserAction::Screenshot {
-            path: Some("alias/shots/page.png".into()),
-            full_page: false,
-        };
-        let err = tool
-            .execute_action(action2, ResolvedBackend::RustNative)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("non-UTF-8"),
-            "a non-UTF-8 canonical target must be rejected for rust_native too, got: {err}"
-        );
     }
 
     /// ComputerUse shares the same canonical target validator, so a non-UTF-8
@@ -3586,9 +2607,6 @@ mod tests {
             vec!["*".into()],
             None,
             "computer_use".into(),
-            None,
-            true,
-            "http://127.0.0.1:9515".into(),
             None,
             test_computer_use_config(),
             Vec::new(),
@@ -3634,8 +2652,8 @@ mod tests {
     async fn execute_action_rejects_malicious_screenshot_before_local_backend_dispatch() {
         // Production-boundary regression for the `execute_action` wiring
         // (line ~1302): a screenshot action carrying a traversal path must be
-        // rejected by `validate_screenshot_path` before either local backend
-        // (AgentBrowser or RustNative) receives it. If that call is removed,
+        // rejected by `validate_screenshot_path` before the local backend
+        // (AgentBrowser) receives it. If that call is removed,
         // the validation error never fires and this assertion fails — the
         // backend-specific error does not mention the path or the allowlist.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -3657,21 +2675,6 @@ mod tests {
             err.contains("not in the workspace allowlist"),
             "traversal path must be rejected by the screenshot-path validator before backend \
              dispatch (the specific allowlist rejection, not any error echoing the path), got: {err}"
-        );
-
-        // The mut-borrow contract still holds for the second local backend.
-        let action2 = BrowserAction::Screenshot {
-            path: Some("../etc/passwd".into()),
-            full_page: false,
-        };
-        let err = tool
-            .execute_action(action2, ResolvedBackend::RustNative)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("not in the workspace allowlist"),
-            "traversal path must be rejected at execute_action for rust_native too, got: {err}"
         );
     }
 
@@ -3758,9 +2761,6 @@ mod tests {
             vec!["*".into()],
             None,
             "computer_use".into(),
-            None,
-            true,
-            "http://127.0.0.1:9515".into(),
             None,
             config,
             Vec::new(),
@@ -3850,9 +2850,6 @@ mod tests {
             None,
             "computer_use".into(),
             None,
-            true,
-            "http://127.0.0.1:9515".into(),
-            None,
             config,
             Vec::new(),
         )
@@ -3917,9 +2914,6 @@ mod tests {
             vec!["*".into()],
             None,
             "computer_use".into(),
-            None,
-            true,
-            "http://127.0.0.1:9515".into(),
             None,
             config,
             Vec::new(),
@@ -3989,9 +2983,6 @@ mod tests {
             vec!["*".into()],
             None,
             "computer_use".into(),
-            None,
-            true,
-            "http://127.0.0.1:9515".into(),
             None,
             config,
             Vec::new(),
@@ -4081,9 +3072,6 @@ mod tests {
             vec!["*".into()],
             None,
             "computer_use".into(),
-            None,
-            true,
-            "http://127.0.0.1:9515".into(),
             None,
             config,
             Vec::new(),
@@ -4203,9 +3191,6 @@ mod tests {
                 vec!["*".into()],
                 None,
                 "computer_use".into(),
-                None,
-                true,
-                "http://127.0.0.1:9515".into(),
                 None,
                 config,
                 Vec::new(),

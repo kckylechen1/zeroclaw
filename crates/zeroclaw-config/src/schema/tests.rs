@@ -1926,34 +1926,6 @@ async fn search_mode_serde_roundtrip() {
 }
 
 #[test]
-async fn storage_postgres_alias_pgvector_roundtrip() {
-    let toml = r#"
-        [postgres.default]
-        db_url = "postgres://user:pw@host/db"
-        vector_enabled = true
-        vector_dimensions = 768
-    "#;
-    let parsed: StorageConfig = toml::from_str(toml).unwrap();
-    let pg = parsed.postgres.get("default").expect("alias present");
-    assert_eq!(pg.db_url.as_deref(), Some("postgres://user:pw@host/db"));
-    assert!(pg.vector_enabled);
-    assert_eq!(pg.vector_dimensions, 768);
-}
-
-#[test]
-async fn storage_postgres_pgvector_defaults_when_omitted() {
-    let toml = r#"
-        [postgres.default]
-    "#;
-    let parsed: StorageConfig = toml::from_str(toml).unwrap();
-    let pg = parsed.postgres.get("default").expect("alias present");
-    assert!(!pg.vector_enabled);
-    assert_eq!(pg.vector_dimensions, 1536);
-    assert_eq!(pg.schema, "public");
-    assert_eq!(pg.table, "memories");
-}
-
-#[test]
 async fn ollama_alias_tuning_fields_roundtrip() {
     // Ollama-specific tuning lives on `OllamaModelProviderConfig`,
     // not on the generic `ModelProviderConfig` base. These knobs
@@ -2575,30 +2547,6 @@ default_temperature = 0.7
 }
 
 #[test]
-async fn storage_postgres_dburl_alias_deserializes() {
-    let raw = r#"
-default_temperature = 0.7
-
-[storage.postgres.default]
-dbURL = "postgres://user:pw@host/db"
-schema = "public"
-table = "memories"
-connect_timeout_secs = 12
-"#;
-
-    let parsed = parse_test_config(raw);
-    let pg = parsed
-        .storage
-        .postgres
-        .get("default")
-        .expect("postgres.default present");
-    assert_eq!(pg.db_url.as_deref(), Some("postgres://user:pw@host/db"));
-    assert_eq!(pg.schema, "public");
-    assert_eq!(pg.table, "memories");
-    assert_eq!(pg.connect_timeout_secs, Some(12));
-}
-
-#[test]
 async fn storage_lucid_timeout_overrides_deserialize() {
     let raw = r#"
 default_temperature = 0.7
@@ -3203,20 +3151,6 @@ async fn config_save_encrypts_nested_credentials() {
     config.browser.computer_use.api_key = Some("browser-credential".into());
     config.web_search.brave_api_key = Some("brave-credential".into());
     config.web_search.tavily_api_key = Some("tavily-credential".into());
-    config.storage.postgres.insert(
-        "default".to_string(),
-        PostgresStorageConfig {
-            db_url: Some("postgres://user:pw@host/db".into()),
-            ..PostgresStorageConfig::default()
-        },
-    );
-    config.storage.qdrant.insert(
-        "default".to_string(),
-        QdrantStorageConfig {
-            api_key: Some("qdrant-credential".into()),
-            ..QdrantStorageConfig::default()
-        },
-    );
     config.reliability.api_keys = vec![
         "rotation-credential-a".into(),
         "rotation-credential-b".into(),
@@ -3311,8 +3245,6 @@ async fn config_save_encrypts_nested_credentials() {
         "browser-credential",
         "brave-credential",
         "tavily-credential",
-        "postgres://user:pw@host/db",
-        "qdrant-credential",
         "rotation-credential-a",
         "rotation-credential-b",
         "node-shared-credential",
@@ -3392,27 +3324,6 @@ async fn config_save_encrypts_nested_credentials() {
     let worker_encrypted = worker_provider.api_key.as_deref().unwrap();
     assert!(crate::secrets::SecretStore::is_encrypted(worker_encrypted));
     assert_eq!(store.decrypt(worker_encrypted).unwrap(), "agent-credential");
-
-    let storage_db_url = stored
-        .storage
-        .postgres
-        .get("default")
-        .and_then(|p| p.db_url.as_deref())
-        .unwrap();
-    assert!(crate::secrets::SecretStore::is_encrypted(storage_db_url));
-    assert_eq!(
-        store.decrypt(storage_db_url).unwrap(),
-        "postgres://user:pw@host/db"
-    );
-
-    let qdrant_key = stored
-        .storage
-        .qdrant
-        .get("default")
-        .and_then(|q| q.api_key.as_deref())
-        .unwrap();
-    assert!(crate::secrets::SecretStore::is_encrypted(qdrant_key));
-    assert_eq!(store.decrypt(qdrant_key).unwrap(), "qdrant-credential");
 
     for key in &stored.reliability.api_keys {
         assert!(crate::secrets::SecretStore::is_encrypted(key));
@@ -4344,9 +4255,6 @@ async fn browser_config_default_enabled() {
     assert_eq!(b.allowed_domains, vec!["*".to_string()]);
     assert_eq!(b.backend, "agent_browser");
     assert_eq!(b.headed, None);
-    assert!(b.native_headless);
-    assert_eq!(b.native_webdriver_url, "http://127.0.0.1:9515");
-    assert!(b.native_chrome_path.is_none());
     assert_eq!(b.computer_use.endpoint, "http://127.0.0.1:8787/v1/actions");
     assert_eq!(b.computer_use.timeout_ms, 15_000);
     assert!(!b.computer_use.allow_remote_endpoint);
@@ -4367,7 +4275,6 @@ headed = true
 
     assert_eq!(parsed.backend, "agent_browser");
     assert_eq!(parsed.headed, Some(true));
-    assert!(parsed.native_headless);
 }
 
 #[test]
@@ -11441,10 +11348,6 @@ async fn credential_shaped_prop_fields_have_explicit_classification() {
         .channels
         .matrix
         .insert("default".into(), MatrixConfig::default());
-    config
-        .storage
-        .qdrant
-        .insert("default".into(), QdrantStorageConfig::default());
 
     let fields = config.prop_fields();
     let missing: Vec<_> = fields
@@ -11963,19 +11866,19 @@ async fn validate_rejects_read_memory_from_self_reference() {
 async fn validate_rejects_read_memory_from_cross_backend() {
     let mut config = multi_agent_test_config();
 
-    // Add a second agent on Postgres.
+    // Add a second agent on Markdown.
     let beta = AliasedAgentConfig {
         channels: vec![crate::providers::ChannelRef::new("telegram.draft")],
         model_provider: crate::providers::ModelProviderRef::new("anthropic.default"),
         risk_profile: "default".into(),
         memory: crate::multi_agent::AgentMemoryConfig {
-            backend: crate::multi_agent::MemoryBackendKind::Postgres,
+            backend: crate::multi_agent::MemoryBackendKind::Markdown,
         },
         ..AliasedAgentConfig::default()
     };
     config.agents.insert("beta".to_string(), beta);
 
-    // Alpha (Sqlite default) tries to read from beta (Postgres).
+    // Alpha (Sqlite default) tries to read from beta (Markdown).
     let alpha = config.agents.get_mut("alpha").unwrap();
     alpha
         .workspace
@@ -11996,7 +11899,7 @@ async fn validate_rejects_read_memory_from_cross_backend() {
 async fn validate_rejects_typed_memory_flags_on_non_sqlite_global_backend() {
     let mut config = multi_agent_test_config();
     config.memory.types.enabled = true;
-    config.memory.backend = "postgres.work".to_string();
+    config.memory.backend = "markdown.work".to_string();
 
     let err = config
         .validate()
@@ -12065,9 +11968,9 @@ async fn validate_accepts_typed_memory_flags_on_mixed_case_sqlite() {
 #[test]
 async fn validate_allows_non_sqlite_backend_when_typed_memory_flags_off() {
     let mut config = multi_agent_test_config();
-    config.memory.backend = "postgres.work".to_string();
+    config.memory.backend = "markdown.work".to_string();
     let alpha = config.agents.get_mut("alpha").unwrap();
-    alpha.memory.backend = crate::multi_agent::MemoryBackendKind::Postgres;
+    alpha.memory.backend = crate::multi_agent::MemoryBackendKind::Markdown;
 
     config
         .validate()

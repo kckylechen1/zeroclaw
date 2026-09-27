@@ -70,22 +70,6 @@ value = "..."
 group = "example"
 
 [[var]]
-path = "storage.qdrant.home.url"
-comment = "Inject Qdrant memory backend connection"
-value = "https://qdrant.example.com"
-group = "example"
-
-[[var]]
-path = "storage.qdrant.home.collection"
-value = "zeroclaw"
-group = "example"
-
-[[var]]
-path = "storage.qdrant.home.api_key"
-value = "..."
-group = "example"
-
-[[var]]
 path = "providers.models.ollama.home.uri"
 value = "http://ollama:11434"
 group = "container"
@@ -133,18 +117,6 @@ group = "bridge_sh"
 prefix = "export "
 
 [[var]]
-path = "storage.qdrant.home.url"
-value = "\"$QDRANT_URL\""
-group = "bridge_sh"
-prefix = "export "
-
-[[var]]
-path = "storage.qdrant.home.api_key"
-value = "\"$QDRANT_API_KEY\""
-group = "bridge_sh"
-prefix = "export "
-
-[[var]]
 path = "gateway.request_timeout_secs"
 value = "\"$GATEWAY_TIMEOUT_SECS\""
 group = "bridge_sh"
@@ -173,11 +145,3 @@ value = "$env:NEARAI_API_KEY"
 group = "bridge_ps"
 prefix = "$env:"
 assign = " = "
-
-[[var]]
-path = "storage.qdrant.home.url"
-value = "$env:QDRANT_URL"
-group = "bridge_ps"
-prefix = "$env:"
-assign = " = "
-
