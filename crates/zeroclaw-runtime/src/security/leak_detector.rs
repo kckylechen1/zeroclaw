@@ -234,11 +234,11 @@ impl LeakDetector {
                 // match. Tool receipts use the dashed `zc-receipt-` shape and
                 // do not collide.
                 (
-                    Regex::new(r"zc_[0-9a-f]{64}").unwrap(),
+                    Regex::new(r"\bzc_[0-9a-f]{64,}").unwrap(),
                     "ZeroClaw paired token",
                 ),
                 (
-                    Regex::new(r"zcb_[0-9a-f]{64}").unwrap(),
+                    Regex::new(r"\bzcb_[0-9a-f]{64,}").unwrap(),
                     "ZeroClaw bridge token",
                 ),
             ]
@@ -892,6 +892,37 @@ mod tests {
                 assert!(!redacted.contains("gsk_abcdefghijklmnopqrstuvwxyz123456"));
             }
             LeakResult::Clean => panic!("Should detect Groq API key"),
+        }
+    }
+
+    #[test]
+    fn gateway_token_patterns_mask_long_runs_and_respect_boundaries() {
+        let detector = LeakDetector::new();
+        // A hex run longer than the mint length after `zc_` must be masked
+        // whole — a surviving tail is a partial leak.
+        let long = format!("zc_{}", "ab".repeat(40)); // 80 hex
+        let result = detector.scan(&format!("leaked {long} in prose"));
+        match result {
+            LeakResult::Detected { redacted, .. } => {
+                assert!(!redacted.contains(&long), "{redacted}");
+                assert!(
+                    !redacted.contains(&"ab".repeat(8)),
+                    "hex tail survived: {redacted}"
+                );
+            }
+            LeakResult::Clean => panic!("Should detect the long gateway token"),
+        }
+        // An identifier containing the shape must not be mangled mid-word.
+        let ident = format!("check_zc_{}", "cd".repeat(32));
+        let result = detector.scan(&format!("ran {ident}()"));
+        match result {
+            LeakResult::Detected { redacted, .. } => {
+                assert!(
+                    !redacted.contains("[REDACTED"),
+                    "partial mangling inside an identifier: {redacted}"
+                );
+            }
+            LeakResult::Clean => {}
         }
     }
 
