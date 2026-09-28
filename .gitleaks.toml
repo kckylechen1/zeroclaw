@@ -1,0 +1,28 @@
+# gitleaks repo configuration.
+#
+# The pre-push gate scans the push delta; rebasing an old branch onto
+# current master drags weeks of already-reviewed history into that delta,
+# so fixture strings that live on master permanently trip it. Allowlist the
+# known fixture sites here instead of bypassing the hook.
+
+title = "zeroclaw gitleaks configuration"
+
+[[allowlists]]
+description = "WebSocket handshake test fixtures (Sec-WebSocket-Key header values are RFC 6455 random base64, not credentials)"
+paths = [
+    '''crates/zeroclaw-gateway/src/tests.rs''',
+    '''crates/zeroclaw-gateway/src/ws_bridge.rs''',
+]
+
+[[allowlists]]
+description = "The leak detector's own pattern corpus and tests embed credential-shaped strings by design"
+paths = [
+    '''crates/zeroclaw-runtime/src/security/outbound.rs''',
+    '''crates/zeroclaw-runtime/src/security/leak_detector.rs''',
+]
+
+[[allowlists]]
+description = "This configuration file (its own regex literals)"
+paths = [
+    '''.gitleaks.toml''',
+]
