@@ -68,7 +68,7 @@ zeroclaw config set browser.enabled false
 > that host to redirect/reject plaintext HTTP itself (HSTS, server-side 308), or a future
 > scheme-aware browser policy.
 
-For the `agent_browser` backend, set `browser.headed = true` to launch the browser in headed mode for debugging or first-time login setup, or `browser.headed = false` to force headless mode. When `browser.headed` is unset, Zeroclaw preserves the inherited `AGENT_BROWSER_HEADED` environment behavior. The rust-native backend continues to use `browser.native_headless`.
+For the `agent_browser` backend, set `browser.headed = true` to launch the browser in headed mode for debugging or first-time login setup, or `browser.headed = false` to force headless mode. When `browser.headed` is unset, Zeroclaw preserves the inherited `AGENT_BROWSER_HEADED` environment behavior. (The rust-native backend and its `browser.native_headless` setting were retired; `browser.native_*` keys now produce a retirement warning.)
 
 See the [Config reference](../reference/config.md) for all browser fields and defaults.
 

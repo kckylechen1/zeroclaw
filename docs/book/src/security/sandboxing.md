@@ -148,5 +148,5 @@ No sandboxing. Tools run with the full privileges of the ZeroClaw service user. 
 ## Code reference
 
 - Detection: `crates/zeroclaw-runtime/src/security/detect.rs`
-- Backends: `crates/zeroclaw-runtime/src/security/sandbox/` (one file per backend)
+- Backends: `crates/zeroclaw-runtime/src/security/` (one file per backend: `bubblewrap.rs`, `docker.rs`, `firejail.rs`)
 - Schema: `RiskProfileConfig` and `DockerRuntimeConfig` in `crates/zeroclaw-config/src/schema.rs`

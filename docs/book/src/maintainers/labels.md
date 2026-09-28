@@ -150,7 +150,7 @@ Applied automatically by `pr-path-labeler.yml`. Globs live in `.github/labeler.y
 | `quickstart` | `crates/zeroclaw-runtime/src/quickstart/**` |
 | `provider` | `src/providers/**`, `crates/zeroclaw-providers/src/**` |
 | `service` | `src/service/**`, `crates/zeroclaw-runtime/src/service/**` |
-| `skillforge` | `src/skillforge/**`, `crates/zeroclaw-runtime/src/skillforge/**` |
+| `skillforge` | retired: the `skillforge` paths were removed; label kept for historical issue labeling |
 | `skills` | `src/skills/**`, `crates/zeroclaw-runtime/src/skills/**` |
 | `tool` | `src/tools/**`, `crates/zeroclaw-tools/src/**` |
 | `tunnel` | `src/tunnel/**`, `crates/zeroclaw-runtime/src/tunnel/**` |
@@ -266,11 +266,11 @@ Tools are grouped by logical function rather than one label per file.
 | `tool:browser` | `browser.rs`, `browser_open.rs`, `text_browser.rs`, `screenshot.rs` |
 | `tool:composio` | `composio.rs` |
 | `tool:cron` | `src/tools/cron_add.rs`, `src/tools/cron_list.rs`, `src/tools/cron_remove.rs`, `src/tools/cron_run.rs`, `src/tools/cron_runs.rs`, `src/tools/cron_update.rs`, `crates/zeroclaw-runtime/src/tools/cron_add.rs`, `crates/zeroclaw-runtime/src/tools/cron_common.rs`, `crates/zeroclaw-runtime/src/tools/cron_list.rs`, `crates/zeroclaw-runtime/src/tools/cron_remove.rs`, `crates/zeroclaw-runtime/src/tools/cron_run.rs`, `crates/zeroclaw-runtime/src/tools/cron_runs.rs`, `crates/zeroclaw-runtime/src/tools/cron_update.rs` |
-| `tool:delegate` | `crates/zeroclaw-runtime/src/tools/delegate.rs` |
+| `tool:delegate` | retired: `tools/delegate.rs` was deleted with its wall; label kept for historical issue labeling |
 | `tool:file` | `src/tools/file_edit.rs`, `src/tools/file_read.rs`, `src/tools/file_write.rs`, `src/tools/glob_search.rs`, `src/tools/content_search.rs`, `crates/zeroclaw-tools/src/file_edit.rs`, `crates/zeroclaw-runtime/src/tools/file_read.rs`, `crates/zeroclaw-tools/src/file_write.rs`, `crates/zeroclaw-tools/src/glob_search.rs`, `crates/zeroclaw-tools/src/content_search.rs` |
 | `tool:mcp` | `mcp_client.rs`, `mcp_deferred.rs`, `mcp_protocol.rs`, `mcp_tool.rs`, `mcp_transport.rs` |
 | `tool:memory` | `memory_forget.rs`, `memory_recall.rs`, `memory_store.rs` |
-| `tool:security` | `src/tools/security_ops.rs`, `src/tools/verifiable_intent.rs`, `crates/zeroclaw-runtime/src/tools/security_ops.rs`, `crates/zeroclaw-runtime/src/tools/verifiable_intent.rs` |
+| `tool:security` | retired: `security_ops.rs` and `verifiable_intent.rs` were removed; security surface lives in `crates/zeroclaw-runtime/src/security/` |
 | `tool:shell` | `src/tools/shell.rs`, `crates/zeroclaw-runtime/src/tools/shell.rs` |
 | `tool:web` | `web_fetch.rs`, `web_search_tool.rs`, `web_search_provider_routing.rs`, `http_request.rs` |
 

@@ -218,5 +218,5 @@ Key code entry points:
   `crates/zeroclaw-channels/src/orchestrator/mod.rs`
 - Runtime turn loop: `crates/zeroclaw-runtime/src/agent/turn/`
 - Runtime generic process entry point:
-  `crates/zeroclaw-runtime/src/agent/loop_.rs`
+  `crates/zeroclaw-runtime/src/agent/loop_/`
 - Gateway webhook/chat path: `crates/zeroclaw-gateway/src/lib.rs`

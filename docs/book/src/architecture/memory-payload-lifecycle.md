@@ -198,7 +198,7 @@ Key code entry points:
 - Prompt recall and injection: `crates/zeroclaw-runtime/src/agent/memory_inject.rs`
   (recall policy plus the `[Memory context]` renderer), injected engine-side in
   `crates/zeroclaw-runtime/src/agent/turn/mod.rs`; the per-turn memory handle is
-  threaded through `crates/zeroclaw-runtime/src/agent/loop_.rs`
+  threaded through `crates/zeroclaw-runtime/src/agent/loop_/`
 - History trimming and tool-result payload shaping:
   `crates/zeroclaw-runtime/src/agent/history.rs`,
   `crates/zeroclaw-runtime/src/agent/history_trim.rs`, and

@@ -221,7 +221,7 @@ For config-schema, env-var, default, or reload changes, ask:
 - Env override grammar: `crates/zeroclaw-config/src/env_overrides.rs`
 - Config CLI commands: `src/main.rs`
 - Shared Quickstart apply path: `crates/zeroclaw-runtime/src/quickstart/mod.rs`
-- Web Quickstart reload signaling: `crates/zeroclaw-gateway/src/api_quickstart.rs`
+- Web Quickstart reload signaling: `crates/zeroclaw-gateway/src/api_sections.rs`
 - Gateway config API and reload banner: `crates/zeroclaw-gateway/src/api_config.rs`
 - Reload endpoint and access gate: `crates/zeroclaw-gateway/src/lib.rs`
 - Gateway bearer auth helper: `crates/zeroclaw-gateway/src/api.rs`

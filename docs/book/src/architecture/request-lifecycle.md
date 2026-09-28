@@ -79,7 +79,7 @@ Outbound messages go back through the same channel adapter. Adapters with multi-
 
 ## Where it lives in code
 
-- Agent loop: `crates/zeroclaw-runtime/src/agent/turn/` (`run_tool_call_loop`), with entry points in `crates/zeroclaw-runtime/src/agent/loop_.rs` (`process_message`, `run`)
+- Agent loop: `crates/zeroclaw-runtime/src/agent/turn/` (`run_tool_call_loop`), with entry points in `crates/zeroclaw-runtime/src/agent/loop_/` (`process_message.rs`, `run.rs`)
 - Memory-context injection: `crates/zeroclaw-runtime/src/agent/memory_inject.rs` (`resolve_inject_policy`, `render_memory_context`), keyed on `TurnOrigin` from `zeroclaw-api`'s ingress types and invoked by the turn engine
 - Tool-call access checks: `crates/zeroclaw-runtime/src/security/` (`iam_policy.rs` `evaluate_tool_access`)
 - Channel orchestration: `crates/zeroclaw-channels/src/orchestrator/`
