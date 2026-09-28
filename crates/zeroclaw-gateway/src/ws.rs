@@ -481,7 +481,9 @@ async fn handle_socket(
         reason,
     })) = restore_trim_event
     {
-        let frame = history_trimmed_ws_frame(dropped_messages, kept_turns, &reason);
+        let leak_detection = state.config.read().security.leak_detection.clone();
+        let frame =
+            history_trimmed_ws_frame(dropped_messages, kept_turns, &reason, &leak_detection);
         let _ = sender.send(Message::Text(frame.to_string().into())).await;
     }
 
@@ -662,10 +664,12 @@ async fn build_ws_session(
         .channel_handles()
         .register_channel(WS_CHANNEL_KEY, approval_channel);
     // Ends when the agent, and with it the approval channel, is dropped.
+    let approval_leak_detection = state.config.read().security.leak_detection.clone();
     zeroclaw_spawn::spawn!(relay_approval_requests(
         approval_event_rx,
         frames,
-        pending_approvals
+        pending_approvals,
+        approval_leak_detection
     ));
 
     let ch = agent.channel_handles();
@@ -697,6 +701,7 @@ async fn relay_approval_requests(
     mut events: tokio::sync::mpsc::Receiver<zeroclaw_api::agent::TurnEvent>,
     frames: FrameSink,
     pending_approvals: PendingApprovals,
+    leak_detection: zeroclaw_config::schema::LeakDetectionConfig,
 ) {
     while let Some(event) = events.recv().await {
         // Forward the runtime-produced summary without inspecting or
@@ -726,7 +731,114 @@ async fn relay_approval_requests(
             &tool_name,
             &arguments_summary,
             timeout_secs,
+            &leak_detection,
         ));
+    }
+}
+
+/// Leak-only outbound redaction for turn-event frame payloads. Unlike
+/// `sanitize_outbound_response` this strips nothing: thinking deltas, tool
+/// arguments/results, approval summaries, plan entries and trim reasons must
+/// keep their shape, only credential-shaped values are masked.
+fn redact_frame_text(
+    text: &str,
+    leak_detection: &zeroclaw_config::schema::LeakDetectionConfig,
+) -> String {
+    zeroclaw_runtime::security::outbound::redact_channel_outbound_leaks(
+        text,
+        leak_detection,
+        zeroclaw_runtime::security::outbound::OutboundContentFormat::Markdown,
+    )
+}
+
+/// `redact_frame_text` over a JSON value: structure is preserved, every
+/// string inside it is redacted (tool arguments arrive as structured JSON).
+fn redact_frame_value(
+    value: serde_json::Value,
+    leak_detection: &zeroclaw_config::schema::LeakDetectionConfig,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(text) => {
+            serde_json::Value::String(redact_frame_text(&text, leak_detection))
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(|item| redact_frame_value(item, leak_detection))
+                .collect(),
+        ),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(key, item)| (key, redact_frame_value(item, leak_detection)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// The non-streaming turn-event wire frames: thinking deltas, tool calls and
+/// results, approval prompts (belt-and-suspenders — the approval relay is the
+/// usual path), history trims, and plan updates. Every human-readable text
+/// field is redacted for credential leaks, matching the chunk and done
+/// frames; `Usage` and `Chunk` stay in the turn loop (accumulation and the
+/// stream redactor are stateful).
+fn turn_event_ws_frame(
+    event: zeroclaw_api::agent::TurnEvent,
+    leak_detection: &zeroclaw_config::schema::LeakDetectionConfig,
+) -> serde_json::Value {
+    match event {
+        zeroclaw_api::agent::TurnEvent::Thinking { delta } => serde_json::json!({
+            "type": "thinking",
+            "content": redact_frame_text(&delta, leak_detection),
+        }),
+        zeroclaw_api::agent::TurnEvent::ToolCall { id, name, args } => serde_json::json!({
+            "type": "tool_call",
+            "id": id,
+            "name": name,
+            "args": redact_frame_value(args, leak_detection),
+        }),
+        zeroclaw_api::agent::TurnEvent::ToolResult { id, name, output } => serde_json::json!({
+            "type": "tool_result",
+            "id": id,
+            "name": name,
+            "output": redact_frame_text(&output, leak_detection),
+        }),
+        zeroclaw_api::agent::TurnEvent::ApprovalRequest {
+            request_id,
+            tool_name,
+            arguments_summary,
+            timeout_secs,
+        } => approval_request_ws_frame(
+            &request_id,
+            &tool_name,
+            &arguments_summary,
+            timeout_secs,
+            leak_detection,
+        ),
+        zeroclaw_api::agent::TurnEvent::HistoryTrimmed {
+            dropped_messages,
+            kept_turns,
+            reason,
+        } => history_trimmed_ws_frame(dropped_messages, kept_turns, &reason, leak_detection),
+        zeroclaw_api::agent::TurnEvent::Plan { entries } => {
+            let entries: Vec<_> = entries
+                .into_iter()
+                .map(|mut entry| {
+                    entry.content = redact_frame_text(&entry.content, leak_detection);
+                    if let Some(active) = entry.active_form.take() {
+                        entry.active_form = Some(redact_frame_text(&active, leak_detection));
+                    }
+                    entry
+                })
+                .collect();
+            serde_json::json!({ "type": "plan", "entries": entries })
+        }
+        // Usage and Chunk never reach this helper; the turn loop handles them
+        // before falling through to `other`.
+        zeroclaw_api::agent::TurnEvent::Usage { .. }
+        | zeroclaw_api::agent::TurnEvent::Chunk { .. } => unreachable!(
+            "Usage and Chunk events are handled by the turn loop before turn_event_ws_frame"
+        ),
     }
 }
 
@@ -735,7 +847,9 @@ fn approval_request_ws_frame(
     tool_name: &str,
     arguments_summary: &str,
     timeout_secs: u64,
+    leak_detection: &zeroclaw_config::schema::LeakDetectionConfig,
 ) -> serde_json::Value {
+    let arguments_summary = redact_frame_text(arguments_summary, leak_detection);
     serde_json::json!({
         "type": "approval_request",
         "request_id": request_id,
@@ -1177,7 +1291,9 @@ fn history_trimmed_ws_frame(
     dropped_messages: usize,
     kept_turns: usize,
     reason: &str,
+    leak_detection: &zeroclaw_config::schema::LeakDetectionConfig,
 ) -> serde_json::Value {
+    let reason = redact_frame_text(reason, leak_detection);
     serde_json::json!({
         "type": "history_trimmed",
         "dropped_messages": dropped_messages,
@@ -1420,35 +1536,7 @@ async fn process_chat_message(
                             };
                             serde_json::json!({ "type": "chunk", "content": visible })
                         }
-                        TurnEvent::Thinking { delta } => {
-                            serde_json::json!({ "type": "thinking", "content": delta })
-                        }
-                        TurnEvent::ToolCall { id, name, args } => {
-                            serde_json::json!({ "type": "tool_call", "id": id, "name": name, "args": args })
-                        }
-                        TurnEvent::ToolResult { id, name, output } => {
-                            serde_json::json!({ "type": "tool_result", "id": id, "name": name, "output": output })
-                        }
-                        TurnEvent::ApprovalRequest {
-                            request_id,
-                            tool_name,
-                            arguments_summary,
-                            timeout_secs,
-                        } => approval_request_ws_frame(
-                            &request_id,
-                            &tool_name,
-                            &arguments_summary,
-                            timeout_secs,
-                        ),
-                        TurnEvent::HistoryTrimmed {
-                            dropped_messages,
-                            kept_turns,
-                            reason,
-                        } => history_trimmed_ws_frame(dropped_messages, kept_turns, &reason),
-                        TurnEvent::Plan { entries } => serde_json::json!({
-                            "type": "plan",
-                            "entries": entries,
-                        }),
+                        other => turn_event_ws_frame(other, &leak_detection),
                     };
                     conversation.publish(&ws_msg);
                 }
@@ -1963,7 +2051,12 @@ mod tests {
 
     #[test]
     fn restore_trim_uses_live_history_trimmed_frame_shape() {
-        let frame = history_trimmed_ws_frame(12, 3, "message limit");
+        let frame = history_trimmed_ws_frame(
+            12,
+            3,
+            "message limit",
+            &zeroclaw_config::schema::LeakDetectionConfig::default(),
+        );
 
         assert_eq!(
             frame,
@@ -2552,6 +2645,98 @@ mod tests {
 
     fn message(content: &str) -> serde_json::Value {
         serde_json::json!({ "type": "message", "content": content })
+    }
+
+    #[test]
+    fn approval_request_frame_redacts_leaked_credentials() {
+        let token = format!("zc_{}", "1a2b3c4d".repeat(8));
+        let key = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+        // Bare forms: the KV-shaped `token=…` pattern catches the assignment
+        // shape; the frame boundary must catch the bare one too.
+        let summary = format!("run shell for the owner: {token} and {key}");
+        let frame = approval_request_ws_frame(
+            "ap1",
+            "shell",
+            &summary,
+            120,
+            &zeroclaw_config::schema::LeakDetectionConfig::default(),
+        );
+        let text = serde_json::to_string(&frame).unwrap();
+        assert!(!text.contains(&token), "{text}");
+        assert!(!text.contains(key), "{text}");
+        assert!(text.contains("[REDACTED"), "{text}");
+    }
+
+    #[test]
+    fn history_trimmed_frame_redacts_leaked_credentials() {
+        let token = format!("zcb_{}", "9f8e7d6c".repeat(8));
+        let reason = format!("context over budget; last payload held {token}");
+        let frame = history_trimmed_ws_frame(
+            3,
+            2,
+            &reason,
+            &zeroclaw_config::schema::LeakDetectionConfig::default(),
+        );
+        let text = serde_json::to_string(&frame).unwrap();
+        assert!(!text.contains(&token), "{text}");
+        assert!(text.contains("[REDACTED"), "{text}");
+    }
+
+    #[test]
+    fn thinking_tool_and_plan_frames_redact_leaked_credentials() {
+        let leak = zeroclaw_config::schema::LeakDetectionConfig::default();
+        let token = format!("zc_{}", "deadbeef".repeat(8));
+        for (label, frame) in [
+            (
+                "thinking",
+                turn_event_ws_frame(
+                    zeroclaw_api::agent::TurnEvent::Thinking {
+                        delta: format!("the owner's key is {token}"),
+                    },
+                    &leak,
+                ),
+            ),
+            (
+                "tool_call",
+                turn_event_ws_frame(
+                    zeroclaw_api::agent::TurnEvent::ToolCall {
+                        id: "t1".into(),
+                        name: "shell".into(),
+                        args: serde_json::json!({ "env": token, "flags": ["-l"] }),
+                    },
+                    &leak,
+                ),
+            ),
+            (
+                "tool_result",
+                turn_event_ws_frame(
+                    zeroclaw_api::agent::TurnEvent::ToolResult {
+                        id: "t1".into(),
+                        name: "shell".into(),
+                        output: format!("exported {token}"),
+                    },
+                    &leak,
+                ),
+            ),
+            (
+                "plan",
+                turn_event_ws_frame(
+                    zeroclaw_api::agent::TurnEvent::Plan {
+                        entries: vec![zeroclaw_api::plan::PlanEntry {
+                            content: format!("rotate the key {token}"),
+                            status: Default::default(),
+                            priority: Default::default(),
+                            active_form: None,
+                        }],
+                    },
+                    &leak,
+                ),
+            ),
+        ] {
+            let text = serde_json::to_string(&frame).unwrap();
+            assert!(!text.contains(&token), "{label}: {text}");
+            assert!(text.contains("[REDACTED"), "{label}: {text}");
+        }
     }
 
     #[tokio::test]
