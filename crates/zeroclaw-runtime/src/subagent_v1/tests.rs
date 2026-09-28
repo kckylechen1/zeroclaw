@@ -1977,6 +1977,28 @@ async fn advisor_calls_are_capped_per_turn() {
 }
 
 #[tokio::test]
+async fn nested_advisor_scopes_share_one_budget() {
+    // A scope entered while another is active (a tool loop re-entering the
+    // accounting) must reuse the outer turn's counter, not mint a fresh one
+    // that silently resets the per-turn cap.
+    super::scope_advisor_turn(async {
+        assert_eq!(
+            super::try_reserve_advisor_call(1),
+            super::AdvisorReservation::Reserved
+        );
+        super::scope_advisor_turn(async {
+            assert_eq!(
+                super::try_reserve_advisor_call(1),
+                super::AdvisorReservation::BudgetUsed,
+                "a nested scope must not reset the per-turn advisor budget"
+            );
+        })
+        .await;
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn advisor_call_outside_a_turn_scope_is_refused() {
     // Fail closed: without a turn scope (e.g. the tool future was moved onto
     // a spawned task, which does not inherit task-locals) the per-turn cap

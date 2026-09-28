@@ -93,14 +93,17 @@ tokio::task_local! {
 }
 
 /// Run `future` as one agent turn for advisor accounting: advisor calls
-/// made inside it count against a fresh per-turn budget.
+/// made inside it count against a per-turn budget. A scope entered while
+/// another is already active reuses its counter — a nested scope must not
+/// mint a fresh budget that silently resets the outer turn's cap.
 pub(crate) async fn scope_advisor_turn<F>(future: F) -> F::Output
 where
     F: std::future::Future,
 {
-    ADVISOR_TURN_CALLS
-        .scope(Arc::new(std::sync::atomic::AtomicU32::new(0)), future)
-        .await
+    let counter = ADVISOR_TURN_CALLS
+        .try_with(Arc::clone)
+        .unwrap_or_else(|_| Arc::new(std::sync::atomic::AtomicU32::new(0)));
+    ADVISOR_TURN_CALLS.scope(counter, future).await
 }
 
 /// The outcome of [`try_reserve_advisor_call`].
