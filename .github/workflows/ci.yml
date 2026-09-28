@@ -514,6 +514,14 @@ jobs:
               cargo nextest run --locked --no-fail-fast $PKGS --features "$all_features" -- "$filter" </dev/null
             done
 
+          # Fluent catalog syntax gate (xtask lives in this leg). Locales
+          # drift silently otherwise — the runtime embeds en and falls back
+          # to it, so a broken translated catalog only shows at runtime.
+          if [ "$LEG" = "tail" ]; then
+            echo "==> leg $LEG: cargo fluent check"
+            cargo fluent check
+          fi
+
   # ── Post-format security checks ───────────────────────────────────────────
 
   security:
