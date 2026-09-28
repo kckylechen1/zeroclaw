@@ -1783,4 +1783,3 @@ fn ensure_browser_env(cmd: &mut Command) {
 
 #[cfg(test)]
 mod tests;
-
