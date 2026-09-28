@@ -122,7 +122,7 @@ These are measured facts from the current codebase, not estimates:
 
 | File | Lines | What It Does | What It Should Do |
 |---|---|---|---|
-| `src/agent/loop_.rs` | ~9,500 | Tool call parsing, streaming, history, cost tracking, model routing, memory, credential scrubbing, context building | Orchestrate a single agent turn |
+| `src/agent/loop_/` (then the single `loop_.rs`) | ~9,500 | Tool call parsing, streaming, history, cost tracking, model routing, memory, credential scrubbing, context building | Orchestrate a single agent turn |
 | `src/gateway/mod.rs` | ~2,260 | Web server + React app server + WhatsApp webhooks + WATI webhooks + Linq webhooks + Nextcloud webhooks + Gmail webhooks + pairing + rate limiting + WebAuthn | Serve the web dashboard API |
 | `src/providers/mod.rs` | ~3,750 | Factory + 40+ provider implementations + OAuth flows + credential resolution + error scrubbing | Route to a provider |
 | `src/tools/mod.rs` | `all_tools_with_runtime()` at L387–L1066 | Instantiate all 70+ tools unconditionally | Register the tools the user configured |
@@ -539,7 +539,7 @@ Every other crate in the workspace that needs these types adds `zeroclaw-api` as
 
 ##### D2: Extract `zeroclaw-tool-call-parser` crate
 
-The tool call parsing logic in `src/agent/loop_.rs` is approximately 1,400 lines of pure text transformation: it takes a string from the LLM and returns a list of structured tool calls. It has no dependency on agent state, memory, providers, or channels. It handles a dozen different LLM output formats (JSON, XML, GLM-style, MiniMax, Perl-style, markdown fences, and more).
+The tool call parsing logic (then in `src/agent/loop_.rs`, since extracted into the `zeroclaw-tool-call-parser` crate) was approximately 1,400 lines of pure text transformation: it takes a string from the LLM and returns a list of structured tool calls. It has no dependency on agent state, memory, providers, or channels. It handles a dozen different LLM output formats (JSON, XML, GLM-style, MiniMax, Perl-style, markdown fences, and more).
 
 This logic is:
 1. Self-contained: perfect for its own crate
@@ -620,6 +620,8 @@ pub async fn run(runtime: Runtime, registry: Registry) -> anyhow::Result<()>;
 The binary crate becomes a thin wiring layer that reads config and calls `run`.
 
 ##### D2: Complete the WASM execution bridge
+
+> **Superseded:** the WASM plugin subsystem this direction drove (`crates/zeroclaw-plugins/`, Extism, and the WIT bridge) was retired in [#418](https://github.com/kckylechen1/zeroclaw/pull/418); the section is kept as the historical record of the decision.
 
 The `extism` dependency is incompatible with WASM Component Model (`.wit` files) and requires the `cranelift` feature of `wasmtime`, which blocks ARM32 targets from compiling. Remove Extism and replace it with direct usage of `wasmtime`. During the transition, Extism should be left as an option until the final deprecation PR.
 
@@ -765,7 +767,7 @@ These are estimates based on direct code analysis of the current codebase. They 
 
 | File | Current lines | Target after migration | Reduction |
 |---|---|---|---|
-| `src/agent/loop_.rs` | ~9,500 | ~5,000 | ~47% |
+| `src/agent/loop_.rs` (now `loop_/`) | ~9,500 | ~5,000 | ~47% |
 | `src/gateway/mod.rs` | ~2,260 | Moves to `zeroclaw-gw` | 100% |
 | `src/tools/mod.rs` | `all_tools_with_runtime` is ~680 lines | ~80 lines (core tools only) | ~88% |
 | `src/providers/mod.rs` | ~3,750 | ~1,200 (providers self-register) | ~68% |
@@ -807,7 +809,7 @@ Estimated wall-clock time improvement for incremental builds: 60–75% reduction
 
 ### For new contributors
 
-The most common complaint from new contributors to large codebases is: "I don't know where to start." With the current architecture, the answer to "where does a Discord message go?" requires tracing through `channels/discord.rs` → `channels/mod.rs` → `gateway/mod.rs` → `agent/loop_.rs` → dozens of other files.
+The most common complaint from new contributors to large codebases is: "I don't know where to start." With the current architecture, the answer to "where does a Discord message go?" requires tracing through `channels/discord.rs` → `channels/mod.rs` → `gateway/mod.rs` → `agent/loop_/` → dozens of other files.
 
 With the microkernel architecture, the answer is: "it goes to the kernel's `Channel` receiver, via the `channel-discord` plugin." A new contributor can understand the Discord channel completely by reading one plugin crate. They can understand the full agent loop by reading `zeroclaw-kernel` without any channel or tool code in scope.
 

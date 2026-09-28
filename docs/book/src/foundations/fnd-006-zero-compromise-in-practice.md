@@ -151,7 +151,7 @@ These are measured facts, not estimates:
 | `zeroclaw-config/src/schema.rs` | 16,800 lines | Now the largest file in the codebase; the original `loop_.rs` was called out at 9,500 lines in the architecture RFC; this surpasses it |
 | `zeroclaw-channels/src/orchestrator/mod.rs` | 11,813 lines | Second-largest file; a single module carrying concentrated responsibility |
 | `zeroclaw-runtime/src/onboard/wizard.rs` | 7,988 lines | A single workflow in a single file |
-| `zeroclaw-runtime/src/agent/loop_.rs` | 6,101 lines | Reduced from ~9,500 in the monolith: real, measurable progress; still large |
+| `zeroclaw-runtime/src/agent/loop_/` | ~1,765 lines (excl. tests) | Split further from the 6,101-line file (tests in `loop_/tests.rs`); still being carved down |
 | `zeroclaw-channels/src/orchestrator/telegram.rs` | 5,122 lines | One channel implementation; one file |
 | `.unwrap()` / `.expect()` calls in crates | 5,630 | Each one is a deferred judgment call about error handling, see §4.1 |
 | `.unwrap()` / `.expect()` calls in legacy `src/` | 240 | The migration carried the pattern forward at scale |

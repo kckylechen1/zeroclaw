@@ -99,7 +99,7 @@ the instance.
 - Session backends: `crates/zeroclaw-infra/src/session_sqlite.rs`, `crates/zeroclaw-infra/src/session_store.rs`
 - ACP session store: `crates/zeroclaw-infra/src/acp_session_store.rs`
 - Cron persistence: `crates/zeroclaw-runtime/src/cron/store.rs`
-- SOP persistence: `crates/zeroclaw-runtime/src/sop/store/`
+- SOP persistence: removed with the SOP run side ([Background work lifecycle](background-work-lifecycle.md)); a legacy `data/sop/runs.db` on an old install is reported by a boot-time warning
 - Durable task supervision: removed with the control-plane migration wall; durable work runs through the Tachi bridge (`crates/zeroclaw-runtime/src/tachi_bridge/`)
 - Logs: `crates/zeroclaw-log/`
 - Cost ledger: `crates/zeroclaw-config/src/cost/tracker.rs`

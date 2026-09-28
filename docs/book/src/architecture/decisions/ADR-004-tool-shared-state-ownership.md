@@ -13,6 +13,8 @@ relates-to:
 
 # ADR-004: Tool-Held Shared State Follows Daemon-Owned Identity And Handle Ownership
 
+> **Retired:** `crates/zeroclaw-tools/src/canvas.rs` (`CanvasStore`) was removed with the canvas tool. The shared-state ownership rules below still govern the stores that remain.
+
 This is a restored retroactive record. The original ADR was added under
 `docs/architecture/adr-004-tool-shared-state-ownership.md` and was
 dropped during the mdBook migration. The code paths have moved into

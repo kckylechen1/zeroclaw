@@ -186,7 +186,7 @@ A setup guide for configuring the Telegram channel describes steps a user takes 
 | `docs/book/src/contributing/` | Considerations + Standards | PR workflow, testing, coding standards |
 | `docs/book/src/maintainers/` | Considerations + Standards | Release runbook, reviewer playbook, label policy |
 | `docs/book/src/security/` | Considerations + Designs | Security policy, sandboxing design, audit logging |
-| `docs/book/src/hardware/` | Designs | Peripheral design docs, datasheets |
+| `docs/book/src/hardware/` | (none) | Retired with the hardware subsystem (#418) |
 | `docs/book/src/reference/config.md` | Designs | Config reference (generated from code) |
 | `docs/book/src/reference/cli.md` | Designs | CLI reference (generated from code) |
 | `docs/book/src/foundations/` | Considerations | Ratified RFCs that shape everything else |

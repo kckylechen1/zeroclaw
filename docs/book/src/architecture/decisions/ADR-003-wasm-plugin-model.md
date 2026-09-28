@@ -11,6 +11,8 @@ relates-to:
 
 # ADR-003: WASM Plugins Use Extism As The Initial Execution Bridge
 
+> **Retired:** the WASM plugin execution surface this ADR specified (`crates/zeroclaw-plugins/`, the `plugins-wasm-*` features, and the WIT interfaces) was removed in [#418](https://github.com/kckylechen1/zeroclaw/pull/418). This record keeps the decision's rationale; the paths it names no longer exist.
+
 This is a restored retroactive record. The original ADR was added under
 `docs/architecture/decisions/adr-003-wasm-extism-plugin-model.md` and
 was dropped during the mdBook migration. It records the historical
