@@ -19,7 +19,8 @@ PROTECTED_METHODS='\.(chat|stream_chat|simple_chat|chat_with_system|chat_with_hi
 #   - dispatch.rs and its integration tests (the implementation + its
 #     dedicated test fakes).
 #   - Any code inside a `tests/` directory (root `tests/` suites,
-#     `crates/*/tests/` integration tests).
+#     `crates/*/tests/` integration tests), and any `tests.rs` module
+#     file (the extracted unit-test layout `src/<mod>/tests.rs`).
 #   - Any line inside a `#[cfg(test)]` module: the gate uses the
 #     first `^#[cfg(test)]` line in each file as a boundary and drops
 #     matches at or below it.
@@ -134,6 +135,11 @@ VIOLATIONS=$(printf '%s\n' "$RG_OUTPUT" | awk -F: '
         if (file in allowed) next
         # Skip live/integration tests in /tests/ directories.
         if (file ~ /(^|\/)tests?\//) next
+        # Skip extracted unit-test modules: `src/<mod>/tests.rs` and
+        # `src/tests.rs` are #[cfg(test)] code by declaration (the parent
+        # declares `#[cfg(test)] mod tests;`), same as the inline blocks
+        # the boundary rule below already exempts.
+        if (file ~ /(^|\/)tests\.rs$/) next
         if (!(file in file_loaded)) read_file_lines(file)
         if (line + 0 >= test_boundary[file] + 0) next
         # Drop matches inside indented #[cfg(test)] blocks (test
