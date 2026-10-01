@@ -43,6 +43,7 @@
 //!   (dedup by event id) without regressing canonical state.
 
 pub mod acpx;
+pub mod codex;
 pub mod controller;
 pub mod facts;
 #[cfg(test)]
@@ -59,6 +60,7 @@ mod obligation_tests;
 mod tests;
 
 pub use acpx::{AcpxController, AcpxControllerConfig};
+pub use codex::{CodexController, CodexControllerConfig};
 pub use controller::{
     ControllerError, ControllerEvent, GatedSessionController, PromptReceipt, SessionCapabilities,
     SessionCollectView, SessionController, SessionEventPage, SessionHandle, SessionStartSpec,
