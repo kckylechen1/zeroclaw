@@ -47,6 +47,7 @@ pub mod controller;
 pub mod facts;
 #[cfg(test)]
 pub(crate) mod fixtures;
+pub mod registry;
 pub mod router;
 pub mod tachi_sink;
 pub mod tool;
@@ -64,6 +65,7 @@ pub use controller::{
     SessionStopReceipt,
 };
 pub use facts::{SessionBinding, SessionEventFact, SessionFactSink};
+pub use registry::{HarnessCapabilities, HarnessEntry, HarnessId, HarnessRegistry, RegistryError};
 pub use router::{DispatchError, DispatchPlan, plan_dispatch};
 pub use tachi_sink::{TachiFactSinkConfig, TachiSessionFactSink};
 pub use tool::{
