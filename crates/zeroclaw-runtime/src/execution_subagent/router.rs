@@ -51,6 +51,27 @@ pub enum DispatchError {
     ObjectiveTooLarge,
 }
 
+impl std::fmt::Display for DispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DurableRequiresBridge => {
+                write!(f, "durable execution requires a configured Tachi bridge")
+            }
+            Self::EphemeralRequiresController => {
+                write!(
+                    f,
+                    "ephemeral execution requires a configured session controller"
+                )
+            }
+            Self::ObjectiveTooLarge => {
+                write!(f, "execution objective exceeded maximum allowed size")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DispatchError {}
+
 /// Plan one execution request. Availability inputs are configuration
 /// facts (is the bridge configured?), never runtime probe results — a
 /// runtime outage fails the EXECUTION typed (the bridge client returns

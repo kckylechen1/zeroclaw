@@ -45,6 +45,7 @@
 pub mod acpx;
 pub mod codex;
 pub mod controller;
+pub mod dispatcher;
 pub mod facts;
 #[cfg(test)]
 pub(crate) mod fixtures;
@@ -66,6 +67,7 @@ pub use controller::{
     SessionCollectView, SessionController, SessionEventPage, SessionHandle, SessionStartSpec,
     SessionStopReceipt,
 };
+pub use dispatcher::{DispatchExecutionOutcome, MissionControlDispatcher};
 pub use facts::{SessionBinding, SessionEventFact, SessionFactSink};
 pub use registry::{HarnessCapabilities, HarnessEntry, HarnessId, HarnessRegistry, RegistryError};
 pub use router::{DispatchError, DispatchPlan, plan_dispatch};

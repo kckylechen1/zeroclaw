@@ -486,6 +486,12 @@ pub struct Config {
     #[nested]
     pub personas: HashMap<String, crate::persona::PersonaKnobs>,
 
+    /// External agent harnesses (`[harnesses.<id>]`) for Mission Control
+    /// orchestration (Codex, DeepSeek Harness, Tachi, Claude Code).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[nested]
+    pub harnesses: HashMap<String, crate::harness::HarnessDefinition>,
+
     /// Companion-memory store and owner gate (`[companion_memory]`).
     ///
     /// `enable` defaults to false. Store files live under `{data_dir}/companion`
@@ -17245,6 +17251,7 @@ impl Default for Config {
             runtime_profiles: HashMap::new(),
             personas: HashMap::new(),
             cards: HashMap::new(),
+            harnesses: HashMap::new(),
             companion_memory: crate::companion::CompanionMemoryConfig::default(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
