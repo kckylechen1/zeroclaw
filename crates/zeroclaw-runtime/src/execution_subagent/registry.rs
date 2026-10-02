@@ -8,7 +8,7 @@
 //! or revoke controller handles already returned to callers.
 
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     convert::Infallible,
     fmt,
     str::FromStr,

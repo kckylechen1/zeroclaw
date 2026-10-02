@@ -94,6 +94,26 @@ const SET: u8 = 1;
 // Configuration (host-constructed; never a port parameter)
 // ─────────────────────────────────────────────────────────────────────────
 
+/// The ACP session resumption method name supported by the target harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AcpResumeMethod {
+    /// Standard ACP / codex-acp method: `session/load`.
+    #[default]
+    Load,
+    /// DeepSeek Harness (DSH) method: `session/resume`.
+    Resume,
+}
+
+/// The policy for responding to harness `session/request_permission` calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AcpPermissionPolicy {
+    /// Deny all permission requests (default, fail-closed: returns outcome "cancelled").
+    #[default]
+    DenyAll,
+    /// Auto-allow permission requests (selects the first option matching kind "allow_once" or "allow_always").
+    AllowAll,
+}
+
 /// Host-constructed binding for the ACPX transport. Constructed once by
 /// the embedder from the operator's own configuration; the port surface
 /// cannot widen any field.
@@ -115,6 +135,16 @@ pub struct AcpxControllerConfig {
     /// after `session/new` (e.g. the harness's workspace-write preset).
     /// `None` keeps the harness's default.
     pub session_mode: Option<String>,
+    /// Whether the target harness supports `session/set_mode`.
+    /// When `false`, `session/set_mode` is skipped even if `session_mode` is set.
+    /// (Default: `true`; DeepSeek Harness sets this to `false`).
+    pub supports_set_mode: bool,
+    /// Which JSON-RPC method to use when resuming a session (`Load` vs `Resume`).
+    /// (Default: `AcpResumeMethod::Load`; DeepSeek Harness uses `AcpResumeMethod::Resume`).
+    pub resume_method: AcpResumeMethod,
+    /// Policy for responding to harness `session/request_permission` requests.
+    /// (Default: `AcpPermissionPolicy::DenyAll`; set to `AllowAll` for autonomous harness workers).
+    pub permission_policy: AcpPermissionPolicy,
     /// Upper bound for the initialize + session/new handshake.
     pub startup_timeout: Duration,
     /// Upper bound for one prompt turn.
@@ -135,6 +165,9 @@ impl std::fmt::Debug for AcpxControllerConfig {
             .field("env_keys", &self.env.keys().collect::<Vec<_>>())
             .field("workspace_root", &self.workspace_root)
             .field("session_mode", &self.session_mode)
+            .field("supports_set_mode", &self.supports_set_mode)
+            .field("resume_method", &self.resume_method)
+            .field("permission_policy", &self.permission_policy)
             .field("startup_timeout", &self.startup_timeout)
             .field("turn_timeout", &self.turn_timeout)
             .field("max_line_bytes", &self.max_line_bytes)
@@ -159,6 +192,67 @@ impl AcpxControllerConfig {
             load: false,
             events: true,
             artifacts: false,
+        }
+    }
+
+    /// Preset configuration for DeepSeek Harness (`dsh --profile acp`).
+    #[must_use]
+    pub fn dsh(command: PathBuf, workspace_root: PathBuf, env: HashMap<String, String>) -> Self {
+        Self {
+            command,
+            args: vec!["--profile".to_string(), "acp".to_string()],
+            env,
+            workspace_root,
+            session_mode: None,
+            supports_set_mode: false,
+            resume_method: AcpResumeMethod::Resume,
+            permission_policy: AcpPermissionPolicy::AllowAll,
+            startup_timeout: Duration::from_secs(60),
+            turn_timeout: Duration::from_secs(600),
+            max_line_bytes: 512 * 1024,
+            declared_capabilities: vec!["observe", "wait", "prompt", "cancel", "resume", "events"],
+        }
+    }
+
+    /// Preset configuration for Codex ACP adapter (`codex-acp`).
+    #[must_use]
+    pub fn codex_acp(
+        command: PathBuf,
+        workspace_root: PathBuf,
+        env: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            command,
+            args: vec![],
+            env,
+            workspace_root,
+            session_mode: None,
+            supports_set_mode: true,
+            resume_method: AcpResumeMethod::Load,
+            permission_policy: AcpPermissionPolicy::DenyAll,
+            startup_timeout: Duration::from_secs(60),
+            turn_timeout: Duration::from_secs(600),
+            max_line_bytes: 256 * 1024,
+            declared_capabilities: vec!["observe", "wait", "prompt", "cancel", "resume", "events"],
+        }
+    }
+}
+
+impl Default for AcpxControllerConfig {
+    fn default() -> Self {
+        Self {
+            command: PathBuf::new(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            workspace_root: PathBuf::new(),
+            session_mode: None,
+            supports_set_mode: true,
+            resume_method: AcpResumeMethod::default(),
+            permission_policy: AcpPermissionPolicy::default(),
+            startup_timeout: Duration::from_secs(60),
+            turn_timeout: Duration::from_secs(300),
+            max_line_bytes: 256 * 1024,
+            declared_capabilities: vec!["observe", "wait", "prompt", "cancel", "resume", "events"],
         }
     }
 }
@@ -556,8 +650,17 @@ impl AcpxController {
         let reader_process = process.clone();
         let reader_state = recovery.state.clone();
         let line_ceiling = self.config.max_line_bytes;
+        let permission_policy = self.config.permission_policy;
         zeroclaw_spawn::spawn!(async move {
-            reader_task(stdout, reader_process, reader_state, pending, line_ceiling).await;
+            reader_task(
+                stdout,
+                reader_process,
+                reader_state,
+                pending,
+                line_ceiling,
+                permission_policy,
+            )
+            .await;
         });
 
         // Handshake: the client declares NO filesystem authority.
@@ -628,7 +731,12 @@ impl AcpxController {
             ));
         };
         *state.session_id.lock() = minted;
-        if let Some(mode) = self.config.session_mode.as_deref() {
+        if let Some(mode) = self
+            .config
+            .session_mode
+            .as_deref()
+            .filter(|_| self.config.supports_set_mode)
+        {
             let session_id = state.session_id();
             let _ = tokio::time::timeout(
                 self.config.startup_timeout,
@@ -741,10 +849,14 @@ impl AcpxController {
         let mut recovery = RecoveryGuard::new(state, self.config.startup_timeout);
         recovery.spawn_and_initialize(self).await?;
         let session_id = state.session_id();
+        let method = match self.config.resume_method {
+            AcpResumeMethod::Load => "session/load",
+            AcpResumeMethod::Resume => "session/resume",
+        };
         let load = tokio::time::timeout(
             self.config.startup_timeout,
             recovery.request(
-                "session/load",
+                method,
                 json!({
                     "sessionId": session_id,
                     "cwd": self.config.workspace_root,
@@ -1388,6 +1500,7 @@ async fn reader_task(
     state: Arc<SessionState>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
     line_ceiling: usize,
+    permission_policy: AcpPermissionPolicy,
 ) {
     let mut reader = BufReader::new(stdout);
     let mut line = Vec::new();
@@ -1423,24 +1536,64 @@ async fn reader_task(
                 }
             }
             // Server→client request: the harness may ask the CLIENT for
-            // permission or file access. This client holds no authority:
-            // permission requests are denied (cancelled); anything else
-            // is answered with a typed method-not-available error. Never
-            // a hang, never an approval.
+            // permission or file access.
             (Some(method), Some(request_id)) => {
                 let response = if method == "session/request_permission" {
-                    state.push_event(
-                        SessionEventKindV1::Progress,
-                        None,
-                        Some(
-                            "harness permission request denied (client holds no authority)"
-                                .to_string(),
-                        ),
-                    );
+                    let outcome = match permission_policy {
+                        AcpPermissionPolicy::DenyAll => {
+                            state.push_event(
+                                SessionEventKindV1::Progress,
+                                None,
+                                Some(
+                                    "harness permission request denied (client holds no authority)"
+                                        .to_string(),
+                                ),
+                            );
+                            json!({"outcome": "cancelled"})
+                        }
+                        AcpPermissionPolicy::AllowAll => {
+                            let options =
+                                message.pointer("/params/options").and_then(Value::as_array);
+                            let selected_id = options.and_then(|opts| {
+                                opts.iter()
+                                    .find(|opt| {
+                                        opt.get("kind").and_then(Value::as_str).is_some_and(|k| {
+                                            k == "allow_once" || k == "allow_always"
+                                        })
+                                    })
+                                    .or_else(|| opts.first())
+                                    .and_then(|opt| opt.get("optionId").and_then(Value::as_str))
+                            });
+
+                            if let Some(option_id) = selected_id {
+                                state.push_event(
+                                    SessionEventKindV1::Progress,
+                                    None,
+                                    Some(format!(
+                                        "harness permission request approved: {option_id}"
+                                    )),
+                                );
+                                json!({
+                                    "outcome": "selected",
+                                    "optionId": option_id,
+                                })
+                            } else {
+                                state.push_event(
+                                    SessionEventKindV1::Progress,
+                                    None,
+                                    Some(
+                                        "harness permission request denied (no selectable option)"
+                                            .to_string(),
+                                    ),
+                                );
+                                json!({"outcome": "cancelled"})
+                            }
+                        }
+                    };
                     json!({
                         "jsonrpc": "2.0",
                         "id": request_id,
-                        "result": {"outcome": {"outcome": "cancelled"}},
+                        "result": {"outcome": outcome},
                     })
                 } else {
                     json!({
@@ -1676,5 +1829,93 @@ async fn drain_task(mut stderr: tokio::process::ChildStderr) {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_acpx_config_defaults() {
+        let config = AcpxControllerConfig::default();
+        assert!(config.supports_set_mode);
+        assert_eq!(config.resume_method, AcpResumeMethod::Load);
+        assert_eq!(config.permission_policy, AcpPermissionPolicy::DenyAll);
+        assert_eq!(config.startup_timeout, Duration::from_secs(60));
+        assert_eq!(config.turn_timeout, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_acpx_config_dsh_preset() {
+        let mut env = HashMap::new();
+        env.insert("DEEPSEEK_API_KEY".to_string(), "sk-test".to_string());
+        let config = AcpxControllerConfig::dsh(
+            PathBuf::from("/usr/local/bin/dsh"),
+            PathBuf::from("/tmp/workspace"),
+            env,
+        );
+        assert_eq!(config.command, PathBuf::from("/usr/local/bin/dsh"));
+        assert_eq!(config.args, vec!["--profile", "acp"]);
+        assert!(!config.supports_set_mode);
+        assert_eq!(config.resume_method, AcpResumeMethod::Resume);
+        assert_eq!(config.permission_policy, AcpPermissionPolicy::AllowAll);
+        assert_eq!(config.workspace_root, PathBuf::from("/tmp/workspace"));
+    }
+
+    #[test]
+    fn test_acpx_config_codex_acp_preset() {
+        let config = AcpxControllerConfig::codex_acp(
+            PathBuf::from("/usr/local/bin/codex-acp"),
+            PathBuf::from("/tmp/workspace"),
+            HashMap::new(),
+        );
+        assert_eq!(config.command, PathBuf::from("/usr/local/bin/codex-acp"));
+        assert!(config.args.is_empty());
+        assert!(config.supports_set_mode);
+        assert_eq!(config.resume_method, AcpResumeMethod::Load);
+        assert_eq!(config.permission_policy, AcpPermissionPolicy::DenyAll);
+    }
+
+    #[test]
+    fn test_acpx_config_debug_redaction() {
+        let mut env = HashMap::new();
+        env.insert("SECRET_KEY".to_string(), "super-secret-value".to_string());
+        let config =
+            AcpxControllerConfig::dsh(PathBuf::from("/bin/dsh"), PathBuf::from("/workspace"), env);
+        let debug_str = format!("{config:?}");
+        assert!(!debug_str.contains("super-secret-value"));
+        assert!(debug_str.contains("SECRET_KEY"));
+        assert!(debug_str.contains("supports_set_mode: false"));
+        assert!(debug_str.contains("Resume"));
+        assert!(debug_str.contains("AllowAll"));
+    }
+
+    #[test]
+    fn test_permission_policy_selection_logic() {
+        let message = json!({
+            "params": {
+                "sessionId": "sess-1",
+                "options": [
+                    {"optionId": "reject-1", "kind": "reject_once"},
+                    {"optionId": "allow-once-1", "kind": "allow_once"},
+                    {"optionId": "allow-always-1", "kind": "allow_always"}
+                ]
+            }
+        });
+
+        let options = message.pointer("/params/options").and_then(Value::as_array);
+        let selected_id = options.and_then(|opts| {
+            opts.iter()
+                .find(|opt| {
+                    opt.get("kind")
+                        .and_then(Value::as_str)
+                        .is_some_and(|k| k == "allow_once" || k == "allow_always")
+                })
+                .or_else(|| opts.first())
+                .and_then(|opt| opt.get("optionId").and_then(Value::as_str))
+        });
+
+        assert_eq!(selected_id, Some("allow-once-1"));
     }
 }

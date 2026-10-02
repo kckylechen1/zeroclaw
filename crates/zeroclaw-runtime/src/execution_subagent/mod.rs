@@ -59,7 +59,7 @@ mod obligation_tests;
 #[cfg(test)]
 mod tests;
 
-pub use acpx::{AcpxController, AcpxControllerConfig};
+pub use acpx::{AcpPermissionPolicy, AcpResumeMethod, AcpxController, AcpxControllerConfig};
 pub use codex::{CodexController, CodexControllerConfig};
 pub use controller::{
     ControllerError, ControllerEvent, GatedSessionController, PromptReceipt, SessionCapabilities,

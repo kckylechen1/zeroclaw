@@ -23,13 +23,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot, watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, timeout_at, Instant};
+use tokio::time::{Instant, timeout, timeout_at};
 use uuid::Uuid;
 use zeroclaw_api::session_exec::{
     AdapterConnectionRef, AuthorityConfirmationRef, RemoteSessionRef, SessionEventIdRef,

@@ -33,10 +33,10 @@ use zeroclaw_api::session_exec::{
     SessionReceiptAdmissionV1, SessionReconnectReceiptView, SessionStateView,
 };
 use zeroclaw_runtime::execution_subagent::{
-    AcpxController, AcpxControllerConfig, ControllerError, ExecutionRunRequest,
-    ExecutionSubagentTool, GatedSessionController, SessionBinding, SessionCapabilities,
-    SessionController, SessionEventFact, SessionFactSink, SessionStartSpec, TachiFactSinkConfig,
-    TachiSessionFactSink,
+    AcpPermissionPolicy, AcpResumeMethod, AcpxController, AcpxControllerConfig, ControllerError,
+    ExecutionRunRequest, ExecutionSubagentTool, GatedSessionController, SessionBinding,
+    SessionCapabilities, SessionController, SessionEventFact, SessionFactSink, SessionStartSpec,
+    TachiFactSinkConfig, TachiSessionFactSink,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -97,6 +97,9 @@ fn acpx_config(workspace: PathBuf, declared: Vec<&'static str>) -> AcpxControlle
         session_mode: std::env::var("ZC_A2_SESSION_MODE")
             .ok()
             .filter(|value| !value.is_empty()),
+        supports_set_mode: true,
+        resume_method: AcpResumeMethod::Load,
+        permission_policy: AcpPermissionPolicy::DenyAll,
         startup_timeout: Duration::from_secs(90),
         turn_timeout: Duration::from_secs(300),
         max_line_bytes: 256 * 1024,
@@ -507,6 +510,9 @@ async fn live_fail_closed_refuses_before_any_session_or_fact() {
         env: Default::default(),
         workspace_root: workspace.clone(),
         session_mode: None,
+        supports_set_mode: true,
+        resume_method: AcpResumeMethod::Load,
+        permission_policy: AcpPermissionPolicy::DenyAll,
         startup_timeout: Duration::from_secs(10),
         turn_timeout: Duration::from_secs(10),
         max_line_bytes: 256 * 1024,
@@ -546,6 +552,9 @@ async fn live_fail_closed_refuses_before_any_session_or_fact() {
         env: cred_env,
         workspace_root: workspace.clone(),
         session_mode: None,
+        supports_set_mode: true,
+        resume_method: AcpResumeMethod::Load,
+        permission_policy: AcpPermissionPolicy::DenyAll,
         startup_timeout: Duration::from_secs(120),
         turn_timeout: Duration::from_secs(60),
         max_line_bytes: 256 * 1024,
