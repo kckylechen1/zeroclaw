@@ -47,8 +47,10 @@ guarantee. Delegation requires the SQLite session backend; JSONL chat remains
 supported without this capability.
 
 Live Tachi routing and agent/card permissions are rechecked on each operation.
-Only tasks and references leave the body: the tool never adds Soul, User Model,
-parent history, credentials, local tool handles or raw execution settings.
+Tasks and references leave the body with protocol caller identity and configured
+profile/project routing metadata. The tool never adds owner/persona identity,
+Soul, User Model, parent history, credentials, local tool handles or raw execution
+settings.
 Task and reference text pass through the same admission engine as typed intent
 composition, rejecting credential, command, placement and private-Dyad content
 before claims or transport. Ordinary harness and vendor mentions are allowed.

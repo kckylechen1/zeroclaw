@@ -184,7 +184,7 @@ The client reads only the fields it uses and ignores the rest. Tachi refuses unk
 
 **Task text.** A task that mentions a harness, vendor, or model is sent as written (§3). The TaskIntent composer no longer refuses vendor names. It still refuses text that tries to choose where or how the work runs, such as a working directory, a worktree, tmux, SSH, a sandbox, or CLI flags.
 
-**Worker context.** Only the task text, the staffing reason, and the references leave the body. The body never copies Soul or User Model bytes into a start (ADR-014, ADR-015, ADR-016). A worker gets the task, not the owner's identity or profile. When a task needs a fact about the owner, the body states that one fact in the task text.
+**Worker context.** Task text, staffing reason, and references leave the body with protocol caller identity and configured profile/project routing metadata. The body never copies Soul or User Model bytes into a start (ADR-014, ADR-015, ADR-016). A worker gets the task without the owner's persona identity or personal profile. When a task needs a fact about the owner, the body states that one fact in the task text.
 
 **Gaps tracked in Tachi** ([kckylechen1/Tachi#2003](https://github.com/kckylechen1/Tachi/issues/2003)):
 

@@ -1,6 +1,7 @@
 //! Thin L2 tools. Tachi owns execution truth; the existing session database
 //! owns only local request admission and its canonical dispatch reference.
-//! No identity, memory, conversation history, or execution authority is sent.
+//! No owner/persona identity, memory, history, or raw execution authority is sent.
+//! Protocol caller identity and routing metadata accompany the admitted task.
 
 use crate::tachi_staff::{StaffRefs, StaffingReason, TachiStaffClient, TachiStaffError};
 use async_trait::async_trait;
