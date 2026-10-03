@@ -761,6 +761,91 @@ async fn tachi_live_status_of_unknown_run_is_a_typed_refusal() {
     assert!(matches!(err, TachiStaffError::Refused(_)), "{err:?}");
 }
 
+/// Opt-in real-worker proof. Point at a dedicated Tachi daemon with an
+/// admitted DSH profile and configured provider authentication. This test
+/// starts a real model request and retains its local request database.
+#[tokio::test]
+#[ignore = "starts a real DSH worker; requires TACHI_DSH_LIVE=1 and TACHI_DSH_ENDPOINT"]
+async fn tachi_live_dsh_through_production_tools_completes_once() {
+    assert_eq!(std::env::var("TACHI_DSH_LIVE").as_deref(), Ok("1"));
+    let endpoint = std::env::var("TACHI_DSH_ENDPOINT").expect("dedicated daemon endpoint");
+    let temp = tempfile::TempDir::new().unwrap();
+    let mut cfg = production_config(&temp, &endpoint);
+    cfg.tachi.harnesses = HashMap::from([("dsh".into(), "dsh_executor".into())]);
+    cfg.tachi.poll_secs = 1;
+    cfg.risk_profiles.get_mut("delegate").unwrap().allowed_tools = Some(
+        [
+            "tachi_start",
+            "tachi_status",
+            "tachi_watch",
+            "tachi_result",
+            "tachi_cancel",
+        ]
+        .map(String::from)
+        .to_vec(),
+    );
+    let live = Arc::new(parking_lot::RwLock::new(cfg.clone()));
+    let tools = production_tools(&cfg, live.clone());
+    let request_id = format!("dsh-live-{}", uuid::Uuid::new_v4());
+    let args = json!({
+        "request_id":request_id,
+        "harness":"dsh",
+        "task":"Compute 137 * 29. Do not use tools or access files. Respond with only the integer answer.",
+        "staffing_reason":"explicit_user_request"
+    });
+    let started = invoke(&tools, "tachi_start", args.clone()).await;
+    assert!(started.success, "{:?}", started.error);
+    let receipt = started.output.data().unwrap()["receipt"].clone();
+    let dispatch_id = receipt["dispatch_id"].as_str().unwrap().to_string();
+    assert!(!dispatch_id.is_empty());
+    println!("DSH_LIVE_RECEIPT {}", receipt);
+    drop(tools);
+    let tools = production_tools(&cfg, live);
+    let replay = invoke(&tools, "tachi_start", args).await;
+    assert!(replay.success, "{:?}", replay.error);
+    assert_eq!(replay.output.data().unwrap()["replayed"], true);
+    assert_eq!(replay.output.data().unwrap()["dispatch_id"], dispatch_id);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "worker completion timeout: {dispatch_id}"
+        );
+        let watch = invoke(
+            &tools,
+            "tachi_watch",
+            json!({"request_id":request_id,"max_wait_secs":15}),
+        )
+        .await;
+        assert!(watch.success, "{:?}", watch.error);
+        let data = watch.output.data().unwrap();
+        if data["terminal"] == true {
+            assert_eq!(data["status"]["state"], "TASK_STATE_COMPLETED", "{data}");
+            break;
+        }
+    }
+    let status = invoke(&tools, "tachi_status", json!({"request_id":request_id})).await;
+    assert!(status.success, "{:?}", status.error);
+    assert_eq!(
+        status.output.data().unwrap()["status"]["dispatch_id"],
+        dispatch_id
+    );
+    let result = invoke(&tools, "tachi_result", json!({"request_id":request_id})).await;
+    assert!(result.success, "{:?}", result.error);
+    let data = result.output.data().unwrap();
+    assert_eq!(data["result"]["state"], "TASK_STATE_COMPLETED");
+    assert_eq!(data["accepted_by_body"], false);
+    assert_eq!(data["trust"], "untrusted_external_report");
+    assert!(
+        data["result"]["body"]
+            .as_str()
+            .is_some_and(|body| body.contains("3973")),
+        "{data}"
+    );
+    println!("DSH_LIVE_RESULT {}", data);
+    println!("DSH_LIVE_REQUEST_DB {}", temp.keep().display());
+}
+
 #[tokio::test]
 async fn transmitted_start_on_stale_session_is_unknown_and_never_replayed() {
     let (fake, endpoint) = serve(|_, _| Reply::Http(StatusCode::NOT_FOUND)).await;
