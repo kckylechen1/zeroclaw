@@ -31,6 +31,17 @@ pub fn migrate_sqlite_memory_to_v3(db_path: &Path, conn: &Connection) -> MigResu
         )?;
         let default_uuid = sqlite_ensure_default_agent_uuid(conn)?;
 
+        // The legacy table may contain rows before init_schema creates its
+        // FTS index. Backfilling agent_id must not fire update triggers that
+        // try to delete those still-unindexed rows. Rebuild FTS below, within
+        // this same transaction, after copying the migrated memories.
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS memories_ai;
+             DROP TRIGGER IF EXISTS memories_ad;
+             DROP TRIGGER IF EXISTS memories_au;
+             DROP TABLE IF EXISTS memories_fts;",
+        )?;
+
         if !sqlite_memories_has_agent_id_column(conn)? {
             conn.execute_batch("ALTER TABLE memories ADD COLUMN agent_id TEXT;")?;
         }
@@ -40,12 +51,7 @@ pub fn migrate_sqlite_memory_to_v3(db_path: &Path, conn: &Connection) -> MigResu
         )?;
 
         conn.execute_batch(
-            "DROP TRIGGER IF EXISTS memories_ai;
-             DROP TRIGGER IF EXISTS memories_ad;
-             DROP TRIGGER IF EXISTS memories_au;
-             DROP TABLE IF EXISTS memories_fts;
-
-             CREATE TABLE memories_new (
+            "CREATE TABLE memories_new (
                 id            TEXT PRIMARY KEY,
                 key           TEXT NOT NULL,
                 content       TEXT NOT NULL,
