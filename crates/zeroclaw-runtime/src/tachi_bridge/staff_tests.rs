@@ -221,6 +221,93 @@ fn working_receipt(id: &str) -> Value {
 // ─────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn modern_staff_bootstrap_uses_discover_and_negotiated_request_metadata() {
+    type Requests = Arc<Mutex<Vec<(HeaderMap, Value)>>>;
+    async fn modern(
+        State(requests): State<Requests>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Response {
+        requests
+            .lock()
+            .expect("request log")
+            .push((headers.clone(), body.clone()));
+        let id = body.get("id").cloned();
+        let method = body["method"].as_str().unwrap_or("");
+        let wire_ok = headers
+            .get("MCP-Protocol-Version")
+            .and_then(|h| h.to_str().ok())
+            == Some("2026-07-28")
+            && headers.get("Mcp-Method").and_then(|h| h.to_str().ok()) == Some(method)
+            && body["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] == "2026-07-28";
+        if method == "initialize" || !wire_ok {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": { "code": if method == "initialize" { -32022 } else { -32020 },
+                    "message": "modern wire required", "data": { "supportedVersions": ["2026-07-28"] } }
+            }))).into_response();
+        }
+        let result = match method {
+            "server/discover" => json!({
+                "resultType": "complete", "supportedVersions": ["2026-07-28"],
+                "capabilities": { "tools": {} }
+            }),
+            "tools/call" => json!({
+                "resultType": "complete", "isError": false,
+                "content": [{ "type": "text", "text": working_receipt("d-modern").to_string() }]
+            }),
+            _ => return StatusCode::BAD_REQUEST.into_response(),
+        };
+        Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
+    }
+    let requests = Requests::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind modern peer");
+    let endpoint = format!(
+        "http://{}/mcp",
+        listener.local_addr().expect("modern peer address")
+    );
+    let app = axum::Router::new()
+        .route("/mcp", post(modern))
+        .with_state(requests.clone());
+    zeroclaw_spawn::spawn!(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("modern peer serves");
+    });
+    let receipt = client(&endpoint)
+        .start(
+            "codex",
+            "bounded task",
+            StaffingReason::ExplicitUserRequest,
+            &StaffRefs::default(),
+        )
+        .await
+        .expect("modern start");
+    assert_eq!(receipt.dispatch_id, "d-modern");
+    let requests = requests.lock().expect("request log");
+    let methods: Vec<_> = requests
+        .iter()
+        .map(|(_, body)| body["method"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        methods,
+        ["server/discover", "server/discover", "tools/call"]
+    );
+    let (headers, call) = requests.last().expect("tool call");
+    assert_eq!(headers["x-tachi-profile"], "standard");
+    assert_eq!(headers["x-tachi-agent-identity"], "zeroclaw:home");
+    assert_eq!(headers["Mcp-Name"], TACHI_STAFF_TOOL);
+    assert!(!headers.contains_key("Mcp-Session-Id"));
+    assert_eq!(
+        call["params"]["_meta"]["io.modelcontextprotocol/clientInfo"]["name"],
+        "zeroclaw"
+    );
+    assert_eq!(call["params"]["arguments"]["profile"], "codex_55_review");
+}
+
+#[tokio::test]
 async fn start_maps_harness_to_profile_and_sends_identity_headers() {
     let (fake, endpoint) = serve(|_, _| Reply::Ok(working_receipt("d-1"))).await;
     let client = client(&endpoint);

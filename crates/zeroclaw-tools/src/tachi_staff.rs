@@ -33,8 +33,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 pub use zeroclaw_api::tachi_staff::*;
 
-use crate::mcp_protocol::{JsonRpcRequest, MCP_PROTOCOL_VERSION};
-use crate::mcp_transport::{McpTransportConn, McpTransportError, create_transport};
+use crate::mcp_era::{PeerEra, PeerProtocol, attach_request_meta};
+use crate::mcp_protocol::JsonRpcRequest;
+use crate::mcp_transport::{
+    McpRequestLifecycle, McpTransportError, SharedMcpTransportConn, create_shared_transport,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -137,7 +140,7 @@ impl TachiStaffSettings {
 /// lifetime. A transport failure drops it so the next call opens a fresh one.
 pub struct TachiStaffClient {
     settings: TachiStaffSettings,
-    session: Mutex<Option<Box<dyn McpTransportConn>>>,
+    session: Mutex<Option<StaffSession>>,
     next_id: AtomicU64,
 }
 
@@ -153,6 +156,12 @@ impl fmt::Debug for TachiStaffClient {
 enum Exchange {
     Answered(Value),
     StaleSession,
+}
+
+/// Negotiated wire facts belong to the transport session, never to a run.
+struct StaffSession {
+    transport: Box<dyn SharedMcpTransportConn>,
+    peer: PeerProtocol,
 }
 
 impl TachiStaffClient {
@@ -175,7 +184,8 @@ impl TachiStaffClient {
         Self {
             settings,
             session: Mutex::new(None),
-            next_id: AtomicU64::new(1),
+            // Canonical bootstrap reserves discover=0 and initialize=1.
+            next_id: AtomicU64::new(2),
         }
     }
 
@@ -455,50 +465,40 @@ impl TachiStaffClient {
         JsonRpcRequest::new(self.next_id.fetch_add(1, Ordering::Relaxed), method, params)
     }
 
-    async fn open_session(&self) -> Result<Box<dyn McpTransportConn>, TachiStaffError> {
-        let mut conn = create_transport(&self.transport_config())
+    async fn open_session(&self) -> Result<StaffSession, TachiStaffError> {
+        let transport = create_shared_transport(&self.transport_config())
             .map_err(|err| TachiStaffError::Unavailable(format!("transport: {err:#}")))?;
-        let init = self.request(
-            "initialize",
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": CLIENT_NAME, "version": env!("CARGO_PKG_VERSION") },
-            }),
-        );
-        let response = tokio::time::timeout(
+        // Reuse the canonical discover/legacy bootstrap. Directly sending the
+        // modern revision in initialize is rejected by modern Tachi peers.
+        let opened = tokio::time::timeout(
             Duration::from_secs(CALL_TIMEOUT_SECS),
-            conn.send_and_recv(&init),
+            crate::mcp_client::open_session(transport.as_ref(), "tachi", 0),
         )
         .await
-        .map_err(|_| TachiStaffError::Unavailable("initialize timed out".to_string()))?
+        .map_err(|_| TachiStaffError::Unavailable("MCP bootstrap timed out".to_string()))?
         .map_err(|err| TachiStaffError::Unavailable(format!("{err:#}")))?;
-        if let Some(error) = response.error {
-            return Err(TachiStaffError::Refused(format!(
-                "initialize rejected ({}): {}",
-                error.code, error.message
-            )));
-        }
-        // Notifications carry no answer; a failure here surfaces on the
-        // first real call instead.
-        let initialized = JsonRpcRequest::notification("notifications/initialized", json!({}));
-        let _ = conn.send_and_recv(&initialized).await;
-        Ok(conn)
+        Ok(StaffSession {
+            transport,
+            peer: opened.peer,
+        })
     }
 
     async fn exchange(
         &self,
-        conn: &mut Box<dyn McpTransportConn>,
+        session: &StaffSession,
         tool: &str,
         args: &Value,
     ) -> Result<Exchange, TachiStaffError> {
-        let request = self.request(
-            "tools/call",
-            json!({ "name": tool, "arguments": args.clone() }),
-        );
+        let params = json!({ "name": tool, "arguments": args.clone() });
+        let params = match session.peer.era {
+            PeerEra::Modern => attach_request_meta(params, &session.peer.version),
+            PeerEra::Legacy => params,
+        };
+        let request = self.request("tools/call", params);
+        let lifecycle = McpRequestLifecycle::uncoordinated_for_peer(0, &session.peer);
         let sent = tokio::time::timeout(
             Duration::from_secs(CALL_TIMEOUT_SECS),
-            conn.send_and_recv(&request),
+            session.transport.send_and_recv(&request, &lifecycle),
         )
         .await
         .map_err(|_| TachiStaffError::Unavailable(format!("{tool} timed out")))?;
@@ -553,7 +553,7 @@ impl TachiStaffClient {
         let mut session = self.session.lock().await;
         let mut reopened = false;
         loop {
-            let mut conn = match session.take() {
+            let conn = match session.take() {
                 Some(conn) => conn,
                 None => match self.open_session().await {
                     Ok(conn) => conn,
@@ -570,7 +570,7 @@ impl TachiStaffClient {
                     }
                 },
             };
-            match self.exchange(&mut conn, tool, &args).await {
+            match self.exchange(&conn, tool, &args).await {
                 Ok(Exchange::Answered(payload)) => {
                     *session = Some(conn);
                     return Ok(payload);

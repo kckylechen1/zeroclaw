@@ -74,9 +74,9 @@ enum ProbeOutcome {
     InvalidModernResult(ResultTypeError),
 }
 
-struct OpenedSession {
+pub(crate) struct OpenedSession {
     capabilities: McpServerCapabilities,
-    peer: PeerProtocol,
+    pub(crate) peer: PeerProtocol,
 }
 
 fn log_version_quality(server_name: &str, peer: &PeerProtocol) {
@@ -304,7 +304,7 @@ async fn handshake(
 /// initialize. The client declares [`MCP_PROTOCOL_VERSION`]; a Legacy
 /// server that answers with an older date is recorded via Stage 1
 /// negotiation.
-async fn open_session(
+pub(crate) async fn open_session(
     transport: &dyn SharedMcpTransportConn,
     server_name: &str,
     epoch: u64,
