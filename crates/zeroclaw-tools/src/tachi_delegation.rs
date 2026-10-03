@@ -255,7 +255,8 @@ impl Tool for TachiDelegationTool {
             if let Err(error) = client.profile_for(&start.harness) {
                 return Ok(staff_failure(error));
             }
-            for value in std::iter::once(start.task.as_str())
+            for value in [start.task.as_str(), request_id.as_str()]
+                .into_iter()
                 .chain(start.issue_ref.as_deref())
                 .chain(start.pr_ref.as_deref())
                 .chain(start.flow_id.as_deref())

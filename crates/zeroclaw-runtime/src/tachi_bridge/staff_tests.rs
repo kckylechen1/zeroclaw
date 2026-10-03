@@ -1032,7 +1032,7 @@ async fn production_unsent_initialize_failure_releases_claim_and_same_id_can_ret
 
     let retry = invoke(&tools, "tachi_start", start_args("same-id")).await;
     assert_eq!(
-        retry.output.data().unwrap()["dispatch_id"],
+        retry.output.data().unwrap()["receipt"]["dispatch_id"],
         "d-after-outage"
     );
     assert_eq!(fake.calls().len(), 1);
@@ -1046,7 +1046,6 @@ async fn production_task_and_refs_reject_execution_and_private_content_before_cl
     let (fake, endpoint) = serve(|_, _| panic!("forbidden content must never reach Tachi")).await;
     let temp = tempfile::TempDir::new().unwrap();
     let cfg = production_config(&temp, &endpoint);
-    let tools = production_tools(&cfg, Arc::new(parking_lot::RwLock::new(cfg.clone())));
     for text in [
         "run in /Users/example/worktrees/change",
         "bash build-script",
@@ -1059,6 +1058,9 @@ async fn production_task_and_refs_reject_execution_and_private_content_before_cl
         "include the private-dyad identity",
     ] {
         for field in ["task", "issue_ref", "pr_ref", "flow_id"] {
+            // Each case has a fresh action tracker so rate limiting cannot
+            // mask a broken admission scanner on later cases.
+            let tools = production_tools(&cfg, Arc::new(parking_lot::RwLock::new(cfg.clone())));
             let mut args = start_args("forbidden");
             args[field] = json!(text);
             let result = invoke(&tools, "tachi_start", args).await;
@@ -1069,6 +1071,9 @@ async fn production_task_and_refs_reject_execution_and_private_content_before_cl
             );
         }
     }
+    let tools = production_tools(&cfg, Arc::new(parking_lot::RwLock::new(cfg.clone())));
+    let result = invoke(&tools, "tachi_start", start_args("ghp_fixture-only")).await;
+    assert_eq!(result.output.data().unwrap()["code"], "forbidden_content");
     let conn = rusqlite::Connection::open(cfg.data_dir.join("sessions/sessions.db")).unwrap();
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM session_delegations", [], |row| {
