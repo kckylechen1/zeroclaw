@@ -1298,15 +1298,16 @@ async fn production_live_policy_and_profile_revocations_apply_before_submission(
             .unwrap()["code"],
         "denied"
     );
-    let mut changed = live.write();
-    changed.risk_profiles.get_mut("delegate").unwrap().level =
-        zeroclaw_config::autonomy::AutonomyLevel::Full;
-    changed
-        .risk_profiles
-        .get_mut("delegate")
-        .unwrap()
-        .allowed_tools = Some(vec![]);
-    drop(changed);
+    {
+        let mut changed = live.write();
+        changed.risk_profiles.get_mut("delegate").unwrap().level =
+            zeroclaw_config::autonomy::AutonomyLevel::Full;
+        changed
+            .risk_profiles
+            .get_mut("delegate")
+            .unwrap()
+            .allowed_tools = Some(vec![]);
+    }
     assert_eq!(
         invoke(&tools, "tachi_start", start_args("denied"))
             .await
