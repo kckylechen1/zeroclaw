@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["COMPANION_AGENT_IDENTITY_FILE","COMPANION_MEMORY_DB_FILE","COMPANION_STORE_DIR_NAME"],"struct":["CompanionMemoryConfig","CompanionOwnerConfig"]};

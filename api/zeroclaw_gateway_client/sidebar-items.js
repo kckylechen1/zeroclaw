@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BRIDGE_PROTOCOL","PROTOCOL"],"enum":["Decision","Frame"],"fn":["bridge_url","new_request_id"],"struct":["Backoff","BridgeClient","Client","ConnectOptions","Deliver","Rejected","SessionStart"]};
