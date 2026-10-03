@@ -53,6 +53,7 @@ enum Reply {
     Ok(Value),
     Text(String),
     ToolError(String),
+    ToolResult(Value),
     RpcError(i64, String),
     Http(StatusCode),
 }
@@ -151,6 +152,12 @@ async fn handle(
                 Reply::Ok(value) => text_result(value.to_string(), false),
                 Reply::Text(text) => text_result(text, false),
                 Reply::ToolError(text) => text_result(text, true),
+                Reply::ToolResult(result) => Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result
+                }))
+                .into_response(),
                 Reply::RpcError(code, message) => Json(json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -693,6 +700,132 @@ async fn cancel_maps_every_tachi_receipt_to_a_typed_outcome() {
 // ─────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn content_block_first_payload_remains_authoritative() {
+    let (fake, endpoint) = serve(|_, args| {
+        let primary = json!({
+            "dispatch_id": args["dispatch_id"],
+            "state": "TASK_STATE_WORKING",
+            "status_revision": 4
+        });
+        let later = json!({
+            "dispatch_id": "wrong-dispatch",
+            "state": "TASK_STATE_COMPLETED",
+            "status_revision": 99
+        });
+        Reply::ToolResult(json!({"content": [
+            {"type":"text", "text":primary.to_string()},
+            {"type":"text", "text":later.to_string()}
+        ], "isError":false}))
+    })
+    .await;
+    let client = client(&endpoint);
+    let status = client.status("d-primary").await.expect("primary status");
+    assert_eq!(status.dispatch_id, "d-primary");
+    assert_eq!(status.state, RunState::Working);
+    assert_eq!(status.revision, Some(4));
+    assert!(!status.is_terminal());
+    assert_eq!(fake.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn content_block_invalid_primary_cannot_be_salvaged() {
+    let (fake, endpoint) = serve(|_, args| {
+        let case = args["dispatch_id"].as_str().expect("scripted case");
+        let payload = json!({"dispatch_id":case, "state":"TASK_STATE_COMPLETED"});
+        let later = json!({"type":"text", "text":payload.to_string()});
+        let primary = match case {
+            "missing-content" => return Reply::ToolResult(json!({"isError":false})),
+            "non-array-content" => {
+                return Reply::ToolResult(json!({"content":later, "isError":false}));
+            }
+            "empty-content" => {
+                return Reply::ToolResult(json!({"content":[], "isError":false}));
+            }
+            "non-text-primary" => json!({"type":"image", "data":"synthetic"}),
+            "non-text-with-json" => json!({"type":"image", "text":payload.to_string()}),
+            "untyped-primary" => json!({}),
+            "untyped-with-json" => json!({"text":payload.to_string()}),
+            "missing-text" => json!({"type":"text"}),
+            "non-string-text" => json!({"type":"text", "text":7}),
+            "empty-text" => json!({"type":"text", "text":""}),
+            "malformed-primary" => json!({"type":"text", "text":"{"}),
+            "trailing-primary" => {
+                json!({"type":"text", "text":format!("{payload}\ntrailing garbage")})
+            }
+            "two-values-primary" => {
+                json!({"type":"text", "text":format!("{payload}\n{payload}")})
+            }
+            _ => panic!("unexpected case {case}"),
+        };
+        Reply::ToolResult(json!({"content":[primary, later], "isError":false}))
+    })
+    .await;
+    let client = client(&endpoint);
+    let cases = [
+        "missing-content",
+        "non-array-content",
+        "empty-content",
+        "non-text-primary",
+        "non-text-with-json",
+        "untyped-primary",
+        "untyped-with-json",
+        "missing-text",
+        "non-string-text",
+        "empty-text",
+        "malformed-primary",
+        "trailing-primary",
+        "two-values-primary",
+    ];
+    for case in cases {
+        let error = client.status(case).await.unwrap_err();
+        assert!(
+            matches!(error, TachiStaffError::Protocol(_)),
+            "{case}: {error:?}"
+        );
+    }
+    assert_eq!(fake.calls().len(), cases.len(), "no alternate-block retry");
+}
+
+#[tokio::test]
+async fn content_block_refusal_retains_all_text_diagnostics() {
+    let (fake, endpoint) = serve(|_, args| {
+        if args["dispatch_id"] == "empty-error" {
+            return Reply::ToolResult(json!({"content":[], "isError":true}));
+        }
+        Reply::ToolResult(json!({"content":[
+            {"type":"text", "text":working_receipt("not-accepted").to_string()},
+            {"type":"text", "text":"policy denied"},
+            {"type":"text", "text":"independent warning"}
+        ], "isError":true}))
+    })
+    .await;
+    let client = client(&endpoint);
+    let expected = TachiStaffError::Refused(format!(
+        "{}\npolicy denied\nindependent warning",
+        working_receipt("not-accepted")
+    ));
+    assert_eq!(client.status("denied").await.unwrap_err(), expected);
+    assert_eq!(
+        client
+            .start(
+                "codex",
+                "review the adapter",
+                StaffingReason::ExplicitUserRequest,
+                &StaffRefs::default(),
+            )
+            .await
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        client.status("empty-error").await.unwrap_err(),
+        TachiStaffError::Refused("tachi_staff returned an error without detail".to_string())
+    );
+    assert_eq!(fake.calls().len(), 3);
+    assert_eq!(fake.sessions_opened.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn tachi_failures_are_typed() {
     let (fake, endpoint) = serve(|_, args| match args["dispatch_id"].as_str() {
         Some("tool-error") => {
@@ -1093,6 +1226,139 @@ async fn invoke(
 
 fn start_args(id: &str) -> Value {
     json!({"request_id":id,"harness":"codex","task":"Review the Codex adapter on GitHub; compare these together", "staffing_reason":"explicit_user_request"})
+}
+
+#[tokio::test]
+async fn production_content_block_diagnostics_preserve_start_status_result_and_watch() {
+    let status_reads = Arc::new(AtomicUsize::new(0));
+    let reads = status_reads.clone();
+    let (fake, endpoint) = serve(move |tool, args| {
+        let payload = match (tool, args["action"].as_str()) {
+            (TACHI_STAFF_TOOL, Some("start")) => working_receipt("d-blocks"),
+            (TACHI_STAFF_TOOL, Some("status")) => {
+                let terminal = reads.fetch_add(1, Ordering::SeqCst) >= 2;
+                json!({
+                    "dispatch_id":"d-blocks",
+                    "state":if terminal {"TASK_STATE_COMPLETED"} else {"TASK_STATE_WORKING"},
+                    "status_revision":if terminal {5} else {4}
+                })
+            }
+            (TACHI_TASK_TOOL, Some("status")) => json!({
+                "state":"TASK_STATE_COMPLETED",
+                "run_status":{"dispatch_id":"d-blocks", "state":"TASK_STATE_WORKING", "status_revision":4},
+                "result":{"body":"Worker report"}
+            }),
+            _ => panic!("unexpected call {tool} {args}"),
+        };
+        Reply::ToolResult(json!({"content":[
+            {"type":"text", "text":payload.to_string()},
+            {"type":"text", "text":"Soft stuck warning: repeated call"}
+        ], "isError":false}))
+    })
+    .await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let tools = production_tools(&cfg, Arc::new(parking_lot::RwLock::new(cfg.clone())));
+    let started = invoke(&tools, "tachi_start", start_args("req-blocks")).await;
+    assert!(started.success, "{:?}", started.error);
+    assert_eq!(
+        started.output.data().unwrap()["receipt"]["dispatch_id"],
+        "d-blocks"
+    );
+    let replay = invoke(&tools, "tachi_start", start_args("req-blocks")).await;
+    assert!(replay.success, "{:?}", replay.error);
+    assert_eq!(replay.output.data().unwrap()["replayed"], true);
+    for _ in 0..2 {
+        let status = invoke(&tools, "tachi_status", json!({"request_id":"req-blocks"})).await;
+        assert!(status.success, "{:?}", status.error);
+        assert_eq!(
+            status.output.data().unwrap()["status"]["state"],
+            "TASK_STATE_WORKING"
+        );
+        assert_eq!(
+            status.output.data().unwrap()["status"]["status_revision"],
+            4
+        );
+    }
+    let result = invoke(&tools, "tachi_result", json!({"request_id":"req-blocks"})).await;
+    assert!(result.success, "{:?}", result.error);
+    let report = result.output.data().unwrap();
+    assert_eq!(report["result"]["state"], "TASK_STATE_WORKING");
+    assert_eq!(report["result"]["task_state"], "TASK_STATE_COMPLETED");
+    assert_eq!(report["result"]["body"], "Worker report");
+    assert_eq!(report["accepted_by_body"], false);
+    assert_eq!(report["trust"], "untrusted_external_report");
+    let watch = invoke(
+        &tools,
+        "tachi_watch",
+        json!({"request_id":"req-blocks", "max_wait_secs":1}),
+    )
+    .await;
+    assert!(watch.success, "{:?}", watch.error);
+    assert_eq!(watch.output.data().unwrap()["terminal"], true);
+    assert_eq!(watch.output.data().unwrap()["status"]["status_revision"], 5);
+    assert_eq!(status_reads.load(Ordering::SeqCst), 3);
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 5);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(_, args)| args["action"] == "start")
+            .count(),
+        1
+    );
+    assert!(calls.iter().all(|(_, args)| args["format"] == "json"));
+}
+
+#[tokio::test]
+async fn production_content_block_missing_primary_keeps_start_unresolved() {
+    let (fake, endpoint) = serve(|_, _| {
+        Reply::ToolResult(json!({"content":[
+            {"type":"text"},
+            {"type":"text", "text":working_receipt("must-not-bind").to_string()}
+        ], "isError":false}))
+    })
+    .await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let live = Arc::new(parking_lot::RwLock::new(cfg.clone()));
+    let tools = production_tools(&cfg, live.clone());
+    let failed = invoke(&tools, "tachi_start", start_args("req-no-primary")).await;
+    assert!(!failed.success);
+    assert_eq!(failed.output.data().unwrap()["code"], "submission_unknown");
+    drop(tools);
+    let tools = production_tools(&cfg, live);
+    let replay = invoke(&tools, "tachi_start", start_args("req-no-primary")).await;
+    assert!(!replay.success);
+    assert_eq!(
+        replay.output.data().unwrap()["code"],
+        "submission_unresolved"
+    );
+    let status = invoke(
+        &tools,
+        "tachi_status",
+        json!({"request_id":"req-no-primary"}),
+    )
+    .await;
+    assert!(!status.success);
+    assert_eq!(
+        status.output.data().unwrap()["code"],
+        "submission_unresolved"
+    );
+    assert_eq!(fake.calls().len(), 1, "no receipt salvage or second start");
+    let db = rusqlite::Connection::open(cfg.data_dir.join("sessions/sessions.db")).unwrap();
+    let claim: (i64, Option<String>) = db
+        .query_row(
+            "SELECT COUNT(*), MAX(dispatch_id) FROM session_delegations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        claim,
+        (1, None),
+        "ambiguous transmission retains its pending claim"
+    );
 }
 
 #[tokio::test]

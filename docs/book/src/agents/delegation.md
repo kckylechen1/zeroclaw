@@ -30,6 +30,14 @@ Status and watch preserve Tachi's `read_projection`: a canonical working receipt
 can coexist with orphaned execution, unavailable control, and unknown outcome.
 These recovery facts do not imply completion or trigger a replacement launch.
 
+For a successful MCP response, the first `content` block is Tachi's canonical
+JSON payload and must be a text block containing one complete JSON value.
+Tachi may append independent call diagnostics, including stuck warnings on
+cached reads; these later blocks never extend or replace the payload. Missing,
+non-text or malformed first blocks fail closed, including trailing garbage
+inside that block. Tool-error and JSON-RPC refusals remain failures; tool-error
+diagnostics retain all text blocks even when a block looks like a valid receipt.
+
 The existing SQLite session owner stores a request payload digest, immutable
 route fingerprint and dispatch reference in `sessions/sessions.db`; Tachi
 still owns execution state. The primary key is the true local agent alias plus

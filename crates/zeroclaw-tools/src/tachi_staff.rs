@@ -523,18 +523,17 @@ impl TachiStaffClient {
         let result = response
             .result
             .ok_or_else(|| TachiStaffError::Protocol(format!("{tool}: empty result")))?;
-        let text = result
-            .get("content")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item.get("text").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default();
+        let content = result.get("content").and_then(Value::as_array);
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
+            let text = content
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
             let detail = if text.is_empty() {
                 format!("{tool} returned an error without detail")
             } else {
@@ -542,7 +541,17 @@ impl TachiStaffClient {
             };
             return Err(TachiStaffError::Refused(detail));
         }
-        serde_json::from_str(&text)
+        // Tachi emits the canonical JSON in the first content block and may
+        // append independent call diagnostics (including on cache hits).
+        // Later blocks neither extend nor replace that authoritative payload.
+        let text = content
+            .and_then(|items| items.first())
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+            .and_then(|item| item.get("text").and_then(Value::as_str))
+            .ok_or_else(|| {
+                TachiStaffError::Protocol(format!("{tool}: first content block is not text"))
+            })?;
+        serde_json::from_str(text)
             .map(Exchange::Answered)
             .map_err(|err| TachiStaffError::Protocol(format!("{tool}: result is not JSON: {err}")))
     }
