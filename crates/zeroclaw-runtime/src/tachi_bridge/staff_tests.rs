@@ -221,6 +221,103 @@ fn working_receipt(id: &str) -> Value {
 // ─────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn legacy_staff_echoing_modern_version_keeps_the_initialized_session() {
+    type Requests = Arc<Mutex<Vec<(HeaderMap, Value)>>>;
+    async fn legacy(
+        State(requests): State<Requests>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Response {
+        requests
+            .lock()
+            .expect("request log")
+            .push((headers.clone(), body.clone()));
+        let id = body.get("id").cloned();
+        match body["method"].as_str().unwrap_or("") {
+            "server/discover" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Unexpected message, expect initialize request",
+            )
+                .into_response(),
+            "initialize" => {
+                let mut response = Json(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "protocolVersion": body["params"]["protocolVersion"],
+                        "capabilities": { "tools": {} }
+                    }
+                }))
+                .into_response();
+                response.headers_mut().insert(
+                    "Mcp-Session-Id",
+                    "legacy-echo-session".parse().expect("session header"),
+                );
+                response
+            }
+            "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
+            "tools/call"
+                if headers.get("Mcp-Session-Id").and_then(|h| h.to_str().ok())
+                    == Some("legacy-echo-session")
+                    && !headers.contains_key("Mcp-Method")
+                    && body["params"].get("_meta").is_none() =>
+            {
+                Json(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "isError": false,
+                        "content": [{ "type": "text", "text": working_receipt("d-legacy-echo").to_string() }] }
+                }))
+                .into_response()
+            }
+            _ => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        }
+    }
+    let requests = Requests::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind legacy echo peer");
+    let endpoint = format!(
+        "http://{}/mcp",
+        listener.local_addr().expect("peer address")
+    );
+    let app = axum::Router::new()
+        .route("/mcp", post(legacy))
+        .with_state(requests.clone());
+    zeroclaw_spawn::spawn!(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("legacy peer serves");
+    });
+    let receipt = client(&endpoint)
+        .start(
+            "codex",
+            "bounded task",
+            StaffingReason::ExplicitUserRequest,
+            &StaffRefs::default(),
+        )
+        .await
+        .expect("legacy echo start retains its initialized session");
+    assert_eq!(receipt.dispatch_id, "d-legacy-echo");
+    let requests = requests.lock().expect("request log");
+    let methods: Vec<_> = requests
+        .iter()
+        .map(|(_, body)| body["method"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "server/discover",
+            "initialize",
+            "notifications/initialized",
+            "tools/call"
+        ]
+    );
+    assert_eq!(requests[1].1["params"]["protocolVersion"], "2026-07-28");
+    assert_eq!(requests[3].0["Mcp-Session-Id"], "legacy-echo-session");
+    assert_eq!(requests[3].0["x-tachi-profile"], "standard");
+    assert_eq!(requests[3].0["x-tachi-agent-identity"], "zeroclaw:home");
+}
+
+#[tokio::test]
 async fn modern_staff_bootstrap_uses_discover_and_negotiated_request_metadata() {
     type Requests = Arc<Mutex<Vec<(HeaderMap, Value)>>>;
     async fn modern(

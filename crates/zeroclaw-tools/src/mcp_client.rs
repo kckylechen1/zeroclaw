@@ -287,7 +287,12 @@ async fn handshake(
         .result
         .as_ref()
         .and_then(|result| result.get("protocolVersion"));
-    let peer = PeerProtocol::from_initialize_field(version_field);
+    let mut peer = PeerProtocol::from_initialize_field(version_field);
+    // This peer completed the handshake-era bootstrap. Some session-based
+    // servers echo our modern revision without implementing the modern wire.
+    // Preserve their advertised revision for diagnostics, but only successful
+    // modern discovery selects stateless requests and modern metadata.
+    peer.era = PeerEra::Legacy;
     log_version_quality(server_name, &peer);
 
     // Notify the server the client is initialized (notifications expect no
@@ -301,9 +306,9 @@ async fn handshake(
 
 /// Resolve [`PeerEra`] via `server/discover`. Modern peers skip the
 /// initialize handshake and speak per-request `_meta`; Legacy peers keep
-/// initialize. The client declares [`MCP_PROTOCOL_VERSION`]; a Legacy
-/// server that answers with an older date is recorded via Stage 1
-/// negotiation.
+/// initialize. The client declares [`MCP_PROTOCOL_VERSION`] and records the
+/// server's revision; the successful bootstrap determines the spoken wire
+/// even when a handshake-era server echoes a modern revision.
 pub(crate) async fn open_session(
     transport: &dyn SharedMcpTransportConn,
     server_name: &str,
