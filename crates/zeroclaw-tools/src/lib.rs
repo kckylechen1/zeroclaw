@@ -65,6 +65,8 @@ pub mod reaction;
 pub mod screenshot;
 pub mod send_via;
 pub mod sessions;
+pub mod tachi_delegation;
+pub mod tachi_staff;
 pub mod text_browser;
 pub mod tool_search;
 pub mod weather_tool;

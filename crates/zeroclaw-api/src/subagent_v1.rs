@@ -134,6 +134,11 @@ pub struct SubAgentToolNameV1(String);
 pub const V1_BANNED_TOOL_NAMES: &[(&str, &str)] = &[
     ("spawn_subagent", "SA-7b/SA-12 (D1 strict local spawn ban)"),
     ("delegate", "SA-7b/SA-12 (D1 strict local spawn ban)"),
+    ("tachi_start", "SA-7b/SA-12 (L1 cannot delegate L2 work)"),
+    ("tachi_status", "SA-7e/SA-17 (no parent delegation handle)"),
+    ("tachi_result", "SA-7e/SA-17 (no parent delegation handle)"),
+    ("tachi_cancel", "SA-7b/SA-12 (no external control)"),
+    ("tachi_watch", "SA-7e/SA-17 (no parent delegation handle)"),
     (
         "memory_store",
         "SA-7e/SA-17 (D2 no personal-memory mutation)",

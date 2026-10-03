@@ -4,6 +4,56 @@ A SubAgent is an **ephemeral child run** spawned by a parent agent. Under the fr
 
 There is no `[subagents.*]` block in the schema (the daemon-wide `[subagents]` coordinator-limit section retired with the control-plane migration wall); SubAgents are not a separate configuration concept.
 
+## External work through Tachi
+
+L2 work uses the thin `tachi_start`, `tachi_status`, `tachi_result`,
+`tachi_cancel`, and `tachi_watch` tools. Their execution settings come from
+owner-admitted `[tachi.harnesses]` profiles. They are included in minimal
+composition, but `[tachi]` stays disabled and its harness map empty by default.
+There is no local external-worker fallback; ordinary tools and L1 reasoning
+continue without Tachi.
+
+A start requires task-specific text, a harness alias, a truthful staffing
+reason, and a stable `request_id`. For example:
+
+```json
+{"request_id":"adapter-review-1","harness":"codex","task":"Review the Codex adapter on GitHub","staffing_reason":"explicit_user_request"}
+```
+
+Acceptance returns a canonical dispatch reference; it does not mean the work
+finished. Later operations use the same local request ID. `tachi_cancel`
+also requires the exact last-observed `expected_status_revision`.
+`tachi_watch` polls for 1–30 seconds; a nonterminal answer at its deadline is
+still running or waiting. It is not a push stream or a background notification.
+Use immediate status reads to keep chat and voice responsive.
+
+The existing SQLite session owner stores only a request digest and dispatch
+reference in `sessions/sessions.db`. A claim is committed before a start is
+sent. Concurrent and repeated requests cannot resend that claim, including
+when the process restarts before the response is recorded. A known reference
+is replayed; reuse with changed arguments fails. A claim with no known reference
+is **unresolved**, not proof that the worker failed or never started. It is
+retained independently of chat history cleanup. Do not bypass it with a new ID;
+reconcile the dispatch with the owner in Tachi. Automatic reconciliation is
+unsupported because the current Staff facade has no request idempotency key.
+SQLite WAL/NORMAL preserves process-crash safety, not a stronger power-loss
+guarantee. Delegation requires the SQLite session backend; JSONL chat remains
+supported without this capability.
+
+Live Tachi routing and agent/card permissions are rechecked on each operation.
+Only tasks and references leave the body: the tool never adds Soul, User Model,
+parent history, credentials, local tool handles or raw execution settings.
+The `tachi_result` response retains canonical `run_status` separately from the
+task facade's inferred state and management projection. Its report is untrusted
+worker evidence, with secret patterns scrubbed; it is not body acceptance or
+permission to change identity, secrets or policy. L1 profiles cannot grant these
+L2/control tools.
+
+This is #381's production tool slice. Real DSH execution, one-then-two-harness
+proof, automatic completion delivery through #63/#377, harness advisors and
+retirement of the duplicate driver remain separate acceptance work. The driver
+stays compiling until the replacement is proven.
+
 ## Which spawn tools exist
 
 - **`reasoning_subagent`**: the V1 bounded SubAgent entrypoint and the single spawn surface on every composition. Profile-admitted, typed `SubAgentReportV1` result, no ambient parent inheritance, no detached/background mode, no tool execution in the v1 child. See the [Tools overview](../tools/overview.md).

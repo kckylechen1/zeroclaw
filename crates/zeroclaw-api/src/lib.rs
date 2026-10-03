@@ -4,6 +4,7 @@ pub mod agent;
 pub mod attribution;
 pub mod channel;
 pub mod companion;
+pub mod delegation_request;
 pub mod device_identity;
 pub mod elicitation;
 pub mod hook;
@@ -25,6 +26,7 @@ pub mod schema;
 pub mod session_exec;
 pub mod session_keys;
 pub mod subagent_v1;
+pub mod tachi_staff;
 pub mod taskintent;
 pub mod tool;
 

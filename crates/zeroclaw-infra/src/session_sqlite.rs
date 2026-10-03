@@ -10,6 +10,8 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 use zeroclaw_api::model_provider::ChatMessage;
 
+mod delegation;
+
 /// Request receipts kept per session (see `record_request`).
 const REQUEST_RECEIPTS_PER_SESSION: i64 = 256;
 /// Hard bound on the whole `session_requests` table. Session keys are
@@ -37,6 +39,7 @@ impl SqliteSessionBackend {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 5000;
              PRAGMA temp_store = MEMORY;
              PRAGMA mmap_size = 4194304;",
         )?;
@@ -67,6 +70,14 @@ impl SqliteSessionBackend {
                 accepted_at TEXT NOT NULL,
                 updated_at  TEXT NOT NULL,
                 PRIMARY KEY (session_key, request_id)
+             );
+
+             CREATE TABLE IF NOT EXISTS session_delegations (
+                agent_alias    TEXT NOT NULL,
+                request_id     TEXT NOT NULL,
+                request_digest TEXT NOT NULL,
+                dispatch_id    TEXT,
+                PRIMARY KEY (agent_alias, request_id)
              );
 
              CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
@@ -184,6 +195,7 @@ impl SqliteSessionBackend {
             [],
         );
 
+        crate::sqlite_perms::harden_sqlite_owner_only(&db_path);
         Ok(Self {
             conn: Mutex::new(conn),
         })

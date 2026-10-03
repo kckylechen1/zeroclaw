@@ -731,6 +731,42 @@ pub fn all_tools_with_runtime(
         )));
     }
 
+    // L2 has one transport owner. Resolve live routing and agent/card
+    // permissions for every operation; do not capture a policy snapshot.
+    let delegation_agent = agent_alias.to_string();
+    let delegation_config = config.clone();
+    let delegation_security = security.clone();
+    let delegation_live = live_config.clone();
+    tool_arcs.extend(zeroclaw_tools::tachi_delegation::tools(
+        agent_alias,
+        move |name, operation| {
+            let resolve = |current: &Config| {
+                if current.tachi.enabled {
+                    let mut policy = SecurityPolicy::for_agent(current, &delegation_agent)
+                        .map_err(|error| error.to_string())?;
+                    if !policy.is_tool_allowed(name)
+                        || (matches!(operation, zeroclaw_config::policy::ToolOperation::Act)
+                            && !policy.can_act())
+                    {
+                        return Err("delegation denied by current agent policy".to_string());
+                    }
+                    policy.tracker = delegation_security.tracker.clone();
+                    policy.enforce_tool_operation(operation, name)?;
+                    if current.channels.session_backend != "sqlite" {
+                        return Err(
+                            "durable delegation bindings require the SQLite session backend"
+                                .to_string(),
+                        );
+                    }
+                }
+                Ok((current.tachi.clone(), current.data_dir.clone()))
+            };
+            match &delegation_live {
+                Some(live) => resolve(&live.read()),
+                None => resolve(&delegation_config),
+            }
+        },
+    ));
     tool_arcs.push(Arc::new(CalculatorTool::new()));
     tool_arcs.push(Arc::new(WeatherTool::new()));
     tool_arcs.push(Arc::new(TodoWriteTool::new()));

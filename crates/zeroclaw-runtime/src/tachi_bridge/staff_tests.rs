@@ -388,7 +388,7 @@ async fn result_reads_result_md_through_tachi_task() {
             "terminal": true,
             "state": "TASK_STATE_COMPLETED",
             "task": {},
-            "run_status": {},
+            "run_status": {"dispatch_id":"done", "state":"TASK_STATE_COMPLETED", "status_revision":4},
             "result": {
                 "body": "# Verdict\n\nAll tests pass.",
                 "truncated": true,
@@ -399,6 +399,7 @@ async fn result_reads_result_md_through_tachi_task() {
         _ => Reply::Ok(json!({
             "status": "ok",
             "state": "TASK_STATE_WORKING",
+            "run_status": {"dispatch_id":"pending", "state":"TASK_STATE_WORKING"},
             "result": { "body": null, "note": "no result.md found in run directory" }
         })),
     })
@@ -748,4 +749,396 @@ async fn tachi_live_status_of_unknown_run_is_a_typed_refusal() {
         .await
         .unwrap_err();
     assert!(matches!(err, TachiStaffError::Refused(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn transmitted_start_on_stale_session_is_unknown_and_never_replayed() {
+    let (fake, endpoint) = serve(|_, _| Reply::Http(StatusCode::NOT_FOUND)).await;
+    let error = client(&endpoint)
+        .start(
+            "codex",
+            "review Codex on GitHub together",
+            StaffingReason::ExplicitUserRequest,
+            &StaffRefs::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, TachiStaffError::SubmissionUnknown(_)),
+        "{error:?}"
+    );
+    assert_eq!(
+        fake.calls().len(),
+        1,
+        "404 after POST must not trigger another start"
+    );
+    assert_eq!(fake.sessions_opened.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn result_retains_canonical_receipt_and_inferred_projection_provenance() {
+    let (_, endpoint) = serve(|_, _| {
+        Reply::Ok(json!({
+            "state":"TASK_STATE_FAILED", "task":{"state_basis":"run_stale_timeout"},
+            "run_status":{"dispatch_id":"d-1","state":"TASK_STATE_WORKING","status_revision":9},
+            "managed_run":{"classification":"managed_custom","cancel_available":false},
+            "result":{"body":"Tests pass according to worker", "truncated":false}
+        }))
+    })
+    .await;
+    let report = client(&endpoint).result("d-1").await.unwrap();
+    assert_eq!(report.state, RunState::Working);
+    assert_eq!(report.status.revision, Some(9));
+    assert_eq!(report.task_state, RunState::Failed);
+    assert_eq!(report.state_basis.as_deref(), Some("run_stale_timeout"));
+    assert_eq!(report.managed_run.unwrap()["cancel_available"], false);
+}
+
+#[tokio::test]
+async fn mismatched_dispatch_receipts_are_not_admitted() {
+    let (_, endpoint) = serve(|tool, _| if tool == TACHI_STAFF_TOOL {
+        Reply::Ok(json!({"dispatch_id":"wrong", "state":"TASK_STATE_COMPLETED"}))
+    } else {
+        Reply::Ok(json!({"state":"TASK_STATE_COMPLETED", "run_status":{"dispatch_id":"wrong", "state":"TASK_STATE_COMPLETED"}, "result":{"body":"success"}}))
+    }).await;
+    let client = client(&endpoint);
+    assert!(matches!(
+        client.status("d-1").await.unwrap_err(),
+        TachiStaffError::Protocol(_)
+    ));
+    assert!(matches!(
+        client.result("d-1").await.unwrap_err(),
+        TachiStaffError::Protocol(_)
+    ));
+}
+
+#[tokio::test]
+async fn bounded_watch_returns_last_observation_without_claiming_completion() {
+    let (fake, endpoint) =
+        serve(|_, _| Reply::Ok(json!({"dispatch_id":"d-1", "state":"TASK_STATE_WORKING"}))).await;
+    let client = client(&endpoint);
+    client.status("d-1").await.unwrap(); // isolate polling from session setup
+    let calls_before = fake.calls().len();
+    let status = client
+        .wait_until_terminal("d-1", std::time::Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(!status.is_terminal());
+    assert_eq!(fake.calls().len() - calls_before, 1);
+}
+
+fn production_config(temp: &tempfile::TempDir, endpoint: &str) -> zeroclaw_config::schema::Config {
+    use zeroclaw_config::schema::{AliasedAgentConfig, RiskProfileConfig};
+    let mut cfg = zeroclaw_config::schema::Config {
+        data_dir: temp.path().join("data"),
+        tachi: config(endpoint),
+        composition: Some(zeroclaw_config::composition::Composition::Minimal),
+        ..Default::default()
+    };
+    cfg.agents.insert(
+        "home".into(),
+        AliasedAgentConfig {
+            risk_profile: "delegate".into(),
+            ..Default::default()
+        },
+    );
+    cfg.risk_profiles.insert(
+        "delegate".into(),
+        RiskProfileConfig {
+            level: zeroclaw_config::autonomy::AutonomyLevel::Full,
+            sandbox_enabled: Some(false),
+            ..Default::default()
+        },
+    );
+    cfg
+}
+
+fn production_tools(
+    cfg: &zeroclaw_config::schema::Config,
+    live: Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>,
+) -> Vec<Box<dyn zeroclaw_api::tool::Tool>> {
+    let security =
+        Arc::new(zeroclaw_config::policy::SecurityPolicy::for_agent(cfg, "home").unwrap());
+    crate::tools::all_tools_with_runtime(
+        Arc::new(cfg.clone()),
+        &security,
+        cfg.risk_profile_for_agent("home").unwrap(),
+        "home",
+        Arc::new(crate::platform::NativeRuntime::new()),
+        Arc::new(zeroclaw_memory::NoneMemory::new("none")),
+        None,
+        None,
+        &cfg.browser,
+        &cfg.http_request,
+        &cfg.web_fetch,
+        &cfg.agent_workspace_dir("home"),
+        &cfg.agents,
+        None,
+        cfg,
+        false,
+        None,
+        Some(live),
+        None,
+    )
+    .tools
+}
+
+async fn invoke(
+    tools: &[Box<dyn zeroclaw_api::tool::Tool>],
+    name: &str,
+    args: Value,
+) -> zeroclaw_api::tool::ToolResult {
+    tools
+        .iter()
+        .find(|tool| tool.name() == name)
+        .expect("registered delegation tool")
+        .execute(args)
+        .await
+        .unwrap()
+}
+
+fn start_args(id: &str) -> Value {
+    json!({"request_id":id,"harness":"codex","task":"Review the Codex adapter on GitHub; compare these together", "staffing_reason":"explicit_user_request"})
+}
+
+#[tokio::test]
+async fn production_registry_starts_once_and_reads_controls_through_same_request_binding() {
+    let (fake, endpoint) = serve(|tool, args| match (tool, args["action"].as_str()) {
+        (TACHI_STAFF_TOOL, Some("start")) => Reply::Ok(working_receipt("d-prod")),
+        (TACHI_STAFF_TOOL, Some("status")) => Reply::Ok(json!({"dispatch_id":"d-prod", "state":"TASK_STATE_COMPLETED", "status_revision":4})),
+        (TACHI_STAFF_TOOL, Some("cancel")) => {
+            assert_eq!(args["expected_status_revision"], 4);
+            Reply::Ok(json!({"receipt":"cancellation_requested", "state":"TASK_STATE_WORKING"}))
+        }
+        (TACHI_TASK_TOOL, _) => Reply::Ok(json!({"state":"TASK_STATE_COMPLETED", "run_status":{"dispatch_id":"d-prod","state":"TASK_STATE_COMPLETED","status_revision":4}, "result":{"body":"Worker report"}})),
+        _ => panic!("unexpected call {tool} {args}")
+    }).await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let protected_dir = cfg.agent_workspace_dir("home");
+    std::fs::create_dir_all(&protected_dir).unwrap();
+    std::fs::write(
+        protected_dir.join("SOUL.md"),
+        "protected-soul-fixture-bytes",
+    )
+    .unwrap();
+    std::fs::write(
+        protected_dir.join("USER.md"),
+        "protected-user-model-fixture-bytes",
+    )
+    .unwrap();
+    let live = Arc::new(parking_lot::RwLock::new(cfg.clone()));
+    let tools = production_tools(&cfg, live.clone());
+    let started = invoke(&tools, "tachi_start", start_args("req-prod")).await;
+    assert!(started.success, "{:?}", started.error);
+    assert_eq!(
+        started.output.data().unwrap()["receipt"]["dispatch_id"],
+        "d-prod"
+    );
+    drop(tools);
+    let tools = production_tools(&cfg, live);
+    let replay = invoke(&tools, "tachi_start", start_args("req-prod")).await;
+    assert_eq!(replay.output.data().unwrap()["replayed"], true);
+    assert_eq!(
+        fake.calls()
+            .iter()
+            .filter(|(_, args)| args["action"] == "start")
+            .count(),
+        1
+    );
+    let status = invoke(&tools, "tachi_status", json!({"request_id":"req-prod"})).await;
+    assert_eq!(
+        status.output.data().unwrap()["status"]["status_revision"],
+        4
+    );
+    let result = invoke(&tools, "tachi_result", json!({"request_id":"req-prod"})).await;
+    assert_eq!(result.output.data().unwrap()["accepted_by_body"], false);
+    assert_eq!(
+        result.output.data().unwrap()["trust"],
+        "untrusted_external_report"
+    );
+    let watch = invoke(
+        &tools,
+        "tachi_watch",
+        json!({"request_id":"req-prod","max_wait_secs":1}),
+    )
+    .await;
+    assert_eq!(watch.output.data().unwrap()["terminal"], true);
+    let cancel = invoke(
+        &tools,
+        "tachi_cancel",
+        json!({"request_id":"req-prod","expected_status_revision":4}),
+    )
+    .await;
+    assert_eq!(
+        cancel.output.data().unwrap()["receipt"]["outcome"],
+        "requested"
+    );
+    let starts = fake.calls();
+    assert!(starts[0].1.to_string().contains("Codex adapter on GitHub"));
+    for (tool, args) in starts {
+        let wire = args.to_string();
+        for protected in [
+            "protected-soul-fixture-bytes",
+            "protected-user-model-fixture-bytes",
+        ] {
+            assert!(!wire.contains(protected));
+        }
+        if tool == TACHI_STAFF_TOOL && args["action"] == "start" {
+            for denied in [
+                "worker",
+                "command",
+                "cwd",
+                "credentials",
+                "sandbox",
+                "allowed_tools",
+                "soul",
+                "user_model",
+                "history",
+            ] {
+                assert!(args.get(denied).is_none(), "{denied}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn production_unknown_submit_survives_registry_restart_and_is_never_reissued() {
+    let (fake, endpoint) = serve(|_, _| Reply::Http(StatusCode::NOT_FOUND)).await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let live = Arc::new(parking_lot::RwLock::new(cfg.clone()));
+    let tools = production_tools(&cfg, live.clone());
+    let first = invoke(&tools, "tachi_start", start_args("lost-response")).await;
+    assert_eq!(first.output.data().unwrap()["code"], "submission_unknown");
+    drop(tools);
+    let tools = production_tools(&cfg, live);
+    let replay = invoke(&tools, "tachi_start", start_args("lost-response")).await;
+    assert_eq!(
+        replay.output.data().unwrap()["code"],
+        "submission_unresolved"
+    );
+    assert_eq!(fake.calls().len(), 1);
+    let read = invoke(
+        &tools,
+        "tachi_status",
+        json!({"request_id":"lost-response"}),
+    )
+    .await;
+    assert_eq!(read.output.data().unwrap()["code"], "submission_unresolved");
+    assert_eq!(fake.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn production_closed_unknown_harness_and_raw_authority_have_zero_external_side_effects() {
+    let (fake, endpoint) = serve(|_, _| panic!("must not reach Tachi")).await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let live = Arc::new(parking_lot::RwLock::new(cfg.clone()));
+    let tools = production_tools(&cfg, live.clone());
+    let mut unknown = start_args("unknown");
+    unknown["harness"] = json!("unregistered");
+    assert_eq!(
+        invoke(&tools, "tachi_start", unknown)
+            .await
+            .output
+            .data()
+            .unwrap()["code"],
+        "unknown_harness"
+    );
+    for field in [
+        "command",
+        "cwd",
+        "credentials",
+        "worker",
+        "allowed_tools",
+        "sandbox",
+        "soul",
+        "user_model",
+        "history",
+    ] {
+        let mut raw = start_args("hostile");
+        raw[field] = json!("untrusted");
+        assert_eq!(
+            invoke(&tools, "tachi_start", raw)
+                .await
+                .output
+                .data()
+                .unwrap()["code"],
+            "invalid_arguments"
+        );
+    }
+    let store = zeroclaw_infra::session_sqlite::SqliteSessionBackend::new(&cfg.data_dir).unwrap();
+    // Other registered session tools may have opened this DB; admission must
+    // leave no claim rather than pretending registry construction is I/O-free.
+    let conn = rusqlite::Connection::open(cfg.data_dir.join("sessions/sessions.db")).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM session_delegations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    drop(store);
+    live.write().tachi.enabled = false;
+    assert_eq!(
+        invoke(&tools, "tachi_start", start_args("closed"))
+            .await
+            .output
+            .data()
+            .unwrap()["code"],
+        "unavailable"
+    );
+    assert_eq!(fake.sessions_opened.load(Ordering::SeqCst), 0);
+    assert!(fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn production_live_policy_and_profile_revocations_apply_before_submission() {
+    let (fake, endpoint) = serve(|_, _| panic!("must not reach Tachi")).await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let live = Arc::new(parking_lot::RwLock::new(cfg.clone()));
+    let tools = production_tools(&cfg, live.clone());
+    live.write().tachi.harnesses.clear();
+    assert_eq!(
+        invoke(&tools, "tachi_start", start_args("revoked-profile"))
+            .await
+            .output
+            .data()
+            .unwrap()["code"],
+        "unknown_harness"
+    );
+    live.write().tachi.harnesses = cfg.tachi.harnesses.clone();
+    live.write()
+        .risk_profiles
+        .get_mut("delegate")
+        .unwrap()
+        .level = zeroclaw_config::autonomy::AutonomyLevel::ReadOnly;
+    assert_eq!(
+        invoke(&tools, "tachi_start", start_args("read-only"))
+            .await
+            .output
+            .data()
+            .unwrap()["code"],
+        "denied"
+    );
+    let mut changed = live.write();
+    changed.risk_profiles.get_mut("delegate").unwrap().level =
+        zeroclaw_config::autonomy::AutonomyLevel::Full;
+    changed
+        .risk_profiles
+        .get_mut("delegate")
+        .unwrap()
+        .allowed_tools = Some(vec![]);
+    drop(changed);
+    assert_eq!(
+        invoke(&tools, "tachi_start", start_args("denied"))
+            .await
+            .output
+            .data()
+            .unwrap()["code"],
+        "denied"
+    );
+    assert!(fake.calls().is_empty());
+    assert_eq!(fake.sessions_opened.load(Ordering::SeqCst), 0);
 }

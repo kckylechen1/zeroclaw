@@ -55,6 +55,12 @@ pub const MINIMAL_TOOL_MEMBERSHIP: &[&str] = &[
     // reasoning/supervisor SubAgent entry point (V1; the sole spawn
     // surface — the legacy `spawn_subagent` is retired)
     "reasoning_subagent",
+    // L2 transport remains closed unless the owner admits Tachi profiles.
+    "tachi_start",
+    "tachi_status",
+    "tachi_result",
+    "tachi_cancel",
+    "tachi_watch",
     // attention/scheduling semantics
     "schedule",
     // governed Soul: propose a change for owner review (ADR-015 §3)

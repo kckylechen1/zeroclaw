@@ -139,7 +139,7 @@ The body keeps what makes it the owner's agent: identity, Soul and memory, conve
 
 ### 8. ZeroClaw ↔ `tachi_staff` mapping
 
-This section is the contract between the body and Tachi for L2 work (#381). The client is `TachiStaffClient` in `crates/zeroclaw-runtime/src/tachi_bridge/staff.rs`. It is checked against Tachi's golden fixture `external-staffing-contract-v1.fixture.json` and against a scripted MCP server in its tests.
+This section is the contract between the body and Tachi for L2 work (#381). The client is `TachiStaffClient` in `crates/zeroclaw-tools/src/tachi_staff.rs`, with shared receipts in `zeroclaw-api` and compatibility exports in `runtime/tachi_bridge/staff.rs`. It is checked against Tachi's golden fixture `external-staffing-contract-v1.fixture.json` and against a scripted MCP server in its tests.
 
 **Transport.** ZeroClaw calls the Tachi daemon over MCP streamable HTTP, using its own MCP transport. It opens one MCP session and reuses it. If Tachi restarts and the session goes stale, the client opens a new session once. Each session sends these headers:
 
@@ -167,7 +167,7 @@ The client reads only the fields it uses and ignores the rest. Tachi refuses unk
 
 **Staffing reason.** Tachi refuses a start without a reason. When the owner asked for the delegation, the reason is `explicit_user_request`. Otherwise the model picks the true reason from Tachi's list: `durable_cross_session`, `cross_device_remote`, or `native_subagent_unavailable`. The client never picks a default reason.
 
-**Polling.** Tachi has no event stream for Staff runs yet, so the body polls `status`. The interval is `[tachi].poll_secs`, 15 seconds by default. The body keeps only the `dispatch_id`, never a copy of the run.
+**Polling.** Tachi has no event stream for Staff runs yet, so the body polls `status`. The interval is `[tachi].poll_secs`, 15 seconds by default. The body keeps local request-to-dispatch bindings in the existing session store, never a copy of the run. `tachi_watch` exposes bounded polling; automatic background completion delivery is still part of #381/#63.
 
 **Cancel.** Tachi can cancel only runs that it manages itself on the same daemon (`managed_custom`). For a CLI run, the answer is `CancelUnsupported`, and the body tells the owner plainly that the run cannot be stopped from here. A cancel quotes the `status_revision` from the last status read. A stale revision is reported as `StaleRevision`, and the body reads the status again.
 
@@ -180,6 +180,7 @@ The client reads only the fields it uses and ignores the rest. Tachi refuses unk
 - `CancelUnsupported`: Tachi cannot cancel the run.
 - `StaleRevision`: the cancel quoted an old `status_revision`.
 - `Protocol`: the response could not be read.
+- `SubmissionUnknown`: a start may have been accepted, but no trustworthy receipt was received; never retry it automatically.
 
 **Task text.** A task that mentions a harness, vendor, or model is sent as written (§3). The TaskIntent composer no longer refuses vendor names. It still refuses text that tries to choose where or how the work runs, such as a working directory, a worktree, tmux, SSH, a sandbox, or CLI flags.
 
@@ -191,7 +192,7 @@ The client reads only the fields it uses and ignores the rest. Tachi refuses unk
 - There is no event stream, so the body has to poll.
 - `result.md` is served by `tachi_task`, not by `tachi_staff`.
 - The HTTP endpoint does not authenticate callers.
-- A start has no idempotency key. If the connection drops after the request is sent, the body cannot tell whether the run started. It reports `Unavailable` and does not retry the start.
+- A start has no idempotency key. If the connection drops after the request is sent, the body cannot tell whether the run started. A transmitted start with no trustworthy receipt reports `SubmissionUnknown` and is never replayed, including after a stale-session response. The production tools persist the local request claim before sending it; an unresolved claim blocks automatic resubmission after reconnect or restart. This prevents replay but does not recover the missing dispatch identity.
 
 ## Consequences
 
@@ -233,3 +234,36 @@ The whole-package acceptance (two harnesses, one Node, shared conversation acros
 - Tachi `crates/tachi-server/src/tools/workflow_facade.rs` (`tachi_staff` handler), `crates/tachi-server/src/staffing_ops/`, and `crates/tachi-params/src/facade/orchestration.rs` (`TachiStaffParams`)
 - Tachi `docs/engineering/architecture/external-staffing-contract-v1.fixture.json` (golden Staff contract)
 - [kckylechen1/Tachi#2003](https://github.com/kckylechen1/Tachi/issues/2003): cancel of CLI runs, events, results on the staff facade, and caller authentication
+
+### Production capability pin and reuse (#381 B1)
+
+The tool mapping above was checked against Tachi `7873b720993cc10519db6232863f4db965c657f2`:
+`TachiStaffParams` in `tachi-params/src/facade/orchestration.rs`, Staff handlers in
+`tachi-server/src/staffing_ops/` and `tools/workflow_facade.rs`, result reads in
+`tools/task_facade.rs`, and the profile catalog in `tachi-dispatch/src/profiles.rs`.
+Start, canonical status, and revision-bound managed-custom cancel are real
+operations. Staff has no watch stream or durable caller request key. Result text
+is still read through Task; its inferred task state must not replace canonical
+`run_status`. Management/projection provenance is retained alongside the report.
+CLI cancellation and lost-submit identity reconciliation remain unsupported.
+The newer `preflight` action is advisory and is not execution/authentication proof.
+
+DSH has no admitted worker/profile in that Tachi pin. The DeepSeek explorer
+profile runs OpenCode and does not prove DSH support. The
+[official DSH CLI reference](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/README.md)
+provides headless and ACP profile carriers; selecting/admitting one belongs to
+Tachi, not a second launcher in this body.
+
+Reuse decision: reuse this fork's existing Staff MCP transport, its pinned
+golden contract and the existing session SQLite owner. Upstream ZeroClaw native
+CLI adapter/process code and Cindy maker-core adapters are not imported into
+this slice: launch ownership stays on Tachi and no local adapter is needed for
+the body's protocol surface. The original local multi-harness launch proposal
+(#433) was closed. No external source code or dependency is added here. Real
+harness execution, result delivery and backend recovery still need their own
+end-to-end evidence before #381 can close or the duplicate driver can be removed.
+
+See [Delegation and SubAgents](../../agents/delegation.md#external-work-through-tachi)
+for production request IDs, polling limits and rollback behavior. To roll back
+this slice, disable `[tachi]`; retain request bindings to avoid forgetting an
+unresolved submission. Existing L0/L1 behavior stays available.
