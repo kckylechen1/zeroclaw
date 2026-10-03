@@ -9,6 +9,29 @@ use rusqlite::{OptionalExtension, params};
 use zeroclaw_api::delegation_request::{DelegationRequestBinding, DelegationRequestClaim};
 
 impl SqliteSessionBackend {
+    /// Release the caller's pending claim only after it proves no start was
+    /// transmitted. Never use this for timeout, lost receipt, or recovery.
+    pub fn release_unsent_delegation_request(
+        &self,
+        agent_alias: &str,
+        request_id: &str,
+        request_digest: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock();
+        let deleted = conn
+            .execute(
+                "DELETE FROM session_delegations
+                 WHERE agent_alias = ?1 AND request_id = ?2 AND request_digest = ?3
+                   AND dispatch_id IS NULL",
+                params![agent_alias, request_id, request_digest],
+            )
+            .context("releasing a proven unsent delegation request")?;
+        if let Some(path) = conn.path() {
+            crate::sqlite_perms::harden_sqlite_owner_only(std::path::Path::new(path));
+        }
+        Ok(deleted == 1)
+    }
+
     /// Claim a request before its first external submission.
     ///
     /// The primary key and conflict-targeted insert arbitrate independent
@@ -118,6 +141,50 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
     use zeroclaw_api::model_provider::ChatMessage;
+
+    #[test]
+    fn unsent_release_matches_scope_digest_and_never_removes_known_dispatch() {
+        let tmp = TempDir::new().unwrap();
+        let store = SqliteSessionBackend::new(tmp.path()).unwrap();
+        store.claim_delegation_request("a", "r", "digest").unwrap();
+        assert!(
+            !store
+                .release_unsent_delegation_request("b", "r", "digest")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .release_unsent_delegation_request("a", "r", "other")
+                .unwrap()
+        );
+        assert!(
+            store
+                .release_unsent_delegation_request("a", "r", "digest")
+                .unwrap()
+        );
+        assert_eq!(store.read_delegation_request("a", "r").unwrap(), None);
+        assert_eq!(
+            store.claim_delegation_request("a", "r", "digest").unwrap(),
+            DelegationRequestClaim::Created
+        );
+        store
+            .bind_delegation_request("a", "r", "digest", "d")
+            .unwrap();
+        assert!(
+            !store
+                .release_unsent_delegation_request("a", "r", "digest")
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .read_delegation_request("a", "r")
+                .unwrap()
+                .unwrap()
+                .dispatch_id
+                .as_deref(),
+            Some("d")
+        );
+    }
 
     #[test]
     fn delegation_claim_distinguishes_duplicate_and_conflicting_digest() {

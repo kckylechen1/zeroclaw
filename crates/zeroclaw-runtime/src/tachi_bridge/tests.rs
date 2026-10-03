@@ -1371,6 +1371,8 @@ fn module_source_scans_hold() {
         .chain([
             format!("{manifest_dir}/../zeroclaw-tools/src/tachi_staff.rs"),
             format!("{manifest_dir}/../zeroclaw-tools/src/tachi_delegation.rs"),
+            format!("{manifest_dir}/../zeroclaw-tools/src/tachi_admission.rs"),
+            format!("{manifest_dir}/../zeroclaw-api/src/delegation_admission.rs"),
             format!("{manifest_dir}/../zeroclaw-api/src/tachi_staff.rs"),
         ]);
     for file in sources {

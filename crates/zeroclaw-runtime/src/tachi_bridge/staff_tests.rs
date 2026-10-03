@@ -70,6 +70,7 @@ struct Fake {
     calls: Mutex<Vec<Call>>,
     sessions_opened: AtomicUsize,
     expire_next_call: AtomicBool,
+    fail_next_initialize: AtomicBool,
 }
 
 impl Fake {
@@ -93,6 +94,9 @@ async fn handle(
     match method {
         "initialize" => {
             let session = fake.sessions_opened.fetch_add(1, Ordering::SeqCst) + 1;
+            if fake.fail_next_initialize.swap(false, Ordering::SeqCst) {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
             let mut response = Json(json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -168,6 +172,7 @@ async fn serve(
         calls: Mutex::new(Vec::new()),
         sessions_opened: AtomicUsize::new(0),
         expire_next_call: AtomicBool::new(false),
+        fail_next_initialize: AtomicBool::new(false),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -361,6 +366,10 @@ async fn status_reads_the_canonical_receipt_and_ignores_extra_fields() {
     let running = client.status("d-1").await.expect("status");
     assert_eq!(running.state, RunState::Working);
     assert_eq!(running.revision, Some(7));
+    assert_eq!(
+        running.read_projection.as_ref().unwrap()["execution_state"],
+        "running"
+    );
     assert!(!running.is_terminal());
 
     let done = client.status("done").await.expect("status");
@@ -691,6 +700,7 @@ fn golden_staffing_contract_matches_our_receipt_and_terminal_rules() {
         closure_kind: closure.map(str::to_string),
         result_written: None,
         updated_at: None,
+        read_projection: None,
     };
     for state in contract["terminal_semantics"]["terminal_states"]
         .as_array()
@@ -1003,6 +1013,74 @@ async fn production_registry_starts_once_and_reads_controls_through_same_request
 }
 
 #[tokio::test]
+async fn production_unsent_initialize_failure_releases_claim_and_same_id_can_retry() {
+    let (fake, endpoint) = serve(|_, _| Reply::Ok(working_receipt("d-after-outage"))).await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let tools = production_tools(&cfg, Arc::new(parking_lot::RwLock::new(cfg.clone())));
+    fake.fail_next_initialize.store(true, Ordering::SeqCst);
+    let failed = invoke(&tools, "tachi_start", start_args("same-id")).await;
+    assert_eq!(failed.output.data().unwrap()["code"], "unavailable");
+    assert!(fake.calls().is_empty());
+    let conn = rusqlite::Connection::open(cfg.data_dir.join("sessions/sessions.db")).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM session_delegations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0, "proven unsent start must not strand its request");
+
+    let retry = invoke(&tools, "tachi_start", start_args("same-id")).await;
+    assert_eq!(
+        retry.output.data().unwrap()["dispatch_id"],
+        "d-after-outage"
+    );
+    assert_eq!(fake.calls().len(), 1);
+    let replay = invoke(&tools, "tachi_start", start_args("same-id")).await;
+    assert_eq!(replay.output.data().unwrap()["replayed"], true);
+    assert_eq!(fake.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn production_task_and_refs_reject_execution_and_private_content_before_claim() {
+    let (fake, endpoint) = serve(|_, _| panic!("forbidden content must never reach Tachi")).await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let tools = production_tools(&cfg, Arc::new(parking_lot::RwLock::new(cfg.clone())));
+    for text in [
+        "run in /Users/example/worktrees/change",
+        "bash build-script",
+        "use cwd chosen by this prompt",
+        "run using tmux",
+        "reach the host via SSH",
+        "skip the sandbox",
+        "pass --full-auto",
+        "api_key=fixture-only",
+        "include the private-dyad identity",
+    ] {
+        for field in ["task", "issue_ref", "pr_ref", "flow_id"] {
+            let mut args = start_args("forbidden");
+            args[field] = json!(text);
+            let result = invoke(&tools, "tachi_start", args).await;
+            assert_eq!(
+                result.output.data().unwrap()["code"],
+                "forbidden_content",
+                "{field}: {text}"
+            );
+        }
+    }
+    let conn = rusqlite::Connection::open(cfg.data_dir.join("sessions/sessions.db")).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM session_delegations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(fake.calls().is_empty());
+    assert_eq!(fake.sessions_opened.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn production_unknown_submit_survives_registry_restart_and_is_never_reissued() {
     let (fake, endpoint) = serve(|_, _| Reply::Http(StatusCode::NOT_FOUND)).await;
     let temp = tempfile::TempDir::new().unwrap();
@@ -1090,6 +1168,99 @@ async fn production_closed_unknown_harness_and_raw_authority_have_zero_external_
     );
     assert_eq!(fake.sessions_opened.load(Ordering::SeqCst), 0);
     assert!(fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn production_status_and_watch_preserve_orphaned_projection_without_terminal_promotion() {
+    let projection = json!({
+        "execution_state":"orphaned",
+        "control_state":"unavailable",
+        "outcome_state":"unknown",
+        "controller_epoch_id":"previous-epoch",
+        "current_controller_epoch_id":"current-epoch",
+        "reconciliation":{"verdict":"orphaned"},
+        "artifacts_available":{"result.md":false}
+    });
+    let expected = projection.clone();
+    let (_, endpoint) = serve(move |_, args| match args["action"].as_str() {
+        Some("start") => Reply::Ok(working_receipt("d-orphaned")),
+        Some("status") => Reply::Ok(json!({
+            "dispatch_id":"d-orphaned",
+            "state":"TASK_STATE_WORKING",
+            "status_revision":4,
+            "read_projection":projection
+        })),
+        _ => panic!("unexpected call"),
+    })
+    .await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let cfg = production_config(&temp, &endpoint);
+    let tools = production_tools(&cfg, Arc::new(parking_lot::RwLock::new(cfg.clone())));
+    let started = invoke(&tools, "tachi_start", start_args("orphaned")).await;
+    assert_eq!(started.output.data().unwrap()["accepted"], true);
+    for name in ["tachi_status", "tachi_watch"] {
+        let args = if name == "tachi_watch" {
+            json!({"request_id":"orphaned","max_wait_secs":1})
+        } else {
+            json!({"request_id":"orphaned"})
+        };
+        let result = invoke(&tools, name, args).await;
+        let data = result.output.data().unwrap();
+        assert_eq!(data["status"]["state"], "TASK_STATE_WORKING");
+        assert_eq!(data["status"]["read_projection"], expected);
+        if name == "tachi_watch" {
+            assert_eq!(data["terminal"], false);
+        }
+    }
+}
+
+#[tokio::test]
+async fn live_agent_construction_rechecks_delegation_policy_after_reload() {
+    use zeroclaw_config::multi_agent::MemoryBackendKind;
+    use zeroclaw_config::schema::{ModelProviderConfig, OllamaModelProviderConfig};
+
+    let (fake, endpoint) = serve(|_, _| panic!("revoked permission must not reach Tachi")).await;
+    let temp = tempfile::TempDir::new().unwrap();
+    let mut cfg = production_config(&temp, &endpoint);
+    cfg.config_path = temp.path().join("config.toml");
+    cfg.providers.models.ollama.insert(
+        "offline".into(),
+        OllamaModelProviderConfig {
+            base: ModelProviderConfig {
+                model: Some("fixture-model".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let agent_cfg = cfg.agents.get_mut("home").unwrap();
+    agent_cfg.model_provider = "ollama.offline".into();
+    agent_cfg.memory.backend = MemoryBackendKind::None;
+    let live = Arc::new(parking_lot::RwLock::new(cfg));
+    let agent = crate::agent::Agent::from_live_config_with_session_cwd_and_mcp_backchannel(
+        live.clone(),
+        "home",
+        None,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(agent.tool_names().contains(&"tachi_start"));
+
+    live.write()
+        .risk_profiles
+        .get_mut("delegate")
+        .unwrap()
+        .level = zeroclaw_config::autonomy::AutonomyLevel::ReadOnly;
+    let denied = agent
+        .execute_tool_for_test("tachi_start", start_args("real-agent-revoked"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(denied.output.data().unwrap()["code"], "denied");
+    assert!(fake.calls().is_empty());
+    assert_eq!(fake.sessions_opened.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

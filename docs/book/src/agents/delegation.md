@@ -26,6 +26,9 @@ also requires the exact last-observed `expected_status_revision`.
 `tachi_watch` polls for 1–30 seconds; a nonterminal answer at its deadline is
 still running or waiting. It is not a push stream or a background notification.
 Use immediate status reads to keep chat and voice responsive.
+Status and watch preserve Tachi's `read_projection`: a canonical working receipt
+can coexist with orphaned execution, unavailable control, and unknown outcome.
+These recovery facts do not imply completion or trigger a replacement launch.
 
 The existing SQLite session owner stores only a request digest and dispatch
 reference in `sessions/sessions.db`. A claim is committed before a start is
@@ -36,6 +39,9 @@ is **unresolved**, not proof that the worker failed or never started. It is
 retained independently of chat history cleanup. Do not bypass it with a new ID;
 reconcile the dispatch with the owner in Tachi. Automatic reconciliation is
 unsupported because the current Staff facade has no request idempotency key.
+If session setup fails before any start is transmitted, its matching pending
+claim is released and the same request ID may safely retry. After transmission,
+an ambiguous outcome always retains the claim; a crash also remains conservative.
 SQLite WAL/NORMAL preserves process-crash safety, not a stronger power-loss
 guarantee. Delegation requires the SQLite session backend; JSONL chat remains
 supported without this capability.
@@ -43,6 +49,9 @@ supported without this capability.
 Live Tachi routing and agent/card permissions are rechecked on each operation.
 Only tasks and references leave the body: the tool never adds Soul, User Model,
 parent history, credentials, local tool handles or raw execution settings.
+Task and reference text pass through the same admission engine as typed intent
+composition, rejecting credential, command, placement and private-Dyad content
+before claims or transport. Ordinary harness and vendor mentions are allowed.
 The `tachi_result` response retains canonical `run_status` separately from the
 task facade's inferred state and management projection. Its report is untrusted
 worker evidence, with secret patterns scrubbed; it is not body acceptance or

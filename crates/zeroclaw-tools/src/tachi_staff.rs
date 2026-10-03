@@ -133,8 +133,8 @@ impl TachiStaffSettings {
 }
 
 /// Client of Tachi's `tachi_staff` MCP tool over ZeroClaw's MCP HTTP
-/// transport. One MCP session is opened lazily and reused; a transport
-/// failure drops it so the next call opens a fresh one.
+/// transport. One MCP session is opened lazily and reused for this client's
+/// lifetime. A transport failure drops it so the next call opens a fresh one.
 pub struct TachiStaffClient {
     settings: TachiStaffSettings,
     session: Mutex<Option<Box<dyn McpTransportConn>>>,
@@ -201,7 +201,9 @@ impl TachiStaffClient {
     ///
     /// # Errors
     /// `UnknownHarness` and an empty task are refused before Tachi is
-    /// contacted; otherwise `Unavailable`, `Refused`, or `Protocol`.
+    /// contacted. `Unavailable` means session setup failed before the start
+    /// POST. After transmission an unreadable/missing answer is always
+    /// `SubmissionUnknown`; an explicit refusal remains `Refused`.
     pub async fn start(
         &self,
         harness: &str,
@@ -556,6 +558,13 @@ impl TachiStaffClient {
                 None => match self.open_session().await {
                     Ok(conn) => conn,
                     Err(error) => {
+                        // Only this path can return Unavailable for start:
+                        // tools/call has not been constructed or transmitted.
+                        let error = if op == "start" {
+                            TachiStaffError::Unavailable(error.to_string())
+                        } else {
+                            error
+                        };
                         log_failure(op, &error);
                         return Err(error);
                     }

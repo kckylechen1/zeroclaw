@@ -4,6 +4,7 @@ pub mod agent;
 pub mod attribution;
 pub mod channel;
 pub mod companion;
+pub mod delegation_admission;
 pub mod delegation_request;
 pub mod device_identity;
 pub mod elicitation;

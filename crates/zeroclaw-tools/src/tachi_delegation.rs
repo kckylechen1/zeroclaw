@@ -255,6 +255,15 @@ impl Tool for TachiDelegationTool {
             if let Err(error) = client.profile_for(&start.harness) {
                 return Ok(staff_failure(error));
             }
+            for value in std::iter::once(start.task.as_str())
+                .chain(start.issue_ref.as_deref())
+                .chain(start.pr_ref.as_deref())
+                .chain(start.flow_id.as_deref())
+            {
+                if let Err(category) = crate::tachi_admission::scan_text(value) {
+                    return Ok(failure("forbidden_content", &category.to_string()));
+                }
+            }
         }
         let db = match tokio::task::spawn_blocking(move || SqliteSessionBackend::new(&data_dir))
             .await?
@@ -307,6 +316,18 @@ impl Tool for TachiDelegationTool {
                 .await
             {
                 Ok(receipt) => receipt,
+                Err(error @ TachiStaffError::Unavailable(_)) => {
+                    // start's Unavailable contract proves tools/call was never
+                    // sent. Other failures never release a durable claim.
+                    let release = tokio::task::spawn_blocking(move || {
+                        db.release_unsent_delegation_request(&scope, &request_id, &digest)
+                    })
+                    .await?;
+                    if let Err(storage) = release {
+                        return Ok(failure("storage_error", &storage.to_string()));
+                    }
+                    return Ok(staff_failure(error));
+                }
                 Err(error) => return Ok(staff_failure(error)),
             };
             let id = receipt.dispatch_id.clone();

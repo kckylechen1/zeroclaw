@@ -159,6 +159,10 @@ pub struct RunStatus {
     /// Last update time as Tachi wrote it.
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// Same-response execution/control/recovery facts. These do not rewrite
+    /// canonical state or imply a terminal outcome after a daemon restart.
+    #[serde(default)]
+    pub read_projection: Option<serde_json::Value>,
 }
 
 impl RunStatus {

@@ -141,7 +141,7 @@ The body keeps what makes it the owner's agent: identity, Soul and memory, conve
 
 This section is the contract between the body and Tachi for L2 work (#381). The client is `TachiStaffClient` in `crates/zeroclaw-tools/src/tachi_staff.rs`, with shared receipts in `zeroclaw-api` and compatibility exports in `runtime/tachi_bridge/staff.rs`. It is checked against Tachi's golden fixture `external-staffing-contract-v1.fixture.json` and against a scripted MCP server in its tests.
 
-**Transport.** ZeroClaw calls the Tachi daemon over MCP streamable HTTP, using its own MCP transport. It opens one MCP session and reuses it. If Tachi restarts and the session goes stale, the client opens a new session once. Each session sends these headers:
+**Transport.** ZeroClaw calls the Tachi daemon over MCP streamable HTTP, using its own MCP transport. Each tool invocation resolves current policy and constructs a client; bounded watch reuses that client's session within its polling loop. Sessions are not cached across tool invocations. Reads may reopen a stale session once. Start and cancel are never automatically replayed after transmission. Each session sends these headers:
 
 | Header | Value |
 |---|---|
@@ -245,6 +245,9 @@ Start, canonical status, and revision-bound managed-custom cancel are real
 operations. Staff has no watch stream or durable caller request key. Result text
 is still read through Task; its inferred task state must not replace canonical
 `run_status`. Management/projection provenance is retained alongside the report.
+Status and bounded watch retain the same-response `read_projection`, including
+orphaned execution, unavailable control, and unknown outcome after a daemon
+restart. Those facts never rewrite canonical state into a terminal outcome.
 CLI cancellation and lost-submit identity reconciliation remain unsupported.
 The newer `preflight` action is advisory and is not execution/authentication proof.
 
