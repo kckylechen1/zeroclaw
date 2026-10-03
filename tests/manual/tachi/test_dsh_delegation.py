@@ -190,6 +190,7 @@ uri = "http://127.0.0.1:{server.server_port}/v1/chat/completions"
 api_key = "synthetic-local-dummy"
 model = "synthetic"
 wire_api = "chat_completions"
+native_tools = true
 timeout_secs = 15
 [risk_profiles.probe]
 level = "full"
